@@ -36,6 +36,9 @@
   "routing_mode": "blocklist",
   "geosite_exit_tags": ["ru-blocked-all"],
   "geoip_exit_tags": [],
+  "geosite_block_tags": [],
+  "geoip_direct_tags": ["ru", "private"],
+  "ru_direct_tld_regex": true,
   "domain_exit": [],
   "domain_direct": [],
 

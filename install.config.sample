@@ -16,6 +16,12 @@ REALITY_SNI=www.microsoft.com
 # Шаблон HTTP для splithttp (bridge→exit).
 PRESET=steamlike
 
+# Маршрутизация на bridge при split_routing: ru_direct — direct для RU/private, остальное на exit;
+# blocklist — только geosite_exit_tags на exit (как раньше).
+ROUTING_MODE=ru_direct
+# Доп. geosite → direct (только если тег есть в geosite.dat; у runetfreedom по умолчанию нет категории ru).
+# GEOSITE_DIRECT_TAGS=ru
+
 VLESS_PORT=443
 TUNNEL_PORT=8443
 LOG_LEVEL=info
@@ -33,12 +39,14 @@ VERIFY_AFTER_INSTALL=y
 VERIFY_IP_URL=https://api.ipify.org
 VERIFY_SOCKS_PORT=10808
 # VERIFY_USER_UUID=
-# Два зонда split-routing после первого GET включены, пока не задано VERIFY_SPLIT_ROUTING=n.
+# После первого GET по умолчанию вызывается split-routing (только зонд exit). Отключить: VERIFY_SPLIT_ROUTING=n.
 # VERIFY_SPLIT_ROUTING=n
-# VERIFY_SPLIT_STRICT=0
-# VERIFY_PROBE_DIRECT_URL=
 # VERIFY_PROBE_EXIT_URL=
+# VERIFY_PROBE_EXIT_PLAIN_URL=   # ru_direct без EXIT_URL: по умолчанию api.ipify.org (международный → exit)
 VERIFY_FAIL_LOG_LINES=400
+
+# Опционально: geosite-теги в blackhole (нужен тег в вашем geosite.dat), например реклама.
+# GEOSITE_BLOCK_TAGS=category-ads-all
 
 # --- Прочее (по умолчанию можно не трогать) ---
 # Geo на bridge при установке (скачивание с GitHub): по умолчанию выполняется по SSH.

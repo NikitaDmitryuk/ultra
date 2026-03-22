@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Интеграционная проверка: по SSH на bridge читается Admin API, локально поднимается клиент ядра (SOCKS inbound),
-# затем HTTPS GET на VERIFY_IP_URL и по умолчанию два зонда split-routing (IP direct на bridge vs через exit).
+# затем HTTPS GET на VERIFY_IP_URL и по умолчанию доп. зонд exit (scripts/verify-split-routing.sh).
 #
 # Зависимости на машине оператора: ssh, curl, бинарник совместимый с go.mod (в PATH как xray), base64.
 # JSON: jq (предпочтительно) или python3.
@@ -20,8 +20,8 @@ usage() {
 	echo "  $0 [-i …] [-u …] [-p …]   # без аргументов: корневой install.config, если есть" >&2
 	echo "Переменные: VERIFY_USER_UUID, VERIFY_SOCKS_PORT, VERIFY_IP_URL (обязательно — HTTPS URL для первого GET)" >&2
 	echo "  VERIFY_SPLIT_ROUTING=n|0 — не вызывать scripts/verify-split-routing.sh (по умолчанию вызывается)" >&2
-	echo "  VERIFY_SPLIT_STRICT=0 — при совпадении обоих IP только предупреждение (по умолчанию 1 — ошибка)" >&2
-	echo "  VERIFY_PROBE_DIRECT_URL / VERIFY_PROBE_EXIT_URL — зонды для split (см. verify-split-routing.sh)" >&2
+	echo "  VERIFY_PROBE_EXIT_URL / VERIFY_PROBE_EXIT_PLAIN_URL — зонды exit для split (см. verify-split-routing.sh)" >&2
+	echo "  VERIFY_SPEC_PATH — путь к spec.json на bridge (по умолчанию /etc/ultra-relay/spec.json; для routing_mode в verify-split)" >&2
 	echo "Пример: VERIFY_IP_URL=https://… $0 -c install.config" >&2
 	exit 2
 }
@@ -206,6 +206,21 @@ trap cleanup EXIT INT TERM
 
 echo "=== relay-check: bridge=${BRIDGE} (Admin API по SSH; поле EXIT в конфиге не используется) ==="
 
+REMOTE_SPEC="${VERIFY_SPEC_PATH:-/etc/ultra-relay/spec.json}"
+ULTRA_ROUTING_MODE="blocklist"
+qspec=$(printf '%q' "$REMOTE_SPEC")
+if SPEC_REMOTE_OUT=$("${ssh_base[@]}" "test -r $qspec && cat $qspec" 2>/dev/null); then
+	if have_cmd jq; then
+		_r=$(printf '%s' "$SPEC_REMOTE_OUT" | jq -r '.routing_mode // empty')
+		[[ -n "${_r// }" ]] && ULTRA_ROUTING_MODE="$_r"
+	else
+		_r=$(printf '%s' "$SPEC_REMOTE_OUT" | python3 -c 'import json,sys; m=json.load(sys.stdin).get("routing_mode"); print(m.strip() if isinstance(m,str) and m.strip() else "")')
+		[[ -n "${_r// }" ]] && ULTRA_ROUTING_MODE="$_r"
+	fi
+fi
+echo "relay-check: routing_mode=${ULTRA_ROUTING_MODE} (spec на bridge: ${REMOTE_SPEC})"
+export ULTRA_ROUTING_MODE
+
 TMPDIR_VERIFY=$(mktemp -d)
 USERS_JSON="${TMPDIR_VERIFY}/users.json"
 
@@ -308,14 +323,13 @@ n | N | no | NO | false | FALSE | 0) skip_split=1 ;;
 esac
 
 if [[ "$skip_split" -eq 0 ]]; then
-	echo "relay-check: split-routing — два зонда (direct на bridge и через exit), SOCKS 127.0.0.1:${SOCKS_PORT}…"
+	echo "relay-check: split-routing — зонд exit, SOCKS 127.0.0.1:${SOCKS_PORT}…"
 	export ULTRA_SOCKS5="127.0.0.1:${SOCKS_PORT}"
-	export SPLIT_STRICT="${VERIFY_SPLIT_STRICT:-1}"
-	if [[ -n "${VERIFY_PROBE_DIRECT_URL:-}" ]]; then
-		export SPLIT_PROBE_DIRECT_URL="$VERIFY_PROBE_DIRECT_URL"
-	fi
 	if [[ -n "${VERIFY_PROBE_EXIT_URL:-}" ]]; then
 		export SPLIT_PROBE_EXIT_URL="$VERIFY_PROBE_EXIT_URL"
+	fi
+	if [[ -n "${VERIFY_PROBE_EXIT_PLAIN_URL:-}" ]]; then
+		export SPLIT_PROBE_EXIT_PLAIN_URL="$VERIFY_PROBE_EXIT_PLAIN_URL"
 	fi
 	if ! "$SCRIPT_DIR/verify-split-routing.sh"; then
 		echo "relay-check: verify-split-routing.sh завершился с ошибкой." >&2

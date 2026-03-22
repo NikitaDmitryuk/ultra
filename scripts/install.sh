@@ -183,6 +183,15 @@ if [[ -n "${SPLITHTTP_PATH// }" ]]; then
 	ARGS+=(-splithttp-path "$SPLITHTTP_PATH")
 fi
 
+ROUTING_MODE="${ROUTING_MODE:-}"
+if [[ -n "${ROUTING_MODE// }" ]]; then
+	ARGS+=(-routing-mode "$ROUTING_MODE")
+fi
+GEOSITE_BLOCK_TAGS="${GEOSITE_BLOCK_TAGS:-}"
+if [[ -n "${GEOSITE_BLOCK_TAGS// }" ]]; then
+	ARGS+=(-geosite-block-tags "$GEOSITE_BLOCK_TAGS")
+fi
+
 case "${SKIP_GEO_DOWNLOAD:-${SKIP_RUNETFREEDOM_GEO:-n}}" in
 y | Y | true | 1 | yes) ARGS+=(-skip-geo-download) ;;
 esac
@@ -223,9 +232,8 @@ if [[ "$RUN_VERIFY" -eq 1 ]]; then
 	export VERIFY_SOCKS_PORT="${VERIFY_SOCKS_PORT:-}"
 	export VERIFY_IP_URL="${VERIFY_IP_URL:-}"
 	export VERIFY_SPLIT_ROUTING="${VERIFY_SPLIT_ROUTING:-}"
-	export VERIFY_SPLIT_STRICT="${VERIFY_SPLIT_STRICT:-}"
-	export VERIFY_PROBE_DIRECT_URL="${VERIFY_PROBE_DIRECT_URL:-}"
 	export VERIFY_PROBE_EXIT_URL="${VERIFY_PROBE_EXIT_URL:-}"
+	export VERIFY_PROBE_EXIT_PLAIN_URL="${VERIFY_PROBE_EXIT_PLAIN_URL:-}"
 	verify_ok=0
 	if [[ "$FROM_CONFIG" -eq 1 && -n "${CONFIG_FILE:-}" ]]; then
 		if bash "$ROOT/scripts/verify-relay.sh" -c "$CONFIG_FILE"; then

@@ -9,6 +9,7 @@ type XrayWireSpec struct {
 	ExitTunnelUserLabel  string   `json:"exit_tunnel_user_label,omitempty"`
 	OutboundExitTag      string   `json:"outbound_exit_tag,omitempty"`
 	OutboundDirectTag    string   `json:"outbound_direct_tag,omitempty"`
+	OutboundBlockTag     string   `json:"outbound_block_tag,omitempty"`
 	VLESSEncryption      string   `json:"vless_encryption,omitempty"`
 	SniffingDestOverride []string `json:"sniffing_dest_override,omitempty"`
 	DomainMatcherSplit   string   `json:"domain_matcher_split,omitempty"`
@@ -32,6 +33,7 @@ type xrayWireResolved struct {
 	ExitTunnelUserLabel  string
 	OutboundExitTag      string
 	OutboundDirectTag    string
+	OutboundBlockTag     string
 	VLESSEncryption      string
 	SniffingDestOverride []string
 	DomainMatcherSplit   string
@@ -54,6 +56,7 @@ func resolveXrayWire(s *Spec) xrayWireResolved {
 		ExitTunnelUserLabel:  "tunnel",
 		OutboundExitTag:      "to-exit",
 		OutboundDirectTag:    "direct",
+		OutboundBlockTag:     "block",
 		VLESSEncryption:      "none",
 		SniffingDestOverride: []string{"http", "tls", "quic"},
 		DomainMatcherSplit:   "mph",
@@ -88,6 +91,9 @@ func resolveXrayWire(s *Spec) xrayWireResolved {
 	}
 	if w.OutboundDirectTag != "" {
 		r.OutboundDirectTag = w.OutboundDirectTag
+	}
+	if w.OutboundBlockTag != "" {
+		r.OutboundBlockTag = w.OutboundBlockTag
 	}
 	if w.VLESSEncryption != "" {
 		r.VLESSEncryption = w.VLESSEncryption

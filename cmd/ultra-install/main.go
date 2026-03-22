@@ -23,6 +23,17 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/realitykey"
 )
 
+func splitCommaNonEmpty(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // realityServerNames builds inbound server_names; sni defaults to the host part of dest.
 func realityServerNames(dest, sni string) []string {
 	if strings.TrimSpace(sni) != "" {
@@ -100,6 +111,16 @@ func main() {
 		"",
 		"pin geo bundle release tag on the bridge (empty = latest via GitHub API)",
 	)
+	routingMode := flag.String(
+		"routing-mode",
+		"",
+		"bridge split routing: blocklist (default) or ru_direct; empty keeps -reuse-bridge-spec remote or blocklist on fresh install",
+	)
+	geositeBlockTags := flag.String(
+		"geosite-block-tags",
+		"",
+		"optional comma-separated geosite category names (no geosite: prefix) routed to blackhole on bridge",
+	)
 	flag.Parse()
 
 	tun := *tunnelPort
@@ -132,6 +153,11 @@ func main() {
 	}
 	if presetStr != "apijson" && presetStr != "steamlike" {
 		fmt.Fprintln(os.Stderr, "ultra-install: unsupported -preset (use apijson, steamlike, or plusgaming=apijson):", presetStr)
+		os.Exit(2)
+	}
+	routingModeStr := strings.TrimSpace(*routingMode)
+	if routingModeStr != "" && routingModeStr != config.RoutingModeBlocklist && routingModeStr != config.RoutingModeRUDirect {
+		fmt.Fprintln(os.Stderr, "ultra-install: -routing-mode must be blocklist or ru_direct")
 		os.Exit(2)
 	}
 
@@ -379,6 +405,25 @@ func main() {
 			}
 			bridgeSpec.SOCKS5 = &cpy
 		}
+		if len(bridgeOverlay.GeositeBlockTags) > 0 {
+			bridgeSpec.GeositeBlockTags = append([]string(nil), bridgeOverlay.GeositeBlockTags...)
+		}
+		if bridgeOverlay.GeositeDirectTags != nil {
+			bridgeSpec.GeositeDirectTags = append([]string(nil), bridgeOverlay.GeositeDirectTags...)
+		}
+		if bridgeOverlay.GeoipDirectTags != nil {
+			bridgeSpec.GeoipDirectTags = append([]string(nil), bridgeOverlay.GeoipDirectTags...)
+		}
+		if bridgeOverlay.RuDirectTLDRegex != nil {
+			v := *bridgeOverlay.RuDirectTLDRegex
+			bridgeSpec.RuDirectTLDRegex = &v
+		}
+	}
+	if routingModeStr != "" {
+		bridgeSpec.RoutingMode = routingModeStr
+	}
+	if s := strings.TrimSpace(*geositeBlockTags); s != "" {
+		bridgeSpec.GeositeBlockTags = splitCommaNonEmpty(s)
 	}
 
 	exitSpec := &config.Spec{
