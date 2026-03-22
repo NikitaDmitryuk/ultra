@@ -136,7 +136,7 @@ func FullClientXRayJSON(spec *Spec, user auth.User) (vlessURI string, jsonBytes 
 		"routing": map[string]any{
 			"domainStrategy": "AsIs",
 			"rules": []any{
-				map[string]any{"type": "field", "outboundTag": "proxy"},
+				map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"},
 			},
 		},
 	}

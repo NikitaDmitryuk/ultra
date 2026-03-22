@@ -21,7 +21,7 @@ func TestBuildBridgeDevJSON(t *testing.T) {
 			TunnelUUID: "11111111-2222-3333-4444-555555555555",
 		},
 	}
-	s, err := mimic.New("plusgaming")
+	s, err := mimic.New("apijson")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestBuildBridgeEmptyClients(t *testing.T) {
 			TunnelUUID: "11111111-2222-3333-4444-555555555555",
 		},
 	}
-	s, err := mimic.New("plusgaming")
+	s, err := mimic.New("apijson")
 	if err != nil {
 		t.Fatal(err)
 	}

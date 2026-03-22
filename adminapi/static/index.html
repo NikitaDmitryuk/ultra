@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ultra-relay — пользователи</title>
+  <title>ultra-relay — admin</title>
   <style>
     :root { font-family: system-ui, sans-serif; background: #0f1419; color: #e7e9ea; }
     body { max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
@@ -48,7 +48,7 @@
   </style>
 </head>
 <body>
-  <h1>ultra-relay — админка пользователей</h1>
+  <h1>ultra-relay — loopback admin</h1>
   <p style="color:#8b98a5;font-size:0.9rem">Только с loopback (например после <code>ssh -L 8443:127.0.0.1:8443 …</code> откройте эту страницу по адресу этого хоста и порта).</p>
 
   <div id="banner"></div>
@@ -63,10 +63,10 @@
   </section>
 
   <section>
-    <h2 style="margin-top:0;font-size:1rem">Добавить пользователя</h2>
+    <h2 style="margin-top:0;font-size:1rem">Добавить запись</h2>
     <form id="form-add">
       <label for="new-name">Имя (метка)</label>
-      <input id="new-name" type="text" required placeholder="например, телефон жены">
+      <input id="new-name" type="text" required placeholder="метка (произвольная строка)">
       <div><button type="submit" class="primary">Создать</button></div>
     </form>
   </section>
@@ -83,8 +83,8 @@
 
   <div id="modal-overlay" role="dialog" aria-modal="true">
     <div class="modal">
-      <h2>Конфиг клиента</h2>
-      <p style="color:#8b98a5;font-size:0.85rem">VLESS URI (импорт в клиент):</p>
+      <h2>Экспорт outbound</h2>
+      <p style="color:#8b98a5;font-size:0.85rem">VLESS URI:</p>
       <pre id="m-vless"></pre>
       <button type="button" class="ghost" id="m-copy-vless">Копировать URI</button>
       <p style="color:#8b98a5;font-size:0.85rem;margin-top:1rem">xray_client_json:</p>
@@ -154,7 +154,7 @@
           </td>
           <td class="row-actions">
             <button type="button" class="ghost" data-rename="${escapeAttr(u.uuid)}">Переименовать</button>
-            <button type="button" class="ghost" data-client="${escapeAttr(u.uuid)}">Клиент</button>
+            <button type="button" class="ghost" data-client="${escapeAttr(u.uuid)}">Экспорт</button>
             <button type="button" class="danger" data-del="${escapeAttr(u.uuid)}">Удалить</button>
           </td>`;
         tbody.appendChild(tr);
@@ -217,7 +217,7 @@
     }
 
     async function doDelete(uuid) {
-      if (!confirm("Удалить пользователя " + uuid + "?")) return;
+      if (!confirm("Удалить запись " + uuid + "?")) return;
       try {
         await api("/v1/users/" + encodeURIComponent(uuid), { method: "DELETE" });
         showBanner("Удалено.", true);
@@ -270,7 +270,7 @@
           body: JSON.stringify({ name: name }),
         });
         el("new-name").value = "";
-        showBanner("Пользователь создан.", true);
+        showBanner("Запись создана.", true);
         await refreshList();
       } catch (e) {
         showBanner(e.message, false);

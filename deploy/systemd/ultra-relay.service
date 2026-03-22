@@ -8,6 +8,8 @@ Type=simple
 User=ultra-relay
 Group=ultra-relay
 EnvironmentFile=-/etc/ultra-relay/environment
+# Writable state dir on the host (not affected by PrivateTmp).
+StateDirectory=ultra-relay
 ExecStart=/usr/local/bin/ultra-relay -spec /etc/ultra-relay/spec.json
 Restart=on-failure
 RestartSec=5

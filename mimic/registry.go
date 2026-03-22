@@ -20,7 +20,7 @@ func Register(name string, ctor func() (Strategy, error)) {
 func New(preset string) (Strategy, error) {
 	key := strings.ToLower(strings.TrimSpace(preset))
 	if key == "" {
-		key = "plusgaming"
+		key = "apijson"
 	}
 	ctor, ok := constructors[key]
 	if !ok {

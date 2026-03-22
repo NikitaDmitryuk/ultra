@@ -35,6 +35,14 @@ func RunSSH(user, host, identity string, script string) error {
 	return cmd.Run()
 }
 
+// RunSSHOutput runs ssh like RunSSH but returns remote stdout (stderr still goes to os.Stderr).
+func RunSSHOutput(user, host, identity string, script string) ([]byte, error) {
+	remote := "bash -lc " + shellSingleQuote(script)
+	cmd := exec.Command("ssh", sshArgs(user, host, identity, remote)...)
+	cmd.Stderr = os.Stderr
+	return cmd.Output()
+}
+
 // SCP copies a local file to remotePath (full remote path like /etc/ultra-relay/spec.json).
 func SCP(identity, local, user, host, remotePath string) error {
 	args := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"}

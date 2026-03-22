@@ -1,23 +1,30 @@
 # Скопируйте в install.config в корне репозитория (install.config в .gitignore).
-# Тогда: make install — без вопросов; make relay-logs — хосты и ключ из файла.
+# make install — без вопросов; make relay-logs / make verify-relay — хосты и ключ из файла.
 #
-# Обязательно при неинтерактивной установке:
+# Обязательно:
 BRIDGE=203.0.113.10
 EXIT=203.0.113.11
+REALITY_DEST=REPLACE_HOST:443
+REALITY_SNI=REPLACE_HOST
 #
-# Синонимы (если удобнее): FRONT=… BACK=… вместо BRIDGE/EXIT.
+# Синонимы: FRONT=… BACK=… вместо BRIDGE/EXIT.
 #
 SSH_USER=root
 IDENTITY=/Users/you/.ssh/id_ed25519
 #
 # Необязательно:
 # PUBLIC_HOST=
-# REALITY_DEST=
-# REALITY_SNI=
 # VLESS_PORT=443
-# Публичный порт на bridge (в vless:// для клиентов). Должен быть свободен на bridge.
-# Если 443 на exit занят другим сервисом, задайте отдельный порт туннеля splithttp только на exit:
 # TUNNEL_PORT=8443
-# (bridge слушает VLESS_PORT, exit — TUNNEL_PORT; в URI клиента остаётся VLESS_PORT.)
+# EXIT_DIAL=exit.example.com
+# REUSE_BRIDGE_SPEC=y
+# (повторная установка: взять с bridge spec.json — REALITY, tunnel UUID, splithttp; токен admin из environment.)
+#
+# --- После make install (нужны локально xray, jq или python3) ---
+# VERIFY_AFTER_INSTALL=y
+# VERIFY_IP_URL=https://…   # обязательно, если VERIFY_AFTER_INSTALL=y
+# VERIFY_USER_UUID=
+# VERIFY_SOCKS_PORT=10808
+# VERIFY_FAIL_LOG_LINES=400
 # LOG_LEVEL=info
 # GENERATE_EXIT_TLS=y

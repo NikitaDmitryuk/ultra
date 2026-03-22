@@ -5,13 +5,14 @@ import (
 	"testing"
 )
 
-func TestPlusGamingHostAndHeaders(t *testing.T) {
-	p := NewPlusGaming()
-	if p.Host() != "gw.cg.yandex.ru" {
+func TestAPIJSONHostAndHeaders(t *testing.T) {
+	p := NewAPIJSON()
+	if p.Host() != DefaultSplithttpHost {
 		t.Fatal(p.Host())
 	}
 	h := p.ExtraHeaders()
-	if h["Origin"] != "https://plusgaming.yandex.ru" {
+	wantOrigin := "https://" + DefaultSplithttpHost
+	if h["Origin"] != wantOrigin {
 		t.Fatal(h["Origin"])
 	}
 	if h["Accept"] != "application/json" {
@@ -19,8 +20,8 @@ func TestPlusGamingHostAndHeaders(t *testing.T) {
 	}
 }
 
-func TestPlusGamingPathShape(t *testing.T) {
-	p := NewPlusGaming()
+func TestAPIJSONPathShape(t *testing.T) {
+	p := NewAPIJSON()
 	for range 200 {
 		path := p.NextPath()
 		if !strings.HasPrefix(path, "/api/") {
@@ -30,6 +31,9 @@ func TestPlusGamingPathShape(t *testing.T) {
 }
 
 func TestNewPreset(t *testing.T) {
+	if _, err := New("apijson"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := New("plusgaming"); err != nil {
 		t.Fatal(err)
 	}

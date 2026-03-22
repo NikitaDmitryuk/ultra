@@ -78,14 +78,19 @@ func splithttpOutboundStream(spec *Spec, strat mimic.Strategy) map[string]any {
 	path := resolveSplithttpPath(spec, strat)
 	headers := strat.ExtraHeaders()
 	host := splithttpHTTPHost(spec, strat)
+	tlsSettings := map[string]any{
+		"serverName":  tlsSN,
+		"alpn":        alpn,
+		"fingerprint": tlsFP,
+	}
+	// Self-signed on exit is not in the public trust store; bridge client must skip CA verify (see deploy/TLS.md).
+	if spec.TunnelTLSProvision == TunnelTLSSelfSigned {
+		tlsSettings["allowInsecure"] = true
+	}
 	return map[string]any{
-		"network":  "splithttp",
-		"security": "tls",
-		"tlsSettings": map[string]any{
-			"serverName":  tlsSN,
-			"alpn":        alpn,
-			"fingerprint": tlsFP,
-		},
+		"network":     "splithttp",
+		"security":    "tls",
+		"tlsSettings": tlsSettings,
 		"splithttpSettings": map[string]any{
 			"host":    host,
 			"path":    path,

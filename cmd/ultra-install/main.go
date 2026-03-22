@@ -2,11 +2,13 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -21,15 +23,32 @@ import (
 	"github.com/NikitaDmitryuk/ultra/mimic"
 )
 
+// realityServerNames builds inbound server_names for REALITY; sni defaults to the host part of dest.
+func realityServerNames(dest, sni string) []string {
+	if strings.TrimSpace(sni) != "" {
+		return []string{sni}
+	}
+	host, _, err := net.SplitHostPort(dest)
+	if err != nil {
+		host = dest
+	}
+	return []string{host}
+}
+
 func main() {
 	bridgeHost := flag.String("bridge", "", "bridge VPS hostname or IP (SSH target)")
 	exitHost := flag.String("exit", "", "exit VPS hostname or IP (SSH target)")
+	exitDial := flag.String(
+		"exit-dial",
+		"",
+		"hostname or IP for bridge→exit splithttp dial in spec (default: same as -exit); use DNS name when dial by IP breaks Host validation",
+	)
 	sshUser := flag.String("ssh-user", "root", "SSH user (key auth; avoid password automation)")
 	identity := flag.String("identity", "", "path to SSH private key (optional if ssh uses agent)")
 	publicHost := flag.String("public-host", "", "hostname or IP clients use to reach the bridge (default: -bridge)")
-	preset := flag.String("preset", "plusgaming", "HTTP profile between nodes (only plusgaming is supported in this release)")
-	realityDest := flag.String("reality-dest", "plusgaming.yandex.ru:443", "outer TLS peer host:port on the bridge")
-	realitySNI := flag.String("reality-sni", "plusgaming.yandex.ru", "outer TLS server name (SNI) on the bridge")
+	preset := flag.String("preset", "apijson", "HTTP profile between nodes (apijson; plusgaming is an alias)")
+	realityDest := flag.String("reality-dest", "", "REALITY TLS mirror target host:port (required unless -reuse-bridge-spec)")
+	realitySNI := flag.String("reality-sni", "", "SNI for REALITY inbound (default: host from -reality-dest)")
 	vlessPort := flag.Int("vless-port", 443, "TCP port: public VLESS+REALITY listener on the bridge (clients connect here)")
 	tunnelPort := flag.Int(
 		"tunnel-port",
@@ -51,6 +70,11 @@ func main() {
 		"log-level",
 		"info",
 		"ULTRA_RELAY_LOG_LEVEL on both nodes (debug, info, warning|warn, error, none); see ultra-relay -log-level",
+	)
+	reuseBridgeSpec := flag.Bool(
+		"reuse-bridge-spec",
+		false,
+		"SSH to bridge first: reuse REALITY keys, tunnel UUID, splithttp path/host/tls from existing spec.json; keep ULTRA_RELAY_ADMIN_TOKEN from remote environment when possible",
 	)
 	flag.Parse()
 
@@ -79,11 +103,13 @@ func main() {
 	presetStr := strings.TrimSpace(*preset)
 	realityDestStr := strings.TrimSpace(*realityDest)
 	realitySNIStr := strings.TrimSpace(*realitySNI)
-	if presetStr != "" && presetStr != "plusgaming" {
-		fmt.Fprintln(os.Stderr, "ultra-install: unsupported -preset (only plusgaming in this release):", presetStr)
+	if presetStr != "" && presetStr != "plusgaming" && presetStr != "apijson" {
+		fmt.Fprintln(os.Stderr, "ultra-install: unsupported -preset (only apijson in this release; plusgaming is an alias):", presetStr)
 		os.Exit(2)
 	}
-	presetStr = "plusgaming"
+	if presetStr == "" || presetStr == "plusgaming" {
+		presetStr = "apijson"
+	}
 
 	logLevelNorm := strings.TrimSpace(*logLevel)
 	if _, _, err := loglevel.ParseRelayLogLevel(logLevelNorm); err != nil {
@@ -91,32 +117,164 @@ func main() {
 		os.Exit(2)
 	}
 
+	if !*reuseBridgeSpec {
+		if realityDestStr == "" {
+			fmt.Fprintln(os.Stderr, "ultra-install: -reality-dest is required (host:port) unless -reuse-bridge-spec")
+			os.Exit(2)
+		}
+		if _, _, err := net.SplitHostPort(realityDestStr); err != nil {
+			fmt.Fprintln(os.Stderr, "ultra-install: -reality-dest must be host:port")
+			os.Exit(2)
+		}
+		if realitySNIStr == "" {
+			host, _, err := net.SplitHostPort(realityDestStr)
+			if err != nil {
+				host = realityDestStr
+			}
+			realitySNIStr = host
+		}
+	}
+
 	strat, err := mimic.New(presetStr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	mimicHost := strat.Host()
-	splitPath := strat.NextPath()
 
-	rk, err := realitykey.Generate()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "reality keys:", err)
-		os.Exit(1)
+	exitDialAddr := strings.TrimSpace(*exitDial)
+	if exitDialAddr == "" {
+		exitDialAddr = *exitHost
 	}
-	tunnelID := uuid.New()
-	tunnelUUID := (&tunnelID).String()
 
-	adminTok := make([]byte, 32)
-	if _, err := rand.Read(adminTok); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	var (
+		mimicHost   string
+		splitPath   string
+		tunnelUUID  string
+		realitySpec config.RealitySpec
+		splitTLS    config.SplitHTTPTLSSpec
+		tlsProv     config.TunnelTLSProvision
+		adminToken  string
+		reused      bool
+	)
+
+	if *reuseBridgeSpec {
+		remoteSpec := path.Join(*remoteDir, "spec.json")
+		script := fmt.Sprintf(`set -euo pipefail; test -r %q && cat %q`, remoteSpec, remoteSpec)
+		out, err := install.RunSSHOutput(*sshUser, *bridgeHost, *identity, script)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "reuse-bridge-spec: read remote spec:", err)
+			os.Exit(1)
+		}
+		out = bytes.TrimSpace(out)
+		var existing config.Spec
+		if err := json.Unmarshal(out, &existing); err != nil {
+			fmt.Fprintln(os.Stderr, "reuse-bridge-spec: parse spec:", err)
+			os.Exit(1)
+		}
+		if existing.Role != config.RoleBridge {
+			fmt.Fprintln(os.Stderr, "reuse-bridge-spec: remote spec role is not bridge")
+			os.Exit(1)
+		}
+		if existing.Reality.PrivateKey == "" || existing.Reality.PublicKey == "" {
+			fmt.Fprintln(os.Stderr, "reuse-bridge-spec: remote spec missing reality keys")
+			os.Exit(1)
+		}
+		mp := strings.TrimSpace(existing.MimicPreset)
+		if mp != "" {
+			strat, err = mimic.New(mp)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
+		realitySpec = existing.Reality
+		tunnelUUID = strings.TrimSpace(existing.Exit.TunnelUUID)
+		if tunnelUUID == "" {
+			tid := uuid.New()
+			tunnelUUID = (&tid).String()
+		}
+		mimicHost = strings.TrimSpace(existing.SplithttpHost)
+		if mimicHost == "" {
+			mimicHost = strat.Host()
+		}
+		splitPath = strings.TrimSpace(existing.SplithttpPath)
+		if splitPath == "" {
+			splitPath = strat.NextPath()
+		}
+		splitTLS = existing.SplitHTTPTLS
+		if splitTLS.ServerName == "" {
+			splitTLS.ServerName = mimicHost
+		}
+		if len(splitTLS.Alpn) == 0 {
+			splitTLS.Alpn = []string{"h2"}
+		}
+		if splitTLS.Fingerprint == "" {
+			splitTLS.Fingerprint = "chrome"
+		}
+		if existing.TunnelTLSProvision != "" {
+			tlsProv = existing.TunnelTLSProvision
+		} else if *generateExitTLS {
+			tlsProv = config.TunnelTLSSelfSigned
+		} else {
+			tlsProv = config.TunnelTLSUserProv
+		}
+		envPath := path.Join(*remoteDir, "environment")
+		envScript := fmt.Sprintf(`grep -E '^ULTRA_RELAY_ADMIN_TOKEN=' %q 2>/dev/null | head -1 || true`, envPath)
+		if envOut, err := install.RunSSHOutput(*sshUser, *bridgeHost, *identity, envScript); err == nil {
+			line := strings.TrimSpace(string(bytes.TrimSpace(envOut)))
+			if strings.HasPrefix(line, "ULTRA_RELAY_ADMIN_TOKEN=") {
+				adminToken = strings.TrimSpace(strings.TrimPrefix(line, "ULTRA_RELAY_ADMIN_TOKEN="))
+			}
+		}
+		if adminToken == "" {
+			adminTok := make([]byte, 32)
+			if _, err := rand.Read(adminTok); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			adminToken = hex.EncodeToString(adminTok)
+			fmt.Fprintln(os.Stderr, "reuse-bridge-spec: warning: could not read remote admin token; generated a new one")
+		}
+		reused = true
+	} else {
+		rk, err := realitykey.Generate()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "reality keys:", err)
+			os.Exit(1)
+		}
+		tunnelID := uuid.New()
+		tunnelUUID = (&tunnelID).String()
+		mimicHost = strat.Host()
+		splitPath = strat.NextPath()
+		realitySpec = config.RealitySpec{
+			Dest:        realityDestStr,
+			ServerNames: realityServerNames(realityDestStr, realitySNIStr),
+			PrivateKey:  rk.PrivateKey,
+			ShortIDs:    []string{""},
+			PublicKey:   rk.PublicKey,
+			Fingerprint: "chrome",
+			SpiderX:     "/",
+		}
+		splitTLS = config.SplitHTTPTLSSpec{
+			ServerName:  mimicHost,
+			Alpn:        []string{"h2"},
+			Fingerprint: "chrome",
+		}
+		tlsProv = config.TunnelTLSUserProv
+		if *generateExitTLS {
+			tlsProv = config.TunnelTLSSelfSigned
+		}
+		adminTok := make([]byte, 32)
+		if _, err := rand.Read(adminTok); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		adminToken = hex.EncodeToString(adminTok)
 	}
-	adminToken := hex.EncodeToString(adminTok)
 
-	tlsProv := config.TunnelTLSUserProv
-	if *generateExitTLS {
-		tlsProv = config.TunnelTLSSelfSigned
+	genExitTLS := *generateExitTLS
+	if reused && tlsProv == config.TunnelTLSSelfSigned {
+		genExitTLS = false
 	}
 
 	bridgeSpec := &config.Spec{
@@ -131,26 +289,14 @@ func main() {
 		AdminListen:        "127.0.0.1:8443",
 		PublicHost:         pub,
 		DevMode:            false,
-		Reality: config.RealitySpec{
-			Dest:        realityDestStr,
-			ServerNames: []string{realitySNIStr},
-			PrivateKey:  rk.PrivateKey,
-			ShortIDs:    []string{""},
-			PublicKey:   rk.PublicKey,
-			Fingerprint: "chrome",
-			SpiderX:     "/",
-		},
+		Reality:            realitySpec,
 		Exit: config.ExitTunnelSpec{
-			Address:    *exitHost,
+			Address:    exitDialAddr,
 			Port:       tun,
 			TunnelUUID: tunnelUUID,
 		},
 		SplithttpPath: splitPath,
-		SplitHTTPTLS: config.SplitHTTPTLSSpec{
-			ServerName:  mimicHost,
-			Alpn:        []string{"h2"},
-			Fingerprint: "chrome",
-		},
+		SplitHTTPTLS:  splitTLS,
 	}
 
 	exitSpec := &config.Spec{
@@ -171,11 +317,7 @@ func main() {
 			TunnelUUID: tunnelUUID,
 		},
 		SplithttpPath: splitPath,
-		SplitHTTPTLS: config.SplitHTTPTLSSpec{
-			ServerName:  mimicHost,
-			Alpn:        []string{"h2"},
-			Fingerprint: "chrome",
-		},
+		SplitHTTPTLS:  splitTLS,
 		ExitCertPaths: config.CertPaths{
 			CertFile: path.Join(*remoteDir, "fullchain.pem"),
 			KeyFile:  path.Join(*remoteDir, "privkey.pem"),
@@ -203,6 +345,9 @@ func main() {
 	}
 
 	if *dryRun {
+		if reused {
+			fmt.Println("=== reuse-bridge-spec: loaded REALITY/tunnel/splithttp from remote bridge ===")
+		}
 		fmt.Println("=== bridge spec ===")
 		fmt.Println(string(bridgeJSON))
 		fmt.Println("=== exit spec ===")
@@ -263,9 +408,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *generateExitTLS {
+	if genExitTLS {
+		// SAN required: Go 1.23+ x509 rejects hostname verify when cert has only legacy CN (bridge splithttp client).
 		ssl := fmt.Sprintf(
-			`set -euo pipefail; REMOTE_DIR=%q; CN=%q; openssl req -x509 -newkey rsa:2048 -keyout "$REMOTE_DIR/privkey.pem" -out "$REMOTE_DIR/fullchain.pem" -days 3650 -nodes -subj "/CN=$CN"; chown ultra-relay:ultra-relay "$REMOTE_DIR/privkey.pem" "$REMOTE_DIR/fullchain.pem"; chmod 600 "$REMOTE_DIR/privkey.pem" "$REMOTE_DIR/fullchain.pem"`,
+			`set -euo pipefail; REMOTE_DIR=%q; CN=%q; openssl req -x509 -newkey rsa:2048 -keyout "$REMOTE_DIR/privkey.pem" -out "$REMOTE_DIR/fullchain.pem" -days 3650 -nodes -subj "/CN=$CN" -addext "subjectAltName=DNS:$CN"; chown ultra-relay:ultra-relay "$REMOTE_DIR/privkey.pem" "$REMOTE_DIR/fullchain.pem"; chmod 600 "$REMOTE_DIR/privkey.pem" "$REMOTE_DIR/fullchain.pem"`,
 			*remoteDir,
 			mimicHost,
 		)
@@ -382,6 +528,9 @@ chmod 600 "$REMOTE_DIR/spec.json" || true
 	}
 
 	fmt.Println("Install finished.")
+	if reused {
+		fmt.Println("Preserved REALITY keys, tunnel UUID, and splithttp settings from existing bridge spec (-reuse-bridge-spec).")
+	}
 	fmt.Println("Log level (ULTRA_RELAY_LOG_LEVEL on both nodes):", logLevelNorm)
 	fmt.Println("Admin token (save securely):", adminToken)
 	fmt.Println("SSH port-forward example: ssh -L 8443:127.0.0.1:8443", fmt.Sprintf("%s@%s", *sshUser, *bridgeHost))

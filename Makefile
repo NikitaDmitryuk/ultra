@@ -1,4 +1,4 @@
-.PHONY: build build-install test vet lint format install relay-logs build-linux-amd64 build-install-linux-amd64 build-linux-arm64 clean
+.PHONY: build build-install test vet lint format install relay-logs verify-relay build-linux-amd64 build-install-linux-amd64 build-linux-arm64 clean
 
 BINARY=ultra-relay
 INSTALL_BINARY=ultra-install
@@ -54,6 +54,25 @@ relay-logs:
 			$(if $(IDENTITY),-i '$(IDENTITY)',) \
 			$(if $(SSH_USER),-u '$(SSH_USER)',) \
 			$(if $(LINES),-n '$(LINES)',); \
+	fi
+
+# Интеграционная проверка (локальный xray + SOCKS). Нужен VERIFY_IP_URL. См. README.
+# Опции: VERIFY_USER_UUID, VERIFY_SOCKS_PORT, VERIFY_IP_URL (передайте make … VAR=…).
+verify-relay:
+	@export VERIFY_USER_UUID="$(VERIFY_USER_UUID)"; \
+	export VERIFY_IP_URL="$(VERIFY_IP_URL)"; \
+	if [ -n "$(BRIDGE)" ] && [ -n "$(EXIT)" ]; then \
+		bash "$(CURDIR)/scripts/verify-relay.sh" \
+			$(if $(IDENTITY),-i '$(IDENTITY)',) \
+			$(if $(SSH_USER),-u '$(SSH_USER)',) \
+			$(if $(VERIFY_SOCKS_PORT),-p '$(VERIFY_SOCKS_PORT)',) \
+			"$(BRIDGE)" "$(EXIT)"; \
+	else \
+		bash "$(CURDIR)/scripts/verify-relay.sh" \
+			$(if $(INSTALL_CONFIG),-c '$(INSTALL_CONFIG)',) \
+			$(if $(IDENTITY),-i '$(IDENTITY)',) \
+			$(if $(SSH_USER),-u '$(SSH_USER)',) \
+			$(if $(VERIFY_SOCKS_PORT),-p '$(VERIFY_SOCKS_PORT)',); \
 	fi
 
 build-linux-amd64:

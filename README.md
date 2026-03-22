@@ -1,43 +1,17 @@
 # ultra
 
-**Репозиторий:** [github.com/NikitaDmitryuk/ultra](https://github.com/NikitaDmitryuk/ultra)
-
-```bash
-git clone https://github.com/NikitaDmitryuk/ultra.git
-```
-
-**ultra** — двухуровневый сетевой релей на Go: один процесс `ultra-relay` работает либо как **внешний узел** (`bridge` в конфиге), либо как **внутренний** (`exit`). Конфигурация задаётся JSON (`spec`), поддерживается горячая перезагрузка списка участников и локальный **loopback**-API для выдачи клиентских артефактов. Транспорт и параметры TLS между сегментами описаны в спецификации и передаются во встроенный движок пакетной обработки.
-
-## Назначение
-
-Проект рассчитан на сценарии, где трафик проходит **два последовательных сетевых узла** с согласованными TLS- и HTTP-параметрами между ними. Публичная документация описывает только механику развёртывания и конфигурации; детали протоколов на проводе определяются полями `spec.json`.
-
-## Схема
-
-```mermaid
-flowchart LR
-  Client[Client]
-  Front[EdgeNode]
-  Back[CoreNode]
-  Up[Upstream]
-  Client -->|TLS| Front
-  Front -->|TLS| Back
-  Back --> Up
-```
-
-В `spec.json` роли называются `bridge` и `exit`.
+Один бинарник `ultra-relay` работает в одной из двух ролей из JSON-спецификации (`bridge` или `exit`): внешний слушатель и внутренний узел с согласованным TLS и HTTP-слоем между ними. Управление записями идентификаторов — файл `users.json` и loopback HTTP API. Маршрутизация выполняется встроенным ядром [Xray-core](https://github.com/XTLS/Xray-core) (зависимость в `go.mod`).
 
 ## Состав репозитория
 
-- **`mimic`** — шаблоны HTTP-слоя для межузлового сегмента (host, path, заголовки). Сейчас доступен один встроенный шаблон `plusgaming`; описание полей — [docs/http-profiles.md](docs/http-profiles.md).
-- **`auth`** — хранение идентификаторов в `users.json`, перечитывание файла, атомарная запись при изменениях через API.
-- **`config`** — загрузка и проверка `spec`, генерация JSON для движка маршрутизации.
-- **`proxy`** — запуск движка в процессе `ultra-relay`.
-- **`adminapi`** — HTTP только на loopback: создание записей и выдача клиентских фрагментов.
-
-## Зависимости
-
-Сборка тянет модуль маршрутизации из экосистемы [Xray-core](https://github.com/XTLS/Xray-core) (лицензия и исходники — в `go.mod` / vendor graph).
+| Пакет / каталог | Назначение |
+|-----------------|------------|
+| `mimic` | Шаблон HTTP для сегмента bridge→exit (host, path, заголовки). Пресет `apijson` (идентификатор `plusgaming` в старых spec остаётся псевдонимом). |
+| `auth` | Хранение UUID в `users.json`, перечитывание, атомарная запись при изменениях через API. |
+| `config` | Загрузка и валидация spec, сборка JSON для Xray. |
+| `proxy` | Запуск Xray в процессе `ultra-relay`. |
+| `adminapi` | HTTP только на `admin_listen`: CRUD записей и выдача outbound-фрагментов. |
+| `cmd/ultra-install` | Сборка пары spec и доставка по SSH (только ключ). |
 
 ## Сборка
 
@@ -51,7 +25,7 @@ make format
 make lint
 ```
 
-Требуется Go из `go.mod`.
+Нужен Go из `go.mod`.
 
 ## Установка двух узлов
 
@@ -61,11 +35,77 @@ make lint
 make install
 ```
 
-Скрипт собирает **`ultra-relay-linux-amd64`** для VPS и **нативный** `./ultra-install` для текущей ОС (на macOS нельзя запускать `ultra-install-linux-amd64` — будет `Exec format error`). SSH: [docs/SSH.md](docs/SSH.md).
+Скрипт собирает `ultra-relay-linux-amd64` для Linux-целей и нативный `./ultra-install` для текущей ОС. На macOS не запускайте `ultra-install-linux-amd64` на месте установки — будет `Exec format error`.
+
+**Параметры REALITY:** для новой установки обязательны `-reality-dest host:port` и при необходимости `-reality-sni` (если пусто — берётся host из dest). В `install.config` — `REALITY_DEST` / `REALITY_SNI`, либо `REUSE_BRIDGE_SPEC=y` без смены зеркала.
+
+**Неинтерактивно:** `install.config.sample` → `install.config` (файл в `.gitignore`), затем `make install` или `ULTRA_INSTALL_CONFIG=/path/to/conf make install`.
+
+**Вручную:**
+
+```bash
+make build-linux-amd64 build-install
+./ultra-install -bridge FRONT -exit BACK -identity ~/.ssh/key \
+  -reality-dest 'HOST:443' -reality-sni 'HOST'
+```
+
+Флаги: `./ultra-install -h` (`-public-host`, `-preset`, `-reality-dest`, `-reality-sni`, `-generate-exit-tls`, `-dry-run`, `-write-local`, `-log-level`, `-reuse-bridge-spec`, …).
+
+- [deploy/systemd/ultra-relay.service](deploy/systemd/ultra-relay.service)
+- [deploy/bootstrap-bridge.sh](deploy/bootstrap-bridge.sh) / [deploy/bootstrap-exit.sh](deploy/bootstrap-exit.sh)
+
+## SSH (ключ к обоим хостам)
+
+Оркестратор использует `ssh -o BatchMode=yes`: без принятого ключа команды завершатся ошибкой.
+
+**Сгенерировать ключ:**
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/ultra_relay_ed25519 -C "ultra-relay-deploy"
+```
+
+При passphrase перед установкой: `eval "$(ssh-agent -s)"` и `ssh-add ~/.ssh/ultra_relay_ed25519`. Путь к ключу в `make install` можно оставить пустым, если ключ уже в агенте.
+
+**Публичный ключ на оба сервера** (front = bridge, back = exit), подставив пользователя и адрес:
+
+```bash
+ssh-copy-id -i ~/.ssh/ultra_relay_ed25519.pub root@FRONT_IP
+ssh-copy-id -i ~/.ssh/ultra_relay_ed25519.pub root@BACK_IP
+```
+
+**Проверка без пароля:**
+
+```bash
+ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -i ~/.ssh/ultra_relay_ed25519 root@FRONT_IP 'echo ok'
+ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -i ~/.ssh/ultra_relay_ed25519 root@BACK_IP 'echo ok'
+```
+
+**Опционально `~/.ssh/config`:**
+
+```sshconfig
+Host ultra-front
+  HostName FRONT_IP
+  User root
+  IdentityFile ~/.ssh/ultra_relay_ed25519
+
+Host ultra-back
+  HostName BACK_IP
+  User root
+  IdentityFile ~/.ssh/ultra_relay_ed25519
+```
+
+Нестандартный порт SSH скрипты не задают — используйте `Port` в `~/.ssh/config` или обёртки вручную.
+
+| Симптом | Проверка |
+|--------|----------|
+| `Permission denied (publickey)` | Ключ в `authorized_keys`, пользователь, путь `-i`. |
+| `Host key verification failed` | Первый вход: `StrictHostKeyChecking=accept-new`; при смене ключа хоста — правка `known_hosts`. |
 
 ## Spec (`schema_version`)
 
-В JSON задаётся `schema_version` (сейчас **1**). Поле `tunnel_tls_provision` фиксирует способ выдачи сертификата на узле `exit` для канала между узлами — [deploy/TLS.md](deploy/TLS.md).
+В JSON задаётся `schema_version` (сейчас **1**). Поле `tunnel_tls_provision` описывает происхождение сертификата на `exit` для канала bridge→exit — см. [deploy/TLS.md](deploy/TLS.md).
+
+Плейсхолдер `splithttp.invalid` в примерах соответствует зарезервированному TLD (RFC 6761); в продакшене задайте согласованные `splithttp_host` и TLS (SAN/CN).
 
 ## Локальная отладка (`dev_mode`)
 
@@ -73,76 +113,58 @@ make install
 
    ```bash
    cd examples
-   openssl req -x509 -newkey rsa:2048 -keyout test-key.pem -out test-cert.pem -days 3650 -nodes -subj "/CN=gw.cg.yandex.ru"
+   openssl req -x509 -newkey rsa:2048 -keyout test-key.pem -out test-cert.pem -days 3650 -nodes \
+     -subj "/CN=splithttp.invalid" -addext "subjectAltName=DNS:splithttp.invalid"
    ```
 
-2. Пользователи: `users.json` по образцу `users.json.sample` или пустой массив `[]` и токен `ULTRA_RELAY_ADMIN_TOKEN` + веб-админка `/admin/` или `POST /v1/users`.
+2. `users.json` по образцу `users.json.sample` или `[]` и токен `ULTRA_RELAY_ADMIN_TOKEN` + `/admin/` или `POST /v1/users`.
 
-3. Терминал A — `exit`: `./ultra-relay -spec examples/spec.exit.dev.json`
+3. Терминал A — exit: `./ultra-relay -spec examples/spec.exit.dev.json`
 
-4. Терминал B — `bridge`:
+4. Терминал B — bridge:
 
    ```bash
    export ULTRA_RELAY_ADMIN_TOKEN="$(openssl rand -hex 16)"
    ./ultra-relay -spec examples/spec.bridge.dev.json -admin-token "$ULTRA_RELAY_ADMIN_TOKEN"
    ```
 
-5. Loopback API на `admin_listen`: `GET /v1/users` (список), `POST /v1/users`, `PATCH /v1/users/{uuid}` (переименовать), `DELETE /v1/users/{uuid}`, `GET /v1/users/{uuid}/client` (конфиг клиента). Веб-UI: [http://127.0.0.1:8443/admin/](http://127.0.0.1:8443/admin/) (страница без Bearer; токен вводится в форме и хранится в sessionStorage вкладки).
+5. API на `admin_listen`: `GET/POST/PATCH/DELETE /v1/users`, `GET /v1/users/{uuid}/client`. Веб: `http://127.0.0.1:8443/admin/`.
 
-Согласуйте между процессами `mimic_preset`, `splithttp_path`, UUID туннеля и блок `splithttp_tls` (см. `deploy/spec.*.example.json`).
+Согласуйте `mimic_preset`, `splithttp_path`, UUID туннеля и `splithttp_tls` между процессами.
 
 ## Loopback API с административной машины
 
 ```bash
 ssh -L 8443:127.0.0.1:8443 user@EDGE_HOST
-# Браузер: http://127.0.0.1:8443/admin/
 curl -H "Authorization: Bearer …" http://127.0.0.1:8443/v1/users
 curl -H "Authorization: Bearer …" http://127.0.0.1:8443/v1/users/UUID/client
 ```
 
-Токен: `-admin-token` или `ULTRA_RELAY_ADMIN_TOKEN`. Без токена API не поднимается; при пустом `users.json` на `bridge` токен нужен, чтобы создать первую запись через API или админку.
+Ответ `client` содержит поля вроде `vless_uri`, `xray_client_json`, `full_xray_config_base64` — это данные для внешнего совместимого с Xray потребителя; репозиторий их не интерпретирует.
 
-### Выдача конфигурации конечным узлам
+## Интеграционная проверка
 
-- Подключение в **AmneziaVPN** (ссылка `vless://` или импорт JSON из `full_xray_config_base64`): [docs/amnezia-client.md](docs/amnezia-client.md).
-
-### Отладка и уровень логов
-
-- Интерактивный `make install` спрашивает **log-level** (пишется в `/etc/ultra-relay/environment` на **bridge и exit**); вручную: флаг `ultra-install -log-level …`.
-- `journalctl`, правка `ULTRA_RELAY_LOG_LEVEL`, проверки: [docs/debug.md](docs/debug.md).
-- Сбор логов: при наличии **`install.config`** достаточно **`make relay-logs`** (хосты и ключ из файла). Иначе: `make relay-logs BRIDGE=… EXIT=… IDENTITY=…`. См. [docs/debug.md](docs/debug.md) и `scripts/collect-relay-logs.sh -h`.
-
-### Переустановка и systemd
-
-Повторный `make install` / `ultra-install` снова копирует unit и выполняет `systemctl daemon-reload`, `enable` и **`restart` `ultra-relay`** на bridge и exit — сервис поднимается с новым бинарником и конфигом (кратковременный обрыв сессий возможен). Ранее только `enable --now` не перезапускал уже активный юнит; сейчас после деплоя всегда делается `restart`.
-
-## Деплой
-
-**Неинтерактивно:** скопируйте [install.config.sample](install.config.sample) → `install.config` в корне репозитория (шаблон в git, ваш файл — в `.gitignore`). Укажите `BRIDGE`, `EXIT`, `IDENTITY`. Затем:
+На машине оператора: `ssh`, `curl`, `xray`, `jq` или `python3`. Задайте **обязательно** `VERIFY_IP_URL` (HTTPS URL для GET через локальный SOCKS после поднятия конфигурации из Admin API).
 
 ```bash
-make install
+VERIFY_IP_URL=https://YOUR_HOST/your-probe-path make verify-relay
+# или с явными хостами:
+VERIFY_IP_URL=https://YOUR_HOST/your-probe-path make verify-relay BRIDGE=… EXIT=… IDENTITY=…
 ```
 
-Другой путь к конфигу: `ULTRA_INSTALL_CONFIG=/path/to/conf make install`.
+Скрипт: `scripts/verify-relay.sh -h`. Быстрый TLS-отсев кандидатов для `reality.dest`: `scripts/probe-reality-dest.sh`.
 
-**Вручную:**
+## Логи
 
-```bash
-make build-linux-amd64 build-install
-./ultra-install -bridge FRONT_IP -exit BACK_IP -identity ~/.ssh/id_ed25519
-```
+`make relay-logs` с `install.config` или `BRIDGE=… EXIT=…`. См. `scripts/collect-relay-logs.sh -h`. Уровень логов: `ULTRA_RELAY_LOG_LEVEL` / флаг `-log-level` у `ultra-relay` и установщика.
 
-Флаги: `./ultra-install -h` (`-public-host`, `-preset`, `-reality-dest`, `-reality-sni`, `-generate-exit-tls`, `-dry-run`, `-write-local`, `-log-level`).
-
-- [deploy/systemd/ultra-relay.service](deploy/systemd/ultra-relay.service)
-- [deploy/bootstrap-bridge.sh](deploy/bootstrap-bridge.sh) / [deploy/bootstrap-exit.sh](deploy/bootstrap-exit.sh)
+Повторный `make install` копирует unit и выполняет `systemctl restart ultra-relay` на обоих узлах.
 
 ## Ограничения
 
-- Поддерживается один идентификатор пресета в `mimic_preset` для текущей ветки релиза (см. справку установщика).
-- Смена `splithttp_path` при пересборке может кратковременно разрывать существующие сессии между узлами.
-- Поведение в разных сетевых средах не унифицировано; проверяйте конфигурацию на своих площадках.
+- Один активный `mimic_preset` на релизную ветку (см. `-preset` / справку установщика).
+- Смена `splithttp_path` может разорвать существующие сессии между узлами.
+- Поведение зависит от среды; валидируйте spec и TLS на своих площадках.
 
 ## Лицензия
 
