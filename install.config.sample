@@ -1,42 +1,51 @@
 # Скопируйте в install.config в корне репозитория (install.config в .gitignore).
 # make install — без вопросов; make relay-logs / make verify-relay — хосты и ключ из файла.
 #
-# Обязательно:
+# Подставьте свои BRIDGE/EXIT и путь к ключу; остальное ниже — рабочие значения по умолчанию.
+
 BRIDGE=203.0.113.10
 EXIT=203.0.113.11
-REALITY_DEST=REPLACE_HOST:443
-REALITY_SNI=REPLACE_HOST
-#
-# Синонимы: FRONT=… BACK=… вместо BRIDGE/EXIT.
-#
 SSH_USER=root
 IDENTITY=/Users/you/.ssh/id_ed25519
-#
-# Необязательно:
+PUBLIC_HOST=203.0.113.10
+
+# Публичный inbound (REALITY): пример цели TLS; замените на свой допустимый host:443.
+REALITY_DEST=www.microsoft.com:443
+REALITY_SNI=www.microsoft.com
+
+# Шаблон HTTP для splithttp (bridge→exit).
+PRESET=steamlike
+
+VLESS_PORT=443
+TUNNEL_PORT=8443
+LOG_LEVEL=info
+GENERATE_EXIT_TLS=y
+
+# При необходимости: DNS/IP для dial к exit (если отличается от EXIT).
+# EXIT_DIAL=exit.example.com
+
+# Переопределение hostname/path сегмента splithttp (SAN self-signed и splithttp_tls под host).
+# SPLITHTTP_HOST=
+# SPLITHTTP_PATH=
+
+# --- Проверка цепочки после установки (нужны локально xray, jq или python3) ---
+VERIFY_AFTER_INSTALL=y
+VERIFY_IP_URL=https://api.ipify.org
+VERIFY_SOCKS_PORT=10808
+# VERIFY_USER_UUID=
+# Два зонда split-routing после первого GET включены, пока не задано VERIFY_SPLIT_ROUTING=n.
+# VERIFY_SPLIT_ROUTING=n
+# VERIFY_SPLIT_STRICT=0
+# VERIFY_PROBE_DIRECT_URL=
+# VERIFY_PROBE_EXIT_URL=
+VERIFY_FAIL_LOG_LINES=400
+
+# --- Прочее (по умолчанию можно не трогать) ---
 # Geo на bridge при установке (скачивание с GitHub): по умолчанию выполняется по SSH.
 # SKIP_GEO_DOWNLOAD=y — не качать (положите geoip.dat и geosite.dat сами в geo_assets_dir).
 # Синоним устаревшего имени: SKIP_RUNETFREEDOM_GEO=y
 # GEO_RELEASE_TAG=202603220955 — зафиксировать тег релиза вместо latest.
-# PUBLIC_HOST=
-# VLESS_PORT=443
-# TUNNEL_PORT=8443
-# EXIT_DIAL=exit.example.com
-# REUSE_BRIDGE_SPEC=y
-# (повторная установка: взять с bridge spec.json — ключи front inbound, tunnel UUID, splithttp; токен admin из environment.)
-#
+# REUSE_BRIDGE_SPEC=y — взять с bridge spec.json ключи front inbound, tunnel UUID, splithttp; токен admin из environment.
+
 # Жёсткая проверка SSH host key (нужен заранее заполненный known_hosts):
 # export ULTRA_INSTALL_SSH_STRICT_HOST_KEY=yes
-#
-# --- После make install (нужны локально xray, jq или python3) ---
-# VERIFY_AFTER_INSTALL=y
-# VERIFY_IP_URL=https://…   # обязательно, если VERIFY_AFTER_INSTALL=y (первый GET через SOCKS)
-# VERIFY_USER_UUID=
-# VERIFY_SOCKS_PORT=10808
-# Два зонда split-routing после первого GET — по умолчанию включены.
-# VERIFY_SPLIT_ROUTING=n   # отключить, если на bridge без split или зонды не подходят
-# VERIFY_SPLIT_STRICT=0    # при совпадении обоих IP только предупреждение (по умолчанию — ошибка)
-# VERIFY_PROBE_DIRECT_URL=   # по умолчанию api.ipify.org
-# VERIFY_PROBE_EXIT_URL=     # по умолчанию встроенный пербор HTTPS; задайте URL под ваши geosite_exit_tags
-# VERIFY_FAIL_LOG_LINES=400
-# LOG_LEVEL=info
-# GENERATE_EXIT_TLS=y

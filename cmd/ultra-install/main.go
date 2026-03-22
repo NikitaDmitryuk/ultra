@@ -46,7 +46,17 @@ func main() {
 	sshUser := flag.String("ssh-user", "root", "SSH user (key auth; avoid password automation)")
 	identity := flag.String("identity", "", "path to SSH private key (optional if ssh uses agent)")
 	publicHost := flag.String("public-host", "", "hostname or IP clients use to reach the bridge (default: -bridge)")
-	preset := flag.String("preset", "apijson", "HTTP profile between nodes (apijson; plusgaming is an alias)")
+	preset := flag.String("preset", "apijson", "splithttp template: apijson, steamlike (plusgaming = apijson)")
+	splithttpHostFlag := flag.String(
+		"splithttp-host",
+		"",
+		"override spec splithttp_host and tunnel TLS server name / cert CN (default: preset default host)",
+	)
+	splithttpPathFlag := flag.String(
+		"splithttp-path",
+		"",
+		"override spec splithttp_path (default: random path from preset at install time)",
+	)
 	realityDest := flag.String(
 		"reality-dest",
 		"",
@@ -117,12 +127,12 @@ func main() {
 	presetStr := strings.TrimSpace(*preset)
 	realityDestStr := strings.TrimSpace(*realityDest)
 	realitySNIStr := strings.TrimSpace(*realitySNI)
-	if presetStr != "" && presetStr != "plusgaming" && presetStr != "apijson" {
-		fmt.Fprintln(os.Stderr, "ultra-install: unsupported -preset (only apijson in this release; plusgaming is an alias):", presetStr)
-		os.Exit(2)
-	}
 	if presetStr == "" || presetStr == "plusgaming" {
 		presetStr = "apijson"
+	}
+	if presetStr != "apijson" && presetStr != "steamlike" {
+		fmt.Fprintln(os.Stderr, "ultra-install: unsupported -preset (use apijson, steamlike, or plusgaming=apijson):", presetStr)
+		os.Exit(2)
 	}
 
 	logLevelNorm := strings.TrimSpace(*logLevel)
@@ -226,6 +236,13 @@ func main() {
 		if splitTLS.Fingerprint == "" {
 			splitTLS.Fingerprint = "chrome"
 		}
+		if sh := strings.TrimSpace(*splithttpHostFlag); sh != "" {
+			mimicHost = sh
+			splitTLS.ServerName = mimicHost
+		}
+		if sp := strings.TrimSpace(*splithttpPathFlag); sp != "" {
+			splitPath = sp
+		}
 		if existing.TunnelTLSProvision != "" {
 			tlsProv = existing.TunnelTLSProvision
 		} else if *generateExitTLS {
@@ -263,6 +280,12 @@ func main() {
 		tunnelUUID = (&tunnelID).String()
 		mimicHost = strat.Host()
 		splitPath = strat.NextPath()
+		if sh := strings.TrimSpace(*splithttpHostFlag); sh != "" {
+			mimicHost = sh
+		}
+		if sp := strings.TrimSpace(*splithttpPathFlag); sp != "" {
+			splitPath = sp
+		}
 		realitySpec = config.RealitySpec{
 			Dest:        realityDestStr,
 			ServerNames: realityServerNames(realityDestStr, realitySNIStr),

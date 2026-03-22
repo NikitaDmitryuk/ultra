@@ -7,7 +7,7 @@
 
 | Пакет / каталог                                                | Назначение                                                                                                                                      |
 | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `internal/mimic`                                               | Шаблон HTTP для сегмента bridge→exit (host, path, заголовки). Пресет `apijson` (идентификатор `plusgaming` в старых spec остаётся псевдонимом). |
+| `internal/mimic`                                               | Шаблоны HTTP для splithttp bridge→exit (`Host`, path, заголовки). Идентификаторы `apijson`, `steamlike`; `plusgaming` — псевдоним `apijson`. |
 | `internal/auth`                                                | Хранение UUID в `users.json`, перечитывание, атомарная запись при изменениях через API.                                                         |
 | `internal/config`                                              | Загрузка и валидация spec, сборка JSON конфигурации для встроенного ядра.                                                                       |
 | `internal/proxy`                                               | Запуск ядра в процессе `ultra-relay`.                                                                                                           |
@@ -42,7 +42,7 @@ make install
 
 **Цель для внешнего TLS handshape на bridge (`-reality-dest`):** для новой установки задайте `-reality-dest host:port` и при необходимости `-reality-sni` (если пусто — берётся host из dest). В `install.config` — переменные `REALITY_DEST` / `REALITY_SNI`, либо `REUSE_BRIDGE_SPEC=y` без смены параметров существующего spec.
 
-**Неинтерактивно:** `install.config.sample` → `install.config` (файл в `.gitignore`), затем `make install` или `ULTRA_INSTALL_CONFIG=/path/to/conf make install`.
+**Неинтерактивно:** `install.config.sample` → `install.config` (файл в `.gitignore`), затем `make install` или `ULTRA_INSTALL_CONFIG=/path/to/conf make install`. В `install.config` задаются `PRESET` (шаблон HTTP для splithttp), при необходимости `SPLITHTTP_HOST` и `SPLITHTTP_PATH` — см. комментарии в образце.
 
 **Вручную:**
 
@@ -111,6 +111,11 @@ Host ultra-back
 ## Spec (`schema_version`)
 
 В JSON задаётся `schema_version` (сейчас **1**). Поле `tunnel_tls_provision` описывает происхождение сертификата на `exit` для канала bridge→exit — см. [deploy/TLS.md](deploy/TLS.md).
+
+**Два независимых сегмента (разные поля spec):**
+
+- **Клиент → bridge:** публичный inbound: блок `reality` задаёт `dest` и `server_names` для TLS на стороне клиента относительно listener bridge (см. документацию Xray по REALITY).
+- **Bridge → exit:** межузловой outbound: VLESS поверх TLS и `splithttp`; `mimic_preset`, `splithttp_host`, `splithttp_path` и заголовки из пресета задают параметры HTTP для этого транспорта. Публичный сертификат CA на FQDN, для которого у вас нет полномочий в DNS, выпустить нельзя; для проверки имени хоста доверенным CA укажите контролируемый FQDN в `splithttp_host` и `splithttp_tls.server_name` и согласуйте материал ключа на exit — см. [deploy/TLS.md](deploy/TLS.md). Пресет `steamlike` подставляет типовые пути и заголовки, сходные с HTTP-клиентом игровой платформы; он не задаёт идентичность TLS удалённого сервиса третьей стороны.
 
 Плейсхолдер `splithttp.invalid` в примерах соответствует зарезервированному TLD (RFC 6761); в продакшене задайте согласованные `splithttp_host` и TLS (SAN/CN).
 
@@ -206,7 +211,7 @@ VERIFY_IP_URL=https://YOUR_HOST/your-probe-path make verify-relay BRIDGE=… EXI
 
 ## Ограничения
 
-- Один активный `mimic_preset` на релизную ветку (см. `-preset` / справку установщика).
+- На паре узлов должен совпадать один и тот же `mimic_preset` и параметры splithttp; установщик: `-preset` (`apijson`, `steamlike`), опционально `-splithttp-host` / `-splithttp-path`.
 - Смена `splithttp_path` может разорвать существующие сессии между узлами.
 - Поведение зависит от среды; валидируйте spec и TLS на своих площадках.
 
