@@ -9,7 +9,6 @@
 *.dylib
 
 # Built binaries
-ultra-relay
 ultra-relay-linux-amd64
 ultra-relay-linux-arm64
 
