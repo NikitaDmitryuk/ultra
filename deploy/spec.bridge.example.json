@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "tunnel_tls_provision": "user_provided",
+  "role": "bridge",
+  "mimic_preset": "plusgaming",
+  "users_path": "/etc/ultra-relay/users.json",
+  "listen_address": "0.0.0.0",
+  "vless_port": 443,
+  "admin_listen": "127.0.0.1:8443",
+  "public_host": "YOUR_BRIDGE_HOSTNAME_OR_IP",
+  "dev_mode": false,
+  "reality": {
+    "dest": "plusgaming.yandex.ru:443",
+    "server_names": ["plusgaming.yandex.ru"],
+    "private_key": "GENERATE_WITH_xray_x25519",
+    "short_ids": [""],
+    "public_key": "CORRESPONDING_PUBLIC_KEY_FOR_CLIENTS",
+    "fingerprint": "chrome",
+    "spider_x": "/"
+  },
+  "exit": {
+    "address": "EXIT_PUBLIC_HOST",
+    "port": 443,
+    "tunnel_uuid": "SHARED_TUNNEL_UUID_BRIDGE_AND_EXIT"
+  },
+  "splithttp_path": "/api/v1/subscription",
+  "splithttp_host": "gw.cg.yandex.ru",
+  "splithttp_tls": {
+    "server_name": "gw.cg.yandex.ru",
+    "alpn": ["h2"],
+    "fingerprint": "chrome"
+  },
+  "exit_cert": {}
+}

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint-test-build:
+    name: Lint, test, build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9.2.0
+        with:
+          version: v2.10.1
+          args: --timeout 5m
+
+      - name: Vet
+        run: make vet
+
+      - name: Test
+        run: make test
+
+      - name: Build ultra-relay
+        run: make build
+
+      - name: Build ultra-install
+        run: make build-install

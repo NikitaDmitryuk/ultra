@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "tunnel_tls_provision": "user_provided",
+  "role": "exit",
+  "mimic_preset": "plusgaming",
+  "users_path": "",
+  "listen_address": "0.0.0.0",
+  "vless_port": 443,
+  "public_host": "",
+  "dev_mode": false,
+  "reality": {},
+  "exit": {
+    "address": "",
+    "port": 0,
+    "tunnel_uuid": "SHARED_TUNNEL_UUID_BRIDGE_AND_EXIT"
+  },
+  "splithttp_path": "/api/v1/subscription",
+  "splithttp_host": "gw.cg.yandex.ru",
+  "splithttp_tls": {
+    "server_name": "gw.cg.yandex.ru",
+    "alpn": ["h2"],
+    "fingerprint": "chrome"
+  },
+  "exit_cert": {
+    "cert_file": "/etc/ultra-relay/fullchain.pem",
+    "key_file": "/etc/ultra-relay/privkey.pem"
+  }
+}

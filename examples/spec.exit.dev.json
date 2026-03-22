@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "role": "exit",
+  "mimic_preset": "plusgaming",
+  "users_path": "",
+  "listen_address": "127.0.0.1",
+  "vless_port": 20443,
+  "public_host": "",
+  "dev_mode": false,
+  "reality": {},
+  "exit": {
+    "address": "",
+    "port": 0,
+    "tunnel_uuid": "11111111-2222-3333-4444-555555555555"
+  },
+  "splithttp_path": "/api/v1/subscription",
+  "splithttp_host": "gw.cg.yandex.ru",
+  "splithttp_tls": {
+    "server_name": "gw.cg.yandex.ru",
+    "alpn": ["h2"],
+    "fingerprint": "chrome"
+  },
+  "exit_cert": {
+    "cert_file": "./examples/test-cert.pem",
+    "key_file": "./examples/test-key.pem"
+  }
+}

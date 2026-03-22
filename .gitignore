@@ -8,6 +8,11 @@
 *.so
 *.dylib
 
+# Built binaries
+ultra-relay
+ultra-relay-linux-amd64
+ultra-relay-linux-arm64
+
 # Test binary, built with `go test -c`
 *.test
 
@@ -26,6 +31,13 @@ go.work.sum
 
 # env file
 .env
+
+# Local dev TLS material (generate with openssl — see README)
+examples/test-cert.pem
+examples/test-key.pem
+
+# Browser HAR captures (large, may contain session metadata)
+*.har
 
 # Editor/IDE
 # .idea/
