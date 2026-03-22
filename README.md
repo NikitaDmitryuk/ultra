@@ -133,11 +133,37 @@ Host ultra-back
    ./ultra-relay -spec examples/spec.bridge.dev.json -admin-token "$ULTRA_RELAY_ADMIN_TOKEN"
    ```
 
-5. API на `admin_listen`: `GET/POST/PATCH/DELETE /v1/users`, `GET /v1/users/{uuid}/client`. Веб: `http://127.0.0.1:8443/admin/`.
+5. API на `admin_listen`: `GET/POST/PATCH/DELETE /v1/users`, `GET /v1/users/{uuid}/client`. Веб-интерфейс на том же адресе — пошагово в разделе «Loopback API с административной машины» ниже.
 
 Согласуйте `mimic_preset`, `splithttp_path`, UUID туннеля и `splithttp_tls` между процессами.
 
 ## Loopback API с административной машины
+
+На **bridge** Admin API и веб-админка слушают только **loopback** (`admin_listen` в spec, по умолчанию `127.0.0.1:8443`). С интернета к ним не подключиться — нужен **SSH port forwarding** с вашей машины на хост bridge.
+
+### Веб-админка
+
+1. Запустите туннель и оставьте сессию открытой (`EDGE_HOST` — DNS или IP **bridge**, пользователь — как при `make install`, часто `root`). При необходимости добавьте `-i ~/.ssh/ваш_ключ`.
+
+   ```bash
+   ssh -L 8443:127.0.0.1:8443 user@EDGE_HOST
+   ```
+
+   Если локальный порт **8443** уже занят, пробросьте другой и откройте админку на нём, например:
+
+   ```bash
+   ssh -L 18443:127.0.0.1:8443 user@EDGE_HOST
+   ```
+
+   тогда в браузере используйте порт **18443** вместо 8443.
+
+2. В браузере откройте **http://127.0.0.1:8443/admin/**.
+
+3. В поле **Admin token (Bearer)** вставьте значение **`ULTRA_RELAY_ADMIN_TOKEN`**: его выводит `ultra-install` при установке; на bridge можно посмотреть так: `grep ULTRA_RELAY_ADMIN_TOKEN /etc/ultra-relay/environment`. Нажмите **Сохранить в sessionStorage** — после этого страница ходит в API от вашего имени.
+
+Локально в dev (без SSH): URL из `admin_listen` в spec, для `examples/spec.bridge.dev.json` это **http://127.0.0.1:18443/admin/**.
+
+### Примеры curl
 
 ```bash
 ssh -L 8443:127.0.0.1:8443 user@EDGE_HOST
