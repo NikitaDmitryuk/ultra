@@ -97,8 +97,9 @@ type Spec struct {
 	// Prepended before other rules on the bridge; requires a block outbound in generated Xray JSON.
 	GeositeBlockTags []string `json:"geosite_block_tags,omitempty"`
 
-	// GeositeDirectTags (ru_direct only): geosite categories sent to direct. JSON null/omitted defaults to ["ru"].
-	// Explicit empty array [] disables the geosite-based direct rule.
+	// GeositeDirectTags (ru_direct only): categories (no "geosite:" prefix) sent to direct.
+	// JSON null/omitted or []: no geosite direct rule (default; compatible with runetfreedom bundle).
+	// Set e.g. ["ru"] only if your geosite.dat defines that code (v2fly full list, not guaranteed in runetfreedom).
 	GeositeDirectTags []string `json:"geosite_direct_tags,omitempty"`
 
 	// GeoipDirectTags (ru_direct only): geoip tags sent to direct. JSON null/omitted defaults to ["ru","private"].

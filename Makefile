@@ -63,9 +63,8 @@ verify-relay:
 	@export VERIFY_USER_UUID="$(VERIFY_USER_UUID)"; \
 	export VERIFY_IP_URL="$(VERIFY_IP_URL)"; \
 	export VERIFY_SPLIT_ROUTING="$(VERIFY_SPLIT_ROUTING)"; \
-	export VERIFY_SPLIT_STRICT="$(VERIFY_SPLIT_STRICT)"; \
-	export VERIFY_PROBE_DIRECT_URL="$(VERIFY_PROBE_DIRECT_URL)"; \
 	export VERIFY_PROBE_EXIT_URL="$(VERIFY_PROBE_EXIT_URL)"; \
+	export VERIFY_PROBE_EXIT_PLAIN_URL="$(VERIFY_PROBE_EXIT_PLAIN_URL)"; \
 	if [ -n "$(BRIDGE)" ] && [ -n "$(EXIT)" ]; then \
 		bash "$(CURDIR)/scripts/verify-relay.sh" \
 			$(if $(IDENTITY),-i '$(IDENTITY)',) \

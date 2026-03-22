@@ -122,7 +122,7 @@ Host ultra-back
 **Маршрутизация на bridge** (при включённом `split_routing`, `domainStrategy` для правил: `IPIfNonMatch`):
 
 - `routing_mode: blocklist` (по умолчанию, если поле пустое) — трафик из `geosite_exit_tags` / `geoip_exit_tags` / `domain_exit` на exit, остальное на direct.
-- `routing_mode: ru_direct` — сначала опционально `geosite_block_tags` → outbound `blackhole`; затем `domain_exit` → exit, `domain_direct` → direct; далее direct для `geosite_direct_tags` (по умолчанию тег `ru`), опционально regexp суффиксов `.ru` / `.su` / `.xn--p1ai` (переключатель `ru_direct_tld_regex`, по умолчанию включён); direct для `geoip_direct_tags` (по умолчанию `ru` и `private`); весь остальной `tcp,udp` → exit. Пустой JSON-массив `geosite_direct_tags` / `geoip_direct_tags` явно отключает соответствующее правило.
+- `routing_mode: ru_direct` — сначала опционально `geosite_block_tags` → outbound `blackhole`; затем `domain_exit` → exit, `domain_direct` → direct; при непустом `geosite_direct_tags` — direct по этим тегам (коды должны существовать в вашем `geosite.dat`; набор runetfreedom по умолчанию **не** содержит категорию `ru`); regexp суффиксов `.ru` / `.su` / `.xn--p1ai` при `ru_direct_tld_regex` (по умолчанию включён); direct для `geoip_direct_tags` (по умолчанию `ru` и `private`); весь остальной `tcp,udp` → exit. Пустой `geoip_direct_tags` отключает соответствующее IP-правило.
 
 Секция `dns` в генерируемом конфиге bridge **не задаётся**; при необходимости раздельных резолверов допишите её вручную или расширьте spec отдельной задачей.
 
@@ -196,7 +196,7 @@ curl -H "Authorization: Bearer …" http://127.0.0.1:8443/v1/users/UUID/client
 
 ## Интеграционная проверка
 
-На машине оператора: `ssh`, `curl`, бинарник ядра из `go.mod`, `jq` или `python3`. Нужен **обязательно** `VERIFY_IP_URL` (первый GET через локальный SOCKS после выдачи конфига из Admin API). Далее по умолчанию идёт проверка **двумя** HTTPS-зондами (`scripts/verify-split-routing.sh`): один запрос обычно идёт в сторону «direct» на bridge, второй — в сторону, маршрутизируемую на exit по вашим `geosite_exit_tags`, пока не удастся отличить IPv4 исхода. Отключить второй этап: `VERIFY_SPLIT_ROUTING=n`; свой URL для второго зонда: `VERIFY_PROBE_EXIT_URL` (должен попадать под ваши правила geosite, ответ с IPv4 или путь `…/cdn-cgi/trace`); ослабить строгость: `VERIFY_SPLIT_STRICT=0`.
+На машине оператора: `ssh`, `curl`, бинарник ядра из `go.mod`, `jq` или `python3`. Нужен **обязательно** `VERIFY_IP_URL` (GET через локальный SOCKS после выдачи конфига из Admin API). Далее по умолчанию вызывается `scripts/verify-split-routing.sh`: **один** HTTPS-зонд на маршрут **exit** (для `ru_direct` по умолчанию `api.ipify.org`, иначе перебор `cdn-cgi/trace`). Публичный IP bridge/direct не проверяется. Отключить: `VERIFY_SPLIT_ROUTING=n`; свои URL: `VERIFY_PROBE_EXIT_URL` / `VERIFY_PROBE_EXIT_PLAIN_URL`; путь к spec: `VERIFY_SPEC_PATH`.
 
 ```bash
 VERIFY_IP_URL=https://YOUR_HOST/your-probe-path make verify-relay
@@ -208,7 +208,7 @@ VERIFY_IP_URL=https://YOUR_HOST/your-probe-path make verify-relay BRIDGE=… EXI
 
 ## Производительность и перезагрузки
 
-Любое изменение `users.json` (в т.ч. через Admin API) приводит к **полной пересборке конфигурации и перезапуску** встроенного ядра в процессе `ultra-relay`: активные клиентские сессии могут обрываться, нагрузка на CPU кратковременно растёт. При частых правках учёток имеет смысл батчить изменения на стороне оператора. Режим `blocklist` с большим набором `geosite_exit_tags` увеличивает стоимость матчинга на запрос — при узком сценарии можно сузить список тегов в spec. В режиме `ru_direct` для интеграционной проверки split задайте `VERIFY_PROBE_EXIT_URL` на хост, не попадающий под правила direct.
+Любое изменение `users.json` (в т.ч. через Admin API) приводит к **полной пересборке конфигурации и перезапуску** встроенного ядра в процессе `ultra-relay`: активные клиентские сессии могут обрываться, нагрузка на CPU кратковременно растёт. При частых правках учёток имеет смысл батчить изменения на стороне оператора. Режим `blocklist` с большим набором `geosite_exit_tags` увеличивает стоимость матчинга на запрос — при узком сценарии можно сузить список тегов в spec. Для `ru_direct` важна идея «**.ru → direct**, **не .ru → exit**», а не конкретные домены; при необходимости задайте `VERIFY_PROBE_EXIT_URL` / `VERIFY_PROBE_EXIT_PLAIN_URL`.
 
 ## Логи
 

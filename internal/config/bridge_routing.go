@@ -81,10 +81,12 @@ func buildBlocklistRouting(spec *Spec, w xrayWireResolved) (string, []any) {
 	return "IPIfNonMatch", rules
 }
 
-// effectiveGeositeDirectTags: nil → default ["ru"]; explicit [] → disabled.
+// effectiveGeositeDirectTags: nil/omitted → no geosite-based direct rule (runetfreedom geosite.dat
+// often has no "ru" list; use geoip + TLD regex by default). Non-empty list adds geosite:* rules
+// only for tags present in your geosite.dat (e.g. v2fly domain-list-community includes "ru").
 func effectiveGeositeDirectTags(s *Spec) []string {
 	if s.GeositeDirectTags == nil {
-		return []string{"ru"}
+		return nil
 	}
 	if len(s.GeositeDirectTags) == 0 {
 		return nil

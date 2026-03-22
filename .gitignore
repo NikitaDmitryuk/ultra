@@ -47,3 +47,5 @@ examples/test-key.pem
 
 ultra-install-linux-amd64
 ultra-install
+
+.cursor/

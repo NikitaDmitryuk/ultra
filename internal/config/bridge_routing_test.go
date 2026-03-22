@@ -49,7 +49,7 @@ func TestBuildRUDirectRouting(t *testing.T) {
 	if ds != "IPIfNonMatch" {
 		t.Fatalf("domainStrategy: got %q", ds)
 	}
-	var sawGeositeRU, sawGeoipPrivate, sawRegexp, lastExit bool
+	var sawGeoipRU, sawGeoipPrivate, sawRegexp, lastExit bool
 	for i, r := range rules {
 		m, ok := r.(map[string]any)
 		if !ok {
@@ -58,8 +58,6 @@ func TestBuildRUDirectRouting(t *testing.T) {
 		if dom, ok := m["domain"].([]string); ok {
 			for _, d := range dom {
 				switch d {
-				case "geosite:ru":
-					sawGeositeRU = true
 				case `regexp:.*\.ru$`, `regexp:.*\.su$`, `regexp:.*\.xn--p1ai$`:
 					sawRegexp = true
 				}
@@ -67,7 +65,10 @@ func TestBuildRUDirectRouting(t *testing.T) {
 		}
 		if ips, ok := m["ip"].([]string); ok {
 			for _, ip := range ips {
-				if ip == "geoip:private" {
+				switch ip {
+				case "geoip:ru":
+					sawGeoipRU = true
+				case "geoip:private":
 					sawGeoipPrivate = true
 				}
 			}
@@ -80,8 +81,8 @@ func TestBuildRUDirectRouting(t *testing.T) {
 			}
 		}
 	}
-	if !sawGeositeRU {
-		t.Fatalf("expected geosite:ru in rules: %#v", rules)
+	if !sawGeoipRU {
+		t.Fatalf("expected geoip:ru in rules: %#v", rules)
 	}
 	if !sawGeoipPrivate {
 		t.Fatalf("expected geoip:private in rules: %#v", rules)
@@ -91,6 +92,32 @@ func TestBuildRUDirectRouting(t *testing.T) {
 	}
 	if !lastExit {
 		t.Fatalf("expected last rule to send tcp,udp to exit: %#v", rules)
+	}
+}
+
+func TestBuildRUDirectRoutingExplicitGeosite(t *testing.T) {
+	_, rules := buildBridgeRouting(&Spec{
+		SplitRouting:      BoolPtr(true),
+		RoutingMode:       RoutingModeRUDirect,
+		GeoAssetsDir:      "/tmp/geo",
+		GeositeDirectTags: []string{"ru"},
+	})
+	var sawGeositeRU bool
+	for _, r := range rules {
+		m, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		if dom, ok := m["domain"].([]string); ok {
+			for _, d := range dom {
+				if d == "geosite:ru" {
+					sawGeositeRU = true
+				}
+			}
+		}
+	}
+	if !sawGeositeRU {
+		t.Fatalf("expected geosite:ru when GeositeDirectTags lists ru: %#v", rules)
 	}
 }
 
