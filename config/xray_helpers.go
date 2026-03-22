@@ -1,7 +1,7 @@
 package config
 
 import (
-	"github.com/nikdmitryuk/ultra/mimic"
+	"github.com/NikitaDmitryuk/ultra/mimic"
 )
 
 func realityShortIDs(ids []string) []string {

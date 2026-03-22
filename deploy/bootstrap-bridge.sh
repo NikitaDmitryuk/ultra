@@ -61,7 +61,7 @@ chmod 600 /etc/ultra-relay/environment
 REMOTE
 
 "${scp_base[@]}" "$ROOT/deploy/systemd/ultra-relay.service" "${SSH_USER}@${BRIDGE_IP}:/tmp/ultra-relay.service"
-"${ssh_base[@]}" "${SSH_USER}@${BRIDGE_IP}" "mv /tmp/ultra-relay.service /etc/systemd/system/${SERVICE_NAME}.service && systemctl daemon-reload && systemctl enable --now ${SERVICE_NAME}"
+"${ssh_base[@]}" "${SSH_USER}@${BRIDGE_IP}" "mv /tmp/ultra-relay.service /etc/systemd/system/${SERVICE_NAME}.service && systemctl daemon-reload && systemctl enable ${SERVICE_NAME} && systemctl restart ${SERVICE_NAME}"
 
 echo "Done. Admin token (save securely): ${TOKEN}"
 echo "Access admin API: ssh -L 8443:127.0.0.1:8443 ${SSH_USER}@${BRIDGE_IP}"

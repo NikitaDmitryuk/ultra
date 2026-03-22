@@ -4,18 +4,22 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/nikdmitryuk/ultra/mimic"
+	"github.com/NikitaDmitryuk/ultra/mimic"
 )
 
 // BuildExitXRayJSON returns xray JSON for the exit node (splithttp inbound -> freedom).
-func BuildExitXRayJSON(spec *Spec, strat mimic.Strategy) ([]byte, error) {
+// xrayLogLevel is Xray log.loglevel; empty means warning.
+func BuildExitXRayJSON(spec *Spec, strat mimic.Strategy, xrayLogLevel string) ([]byte, error) {
 	if spec.Role != RoleExit {
 		return nil, fmt.Errorf("config: expected exit role")
+	}
+	if xrayLogLevel == "" {
+		xrayLogLevel = "warning"
 	}
 	inStream := splithttpInboundStream(spec, strat)
 
 	cfg := map[string]any{
-		"log": map[string]any{"loglevel": "warning"},
+		"log": map[string]any{"loglevel": xrayLogLevel},
 		"inbounds": []any{
 			map[string]any{
 				"tag":      "vless-splithttp",

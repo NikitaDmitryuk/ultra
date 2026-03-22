@@ -5,11 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/xtls/xray-core/common/uuid"
 )
+
+// ErrUserNotFound is returned by RenameUser and RemoveUser when the UUID is unknown.
+var ErrUserNotFound = errors.New("auth: user not found")
+
+// ErrEmptyUserName is returned by RenameUser when the new name is empty after trimming.
+var ErrEmptyUserName = errors.New("auth: empty user name")
 
 // User is a single client identity stored in users.json.
 type User struct {
@@ -158,6 +165,63 @@ func (m *Manager) AddUser(name string) (User, error) {
 		return User{}, err
 	}
 	return u, nil
+}
+
+// RenameUser updates the display name for an existing UUID.
+func (m *Manager) RenameUser(id, name string) (User, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return User{}, ErrEmptyUserName
+	}
+	m.mu.Lock()
+	next := make([]User, len(m.list))
+	copy(next, m.list)
+	var out User
+	found := false
+	for i := range next {
+		if next[i].UUID == id {
+			next[i].Name = name
+			out = next[i]
+			found = true
+			break
+		}
+	}
+	m.mu.Unlock()
+	if !found {
+		return User{}, ErrUserNotFound
+	}
+	if err := m.saveUsers(next); err != nil {
+		return User{}, err
+	}
+	if err := m.applySnapshot(next, true); err != nil {
+		return User{}, err
+	}
+	return out, nil
+}
+
+// RemoveUser deletes a user by UUID and rewrites users.json.
+func (m *Manager) RemoveUser(id string) error {
+	if id == "" {
+		return ErrUserNotFound
+	}
+	m.mu.Lock()
+	next := make([]User, 0, len(m.list))
+	found := false
+	for _, u := range m.list {
+		if u.UUID == id {
+			found = true
+			continue
+		}
+		next = append(next, u)
+	}
+	m.mu.Unlock()
+	if !found {
+		return ErrUserNotFound
+	}
+	if err := m.saveUsers(next); err != nil {
+		return err
+	}
+	return m.applySnapshot(next, true)
 }
 
 func (m *Manager) saveUsers(users []User) error {

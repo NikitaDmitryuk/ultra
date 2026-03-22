@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/nikdmitryuk/ultra/auth"
-	"github.com/nikdmitryuk/ultra/config"
+	"github.com/NikitaDmitryuk/ultra/auth"
+	"github.com/NikitaDmitryuk/ultra/config"
 )
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
@@ -49,18 +49,36 @@ func NewServer(listen, token string, users *auth.Manager, spec *config.Spec, log
 		lim:    newVisitorLimiter(30, 60, 256),
 		tokenH: sha256.Sum256([]byte(token)),
 	}
-	s.routes()
+	if err := s.routes(); err != nil {
+		return nil, err
+	}
 	s.srv = &http.Server{Addr: listen, Handler: s.authMiddleware(s.mux)}
 	return s, nil
 }
 
-func (s *Server) routes() {
+func (s *Server) routes() error {
+	adminHandler, err := newAdminStaticHandler()
+	if err != nil {
+		return err
+	}
+	s.mux.Handle("GET /admin/", adminHandler)
+	s.mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/", http.StatusFound)
+	})
+	s.mux.HandleFunc("GET /v1/users", s.handleListUsers)
+	s.mux.HandleFunc("PATCH /v1/users/{uuid}", s.handlePatchUser)
+	s.mux.HandleFunc("DELETE /v1/users/{uuid}", s.handleDeleteUser)
 	s.mux.HandleFunc("POST /v1/users", s.handlePostUser)
 	s.mux.HandleFunc("GET /v1/users/{uuid}/client", s.handleGetClient)
+	return nil
 }
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/admin") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !s.lim.allow(clientIP(r)) {
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
 			return
@@ -97,7 +115,12 @@ func (s *Server) handlePostUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-	u, err := s.users.AddUser(strings.TrimSpace(body.Name))
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		http.Error(w, "bad name", http.StatusBadRequest)
+		return
+	}
+	u, err := s.users.AddUser(name)
 	if err != nil {
 		s.log.Error("add user", "err", err)
 		http.Error(w, "internal", http.StatusInternalServerError)
@@ -147,6 +170,77 @@ func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	users := s.users.List()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(users)
+}
+
+type patchUserReq struct {
+	Name string `json:"name"`
+}
+
+func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.PathValue("uuid")
+	if id == "" {
+		http.Error(w, "uuid", http.StatusBadRequest)
+		return
+	}
+	var body patchUserReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	u, err := s.users.RenameUser(id, body.Name)
+	if errors.Is(err, auth.ErrUserNotFound) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, auth.ErrEmptyUserName) {
+		http.Error(w, "bad name", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		s.log.Error("rename user", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(struct {
+		User auth.User `json:"user"`
+	}{User: u})
+}
+
+func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.PathValue("uuid")
+	if id == "" {
+		http.Error(w, "uuid", http.StatusBadRequest)
+		return
+	}
+	if err := s.users.RemoveUser(id); err != nil {
+		if errors.Is(err, auth.ErrUserNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		s.log.Error("remove user", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // Start runs the HTTP server (non-TLS).

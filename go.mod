@@ -1,4 +1,4 @@
-module github.com/nikdmitryuk/ultra
+module github.com/NikitaDmitryuk/ultra
 
 go 1.25.7
 

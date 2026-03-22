@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/nikdmitryuk/ultra/auth"
+	"github.com/NikitaDmitryuk/ultra/auth"
 )
 
 // ClientExport holds wire-format artifacts for compatible clients (JSON fragment and connection URI).

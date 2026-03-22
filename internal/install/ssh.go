@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 func sshArgs(user, host, identity string, remoteWords ...string) []string {
@@ -17,9 +18,17 @@ func sshArgs(user, host, identity string, remoteWords ...string) []string {
 	return args
 }
 
-// RunSSH runs ssh with a single remote shell invocation (e.g. "bash", "-lc", "true").
-func RunSSH(user, host, identity string, remoteWords ...string) error {
-	cmd := exec.Command("ssh", sshArgs(user, host, identity, remoteWords...)...)
+// shellSingleQuote wraps s in single quotes for a POSIX shell (-lc) argument.
+func shellSingleQuote(s string) string {
+	return `'` + strings.ReplaceAll(s, `'`, `'"'"'`) + `'`
+}
+
+// RunSSH runs ssh with one remote argv: login bash executes script as a single -c string.
+// Multiple ssh "command" tokens are unsafe: OpenSSH joins them with spaces, so
+// bash -lc mv /a /b is parsed as -c mv only → "mv: missing file operand".
+func RunSSH(user, host, identity string, script string) error {
+	remote := "bash -lc " + shellSingleQuote(script)
+	cmd := exec.Command("ssh", sshArgs(user, host, identity, remote)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin

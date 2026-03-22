@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ultra-relay — пользователи</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; background: #0f1419; color: #e7e9ea; }
+    body { max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.35rem; font-weight: 600; }
+    a { color: #1d9bf0; }
+    section { background: #16181c; border: 1px solid #2f3336; border-radius: 10px; padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+    label { display: block; font-size: 0.85rem; color: #8b98a5; margin-bottom: 0.35rem; }
+    input[type="password"], input[type="text"] {
+      width: 100%; max-width: 32rem; box-sizing: border-box;
+      padding: 0.5rem 0.65rem; border-radius: 6px; border: 1px solid #2f3336;
+      background: #0f1419; color: #e7e9ea;
+    }
+    button {
+      cursor: pointer; border: none; border-radius: 6px; padding: 0.45rem 0.85rem;
+      font-size: 0.9rem; margin-right: 0.4rem; margin-top: 0.4rem;
+    }
+    .primary { background: #1d9bf0; color: #fff; }
+    .danger { background: #f4212e; color: #fff; }
+    .ghost { background: #2f3336; color: #e7e9ea; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 0.5rem 0.4rem; border-bottom: 1px solid #2f3336; vertical-align: top; }
+    th { color: #8b98a5; font-weight: 500; }
+    code { font-size: 0.78rem; word-break: break-all; color: #aad7ff; }
+    .msg { padding: 0.65rem 0.85rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+    .msg-err { background: #2a1416; border: 1px solid #f4212e; color: #f9d0d3; }
+    .msg-ok { background: #14231a; border: 1px solid #00ba7c; color: #c8f5e0; }
+    #modal-overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65);
+      align-items: center; justify-content: center; z-index: 50; padding: 1rem;
+    }
+    #modal-overlay.open { display: flex; }
+    .modal {
+      background: #16181c; border: 1px solid #2f3336; border-radius: 12px;
+      max-width: 720px; width: 100%; max-height: 85vh; overflow: auto; padding: 1.25rem;
+    }
+    .modal h2 { margin-top: 0; font-size: 1.1rem; }
+    pre {
+      background: #0f1419; border: 1px solid #2f3336; border-radius: 8px;
+      padding: 0.75rem; overflow: auto; font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+    }
+    .row-actions { white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <h1>ultra-relay — админка пользователей</h1>
+  <p style="color:#8b98a5;font-size:0.9rem">Только с loopback (например после <code>ssh -L 8443:127.0.0.1:8443 …</code> откройте эту страницу по адресу этого хоста и порта).</p>
+
+  <div id="banner"></div>
+
+  <section>
+    <label for="token">Admin token (Bearer)</label>
+    <input id="token" type="password" autocomplete="off" placeholder="ULTRA_RELAY_ADMIN_TOKEN">
+    <div>
+      <button type="button" class="primary" id="btn-save-token">Сохранить в sessionStorage</button>
+      <button type="button" class="ghost" id="btn-forget-token">Забыть токен</button>
+    </div>
+  </section>
+
+  <section>
+    <h2 style="margin-top:0;font-size:1rem">Добавить пользователя</h2>
+    <form id="form-add">
+      <label for="new-name">Имя (метка)</label>
+      <input id="new-name" type="text" required placeholder="например, телефон жены">
+      <div><button type="submit" class="primary">Создать</button></div>
+    </form>
+  </section>
+
+  <section>
+    <h2 style="margin-top:0;font-size:1rem">Список</h2>
+    <p id="list-empty" style="color:#8b98a5;display:none">Пока никого нет.</p>
+    <table id="tbl" style="display:none">
+      <thead><tr><th>Имя</th><th>UUID</th><th></th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <button type="button" class="ghost" id="btn-refresh">Обновить список</button>
+  </section>
+
+  <div id="modal-overlay" role="dialog" aria-modal="true">
+    <div class="modal">
+      <h2>Конфиг клиента</h2>
+      <p style="color:#8b98a5;font-size:0.85rem">VLESS URI (импорт в клиент):</p>
+      <pre id="m-vless"></pre>
+      <button type="button" class="ghost" id="m-copy-vless">Копировать URI</button>
+      <p style="color:#8b98a5;font-size:0.85rem;margin-top:1rem">xray_client_json:</p>
+      <pre id="m-xray"></pre>
+      <button type="button" class="ghost" id="m-copy-xray">Копировать JSON</button>
+      <p style="color:#8b98a5;font-size:0.85rem;margin-top:1rem">full_xray_config_base64:</p>
+      <pre id="m-b64"></pre>
+      <button type="button" class="ghost" id="m-copy-b64">Копировать base64</button>
+      <div style="margin-top:1rem"><button type="button" class="primary" id="m-close">Закрыть</button></div>
+    </div>
+  </div>
+
+  <script>
+    const KEY = "ultra_relay_admin_token";
+
+    const el = (id) => document.getElementById(id);
+    const banner = el("banner");
+
+    function showBanner(text, ok) {
+      banner.innerHTML = text ? `<div class="msg ${ok ? "msg-ok" : "msg-err"}">${text}</div>` : "";
+    }
+
+    function getToken() {
+      return (el("token").value || sessionStorage.getItem(KEY) || "").trim();
+    }
+
+    async function api(path, opts = {}) {
+      const t = getToken();
+      if (!t) throw new Error("Нет токена: введите и сохраните.");
+      const headers = Object.assign(
+        { Authorization: "Bearer " + t, Accept: "application/json" },
+        opts.headers || {}
+      );
+      const r = await fetch(path, Object.assign({}, opts, { headers }));
+      const ct = r.headers.get("content-type") || "";
+      let bodyText = await r.text();
+      let data = null;
+      if (ct.includes("application/json") && bodyText) {
+        try { data = JSON.parse(bodyText); } catch (_) {}
+      }
+      if (!r.ok) {
+        const msg = (data && data.message) || bodyText || r.statusText;
+        throw new Error(r.status + " " + msg);
+      }
+      return data !== null ? data : bodyText;
+    }
+
+    function renderUsers(users) {
+      const tbody = el("tbody");
+      const tbl = el("tbl");
+      const empty = el("list-empty");
+      tbody.innerHTML = "";
+      if (!users || !users.length) {
+        tbl.style.display = "none";
+        empty.style.display = "block";
+        return;
+      }
+      empty.style.display = "none";
+      tbl.style.display = "table";
+      for (const u of users) {
+        const tr = document.createElement("tr");
+        const short = u.uuid.slice(0, 8) + "…";
+        tr.innerHTML = `
+          <td>${escapeHtml(u.name)}</td>
+          <td><code title="${escapeHtml(u.uuid)}">${escapeHtml(short)}</code>
+            <button type="button" class="ghost" data-copy="${escapeAttr(u.uuid)}">UUID</button>
+          </td>
+          <td class="row-actions">
+            <button type="button" class="ghost" data-rename="${escapeAttr(u.uuid)}">Переименовать</button>
+            <button type="button" class="ghost" data-client="${escapeAttr(u.uuid)}">Клиент</button>
+            <button type="button" class="danger" data-del="${escapeAttr(u.uuid)}">Удалить</button>
+          </td>`;
+        tbody.appendChild(tr);
+      }
+      tbody.querySelectorAll("[data-copy]").forEach((b) => {
+        b.addEventListener("click", () => copyText(b.getAttribute("data-copy")));
+      });
+      tbody.querySelectorAll("[data-rename]").forEach((b) => {
+        b.addEventListener("click", () => doRename(b.getAttribute("data-rename")));
+      });
+      tbody.querySelectorAll("[data-client]").forEach((b) => {
+        b.addEventListener("click", () => doClient(b.getAttribute("data-client")));
+      });
+      tbody.querySelectorAll("[data-del]").forEach((b) => {
+        b.addEventListener("click", () => doDelete(b.getAttribute("data-del")));
+      });
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+    function escapeAttr(s) {
+      return String(s).replace(/"/g, "&quot;");
+    }
+
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        showBanner("Скопировано в буфер.", true);
+        setTimeout(() => showBanner(""), 2000);
+      } catch (e) {
+        showBanner("Не удалось скопировать: " + e.message, false);
+      }
+    }
+
+    async function refreshList() {
+      try {
+        showBanner("");
+        const users = await api("/v1/users");
+        renderUsers(users);
+      } catch (e) {
+        showBanner(e.message, false);
+      }
+    }
+
+    async function doRename(uuid) {
+      const name = prompt("Новое имя:", "");
+      if (name === null) return;
+      try {
+        await api("/v1/users/" + encodeURIComponent(uuid), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name }),
+        });
+        showBanner("Имя обновлено.", true);
+        await refreshList();
+      } catch (e) {
+        showBanner(e.message, false);
+      }
+    }
+
+    async function doDelete(uuid) {
+      if (!confirm("Удалить пользователя " + uuid + "?")) return;
+      try {
+        await api("/v1/users/" + encodeURIComponent(uuid), { method: "DELETE" });
+        showBanner("Удалено.", true);
+        await refreshList();
+      } catch (e) {
+        showBanner(e.message, false);
+      }
+    }
+
+    async function doClient(uuid) {
+      try {
+        const d = await api("/v1/users/" + encodeURIComponent(uuid) + "/client");
+        el("m-vless").textContent = d.vless_uri || "";
+        el("m-xray").textContent = JSON.stringify(d.xray_client_json || {}, null, 2);
+        el("m-b64").textContent = d.full_xray_config_base64 || "";
+        el("modal-overlay").classList.add("open");
+        el("m-copy-vless").onclick = () => copyText(d.vless_uri || "");
+        el("m-copy-xray").onclick = () => copyText(JSON.stringify(d.xray_client_json || {}));
+        el("m-copy-b64").onclick = () => copyText(d.full_xray_config_base64 || "");
+      } catch (e) {
+        showBanner(e.message, false);
+      }
+    }
+
+    el("btn-save-token").addEventListener("click", () => {
+      const t = el("token").value.trim();
+      if (!t) {
+        showBanner("Введите токен.", false);
+        return;
+      }
+      sessionStorage.setItem(KEY, t);
+      showBanner("Токен сохранён в sessionStorage этой вкладки.", true);
+      refreshList();
+    });
+
+    el("btn-forget-token").addEventListener("click", () => {
+      sessionStorage.removeItem(KEY);
+      el("token").value = "";
+      showBanner("Токен очищен.", true);
+    });
+
+    el("form-add").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const name = el("new-name").value.trim();
+      if (!name) return;
+      try {
+        await api("/v1/users", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name }),
+        });
+        el("new-name").value = "";
+        showBanner("Пользователь создан.", true);
+        await refreshList();
+      } catch (e) {
+        showBanner(e.message, false);
+      }
+    });
+
+    el("btn-refresh").addEventListener("click", refreshList);
+    el("m-close").addEventListener("click", () => el("modal-overlay").classList.remove("open"));
+    el("modal-overlay").addEventListener("click", (ev) => {
+      if (ev.target === el("modal-overlay")) el("modal-overlay").classList.remove("open");
+    });
+
+    (function init() {
+      const stored = sessionStorage.getItem(KEY);
+      if (stored) el("token").value = stored;
+      refreshList();
+    })();
+  </script>
+</body>
+</html>

@@ -4,12 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/nikdmitryuk/ultra/auth"
-	"github.com/nikdmitryuk/ultra/mimic"
+	"github.com/NikitaDmitryuk/ultra/auth"
+	"github.com/NikitaDmitryuk/ultra/mimic"
 )
 
 // BuildBridgeXRayJSON returns a full xray JSON config for the bridge role.
-func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy) ([]byte, error) {
+// xrayLogLevel is passed to Xray's log.loglevel (e.g. debug, warning, none); empty means warning.
+func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xrayLogLevel string) ([]byte, error) {
 	if spec.Role != RoleBridge {
 		return nil, fmt.Errorf("config: expected bridge role")
 	}
@@ -28,11 +29,14 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy) ([
 		})
 	}
 
+	if xrayLogLevel == "" {
+		xrayLogLevel = "warning"
+	}
 	inStream := bridgeInboundStream(spec)
 	outStream := splithttpOutboundStream(spec, strat)
 
 	cfg := map[string]any{
-		"log": map[string]any{"loglevel": "warning"},
+		"log": map[string]any{"loglevel": xrayLogLevel},
 		"inbounds": []any{
 			map[string]any{
 				"tag":      "vless-in",

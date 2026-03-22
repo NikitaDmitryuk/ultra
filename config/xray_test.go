@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/nikdmitryuk/ultra/auth"
-	"github.com/nikdmitryuk/ultra/mimic"
+	"github.com/NikitaDmitryuk/ultra/auth"
+	"github.com/NikitaDmitryuk/ultra/mimic"
 )
 
 func TestBuildBridgeDevJSON(t *testing.T) {
@@ -25,7 +25,7 @@ func TestBuildBridgeDevJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := BuildBridgeXRayJSON(spec, []auth.User{{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", Name: "u"}}, s)
+	b, err := BuildBridgeXRayJSON(spec, []auth.User{{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", Name: "u"}}, s, "warning")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestBuildBridgeEmptyClients(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := BuildBridgeXRayJSON(spec, nil, s)
+	b, err := BuildBridgeXRayJSON(spec, nil, s, "")
 	if err != nil {
 		t.Fatal(err)
 	}

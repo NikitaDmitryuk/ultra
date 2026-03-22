@@ -48,6 +48,6 @@ chmod 600 "\$REMOTE_DIR/privkey.pem" 2>/dev/null || true
 REMOTE
 
 "${scp_base[@]}" "$ROOT/deploy/systemd/ultra-relay.service" "${SSH_USER}@${EXIT_IP}:/tmp/ultra-relay.service"
-"${ssh_base[@]}" "${SSH_USER}@${EXIT_IP}" "mv /tmp/ultra-relay.service /etc/systemd/system/${SERVICE_NAME}.service && systemctl daemon-reload && systemctl enable --now ${SERVICE_NAME}"
+"${ssh_base[@]}" "${SSH_USER}@${EXIT_IP}" "mv /tmp/ultra-relay.service /etc/systemd/system/${SERVICE_NAME}.service && systemctl daemon-reload && systemctl enable ${SERVICE_NAME} && systemctl restart ${SERVICE_NAME}"
 
 echo "Ensure TLS files in spec exist under ${REMOTE_DIR} (see deploy/TLS.md)."

@@ -61,7 +61,7 @@ make lint
 make install
 ```
 
-Скрипт собирает бинарники и вызывает оркестратор. SSH: [docs/SSH.md](docs/SSH.md).
+Скрипт собирает **`ultra-relay-linux-amd64`** для VPS и **нативный** `./ultra-install` для текущей ОС (на macOS нельзя запускать `ultra-install-linux-amd64` — будет `Exec format error`). SSH: [docs/SSH.md](docs/SSH.md).
 
 ## Spec (`schema_version`)
 
@@ -76,7 +76,7 @@ make install
    openssl req -x509 -newkey rsa:2048 -keyout test-key.pem -out test-cert.pem -days 3650 -nodes -subj "/CN=gw.cg.yandex.ru"
    ```
 
-2. Пользователи: `users.json` по образцу `users.json.sample` или пустой массив `[]` и токен `ULTRA_RELAY_ADMIN_TOKEN` + `POST /v1/users`.
+2. Пользователи: `users.json` по образцу `users.json.sample` или пустой массив `[]` и токен `ULTRA_RELAY_ADMIN_TOKEN` + веб-админка `/admin/` или `POST /v1/users`.
 
 3. Терминал A — `exit`: `./ultra-relay -spec examples/spec.exit.dev.json`
 
@@ -87,7 +87,7 @@ make install
    ./ultra-relay -spec examples/spec.bridge.dev.json -admin-token "$ULTRA_RELAY_ADMIN_TOKEN"
    ```
 
-5. Loopback API: `POST /v1/users`, `GET /v1/users/{uuid}/client` на `admin_listen`.
+5. Loopback API на `admin_listen`: `GET /v1/users` (список), `POST /v1/users`, `PATCH /v1/users/{uuid}` (переименовать), `DELETE /v1/users/{uuid}`, `GET /v1/users/{uuid}/client` (конфиг клиента). Веб-UI: [http://127.0.0.1:8443/admin/](http://127.0.0.1:8443/admin/) (страница без Bearer; токен вводится в форме и хранится в sessionStorage вкладки).
 
 Согласуйте между процессами `mimic_preset`, `splithttp_path`, UUID туннеля и блок `splithttp_tls` (см. `deploy/spec.*.example.json`).
 
@@ -95,21 +95,45 @@ make install
 
 ```bash
 ssh -L 8443:127.0.0.1:8443 user@EDGE_HOST
-curl -H "Authorization: Bearer …" http://127.0.0.1:8443/v1/users/...
+# Браузер: http://127.0.0.1:8443/admin/
+curl -H "Authorization: Bearer …" http://127.0.0.1:8443/v1/users
+curl -H "Authorization: Bearer …" http://127.0.0.1:8443/v1/users/UUID/client
 ```
 
-Токен: `-admin-token` или `ULTRA_RELAY_ADMIN_TOKEN`. Без токена API не поднимается; при пустом `users.json` на `bridge` токен нужен, чтобы создать первую запись через API.
+Токен: `-admin-token` или `ULTRA_RELAY_ADMIN_TOKEN`. Без токена API не поднимается; при пустом `users.json` на `bridge` токен нужен, чтобы создать первую запись через API или админку.
 
 ### Выдача конфигурации конечным узлам
 
+- Подключение в **AmneziaVPN** (ссылка `vless://` или импорт JSON из `full_xray_config_base64`): [docs/amnezia-client.md](docs/amnezia-client.md).
+
+### Отладка и уровень логов
+
+- Интерактивный `make install` спрашивает **log-level** (пишется в `/etc/ultra-relay/environment` на **bridge и exit**); вручную: флаг `ultra-install -log-level …`.
+- `journalctl`, правка `ULTRA_RELAY_LOG_LEVEL`, проверки: [docs/debug.md](docs/debug.md).
+- Сбор логов: при наличии **`install.config`** достаточно **`make relay-logs`** (хосты и ключ из файла). Иначе: `make relay-logs BRIDGE=… EXIT=… IDENTITY=…`. См. [docs/debug.md](docs/debug.md) и `scripts/collect-relay-logs.sh -h`.
+
+### Переустановка и systemd
+
+Повторный `make install` / `ultra-install` снова копирует unit и выполняет `systemctl daemon-reload`, `enable` и **`restart` `ultra-relay`** на bridge и exit — сервис поднимается с новым бинарником и конфигом (кратковременный обрыв сессий возможен). Ранее только `enable --now` не перезапускал уже активный юнит; сейчас после деплоя всегда делается `restart`.
+
 ## Деплой
+
+**Неинтерактивно:** скопируйте [install.config.sample](install.config.sample) → `install.config` в корне репозитория (шаблон в git, ваш файл — в `.gitignore`). Укажите `BRIDGE`, `EXIT`, `IDENTITY`. Затем:
+
+```bash
+make install
+```
+
+Другой путь к конфигу: `ULTRA_INSTALL_CONFIG=/path/to/conf make install`.
+
+**Вручную:**
 
 ```bash
 make build-linux-amd64 build-install
 ./ultra-install -bridge FRONT_IP -exit BACK_IP -identity ~/.ssh/id_ed25519
 ```
 
-Флаги: `./ultra-install -h` (`-public-host`, `-preset`, `-reality-dest`, `-reality-sni`, `-generate-exit-tls`, `-dry-run`, `-write-local`).
+Флаги: `./ultra-install -h` (`-public-host`, `-preset`, `-reality-dest`, `-reality-sni`, `-generate-exit-tls`, `-dry-run`, `-write-local`, `-log-level`).
 
 - [deploy/systemd/ultra-relay.service](deploy/systemd/ultra-relay.service)
 - [deploy/bootstrap-bridge.sh](deploy/bootstrap-bridge.sh) / [deploy/bootstrap-exit.sh](deploy/bootstrap-exit.sh)

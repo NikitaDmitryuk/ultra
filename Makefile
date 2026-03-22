@@ -1,4 +1,4 @@
-.PHONY: build build-install test vet lint format install build-linux-amd64 build-install-linux-amd64 build-linux-arm64 clean
+.PHONY: build build-install test vet lint format install relay-logs build-linux-amd64 build-install-linux-amd64 build-linux-arm64 clean
 
 BINARY=ultra-relay
 INSTALL_BINARY=ultra-install
@@ -38,6 +38,23 @@ lint:
 
 install:
 	@bash "$(CURDIR)/scripts/install.sh"
+
+# С journalctl: либо BRIDGE и EXIT, либо корневой install.config (см. install.config.sample).
+# Опции: IDENTITY, SSH_USER, LINES, INSTALL_CONFIG (путь к конфигу вместо install.config).
+relay-logs:
+	@if [ -n "$(BRIDGE)" ] && [ -n "$(EXIT)" ]; then \
+		bash "$(CURDIR)/scripts/collect-relay-logs.sh" \
+			$(if $(IDENTITY),-i '$(IDENTITY)',) \
+			$(if $(SSH_USER),-u '$(SSH_USER)',) \
+			$(if $(LINES),-n '$(LINES)',) \
+			"$(BRIDGE)" "$(EXIT)"; \
+	else \
+		bash "$(CURDIR)/scripts/collect-relay-logs.sh" \
+			$(if $(INSTALL_CONFIG),-c '$(INSTALL_CONFIG)',) \
+			$(if $(IDENTITY),-i '$(IDENTITY)',) \
+			$(if $(SSH_USER),-u '$(SSH_USER)',) \
+			$(if $(LINES),-n '$(LINES)',); \
+	fi
 
 build-linux-amd64:
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BINARY)-linux-amd64 ./cmd/ultra-relay

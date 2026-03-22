@@ -32,6 +32,9 @@ go.work.sum
 # env file
 .env
 
+# Локальные параметры установки (IP, SSH-ключ)
+install.config
+
 # Local dev TLS material (generate with openssl — see README)
 examples/test-cert.pem
 examples/test-key.pem
@@ -42,3 +45,6 @@ examples/test-key.pem
 # Editor/IDE
 # .idea/
 # .vscode/
+
+ultra-install
+ultra-install-linux-amd64
