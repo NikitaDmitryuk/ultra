@@ -175,7 +175,7 @@ curl -H "Authorization: Bearer …" http://127.0.0.1:8443/v1/users/UUID/client
 
 ## Интеграционная проверка
 
-На машине оператора: `ssh`, `curl`, `xray`, `jq` или `python3`. Задайте **обязательно** `VERIFY_IP_URL` (HTTPS URL для GET через локальный SOCKS после поднятия конфигурации из Admin API).
+На машине оператора: `ssh`, `curl`, `xray`, `jq` или `python3`. Нужен **обязательно** `VERIFY_IP_URL` (первый GET через локальный SOCKS после выдачи конфига из Admin API). Далее по умолчанию идёт проверка **двумя** HTTPS-зондами (`scripts/verify-split-routing.sh`): direct обычно на `api.ipify.org`, для exit — `cdn-cgi/trace` на доменах вроде Meta/X (типично в `ru-blocked-all`), пока не получится отличить IPv4 от IP моста. Отключить второй этап: `VERIFY_SPLIT_ROUTING=n`; свой зонд exit: `VERIFY_PROBE_EXIT_URL` (должен попадать под `geosite_exit_tags`, ответ с IPv4 или путь `…/cdn-cgi/trace`); ослабить строгость: `VERIFY_SPLIT_STRICT=0`.
 
 ```bash
 VERIFY_IP_URL=https://YOUR_HOST/your-probe-path make verify-relay

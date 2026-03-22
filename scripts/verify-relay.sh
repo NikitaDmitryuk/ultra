@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Интеграционная проверка: по SSH на bridge читается Admin API, локально поднимается Xray (SOCKS inbound),
-# затем выполняется HTTPS GET на URL из VERIFY_IP_URL через этот SOCKS.
+# затем HTTPS GET на VERIFY_IP_URL и по умолчанию два зонда split-routing (IP direct на bridge vs через exit).
 #
 # Зависимости на машине оператора: ssh, curl, xray (в PATH), base64.
 # JSON: jq (предпочтительно) или python3.
@@ -18,9 +18,10 @@ usage() {
 	echo "  $0 [-i identity] [-u ssh_user] [-p socks_port] BRIDGE_HOST EXIT_HOST" >&2
 	echo "  $0 [-c install.config] [-i …] [-u …] [-p …]   # хосты из файла (EXIT не используется)" >&2
 	echo "  $0 [-i …] [-u …] [-p …]   # без аргументов: корневой install.config, если есть" >&2
-	echo "Переменные: VERIFY_USER_UUID, VERIFY_SOCKS_PORT, VERIFY_IP_URL (обязательно — HTTPS URL для GET)" >&2
-	echo "  VERIFY_SPLIT_ROUTING=1 — после основного GET вызвать scripts/verify-split-routing.sh на этом SOCKS" >&2
-	echo "  VERIFY_SPLIT_STRICT=1 — внутри split-проверки завершить с ошибкой, если оба IP совпали" >&2
+	echo "Переменные: VERIFY_USER_UUID, VERIFY_SOCKS_PORT, VERIFY_IP_URL (обязательно — HTTPS URL для первого GET)" >&2
+	echo "  VERIFY_SPLIT_ROUTING=n|0 — не вызывать scripts/verify-split-routing.sh (по умолчанию вызывается)" >&2
+	echo "  VERIFY_SPLIT_STRICT=0 — при совпадении обоих IP только предупреждение (по умолчанию 1 — ошибка)" >&2
+	echo "  VERIFY_PROBE_DIRECT_URL / VERIFY_PROBE_EXIT_URL — зонды для split (см. verify-split-routing.sh)" >&2
 	echo "Пример: VERIFY_IP_URL=https://… $0 -c install.config" >&2
 	exit 2
 }
@@ -301,10 +302,21 @@ fi
 
 echo "probe_response=${PROBE_BODY}"
 
-if [[ "${VERIFY_SPLIT_ROUTING:-}" == "1" ]]; then
-	echo "relay-check: split-routing (VERIFY_SPLIT_ROUTING=1), SOCKS 127.0.0.1:${SOCKS_PORT}…"
+skip_split=0
+case "${VERIFY_SPLIT_ROUTING:-y}" in
+n | N | no | NO | false | FALSE | 0) skip_split=1 ;;
+esac
+
+if [[ "$skip_split" -eq 0 ]]; then
+	echo "relay-check: split-routing — два зонда (direct на bridge и через exit), SOCKS 127.0.0.1:${SOCKS_PORT}…"
 	export ULTRA_SOCKS5="127.0.0.1:${SOCKS_PORT}"
-	export SPLIT_STRICT="${VERIFY_SPLIT_STRICT:-0}"
+	export SPLIT_STRICT="${VERIFY_SPLIT_STRICT:-1}"
+	if [[ -n "${VERIFY_PROBE_DIRECT_URL:-}" ]]; then
+		export SPLIT_PROBE_DIRECT_URL="$VERIFY_PROBE_DIRECT_URL"
+	fi
+	if [[ -n "${VERIFY_PROBE_EXIT_URL:-}" ]]; then
+		export SPLIT_PROBE_EXIT_URL="$VERIFY_PROBE_EXIT_URL"
+	fi
 	if ! "$SCRIPT_DIR/verify-split-routing.sh"; then
 		echo "relay-check: verify-split-routing.sh завершился с ошибкой." >&2
 		exit 1

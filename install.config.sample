@@ -25,9 +25,14 @@ IDENTITY=/Users/you/.ssh/id_ed25519
 #
 # --- После make install (нужны локально xray, jq или python3) ---
 # VERIFY_AFTER_INSTALL=y
-# VERIFY_IP_URL=https://…   # обязательно, если VERIFY_AFTER_INSTALL=y
+# VERIFY_IP_URL=https://…   # обязательно, если VERIFY_AFTER_INSTALL=y (первый GET через SOCKS)
 # VERIFY_USER_UUID=
 # VERIFY_SOCKS_PORT=10808
+# Два зонда split-routing (direct на bridge vs через exit) после первого GET — по умолчанию включены.
+# VERIFY_SPLIT_ROUTING=n   # отключить, если на bridge без split или зонды не подходят
+# VERIFY_SPLIT_STRICT=0    # при совпадении обоих IP только предупреждение (по умолчанию — ошибка)
+# VERIFY_PROBE_DIRECT_URL=   # по умолчанию api.ipify.org (часто direct на мосту)
+# VERIFY_PROBE_EXIT_URL=     # по умолчанию перебор cdn-cgi/trace (Meta/X); задайте свой URL из ru-blocked-all
 # VERIFY_FAIL_LOG_LINES=400
 # LOG_LEVEL=info
 # GENERATE_EXIT_TLS=y

@@ -211,6 +211,10 @@ if [[ "$RUN_VERIFY" -eq 1 ]]; then
 	export VERIFY_USER_UUID="${VERIFY_USER_UUID:-}"
 	export VERIFY_SOCKS_PORT="${VERIFY_SOCKS_PORT:-}"
 	export VERIFY_IP_URL="${VERIFY_IP_URL:-}"
+	export VERIFY_SPLIT_ROUTING="${VERIFY_SPLIT_ROUTING:-}"
+	export VERIFY_SPLIT_STRICT="${VERIFY_SPLIT_STRICT:-}"
+	export VERIFY_PROBE_DIRECT_URL="${VERIFY_PROBE_DIRECT_URL:-}"
+	export VERIFY_PROBE_EXIT_URL="${VERIFY_PROBE_EXIT_URL:-}"
 	verify_ok=0
 	if [[ "$FROM_CONFIG" -eq 1 && -n "${CONFIG_FILE:-}" ]]; then
 		if bash "$ROOT/scripts/verify-relay.sh" -c "$CONFIG_FILE"; then
