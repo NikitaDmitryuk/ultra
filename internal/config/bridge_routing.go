@@ -27,6 +27,19 @@ func buildBridgeRouting(spec *Spec) (domainStrategy string, rules []any) {
 	}
 }
 
+func prependGeositeBlockRules(spec *Spec, w xrayWireResolved, rules []any) []any {
+	doms := normalizeGeositeDomains(spec.GeositeBlockTags)
+	if len(doms) == 0 {
+		return rules
+	}
+	blockRule := map[string]any{
+		"type":        "field",
+		"domain":      doms,
+		"outboundTag": w.OutboundBlockTag,
+	}
+	return append([]any{blockRule}, rules...)
+}
+
 func buildBlocklistRouting(spec *Spec, w xrayWireResolved) (string, []any) {
 	var rules []any
 	for _, d := range spec.DomainDirect {
@@ -64,7 +77,51 @@ func buildBlocklistRouting(spec *Spec, w xrayWireResolved) (string, []any) {
 	rules = append(rules, map[string]any{
 		"type": "field", "network": "tcp,udp", "outboundTag": w.OutboundDirectTag,
 	})
+	rules = prependGeositeBlockRules(spec, w, rules)
 	return "IPIfNonMatch", rules
+}
+
+// effectiveGeositeDirectTags: nil → default ["ru"]; explicit [] → disabled.
+func effectiveGeositeDirectTags(s *Spec) []string {
+	if s.GeositeDirectTags == nil {
+		return []string{"ru"}
+	}
+	if len(s.GeositeDirectTags) == 0 {
+		return nil
+	}
+	var out []string
+	for _, t := range s.GeositeDirectTags {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// effectiveGeoipDirectTags: nil → default ["ru","private"]; explicit [] → disabled.
+func effectiveGeoipDirectTags(s *Spec) []string {
+	if s.GeoipDirectTags == nil {
+		return []string{"ru", "private"}
+	}
+	if len(s.GeoipDirectTags) == 0 {
+		return nil
+	}
+	var out []string
+	for _, t := range s.GeoipDirectTags {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func ruDirectTLDRegexEnabled(s *Spec) bool {
+	if s.RuDirectTLDRegex == nil {
+		return true
+	}
+	return *s.RuDirectTLDRegex
 }
 
 func buildRUDirectRouting(spec *Spec, w xrayWireResolved) (string, []any) {
@@ -87,12 +144,31 @@ func buildRUDirectRouting(spec *Spec, w xrayWireResolved) (string, []any) {
 			"type": "field", "domain": []string{d}, "outboundTag": w.OutboundDirectTag,
 		})
 	}
-	rules = append(rules, map[string]any{
-		"type": "field", "ip": []string{w.RuDirectGeoipMatcher}, "outboundTag": w.OutboundDirectTag,
-	})
+	var domainDirect []string
+	if gs := effectiveGeositeDirectTags(spec); len(gs) > 0 {
+		domainDirect = append(domainDirect, normalizeGeositeDomains(gs)...)
+	}
+	if ruDirectTLDRegexEnabled(spec) {
+		domainDirect = append(domainDirect,
+			`regexp:.*\.ru$`,
+			`regexp:.*\.su$`,
+			`regexp:.*\.xn--p1ai$`,
+		)
+	}
+	if len(domainDirect) > 0 {
+		rules = append(rules, map[string]any{
+			"type": "field", "domain": domainDirect, "outboundTag": w.OutboundDirectTag,
+		})
+	}
+	if ips := normalizeGeoipIPs(effectiveGeoipDirectTags(spec)); len(ips) > 0 {
+		rules = append(rules, map[string]any{
+			"type": "field", "ip": ips, "outboundTag": w.OutboundDirectTag,
+		})
+	}
 	rules = append(rules, map[string]any{
 		"type": "field", "network": "tcp,udp", "outboundTag": w.OutboundExitTag,
 	})
+	rules = prependGeositeBlockRules(spec, w, rules)
 	return "IPIfNonMatch", rules
 }
 
@@ -126,4 +202,9 @@ func normalizeGeoipIPs(tags []string) []string {
 		out = append(out, "geoip:"+t)
 	}
 	return out
+}
+
+// BridgeNeedsBlockOutbound is true when spec references geosite block rules (blackhole outbound required).
+func BridgeNeedsBlockOutbound(spec *Spec) bool {
+	return len(normalizeGeositeDomains(spec.GeositeBlockTags)) > 0
 }

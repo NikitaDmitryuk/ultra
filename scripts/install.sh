@@ -183,6 +183,15 @@ if [[ -n "${SPLITHTTP_PATH// }" ]]; then
 	ARGS+=(-splithttp-path "$SPLITHTTP_PATH")
 fi
 
+ROUTING_MODE="${ROUTING_MODE:-}"
+if [[ -n "${ROUTING_MODE// }" ]]; then
+	ARGS+=(-routing-mode "$ROUTING_MODE")
+fi
+GEOSITE_BLOCK_TAGS="${GEOSITE_BLOCK_TAGS:-}"
+if [[ -n "${GEOSITE_BLOCK_TAGS// }" ]]; then
+	ARGS+=(-geosite-block-tags "$GEOSITE_BLOCK_TAGS")
+fi
+
 case "${SKIP_GEO_DOWNLOAD:-${SKIP_RUNETFREEDOM_GEO:-n}}" in
 y | Y | true | 1 | yes) ARGS+=(-skip-geo-download) ;;
 esac

@@ -16,6 +16,10 @@ REALITY_SNI=www.microsoft.com
 # Шаблон HTTP для splithttp (bridge→exit).
 PRESET=steamlike
 
+# Маршрутизация на bridge при split_routing: ru_direct — direct для RU/private, остальное на exit;
+# blocklist — только geosite_exit_tags на exit (как раньше).
+ROUTING_MODE=ru_direct
+
 VLESS_PORT=443
 TUNNEL_PORT=8443
 LOG_LEVEL=info
@@ -39,6 +43,9 @@ VERIFY_SOCKS_PORT=10808
 # VERIFY_PROBE_DIRECT_URL=
 # VERIFY_PROBE_EXIT_URL=
 VERIFY_FAIL_LOG_LINES=400
+
+# Опционально: geosite-теги в blackhole (нужен тег в вашем geosite.dat), например реклама.
+# GEOSITE_BLOCK_TAGS=category-ads-all
 
 # --- Прочее (по умолчанию можно не трогать) ---
 # Geo на bridge при установке (скачивание с GitHub): по умолчанию выполняется по SSH.

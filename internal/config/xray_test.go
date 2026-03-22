@@ -93,6 +93,44 @@ func TestBuildClientExportDev(t *testing.T) {
 	}
 }
 
+func TestBuildBridgeXRayJSONAddsBlackholeWhenBlockTags(t *testing.T) {
+	spec := &Spec{
+		Role:             RoleBridge,
+		ListenAddress:    "127.0.0.1",
+		VLESSPort:        10446,
+		PublicHost:       "example.com",
+		DevMode:          true,
+		SplitRouting:     BoolPtr(true),
+		GeoAssetsDir:     "/tmp/geo",
+		GeositeBlockTags: []string{"category-ads-all"},
+		Exit: ExitTunnelSpec{
+			Address:    "10.0.0.2",
+			Port:       443,
+			TunnelUUID: "11111111-2222-3333-4444-555555555555",
+		},
+	}
+	s, err := mimic.New("apijson")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := BuildBridgeXRayJSON(spec, nil, s, "warning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := root["outbounds"].([]any)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 outbounds (exit, direct, blackhole), got %d", len(out))
+	}
+	blk, _ := out[2].(map[string]any)
+	if blk["protocol"] != "blackhole" {
+		t.Fatalf("third outbound: %#v", blk)
+	}
+}
+
 func TestBuildBridgeXRayJSONSplitUsesMphMatcher(t *testing.T) {
 	spec := &Spec{
 		Role:          RoleBridge,

@@ -42,7 +42,7 @@ make install
 
 **Цель для внешнего TLS handshape на bridge (`-reality-dest`):** для новой установки задайте `-reality-dest host:port` и при необходимости `-reality-sni` (если пусто — берётся host из dest). В `install.config` — переменные `REALITY_DEST` / `REALITY_SNI`, либо `REUSE_BRIDGE_SPEC=y` без смены параметров существующего spec.
 
-**Неинтерактивно:** `install.config.sample` → `install.config` (файл в `.gitignore`), затем `make install` или `ULTRA_INSTALL_CONFIG=/path/to/conf make install`. В `install.config` задаются `PRESET` (шаблон HTTP для splithttp), при необходимости `SPLITHTTP_HOST` и `SPLITHTTP_PATH` — см. комментарии в образце.
+**Неинтерактивно:** `install.config.sample` → `install.config` (файл в `.gitignore`), затем `make install` или `ULTRA_INSTALL_CONFIG=/path/to/conf make install`. В `install.config` задаются `PRESET`, опционально `SPLITHTTP_HOST` / `SPLITHTTP_PATH`, `ROUTING_MODE` (`blocklist` или `ru_direct`), опционально `GEOSITE_BLOCK_TAGS` (через запятую) — см. образец.
 
 **Вручную:**
 
@@ -52,7 +52,7 @@ make build-linux-amd64 build-install
   -reality-dest 'HOST:443' -reality-sni 'HOST'
 ```
 
-Флаги: `./ultra-install -h` (`-public-host`, `-preset`, `-reality-dest`, `-reality-sni`, `-generate-exit-tls`, `-dry-run`, `-write-local`, `-log-level`, `-reuse-bridge-spec`, …).
+Флаги: `./ultra-install -h` (`-public-host`, `-preset`, `-routing-mode`, `-geosite-block-tags`, `-reality-dest`, `-reality-sni`, `-generate-exit-tls`, `-dry-run`, `-write-local`, `-log-level`, `-reuse-bridge-spec`, …).
 
 - [deploy/systemd/ultra-relay.service](deploy/systemd/ultra-relay.service)
 - [deploy/bootstrap-bridge.sh](deploy/bootstrap-bridge.sh) / [deploy/bootstrap-exit.sh](deploy/bootstrap-exit.sh)
@@ -118,6 +118,13 @@ Host ultra-back
 - **Bridge → exit:** межузловой outbound: VLESS поверх TLS и `splithttp`; `mimic_preset`, `splithttp_host`, `splithttp_path` и заголовки из пресета задают параметры HTTP для этого транспорта. Публичный сертификат CA на FQDN, для которого у вас нет полномочий в DNS, выпустить нельзя; для проверки имени хоста доверенным CA укажите контролируемый FQDN в `splithttp_host` и `splithttp_tls.server_name` и согласуйте материал ключа на exit — см. [deploy/TLS.md](deploy/TLS.md). Пресет `steamlike` подставляет типовые пути и заголовки, сходные с HTTP-клиентом игровой платформы; он не задаёт идентичность TLS удалённого сервиса третьей стороны.
 
 Плейсхолдер `splithttp.invalid` в примерах соответствует зарезервированному TLD (RFC 6761); в продакшене задайте согласованные `splithttp_host` и TLS (SAN/CN).
+
+**Маршрутизация на bridge** (при включённом `split_routing`, `domainStrategy` для правил: `IPIfNonMatch`):
+
+- `routing_mode: blocklist` (по умолчанию, если поле пустое) — трафик из `geosite_exit_tags` / `geoip_exit_tags` / `domain_exit` на exit, остальное на direct.
+- `routing_mode: ru_direct` — сначала опционально `geosite_block_tags` → outbound `blackhole`; затем `domain_exit` → exit, `domain_direct` → direct; далее direct для `geosite_direct_tags` (по умолчанию тег `ru`), опционально regexp суффиксов `.ru` / `.su` / `.xn--p1ai` (переключатель `ru_direct_tld_regex`, по умолчанию включён); direct для `geoip_direct_tags` (по умолчанию `ru` и `private`); весь остальной `tcp,udp` → exit. Пустой JSON-массив `geosite_direct_tags` / `geoip_direct_tags` явно отключает соответствующее правило.
+
+Секция `dns` в генерируемом конфиге bridge **не задаётся**; при необходимости раздельных резолверов допишите её вручную или расширьте spec отдельной задачей.
 
 **SOCKS5 на bridge:** блок `socks5` в spec (`enabled`, `port`, `username`, `password`, опционально `listen_address`, `udp`). Порт должен отличаться от `vless_port`. Если `listen_address` не задан, inbound SOCKS слушает **только `127.0.0.1`**, даже когда публичный inbound на `0.0.0.0` — чтобы не открывать второй парольный сервис в интернет по умолчанию. Для привязки ко всем интерфейсам задайте, например, `"listen_address": "0.0.0.0"` и ограничьте доступ firewall. Тот же глобальный `routing`, что и для публичного inbound (split / direct vs exit).
 
@@ -201,7 +208,7 @@ VERIFY_IP_URL=https://YOUR_HOST/your-probe-path make verify-relay BRIDGE=… EXI
 
 ## Производительность и перезагрузки
 
-Любое изменение `users.json` (в т.ч. через Admin API) приводит к **полной пересборке конфигурации и перезапуску** встроенного ядра в процессе `ultra-relay`: активные клиентские сессии могут обрываться, нагрузка на CPU кратковременно растёт. При частых правках учёток имеет смысл батчить изменения на стороне оператора. Режим split с большим набором `geosite_exit_tags` увеличивает стоимость матчинга на запрос — при узком сценарии можно сузить список тегов в spec.
+Любое изменение `users.json` (в т.ч. через Admin API) приводит к **полной пересборке конфигурации и перезапуску** встроенного ядра в процессе `ultra-relay`: активные клиентские сессии могут обрываться, нагрузка на CPU кратковременно растёт. При частых правках учёток имеет смысл батчить изменения на стороне оператора. Режим `blocklist` с большим набором `geosite_exit_tags` увеличивает стоимость матчинга на запрос — при узком сценарии можно сузить список тегов в spec. В режиме `ru_direct` для интеграционной проверки split задайте `VERIFY_PROBE_EXIT_URL` на хост, не попадающий под правила direct.
 
 ## Логи
 

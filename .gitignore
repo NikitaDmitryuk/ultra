@@ -45,5 +45,5 @@ examples/test-key.pem
 # .idea/
 # .vscode/
 
-ultra-install
 ultra-install-linux-amd64
+ultra-install

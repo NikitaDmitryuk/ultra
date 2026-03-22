@@ -37,6 +37,7 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 	outStream := splithttpOutboundStream(spec, strat, w)
 
 	domainStrategy, routeRules := buildBridgeRouting(spec)
+	needsBlock := BridgeNeedsBlockOutbound(spec)
 
 	routing := map[string]any{
 		"domainStrategy": domainStrategy,
@@ -84,36 +85,45 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 		})
 	}
 
-	cfg := map[string]any{
-		"log":      map[string]any{"loglevel": xrayLogLevel},
-		"inbounds": inbounds,
-		"outbounds": []any{
-			map[string]any{
-				"tag":      w.OutboundExitTag,
-				"protocol": "vless",
-				"settings": map[string]any{
-					"vnext": []any{
-						map[string]any{
-							"address": spec.Exit.Address,
-							"port":    spec.Exit.Port,
-							"users": []any{
-								map[string]any{
-									"id":         spec.Exit.TunnelUUID,
-									"encryption": w.VLESSEncryption,
-								},
+	outbounds := []any{
+		map[string]any{
+			"tag":      w.OutboundExitTag,
+			"protocol": "vless",
+			"settings": map[string]any{
+				"vnext": []any{
+					map[string]any{
+						"address": spec.Exit.Address,
+						"port":    spec.Exit.Port,
+						"users": []any{
+							map[string]any{
+								"id":         spec.Exit.TunnelUUID,
+								"encryption": w.VLESSEncryption,
 							},
 						},
 					},
 				},
-				"streamSettings": outStream,
 			},
-			map[string]any{
-				"tag":      w.OutboundDirectTag,
-				"protocol": "freedom",
-				"settings": map[string]any{},
-			},
+			"streamSettings": outStream,
 		},
-		"routing": routing,
+		map[string]any{
+			"tag":      w.OutboundDirectTag,
+			"protocol": "freedom",
+			"settings": map[string]any{},
+		},
+	}
+	if needsBlock {
+		outbounds = append(outbounds, map[string]any{
+			"tag":      w.OutboundBlockTag,
+			"protocol": "blackhole",
+			"settings": map[string]any{},
+		})
+	}
+
+	cfg := map[string]any{
+		"log":       map[string]any{"loglevel": xrayLogLevel},
+		"inbounds":  inbounds,
+		"outbounds": outbounds,
+		"routing":   routing,
 	}
 	return json.MarshalIndent(cfg, "", "  ")
 }

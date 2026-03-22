@@ -90,8 +90,24 @@ type Spec struct {
 
 	// RoutingMode selects split policy when SplitRouting is true:
 	//   "blocklist" — geosite/geoip/domain_exit → exit; everything else → direct (default).
-	//   "ru_direct" — geoip:ru (and domain_direct) → direct; everything else → exit.
+	//   "ru_direct" — RU / private (geosite, geoip, optional TLD regex, domain_direct) → direct; everything else → exit.
 	RoutingMode string `json:"routing_mode,omitempty"`
+
+	// GeositeBlockTags are geosite.dat category names (no "geosite:" prefix) routed to blackhole when non-empty.
+	// Prepended before other rules on the bridge; requires a block outbound in generated Xray JSON.
+	GeositeBlockTags []string `json:"geosite_block_tags,omitempty"`
+
+	// GeositeDirectTags (ru_direct only): geosite categories sent to direct. JSON null/omitted defaults to ["ru"].
+	// Explicit empty array [] disables the geosite-based direct rule.
+	GeositeDirectTags []string `json:"geosite_direct_tags,omitempty"`
+
+	// GeoipDirectTags (ru_direct only): geoip tags sent to direct. JSON null/omitted defaults to ["ru","private"].
+	// Explicit empty array [] disables the geoip-based direct rule.
+	GeoipDirectTags []string `json:"geoip_direct_tags,omitempty"`
+
+	// RuDirectTLDRegex (ru_direct only): when true, append regexp matchers for .ru, .su, and .xn--p1ai (IDN .рф).
+	// JSON null/omitted defaults to true.
+	RuDirectTLDRegex *bool `json:"ru_direct_tld_regex,omitempty"`
 
 	// GeositeExitTags are geosite.dat category names without the "geosite:" prefix, routed to exit in blocklist mode.
 	// Empty defaults to a broad built-in tag list; narrower lists reduce matching cost.
