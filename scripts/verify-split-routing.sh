@@ -1,30 +1,29 @@
 #!/usr/bin/env bash
-# verify-split-routing.sh — проверка split-routing на мосту через локальный SOCKS5 клиента Xray.
-# Клиент может быть на любой ОС; ultra-relay в проде — на Linux. Трафик: клиент → мост (РФ) →
-# при blocklist direct или to-exit; удалённый сервис видит либо IP моста, либо IP exit.
+# verify-split-routing.sh — проверка split-routing на bridge через локальный SOCKS (клиент ядра на машине оператора).
+# Трафик: клиент → bridge → при blocklist либо direct, либо на exit; удалённый сервис видит IP bridge или IP exit.
 #
 # Требует: curl с поддержкой --socks5-hostname.
 #
 # Переменные:
 #   ULTRA_SOCKS5            host:port SOCKS (по умолчанию 127.0.0.1:10808)
-#   SPLIT_PROBE_DIRECT_URL  HTTPS; ответ — видимый IPv4; CONNECT обычно НЕ в ru-blocked-all (direct).
-#   SPLIT_PROBE_EXIT_URL    HTTPS; CONNECT в ru-blocked-all (через exit). Пусто — встроенный перебор
-#                           (cdn-cgi/trace на доменах Meta/X и т.п.).
+#   SPLIT_PROBE_DIRECT_URL  HTTPS; ответ — видимый IPv4; маршрут должен идти в direct на bridge.
+#   SPLIT_PROBE_EXIT_URL    HTTPS; маршрут должен идти на exit. Пусто — встроенный перебор
+#                           (cdn-cgi/trace на публичных доменах).
 #   SPLIT_STRICT=1          завершить с ошибкой, если оба IP совпали (relay-check задаёт по умолчанию).
 #   SPLIT_EXPECT_DIRECT_IP  если задано — IP с DIRECT_URL должен совпасть.
 #   SPLIT_EXPECT_EXIT_IP    если задано — IP с EXIT_URL должен совпасть.
 # Из install.config verify-relay прокидывает VERIFY_PROBE_* в SPLIT_PROBE_*.
 #
-# Подбор URL зависит от актуальных списков runetfreedom; при ложных срабатываниях задайте SPLIT_PROBE_EXIT_URL.
+# Набор встроенных URL может перестать подходить при смене geo-списков; тогда задайте SPLIT_PROBE_EXIT_URL вручную.
 #
 set -euo pipefail
 
 SOCKS="${ULTRA_SOCKS5:-127.0.0.1:10808}"
-# ipify часто остаётся в direct на bridge с ru-blocked-all (сервис не в блоклисте).
+# ipify часто остаётся на direct при типичном blocklist (сервис не в geosite_exit_tags).
 DIRECT_URL="${SPLIT_PROBE_DIRECT_URL:-https://api.ipify.org}"
 USER_EXIT_URL="${SPLIT_PROBE_EXIT_URL:-}"
 
-# Запасные зонды: SNI обычно в geosite:ru-blocked-all; тело — Cloudflare trace (строка ip=…).
+# Запасные зонды: публичные HTTPS с cdn-cgi/trace (строка ip=…).
 DEFAULT_EXIT_TRACE_URLS=(
 	"https://www.facebook.com/cdn-cgi/trace"
 	"https://www.instagram.com/cdn-cgi/trace"
@@ -102,7 +101,7 @@ fi
 if [[ -z "$IP_X" ]]; then
 	echo "split-check: не удалось IPv4 для exit-зонда (direct=${IP_D})" >&2
 	if [[ -n "$USER_EXIT_URL" ]]; then
-		echo "split-check: проверьте SPLIT_PROBE_EXIT_URL (или cdn-cgi/trace на домене из ru-blocked-all)." >&2
+		echo "split-check: проверьте SPLIT_PROBE_EXIT_URL (HTTPS, маршрут на exit по вашему spec)." >&2
 	else
 		echo "split-check: ни один встроенный trace-URL не сработал; задайте SPLIT_PROBE_EXIT_URL вручную." >&2
 	fi
@@ -122,7 +121,7 @@ if [[ -n "${SPLIT_EXPECT_EXIT_IP:-}" && "$IP_X" != "$SPLIT_EXPECT_EXIT_IP" ]]; t
 fi
 
 if [[ "$IP_D" == "$IP_X" ]]; then
-	echo "split-check: оба зонда дали один IP ($IP_D) — CONNECT для exit-зонда, скорее всего, всё ещё в direct; смените SPLIT_PROBE_EXIT_URL (домен из ru-blocked-all, ответ с IPv4 или cdn-cgi/trace)." >&2
+	echo "split-check: оба зонда дали один IP ($IP_D) — CONNECT для exit-зонда, скорее всего, всё ещё в direct; смените SPLIT_PROBE_EXIT_URL (должен уходить на exit по geosite_exit_tags, ответ с IPv4 или cdn-cgi/trace)." >&2
 	if [[ "${SPLIT_STRICT:-0}" == "1" ]]; then
 		exit 1
 	fi

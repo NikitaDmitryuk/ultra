@@ -23,7 +23,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/realitykey"
 )
 
-// realityServerNames builds inbound server_names for REALITY; sni defaults to the host part of dest.
+// realityServerNames builds inbound server_names; sni defaults to the host part of dest.
 func realityServerNames(dest, sni string) []string {
 	if strings.TrimSpace(sni) != "" {
 		return []string{sni}
@@ -47,9 +47,13 @@ func main() {
 	identity := flag.String("identity", "", "path to SSH private key (optional if ssh uses agent)")
 	publicHost := flag.String("public-host", "", "hostname or IP clients use to reach the bridge (default: -bridge)")
 	preset := flag.String("preset", "apijson", "HTTP profile between nodes (apijson; plusgaming is an alias)")
-	realityDest := flag.String("reality-dest", "", "REALITY TLS mirror target host:port (required unless -reuse-bridge-spec)")
-	realitySNI := flag.String("reality-sni", "", "SNI for REALITY inbound (default: host from -reality-dest)")
-	vlessPort := flag.Int("vless-port", 443, "TCP port: public VLESS+REALITY listener on the bridge (clients connect here)")
+	realityDest := flag.String(
+		"reality-dest",
+		"",
+		"public TLS handshake target host:port for the front inbound (required unless -reuse-bridge-spec)",
+	)
+	realitySNI := flag.String("reality-sni", "", "TLS server name for that handshake (default: host from -reality-dest)")
+	vlessPort := flag.Int("vless-port", 443, "TCP port: public client listener on the bridge")
 	tunnelPort := flag.Int(
 		"tunnel-port",
 		0,
@@ -74,17 +78,17 @@ func main() {
 	reuseBridgeSpec := flag.Bool(
 		"reuse-bridge-spec",
 		false,
-		"SSH to bridge first: reuse REALITY keys, tunnel UUID, splithttp path/host/tls from existing spec.json; keep ULTRA_RELAY_ADMIN_TOKEN from remote environment when possible",
+		"SSH to bridge first: reuse front inbound keys, tunnel UUID, splithttp path/host/tls from existing spec.json; keep ULTRA_RELAY_ADMIN_TOKEN from remote environment when possible",
 	)
 	skipGeoDownload := flag.Bool(
 		"skip-geo-download",
 		false,
-		"do not download runetfreedom geoip.dat/geosite.dat on the bridge (for air-gapped installs; you must place files under geo_assets_dir yourself)",
+		"do not download geoip.dat/geosite.dat on the bridge (air-gapped: place files under geo_assets_dir yourself)",
 	)
 	geoReleaseTag := flag.String(
 		"geo-release-tag",
 		"",
-		"pin runetfreedom/russia-v2ray-rules-dat release tag on the bridge (empty = latest via GitHub API)",
+		"pin geo bundle release tag on the bridge (empty = latest via GitHub API)",
 	)
 	flag.Parse()
 
@@ -187,7 +191,7 @@ func main() {
 			os.Exit(1)
 		}
 		if existing.Reality.PrivateKey == "" || existing.Reality.PublicKey == "" {
-			fmt.Fprintln(os.Stderr, "reuse-bridge-spec: remote spec missing reality keys")
+			fmt.Fprintln(os.Stderr, "reuse-bridge-spec: remote spec missing front inbound key material")
 			os.Exit(1)
 		}
 		mp := strings.TrimSpace(existing.MimicPreset)
@@ -401,7 +405,7 @@ func main() {
 
 	if *dryRun {
 		if reused {
-			fmt.Println("=== reuse-bridge-spec: loaded REALITY/tunnel/splithttp from remote bridge ===")
+			fmt.Println("=== reuse-bridge-spec: loaded front keys, tunnel, splithttp from remote bridge ===")
 		}
 		fmt.Println("=== bridge spec ===")
 		fmt.Println(string(bridgeJSON))
@@ -592,7 +596,7 @@ chmod 600 "$REMOTE_DIR/spec.json" || true
 
 	fmt.Println("Install finished.")
 	if reused {
-		fmt.Println("Preserved REALITY keys, tunnel UUID, and splithttp settings from existing bridge spec (-reuse-bridge-spec).")
+		fmt.Println("Preserved front inbound keys, tunnel UUID, and splithttp settings from existing bridge spec (-reuse-bridge-spec).")
 	}
 	fmt.Println("Log level (ULTRA_RELAY_LOG_LEVEL on both nodes):", logLevelNorm)
 	fmt.Println("Admin token (save securely):", adminToken)

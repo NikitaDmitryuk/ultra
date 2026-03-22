@@ -12,8 +12,14 @@ SSH_IDENTITY="${SSH_IDENTITY:-}"
 REMOTE_DIR="${REMOTE_DIR:-/etc/ultra-relay}"
 SERVICE_NAME="${SERVICE_NAME:-ultra-relay}"
 
-ssh_base=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
-scp_base=(scp -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+SSH_STRICT="${ULTRA_INSTALL_SSH_STRICT_HOST_KEY:-}"
+if [[ "$SSH_STRICT" == "1" || "$SSH_STRICT" == "yes" || "$SSH_STRICT" == "true" || "$SSH_STRICT" == "strict" ]]; then
+  _SSH_CHK=yes
+else
+  _SSH_CHK=accept-new
+fi
+ssh_base=(ssh -o BatchMode=yes -o "StrictHostKeyChecking=${_SSH_CHK}")
+scp_base=(scp -o BatchMode=yes -o "StrictHostKeyChecking=${_SSH_CHK}")
 if [[ -n "$SSH_IDENTITY" ]]; then
   ssh_base+=(-i "$SSH_IDENTITY")
   scp_base+=(-i "$SSH_IDENTITY")

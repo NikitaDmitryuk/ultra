@@ -1,5 +1,5 @@
-// Package realitykey generates X25519 key material compatible with Xray REALITY
-// (same algorithm as `xray x25519`: RawURLEncoding, clamped scalar).
+// Package realitykey generates X25519 key material compatible with the front inbound TLS camouflage mode
+// used by the embedded routing core (RawURLEncoding, clamped scalar).
 package realitykey
 
 import (
@@ -14,7 +14,7 @@ type Pair struct {
 	PublicKey  string
 }
 
-// Generate returns a fresh REALITY key pair.
+// Generate returns a fresh key pair for that mode.
 func Generate() (Pair, error) {
 	privateKey := make([]byte, 32)
 	if _, err := rand.Read(privateKey); err != nil {

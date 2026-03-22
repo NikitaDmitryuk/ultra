@@ -1,7 +1,7 @@
 package mimic
 
 // Strategy describes HTTP-layer camouflage for XHTTP / splithttp (host, path, headers).
-// TLS/Reality SNI is configured separately in relay-spec (see README).
+// Public-edge TLS server name / handshake target are configured separately in the relay spec.
 type Strategy interface {
 	// Name is the preset id (e.g. apijson).
 	Name() string

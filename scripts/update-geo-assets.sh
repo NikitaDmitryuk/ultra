@@ -1,25 +1,18 @@
 #!/usr/bin/env bash
-# update-runetfreedom-geo.sh — download geoip.dat + geosite.dat from
-# https://github.com/runetfreedom/russia-v2ray-rules-dat releases into the directory
-# used as spec.geo_assets_dir (XRAY_LOCATION_ASSET). После make install по умолчанию: .../geo
-# внутри -remote-dir ultra-install (часто /etc/ultra-relay/geo).
+# update-geo-assets.sh — fetch geoip.dat + geosite.dat from a pinned GitHub release
+# into spec.geo_assets_dir (XRAY_LOCATION_ASSET). Typical path after install: .../geo under the relay config dir.
 #
 # Usage:
-#   ./scripts/update-runetfreedom-geo.sh /var/lib/ultra/geo
-#   ./scripts/update-runetfreedom-geo.sh /var/lib/ultra/geo 202603220955
+#   ./scripts/update-geo-assets.sh /var/lib/ultra/geo
+#   ./scripts/update-geo-assets.sh /var/lib/ultra/geo 202603220955
 #
 # Optional: GITHUB_TOKEN reduces GitHub API rate limits when resolving "latest".
 #
 # After a successful update, reload embedded Xray on the Linux bridge:
 #   kill -USR1 "$(pidof ultra-relay)"
 #
-# --- Periodic updates (operator examples) ---
-#
-# cron (twice daily):
-#   15 */6 * * * /path/to/ultra/scripts/update-runetfreedom-geo.sh /var/lib/ultra/geo && kill -USR1 "$(pidof ultra-relay)"
-#
-# systemd service + timer (sketch): run the script as the same user as ultra-relay,
-# then signal the main PID (e.g. from a pidfile your unit manages, or use systemctl kill -s USR1).
+# cron (example, twice daily):
+#   15 */6 * * * /path/to/ultra/scripts/update-geo-assets.sh /var/lib/ultra/geo && kill -USR1 "$(pidof ultra-relay)"
 #
 set -euo pipefail
 

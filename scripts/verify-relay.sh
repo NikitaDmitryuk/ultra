@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Интеграционная проверка: по SSH на bridge читается Admin API, локально поднимается Xray (SOCKS inbound),
+# Интеграционная проверка: по SSH на bridge читается Admin API, локально поднимается клиент ядра (SOCKS inbound),
 # затем HTTPS GET на VERIFY_IP_URL и по умолчанию два зонда split-routing (IP direct на bridge vs через exit).
 #
-# Зависимости на машине оператора: ssh, curl, xray (в PATH), base64.
+# Зависимости на машине оператора: ssh, curl, бинарник совместимый с go.mod (в PATH как xray), base64.
 # JSON: jq (предпочтительно) или python3.
-# Версию Xray ориентируйте по github.com/xtls/xray-core в go.mod репозитория.
+# Версию клиента ориентируйте по github.com/xtls/xray-core в go.mod репозитория.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -147,7 +147,7 @@ for x in ssh curl xray; do
 	if ! have_cmd "$x"; then
 		echo "Требуется команда в PATH: $x" >&2
 		if [[ "$x" == xray ]]; then
-			echo "Установите Xray (версию смотрите в go.mod: github.com/xtls/xray-core)." >&2
+			echo "Нужен клиент ядра в PATH как «xray» (версию ориентируйте по go.mod: github.com/xtls/xray-core)." >&2
 		fi
 		exit 1
 	fi
@@ -265,7 +265,7 @@ if port_open 127.0.0.1 "$SOCKS_PORT"; then
 	exit 1
 fi
 
-echo "relay-check: локальный xray (SOCKS 127.0.0.1:${SOCKS_PORT})…"
+echo "relay-check: локальный клиент (SOCKS 127.0.0.1:${SOCKS_PORT})…"
 xray run -c "$CFG" &
 XRAY_PID=$!
 
@@ -276,7 +276,7 @@ for _ in $(seq 1 50); do
 		break
 	fi
 	if ! kill -0 "$XRAY_PID" 2>/dev/null; then
-		echo "relay-check: xray завершился до готовности SOCKS — проверьте конфиг и версию xray." >&2
+		echo "relay-check: клиент завершился до готовности SOCKS — проверьте конфиг и версию бинарника." >&2
 		exit 1
 	fi
 	sleep 0.2

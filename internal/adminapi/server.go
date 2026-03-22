@@ -10,10 +10,14 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 )
+
+// maxAdminJSONBody caps JSON bodies on mutating Admin API routes (DoS on loopback via SSH tunnel).
+const maxAdminJSONBody = 16384
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
 type Server struct {
@@ -52,8 +56,28 @@ func NewServer(listen, token string, users *auth.Manager, spec *config.Spec, log
 	if err := s.routes(); err != nil {
 		return nil, err
 	}
-	s.srv = &http.Server{Addr: listen, Handler: s.authMiddleware(s.mux)}
+	s.srv = &http.Server{
+		Addr:              listen,
+		Handler:           s.authMiddleware(s.mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+	}
 	return s, nil
+}
+
+func (s *Server) decodeAdminJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAdminJSONBody)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+			return false
+		}
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return false
+	}
+	return true
 }
 
 func (s *Server) routes() error {
@@ -111,8 +135,7 @@ func (s *Server) handlePostUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body postUserReq
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
+	if !s.decodeAdminJSON(w, r, &body) {
 		return
 	}
 	name := strings.TrimSpace(body.Name)
@@ -197,8 +220,7 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body patchUserReq
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
+	if !s.decodeAdminJSON(w, r, &body) {
 		return
 	}
 	u, err := s.users.RenameUser(id, body.Name)

@@ -78,9 +78,9 @@ type Spec struct {
 	// ExitCertPaths are required on the exit node when using TLS on splithttp inbound.
 	ExitCertPaths CertPaths `json:"exit_cert"`
 
-	// --- Bridge-only: split routing (runetfreedom geo + direct vs exit) ---
+	// --- Bridge-only: split routing (geo rules: direct vs upstream exit) ---
 
-	// SplitRouting selects whether the bridge uses geo rules (direct vs exit).
+	// SplitRouting selects whether the bridge uses geo-based path rules.
 	// JSON null/omitted defaults to true (split on). Explicit false sends all traffic via exit (legacy).
 	SplitRouting *bool `json:"split_routing,omitempty"`
 
@@ -94,7 +94,7 @@ type Spec struct {
 	RoutingMode string `json:"routing_mode,omitempty"`
 
 	// GeositeExitTags are geosite.dat category names without the "geosite:" prefix, routed to exit in blocklist mode.
-	// Empty defaults to ["ru-blocked-all"] (maximal Roskomnadzor-related coverage; larger list, more CPU per match than ru-blocked).
+	// Empty defaults to a broad built-in tag list; narrower lists reduce matching cost.
 	GeositeExitTags []string `json:"geosite_exit_tags,omitempty"`
 
 	// GeoipExitTags are geoip.dat tags without the "geoip:" prefix, routed to exit in blocklist mode.

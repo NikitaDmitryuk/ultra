@@ -17,7 +17,7 @@ func init() {
 const DefaultSplithttpHost = "splithttp.invalid"
 
 // APIJSON is an HTTP template for the inter-node splithttp segment: JSON API–like paths and
-// browser-style headers. Public inbound TLS (REALITY) is configured separately in spec.reality.
+// browser-style headers. Public inbound TLS is configured separately in spec.reality.
 type APIJSON struct{}
 
 func NewAPIJSON() *APIJSON { return &APIJSON{} }

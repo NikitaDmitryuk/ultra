@@ -61,7 +61,7 @@ if [[ "$FROM_CONFIG" -eq 1 ]]; then
 	y | Y | true | 1 | yes) reuse_spec=1 ;;
 	esac
 	if [[ "$reuse_spec" -ne 1 && -z "${REALITY_DEST// }" ]]; then
-		echo "ultra: в install.config укажите REALITY_DEST=host:443 или REUSE_BRIDGE_SPEC=y." >&2
+		echo "ultra: в install.config укажите REALITY_DEST=host:443 (цель TLS handshape) или REUSE_BRIDGE_SPEC=y." >&2
 		exit 1
 	fi
 	if [[ -n "$IDENTITY" && "$IDENTITY" == ~/* ]]; then
@@ -83,12 +83,12 @@ else
 	read -r -p "Публичный адрес входа (public-host) [${FRONT}]: " PUB
 	PUB=${PUB:-$FRONT}
 
-	read -r -p "REALITY dest (host:port), обязательно: " REALITY_DEST
+	read -r -p "Публичный TLS handshape, host:port (обязательно): " REALITY_DEST
 	if [[ -z "${REALITY_DEST// }" ]]; then
-		echo "REALITY dest обязателен." >&2
+		echo "Параметр host:port обязателен." >&2
 		exit 1
 	fi
-	read -r -p "REALITY SNI [пусто = host из dest]: " REALITY_SNI
+	read -r -p "SNI для этого handshape [пусто = host из dest]: " REALITY_SNI
 
 	read -r -p "TCP-порт публичного inbound на bridge (vless_port) [443]: " VLESS_PORT
 	VLESS_PORT=${VLESS_PORT:-443}
@@ -172,7 +172,7 @@ fi
 ARGS+=("${GEN_FLAG[@]}")
 ARGS+=(-log-level "$LOG_LEVEL")
 
-case "${SKIP_RUNETFREEDOM_GEO:-n}" in
+case "${SKIP_GEO_DOWNLOAD:-${SKIP_RUNETFREEDOM_GEO:-n}}" in
 y | Y | true | 1 | yes) ARGS+=(-skip-geo-download) ;;
 esac
 # Пусто = ultra-install сам берёт latest с GitHub API на bridge; иначе зафиксировать тег релиза.

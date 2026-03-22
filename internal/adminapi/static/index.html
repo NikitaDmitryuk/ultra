@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ultra-relay — admin</title>
+  <title>ultra-relay — provisioning</title>
   <style>
     :root { font-family: system-ui, sans-serif; background: #0f1419; color: #e7e9ea; }
     body { max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
@@ -48,7 +48,7 @@
   </style>
 </head>
 <body>
-  <h1>ultra-relay — loopback admin</h1>
+  <h1>ultra-relay — loopback provisioning</h1>
   <p style="color:#8b98a5;font-size:0.9rem">Только с loopback (например после <code>ssh -L 8443:127.0.0.1:8443 …</code> откройте эту страницу по адресу этого хоста и порта).</p>
 
   <div id="banner"></div>
@@ -83,14 +83,14 @@
 
   <div id="modal-overlay" role="dialog" aria-modal="true">
     <div class="modal">
-      <h2>Экспорт outbound</h2>
-      <p style="color:#8b98a5;font-size:0.85rem">VLESS URI:</p>
+      <h2>Экспорт для клиента</h2>
+      <p style="color:#8b98a5;font-size:0.85rem">URI подключения:</p>
       <pre id="m-vless"></pre>
       <button type="button" class="ghost" id="m-copy-vless">Копировать URI</button>
-      <p style="color:#8b98a5;font-size:0.85rem;margin-top:1rem">xray_client_json:</p>
+      <p style="color:#8b98a5;font-size:0.85rem;margin-top:1rem">Фрагмент outbound (JSON):</p>
       <pre id="m-xray"></pre>
       <button type="button" class="ghost" id="m-copy-xray">Копировать JSON</button>
-      <p style="color:#8b98a5;font-size:0.85rem;margin-top:1rem">full_xray_config_base64:</p>
+      <p style="color:#8b98a5;font-size:0.85rem;margin-top:1rem">Полный профиль клиента (base64):</p>
       <pre id="m-b64"></pre>
       <button type="button" class="ghost" id="m-copy-b64">Копировать base64</button>
       <div style="margin-top:1rem"><button type="button" class="primary" id="m-close">Закрыть</button></div>

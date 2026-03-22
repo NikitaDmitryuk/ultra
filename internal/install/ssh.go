@@ -8,8 +8,21 @@ import (
 	"strings"
 )
 
+// strictHostKeyChecking returns OpenSSH StrictHostKeyChecking value.
+// ULTRA_INSTALL_SSH_STRICT_HOST_KEY=yes|1|true|strict uses "yes" (hosts must be in known_hosts).
+// Default is accept-new (TOFU on first connect). See README (SSH section).
+func strictHostKeyChecking() string {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("ULTRA_INSTALL_SSH_STRICT_HOST_KEY")))
+	switch v {
+	case "1", "true", "yes", "strict":
+		return "yes"
+	default:
+		return "accept-new"
+	}
+}
+
 func sshArgs(user, host, identity string, remoteWords ...string) []string {
-	args := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"}
+	args := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=" + strictHostKeyChecking()}
 	if identity != "" {
 		args = append(args, "-i", identity)
 	}
@@ -45,7 +58,7 @@ func RunSSHOutput(user, host, identity string, script string) ([]byte, error) {
 
 // SCP copies a local file to remotePath (full remote path like /etc/ultra-relay/spec.json).
 func SCP(identity, local, user, host, remotePath string) error {
-	args := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"}
+	args := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=" + strictHostKeyChecking()}
 	if identity != "" {
 		args = append(args, "-i", identity)
 	}

@@ -146,7 +146,7 @@ func (m *Manager) lastEncodedLocked() []byte {
 	return b
 }
 
-// Lookup returns a user by VLESS UUID.
+// Lookup returns a user by protocol client id (UUID).
 func (m *Manager) Lookup(id string) (User, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

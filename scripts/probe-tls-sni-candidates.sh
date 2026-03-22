@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# Быстрый отсев кандидатов для REALITY dest: TLS 1.3, сертификат с SAN (DNS).
-# Не заменяет интеграционный прогон — после выбора dest используйте make verify-relay и VERIFY_IP_URL.
+# Quick TLS probe: TLS 1.3 and server certificate with DNS SAN. Use to short-list public handshake targets.
+# Does not replace end-to-end checks — after choosing a host use make verify-relay and VERIFY_IP_URL.
 #
-# Надёжнее запускать с той же сети, что у bridge (SSH на bridge и ./probe-reality-dest.sh …):
-# исходящий IP и маршрут до цели должны совпадать с тем, как bridge открывает исходящие соединения.
+# Prefer running from the same egress as the front node (e.g. SSH to that host) so paths and IPs match production.
 #
-# Зависимости: openssl, head; лимит времени: timeout(1) на Linux или gtimeout из GNU coreutils (macOS: brew install coreutils).
+# Requires: openssl, head; time limit: timeout(1) on Linux or gtimeout (brew install coreutils on macOS).
 set -euo pipefail
 
 usage() {
-	echo "Использование:" >&2
+	echo "Usage:" >&2
 	echo "  $0 [-p PORT] HOST [HOST ...]" >&2
-	echo "  $0 [-p PORT] -           # хосты по одному на строку из stdin" >&2
-	echo "По умолчанию PORT=443. Пример: $0 host1.example.org host2.example.org" >&2
+	echo "  $0 [-p PORT] -           # one host per line on stdin" >&2
+	echo "Default PORT=443. Example: $0 host1.example.org host2.example.org" >&2
 	exit 2
 }
 
@@ -44,7 +43,7 @@ while [ $# -gt 0 ]; do
 		break
 		;;
 	-*)
-		echo "Неизвестный флаг: $1" >&2
+		echo "Unknown flag: $1" >&2
 		usage
 		;;
 	*)
@@ -72,16 +71,14 @@ run_s_client() {
 	elif have_cmd gtimeout; then
 		to_cmd=gtimeout
 	fi
-	# Ограничиваем объём (head) и время: при обрыве connect без таймера head ждёт бесконечно.
 	if [ -z "$to_cmd" ]; then
-		echo "Нужен timeout(1) (Linux) или gtimeout (brew install coreutils). Запуск с bridge предпочтителен." >&2
+		echo "Need timeout(1) (Linux) or gtimeout (brew install coreutils). Prefer running from the front node." >&2
 		return 1
 	fi
 	"$to_cmd" "$sec" sh -c 'echo | openssl s_client -connect "$1" -servername "$2" 2>&1 | head -n 500' _ "${host}:${port}" "$host"
 	return 0
 }
 
-# Только первый PEM-блок (серверный сертификат в начале цепочки).
 first_server_pem() {
 	awk '/-----BEGIN CERTIFICATE-----/{t=1} t{print} /-----END CERTIFICATE-----/{if(t) exit}'
 }
@@ -100,7 +97,6 @@ probe_one() {
 		return 0
 	fi
 
-	# s_client часто завершается с ненулевым кодом при закрытии stdin — не падаем из-за set -e.
 	if ! raw="$(run_s_client "$host" "$port")"; then
 		echo "${host}:${port}  FAIL  openssl probe failed (no timeout/gtimeout?)"
 		return 0

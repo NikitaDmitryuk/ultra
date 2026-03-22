@@ -13,26 +13,30 @@ SSH_USER=root
 IDENTITY=/Users/you/.ssh/id_ed25519
 #
 # Необязательно:
-# Geo на bridge при установке (runetfreedom/russia-v2ray-rules-dat): по умолчанию скачивается по SSH.
-# SKIP_RUNETFREEDOM_GEO=y   — не качать (положите geoip.dat и geosite.dat сами в geo_assets_dir).
+# Geo на bridge при установке (скачивание с GitHub): по умолчанию выполняется по SSH.
+# SKIP_GEO_DOWNLOAD=y — не качать (положите geoip.dat и geosite.dat сами в geo_assets_dir).
+# Синоним устаревшего имени: SKIP_RUNETFREEDOM_GEO=y
 # GEO_RELEASE_TAG=202603220955 — зафиксировать тег релиза вместо latest.
 # PUBLIC_HOST=
 # VLESS_PORT=443
 # TUNNEL_PORT=8443
 # EXIT_DIAL=exit.example.com
 # REUSE_BRIDGE_SPEC=y
-# (повторная установка: взять с bridge spec.json — REALITY, tunnel UUID, splithttp; токен admin из environment.)
+# (повторная установка: взять с bridge spec.json — ключи front inbound, tunnel UUID, splithttp; токен admin из environment.)
+#
+# Жёсткая проверка SSH host key (нужен заранее заполненный known_hosts):
+# export ULTRA_INSTALL_SSH_STRICT_HOST_KEY=yes
 #
 # --- После make install (нужны локально xray, jq или python3) ---
 # VERIFY_AFTER_INSTALL=y
 # VERIFY_IP_URL=https://…   # обязательно, если VERIFY_AFTER_INSTALL=y (первый GET через SOCKS)
 # VERIFY_USER_UUID=
 # VERIFY_SOCKS_PORT=10808
-# Два зонда split-routing (direct на bridge vs через exit) после первого GET — по умолчанию включены.
+# Два зонда split-routing после первого GET — по умолчанию включены.
 # VERIFY_SPLIT_ROUTING=n   # отключить, если на bridge без split или зонды не подходят
 # VERIFY_SPLIT_STRICT=0    # при совпадении обоих IP только предупреждение (по умолчанию — ошибка)
-# VERIFY_PROBE_DIRECT_URL=   # по умолчанию api.ipify.org (часто direct на мосту)
-# VERIFY_PROBE_EXIT_URL=     # по умолчанию перебор cdn-cgi/trace (Meta/X); задайте свой URL из ru-blocked-all
+# VERIFY_PROBE_DIRECT_URL=   # по умолчанию api.ipify.org
+# VERIFY_PROBE_EXIT_URL=     # по умолчанию встроенный пербор HTTPS; задайте URL под ваши geosite_exit_tags
 # VERIFY_FAIL_LOG_LINES=400
 # LOG_LEVEL=info
 # GENERATE_EXIT_TLS=y

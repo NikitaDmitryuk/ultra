@@ -43,7 +43,6 @@
 
   "socks5": {
     "enabled": false,
-    "listen_address": "0.0.0.0",
     "port": 1080,
     "username": "homelab",
     "password": "CHANGE_ME"

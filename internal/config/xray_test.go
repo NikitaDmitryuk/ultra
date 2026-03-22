@@ -169,4 +169,50 @@ func TestBuildBridgeSOCKS5SecondInbound(t *testing.T) {
 	if socks["protocol"] != "socks" {
 		t.Fatalf("second inbound: %v", socks["protocol"])
 	}
+	if socks["listen"] != "127.0.0.1" {
+		t.Fatalf("socks listen: got %#v want 127.0.0.1", socks["listen"])
+	}
+}
+
+func TestBuildBridgeSOCKS5DefaultListenNotPublicVLESSBind(t *testing.T) {
+	spec := &Spec{
+		Role:          RoleBridge,
+		ListenAddress: "0.0.0.0",
+		VLESSPort:     10443,
+		PublicHost:    "example.com",
+		DevMode:       true,
+		SplitRouting:  BoolPtr(false),
+		SOCKS5: &BridgeSOCKS5Spec{
+			Enabled:  true,
+			Port:     1080,
+			Username: "dev",
+			Password: "secret",
+		},
+		Exit: ExitTunnelSpec{
+			Address:    "10.0.0.2",
+			Port:       443,
+			TunnelUUID: "11111111-2222-3333-4444-555555555555",
+		},
+	}
+	s, err := mimic.New("apijson")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := BuildBridgeXRayJSON(spec, nil, s, "warning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
+	}
+	inbounds, _ := root["inbounds"].([]any)
+	socks, _ := inbounds[1].(map[string]any)
+	if socks["listen"] != "127.0.0.1" {
+		t.Fatalf("socks listen with public vless bind: got %#v want 127.0.0.1", socks["listen"])
+	}
+	vless, _ := inbounds[0].(map[string]any)
+	if vless["listen"] != "0.0.0.0" {
+		t.Fatalf("vless listen: got %#v", vless["listen"])
+	}
 }

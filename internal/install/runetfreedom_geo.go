@@ -6,7 +6,7 @@ import (
 )
 
 // RunetfreedomGeoRemoteScript returns a bash script run on the bridge host: downloads geoip.dat and
-// geosite.dat from runetfreedom/russia-v2ray-rules-dat into geoDir, verifies sha256, sets owner to ultra-relay.
+// geosite.dat from a fixed upstream rules release into geoDir, verifies sha256, sets owner to ultra-relay.
 // releaseTag empty means resolve latest via GitHub API (needs curl, openssl on the server).
 func RunetfreedomGeoRemoteScript(geoDir, releaseTag string) string {
 	q := func(s string) string {

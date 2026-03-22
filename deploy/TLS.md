@@ -16,7 +16,7 @@
 
 ## Согласование SNI, сертификата и Host
 
-- В конфиге Xray для splithttp задаются **`serverName` / uTLS fingerprint** и HTTP **`host`** (из пресета mimic).
+- В сгенерированной конфигурации ядра для splithttp задаются **`serverName` / uTLS fingerprint** и HTTP **`host`** (из пресета mimic).
 - Сторона front проверяет сертификат сервера в соответствии с `splithttp_tls.server_name` (если пусто — подставляется host пресета).
 - **Рекомендация:** имя в сертификате back (SAN/CN) и `splithttp_tls.server_name` должны быть согласованы: либо **свой домен** на back с валидным публичным сертификатом, либо режим `self_signed` с пониманием ограничений.
 
@@ -38,6 +38,6 @@ openssl req -x509 -newkey rsa:2048 \
 
 Нужен **SAN** (не только CN): иначе при проверке имени хоста Go 1.23+ выдаёт `certificate relies on legacy Common Name field, use SANs instead`.
 
-При `tunnel_tls_provision: self_signed` конфиг bridge→exit, который собирает `ultra-relay`, включает **`allowInsecure: true`** на исходящем splithttp (сертификат не из публичного CA — иначе `x509: certificate signed by unknown authority`).
+При `tunnel_tls_provision: self_signed` фрагмент bridge→exit, который собирает `ultra-relay`, включает **`allowInsecure: true`** на исходящем splithttp (сертификат не из публичного CA — иначе `x509: certificate signed by unknown authority`).
 
 В `spec` для роли `exit` укажите `exit_cert.cert_file` / `key_file` на эти пути и при необходимости `tunnel_tls_provision`: `self_signed`.
