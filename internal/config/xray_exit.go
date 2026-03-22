@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/NikitaDmitryuk/ultra/mimic"
+	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 )
 
 // BuildExitXRayJSON returns xray JSON for the exit node (splithttp inbound -> freedom).
@@ -13,16 +13,17 @@ func BuildExitXRayJSON(spec *Spec, strat mimic.Strategy, xrayLogLevel string) ([
 	if spec.Role != RoleExit {
 		return nil, fmt.Errorf("config: expected exit role")
 	}
+	w := resolveXrayWire(spec)
 	if xrayLogLevel == "" {
 		xrayLogLevel = "warning"
 	}
-	inStream := splithttpInboundStream(spec, strat)
+	inStream := splithttpInboundStream(spec, strat, w)
 
 	cfg := map[string]any{
 		"log": map[string]any{"loglevel": xrayLogLevel},
 		"inbounds": []any{
 			map[string]any{
-				"tag":      "vless-splithttp",
+				"tag":      w.ExitInboundTunnelTag,
 				"listen":   spec.ListenAddress,
 				"port":     spec.VLESSPort,
 				"protocol": "vless",
@@ -30,21 +31,21 @@ func BuildExitXRayJSON(spec *Spec, strat mimic.Strategy, xrayLogLevel string) ([
 					"clients": []any{
 						map[string]any{
 							"id":    spec.Exit.TunnelUUID,
-							"email": "tunnel",
+							"email": w.ExitTunnelUserLabel,
 						},
 					},
-					"decryption": "none",
+					"decryption": w.VLESSEncryption,
 				},
 				"streamSettings": inStream,
 				"sniffing": map[string]any{
 					"enabled":      true,
-					"destOverride": []string{"http", "tls", "quic"},
+					"destOverride": w.SniffingDestOverride,
 				},
 			},
 		},
 		"outbounds": []any{
 			map[string]any{
-				"tag":      "direct",
+				"tag":      w.OutboundDirectTag,
 				"protocol": "freedom",
 				"settings": map[string]any{},
 			},
@@ -52,7 +53,7 @@ func BuildExitXRayJSON(spec *Spec, strat mimic.Strategy, xrayLogLevel string) ([
 		"routing": map[string]any{
 			"domainStrategy": "AsIs",
 			"rules": []any{
-				map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "direct"},
+				map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": w.OutboundDirectTag},
 			},
 		},
 	}

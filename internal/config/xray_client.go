@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/NikitaDmitryuk/ultra/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
 )
 
 // ClientExport holds wire-format artifacts for compatible clients (JSON fragment and connection URI).
@@ -16,6 +16,8 @@ type ClientExport struct {
 
 // BuildClientExport builds a minimal outbound fragment and a connection URI for one user.
 func BuildClientExport(spec *Spec, user auth.User) (*ClientExport, error) {
+	w := resolveXrayWire(spec)
+	enc := w.VLESSEncryption
 	if spec.DevMode {
 		frag := map[string]any{
 			"protocol": "vless",
@@ -27,7 +29,7 @@ func BuildClientExport(spec *Spec, user auth.User) (*ClientExport, error) {
 						"users": []any{
 							map[string]any{
 								"id":         user.UUID,
-								"encryption": "none",
+								"encryption": enc,
 							},
 						},
 					},
@@ -37,10 +39,10 @@ func BuildClientExport(spec *Spec, user auth.User) (*ClientExport, error) {
 				"network":  "tcp",
 				"security": "none",
 			},
-			"tag": "proxy",
+			"tag": w.ClientOutboundTag,
 		}
-		uri := fmt.Sprintf("vless://%s@%s:%d?encryption=none&security=none&type=tcp#%s",
-			user.UUID, spec.PublicHost, spec.VLESSPort, url.PathEscape(user.Name))
+		uri := fmt.Sprintf("vless://%s@%s:%d?encryption=%s&security=none&type=tcp#%s",
+			user.UUID, spec.PublicHost, spec.VLESSPort, url.QueryEscape(enc), url.PathEscape(user.Name))
 		return &ClientExport{XRayOutboundJSON: frag, VLESSURI: uri}, nil
 	}
 
@@ -68,7 +70,7 @@ func BuildClientExport(spec *Spec, user auth.User) (*ClientExport, error) {
 					"users": []any{
 						map[string]any{
 							"id":         user.UUID,
-							"encryption": "none",
+							"encryption": enc,
 						},
 					},
 				},
@@ -86,11 +88,11 @@ func BuildClientExport(spec *Spec, user auth.User) (*ClientExport, error) {
 				"spiderX":     spx,
 			},
 		},
-		"tag": "proxy",
+		"tag": w.ClientOutboundTag,
 	}
 
 	q := url.Values{}
-	q.Set("encryption", "none")
+	q.Set("encryption", enc)
 	q.Set("security", "reality")
 	q.Set("type", "tcp")
 	q.Set("fp", fp)
@@ -110,6 +112,7 @@ func BuildClientExport(spec *Spec, user auth.User) (*ClientExport, error) {
 
 // FullClientXRayJSON returns a minimal runnable config document for a single client (file import).
 func FullClientXRayJSON(spec *Spec, user auth.User) (vlessURI string, jsonBytes []byte, err error) {
+	w := resolveXrayWire(spec)
 	exp, err := BuildClientExport(spec, user)
 	if err != nil {
 		return "", nil, err
@@ -120,14 +123,14 @@ func FullClientXRayJSON(spec *Spec, user auth.User) (vlessURI string, jsonBytes 
 	}
 	full := map[string]any{
 		"remarks": remarks,
-		"log":     map[string]any{"loglevel": "warning"},
+		"log":     map[string]any{"loglevel": w.ClientFullLogLevel},
 		"inbounds": []any{
 			map[string]any{
-				"listen":   "127.0.0.1",
-				"port":     10808,
+				"listen":   w.ClientSOCKSListen,
+				"port":     w.ClientSOCKSPort,
 				"protocol": "socks",
 				"settings": map[string]any{"udp": true},
-				"tag":      "socks-in",
+				"tag":      w.ClientSOCKSInboundTag,
 			},
 		},
 		"outbounds": []any{
@@ -136,7 +139,7 @@ func FullClientXRayJSON(spec *Spec, user auth.User) (vlessURI string, jsonBytes 
 		"routing": map[string]any{
 			"domainStrategy": "AsIs",
 			"rules": []any{
-				map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"},
+				map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": w.ClientOutboundTag},
 			},
 		},
 	}

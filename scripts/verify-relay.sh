@@ -19,6 +19,8 @@ usage() {
 	echo "  $0 [-c install.config] [-i …] [-u …] [-p …]   # хосты из файла (EXIT не используется)" >&2
 	echo "  $0 [-i …] [-u …] [-p …]   # без аргументов: корневой install.config, если есть" >&2
 	echo "Переменные: VERIFY_USER_UUID, VERIFY_SOCKS_PORT, VERIFY_IP_URL (обязательно — HTTPS URL для GET)" >&2
+	echo "  VERIFY_SPLIT_ROUTING=1 — после основного GET вызвать scripts/verify-split-routing.sh на этом SOCKS" >&2
+	echo "  VERIFY_SPLIT_STRICT=1 — внутри split-проверки завершить с ошибкой, если оба IP совпали" >&2
 	echo "Пример: VERIFY_IP_URL=https://… $0 -c install.config" >&2
 	exit 2
 }
@@ -298,5 +300,16 @@ if [[ -z "$PROBE_BODY" ]]; then
 fi
 
 echo "probe_response=${PROBE_BODY}"
+
+if [[ "${VERIFY_SPLIT_ROUTING:-}" == "1" ]]; then
+	echo "relay-check: split-routing (VERIFY_SPLIT_ROUTING=1), SOCKS 127.0.0.1:${SOCKS_PORT}…"
+	export ULTRA_SOCKS5="127.0.0.1:${SOCKS_PORT}"
+	export SPLIT_STRICT="${VERIFY_SPLIT_STRICT:-0}"
+	if ! "$SCRIPT_DIR/verify-split-routing.sh"; then
+		echo "relay-check: verify-split-routing.sh завершился с ошибкой." >&2
+		exit 1
+	fi
+fi
+
 echo "=== relay-check: OK ==="
 exit 0

@@ -13,6 +13,9 @@ SSH_USER=root
 IDENTITY=/Users/you/.ssh/id_ed25519
 #
 # Необязательно:
+# Geo на bridge при установке (runetfreedom/russia-v2ray-rules-dat): по умолчанию скачивается по SSH.
+# SKIP_RUNETFREEDOM_GEO=y   — не качать (положите geoip.dat и geosite.dat сами в geo_assets_dir).
+# GEO_RELEASE_TAG=202603220955 — зафиксировать тег релиза вместо latest.
 # PUBLIC_HOST=
 # VLESS_PORT=443
 # TUNNEL_PORT=8443

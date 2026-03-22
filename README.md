@@ -6,12 +6,13 @@
 
 | Пакет / каталог | Назначение |
 |-----------------|------------|
-| `mimic` | Шаблон HTTP для сегмента bridge→exit (host, path, заголовки). Пресет `apijson` (идентификатор `plusgaming` в старых spec остаётся псевдонимом). |
-| `auth` | Хранение UUID в `users.json`, перечитывание, атомарная запись при изменениях через API. |
-| `config` | Загрузка и валидация spec, сборка JSON для Xray. |
-| `proxy` | Запуск Xray в процессе `ultra-relay`. |
-| `adminapi` | HTTP только на `admin_listen`: CRUD записей и выдача outbound-фрагментов. |
-| `cmd/ultra-install` | Сборка пары spec и доставка по SSH (только ключ). |
+| `internal/mimic` | Шаблон HTTP для сегмента bridge→exit (host, path, заголовки). Пресет `apijson` (идентификатор `plusgaming` в старых spec остаётся псевдонимом). |
+| `internal/auth` | Хранение UUID в `users.json`, перечитывание, атомарная запись при изменениях через API. |
+| `internal/config` | Загрузка и валидация spec, сборка JSON для Xray. |
+| `internal/proxy` | Запуск Xray в процессе `ultra-relay`. |
+| `internal/adminapi` | HTTP только на `admin_listen`: CRUD записей и выдача outbound-фрагментов. |
+| `internal/install`, `internal/loglevel`, `internal/realitykey` | Установка по SSH, уровни логов, ключи REALITY. |
+| `cmd/ultra-relay`, `cmd/ultra-install` | Точки входа бинарников. |
 
 ## Сборка
 
@@ -106,6 +107,10 @@ Host ultra-back
 В JSON задаётся `schema_version` (сейчас **1**). Поле `tunnel_tls_provision` описывает происхождение сертификата на `exit` для канала bridge→exit — см. [deploy/TLS.md](deploy/TLS.md).
 
 Плейсхолдер `splithttp.invalid` в примерах соответствует зарезервированному TLD (RFC 6761); в продакшене задайте согласованные `splithttp_host` и TLS (SAN/CN).
+
+**SOCKS5 на bridge:** блок `socks5` в spec (`enabled`, `port`, `username`, `password`, опционально `listen_address`, `udp`). Порт должен отличаться от `vless_port`. Тот же глобальный `routing`, что и для VLESS (split / direct vs exit). Подключайте с него, например, домашний сервер: `curl --socks5-hostname user:pass@bridge:port …`.
+
+**Имена и литералы Xray:** опциональный объект `xray_wire` в spec задаёт теги inbounds/outbounds, `vless_encryption`, `sniffing_dest_override`, `domain_matcher_split`, `splithttp_mode`, параметры локального SOCKS в выдаче `full_xray_config` и т.д. Пустые поля не переопределяют встроенные значения по умолчанию (см. `internal/config/xray_wire_spec.go`).
 
 ## Локальная отладка (`dev_mode`)
 

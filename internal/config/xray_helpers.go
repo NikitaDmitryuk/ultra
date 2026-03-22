@@ -1,7 +1,7 @@
 package config
 
 import (
-	"github.com/NikitaDmitryuk/ultra/mimic"
+	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 )
 
 func realityShortIDs(ids []string) []string {
@@ -73,7 +73,7 @@ func bridgeInboundStream(spec *Spec) map[string]any {
 	return inStream
 }
 
-func splithttpOutboundStream(spec *Spec, strat mimic.Strategy) map[string]any {
+func splithttpOutboundStream(spec *Spec, strat mimic.Strategy, w xrayWireResolved) map[string]any {
 	tlsSN, alpn, tlsFP := resolveSplithttpTLS(spec, strat)
 	path := resolveSplithttpPath(spec, strat)
 	headers := strat.ExtraHeaders()
@@ -94,13 +94,13 @@ func splithttpOutboundStream(spec *Spec, strat mimic.Strategy) map[string]any {
 		"splithttpSettings": map[string]any{
 			"host":    host,
 			"path":    path,
-			"mode":    "packet-up",
+			"mode":    w.SplithttpMode,
 			"headers": headers,
 		},
 	}
 }
 
-func splithttpInboundStream(spec *Spec, strat mimic.Strategy) map[string]any {
+func splithttpInboundStream(spec *Spec, strat mimic.Strategy, w xrayWireResolved) map[string]any {
 	tlsSN, alpn, tlsFP := resolveSplithttpTLS(spec, strat)
 	path := resolveSplithttpPath(spec, strat)
 	headers := strat.ExtraHeaders()
@@ -122,7 +122,7 @@ func splithttpInboundStream(spec *Spec, strat mimic.Strategy) map[string]any {
 		"splithttpSettings": map[string]any{
 			"host":    host,
 			"path":    path,
-			"mode":    "packet-up",
+			"mode":    w.SplithttpMode,
 			"headers": headers,
 		},
 	}

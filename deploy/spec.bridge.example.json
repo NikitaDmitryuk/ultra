@@ -30,5 +30,22 @@
     "alpn": ["h2"],
     "fingerprint": "chrome"
   },
-  "exit_cert": {}
+  "exit_cert": {},
+
+  "geo_assets_dir": "/etc/ultra-relay/geo",
+  "routing_mode": "blocklist",
+  "geosite_exit_tags": ["ru-blocked-all"],
+  "geoip_exit_tags": [],
+  "domain_exit": [],
+  "domain_direct": [],
+
+  "xray_wire": {},
+
+  "socks5": {
+    "enabled": false,
+    "listen_address": "0.0.0.0",
+    "port": 1080,
+    "username": "homelab",
+    "password": "CHANGE_ME"
+  }
 }

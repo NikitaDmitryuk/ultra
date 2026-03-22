@@ -3,8 +3,11 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 )
 
 // CurrentSpecSchemaVersion is bumped when JSON fields or semantics change incompatibly.
@@ -26,6 +29,12 @@ type Role string
 const (
 	RoleBridge Role = "bridge"
 	RoleExit   Role = "exit"
+)
+
+// Routing modes for bridge SplitRouting (see Spec.RoutingMode).
+const (
+	RoutingModeBlocklist = "blocklist"
+	RoutingModeRUDirect  = "ru_direct"
 )
 
 // Spec is relay deployment configuration (JSON file: -spec flag).
@@ -68,6 +77,40 @@ type Spec struct {
 
 	// ExitCertPaths are required on the exit node when using TLS on splithttp inbound.
 	ExitCertPaths CertPaths `json:"exit_cert"`
+
+	// --- Bridge-only: split routing (runetfreedom geo + direct vs exit) ---
+
+	// SplitRouting selects whether the bridge uses geo rules (direct vs exit).
+	// JSON null/omitted defaults to true (split on). Explicit false sends all traffic via exit (legacy).
+	SplitRouting *bool `json:"split_routing,omitempty"`
+
+	// GeoAssetsDir is the directory containing geoip.dat and geosite.dat (XRAY_LOCATION_ASSET).
+	// Required on bridge when split routing is enabled (default).
+	GeoAssetsDir string `json:"geo_assets_dir,omitempty"`
+
+	// RoutingMode selects split policy when SplitRouting is true:
+	//   "blocklist" — geosite/geoip/domain_exit → exit; everything else → direct (default).
+	//   "ru_direct" — geoip:ru (and domain_direct) → direct; everything else → exit.
+	RoutingMode string `json:"routing_mode,omitempty"`
+
+	// GeositeExitTags are geosite.dat category names without the "geosite:" prefix, routed to exit in blocklist mode.
+	// Empty defaults to ["ru-blocked-all"] (maximal Roskomnadzor-related coverage; larger list, more CPU per match than ru-blocked).
+	GeositeExitTags []string `json:"geosite_exit_tags,omitempty"`
+
+	// GeoipExitTags are geoip.dat tags without the "geoip:" prefix, routed to exit in blocklist mode.
+	GeoipExitTags []string `json:"geoip_exit_tags,omitempty"`
+
+	// DomainExit are Xray domain matchers (e.g. "domain:example.com", "regexp:...") routed to exit (blocklist and ru_direct).
+	DomainExit []string `json:"domain_exit,omitempty"`
+
+	// DomainDirect are Xray domain matchers forced to direct, evaluated before other rules (blocklist and ru_direct).
+	DomainDirect []string `json:"domain_direct,omitempty"`
+
+	// XrayWire overrides tags and literals in generated Xray JSON (optional; see resolveXrayWire defaults).
+	XrayWire *XrayWireSpec `json:"xray_wire,omitempty"`
+
+	// SOCKS5 is an optional password SOCKS inbound on the bridge; same routing as VLESS when split_routing is on.
+	SOCKS5 *BridgeSOCKS5Spec `json:"socks5,omitempty"`
 }
 
 type RealitySpec struct {
@@ -110,7 +153,39 @@ func LoadSpec(path string) (*Spec, error) {
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
+	if err := s.requireGeoAssetFilesIfNeeded(); err != nil {
+		return nil, err
+	}
 	return &s, nil
+}
+
+// requireGeoAssetFilesIfNeeded ensures geoip.dat and geosite.dat exist when loading a bridge spec from disk.
+// Programmatic builds (e.g. ultra-install before SSH bootstrap) validate without this check.
+func (s *Spec) requireGeoAssetFilesIfNeeded() error {
+	if s.Role != RoleBridge || !s.SplitRoutingEnabled() {
+		return nil
+	}
+	for _, name := range []string{"geoip.dat", "geosite.dat"} {
+		p := filepath.Join(s.GeoAssetsDir, name)
+		if _, err := os.Stat(p); err != nil {
+			return fmt.Errorf("config: geo asset %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// SplitRoutingEnabled returns the effective split-routing flag for the bridge.
+// Omitted split_routing in JSON means true.
+func (s *Spec) SplitRoutingEnabled() bool {
+	if s.SplitRouting == nil {
+		return true
+	}
+	return *s.SplitRouting
+}
+
+// BoolPtr returns a pointer to b (for specs/tests).
+func BoolPtr(b bool) *bool {
+	return &b
 }
 
 func (s *Spec) Validate() error {
@@ -138,6 +213,9 @@ func (s *Spec) Validate() error {
 	}
 	switch s.Role {
 	case RoleBridge:
+		if strings.TrimSpace(s.AdminListen) == "" {
+			s.AdminListen = "127.0.0.1:8443"
+		}
 		if s.UsersPath == "" {
 			return errors.New("config: bridge requires users_path")
 		}
@@ -155,7 +233,41 @@ func (s *Spec) Validate() error {
 		if s.Exit.Address == "" || s.Exit.Port <= 0 || s.Exit.TunnelUUID == "" {
 			return errors.New("config: bridge requires exit.address, exit.port, exit.tunnel_uuid")
 		}
+		if s.SplitRoutingEnabled() {
+			if s.GeoAssetsDir == "" {
+				return errors.New("config: split_routing requires geo_assets_dir on bridge")
+			}
+			absGeo, err := filepath.Abs(s.GeoAssetsDir)
+			if err != nil {
+				return fmt.Errorf("config: geo_assets_dir: %w", err)
+			}
+			s.GeoAssetsDir = absGeo
+			mode := s.RoutingMode
+			if mode == "" {
+				mode = RoutingModeBlocklist
+			}
+			if mode != RoutingModeBlocklist && mode != RoutingModeRUDirect {
+				return errors.New("config: routing_mode must be blocklist or ru_direct when split_routing is set")
+			}
+		}
+		if s.SOCKS5 != nil && s.SOCKS5.Enabled {
+			if s.SOCKS5.Port <= 0 || s.SOCKS5.Port > 65535 {
+				return errors.New("config: socks5.port must be 1..65535 when socks5.enabled")
+			}
+			if s.SOCKS5.Port == s.VLESSPort {
+				return errors.New("config: socks5.port must differ from vless_port")
+			}
+			if strings.TrimSpace(s.SOCKS5.Username) == "" {
+				return errors.New("config: socks5.username required when socks5.enabled")
+			}
+			if s.SOCKS5.Password == "" {
+				return errors.New("config: socks5.password required when socks5.enabled")
+			}
+		}
 	case RoleExit:
+		if s.SOCKS5 != nil && s.SOCKS5.Enabled {
+			return errors.New("config: socks5 is only valid on bridge role")
+		}
 		if s.Exit.TunnelUUID == "" {
 			return errors.New("config: exit requires exit.tunnel_uuid for inbound tunnel")
 		}

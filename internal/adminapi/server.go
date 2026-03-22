@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/NikitaDmitryuk/ultra/auth"
-	"github.com/NikitaDmitryuk/ultra/config"
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/config"
 )
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).

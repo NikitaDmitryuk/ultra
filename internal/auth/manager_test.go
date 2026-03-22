@@ -42,6 +42,27 @@ func TestManagerReloadAndAdd(t *testing.T) {
 	}
 }
 
+func TestManagerDeferredFirstNotify(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "users.json")
+	seed := `[{"uuid":"2784871e-d8a9-4e1f-b831-3d86aa8653ee","name":"a"}]`
+	if err := os.WriteFile(p, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	m, err := NewManagerDeferredFirstNotify(p, time.Hour, func([]User) { calls++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if calls != 0 {
+		t.Fatalf("expected no initial callback, got %d", calls)
+	}
+	if _, ok := m.Lookup("2784871e-d8a9-4e1f-b831-3d86aa8653ee"); !ok {
+		t.Fatal("expected user loaded from disk")
+	}
+}
+
 func TestManagerRenameRemove(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "users.json")

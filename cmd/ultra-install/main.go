@@ -16,11 +16,11 @@ import (
 
 	"github.com/xtls/xray-core/common/uuid"
 
-	"github.com/NikitaDmitryuk/ultra/config"
+	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/install"
 	"github.com/NikitaDmitryuk/ultra/internal/loglevel"
+	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 	"github.com/NikitaDmitryuk/ultra/internal/realitykey"
-	"github.com/NikitaDmitryuk/ultra/mimic"
 )
 
 // realityServerNames builds inbound server_names for REALITY; sni defaults to the host part of dest.
@@ -75,6 +75,16 @@ func main() {
 		"reuse-bridge-spec",
 		false,
 		"SSH to bridge first: reuse REALITY keys, tunnel UUID, splithttp path/host/tls from existing spec.json; keep ULTRA_RELAY_ADMIN_TOKEN from remote environment when possible",
+	)
+	skipGeoDownload := flag.Bool(
+		"skip-geo-download",
+		false,
+		"do not download runetfreedom geoip.dat/geosite.dat on the bridge (for air-gapped installs; you must place files under geo_assets_dir yourself)",
+	)
+	geoReleaseTag := flag.String(
+		"geo-release-tag",
+		"",
+		"pin runetfreedom/russia-v2ray-rules-dat release tag on the bridge (empty = latest via GitHub API)",
 	)
 	flag.Parse()
 
@@ -147,14 +157,15 @@ func main() {
 	}
 
 	var (
-		mimicHost   string
-		splitPath   string
-		tunnelUUID  string
-		realitySpec config.RealitySpec
-		splitTLS    config.SplitHTTPTLSSpec
-		tlsProv     config.TunnelTLSProvision
-		adminToken  string
-		reused      bool
+		mimicHost     string
+		splitPath     string
+		tunnelUUID    string
+		realitySpec   config.RealitySpec
+		splitTLS      config.SplitHTTPTLSSpec
+		tlsProv       config.TunnelTLSProvision
+		adminToken    string
+		reused        bool
+		bridgeOverlay *config.Spec
 	)
 
 	if *reuseBridgeSpec {
@@ -235,6 +246,8 @@ func main() {
 			adminToken = hex.EncodeToString(adminTok)
 			fmt.Fprintln(os.Stderr, "reuse-bridge-spec: warning: could not read remote admin token; generated a new one")
 		}
+		snap := existing
+		bridgeOverlay = &snap
 		reused = true
 	} else {
 		rk, err := realitykey.Generate()
@@ -297,6 +310,48 @@ func main() {
 		},
 		SplithttpPath: splitPath,
 		SplitHTTPTLS:  splitTLS,
+	}
+
+	bridgeSpec.GeoAssetsDir = path.Join(*remoteDir, "geo")
+	bridgeSpec.GeositeExitTags = []string{"ru-blocked-all"}
+	if bridgeOverlay != nil {
+		if g := strings.TrimSpace(bridgeOverlay.GeoAssetsDir); g != "" {
+			bridgeSpec.GeoAssetsDir = g
+		}
+		if len(bridgeOverlay.GeositeExitTags) > 0 {
+			bridgeSpec.GeositeExitTags = append([]string(nil), bridgeOverlay.GeositeExitTags...)
+		}
+		if len(bridgeOverlay.GeoipExitTags) > 0 {
+			bridgeSpec.GeoipExitTags = append([]string(nil), bridgeOverlay.GeoipExitTags...)
+		}
+		if len(bridgeOverlay.DomainDirect) > 0 {
+			bridgeSpec.DomainDirect = append([]string(nil), bridgeOverlay.DomainDirect...)
+		}
+		if len(bridgeOverlay.DomainExit) > 0 {
+			bridgeSpec.DomainExit = append([]string(nil), bridgeOverlay.DomainExit...)
+		}
+		if rm := strings.TrimSpace(bridgeOverlay.RoutingMode); rm != "" {
+			bridgeSpec.RoutingMode = rm
+		}
+		if bridgeOverlay.SplitRouting != nil {
+			v := *bridgeOverlay.SplitRouting
+			bridgeSpec.SplitRouting = &v
+		}
+		if bridgeOverlay.XrayWire != nil {
+			cpy := *bridgeOverlay.XrayWire
+			if len(bridgeOverlay.XrayWire.SniffingDestOverride) > 0 {
+				cpy.SniffingDestOverride = append([]string(nil), bridgeOverlay.XrayWire.SniffingDestOverride...)
+			}
+			bridgeSpec.XrayWire = &cpy
+		}
+		if bridgeOverlay.SOCKS5 != nil {
+			cpy := *bridgeOverlay.SOCKS5
+			if bridgeOverlay.SOCKS5.UDP != nil {
+				u := *bridgeOverlay.SOCKS5.UDP
+				cpy.UDP = &u
+			}
+			bridgeSpec.SOCKS5 = &cpy
+		}
 	}
 
 	exitSpec := &config.Spec{
@@ -398,6 +453,14 @@ func main() {
 	if err := install.RunSSH(*sshUser, *bridgeHost, *identity, bridgePrep); err != nil {
 		fmt.Fprintln(os.Stderr, "bridge prepare:", err)
 		os.Exit(1)
+	}
+	if !*skipGeoDownload && bridgeSpec.SplitRoutingEnabled() {
+		fmt.Println("bridge: installing runetfreedom geo →", bridgeSpec.GeoAssetsDir)
+		geoScript := install.RunetfreedomGeoRemoteScript(bridgeSpec.GeoAssetsDir, *geoReleaseTag)
+		if err := install.RunSSH(*sshUser, *bridgeHost, *identity, geoScript); err != nil {
+			fmt.Fprintln(os.Stderr, "bridge geo download:", err)
+			os.Exit(1)
+		}
 	}
 	exitPrep := fmt.Sprintf(
 		`set -euo pipefail; REMOTE_DIR=%q; mkdir -p "$REMOTE_DIR" && chmod 700 "$REMOTE_DIR"; id -u ultra-relay >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin ultra-relay`,

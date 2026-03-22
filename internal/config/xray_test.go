@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/NikitaDmitryuk/ultra/auth"
-	"github.com/NikitaDmitryuk/ultra/mimic"
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 )
 
 func TestBuildBridgeDevJSON(t *testing.T) {
@@ -15,6 +15,7 @@ func TestBuildBridgeDevJSON(t *testing.T) {
 		VLESSPort:     10443,
 		PublicHost:    "example.com",
 		DevMode:       true,
+		SplitRouting:  BoolPtr(false),
 		Exit: ExitTunnelSpec{
 			Address:    "10.0.0.2",
 			Port:       443,
@@ -45,6 +46,7 @@ func TestBuildBridgeEmptyClients(t *testing.T) {
 		VLESSPort:     10444,
 		PublicHost:    "example.com",
 		DevMode:       true,
+		SplitRouting:  BoolPtr(false),
 		Exit: ExitTunnelSpec{
 			Address:    "10.0.0.2",
 			Port:       443,
@@ -88,5 +90,83 @@ func TestBuildClientExportDev(t *testing.T) {
 	}
 	if exp.VLESSURI == "" || exp.XRayOutboundJSON == nil {
 		t.Fatal(exp)
+	}
+}
+
+func TestBuildBridgeXRayJSONSplitUsesMphMatcher(t *testing.T) {
+	spec := &Spec{
+		Role:          RoleBridge,
+		ListenAddress: "127.0.0.1",
+		VLESSPort:     10445,
+		PublicHost:    "example.com",
+		DevMode:       true,
+		SplitRouting:  BoolPtr(true),
+		GeoAssetsDir:  "/nonexistent-but-unused-for-json",
+		Exit: ExitTunnelSpec{
+			Address:    "10.0.0.2",
+			Port:       443,
+			TunnelUUID: "11111111-2222-3333-4444-555555555555",
+		},
+	}
+	s, err := mimic.New("apijson")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := BuildBridgeXRayJSON(spec, nil, s, "warning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := root["routing"].(map[string]any)
+	if rt == nil {
+		t.Fatal("missing routing")
+	}
+	if rt["domainMatcher"] != "mph" {
+		t.Fatalf("domainMatcher: got %#v", rt["domainMatcher"])
+	}
+}
+
+func TestBuildBridgeSOCKS5SecondInbound(t *testing.T) {
+	spec := &Spec{
+		Role:          RoleBridge,
+		ListenAddress: "127.0.0.1",
+		VLESSPort:     10443,
+		PublicHost:    "example.com",
+		DevMode:       true,
+		SplitRouting:  BoolPtr(false),
+		SOCKS5: &BridgeSOCKS5Spec{
+			Enabled:  true,
+			Port:     1080,
+			Username: "dev",
+			Password: "secret",
+		},
+		Exit: ExitTunnelSpec{
+			Address:    "10.0.0.2",
+			Port:       443,
+			TunnelUUID: "11111111-2222-3333-4444-555555555555",
+		},
+	}
+	s, err := mimic.New("apijson")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := BuildBridgeXRayJSON(spec, nil, s, "warning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
+	}
+	inbounds, _ := root["inbounds"].([]any)
+	if len(inbounds) != 2 {
+		t.Fatalf("expected 2 inbounds, got %d", len(inbounds))
+	}
+	socks, _ := inbounds[1].(map[string]any)
+	if socks["protocol"] != "socks" {
+		t.Fatalf("second inbound: %v", socks["protocol"])
 	}
 }

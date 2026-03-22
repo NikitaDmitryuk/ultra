@@ -37,6 +37,7 @@ lint:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 
 install:
+	@# ultra-install скачивает geoip.dat + geosite.dat на bridge (runetfreedom); отключение: SKIP_RUNETFREEDOM_GEO=y в install.config
 	@bash "$(CURDIR)/scripts/install.sh"
 
 # С journalctl: либо BRIDGE и EXIT, либо корневой install.config (см. install.config.sample).

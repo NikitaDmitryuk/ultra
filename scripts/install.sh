@@ -172,6 +172,15 @@ fi
 ARGS+=("${GEN_FLAG[@]}")
 ARGS+=(-log-level "$LOG_LEVEL")
 
+case "${SKIP_RUNETFREEDOM_GEO:-n}" in
+y | Y | true | 1 | yes) ARGS+=(-skip-geo-download) ;;
+esac
+# Пусто = ultra-install сам берёт latest с GitHub API на bridge; иначе зафиксировать тег релиза.
+GEO_RELEASE_TAG="${GEO_RELEASE_TAG:-}"
+if [[ -n "${GEO_RELEASE_TAG// }" ]]; then
+	ARGS+=(-geo-release-tag "$GEO_RELEASE_TAG")
+fi
+
 RUN_VERIFY=0
 if [[ "$FROM_CONFIG" -eq 1 ]]; then
 	case "${VERIFY_AFTER_INSTALL:-n}" in

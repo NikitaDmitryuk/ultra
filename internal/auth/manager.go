@@ -44,6 +44,16 @@ type Manager struct {
 // NewManager loads path immediately, then re-reads the file every interval.
 // onChange is invoked after each successful load or Save that changed content.
 func NewManager(path string, interval time.Duration, onChange func([]User)) (*Manager, error) {
+	return newManager(path, interval, onChange, true)
+}
+
+// NewManagerDeferredFirstNotify loads users.json like NewManager but skips the first onChange
+// callback so the caller can start other listeners (e.g. Admin API) before the first heavy reload.
+func NewManagerDeferredFirstNotify(path string, interval time.Duration, onChange func([]User)) (*Manager, error) {
+	return newManager(path, interval, onChange, false)
+}
+
+func newManager(path string, interval time.Duration, onChange func([]User), invokeInitialOnChange bool) (*Manager, error) {
 	if path == "" {
 		return nil, errors.New("auth: empty users file path")
 	}
@@ -58,7 +68,7 @@ func NewManager(path string, interval time.Duration, onChange func([]User)) (*Ma
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
-	if err := m.reloadFromDisk(); err != nil {
+	if err := m.reloadFromDiskInvoke(invokeInitialOnChange); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
@@ -88,6 +98,10 @@ func (m *Manager) Close() {
 }
 
 func (m *Manager) reloadFromDisk() error {
+	return m.reloadFromDiskInvoke(true)
+}
+
+func (m *Manager) reloadFromDiskInvoke(invokeOnChange bool) error {
 	data, err := os.ReadFile(m.path)
 	if err != nil {
 		return err
@@ -96,10 +110,10 @@ func (m *Manager) reloadFromDisk() error {
 	if err := json.Unmarshal(data, &users); err != nil {
 		return err
 	}
-	return m.applySnapshot(users, false)
+	return m.applySnapshot(users, false, invokeOnChange)
 }
 
-func (m *Manager) applySnapshot(users []User, forceNotify bool) error {
+func (m *Manager) applySnapshot(users []User, forceNotify bool, invokeOnChange bool) error {
 	byID := make(map[string]User, len(users))
 	for _, u := range users {
 		if u.UUID == "" {
@@ -118,7 +132,7 @@ func (m *Manager) applySnapshot(users []User, forceNotify bool) error {
 	m.list = append([]User(nil), users...)
 	m.mu.Unlock()
 
-	if changed && m.onChange != nil {
+	if changed && m.onChange != nil && (forceNotify || invokeOnChange) {
 		m.onChange(append([]User(nil), users...))
 	}
 	return nil
@@ -161,7 +175,7 @@ func (m *Manager) AddUser(name string) (User, error) {
 	if err := m.saveUsers(next); err != nil {
 		return User{}, err
 	}
-	if err := m.applySnapshot(next, true); err != nil {
+	if err := m.applySnapshot(next, true, true); err != nil {
 		return User{}, err
 	}
 	return u, nil
@@ -193,7 +207,7 @@ func (m *Manager) RenameUser(id, name string) (User, error) {
 	if err := m.saveUsers(next); err != nil {
 		return User{}, err
 	}
-	if err := m.applySnapshot(next, true); err != nil {
+	if err := m.applySnapshot(next, true, true); err != nil {
 		return User{}, err
 	}
 	return out, nil
@@ -221,7 +235,7 @@ func (m *Manager) RemoveUser(id string) error {
 	if err := m.saveUsers(next); err != nil {
 		return err
 	}
-	return m.applySnapshot(next, true)
+	return m.applySnapshot(next, true, true)
 }
 
 func (m *Manager) saveUsers(users []User) error {

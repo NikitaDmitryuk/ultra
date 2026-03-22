@@ -8,6 +8,7 @@
   "admin_listen": "127.0.0.1:18443",
   "public_host": "127.0.0.1",
   "dev_mode": true,
+  "split_routing": false,
   "reality": {},
   "exit": {
     "address": "127.0.0.1",

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/NikitaDmitryuk/ultra/auth"
-	"github.com/NikitaDmitryuk/ultra/mimic"
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 )
 
 // BuildBridgeXRayJSON returns a full xray JSON config for the bridge role.
@@ -14,6 +14,7 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 	if spec.Role != RoleBridge {
 		return nil, fmt.Errorf("config: expected bridge role")
 	}
+	w := resolveXrayWire(spec)
 	clients := make([]map[string]any, 0, len(users))
 	for _, u := range users {
 		if u.UUID == "" {
@@ -33,31 +34,62 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 		xrayLogLevel = "warning"
 	}
 	inStream := bridgeInboundStream(spec)
-	outStream := splithttpOutboundStream(spec, strat)
+	outStream := splithttpOutboundStream(spec, strat, w)
 
-	cfg := map[string]any{
-		"log": map[string]any{"loglevel": xrayLogLevel},
-		"inbounds": []any{
-			map[string]any{
-				"tag":      "vless-in",
-				"listen":   spec.ListenAddress,
-				"port":     spec.VLESSPort,
-				"protocol": "vless",
-				"settings": map[string]any{
-					"clients":    clients,
-					"decryption": "none",
-					"fallbacks":  []any{},
-				},
-				"streamSettings": inStream,
-				"sniffing": map[string]any{
-					"enabled":      true,
-					"destOverride": []string{"http", "tls", "quic"},
-				},
+	domainStrategy, routeRules := buildBridgeRouting(spec)
+
+	routing := map[string]any{
+		"domainStrategy": domainStrategy,
+		"rules":          routeRules,
+	}
+	if spec.SplitRoutingEnabled() {
+		routing["domainMatcher"] = w.DomainMatcherSplit
+	}
+
+	inbounds := []any{
+		map[string]any{
+			"tag":      w.InboundVLESSTag,
+			"listen":   spec.ListenAddress,
+			"port":     spec.VLESSPort,
+			"protocol": "vless",
+			"settings": map[string]any{
+				"clients":    clients,
+				"decryption": w.VLESSEncryption,
+				"fallbacks":  []any{},
+			},
+			"streamSettings": inStream,
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": w.SniffingDestOverride,
 			},
 		},
+	}
+	if s := spec.bridgeSOCKS5(); s != nil {
+		inbounds = append(inbounds, map[string]any{
+			"tag":      w.InboundSocksTag,
+			"listen":   socks5ListenAddress(spec, s),
+			"port":     s.Port,
+			"protocol": "socks",
+			"settings": map[string]any{
+				"auth": w.SocksAuth,
+				"accounts": []any{
+					map[string]any{"user": s.Username, "pass": s.Password},
+				},
+				"udp": socks5UDPEnabled(s),
+			},
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": w.SniffingDestOverride,
+			},
+		})
+	}
+
+	cfg := map[string]any{
+		"log":      map[string]any{"loglevel": xrayLogLevel},
+		"inbounds": inbounds,
 		"outbounds": []any{
 			map[string]any{
-				"tag":      "to-exit",
+				"tag":      w.OutboundExitTag,
 				"protocol": "vless",
 				"settings": map[string]any{
 					"vnext": []any{
@@ -67,7 +99,7 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 							"users": []any{
 								map[string]any{
 									"id":         spec.Exit.TunnelUUID,
-									"encryption": "none",
+									"encryption": w.VLESSEncryption,
 								},
 							},
 						},
@@ -76,17 +108,12 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 				"streamSettings": outStream,
 			},
 			map[string]any{
-				"tag":      "direct",
+				"tag":      w.OutboundDirectTag,
 				"protocol": "freedom",
 				"settings": map[string]any{},
 			},
 		},
-		"routing": map[string]any{
-			"domainStrategy": "AsIs",
-			"rules": []any{
-				map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "to-exit"},
-			},
-		},
+		"routing": routing,
 	}
 	return json.MarshalIndent(cfg, "", "  ")
 }
