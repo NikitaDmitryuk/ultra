@@ -114,6 +114,10 @@ else
 	esac
 fi
 
+PRESET=${PRESET:-apijson}
+SPLITHTTP_HOST=${SPLITHTTP_HOST:-}
+SPLITHTTP_PATH=${SPLITHTTP_PATH:-}
+
 if [[ -z "${FRONT// }" || -z "${BACK// }" ]]; then
 	echo "Нужны непустые BRIDGE и EXIT (или FRONT и BACK) в install.config либо ответы в интерактиве." >&2
 	exit 1
@@ -171,6 +175,13 @@ fi
 
 ARGS+=("${GEN_FLAG[@]}")
 ARGS+=(-log-level "$LOG_LEVEL")
+ARGS+=(-preset "$PRESET")
+if [[ -n "${SPLITHTTP_HOST// }" ]]; then
+	ARGS+=(-splithttp-host "$SPLITHTTP_HOST")
+fi
+if [[ -n "${SPLITHTTP_PATH// }" ]]; then
+	ARGS+=(-splithttp-path "$SPLITHTTP_PATH")
+fi
 
 case "${SKIP_GEO_DOWNLOAD:-${SKIP_RUNETFREEDOM_GEO:-n}}" in
 y | Y | true | 1 | yes) ARGS+=(-skip-geo-download) ;;
