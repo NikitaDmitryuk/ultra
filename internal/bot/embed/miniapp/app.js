@@ -8,6 +8,8 @@ tg.expand();
 let currentUserUUID = null;
 let currentVlessURI = null;
 let usersCache = [];
+let monthlyChart = null;
+let usersChart = null;
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 (async function init() {
@@ -57,7 +59,10 @@ function showAddUser() {
 async function loadStats() {
   document.getElementById('stats-loader').style.display = 'block';
   try {
-    const data = await api('GET', '/api/stats');
+    const [data, history] = await Promise.all([
+      api('GET', '/api/stats'),
+      api('GET', '/api/stats/history').catch(() => []),
+    ]);
     document.getElementById('stat-users').textContent = data.total_users;
     document.getElementById('stat-traffic').textContent = formatBytes(data.total_bytes_month);
     if (data.stats_month) {
@@ -65,10 +70,89 @@ async function loadStats() {
       document.getElementById('stats-month').textContent =
         d.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
     }
+    // Use cached users for per-user chart; fetch only if cache is empty.
+    const users = usersCache.length > 0
+      ? usersCache
+      : await api('GET', '/api/users').catch(() => []);
+    renderCharts(history || [], users);
   } catch (e) {
     console.error('loadStats', e);
   } finally {
     document.getElementById('stats-loader').style.display = 'none';
+  }
+}
+
+function renderCharts(history, users) {
+  const MONTH_RU = ['Янв','Фев','Мар','Апр','Май','Июн','Июл','Авг','Сен','Окт','Ноя','Дек'];
+  const BAR_COLOR = 'rgba(82,136,193,0.8)';
+  const BAR_HOVER = 'rgba(82,136,193,1)';
+  const TICK_COLOR = getComputedStyle(document.documentElement)
+    .getPropertyValue('--tg-hint').trim() || '#888';
+  const GRID_COLOR = 'rgba(136,136,136,0.15)';
+
+  // Monthly history chart
+  const monthCtx = document.getElementById('chart-monthly');
+  if (monthlyChart) { monthlyChart.destroy(); monthlyChart = null; }
+  if (history && history.length > 0) {
+    document.getElementById('chart-history-card').style.display = '';
+    monthlyChart = new Chart(monthCtx, {
+      type: 'bar',
+      data: {
+        labels: history.map(p => `${MONTH_RU[(p.Month || 1) - 1]} ${p.Year}`),
+        datasets: [{
+          data: history.map(p => +((p.TotalBytes || 0) / 1073741824).toFixed(2)),
+          backgroundColor: BAR_COLOR,
+          hoverBackgroundColor: BAR_HOVER,
+          borderRadius: 4,
+        }],
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: TICK_COLOR, font: { size: 11 } }, grid: { display: false } },
+          y: { ticks: { color: TICK_COLOR, font: { size: 11 }, callback: v => v + ' ГБ' },
+               grid: { color: GRID_COLOR } },
+        },
+      },
+    });
+  } else {
+    document.getElementById('chart-history-card').style.display = 'none';
+  }
+
+  // Per-user chart (current month, top 8 by traffic)
+  const usersCtx = document.getElementById('chart-users');
+  if (usersChart) { usersChart.destroy(); usersChart = null; }
+  const activeUsers = (users || [])
+    .filter(u => (u.total_bytes || 0) > 0)
+    .sort((a, b) => (b.total_bytes || 0) - (a.total_bytes || 0))
+    .slice(0, 8);
+  if (activeUsers.length > 0) {
+    document.getElementById('chart-users-card').style.display = '';
+    usersChart = new Chart(usersCtx, {
+      type: 'bar',
+      data: {
+        labels: activeUsers.map(u => u.name || u.uuid.slice(0, 8)),
+        datasets: [{
+          data: activeUsers.map(u => +((u.total_bytes || 0) / 1073741824).toFixed(2)),
+          backgroundColor: BAR_COLOR,
+          hoverBackgroundColor: BAR_HOVER,
+          borderRadius: 4,
+        }],
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: TICK_COLOR, font: { size: 11 }, callback: v => v + ' ГБ' },
+               grid: { color: GRID_COLOR } },
+          y: { ticks: { color: TICK_COLOR, font: { size: 11 } }, grid: { display: false } },
+        },
+      },
+    });
+  } else {
+    document.getElementById('chart-users-card').style.display = 'none';
   }
 }
 
@@ -101,17 +185,34 @@ function renderUsers(users) {
     item.onclick = () => openUserDetail(u);
     const initial = (u.name || '?')[0].toUpperCase();
     const traffic = formatBytes(u.total_bytes || 0);
+    const badge = lastSeenBadge(u.last_seen_at);
     item.innerHTML = `
       <div class="user-avatar">${initial}</div>
       <div class="user-info">
         <div class="user-name">${esc(u.name)}</div>
         <div class="user-traffic">${traffic} этот месяц</div>
+        <div>${badge}</div>
       </div>
       <svg class="user-chevron" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
         <path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/>
       </svg>`;
     list.appendChild(item);
   });
+}
+
+function lastSeenBadge(isoStr) {
+  if (!isoStr) return '<span class="seen-never">не активен</span>';
+  const d = new Date(isoStr);
+  if (isNaN(d.getTime())) return '<span class="seen-never">не активен</span>';
+  const diffMin = Math.floor((Date.now() - d.getTime()) / 60000);
+  if (diffMin < 5) return '<span class="seen-online">● онлайн</span>';
+  if (diffMin < 60) return `<span class="seen-recent">${diffMin} мин назад</span>`;
+  const hm = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  if (new Date().toDateString() === d.toDateString()) {
+    return `<span class="seen-hint">сегодня ${hm}</span>`;
+  }
+  const MONTHS = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
+  return `<span class="seen-hint">${d.getDate()} ${MONTHS[d.getMonth()]} ${hm}</span>`;
 }
 
 async function createUser() {

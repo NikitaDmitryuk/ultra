@@ -131,7 +131,7 @@ func main() {
 		"",
 		"optional comma-separated geosite category names (no geosite: prefix) routed to blackhole on bridge",
 	)
-	// ── Anti-censorship / DPI-evasion flags ──────────────────────────────────
+	// ── Connection tuning flags ───────────────────────────────────────────────
 	disableDOH := flag.Bool(
 		"disable-doh",
 		false,
@@ -251,12 +251,24 @@ func main() {
 
 	if *reuseBridgeSpec {
 		remoteSpec := path.Join(*remoteDir, "spec.json")
-		script := fmt.Sprintf(`set -euo pipefail; test -r %q && cat %q`, remoteSpec, remoteSpec)
+		// Use || true so the script always exits 0; empty output means spec doesn't exist yet.
+		script := fmt.Sprintf(`test -r %q && cat %q || true`, remoteSpec, remoteSpec)
 		out, err := install.RunSSHOutput(*sshUser, *bridgeHost, *identity, script)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "reuse-bridge-spec: read remote spec:", err)
+			fmt.Fprintln(os.Stderr, "reuse-bridge-spec: SSH read failed:", err)
 			os.Exit(1)
 		}
+		out = bytes.TrimSpace(out)
+		if len(out) == 0 {
+			// First install: no spec on bridge yet — fall through to generate fresh keys.
+			fmt.Println("reuse-bridge-spec: no existing spec on bridge — generating fresh keys.")
+			*reuseBridgeSpec = false
+		}
+	}
+	if *reuseBridgeSpec {
+		remoteSpec := path.Join(*remoteDir, "spec.json")
+		out, _ := install.RunSSHOutput(*sshUser, *bridgeHost, *identity,
+			fmt.Sprintf(`cat %q`, remoteSpec))
 		out = bytes.TrimSpace(out)
 		var existing config.Spec
 		if err := json.Unmarshal(out, &existing); err != nil {
@@ -391,7 +403,6 @@ func main() {
 		MimicPreset:        strat.Name(),
 		SplithttpHost:      mimicHost,
 		TunnelTLSProvision: tlsProv,
-		UsersPath:          path.Join(*remoteDir, "users.json"),
 		ListenAddress:      "0.0.0.0",
 		VLESSPort:          *vlessPort,
 		AdminListen:        "127.0.0.1:8443",
@@ -407,7 +418,7 @@ func main() {
 		SplitHTTPTLS:  splitTLS,
 	}
 
-	// ── Anti-censorship defaults (always set; flags may override) ────────────
+	// ── Connection tuning defaults (always set; flags may override) ──────────
 	antiCensor := &config.AntiCensorSpec{}
 	if *disableDOH {
 		antiCensor.DisableDOH = true
@@ -502,7 +513,6 @@ func main() {
 		MimicPreset:        strat.Name(),
 		SplithttpHost:      mimicHost,
 		TunnelTLSProvision: tlsProv,
-		UsersPath:          "",
 		ListenAddress:      "0.0.0.0",
 		VLESSPort:          tun,
 		PublicHost:         "",
@@ -595,6 +605,20 @@ func main() {
 		}
 
 		if !*dryRun {
+			// Configure locale and timezone on DB hosts before installing PostgreSQL,
+			// so package scripts run without "perl: Setting locale failed" warnings.
+			fmt.Printf("Configuring system locale/timezone on %s …\n", primaryHost)
+			if err := install.SetupSystem(dbSSH, primaryHost, *identity); err != nil {
+				fmt.Fprintln(os.Stderr, "system setup (primary):", err)
+				os.Exit(1)
+			}
+			if replicaHost != "" && replicaHost != primaryHost {
+				fmt.Printf("Configuring system locale/timezone on %s …\n", replicaHost)
+				if err := install.SetupSystem(dbSSH, replicaHost, *identity); err != nil {
+					fmt.Fprintln(os.Stderr, "system setup (replica):", err)
+					os.Exit(1)
+				}
+			}
 			fmt.Printf("Setting up PostgreSQL primary on %s …\n", primaryHost)
 			if err := install.SetupPrimaryPostgres(dbSSH, primaryHost, *identity, *pc); err != nil {
 				fmt.Fprintln(os.Stderr, "postgres primary setup:", err)
@@ -662,6 +686,19 @@ func main() {
 	}
 	if _, err := os.Stat(*binaryPath); err != nil {
 		fmt.Fprintln(os.Stderr, "binary not found:", *binaryPath)
+		os.Exit(1)
+	}
+
+	// If DB setup was on separate hosts, bridge/exit may not have had system setup yet.
+	// Run SetupSystem on bridge and exit unconditionally — it is idempotent.
+	fmt.Printf("Configuring system locale/timezone on bridge %s …\n", *bridgeHost)
+	if err := install.SetupSystem(*sshUser, *bridgeHost, *identity); err != nil {
+		fmt.Fprintln(os.Stderr, "system setup (bridge):", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Configuring system locale/timezone on exit %s …\n", *exitHost)
+	if err := install.SetupSystem(*sshUser, *exitHost, *identity); err != nil {
+		fmt.Fprintln(os.Stderr, "system setup (exit):", err)
 		os.Exit(1)
 	}
 
@@ -754,17 +791,6 @@ func main() {
 		}
 	}
 
-	// When DB backend is active, users.json is not consulted by the relay.
-	// For non-DB deployments, create an empty list so the relay can start without a seed file.
-	if bridgeSpec.Database == nil {
-		usersRemote := path.Join(*remoteDir, "users.json")
-		initUsers := fmt.Sprintf(`test -f %q || (printf '[]' > %q && chmod 600 %q)`, usersRemote, usersRemote, usersRemote)
-		if err := install.RunSSH(*sshUser, *bridgeHost, *identity, initUsers); err != nil {
-			fmt.Fprintln(os.Stderr, "users.json init:", err)
-			os.Exit(1)
-		}
-	}
-
 	remoteFinalize := fmt.Sprintf(`set -euo pipefail
 REMOTE_DIR=%q
 install -m 755 /tmp/ultra-relay /usr/local/bin/ultra-relay
@@ -774,7 +800,6 @@ rm -f "$REMOTE_DIR/environment.tmp"
 chown -R ultra-relay:ultra-relay "$REMOTE_DIR"
 chmod 700 "$REMOTE_DIR"
 chmod 600 "$REMOTE_DIR/spec.json" || true
-chmod 600 "$REMOTE_DIR/users.json" 2>/dev/null || true
 chmod 600 /etc/ultra-relay/environment
 `, *remoteDir)
 

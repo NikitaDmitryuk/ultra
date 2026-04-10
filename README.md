@@ -166,7 +166,7 @@ Host ultra-back
 - `routing_mode: blocklist` (по умолчанию) — трафик из `geosite_exit_tags` / `geoip_exit_tags` / `domain_exit` на exit, остальное прямо.
 - `routing_mode: ru_direct` — русские домены (`.ru`, `.su`, `.рф`, VK, Яндекс и т.д.) напрямую, остальное на exit. Опционально `geosite_block_tags` → blackhole.
 
-**Обход определения VPN на destination-сайтах:**
+**Параметры протокола:**
 
 - `anti_censor.warp_proxy: true` — на exit использовать Cloudflare WARP в режиме прокси; destination-сайты видят Cloudflare IP вместо IP датацентра.
 - `anti_censor.disable_doh: false` (по умолчанию) — DNS over HTTPS; bridge использует Yandex DoH для `.ru`-доменов и Cloudflare для остального.

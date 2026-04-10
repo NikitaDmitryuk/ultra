@@ -3,9 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Ultra VPN</title>
+  <title>Ultra</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -28,6 +29,14 @@
     </div>
   </div>
   <div id="stats-loader" class="loader">Загрузка…</div>
+  <div class="card" id="chart-history-card" style="display:none">
+    <div class="card-title">Трафик по месяцам</div>
+    <canvas id="chart-monthly" height="180"></canvas>
+  </div>
+  <div class="card" id="chart-users-card" style="display:none">
+    <div class="card-title">По пользователям (текущий месяц)</div>
+    <canvas id="chart-users" height="200"></canvas>
+  </div>
 </div>
 
 <div id="screen-users" class="screen">

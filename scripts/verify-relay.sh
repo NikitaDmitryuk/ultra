@@ -250,7 +250,7 @@ if ! remote_curl_api "/v1/users/${UUID}/client" >"$CLIENT_JSON"; then
 	exit 1
 fi
 
-if head -c 400 "$CLIENT_JSON" | grep -qiE 'not found|404'; then
+if head -c 400 "$CLIENT_JSON" | grep -qiE 'not found'; then
 	echo "relay-check: запись не найдена на сервере." >&2
 	exit 1
 fi

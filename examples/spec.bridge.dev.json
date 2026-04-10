@@ -2,7 +2,6 @@
   "schema_version": 1,
   "role": "bridge",
   "mimic_preset": "apijson",
-  "users_path": "./users.json",
   "listen_address": "127.0.0.1",
   "vless_port": 10443,
   "admin_listen": "127.0.0.1:18443",

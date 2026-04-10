@@ -28,6 +28,7 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/users/{uuid}", b.handleDeleteUser)
 	mux.HandleFunc("GET /api/users/{uuid}/config", b.handleGetUserConfig)
 	mux.HandleFunc("GET /api/stats", b.handleStats)
+	mux.HandleFunc("GET /api/stats/history", b.handleStatsHistory)
 	mux.HandleFunc("POST /api/admin/invite", b.handleGenerateInvite)
 }
 
@@ -99,7 +100,7 @@ func (b *Bot) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	if _, ok := b.mustAdmin(w, r); !ok {
 		return
 	}
-	// Fetch users and monthly traffic from the admin API.
+	// Fetch users, monthly traffic, and last-seen from the admin API.
 	users, err := b.adminGet(r.Context(), "/v1/users")
 	if err != nil {
 		b.log.Error("admin GET /v1/users", "err", err)
@@ -109,8 +110,12 @@ func (b *Bot) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	traffic, err := b.adminGet(r.Context(), "/v1/traffic/monthly")
 	if err != nil {
 		b.log.Error("admin GET /v1/traffic/monthly", "err", err)
-		// Non-fatal: return users without traffic stats.
 		traffic = []byte("[]")
+	}
+	lastSeen, err := b.adminGet(r.Context(), "/v1/traffic/last-seen")
+	if err != nil {
+		b.log.Error("admin GET /v1/traffic/last-seen", "err", err)
+		lastSeen = []byte("[]")
 	}
 
 	var userList []map[string]any
@@ -120,6 +125,8 @@ func (b *Bot) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	var trafficList []map[string]any
 	_ = json.Unmarshal(traffic, &trafficList)
+	var seenList []map[string]any
+	_ = json.Unmarshal(lastSeen, &seenList)
 
 	// Index traffic by UserUUID (admin API returns PascalCase field names).
 	trafficByUUID := make(map[string]map[string]any, len(trafficList))
@@ -128,8 +135,17 @@ func (b *Bot) handleListUsers(w http.ResponseWriter, r *http.Request) {
 			trafficByUUID[uuid] = t
 		}
 	}
+	// Index last-seen timestamp by UserUUID.
+	seenByUUID := make(map[string]string, len(seenList))
+	for _, s := range seenList {
+		if uuid, ok := s["UserUUID"].(string); ok {
+			if ts, ok := s["LastSeen"].(string); ok {
+				seenByUUID[uuid] = ts
+			}
+		}
+	}
 
-	// Merge traffic into user list.
+	// Merge traffic and last-seen into user list.
 	now := time.Now()
 	year, month, _ := now.Date()
 	for i, u := range userList {
@@ -145,6 +161,7 @@ func (b *Bot) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		userList[i]["downlink_bytes"] = int64(down)
 		userList[i]["total_bytes"] = int64(total)
 		userList[i]["stats_month"] = map[string]int{"year": year, "month": int(month)}
+		userList[i]["last_seen_at"] = seenByUUID[uuid] // empty string if never seen
 	}
 	jsonOK(w, userList)
 }
@@ -242,6 +259,24 @@ func (b *Bot) handleStats(w http.ResponseWriter, r *http.Request) {
 		"total_bytes_month": int64(totalBytes),
 		"stats_month":       map[string]int{"year": now.Year(), "month": int(now.Month())},
 	})
+}
+
+func (b *Bot) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	path := "/v1/traffic/history"
+	if m := r.URL.Query().Get("months"); m != "" {
+		path += "?months=" + m
+	}
+	data, err := b.adminGet(r.Context(), path)
+	if err != nil {
+		b.log.Error("admin GET /v1/traffic/history", "err", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }
 
 func (b *Bot) handleGenerateInvite(w http.ResponseWriter, r *http.Request) {

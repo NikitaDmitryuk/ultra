@@ -46,9 +46,6 @@ chmod 600 "$ENV_LOCAL"
 "${scp_base[@]}" "$BIN_LOCAL" "${SSH_USER}@${BRIDGE_IP}:/tmp/ultra-relay"
 "${scp_base[@]}" "$SPEC_LOCAL" "${SSH_USER}@${BRIDGE_IP}:${REMOTE_DIR}/spec.json"
 "${scp_base[@]}" "$ENV_LOCAL" "${SSH_USER}@${BRIDGE_IP}:${REMOTE_DIR}/environment.tmp"
-# Create an empty users list if not present (relay starts with no users; add via Admin API).
-"${ssh_base[@]}" "${SSH_USER}@${BRIDGE_IP}" \
-  "test -f '${REMOTE_DIR}/users.json' || (printf '[]' > '${REMOTE_DIR}/users.json' && chmod 600 '${REMOTE_DIR}/users.json')"
 
 "${ssh_base[@]}" "${SSH_USER}@${BRIDGE_IP}" bash -s <<REMOTE
 set -euo pipefail
@@ -63,7 +60,6 @@ rm -f "\${REMOTE_DIR}/environment.tmp"
 chown -R ultra-relay:ultra-relay "\$REMOTE_DIR"
 chmod 700 "\$REMOTE_DIR"
 chmod 600 "\$REMOTE_DIR/spec.json" || true
-chmod 600 "\$REMOTE_DIR/users.json" 2>/dev/null || true
 chmod 600 /etc/ultra-relay/environment
 REMOTE
 
