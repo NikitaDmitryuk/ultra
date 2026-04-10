@@ -98,4 +98,3 @@ func (r *UserRepo) Lookup(ctx context.Context, id string) (auth.User, bool, erro
 	}
 	return u, true, nil
 }
-

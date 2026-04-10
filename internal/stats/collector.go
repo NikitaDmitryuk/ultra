@@ -22,7 +22,12 @@ type XrayInstance interface {
 // TrafficDB is the subset of db.TrafficRepo used by the collector.
 type TrafficDB interface {
 	RecordSamples(ctx context.Context, samples []db.TrafficSample) error
+	PruneOldSamples(ctx context.Context, retention time.Duration) (int64, error)
 }
+
+// SampleRetention is how long raw traffic_stats rows are kept before pruning.
+// Monthly aggregates in monthly_traffic are unaffected and kept indefinitely.
+const SampleRetention = 60 * 24 * time.Hour // 60 days
 
 // UserLister provides the current active user list.
 type UserLister interface {
@@ -75,13 +80,32 @@ func (c *Collector) loop() {
 	defer close(c.done)
 	t := time.NewTicker(c.interval)
 	defer t.Stop()
+	prune := time.NewTicker(24 * time.Hour)
+	defer prune.Stop()
+	// Prune once on startup so stale rows are removed immediately after a long downtime.
+	c.prune()
 	for {
 		select {
 		case <-c.stop:
 			return
 		case now := <-t.C:
 			c.collect(now)
+		case <-prune.C:
+			c.prune()
 		}
+	}
+}
+
+func (c *Collector) prune() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	n, err := c.traffic.PruneOldSamples(ctx, SampleRetention)
+	if err != nil {
+		c.log.Warn("stats: prune old samples failed", "err", err)
+		return
+	}
+	if n > 0 {
+		c.log.Info("stats: pruned old traffic samples", "deleted", n, "retention_days", int(SampleRetention.Hours()/24))
 	}
 }
 

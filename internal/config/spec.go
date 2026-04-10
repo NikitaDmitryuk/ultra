@@ -38,7 +38,7 @@ const (
 )
 
 // FragmentSpec controls Xray sockopt.fragment on the bridge→exit outbound.
-// Splitting the TLS ClientHello across multiple TCP packets prevents DPI from reading the SNI.
+// Splitting the TLS ClientHello across multiple TCP packets obfuscates the SNI field.
 type FragmentSpec struct {
 	// Packets selects which packets to fragment. "tlshello" targets only the TLS ClientHello.
 	// Defaults to "tlshello".
@@ -49,7 +49,7 @@ type FragmentSpec struct {
 	Interval string `json:"interval,omitempty"`
 }
 
-// AntiCensorSpec groups optional DPI-evasion settings. All fields have safe defaults;
+// AntiCensorSpec groups optional connection tuning settings. All fields have safe defaults;
 // the block may be omitted entirely and sensible values apply automatically.
 type AntiCensorSpec struct {
 	// Fragment enables TLS ClientHello fragmentation on the bridge→exit outbound.
@@ -200,7 +200,7 @@ type Spec struct {
 	// Stats configures Xray traffic stat collection. Requires Database to be set.
 	Stats *StatsSpec `json:"stats,omitempty"`
 
-	// AntiCensor groups optional DPI-evasion settings for the Russian TSPU and similar systems.
+	// AntiCensor groups optional connection tuning settings.
 	// All fields have safe defaults; the block may be omitted entirely.
 	AntiCensor *AntiCensorSpec `json:"anti_censor,omitempty"`
 }

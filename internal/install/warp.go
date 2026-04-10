@@ -7,7 +7,7 @@ import "fmt"
 //
 // After this script runs, warp-cli listens on 127.0.0.1:<proxyPort> as a SOCKS5 proxy.
 // All TCP connections going through that proxy appear to originate from a Cloudflare IP
-// instead of the VPS's datacenter IP, which makes VPN detection by destination servers harder.
+// instead of the VPS's datacenter IP.
 //
 // The warp-svc systemd service is enabled so WARP auto-starts on reboot.
 // warp-cli connect is idempotent: re-running the script on an already-connected node is safe.

@@ -144,7 +144,9 @@ func main() {
 
 		users := mgr.List()
 		if len(users) == 0 && *adminToken == "" {
-			log.Error("bridge has no users and Admin API is disabled (empty -admin-token and ULTRA_RELAY_ADMIN_TOKEN); set a token and use POST /v1/users")
+			log.Error(
+				"bridge has no users and Admin API is disabled (empty -admin-token and ULTRA_RELAY_ADMIN_TOKEN); set a token and use POST /v1/users",
+			)
 			os.Exit(1)
 		}
 		if len(users) == 0 {

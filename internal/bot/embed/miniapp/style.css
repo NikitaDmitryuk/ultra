@@ -201,3 +201,12 @@ body {
   gap: 4px;
   padding: 0;
 }
+
+/* ── Last-seen badges ── */
+.seen-online { color: #4caf50; font-size: 12px; }
+.seen-recent { color: var(--tg-hint); font-size: 12px; }
+.seen-hint   { color: var(--tg-hint); font-size: 12px; }
+.seen-never  { color: var(--tg-hint); font-size: 12px; opacity: 0.5; }
+
+/* ── Charts ── */
+#chart-monthly, #chart-users { max-height: 200px; }

@@ -53,24 +53,23 @@ VERIFY_FAIL_LOG_LINES=400
 # Опционально: geosite-теги в blackhole (нужен тег в вашем geosite.dat), например реклама.
 # GEOSITE_BLOCK_TAGS=category-ads-all
 
-# --- Обход определения VPN destination-сайтами ---
+# --- Выходной IP (Cloudflare WARP на exit) ---
 #
 # Cloudflare WARP на exit-ноде: меняет IP выхода с датацентра на Cloudflare.
-# Destination-сайты видят Cloudflare IP, а не IP вашего VPS.
 # Устанавливается автоматически при make install.
 # WARP_ENABLE=y
 # WARP_PORT=40000   # порт SOCKS5 (по умолчанию 40000)
 #
-# DNS over HTTPS (включён по умолчанию): скрывает DNS-запросы от провайдера.
+# DNS over HTTPS (включён по умолчанию).
 # Bridge использует Yandex DoH для .ru/.su и Cloudflare для остального.
 # DOH_DISABLE=y   # раскомментируйте, чтобы использовать системный DNS
 
-# --- Обход DPI / ТСПУ (все опции по умолчанию включены или имеют разумные значения) ---
-# Фрагментация TLS ClientHello в туннеле bridge→exit (мешает DPI читать SNI).
+# --- Параметры протокола (все опции по умолчанию включены или имеют разумные значения) ---
+# Фрагментация TLS ClientHello в туннеле bridge→exit.
 # По умолчанию включена; раскомментируйте, чтобы отключить:
 # FRAGMENT_DISABLE=y
 #
-# Паддинг каждого splithttp-чанка случайным числом байт (маскирует размер чанков).
+# Паддинг каждого splithttp-чанка случайным числом байт.
 # По умолчанию "100-1000"; "0" отключает:
 # SPLITHTTP_PADDING=100-1000
 #
@@ -91,7 +90,7 @@ VERIFY_FAIL_LOG_LINES=400
 #   В конце установки будет выведен токен для регистрации первого администратора.
 #
 # BOT_ENABLE=y
-# BOT_DOMAIN=vpn-admin.example.com   # FQDN с DNS A-записью на BRIDGE
+# BOT_DOMAIN=admin.example.com   # FQDN с DNS A-записью на BRIDGE
 # BOT_PORT=8444                       # HTTPS порт Mini App (по умолчанию 8444)
 #
 # TLS-сертификат получается автоматически через certbot (HTTP-01) при make install.
@@ -101,7 +100,7 @@ VERIFY_FAIL_LOG_LINES=400
 # DB_ENABLE=y запускает автоматическую установку и настройку PostgreSQL:
 #   — primary на DB_HOST (по умолчанию: BRIDGE)
 #   — streaming replica на DB_REPLICA (по умолчанию: EXIT)
-# Хранит пользователей, VPN-ключи, статистику трафика (месячный расход).
+# Хранит пользователей, ключи, статистику трафика (месячный расход).
 # Заделы для Telegram-бота: планы, подписки, платежи, сессии, очередь уведомлений.
 #
 DB_ENABLE=y

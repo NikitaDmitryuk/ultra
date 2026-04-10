@@ -4,9 +4,8 @@ package config
 //
 // Bridge role: Russian TLD domains (.ru, .su, .рф) and major Russian services on
 // non-.ru domains (vk.com, yandex.com, …) are resolved via Yandex DoH running inside
-// Russia — this produces correct IPs and prevents TSPU DNS poisoning for direct connections.
-// All other domains use Cloudflare 1.1.1.1 DoH, hiding international queries from the
-// Russian ISP on the bridge host.
+// Russia — this produces correct IPs for direct connections.
+// All other domains use Cloudflare 1.1.1.1 DoH.
 //
 // Exit role: All domains use Cloudflare 1.1.1.1 DoH, hiding DNS traffic from the exit ISP.
 //

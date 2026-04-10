@@ -27,6 +27,8 @@ const maxAdminJSONBody = 16384
 type TrafficQuerier interface {
 	GetMonthlyAll(ctx context.Context, year, month int) ([]db.MonthlyTotal, error)
 	GetMonthlyUser(ctx context.Context, userUUID string, year, month int) (db.MonthlyTotal, error)
+	GetMonthlyHistory(ctx context.Context, months int) ([]db.MonthlyHistoryPoint, error)
+	GetLastSeenAll(ctx context.Context) ([]db.UserLastSeen, error)
 }
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
@@ -109,6 +111,8 @@ func (s *Server) routes() error {
 	s.mux.HandleFunc("GET /v1/users/{uuid}/client", s.handleGetClient)
 	s.mux.HandleFunc("GET /v1/users/{uuid}/traffic", s.handleGetUserTraffic)
 	s.mux.HandleFunc("GET /v1/traffic/monthly", s.handleGetMonthlyTraffic)
+	s.mux.HandleFunc("GET /v1/traffic/history", s.handleGetTrafficHistory)
+	s.mux.HandleFunc("GET /v1/traffic/last-seen", s.handleGetLastSeen)
 	return nil
 }
 
@@ -340,6 +344,56 @@ func parseMonthParam(r *http.Request) (year, month int) {
 		}
 	}
 	return year, month
+}
+
+// handleGetTrafficHistory returns aggregated monthly traffic totals across all users
+// for the last N calendar months (oldest→newest).
+// Query param: ?months=N (default 6, max 24).
+func (s *Server) handleGetTrafficHistory(w http.ResponseWriter, r *http.Request) {
+	if s.traffic == nil {
+		http.Error(w, "traffic stats require database backend", http.StatusNotImplemented)
+		return
+	}
+	months := 6
+	if v := r.URL.Query().Get("months"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+			if n > 24 {
+				n = 24
+			}
+			months = n
+		}
+	}
+	history, err := s.traffic.GetMonthlyHistory(r.Context(), months)
+	if err != nil {
+		s.log.Error("get traffic history", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	if history == nil {
+		history = []db.MonthlyHistoryPoint{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(history)
+}
+
+// handleGetLastSeen returns the most recent activity timestamp for each user.
+func (s *Server) handleGetLastSeen(w http.ResponseWriter, r *http.Request) {
+	if s.traffic == nil {
+		http.Error(w, "traffic stats require database backend", http.StatusNotImplemented)
+		return
+	}
+	seen, err := s.traffic.GetLastSeenAll(r.Context())
+	if err != nil {
+		s.log.Error("get last seen", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	if seen == nil {
+		seen = []db.UserLastSeen{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(seen)
 }
 
 // Start runs the HTTP server (non-TLS).

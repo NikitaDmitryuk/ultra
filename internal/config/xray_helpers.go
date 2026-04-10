@@ -204,7 +204,7 @@ func splithttpOutboundStream(spec *Spec, strat mimic.Strategy, w xrayWireResolve
 		"splithttpSettings": splithttpCfg,
 	}
 
-	// TLS ClientHello fragmentation: prevents DPI from reading the SNI of the bridge→exit tunnel.
+	// TLS ClientHello fragmentation: obfuscates the SNI of the bridge→exit tunnel.
 	if sockopt := buildFragmentSockopt(spec); len(sockopt) > 0 {
 		out["sockopt"] = sockopt
 	}

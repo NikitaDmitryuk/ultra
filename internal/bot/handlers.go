@@ -110,7 +110,7 @@ func (b *Bot) handleHelp(_ context.Context, msg *tgbotapi.Message) {
 		"/app — открыть панель управления\n" +
 		"/addadmin — выдать приглашение нового администратора\n" +
 		"/help — эта справка\n\n" +
-		"Управление пользователями VPN доступно через Mini App."
+		"Управление доступно через Mini App."
 	b.reply(msg.Chat.ID, text)
 }
 
@@ -137,7 +137,7 @@ func (b *Bot) sendAppButton(chatID int64) {
 		b.reply(chatID, "Mini App URL не настроен. Обратитесь к оператору.")
 		return
 	}
-	msg := tgbotapi.NewMessage(chatID, "Панель управления Ultra VPN:")
+	msg := tgbotapi.NewMessage(chatID, "Панель управления Ultra:")
 	msg.ReplyMarkup = webAppMarkup("Открыть панель управления", b.miniAppURL)
 	if _, err := b.api.Send(msg); err != nil {
 		b.log.Error("send app button", "err", err)

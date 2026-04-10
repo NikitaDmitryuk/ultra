@@ -83,7 +83,7 @@ if [[ "$FROM_CONFIG" -eq 1 ]]; then
 	REALITY_SNI=${REALITY_SNI:-}
 	IDENTITY=${IDENTITY:-}
 	reuse_spec=0
-	case "${REUSE_BRIDGE_SPEC:-n}" in
+	case "${REUSE_BRIDGE_SPEC:-y}" in
 	y | Y | true | 1 | yes) reuse_spec=1 ;;
 	esac
 	if [[ "$reuse_spec" -ne 1 && -z "${REALITY_DEST// }" ]]; then
@@ -267,7 +267,7 @@ if [[ -n "${EXIT_DIAL// }" ]]; then
 	ARGS+=(-exit-dial "$EXIT_DIAL")
 fi
 
-case "${REUSE_BRIDGE_SPEC:-n}" in
+case "${REUSE_BRIDGE_SPEC:-y}" in
 y | Y | true | 1 | yes) ARGS+=(-reuse-bridge-spec) ;;
 esac
 
@@ -320,7 +320,7 @@ case "${DOH_DISABLE:-n}" in
 y | Y | true | 1 | yes) ARGS+=(-disable-doh) ;;
 esac
 
-# ── Anti-censorship / DPI-evasion options ────────────────────────────────────
+# ── Connection tuning options ────────────────────────────────────────────────
 # FRAGMENT_DISABLE=y — отключить фрагментацию TLS ClientHello (по умолчанию включена).
 case "${FRAGMENT_DISABLE:-n}" in
 y | Y | true | 1 | yes) ARGS+=(-no-fragment) ;;

@@ -76,15 +76,6 @@ func primarySetupScript(cfg PostgresConfig) string {
 	walSection := ""
 	if cfg.ReplicaHost != "" {
 		walSection = `
-# ── WAL streaming (required for replication) ─────────────────────────────────
-setpgconf() {
-  local k="$1" v="$2"
-  if grep -qE "^#?[[:space:]]*${k}[[:space:]]*=" "$PG_CONF"; then
-    sed -i "s|^#*[[:space:]]*${k}[[:space:]]*=.*|${k} = ${v}|" "$PG_CONF"
-  else
-    echo "${k} = ${v}" >> "$PG_CONF"
-  fi
-}
 setpgconf wal_level        replica
 setpgconf max_wal_senders  10
 setpgconf wal_keep_size    256
@@ -142,6 +133,20 @@ PG_VER=$(runuser -s /bin/sh postgres -c "psql -Atc 'SHOW server_version_num;'" |
 PG_CONF_DIR="/etc/postgresql/${PG_VER}/main"
 PG_CONF="${PG_CONF_DIR}/postgresql.conf"
 PG_HBA="${PG_CONF_DIR}/pg_hba.conf"
+
+# Helper: set or replace a postgresql.conf parameter (idempotent).
+setpgconf() {
+  local k="$1" v="$2"
+  if grep -qE "^#?[[:space:]]*${k}[[:space:]]*=" "$PG_CONF"; then
+    sed -i "s|^#*[[:space:]]*${k}[[:space:]]*=.*|${k} = ${v}|" "$PG_CONF"
+  else
+    echo "${k} = ${v}" >> "$PG_CONF"
+  fi
+}
+
+# ── Timezone → UTC (ensures DB timestamps match system clock) ─────────────────
+setpgconf timezone     "'UTC'"
+setpgconf log_timezone "'UTC'"
 %s
 # ── pg_hba: application access from bridge ───────────────────────────────────
 grep -qF '# ultra_app_access' "$PG_HBA" || cat >> "$PG_HBA" << 'HBAEOF'
@@ -183,6 +188,8 @@ func replicaSetupScript(cfg PostgresConfig, primaryHost string) string {
 	return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+export LC_ALL=en_US.UTF-8
+export LANG=en_US.UTF-8
 
 apt-get update -q
 apt-get install -y -q postgresql postgresql-contrib
