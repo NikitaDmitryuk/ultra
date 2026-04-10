@@ -27,6 +27,11 @@ TUNNEL_PORT=8443
 LOG_LEVEL=info
 GENERATE_EXIT_TLS=y
 
+# Переиспользовать ключи с bridge при переустановке (Reality, tunnel UUID, splithttp).
+# Отключает ротацию ключей — существующие клиентские конфиги продолжают работать.
+# Закомментируйте только при намеренной смене ключей.
+REUSE_BRIDGE_SPEC=y
+
 # При необходимости: DNS/IP для dial к exit (если отличается от EXIT).
 # EXIT_DIAL=exit.example.com
 
@@ -111,7 +116,6 @@ DB_ENABLE=y
 # SKIP_GEO_DOWNLOAD=y — не качать (положите geoip.dat и geosite.dat сами в geo_assets_dir).
 # Синоним устаревшего имени: SKIP_RUNETFREEDOM_GEO=y
 # GEO_RELEASE_TAG=202603220955 — зафиксировать тег релиза вместо latest.
-# REUSE_BRIDGE_SPEC=y — взять с bridge spec.json ключи front inbound, tunnel UUID, splithttp; токен admin из environment.
 
 # Жёсткая проверка SSH host key (нужен заранее заполненный known_hosts):
 # export ULTRA_INSTALL_SSH_STRICT_HOST_KEY=yes
