@@ -110,7 +110,6 @@ type Spec struct {
 
 	Role        Role   `json:"role"`
 	MimicPreset string `json:"mimic_preset"`
-	UsersPath   string `json:"users_path"`
 
 	// TunnelTLSProvision documents exit TLS provisioning for operators (optional).
 	TunnelTLSProvision TunnelTLSProvision `json:"tunnel_tls_provision,omitempty"`
@@ -195,8 +194,7 @@ type Spec struct {
 	// SOCKS5 is an optional password SOCKS inbound on the bridge; same routing as VLESS when split_routing is on.
 	SOCKS5 *BridgeSOCKS5Spec `json:"socks5,omitempty"`
 
-	// Database configures an optional PostgreSQL backend for user storage and traffic stats.
-	// When nil the relay uses the JSON file at users_path (default behavior).
+	// Database configures the PostgreSQL backend for user storage and traffic stats (required on bridge).
 	Database *DatabaseSpec `json:"database,omitempty"`
 
 	// Stats configures Xray traffic stat collection. Requires Database to be set.
@@ -309,9 +307,6 @@ func (s *Spec) Validate() error {
 	case RoleBridge:
 		if strings.TrimSpace(s.AdminListen) == "" {
 			s.AdminListen = "127.0.0.1:8443"
-		}
-		if s.UsersPath == "" {
-			return errors.New("config: bridge requires users_path")
 		}
 		if s.PublicHost == "" {
 			return errors.New("config: bridge requires public_host for client export")

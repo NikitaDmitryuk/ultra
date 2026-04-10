@@ -12,7 +12,6 @@ func bridgeSpecForAntiCensorTest() *Spec {
 	return &Spec{
 		SchemaVersion: 1,
 		Role:          RoleBridge,
-		UsersPath:     "/tmp/users.json",
 		ListenAddress: "0.0.0.0",
 		VLESSPort:     443,
 		PublicHost:    "1.2.3.4",

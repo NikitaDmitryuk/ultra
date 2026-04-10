@@ -99,28 +99,3 @@ func (r *UserRepo) Lookup(ctx context.Context, id string) (auth.User, bool, erro
 	return u, true, nil
 }
 
-// MigrateFromJSON imports users if the users table is currently empty.
-// Idempotent: does nothing when at least one active user already exists.
-func (r *UserRepo) MigrateFromJSON(ctx context.Context, users []auth.User) error {
-	var count int
-	if err := r.db.Pool.QueryRow(ctx,
-		"SELECT COUNT(*) FROM users WHERE is_active=true",
-	).Scan(&count); err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-	for _, u := range users {
-		if u.UUID == "" {
-			continue
-		}
-		if _, err := r.db.Pool.Exec(ctx,
-			`INSERT INTO users(uuid, name) VALUES($1, $2) ON CONFLICT DO NOTHING`,
-			u.UUID, u.Name,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
-}

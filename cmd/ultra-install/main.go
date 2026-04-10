@@ -391,7 +391,6 @@ func main() {
 		MimicPreset:        strat.Name(),
 		SplithttpHost:      mimicHost,
 		TunnelTLSProvision: tlsProv,
-		UsersPath:          path.Join(*remoteDir, "users.json"),
 		ListenAddress:      "0.0.0.0",
 		VLESSPort:          *vlessPort,
 		AdminListen:        "127.0.0.1:8443",
@@ -502,7 +501,6 @@ func main() {
 		MimicPreset:        strat.Name(),
 		SplithttpHost:      mimicHost,
 		TunnelTLSProvision: tlsProv,
-		UsersPath:          "",
 		ListenAddress:      "0.0.0.0",
 		VLESSPort:          tun,
 		PublicHost:         "",
@@ -754,17 +752,6 @@ func main() {
 		}
 	}
 
-	// When DB backend is active, users.json is not consulted by the relay.
-	// For non-DB deployments, create an empty list so the relay can start without a seed file.
-	if bridgeSpec.Database == nil {
-		usersRemote := path.Join(*remoteDir, "users.json")
-		initUsers := fmt.Sprintf(`test -f %q || (printf '[]' > %q && chmod 600 %q)`, usersRemote, usersRemote, usersRemote)
-		if err := install.RunSSH(*sshUser, *bridgeHost, *identity, initUsers); err != nil {
-			fmt.Fprintln(os.Stderr, "users.json init:", err)
-			os.Exit(1)
-		}
-	}
-
 	remoteFinalize := fmt.Sprintf(`set -euo pipefail
 REMOTE_DIR=%q
 install -m 755 /tmp/ultra-relay /usr/local/bin/ultra-relay
@@ -774,7 +761,6 @@ rm -f "$REMOTE_DIR/environment.tmp"
 chown -R ultra-relay:ultra-relay "$REMOTE_DIR"
 chmod 700 "$REMOTE_DIR"
 chmod 600 "$REMOTE_DIR/spec.json" || true
-chmod 600 "$REMOTE_DIR/users.json" 2>/dev/null || true
 chmod 600 /etc/ultra-relay/environment
 `, *remoteDir)
 

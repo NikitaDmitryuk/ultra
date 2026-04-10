@@ -215,8 +215,8 @@ obtain_bot_cert() {
 	echo >&2
 	echo "ultra: certbot не смог получить сертификат для ${domain}." >&2
 	echo "  Проверьте:" >&2
-	echo "    • DNS A-запись для ${domain} указывает на ${FRONT}" >&2
-	echo "    • Порт 80/tcp открыт в firewall / security group" >&2
+	echo "    • DNS A-запись для ${domain} указывает на IP exit-ноды ${BACK}" >&2
+	echo "    • Порт 80/tcp открыт на exit-ноде ${BACK}" >&2
 	echo "  После исправления запустите: make bot-cert" >&2
 	return 1
 }
@@ -398,20 +398,21 @@ y | Y | true | 1 | yes)
 		echo "ultra: не найден $BOT_BIN — пропускаю деплой бота." >&2
 	else
 		# ── Проверка портов ───────────────────────────────────────────────────
+		# Mini App доступна через exit-ноду (nginx TCP-прокси → bridge).
+		# Let's Encrypt HTTP-01 также идёт через exit (nginx → bridge:80).
 		echo
-		echo "Проверка доступности портов на $FRONT для Mini App…"
+		echo "Проверка доступности портов на exit ($BACK) для Mini App…"
 		_ports_ok=1
-		check_port "$FRONT" 80 "Let's Encrypt ACME HTTP-01" || _ports_ok=0
-		check_port "$FRONT" "${BOT_PORT}" "Mini App HTTPS" || _ports_ok=0
+		check_port "$BACK" 80 "Let's Encrypt ACME HTTP-01 (через exit)" || _ports_ok=0
+		check_port "$BACK" "${BOT_PORT}" "Mini App HTTPS (через exit)" || _ports_ok=0
 		if [[ "$_ports_ok" -eq 0 ]]; then
 			echo >&2
-			echo "ultra: ошибка — необходимые порты недоступны на $FRONT." >&2
+			echo "ultra: ошибка — необходимые порты недоступны на exit ($BACK)." >&2
 			echo >&2
 			echo "  Откройте входящие правила в firewall / security group:" >&2
-			echo "    80/tcp  — для получения TLS-сертификата (Let's Encrypt HTTP-01)" >&2
+			echo "    80/tcp          — для получения TLS-сертификата (Let's Encrypt HTTP-01)" >&2
 			echo "    ${BOT_PORT}/tcp — для Mini App HTTPS" >&2
 			echo >&2
-			echo "  Yandex Cloud: Консоль → VPC → Группы безопасности → входящие правила." >&2
 			echo "  После открытия портов повторите: make install" >&2
 			exit 1
 		fi
@@ -424,6 +425,65 @@ y | Y | true | 1 | yes)
 		fi
 		_ssh_base=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${_ssh_id_args[@]}" "${SSH_USER}@${FRONT}")
 		_scp_base=(scp -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${_ssh_id_args[@]}")
+		_ssh_exit_bot=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${_ssh_id_args[@]}" "${SSH_USER}@${BACK}")
+
+		# ── nginx TCP-прокси на exit для Mini App ─────────────────────────────
+		# Mini App (HTTPS) и Let's Encrypt HTTP-01 проходят через exit-ноду:
+		#   exit:BOT_PORT  → TCP passthrough → bridge:BOT_PORT  (TLS на bridge)
+		#   exit:80 (/.well-known/acme-challenge/) → HTTP proxy → bridge:80  (certbot standalone)
+		# Это позволяет держать DNS A-запись на exit и работать в сетях,
+		# которые не могут напрямую достучаться до bridge (напр. Cloudflare WARP → Yandex Cloud).
+		echo
+		echo "Настройка nginx на exit ($BACK) для Mini App…"
+		if "${_ssh_exit_bot[@]}" "
+			set -e
+			# Установить nginx и модуль stream, если отсутствуют.
+			if ! command -v nginx >/dev/null 2>&1; then
+				DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nginx libnginx-mod-stream
+			elif ! dpkg -l libnginx-mod-stream 2>/dev/null | grep -q '^ii'; then
+				DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libnginx-mod-stream
+			fi
+			# Добавить блок stream в nginx.conf, если его ещё нет.
+			grep -q 'stream\.d' /etc/nginx/nginx.conf || printf '\nstream {\n    include /etc/nginx/stream.d/*.conf;\n}\n' >> /etc/nginx/nginx.conf
+			mkdir -p /etc/nginx/stream.d
+
+			# TCP passthrough: BOT_PORT → bridge.
+			cat > /etc/nginx/stream.d/bot-proxy.conf << 'EOSTREAM'
+server {
+    listen ${BOT_PORT};
+    listen [::]:${BOT_PORT};
+    proxy_pass ${FRONT}:${BOT_PORT};
+    proxy_connect_timeout 10s;
+    proxy_timeout 300s;
+}
+EOSTREAM
+
+			# HTTP proxy для ACME HTTP-01 certbot renewal на bridge.
+			cat > /etc/nginx/conf.d/acme-proxy.conf << 'EOACME'
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${BOT_DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        proxy_pass http://${FRONT}:80;
+        proxy_set_header Host \$host;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+    }
+
+    location / {
+        return 301 https://\$host:${BOT_PORT}\$request_uri;
+    }
+}
+EOACME
+
+			nginx -t && systemctl enable nginx && { systemctl reload nginx 2>/dev/null || systemctl start nginx; }
+		"; then
+			echo "  nginx на exit настроен."
+		else
+			echo "ultra: ошибка настройки nginx на exit — Mini App будет доступна только напрямую через bridge ($FRONT)." >&2
+		fi
 
 		# Stop the bot before replacing the binary (running process locks the file on Linux).
 		"${_ssh_base[@]}" "systemctl stop ultra-bot 2>/dev/null || true"
@@ -475,6 +535,16 @@ y | Y | true | 1 | yes)
 			echo "  Бот (polling) работает, Mini App недоступна." >&2
 			echo "  После устранения проблемы с DNS/портами запустите: make bot-cert" >&2
 		fi
+		echo
+		echo "╔══════════════════════════════════════════════════════════════════╗"
+		echo "║                    DNS ДЛЯ MINI APP                             ║"
+		echo "╠══════════════════════════════════════════════════════════════════╣"
+		echo "║  Укажите A-запись для домена Mini App на IP exit-ноды:          ║"
+		echo "║                                                                  ║"
+		printf  "║    %-62s║\n" "${BOT_DOMAIN}  →  ${BACK}"
+		echo "║                                                                  ║"
+		echo "║  Mini App доступна через exit (nginx TCP-прокси → bridge).      ║"
+		echo "╚══════════════════════════════════════════════════════════════════╝"
 		echo
 
 		# Generate an initial admin invite token and store it in the DB on the server.
