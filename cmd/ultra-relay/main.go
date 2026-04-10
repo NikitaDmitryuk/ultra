@@ -18,9 +18,11 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/adminapi"
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/db"
 	"github.com/NikitaDmitryuk/ultra/internal/loglevel"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 	"github.com/NikitaDmitryuk/ultra/internal/proxy"
+	"github.com/NikitaDmitryuk/ultra/internal/stats"
 
 	_ "github.com/xtls/xray-core/main/distro/all"
 )
@@ -100,12 +102,62 @@ func main() {
 			log.Info("xray config reloaded", "users", len(users))
 		}
 
-		mgr, err := auth.NewManagerDeferredFirstNotify(spec.UsersPath, 60*time.Second, reload)
-		if err != nil {
-			log.Error("auth manager", "err", err)
-			os.Exit(1)
+		// Choose user storage backend: PostgreSQL when spec.Database is set, JSON file otherwise.
+		var mgr auth.UserManager
+		var trafficRepo adminapi.TrafficQuerier // nil when DB not configured
+		if spec.Database != nil && spec.Database.DSN != "" {
+			database, err := db.Open(ctx, spec.Database.DSN)
+			if err != nil {
+				log.Error("open database", "err", err)
+				os.Exit(1)
+			}
+			defer database.Close()
+			log.Info("database connected", "dsn_prefix", dsnPrefix(spec.Database.DSN))
+
+			userRepo := db.NewUserRepo(database)
+
+			// One-time migration from users.json when the table is empty.
+			if spec.UsersPath != "" {
+				if jsonMgr, err := auth.NewManager(spec.UsersPath, 0, nil); err == nil {
+					if err := userRepo.MigrateFromJSON(ctx, jsonMgr.List()); err != nil {
+						log.Warn("users.json migration failed", "err", err)
+					} else {
+						log.Info("migrated users from JSON if needed")
+					}
+					jsonMgr.Close()
+				}
+			}
+
+			dbMgr, err := auth.NewDBManager(userRepo, reload, log)
+			if err != nil {
+				log.Error("db user manager", "err", err)
+				os.Exit(1)
+			}
+			mgr = dbMgr
+
+			tRepo := db.NewTrafficRepo(database)
+			trafficRepo = tRepo
+
+			// Start traffic stats collector when spec.Stats is set.
+			if spec.Stats != nil {
+				interval := time.Duration(spec.Stats.CollectIntervalSeconds) * time.Second
+				if interval <= 0 {
+					interval = 60 * time.Second
+				}
+				collector := stats.New(runner, tRepo, mgr, interval, log)
+				collector.Start()
+				defer collector.Close()
+				log.Info("traffic stats collector started", "interval", interval)
+			}
+		} else {
+			jsonMgr, err := auth.NewManagerDeferredFirstNotify(spec.UsersPath, 60*time.Second, reload)
+			if err != nil {
+				log.Error("auth manager", "err", err)
+				os.Exit(1)
+			}
+			defer jsonMgr.Close()
+			mgr = jsonMgr
 		}
-		defer mgr.Close()
 
 		if spec.SplitRoutingEnabled() {
 			registerSplitRoutingUSR1(log, reload, mgr)
@@ -128,7 +180,7 @@ func main() {
 		if *adminToken == "" {
 			log.Warn("Admin API disabled: set -admin-token or ULTRA_RELAY_ADMIN_TOKEN to enable user provisioning on loopback")
 		} else {
-			srv, err := adminapi.NewServer(spec.AdminListen, *adminToken, mgr, spec, log)
+			srv, err := adminapi.NewServer(spec.AdminListen, *adminToken, mgr, trafficRepo, spec, log)
 			if err != nil {
 				log.Error("admin api", "err", err)
 				os.Exit(1)
@@ -169,4 +221,17 @@ func main() {
 	log.Info("shutting down")
 	_ = runner.Close()
 	wg.Wait()
+}
+
+// dsnPrefix returns the scheme+host portion of a DSN for safe logging (no password).
+func dsnPrefix(dsn string) string {
+	for i, c := range dsn {
+		if c == '@' {
+			// Find the last '@' to handle passwords containing '@'
+			last := strings.LastIndexByte(dsn, '@')
+			return dsn[last+1:]
+		}
+		_ = i
+	}
+	return dsn
 }

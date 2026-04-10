@@ -46,9 +46,9 @@ chmod 600 "$ENV_LOCAL"
 "${scp_base[@]}" "$BIN_LOCAL" "${SSH_USER}@${BRIDGE_IP}:/tmp/ultra-relay"
 "${scp_base[@]}" "$SPEC_LOCAL" "${SSH_USER}@${BRIDGE_IP}:${REMOTE_DIR}/spec.json"
 "${scp_base[@]}" "$ENV_LOCAL" "${SSH_USER}@${BRIDGE_IP}:${REMOTE_DIR}/environment.tmp"
-if "${ssh_base[@]}" "${SSH_USER}@${BRIDGE_IP}" "test ! -f '${REMOTE_DIR}/users.json'"; then
-  "${scp_base[@]}" "$ROOT/users.json.sample" "${SSH_USER}@${BRIDGE_IP}:${REMOTE_DIR}/users.json"
-fi
+# Create an empty users list if not present (relay starts with no users; add via Admin API).
+"${ssh_base[@]}" "${SSH_USER}@${BRIDGE_IP}" \
+  "test -f '${REMOTE_DIR}/users.json' || (printf '[]' > '${REMOTE_DIR}/users.json' && chmod 600 '${REMOTE_DIR}/users.json')"
 
 "${ssh_base[@]}" "${SSH_USER}@${BRIDGE_IP}" bash -s <<REMOTE
 set -euo pipefail

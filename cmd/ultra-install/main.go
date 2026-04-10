@@ -49,6 +49,17 @@ func realityServerNames(dest, sni string) []string {
 func main() {
 	bridgeHost := flag.String("bridge", "", "bridge VPS hostname or IP (SSH target)")
 	exitHost := flag.String("exit", "", "exit VPS hostname or IP (SSH target)")
+
+	// PostgreSQL flags
+	dbHost := flag.String("db-host", "", "host to install PostgreSQL primary on (default: same as -bridge)")
+	dbReplica := flag.String(
+		"db-replica",
+		"",
+		"host to install PostgreSQL streaming replica on (default: same as -exit); requires -db-host",
+	)
+	dbSSHUser := flag.String("db-ssh-user", "", "SSH user for DB hosts (default: same as -ssh-user)")
+	dbName := flag.String("db-name", "ultra_db", "PostgreSQL database name")
+	dbUser := flag.String("db-user", "ultra", "PostgreSQL application role")
 	exitDial := flag.String(
 		"exit-dial",
 		"",
@@ -81,9 +92,8 @@ func main() {
 		"TCP port on exit for bridge→exit splithttp; 0 means same as -vless-port (legacy single-port setup)",
 	)
 	remoteDir := flag.String("remote-dir", "/etc/ultra-relay", "remote config directory")
-	projectRoot := flag.String("project-root", ".", "repo root (for systemd unit and users.json.sample)")
+	projectRoot := flag.String("project-root", ".", "repo root (for systemd unit template)")
 	binaryPath := flag.String("binary", "ultra-relay-linux-amd64", "local ultra-relay binary to upload")
-	usersSample := flag.String("users-sample", "", "path to users.json seed (default: <project-root>/users.json.sample)")
 	dryRun := flag.Bool("dry-run", false, "print specs and secrets to stdout; do not SSH")
 	generateExitTLS := flag.Bool("generate-exit-tls", true, "on exit: openssl self-signed cert for mimic host (see deploy/TLS.md)")
 	writeLocal := flag.String(
@@ -121,6 +131,42 @@ func main() {
 		"",
 		"optional comma-separated geosite category names (no geosite: prefix) routed to blackhole on bridge",
 	)
+	// ── Anti-censorship / DPI-evasion flags ──────────────────────────────────
+	disableDOH := flag.Bool(
+		"disable-doh",
+		false,
+		"disable DNS over HTTPS in Xray on both nodes (default: DoH is enabled)",
+	)
+	noFragment := flag.Bool(
+		"no-fragment",
+		false,
+		"disable TLS ClientHello fragmentation on bridge→exit outbound (default: enabled)",
+	)
+	splithttpPadding := flag.String(
+		"splithttp-padding",
+		"",
+		`random-padding byte range for each splithttp chunk, e.g. "100-1000" (default "100-1000"); "0" disables`,
+	)
+	splithttpMaxChunkKB := flag.Int(
+		"splithttp-max-chunk-kb",
+		0,
+		"max bytes per splithttp POST in kilobytes (0 = Xray default ~1 MB; e.g. 64 reduces burst size)",
+	)
+	realityFPs := flag.String(
+		"reality-fingerprints",
+		"",
+		`comma-separated TLS fingerprint pool to rotate per reload, e.g. "chrome,firefox,safari" (default: all mainstream browsers)`,
+	)
+	warpFlag := flag.Bool(
+		"warp",
+		false,
+		"install Cloudflare WARP on exit node and route outbound traffic through it (changes exit IP to Cloudflare)",
+	)
+	warpPort := flag.Int(
+		"warp-port",
+		40000,
+		"local SOCKS5 port for WARP proxy on exit node (default 40000)",
+	)
 	flag.Parse()
 
 	tun := *tunnelPort
@@ -140,11 +186,6 @@ func main() {
 	if pub == "" {
 		pub = *bridgeHost
 	}
-	usersPath := *usersSample
-	if usersPath == "" {
-		usersPath = filepath.Join(*projectRoot, "users.json.sample")
-	}
-
 	presetStr := strings.TrimSpace(*preset)
 	realityDestStr := strings.TrimSpace(*realityDest)
 	realitySNIStr := strings.TrimSpace(*realitySNI)
@@ -318,8 +359,9 @@ func main() {
 			PrivateKey:  rk.PrivateKey,
 			ShortIDs:    []string{""},
 			PublicKey:   rk.PublicKey,
-			Fingerprint: "chrome",
-			SpiderX:     "/",
+			// Fingerprint intentionally left empty so bridgeInboundStream rotates
+			// randomly from the pool on each Xray config build (anti-fingerprinting).
+			SpiderX: "/",
 		}
 		splitTLS = config.SplitHTTPTLSSpec{
 			ServerName:  mimicHost,
@@ -364,6 +406,25 @@ func main() {
 		SplithttpPath: splitPath,
 		SplitHTTPTLS:  splitTLS,
 	}
+
+	// ── Anti-censorship defaults (always set; flags may override) ────────────
+	antiCensor := &config.AntiCensorSpec{}
+	if *disableDOH {
+		antiCensor.DisableDOH = true
+	}
+	if *noFragment {
+		antiCensor.Fragment = &config.FragmentSpec{} // Packets="" → disabled in buildFragmentSockopt
+	}
+	if p := strings.TrimSpace(*splithttpPadding); p != "" {
+		antiCensor.SplitHTTPPadding = p
+	}
+	if *splithttpMaxChunkKB > 0 {
+		antiCensor.SplitHTTPMaxChunkKB = *splithttpMaxChunkKB
+	}
+	if fps := splitCommaNonEmpty(*realityFPs); len(fps) > 0 {
+		antiCensor.RealityFingerprints = fps
+	}
+	bridgeSpec.AntiCensor = antiCensor
 
 	bridgeSpec.GeoAssetsDir = path.Join(*remoteDir, "geo")
 	bridgeSpec.GeositeExitTags = []string{"ru-blocked-all"}
@@ -426,6 +487,15 @@ func main() {
 		bridgeSpec.GeositeBlockTags = splitCommaNonEmpty(s)
 	}
 
+	exitAntiCensor := &config.AntiCensorSpec{}
+	if *disableDOH {
+		exitAntiCensor.DisableDOH = true
+	}
+	if *warpFlag {
+		exitAntiCensor.WARPProxy = true
+		exitAntiCensor.WARPProxyPort = *warpPort
+	}
+
 	exitSpec := &config.Spec{
 		SchemaVersion:      config.CurrentSpecSchemaVersion,
 		Role:               config.RoleExit,
@@ -449,6 +519,7 @@ func main() {
 			CertFile: path.Join(*remoteDir, "fullchain.pem"),
 			KeyFile:  path.Join(*remoteDir, "privkey.pem"),
 		},
+		AntiCensor: exitAntiCensor,
 	}
 
 	if err := bridgeSpec.Validate(); err != nil {
@@ -471,6 +542,77 @@ func main() {
 		os.Exit(1)
 	}
 
+	// ── PostgreSQL configuration (if requested) ─────────────────────────────
+	var pgCfg *install.PostgresConfig
+	var dbDSN string
+	if *dbHost != "" || (*dbHost == "" && *dbReplica != "") {
+		dbSSH := *dbSSHUser
+		if dbSSH == "" {
+			dbSSH = *sshUser
+		}
+		primaryHost := *dbHost
+		if primaryHost == "" {
+			primaryHost = *bridgeHost
+		}
+		replicaHost := *dbReplica
+		if replicaHost == "" && *dbReplica == "" {
+			replicaHost = *exitHost
+		}
+
+		// When the DB is co-located with the bridge the relay connects via loopback.
+		// For pg_hba we use 127.0.0.1 in that case; otherwise the bridge's external IP.
+		bridgeIPForHBA := *bridgeHost
+		if primaryHost == *bridgeHost {
+			bridgeIPForHBA = "127.0.0.1"
+		}
+
+		pc := &install.PostgresConfig{
+			DBName:      *dbName,
+			DBUser:      *dbUser,
+			BridgeHost:  bridgeIPForHBA,
+			ReplicaHost: replicaHost,
+		}
+		if err := pc.Defaults(); err != nil {
+			fmt.Fprintln(os.Stderr, "postgres config:", err)
+			os.Exit(1)
+		}
+		pgCfg = pc
+
+		// Relay connects to DB on loopback when co-located; external IP otherwise.
+		dsnHost := primaryHost
+		if primaryHost == *bridgeHost {
+			dsnHost = "127.0.0.1"
+		}
+		dbDSN = pc.DSN(dsnHost)
+		bridgeSpec.Database = &config.DatabaseSpec{DSN: dbDSN}
+		bridgeSpec.Stats = &config.StatsSpec{CollectIntervalSeconds: 60}
+
+		// Re-marshal bridge spec with DB fields added.
+		bridgeJSON, err = json.MarshalIndent(bridgeSpec, "", "  ")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+
+		if !*dryRun {
+			fmt.Printf("Setting up PostgreSQL primary on %s …\n", primaryHost)
+			if err := install.SetupPrimaryPostgres(dbSSH, primaryHost, *identity, *pc); err != nil {
+				fmt.Fprintln(os.Stderr, "postgres primary setup:", err)
+				os.Exit(1)
+			}
+			fmt.Println("PostgreSQL primary ready.")
+
+			if replicaHost != "" {
+				fmt.Printf("Setting up PostgreSQL replica on %s …\n", replicaHost)
+				if err := install.SetupReplicaPostgres(dbSSH, replicaHost, *identity, *pc, primaryHost); err != nil {
+					fmt.Fprintln(os.Stderr, "postgres replica setup:", err)
+					os.Exit(1)
+				}
+				fmt.Println("PostgreSQL replica ready.")
+			}
+		}
+	}
+
 	if *dryRun {
 		if reused {
 			fmt.Println("=== reuse-bridge-spec: loaded front keys, tunnel, splithttp from remote bridge ===")
@@ -479,10 +621,19 @@ func main() {
 		fmt.Println(string(bridgeJSON))
 		fmt.Println("=== exit spec ===")
 		fmt.Println(string(exitJSON))
+		if *warpFlag {
+			fmt.Printf("=== WARP: would install on exit, proxy port %d ===\n", *warpPort)
+		}
 		fmt.Println("=== one-time values (store securely) ===")
 		fmt.Println("admin_token:", adminToken)
 		fmt.Println("tunnel_uuid:", tunnelUUID)
 		fmt.Println("splithttp_path:", splitPath)
+		if dbDSN != "" {
+			fmt.Println("db_dsn:", dbDSN)
+			if pgCfg != nil {
+				fmt.Println("db_repl_password:", pgCfg.ReplPassword)
+			}
+		}
 		return
 	}
 
@@ -513,10 +664,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "binary not found:", *binaryPath)
 		os.Exit(1)
 	}
-	if _, err := os.Stat(usersPath); err != nil {
-		fmt.Fprintln(os.Stderr, "users sample not found:", usersPath)
-		os.Exit(1)
-	}
 
 	bridgePrep := fmt.Sprintf(
 		`set -euo pipefail; REMOTE_DIR=%q; mkdir -p "$REMOTE_DIR" && chmod 700 "$REMOTE_DIR"; id -u ultra-relay >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin ultra-relay`,
@@ -543,6 +690,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *warpFlag {
+		fmt.Printf("exit: installing Cloudflare WARP (proxy mode → 127.0.0.1:%d) …\n", *warpPort)
+		if err := install.SetupWARP(*sshUser, *exitHost, *identity, *warpPort); err != nil {
+			fmt.Fprintln(os.Stderr, "warp setup:", err)
+			os.Exit(1)
+		}
+		fmt.Println("WARP proxy ready on exit node.")
+	}
+
 	if genExitTLS {
 		// SAN required: Go 1.23+ x509 rejects hostname verify when cert has only legacy CN (bridge splithttp client).
 		ssl := fmt.Sprintf(
@@ -561,6 +717,9 @@ func main() {
 	tmpEnv := filepath.Join(os.TempDir(), "ultra-relay.env")
 	tmpEnvExit := filepath.Join(os.TempDir(), "ultra-relay-exit.env")
 	bridgeEnv := fmt.Sprintf("ULTRA_RELAY_ADMIN_TOKEN=%s\nULTRA_RELAY_LOG_LEVEL=%s\n", adminToken, logLevelNorm)
+	if dbDSN != "" {
+		bridgeEnv += install.FormatDBEnvLine(dbDSN)
+	}
 	exitEnv := fmt.Sprintf("ULTRA_RELAY_LOG_LEVEL=%s\n", logLevelNorm)
 	_ = os.WriteFile(tmpBridge, bridgeJSON, 0o600)
 	_ = os.WriteFile(tmpExit, exitJSON, 0o600)
@@ -595,11 +754,13 @@ func main() {
 		}
 	}
 
-	usersRemote := path.Join(*remoteDir, "users.json")
-	checkUsers := fmt.Sprintf(`test -f %q`, usersRemote)
-	if err := install.RunSSH(*sshUser, *bridgeHost, *identity, checkUsers); err != nil {
-		if err := install.SCP(*identity, usersPath, *sshUser, *bridgeHost, usersRemote); err != nil {
-			fmt.Fprintln(os.Stderr, "users scp:", err)
+	// When DB backend is active, users.json is not consulted by the relay.
+	// For non-DB deployments, create an empty list so the relay can start without a seed file.
+	if bridgeSpec.Database == nil {
+		usersRemote := path.Join(*remoteDir, "users.json")
+		initUsers := fmt.Sprintf(`test -f %q || (printf '[]' > %q && chmod 600 %q)`, usersRemote, usersRemote, usersRemote)
+		if err := install.RunSSH(*sshUser, *bridgeHost, *identity, initUsers); err != nil {
+			fmt.Fprintln(os.Stderr, "users.json init:", err)
 			os.Exit(1)
 		}
 	}
@@ -670,4 +831,17 @@ chmod 600 "$REMOTE_DIR/spec.json" || true
 	fmt.Println("Admin token (save securely):", adminToken)
 	fmt.Println("SSH port-forward example: ssh -L 8443:127.0.0.1:8443", fmt.Sprintf("%s@%s", *sshUser, *bridgeHost))
 	fmt.Println("See deploy/TLS.md for tunnel TLS posture (tunnel_tls_provision:", tlsProv, ").")
+	if *warpFlag {
+		fmt.Printf("Cloudflare WARP proxy: exit outbound traffic routed through 127.0.0.1:%d → Cloudflare IP.\n", *warpPort)
+		fmt.Println("  Destination sites see a Cloudflare IP instead of the VPS datacenter IP.")
+		fmt.Println("  On reboot, WARP reconnects automatically via warp-svc (systemd).")
+	}
+	if dbDSN != "" {
+		fmt.Println("PostgreSQL DSN (save securely):", dbDSN)
+		if pgCfg != nil && pgCfg.ReplicaHost != "" {
+			fmt.Println("PostgreSQL replication user:", pgCfg.ReplUser)
+			fmt.Println("PostgreSQL replica host:", pgCfg.ReplicaHost)
+		}
+		fmt.Println("Traffic stats API: GET /v1/traffic/monthly  GET /v1/users/{uuid}/traffic")
+	}
 }

@@ -12,6 +12,9 @@ import (
 	"github.com/xtls/xray-core/common/uuid"
 )
 
+// Ensure Manager satisfies UserManager at compile time.
+var _ UserManager = (*Manager)(nil)
+
 // ErrUserNotFound is returned by RenameUser and RemoveUser when the UUID is unknown.
 var ErrUserNotFound = errors.New("auth: user not found")
 

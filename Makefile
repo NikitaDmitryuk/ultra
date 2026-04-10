@@ -1,7 +1,8 @@
-.PHONY: build build-install test vet lint format install relay-logs verify-relay build-linux-amd64 build-install-linux-amd64 build-linux-arm64 clean
+.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 clean
 
 BINARY=ultra-relay
 INSTALL_BINARY=ultra-install
+BOT_BINARY=ultra-bot
 
 # Pin tool versions (align with reproducible CI-style runs)
 GOIMPORTS_PKG=golang.org/x/tools/cmd/goimports@v0.30.0
@@ -12,6 +13,9 @@ build:
 
 build-install:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(INSTALL_BINARY) ./cmd/ultra-install
+
+build-bot:
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BOT_BINARY) ./cmd/ultra-bot
 
 test:
 	CGO_ENABLED=0 go test ./...
@@ -39,6 +43,11 @@ lint:
 install:
 	@# ultra-install fetches geo bundles on the bridge unless skipped; see install.config.sample (SKIP_GEO_DOWNLOAD)
 	@bash "$(CURDIR)/scripts/install.sh"
+
+# Получить (или обновить) TLS-сертификат для ultra-bot локально через acme.sh и загрузить на bridge.
+# Требует DUCKDNS_TOKEN в .env и настроенного install.config (BOT_DOMAIN, BRIDGE, IDENTITY).
+bot-cert:
+	@bash "$(CURDIR)/scripts/bot-cert.sh"
 
 # С journalctl: либо BRIDGE и EXIT, либо корневой install.config (см. install.config.sample).
 # Опции: IDENTITY, SSH_USER, LINES, INSTALL_CONFIG (путь к конфигу вместо install.config).
@@ -85,8 +94,13 @@ build-linux-amd64:
 build-install-linux-amd64:
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(INSTALL_BINARY)-linux-amd64 ./cmd/ultra-install
 
+build-bot-linux-amd64:
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BOT_BINARY)-linux-amd64 ./cmd/ultra-bot
+
 build-linux-arm64:
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BINARY)-linux-arm64 ./cmd/ultra-relay
 
 clean:
-	rm -f $(BINARY) $(BINARY)-linux-amd64 $(BINARY)-linux-arm64 $(INSTALL_BINARY) $(INSTALL_BINARY)-linux-amd64
+	rm -f $(BINARY) $(BINARY)-linux-amd64 $(BINARY)-linux-arm64 \
+	      $(INSTALL_BINARY) $(INSTALL_BINARY)-linux-amd64 \
+	      $(BOT_BINARY) $(BOT_BINARY)-linux-amd64
