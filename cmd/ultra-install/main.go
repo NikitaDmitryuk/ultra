@@ -167,6 +167,11 @@ func main() {
 		40000,
 		"local SOCKS5 port for WARP proxy on exit node (default 40000)",
 	)
+	traceLatency := flag.Bool(
+		"trace-latency",
+		false,
+		"enable per-connection latency tracing on the bridge (GET /v1/latency/sessions on admin API)",
+	)
 	flag.Parse()
 
 	tun := *tunnelPort
@@ -407,8 +412,9 @@ func main() {
 		VLESSPort:          *vlessPort,
 		AdminListen:        "127.0.0.1:8443",
 		PublicHost:         pub,
-		DevMode:            false,
-		Reality:            realitySpec,
+		DevMode:      false,
+		TraceLatency: *traceLatency,
+		Reality:      realitySpec,
 		Exit: config.ExitTunnelSpec{
 			Address:    exitDialAddr,
 			Port:       tun,
@@ -734,6 +740,12 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("WARP proxy ready on exit node.")
+		fmt.Printf("exit: installing WARP watchdog timer (checks every 5 min) …\n")
+		if err := install.SetupWARPWatchdog(*sshUser, *exitHost, *identity, *warpPort); err != nil {
+			fmt.Fprintln(os.Stderr, "warp watchdog setup:", err)
+			os.Exit(1)
+		}
+		fmt.Println("WARP watchdog timer active on exit node.")
 	}
 
 	if genExitTLS {
