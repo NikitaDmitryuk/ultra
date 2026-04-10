@@ -104,9 +104,9 @@ func TestStoreAppendAndRecent(t *testing.T) {
 	if s.Destination != "example.com" {
 		t.Errorf("destination: got %q want %q", s.Destination, "example.com")
 	}
-	deltas := s.StageDeltasMS()
-	if deltas[StageTunnelUp] != 30 {
-		t.Errorf("tunnel_up delta: got %d want 30", deltas[StageTunnelUp])
+	deltas := s.StageDeltasUS()
+	if deltas[StageTunnelUp] != 30000 {
+		t.Errorf("tunnel_up delta: got %d want 30000", deltas[StageTunnelUp])
 	}
 }
 

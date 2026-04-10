@@ -459,7 +459,7 @@ func (s *Server) handleLatencySessions(w http.ResponseWriter, r *http.Request) {
 		StartedAt   string           `json:"started_at"`
 		Destination string           `json:"destination"`
 		OutboundTag string           `json:"outbound_tag,omitempty"`
-		StagesMS    map[string]int64 `json:"stages_ms"`
+		StagesUS    map[string]int64 `json:"stages_us"`
 	}
 	out := make([]sessionJSON, 0, len(sessions))
 	for _, s := range sessions {
@@ -468,7 +468,7 @@ func (s *Server) handleLatencySessions(w http.ResponseWriter, r *http.Request) {
 			StartedAt:   s.StartedAt.UTC().Format(time.RFC3339Nano),
 			Destination: s.Destination,
 			OutboundTag: s.OutboundTag,
-			StagesMS:    s.StageDeltasMS(),
+			StagesUS:    s.StageDeltasUS(),
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
