@@ -18,7 +18,7 @@ func DialTCP(ctx context.Context, addr string) (time.Duration, error) {
 	if err != nil {
 		return 0, fmt.Errorf("probe: TCP dial %s: %w", addr, err)
 	}
-	conn.Close()
+	_ = conn.Close()
 	return elapsed, nil
 }
 
@@ -41,10 +41,10 @@ func DialSOCKS5(ctx context.Context, socksAddr, targetAddr string) (time.Duratio
 	if err != nil {
 		return 0, fmt.Errorf("probe: SOCKS5 dial %s: %w", socksAddr, err)
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck
 
 	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(deadline)
+		_ = conn.SetDeadline(deadline)
 	}
 
 	if err := socks5Connect(conn, host, uint16(port)); err != nil {

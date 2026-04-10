@@ -412,9 +412,9 @@ func main() {
 		VLESSPort:          *vlessPort,
 		AdminListen:        "127.0.0.1:8443",
 		PublicHost:         pub,
-		DevMode:      false,
-		TraceLatency: *traceLatency,
-		Reality:      realitySpec,
+		DevMode:            false,
+		TraceLatency:       *traceLatency,
+		Reality:            realitySpec,
 		Exit: config.ExitTunnelSpec{
 			Address:    exitDialAddr,
 			Port:       tun,

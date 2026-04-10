@@ -48,7 +48,14 @@ type Server struct {
 
 // NewServer validates listen address is loopback.
 // traffic and traceStore may be nil when those features are not configured.
-func NewServer(listen, token string, users auth.UserManager, traffic TrafficQuerier, traceStore *trace.Store, spec *config.Spec, log *slog.Logger) (*Server, error) {
+func NewServer(
+	listen, token string,
+	users auth.UserManager,
+	traffic TrafficQuerier,
+	traceStore *trace.Store,
+	spec *config.Spec,
+	log *slog.Logger,
+) (*Server, error) {
 	if token == "" {
 		return nil, errors.New("adminapi: empty admin token")
 	}
@@ -448,11 +455,11 @@ func (s *Server) handleLatencySessions(w http.ResponseWriter, r *http.Request) {
 	sessions := s.traceStore.Recent(limit)
 
 	type sessionJSON struct {
-		SessionID   uint32            `json:"session_id"`
-		StartedAt   string            `json:"started_at"`
-		Destination string            `json:"destination"`
-		OutboundTag string            `json:"outbound_tag,omitempty"`
-		StagesMS    map[string]int64  `json:"stages_ms"`
+		SessionID   uint32           `json:"session_id"`
+		StartedAt   string           `json:"started_at"`
+		Destination string           `json:"destination"`
+		OutboundTag string           `json:"outbound_tag,omitempty"`
+		StagesMS    map[string]int64 `json:"stages_ms"`
 	}
 	out := make([]sessionJSON, 0, len(sessions))
 	for _, s := range sessions {

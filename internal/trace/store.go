@@ -6,8 +6,8 @@ import (
 )
 
 const (
-	ringSize       = 200          // completed sessions kept in memory
-	activeTimeout  = 30 * time.Second // stale active sessions are evicted after this
+	ringSize        = 200              // completed sessions kept in memory
+	activeTimeout   = 30 * time.Second // stale active sessions are evicted after this
 	cleanupInterval = 15 * time.Second
 )
 

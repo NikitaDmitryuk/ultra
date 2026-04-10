@@ -4,13 +4,13 @@ import "time"
 
 // Stage names emitted by the LogHandler when classifying xray log events.
 const (
-	StageClientFirstByte  = "client_first_byte"  // bridge: first bytes received from client
-	StageDomainSniffed    = "domain_sniffed"      // bridge: destination domain extracted from TLS/HTTP
-	StageRoutingDecision  = "routing_decision"    // bridge/exit: outbound tag selected
-	StageDialExitStart    = "dial_exit_start"     // bridge: SplitHTTP dial to exit node started
-	StageTunnelUp         = "tunnel_up"           // bridge: outbound connection established (data flowing)
-	StageWARPDialStart    = "warp_dial_start"     // exit: connecting to destination via WARP SOCKS5
-	StageDirectDialStart  = "direct_dial_start"   // exit: connecting to destination directly (freedom)
+	StageClientFirstByte = "client_first_byte" // bridge: first bytes received from client
+	StageDomainSniffed   = "domain_sniffed"    // bridge: destination domain extracted from TLS/HTTP
+	StageRoutingDecision = "routing_decision"  // bridge/exit: outbound tag selected
+	StageDialExitStart   = "dial_exit_start"   // bridge: SplitHTTP dial to exit node started
+	StageTunnelUp        = "tunnel_up"         // bridge: outbound connection established (data flowing)
+	StageWARPDialStart   = "warp_dial_start"   // exit: connecting to destination via WARP SOCKS5
+	StageDirectDialStart = "direct_dial_start" // exit: connecting to destination directly (freedom)
 )
 
 // Event is a single timestamped step captured from an xray log line.
