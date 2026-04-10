@@ -18,7 +18,7 @@ func TestBuildBridgeRoutingBlocklistDefaultGeosite(t *testing.T) {
 		RoutingMode:  RoutingModeBlocklist,
 		GeoAssetsDir: "/tmp/geo",
 	})
-	if ds != "IPIfNonMatch" {
+	if ds != "AsIs" {
 		t.Fatalf("domainStrategy: got %q", ds)
 	}
 	var sawGeosite bool
@@ -46,7 +46,7 @@ func TestBuildRUDirectRouting(t *testing.T) {
 		RoutingMode:  RoutingModeRUDirect,
 		GeoAssetsDir: "/tmp/geo",
 	})
-	if ds != "IPIfNonMatch" {
+	if ds != "AsIs" {
 		t.Fatalf("domainStrategy: got %q", ds)
 	}
 	var sawGeoipRU, sawGeoipPrivate, sawRegexp, lastExit bool

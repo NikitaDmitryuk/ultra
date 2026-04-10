@@ -1,0 +1,11 @@
+[Unit]
+Description=Run ultra WARP proxy watchdog every 5 minutes
+After=warp-svc.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=ultra-warp-watchdog.service
+
+[Install]
+WantedBy=timers.target

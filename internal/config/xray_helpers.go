@@ -32,7 +32,7 @@ func buildFragmentSockopt(spec *Spec) map[string]any {
 			"fragment": map[string]any{
 				"packets":  "tlshello",
 				"length":   "100-200",
-				"interval": "10-20",
+				"interval": "1-3",
 			},
 		}
 	}
@@ -43,7 +43,7 @@ func buildFragmentSockopt(spec *Spec) map[string]any {
 			"fragment": map[string]any{
 				"packets":  "tlshello",
 				"length":   "100-200",
-				"interval": "10-20",
+				"interval": "1-3",
 			},
 		}
 	}
@@ -57,7 +57,7 @@ func buildFragmentSockopt(spec *Spec) map[string]any {
 	}
 	interval := f.Interval
 	if interval == "" {
-		interval = "10-20"
+		interval = "1-3"
 	}
 	return map[string]any{
 		"fragment": map[string]any{
@@ -74,7 +74,7 @@ func splithttpExtraSettings(spec *Spec) map[string]any {
 	extra := map[string]any{}
 
 	// Padding is on by default; spec may override or disable with "0".
-	padding := "100-1000"
+	padding := "0-100"
 	if spec.AntiCensor != nil && spec.AntiCensor.SplitHTTPPadding != "" {
 		padding = spec.AntiCensor.SplitHTTPPadding
 	}

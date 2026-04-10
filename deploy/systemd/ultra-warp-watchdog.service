@@ -1,0 +1,9 @@
+[Unit]
+Description=ultra WARP proxy watchdog — verify SOCKS5 connectivity and reconnect if broken
+After=warp-svc.service
+
+[Service]
+Type=oneshot
+# WARP_PROXY_PORT is written by ultra-install with the configured proxy port.
+Environment=WARP_PROXY_PORT=40000
+ExecStart=/usr/local/bin/ultra-warp-watchdog

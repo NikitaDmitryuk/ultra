@@ -2,9 +2,16 @@ package install
 
 import (
 	"crypto/rand"
+	_ "embed"
 	"encoding/hex"
 	"fmt"
 )
+
+//go:embed scripts/postgres-primary.sh
+var postgresPrimaryScriptTmpl string
+
+//go:embed scripts/postgres-replica.sh
+var postgresReplicaScriptTmpl string
 
 // PostgresConfig holds parameters for a managed PostgreSQL installation.
 type PostgresConfig struct {
@@ -96,66 +103,7 @@ HBAEOF
 		)
 	}
 
-	// Passwords are hex — no single quotes, no backslashes; safe to interpolate in SQL literals.
-	// runuser switches to postgres without requiring sudo/password — it works from root directly.
-	return fmt.Sprintf(`#!/bin/bash
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-
-apt-get update -q
-apt-get install -y -q postgresql postgresql-contrib
-
-systemctl enable postgresql
-systemctl start postgresql
-
-# Wait for PostgreSQL to become ready (up to 30 s).
-for i in $(seq 1 30); do
-  runuser -s /bin/sh postgres -c "psql -c 'SELECT 1'" >/dev/null 2>&1 && break
-  sleep 1
-done
-
-# ── Roles ─────────────────────────────────────────────────────────────────────
-# CREATE or ALTER (idempotent — ALTER ensures password stays current).
-# -s /bin/sh avoids login-shell profile output; quotes: outer double, inner escaped double.
-runuser -s /bin/sh postgres -c "psql -c \"CREATE ROLE %s WITH LOGIN PASSWORD '%s';\"" 2>/dev/null || \
-  runuser -s /bin/sh postgres -c "psql -c \"ALTER ROLE %s WITH PASSWORD '%s';\""
-
-runuser -s /bin/sh postgres -c "psql -c \"CREATE ROLE %s WITH REPLICATION LOGIN PASSWORD '%s';\"" 2>/dev/null || \
-  runuser -s /bin/sh postgres -c "psql -c \"ALTER ROLE %s WITH PASSWORD '%s';\""
-
-# ── Database ──────────────────────────────────────────────────────────────────
-runuser -s /bin/sh postgres -c "psql -c \"CREATE DATABASE %s OWNER %s;\"" 2>/dev/null || true
-runuser -s /bin/sh postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE %s TO %s;\""
-
-# ── Locate active cluster configuration ───────────────────────────────────────
-# --shell /bin/sh avoids login-profile output that would pollute the captured version string.
-PG_VER=$(runuser -s /bin/sh postgres -c "psql -Atc 'SHOW server_version_num;'" | tail -1 | cut -c1-2)
-PG_CONF_DIR="/etc/postgresql/${PG_VER}/main"
-PG_CONF="${PG_CONF_DIR}/postgresql.conf"
-PG_HBA="${PG_CONF_DIR}/pg_hba.conf"
-
-# Helper: set or replace a postgresql.conf parameter (idempotent).
-setpgconf() {
-  local k="$1" v="$2"
-  if grep -qE "^#?[[:space:]]*${k}[[:space:]]*=" "$PG_CONF"; then
-    sed -i "s|^#*[[:space:]]*${k}[[:space:]]*=.*|${k} = ${v}|" "$PG_CONF"
-  else
-    echo "${k} = ${v}" >> "$PG_CONF"
-  fi
-}
-
-# ── Timezone → UTC (ensures DB timestamps match system clock) ─────────────────
-setpgconf timezone     "'UTC'"
-setpgconf log_timezone "'UTC'"
-%s
-# ── pg_hba: application access from bridge ───────────────────────────────────
-grep -qF '# ultra_app_access' "$PG_HBA" || cat >> "$PG_HBA" << 'HBAEOF'
-host    %s    %s    %s/32    scram-sha-256    # ultra_app_access
-HBAEOF
-%s
-systemctl restart postgresql
-echo "ultra: PostgreSQL primary ready on port %d."
-`,
+	return fmt.Sprintf(postgresPrimaryScriptTmpl,
 		// app role: CREATE
 		cfg.DBUser, cfg.DBPassword,
 		// app role: ALTER (idempotent)
@@ -182,82 +130,7 @@ echo "ultra: PostgreSQL primary ready on port %d."
 // replicaSetupScript returns the bash script that bootstraps a streaming replica via pg_basebackup.
 func replicaSetupScript(cfg PostgresConfig, primaryHost string) string {
 	// Passwords are hex — safe to embed in PGPASSWORD and connstring.
-	// runuser -l resets the environment, so PGPASSWORD must be set inside the -c command.
-	// We write a temporary helper script owned by postgres to avoid quoting issues with
-	// shell variable expansion inside the runuser -c argument.
-	return fmt.Sprintf(`#!/bin/bash
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-export LC_ALL=en_US.UTF-8
-export LANG=en_US.UTF-8
-
-apt-get update -q
-apt-get install -y -q postgresql postgresql-contrib
-
-# Detect installed PostgreSQL major version
-PG_VER=$(pg_config --version | grep -oP '\d+' | head -1)
-DATA_DIR="/var/lib/postgresql/${PG_VER}/main"
-PG_CONF_DIR="/etc/postgresql/${PG_VER}/main"
-
-# Stop PostgreSQL and drop the default cluster so pg_basebackup can populate the data dir.
-systemctl stop postgresql || true
-pg_dropcluster --stop "${PG_VER}" main 2>/dev/null || true
-rm -rf "${DATA_DIR}"
-mkdir -p "${DATA_DIR}"
-chown postgres:postgres "${DATA_DIR}"
-chmod 700 "${DATA_DIR}"
-
-# Write a helper script that pg_basebackup runs as the postgres user.
-# Avoids quoting/expansion issues when passing PGPASSWORD + args via runuser -c.
-cat > /tmp/ultra_pg_basebackup.sh << 'SCRIPTEOF'
-#!/bin/bash
-set -euo pipefail
-export PGPASSWORD='REPLPASS_PLACEHOLDER'
-pg_basebackup \
-  -h 'PRIMARY_HOST_PLACEHOLDER' \
-  -p PRIMARY_PORT_PLACEHOLDER \
-  -U 'REPLUSER_PLACEHOLDER' \
-  -D "$1" \
-  --wal-method=stream \
-  --write-recovery-conf \
-  --progress \
-  --checkpoint=fast
-SCRIPTEOF
-
-# Substitute placeholders (passwords are hex — no shell-special chars).
-sed -i "s/REPLPASS_PLACEHOLDER/%s/" /tmp/ultra_pg_basebackup.sh
-sed -i "s/PRIMARY_HOST_PLACEHOLDER/%s/" /tmp/ultra_pg_basebackup.sh
-sed -i "s/PRIMARY_PORT_PLACEHOLDER/%d/" /tmp/ultra_pg_basebackup.sh
-sed -i "s/REPLUSER_PLACEHOLDER/%s/" /tmp/ultra_pg_basebackup.sh
-
-chown postgres:postgres /tmp/ultra_pg_basebackup.sh
-chmod 700 /tmp/ultra_pg_basebackup.sh
-
-# Bootstrap replica data directory from primary.
-# runuser switches from root to postgres without requiring sudo/password.
-runuser -s /bin/sh postgres -c "/tmp/ultra_pg_basebackup.sh '${DATA_DIR}'"
-rm -f /tmp/ultra_pg_basebackup.sh
-
-chown -R postgres:postgres "${DATA_DIR}"
-chmod 700 "${DATA_DIR}"
-
-# Restore cluster config directory if pg_dropcluster removed it.
-mkdir -p "${PG_CONF_DIR}"
-chown postgres:postgres "${PG_CONF_DIR}"
-
-# Minimal pg_hba: allow local connections for health checks.
-if [ ! -f "${PG_CONF_DIR}/pg_hba.conf" ]; then
-  cat > "${PG_CONF_DIR}/pg_hba.conf" << 'HBAEOF'
-local   all   postgres   peer
-local   all   all        peer
-host    all   all        127.0.0.1/32   scram-sha-256
-HBAEOF
-fi
-
-systemctl enable postgresql
-systemctl start postgresql
-echo "ultra: PostgreSQL replica ready (hot standby)."
-`,
+	return fmt.Sprintf(postgresReplicaScriptTmpl,
 		cfg.ReplPassword,
 		primaryHost,
 		cfg.Port,

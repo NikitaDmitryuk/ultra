@@ -78,7 +78,7 @@ func buildBlocklistRouting(spec *Spec, w xrayWireResolved) (string, []any) {
 		"type": "field", "network": "tcp,udp", "outboundTag": w.OutboundDirectTag,
 	})
 	rules = prependGeositeBlockRules(spec, w, rules)
-	return "IPIfNonMatch", rules
+	return "AsIs", rules
 }
 
 // effectiveGeositeDirectTags: nil/omitted → no geosite-based direct rule (runetfreedom geosite.dat
@@ -201,7 +201,7 @@ func buildRUDirectRouting(spec *Spec, w xrayWireResolved) (string, []any) {
 		"type": "field", "network": "tcp,udp", "outboundTag": w.OutboundExitTag,
 	})
 	rules = prependGeositeBlockRules(spec, w, rules)
-	return "IPIfNonMatch", rules
+	return "AsIs", rules
 }
 
 func normalizeGeositeDomains(tags []string) []string {

@@ -60,7 +60,7 @@ func resolveXrayWire(s *Spec) xrayWireResolved {
 		VLESSEncryption:      "none",
 		SniffingDestOverride: []string{"http", "tls", "quic"},
 		DomainMatcherSplit:   "mph",
-		SplithttpMode:        "packet-up",
+		SplithttpMode:        "stream-up",
 		RuDirectGeoipMatcher: "geoip:ru",
 
 		ClientOutboundTag:     "proxy",
