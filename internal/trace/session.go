@@ -29,15 +29,15 @@ type Session struct {
 	Events      []Event
 }
 
-// StageDeltasMS returns, for each Stage seen, the milliseconds elapsed since StartedAt.
+// StageDeltasUS returns, for each Stage seen, the microseconds elapsed since StartedAt.
 // Useful for JSON serialisation in the admin API.
-func (s *Session) StageDeltasMS() map[string]int64 {
+func (s *Session) StageDeltasUS() map[string]int64 {
 	out := make(map[string]int64, len(s.Events))
 	for _, e := range s.Events {
-		ms := e.At.Sub(s.StartedAt).Milliseconds()
+		us := e.At.Sub(s.StartedAt).Microseconds()
 		// Keep the first occurrence of each stage (don't overwrite with later ones).
 		if _, exists := out[e.Stage]; !exists {
-			out[e.Stage] = ms
+			out[e.Stage] = us
 		}
 	}
 	return out

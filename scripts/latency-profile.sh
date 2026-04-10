@@ -62,19 +62,27 @@ ssh_cmd() {
 
 # ── Admin API helper (SSH tunnel) ─────────────────────────────────────────────
 TUNNEL_PORT=28443
-TUNNEL_PID=""
+TUNNEL_SOCKET=""
 
 start_tunnel() {
 	local id_args=()
 	[[ -n "$IDENTITY" ]] && id_args=(-i "$IDENTITY")
-	ssh "${id_args[@]}" -f -N -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes \
-		-L "${TUNNEL_PORT}:127.0.0.1:8443" "${SSH_USER}@${BRIDGE_HOST}" 2>/dev/null &
-	TUNNEL_PID=$!
+	TUNNEL_SOCKET=$(mktemp -u /tmp/ultra-latency-XXXXXX.sock)
+	ssh "${id_args[@]}" -f -N \
+		-o StrictHostKeyChecking=no \
+		-o ExitOnForwardFailure=yes \
+		-o ControlMaster=yes \
+		-o ControlPath="$TUNNEL_SOCKET" \
+		-L "${TUNNEL_PORT}:127.0.0.1:8443" "${SSH_USER}@${BRIDGE_HOST}" 2>/dev/null
 	sleep 1
 }
 
 stop_tunnel() {
-	[[ -n "$TUNNEL_PID" ]] && kill "$TUNNEL_PID" 2>/dev/null || true
+	if [[ -n "$TUNNEL_SOCKET" ]]; then
+		ssh -O exit -o ControlPath="$TUNNEL_SOCKET" "${SSH_USER}@${BRIDGE_HOST}" 2>/dev/null || true
+		rm -f "$TUNNEL_SOCKET"
+		TUNNEL_SOCKET=""
+	fi
 }
 trap stop_tunnel EXIT
 
@@ -108,8 +116,8 @@ sessions_table() {
 		echo "$json" | jq -r '
 			.[] |
 			"  session \(.session_id)  \(.destination // "?")  [\(.outbound_tag // "?")]" ,
-			(.stages_ms | to_entries | sort_by(.value) |
-			 .[] | "    +" + (.value|tostring) + "ms  " + .key)
+			(.stages_us | to_entries | sort_by(.value) |
+			 .[] | "    +" + (.value|tostring) + "µs  " + .key)
 		' 2>/dev/null | head -60
 	else
 		echo "$json" | python3 -c "
@@ -117,9 +125,9 @@ import json, sys
 sessions = json.load(sys.stdin)
 for s in sessions[:5]:
     print('  session', s.get('session_id'), ' ', s.get('destination','?'), ' [', s.get('outbound_tag','?'), ']', sep='')
-    stages = s.get('stages_ms', {})
+    stages = s.get('stages_us', {})
     for k, v in sorted(stages.items(), key=lambda x: x[1]):
-        print('    +{}ms  {}'.format(v, k))
+        print('    +{}us  {}'.format(v, k))
 " 2>/dev/null
 	fi
 }
