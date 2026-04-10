@@ -1,4 +1,4 @@
-.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 clean
+.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay latency-profile build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 clean
 
 BINARY=ultra-relay
 INSTALL_BINARY=ultra-install
@@ -87,6 +87,17 @@ verify-relay:
 			$(if $(SSH_USER),-u '$(SSH_USER)',) \
 			$(if $(VERIFY_SOCKS_PORT),-p '$(VERIFY_SOCKS_PORT)',); \
 	fi
+
+# Hop-by-hop latency profiling: bridge→exit TCP, WARP overhead, session traces, E2E SOCKS.
+# Включи трейсинг: "trace_latency": true в /etc/ultra-relay/spec.json на bridge, затем перезапусти.
+latency-profile:
+	@bash "$(CURDIR)/scripts/latency-profile.sh" \
+		$(if $(INSTALL_CONFIG),-c '$(INSTALL_CONFIG)',) \
+		$(if $(IDENTITY),-i '$(IDENTITY)',) \
+		$(if $(SSH_USER),-u '$(SSH_USER)',) \
+		$(if $(VERIFY_SOCKS_PORT),-p '$(VERIFY_SOCKS_PORT)',) \
+		$(if $(BRIDGE),"$(BRIDGE)",) \
+		$(if $(EXIT),"$(EXIT)",)
 
 build-linux-amd64:
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BINARY)-linux-amd64 ./cmd/ultra-relay
