@@ -8,9 +8,10 @@
 *.so
 *.dylib
 
-# Built binaries
-ultra-relay-linux-amd64
-ultra-relay-linux-arm64
+# Built binaries (/ anchors to repo root so cmd/* directories are not affected)
+/ultra-relay
+/ultra-relay-linux-amd64
+/ultra-relay-linux-arm64
 
 # Test binary, built with `go test -c`
 *.test
@@ -45,7 +46,12 @@ examples/test-key.pem
 # .idea/
 # .vscode/
 
-ultra-install-linux-amd64
-ultra-install
+/ultra-install
+/ultra-install-linux-amd64
+
+/ultra-bot
+/ultra-bot-linux-amd64
 
 .cursor/
+.claude/
+.idea/

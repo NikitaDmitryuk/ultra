@@ -11,7 +11,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 )
 
-func registerSplitRoutingUSR1(log *slog.Logger, reload func([]auth.User), mgr *auth.Manager) {
+func registerSplitRoutingUSR1(log *slog.Logger, reload func([]auth.User), mgr auth.UserManager) {
 	sigReload := make(chan os.Signal, 1)
 	signal.Notify(sigReload, syscall.SIGUSR1)
 	go func() {

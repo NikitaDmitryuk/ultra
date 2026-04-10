@@ -1,34 +1,38 @@
 # ultra
 
-Один бинарник `ultra-relay` работает в одной из двух ролей из JSON-спецификации (`bridge` или `exit`): внешний узел и внутренний узел с согласованным TLS и HTTP-слоем между ними. Управление записями клиентов — файл `users.json` и HTTP API только на loopback. Маршрутизацию выполняет встроенное ядро из зависимостей `go.mod` ([Xray-core](https://github.com/XTLS/Xray-core)).
+Один бинарник `ultra-relay` работает в одной из двух ролей из JSON-спецификации (`bridge` или `exit`): внешний узел и внутренний узел с согласованным TLS и HTTP-слоем между ними. Управление пользователями — PostgreSQL-база и HTTP API только на loopback. Маршрутизацию и транспорт обеспечивает встроенное ядро ([Xray-core](https://github.com/XTLS/Xray-core)).
+
+Дополнительно — `ultra-bot`: Telegram-бот с веб-интерфейсом (Mini App) для управления пользователями и мониторинга прямо из мессенджера.
 
 ## Состав репозитория
 
-
-| Пакет / каталог                                                | Назначение                                                                                                                                      |
-| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `internal/mimic`                                               | Шаблоны HTTP для splithttp bridge→exit (`Host`, path, заголовки). Идентификаторы `apijson`, `steamlike`; `plusgaming` — псевдоним `apijson`. |
-| `internal/auth`                                                | Хранение UUID в `users.json`, перечитывание, атомарная запись при изменениях через API.                                                         |
-| `internal/config`                                              | Загрузка и валидация spec, сборка JSON конфигурации для встроенного ядра.                                                                       |
-| `internal/proxy`                                               | Запуск ядра в процессе `ultra-relay`.                                                                                                           |
-| `internal/adminapi`                                            | HTTP только на `admin_listen`: CRUD записей и выдача outbound-фрагментов для клиентов.                                                          |
-| `internal/install`, `internal/loglevel`, `internal/realitykey` | Установка по SSH, уровни логов, ключевой материал для публичного inbound.                                                                       |
-| `cmd/ultra-relay`, `cmd/ultra-install`                         | Точки входа бинарников.                                                                                                                         |
-
+| Пакет / каталог                                | Назначение                                                                                                  |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `internal/mimic`                               | Шаблоны HTTP для внутреннего транспорта (`apijson`, `steamlike`; `plusgaming` — псевдоним `apijson`).      |
+| `internal/auth`                                | Управление пользователями: PostgreSQL-бэкенд с кешом, опциональный fallback на JSON-файл.                  |
+| `internal/config`                              | Загрузка и валидация spec, сборка конфигурации для встроенного ядра.                                       |
+| `internal/proxy`                               | Запуск ядра внутри процесса `ultra-relay`.                                                                  |
+| `internal/adminapi`                            | HTTP API только на `admin_listen`: CRUD пользователей, экспорт конфигурации клиента, статистика трафика.   |
+| `internal/bot`                                 | Telegram-бот (long polling) + Mini App HTTP-сервер с HMAC-валидацией initData.                             |
+| `internal/db`                                  | PostgreSQL: подключение, миграции, репозитории (пользователи, трафик, Telegram-состояние, администраторы). |
+| `internal/stats`                               | Сбор статистики трафика через gRPC API встроенного ядра.                                                   |
+| `internal/install`, `internal/loglevel`, `internal/realitykey` | Установка по SSH, управление уровнями логов, ключевой материал.                          |
+| `cmd/ultra-relay`, `cmd/ultra-install`, `cmd/ultra-bot` | Точки входа бинарников.                                                                          |
 
 ## Сборка
 
 ```bash
-make build                    # ./ultra-relay
-make build-linux-amd64
-make build-install            # ./ultra-install
-make build-install-linux-amd64
+make build               # ./ultra-relay
+make build-install       # ./ultra-install
+make build-bot           # ./ultra-bot
+make build-linux-amd64   # кросс-компиляция для Linux x86-64
+make build-bot-linux-amd64
 make test
 make format
 make lint
 ```
 
-Нужен Go из `go.mod`.
+Требуется Go из `go.mod`.
 
 ## Установка двух узлов
 
@@ -38,11 +42,11 @@ make lint
 make install
 ```
 
-Скрипт собирает `ultra-relay-linux-amd64` для Linux-целей и нативный `./ultra-install` для текущей ОС. На macOS не запускайте `ultra-install-linux-amd64` на месте установки — будет `Exec format error`.
+Скрипт собирает `ultra-relay-linux-amd64` для Linux-серверов и `ultra-install` для текущей ОС. На macOS не запускайте `ultra-install-linux-amd64` локально — будет `Exec format error`.
 
-**Цель для внешнего TLS handshape на bridge (`-reality-dest`):** для новой установки задайте `-reality-dest host:port` и при необходимости `-reality-sni` (если пусто — берётся host из dest). В `install.config` — переменные `REALITY_DEST` / `REALITY_SNI`, либо `REUSE_BRIDGE_SPEC=y` без смены параметров существующего spec.
+**Цель для внешнего TLS handshake на bridge (`-reality-dest`):** задайте `-reality-dest host:port` при установке, при необходимости — `-reality-sni`. В `install.config` это переменные `REALITY_DEST` / `REALITY_SNI`.
 
-**Неинтерактивно:** `install.config.sample` → `install.config` (файл в `.gitignore`), затем `make install` или `ULTRA_INSTALL_CONFIG=/path/to/conf make install`. В `install.config` задаются `PRESET`, опционально `SPLITHTTP_HOST` / `SPLITHTTP_PATH`, `ROUTING_MODE` (`blocklist` или `ru_direct`), опционально `GEOSITE_BLOCK_TAGS` (через запятую) — см. образец.
+**Неинтерактивно:** скопируйте `install.config.sample` → `install.config` (файл в `.gitignore`), заполните и запустите `make install` или `ULTRA_INSTALL_CONFIG=/path/to/conf make install`.
 
 **Вручную:**
 
@@ -52,16 +56,67 @@ make build-linux-amd64 build-install
   -reality-dest 'HOST:443' -reality-sni 'HOST'
 ```
 
-Флаги: `./ultra-install -h` (`-public-host`, `-preset`, `-routing-mode`, `-geosite-block-tags`, `-reality-dest`, `-reality-sni`, `-generate-exit-tls`, `-dry-run`, `-write-local`, `-log-level`, `-reuse-bridge-spec`, …).
+Флаги: `./ultra-install -h` (включая `-public-host`, `-preset`, `-routing-mode`, `-geosite-block-tags`, `-warp`, `-disable-doh`, `-db-host` и другие).
 
 - [deploy/systemd/ultra-relay.service](deploy/systemd/ultra-relay.service)
 - [deploy/bootstrap-bridge.sh](deploy/bootstrap-bridge.sh) / [deploy/bootstrap-exit.sh](deploy/bootstrap-exit.sh)
 
-## SSH (ключ к обоим хостам)
+## Telegram Mini App
+
+`ultra-bot` запускается на bridge-узле и предоставляет веб-интерфейс администратора в Telegram.
+
+**Минимальная конфигурация:**
+
+1. Создать бота: [@BotFather](https://t.me/BotFather) → `/newbot` → скопировать токен.
+2. Скопировать `.env.sample` → `.env`, вставить `TELEGRAM_BOT_TOKEN`.
+3. Получить домен — см. раздел «[Домен для Mini App](#домен-для-mini-app)» ниже.
+4. В `install.config` раскомментировать и заполнить:
+   ```
+   BOT_ENABLE=y
+   BOT_DOMAIN=bot.example.com   # FQDN с DNS A-записью на bridge (обязательно)
+   BOT_PORT=8444
+   ```
+5. Запустить `make install`. В конце будет выведена команда `/start <токен>` — отправить её боту для регистрации первого администратора.
+
+Остальные секреты (`ULTRA_RELAY_ADMIN_TOKEN`, DB DSN) берутся автоматически из `/etc/ultra-relay/environment` и `spec.json` — вручную задавать не нужно.
+
+**Mini App** открывается по кнопке от бота и предоставляет:
+- Обзор: количество пользователей и трафик за текущий месяц.
+- Список пользователей с трафиком; карточка пользователя с VLESS URI и QR-кодом.
+- Добавление и удаление пользователей.
+- Генерация инвайт-токенов для новых администраторов.
+
+### Домен для Mini App
+
+Telegram Mini App требует публичного HTTPS-адреса. Сертификат получается автоматически через Let's Encrypt — нужен только домен с DNS A-записью.
+
+**Варианты получения домена:**
+
+| Вариант | Стоимость | Как |
+|---------|-----------|-----|
+| Платный домен (reg.ru, namecheap и др.) | ~$10–15/год | Зарегистрировать любое доменное имя |
+| Бесплатный поддомен [afraid.org](https://freedns.afraid.org/) | Бесплатно | Выбрать поддомен, добавить A-запись на IP bridge |
+| Поддомен существующего домена | Бесплатно | Добавить A-запись в уже имеющийся домен |
+
+**После получения домена:**
+
+1. Добавить A-запись в DNS:
+   ```
+   bot.example.com.  A  <IP bridge-сервера>
+   ```
+   Проверить: `dig +short bot.example.com` должен вернуть IP bridge-а.
+
+2. Убедиться, что порты открыты на bridge:
+   - **80/tcp** — для HTTP-01 ACME challenge (нужен только при выдаче/обновлении сертификата)
+   - **8444/tcp** — Mini App HTTPS (или другой `BOT_PORT`)
+
+3. Прописать домен в `install.config` и запустить `make install`.
+
+## SSH
 
 Оркестратор использует `ssh -o BatchMode=yes`: без принятого ключа команды завершатся ошибкой.
 
-По умолчанию для `ultra-install`, `make install` и bootstrap-скриптов задаётся `StrictHostKeyChecking=accept-new`: при **первом** подключении к хосту ключ записывается в `known_hosts` (trust-on-first-use). Для жёсткой модели доверия задайте `**ULTRA_INSTALL_SSH_STRICT_HOST_KEY=yes`** (или `1` / `true` / `strict`): тогда используется `StrictHostKeyChecking=yes`, и хосты должны быть заранее в `known_hosts` оператора.
+По умолчанию — `StrictHostKeyChecking=accept-new`: при **первом** подключении ключ записывается в `known_hosts`. Для строгой модели доверия задайте `ULTRA_INSTALL_SSH_STRICT_HOST_KEY=yes` — хосты должны быть в `known_hosts` заранее.
 
 **Сгенерировать ключ:**
 
@@ -69,157 +124,132 @@ make build-linux-amd64 build-install
 ssh-keygen -t ed25519 -f ~/.ssh/ultra_relay_ed25519 -C "ultra-relay-deploy"
 ```
 
-При passphrase перед установкой: `eval "$(ssh-agent -s)"` и `ssh-add ~/.ssh/ultra_relay_ed25519`. Путь к ключу в `make install` можно оставить пустым, если ключ уже в агенте.
+При passphrase: `eval "$(ssh-agent -s)"` и `ssh-add ~/.ssh/ultra_relay_ed25519`.
 
-**Публичный ключ на оба сервера** (front = bridge, back = exit), подставив пользователя и адрес:
-
-```bash
-ssh-copy-id -i ~/.ssh/ultra_relay_ed25519.pub root@FRONT_IP
-ssh-copy-id -i ~/.ssh/ultra_relay_ed25519.pub root@BACK_IP
-```
-
-**Проверка без пароля:**
+**Скопировать публичный ключ на серверы:**
 
 ```bash
-ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -i ~/.ssh/ultra_relay_ed25519 root@FRONT_IP 'echo ok'
-ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -i ~/.ssh/ultra_relay_ed25519 root@BACK_IP 'echo ok'
+ssh-copy-id -i ~/.ssh/ultra_relay_ed25519.pub root@BRIDGE_IP
+ssh-copy-id -i ~/.ssh/ultra_relay_ed25519.pub root@EXIT_IP
 ```
 
 **Опционально `~/.ssh/config`:**
 
 ```sshconfig
 Host ultra-front
-  HostName FRONT_IP
+  HostName BRIDGE_IP
   User root
   IdentityFile ~/.ssh/ultra_relay_ed25519
 
 Host ultra-back
-  HostName BACK_IP
+  HostName EXIT_IP
   User root
   IdentityFile ~/.ssh/ultra_relay_ed25519
 ```
 
-Нестандартный порт SSH скрипты не задают — используйте `Port` в `~/.ssh/config` или обёртки вручную.
-
-
-| Симптом                         | Проверка                                                                                       |
-| ------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `Permission denied (publickey)` | Ключ в `authorized_keys`, пользователь, путь `-i`.                                             |
-| `Host key verification failed`  | Первый вход: `StrictHostKeyChecking=accept-new`; при смене ключа хоста — правка `known_hosts`. |
-
+| Симптом                         | Проверка                                                                                             |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `Permission denied (publickey)` | Ключ в `authorized_keys`, пользователь, путь `-i`.                                                   |
+| `Host key verification failed`  | Первый вход: `StrictHostKeyChecking=accept-new`; при смене ключа хоста — правка `known_hosts`.      |
 
 ## Spec (`schema_version`)
 
-В JSON задаётся `schema_version` (сейчас **1**). Поле `tunnel_tls_provision` описывает происхождение сертификата на `exit` для канала bridge→exit — см. [deploy/TLS.md](deploy/TLS.md).
+Конфигурация задаётся JSON-файлом (`-spec`). Поле `schema_version` — сейчас **1**. Поле `tunnel_tls_provision` описывает источник TLS-сертификата на exit для внутреннего канала — см. [deploy/TLS.md](deploy/TLS.md).
 
-**Два независимых сегмента (разные поля spec):**
+**Два независимых сегмента:**
 
-- **Клиент → bridge:** публичный inbound: блок `reality` задаёт `dest` и `server_names` для TLS на стороне клиента относительно listener bridge (см. документацию Xray по REALITY).
-- **Bridge → exit:** межузловой outbound: VLESS поверх TLS и `splithttp`; `mimic_preset`, `splithttp_host`, `splithttp_path` и заголовки из пресета задают параметры HTTP для этого транспорта. Публичный сертификат CA на FQDN, для которого у вас нет полномочий в DNS, выпустить нельзя; для проверки имени хоста доверенным CA укажите контролируемый FQDN в `splithttp_host` и `splithttp_tls.server_name` и согласуйте материал ключа на exit — см. [deploy/TLS.md](deploy/TLS.md). Пресет `steamlike` подставляет типовые пути и заголовки, сходные с HTTP-клиентом игровой платформы; он не задаёт идентичность TLS удалённого сервиса третьей стороны.
+- **Клиент → bridge:** публичный inbound; блок `reality` задаёт параметры TLS для внешних клиентов.
+- **Bridge → exit:** межузловой канал; `mimic_preset`, `splithttp_host`, `splithttp_path` определяют HTTP-параметры транспорта.
 
-Плейсхолдер `splithttp.invalid` в примерах соответствует зарезервированному TLD (RFC 6761); в продакшене задайте согласованные `splithttp_host` и TLS (SAN/CN).
+**Маршрутизация на bridge** (при `split_routing: true`, `domainStrategy: IPIfNonMatch`):
 
-**Маршрутизация на bridge** (при включённом `split_routing`, `domainStrategy` для правил: `IPIfNonMatch`):
+- `routing_mode: blocklist` (по умолчанию) — трафик из `geosite_exit_tags` / `geoip_exit_tags` / `domain_exit` на exit, остальное прямо.
+- `routing_mode: ru_direct` — русские домены (`.ru`, `.su`, `.рф`, VK, Яндекс и т.д.) напрямую, остальное на exit. Опционально `geosite_block_tags` → blackhole.
 
-- `routing_mode: blocklist` (по умолчанию, если поле пустое) — трафик из `geosite_exit_tags` / `geoip_exit_tags` / `domain_exit` на exit, остальное на direct.
-- `routing_mode: ru_direct` — сначала опционально `geosite_block_tags` → outbound `blackhole`; затем `domain_exit` → exit, `domain_direct` → direct; при непустом `geosite_direct_tags` — direct по этим тегам (коды должны существовать в вашем `geosite.dat`; набор runetfreedom по умолчанию **не** содержит категорию `ru`); regexp суффиксов `.ru` / `.su` / `.xn--p1ai` при `ru_direct_tld_regex` (по умолчанию включён); direct для `geoip_direct_tags` (по умолчанию `ru` и `private`); весь остальной `tcp,udp` → exit. Пустой `geoip_direct_tags` отключает соответствующее IP-правило.
+**Обход определения VPN на destination-сайтах:**
 
-Секция `dns` в генерируемом конфиге bridge **не задаётся**; при необходимости раздельных резолверов допишите её вручную или расширьте spec отдельной задачей.
+- `anti_censor.warp_proxy: true` — на exit использовать Cloudflare WARP в режиме прокси; destination-сайты видят Cloudflare IP вместо IP датацентра.
+- `anti_censor.disable_doh: false` (по умолчанию) — DNS over HTTPS; bridge использует Yandex DoH для `.ru`-доменов и Cloudflare для остального.
+- Фрагментация TLS ClientHello и паддинг splithttp-чанков включены по умолчанию.
 
-**SOCKS5 на bridge:** блок `socks5` в spec (`enabled`, `port`, `username`, `password`, опционально `listen_address`, `udp`). Порт должен отличаться от `vless_port`. Если `listen_address` не задан, inbound SOCKS слушает **только `127.0.0.1`**, даже когда публичный inbound на `0.0.0.0` — чтобы не открывать второй парольный сервис в интернет по умолчанию. Для привязки ко всем интерфейсам задайте, например, `"listen_address": "0.0.0.0"` и ограничьте доступ firewall. Тот же глобальный `routing`, что и для публичного inbound (split / direct vs exit).
+**SOCKS5 на bridge:** блок `socks5` (`enabled`, `port`, `username`, `password`). По умолчанию слушает только `127.0.0.1`. Тот же routing, что у публичного inbound.
 
-**Тонкая настройка inbounds/outbounds:** опциональный объект `xray_wire` в spec задаёт теги, шифрование, sniffing, `domain_matcher_split`, `splithttp_mode`, параметры локального SOCKS в выдаче `full_xray_config` и т.д. Пустые поля не переопределяют встроенные значения по умолчанию (см. `internal/config/xray_wire_spec.go`).
+**Тонкая настройка:** опциональный объект `xray_wire` в spec задаёт теги, шифрование, sniffing и другие параметры; пустые поля не переопределяют встроенные значения (см. `internal/config/xray_wire_spec.go`).
 
-**Обновление geo-файлов на bridge:** `scripts/update-geo-assets.sh` (аргумент — каталог `geo_assets_dir`). Старые cron-задачи с прежним именем скрипта нужно перепривязать на этот путь.
+**Обновление geo-файлов:** `scripts/update-geo-assets.sh <geo_assets_dir>`.
 
-### Локальный прокси через Xray и конфиг из Admin API
+## Loopback API
 
-**SOCKS5 на bridge по умолчанию слушает только `127.0.0.1` на самом bridge** — с другой машины в сеть к этому порту не подключиться. Для клиентского хоста (ноутбук, сервер и т.д.) обычный путь — **запустить Xray локально** с конфигом, выданным Admin API: он подключается к **публичному** inbound bridge (`public_host` и порт из spec), а на `127.0.0.1` поднимает SOCKS для приложений.
+Admin API на bridge слушает только loopback (`admin_listen` в spec, по умолчанию `127.0.0.1:8443`). Доступ с локальной машины — через SSH port forwarding:
 
-1. Получите JSON клиента: Admin API на bridge (доступ через SSH `-L` на `admin_listen`, см. раздел ниже) → `GET /v1/users/{uuid}/client`.
-2. Декодируйте `full_xray_config_base64` в файл конфигурации, например `config.json`. Ограничьте права на файл (`chmod 600`).
-3. Установите [Xray-core](https://github.com/XTLS/Xray-core/releases) той же ветки версий, что и в `go.mod` репозитория (дистрибутивный пакет или бинарник — как удобнее на вашей ОС).
-4. Запуск: `xray run -c /path/to/config.json`.
-5. В конфиге уже задан inbound SOCKS на loopback (адрес и порт смотрите в JSON, часто `127.0.0.1:10808`). Для приложений: `ALL_PROXY=socks5h://127.0.0.1:10808` или отдельная настройка прокси в сервисе.
+```bash
+ssh -L 8443:127.0.0.1:8443 user@BRIDGE_IP
+```
 
-**Без локального Xray:** SSH с клиентского хоста на bridge с пробросом порта на loopback SOCKS bridge, например `ssh -N -L 1080:127.0.0.1:1080 user@bridge` (порт возьмите из `socks5.port` в spec). Локальный SOCKS на клиенте: `127.0.0.1:1080`. Нужны SSH-доступ к bridge и учётные данные SOCKS из spec.
+**Веб-интерфейс:** [http://127.0.0.1:8443/admin/](http://127.0.0.1:8443/admin/) — вставить `ULTRA_RELAY_ADMIN_TOKEN` (выводится при `make install`, хранится в `/etc/ultra-relay/environment`).
 
-**SOCKS на bridge, видимый из сети без SSH:** в spec задайте `"listen_address": "0.0.0.0"` (или адрес интерфейса), ограничьте доступ **firewall** и используйте **сильный пароль**; учитывайте риск сканирования и перебора.
+**Локально в dev:** [http://127.0.0.1:18443/admin/](http://127.0.0.1:18443/admin/) (из `examples/spec.bridge.dev.json`).
+
+**curl:**
+
+```bash
+curl -H "Authorization: Bearer …" http://127.0.0.1:8443/v1/users
+curl -H "Authorization: Bearer …" http://127.0.0.1:8443/v1/users/UUID/client
+curl -H "Authorization: Bearer …" http://127.0.0.1:8443/v1/traffic/monthly
+```
+
+Ответ `/client` содержит `vless_uri` и `full_xray_config_base64` для запуска Xray-клиента.
 
 ## Локальная отладка (`dev_mode`)
 
-1. TLS-материалы для `exit` (не коммитить):
-  ```bash
+1. TLS-материалы для exit (не коммитить):
+   ```bash
    cd examples
    openssl req -x509 -newkey rsa:2048 -keyout test-key.pem -out test-cert.pem -days 3650 -nodes \
      -subj "/CN=splithttp.invalid" -addext "subjectAltName=DNS:splithttp.invalid"
-  ```
-2. `users.json` по образцу `users.json.sample` или `[]` и токен `ULTRA_RELAY_ADMIN_TOKEN` + `/admin/` или `POST /v1/users`.
+   ```
+2. Пустой `users.json` (`[]`) и токен `ULTRA_RELAY_ADMIN_TOKEN`.
 3. Терминал A — exit: `./ultra-relay -spec examples/spec.exit.dev.json`
 4. Терминал B — bridge:
-  ```bash
+   ```bash
    export ULTRA_RELAY_ADMIN_TOKEN="$(openssl rand -hex 16)"
    ./ultra-relay -spec examples/spec.bridge.dev.json -admin-token "$ULTRA_RELAY_ADMIN_TOKEN"
-  ```
-5. API на `admin_listen`: `GET/POST/PATCH/DELETE /v1/users`, `GET /v1/users/{uuid}/client`. Веб-интерфейс на том же адресе — пошагово в разделе «Loopback API с административной машины» ниже.
-
-Согласуйте `mimic_preset`, `splithttp_path`, UUID туннеля и `splithttp_tls` между процессами.
-
-## Loopback API с административной машины
-
-На **bridge** Admin API и веб-админка слушают только **loopback** (`admin_listen` в spec, по умолчанию `127.0.0.1:8443`). С интернета к ним не подключиться — нужен **SSH port forwarding** с вашей машины на хост bridge.
-
-Файл `/etc/ultra-relay/environment` с `ULTRA_RELAY_ADMIN_TOKEN` на сервере должен быть доступен только привилегированным пользователям (**режим 600**); шаблон в [deploy/bootstrap-bridge.sh](deploy/bootstrap-bridge.sh) задаёт это при установке.
-
-### Веб-админка
-
-1. Запустите туннель и оставьте сессию открытой (`EDGE_HOST` — DNS или IP **bridge**, пользователь — как при `make install`, часто `root`). При необходимости добавьте `-i ~/.ssh/ваш_ключ`.
-  ```bash
-   ssh -L 8443:127.0.0.1:8443 user@EDGE_HOST
-  ```
-   Если локальный порт **8443** уже занят, пробросьте другой и откройте админку на нём, например:
-   тогда в браузере используйте порт **18443** вместо 8443.
-2. В браузере откройте **[http://127.0.0.1:8443/admin/](http://127.0.0.1:8443/admin/)**.
-3. В поле **Admin token (Bearer)** вставьте значение `**ULTRA_RELAY_ADMIN_TOKEN`**: его выводит `ultra-install` при установке. На bridge значение хранится в `/etc/ultra-relay/environment` (не коммитьте и не копируйте токен в открытые каналы). Нажмите **Сохранить в sessionStorage** — после этого страница ходит в API от вашего имени.
-
-Локально в dev (без SSH): URL из `admin_listen` в spec, для `examples/spec.bridge.dev.json` это **[http://127.0.0.1:18443/admin/](http://127.0.0.1:18443/admin/)**.
-
-### Примеры curl
-
-```bash
-ssh -L 8443:127.0.0.1:8443 user@EDGE_HOST
-curl -H "Authorization: Bearer …" http://127.0.0.1:8443/v1/users
-curl -H "Authorization: Bearer …" http://127.0.0.1:8443/v1/users/UUID/client
-```
-
-Ответ `client` содержит поля для подключения внешнего клиента, совместимого с тем же стеком, что и встроенное ядро; репозиторий их не интерпретирует.
+   ```
+5. Для `ultra-bot` в dev-режиме:
+   ```bash
+   # В .env: TELEGRAM_BOT_TOKEN=... и ULTRA_RELAY_ADMIN_TOKEN=...
+   ./ultra-bot -spec examples/spec.bridge.dev.json -dev -port 8080
+   ```
 
 ## Интеграционная проверка
-
-На машине оператора: `ssh`, `curl`, бинарник ядра из `go.mod`, `jq` или `python3`. Нужен **обязательно** `VERIFY_IP_URL` (GET через локальный SOCKS после выдачи конфига из Admin API). Далее по умолчанию вызывается `scripts/verify-split-routing.sh`: **один** HTTPS-зонд на маршрут **exit** (для `ru_direct` по умолчанию `api.ipify.org`, иначе перебор `cdn-cgi/trace`). Публичный IP bridge/direct не проверяется. Отключить: `VERIFY_SPLIT_ROUTING=n`; свои URL: `VERIFY_PROBE_EXIT_URL` / `VERIFY_PROBE_EXIT_PLAIN_URL`; путь к spec: `VERIFY_SPEC_PATH`.
 
 ```bash
 VERIFY_IP_URL=https://YOUR_HOST/your-probe-path make verify-relay
 # или с явными хостами:
-VERIFY_IP_URL=https://YOUR_HOST/your-probe-path make verify-relay BRIDGE=… EXIT=… IDENTITY=…
+VERIFY_IP_URL=https://api.ipify.org make verify-relay BRIDGE=… EXIT=… IDENTITY=…
 ```
 
-Скрипт: `scripts/verify-relay.sh -h`. Быстрая проверка TLS-кандидатов для `-reality-dest`: `scripts/probe-tls-sni-candidates.sh`.
+Скрипт: `scripts/verify-relay.sh -h`. Быстрая проверка TLS-кандидатов: `scripts/probe-tls-sni-candidates.sh`.
 
 ## Производительность и перезагрузки
 
-Любое изменение `users.json` (в т.ч. через Admin API) приводит к **полной пересборке конфигурации и перезапуску** встроенного ядра в процессе `ultra-relay`: активные клиентские сессии могут обрываться, нагрузка на CPU кратковременно растёт. При частых правках учёток имеет смысл батчить изменения на стороне оператора. Режим `blocklist` с большим набором `geosite_exit_tags` увеличивает стоимость матчинга на запрос — при узком сценарии можно сузить список тегов в spec. Для `ru_direct` важна идея «**.ru → direct**, **не .ru → exit**», а не конкретные домены; при необходимости задайте `VERIFY_PROBE_EXIT_URL` / `VERIFY_PROBE_EXIT_PLAIN_URL`.
+Любое изменение пользователей (через API или Mini App) приводит к **пересборке конфигурации и перезапуску ядра** — активные сессии могут прерваться. При частых правках имеет смысл батчить изменения. Режим `blocklist` с большим `geosite_exit_tags` увеличивает стоимость матчинга; при необходимости сузьте список тегов.
 
 ## Логи
 
-`make relay-logs` с `install.config` или `BRIDGE=… EXIT=…`. См. `scripts/collect-relay-logs.sh -h`. Уровень логов: `ULTRA_RELAY_LOG_LEVEL` / флаг `-log-level` у `ultra-relay` и установщика.
+```bash
+make relay-logs BRIDGE=… EXIT=…
+# или через install.config:
+make relay-logs
+```
 
-Повторный `make install` копирует unit и выполняет `systemctl restart ultra-relay` на обоих узлах.
+Уровень логов: `ULTRA_RELAY_LOG_LEVEL` (в `/etc/ultra-relay/environment`) или флаг `-log-level`.
 
 ## Ограничения
 
-- На паре узлов должен совпадать один и тот же `mimic_preset` и параметры splithttp; установщик: `-preset` (`apijson`, `steamlike`), опционально `-splithttp-host` / `-splithttp-path`.
+- На паре узлов должен совпадать `mimic_preset` и параметры splithttp.
 - Смена `splithttp_path` может разорвать существующие сессии между узлами.
+- Для Telegram Mini App требуется FQDN с DNS A-записью на bridge и открытый порт 80 (ACME HTTP-01 challenge).
 - Поведение зависит от среды; валидируйте spec и TLS на своих площадках.
 
 ## Лицензия

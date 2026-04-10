@@ -126,6 +126,33 @@ func ruDirectTLDRegexEnabled(s *Spec) bool {
 	return *s.RuDirectTLDRegex
 }
 
+// ruDirectDefaultServiceDomains returns well-known Russian services that use
+// non-.ru/.su/.рф TLDs but should route directly through the bridge in ru_direct mode.
+// These supplement the TLD regex (.ru, .su, .xn--p1ai) and geoip:ru rules.
+// Users can override specific entries by listing them in spec.DomainExit.
+func ruDirectDefaultServiceDomains() []string {
+	return []string{
+		// VKontakte — Russia's largest social network (primary domain is vk.com, not vk.ru)
+		"domain:vk.com",
+		"domain:vk.me",
+		"domain:vkontakte.com",
+		"domain:userapi.com", // VK user-generated content CDN
+		"domain:vk-cdn.net",  // VK video CDN
+		// Yandex international / CDN
+		"domain:yandex.com",
+		"domain:yandex.net", // Yandex internal CDN and infrastructure
+		"domain:yandex.eu",
+		// Mail.ru Group international
+		"domain:my.com", // Mail.ru Group's international brand
+		// Sberbank / Sber international
+		"domain:sber.com",
+		// Ozone (uses .ru primary, but also .com for some API traffic)
+		"domain:ozon.com",
+		// HeadHunter (hh.ru — already caught by TLD, but CDN uses hh.com)
+		"domain:hh.com",
+	}
+}
+
 func buildRUDirectRouting(spec *Spec, w xrayWireResolved) (string, []any) {
 	var rules []any
 	for _, d := range spec.DomainExit {
@@ -157,6 +184,9 @@ func buildRUDirectRouting(spec *Spec, w xrayWireResolved) (string, []any) {
 			`regexp:.*\.xn--p1ai$`,
 		)
 	}
+	// Append default Russian services on non-.ru domains (vk.com, yandex.com, etc.)
+	// unless the user has explicitly routed them to exit via DomainExit.
+	domainDirect = append(domainDirect, ruDirectDefaultServiceDomains()...)
 	if len(domainDirect) > 0 {
 		rules = append(rules, map[string]any{
 			"type": "field", "domain": domainDirect, "outboundTag": w.OutboundDirectTag,

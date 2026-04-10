@@ -48,6 +48,64 @@ VERIFY_FAIL_LOG_LINES=400
 # Опционально: geosite-теги в blackhole (нужен тег в вашем geosite.dat), например реклама.
 # GEOSITE_BLOCK_TAGS=category-ads-all
 
+# --- Обход определения VPN destination-сайтами ---
+#
+# Cloudflare WARP на exit-ноде: меняет IP выхода с датацентра на Cloudflare.
+# Destination-сайты видят Cloudflare IP, а не IP вашего VPS.
+# Устанавливается автоматически при make install.
+# WARP_ENABLE=y
+# WARP_PORT=40000   # порт SOCKS5 (по умолчанию 40000)
+#
+# DNS over HTTPS (включён по умолчанию): скрывает DNS-запросы от провайдера.
+# Bridge использует Yandex DoH для .ru/.su и Cloudflare для остального.
+# DOH_DISABLE=y   # раскомментируйте, чтобы использовать системный DNS
+
+# --- Обход DPI / ТСПУ (все опции по умолчанию включены или имеют разумные значения) ---
+# Фрагментация TLS ClientHello в туннеле bridge→exit (мешает DPI читать SNI).
+# По умолчанию включена; раскомментируйте, чтобы отключить:
+# FRAGMENT_DISABLE=y
+#
+# Паддинг каждого splithttp-чанка случайным числом байт (маскирует размер чанков).
+# По умолчанию "100-1000"; "0" отключает:
+# SPLITHTTP_PADDING=100-1000
+#
+# Ограничить размер каждого POST в туннеле (0 = умолчание Xray ≈1 МБ):
+# SPLITHTTP_MAX_CHUNK_KB=64
+#
+# Пул TLS-отпечатков (fingerprint) для ротации при каждом перезапуске Xray.
+# По умолчанию: chrome,firefox,safari,ios,android,randomized.
+# REALITY_FINGERPRINTS=chrome,firefox,safari
+
+# --- Telegram Mini App (ultra-bot) ---
+# Чтобы развернуть Telegram-бота с веб-интерфейсом администратора:
+#   1. Создайте бота через https://t.me/BotFather и получите токен.
+#   2. Запишите токен и другие секреты в .env (см. .env.sample).
+#   3. Укажите домен, на котором будет доступна Mini App (FQDN; нужен DNS A-запись на bridge).
+#      Let's Encrypt сертификат будет выпущен автоматически.
+#   4. Установите BOT_ENABLE=y и запустите make install.
+#   В конце установки будет выведен токен для регистрации первого администратора.
+#
+# BOT_ENABLE=y
+# BOT_DOMAIN=vpn-admin.example.com   # FQDN с DNS A-записью на BRIDGE
+# BOT_PORT=8444                       # HTTPS порт Mini App (по умолчанию 8444)
+#
+# TLS-сертификат получается автоматически через certbot (HTTP-01) при make install.
+# Бесплатный поддомен: https://freedns.afraid.org/ — надёжно работает с Let's Encrypt.
+
+# --- База данных PostgreSQL ---
+# DB_ENABLE=y запускает автоматическую установку и настройку PostgreSQL:
+#   — primary на DB_HOST (по умолчанию: BRIDGE)
+#   — streaming replica на DB_REPLICA (по умолчанию: EXIT)
+# Хранит пользователей, VPN-ключи, статистику трафика (месячный расход).
+# Заделы для Telegram-бота: планы, подписки, платежи, сессии, очередь уведомлений.
+#
+DB_ENABLE=y
+# DB_HOST=          # хост для PostgreSQL primary; пусто = BRIDGE (база на bridge-хосте)
+# DB_REPLICA=       # хост для streaming replica;  пусто = EXIT  (реплика на exit-хосте)
+# DB_SSH_USER=      # SSH-пользователь для DB-хостов; пусто = SSH_USER
+# DB_NAME=ultra_db
+# DB_USER=ultra
+
 # --- Прочее (по умолчанию можно не трогать) ---
 # Geo на bridge при установке (скачивание с GitHub): по умолчанию выполняется по SSH.
 # SKIP_GEO_DOWNLOAD=y — не качать (положите geoip.dat и geosite.dat сами в geo_assets_dir).

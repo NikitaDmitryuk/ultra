@@ -37,6 +37,72 @@ const (
 	RoutingModeRUDirect  = "ru_direct"
 )
 
+// FragmentSpec controls Xray sockopt.fragment on the bridge→exit outbound.
+// Splitting the TLS ClientHello across multiple TCP packets prevents DPI from reading the SNI.
+type FragmentSpec struct {
+	// Packets selects which packets to fragment. "tlshello" targets only the TLS ClientHello.
+	// Defaults to "tlshello".
+	Packets string `json:"packets,omitempty"`
+	// Length is the byte-range of each fragment, e.g. "100-200". Defaults to "100-200".
+	Length string `json:"length,omitempty"`
+	// Interval is the delay range between fragments in milliseconds, e.g. "10-20". Defaults to "10-20".
+	Interval string `json:"interval,omitempty"`
+}
+
+// AntiCensorSpec groups optional DPI-evasion settings. All fields have safe defaults;
+// the block may be omitted entirely and sensible values apply automatically.
+type AntiCensorSpec struct {
+	// Fragment enables TLS ClientHello fragmentation on the bridge→exit outbound.
+	// When nil the feature is on with default parameters; set packets/length/interval to tune.
+	// Set to &FragmentSpec{Packets:""} (empty packets) to disable fragmentation.
+	Fragment *FragmentSpec `json:"fragment,omitempty"`
+
+	// RealityFingerprints is the list of TLS client fingerprints to rotate randomly on each
+	// Xray config build. Overrides reality.fingerprint when non-empty.
+	// Defaults to ["chrome","firefox","safari","ios","android","randomized"].
+	RealityFingerprints []string `json:"reality_fingerprints,omitempty"`
+
+	// SplitHTTPMaxChunkKB limits each splithttp POST body in kilobytes (e.g. 64).
+	// 0 = Xray default (≈1 MB). Smaller values disguise traffic patterns better.
+	SplitHTTPMaxChunkKB int `json:"splithttp_max_chunk_kb,omitempty"`
+
+	// SplitHTTPPadding adds random padding to each splithttp chunk.
+	// Format: "min-max" bytes, e.g. "100-1000". Empty = no padding.
+	SplitHTTPPadding string `json:"splithttp_padding,omitempty"`
+
+	// ExitFallbackHost is the host:port the exit node forwards unrecognized TCP connections to
+	// (active-probe defence). Defaults to the bridge REALITY dest (e.g. "www.yandex.ru:443").
+	ExitFallbackHost string `json:"exit_fallback_host,omitempty"`
+
+	// DisableDOH disables the built-in DNS over HTTPS resolver in Xray (default: DoH is enabled).
+	// When false (default), Xray uses DoH servers to hide DNS queries from the local ISP.
+	DisableDOH bool `json:"disable_doh,omitempty"`
+
+	// WARPProxy routes all exit outbound traffic through a local Cloudflare WARP SOCKS5 proxy
+	// on WARPProxyPort (default 40000). This changes the exit IP seen by destination servers
+	// from the VPS datacenter IP to Cloudflare's IP pool.
+	// Requires warp-cli to be installed and connected on the exit node.
+	WARPProxy bool `json:"warp_proxy,omitempty"`
+
+	// WARPProxyPort is the local port where warp-cli listens in proxy mode (default 40000).
+	WARPProxyPort int `json:"warp_proxy_port,omitempty"`
+}
+
+// DatabaseSpec configures the PostgreSQL connection for user storage and traffic stats.
+type DatabaseSpec struct {
+	// DSN is a libpq-compatible connection string, e.g.:
+	// "postgres://ultra:secret@db-host:5432/ultra_db?sslmode=require"
+	DSN string `json:"dsn"`
+}
+
+// StatsSpec configures Xray in-process traffic stat collection.
+type StatsSpec struct {
+	// CollectIntervalSeconds is how often the collector polls Xray counters (default 60).
+	CollectIntervalSeconds int `json:"collect_interval_seconds"`
+	// APIListen is the loopback address for the Xray gRPC API inbound (default "127.0.0.1:10085").
+	APIListen string `json:"api_listen"`
+}
+
 // Spec is relay deployment configuration (JSON file: -spec flag).
 type Spec struct {
 	// SchemaVersion defaults to 1 when zero (see Validate).
@@ -128,6 +194,17 @@ type Spec struct {
 
 	// SOCKS5 is an optional password SOCKS inbound on the bridge; same routing as VLESS when split_routing is on.
 	SOCKS5 *BridgeSOCKS5Spec `json:"socks5,omitempty"`
+
+	// Database configures an optional PostgreSQL backend for user storage and traffic stats.
+	// When nil the relay uses the JSON file at users_path (default behavior).
+	Database *DatabaseSpec `json:"database,omitempty"`
+
+	// Stats configures Xray traffic stat collection. Requires Database to be set.
+	Stats *StatsSpec `json:"stats,omitempty"`
+
+	// AntiCensor groups optional DPI-evasion settings for the Russian TSPU and similar systems.
+	// All fields have safe defaults; the block may be omitted entirely.
+	AntiCensor *AntiCensorSpec `json:"anti_censor,omitempty"`
 }
 
 type RealitySpec struct {

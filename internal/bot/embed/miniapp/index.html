@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Ultra VPN</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ── Screens ──────────────────────────────────────────────────────── -->
+
+<div id="screen-stats" class="screen active">
+  <div class="screen-header">
+    <span class="screen-title">Обзор</span>
+    <span id="stats-month" style="font-size:12px;color:var(--tg-hint)"></span>
+  </div>
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-value" id="stat-users">—</div>
+      <div class="stat-label">Пользователей</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="stat-traffic">—</div>
+      <div class="stat-label">Трафик за месяц</div>
+    </div>
+  </div>
+  <div id="stats-loader" class="loader">Загрузка…</div>
+</div>
+
+<div id="screen-users" class="screen">
+  <div class="screen-header">
+    <span class="screen-title">Пользователи</span>
+    <button class="btn" style="width:auto;padding:8px 14px;font-size:13px" onclick="showAddUser()">+ Добавить</button>
+  </div>
+  <div id="users-loader" class="loader">Загрузка…</div>
+  <div id="users-list"></div>
+</div>
+
+<div id="screen-add-user" class="screen">
+  <div class="screen-header">
+    <button class="back-btn" onclick="showScreen('users')">← Назад</button>
+    <span class="screen-title">Новый пользователь</span>
+  </div>
+  <div class="card">
+    <div class="form-group">
+      <label class="form-label" for="new-user-name">Имя</label>
+      <input class="form-input" id="new-user-name" type="text" placeholder="Иван Иванов" autocomplete="off">
+    </div>
+    <button class="btn" onclick="createUser()">Создать</button>
+  </div>
+</div>
+
+<div id="screen-user-detail" class="screen">
+  <div class="screen-header">
+    <button class="back-btn" onclick="showScreen('users')">← Назад</button>
+    <span class="screen-title" id="detail-name"></span>
+  </div>
+  <div class="card">
+    <div class="card-title">Статистика (текущий месяц)</div>
+    <div id="detail-traffic" style="font-size:22px;font-weight:700">—</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Конфигурация</div>
+    <div id="qr-container"></div>
+    <button class="btn secondary" onclick="copyVlessURI()" style="margin-bottom:8px">Скопировать VLESS URI</button>
+    <div class="config-uri" id="detail-vless-uri">Загрузка…</div>
+  </div>
+  <div style="margin-top:8px">
+    <button class="btn danger" onclick="deleteCurrentUser()">Удалить пользователя</button>
+  </div>
+</div>
+
+<div id="screen-settings" class="screen">
+  <div class="screen-header">
+    <span class="screen-title">Настройки</span>
+  </div>
+  <div class="card">
+    <div class="card-title">Добавить администратора</div>
+    <p style="font-size:13px;color:var(--tg-hint);margin-bottom:10px">
+      Сгенерируйте одноразовый токен. Новый администратор должен отправить боту /start &lt;токен&gt;.
+    </p>
+    <button class="btn" onclick="generateInvite()">Сгенерировать токен</button>
+    <div id="invite-result" style="display:none">
+      <div class="token-box" id="invite-token" onclick="copyInviteToken()"></div>
+      <p style="font-size:11px;color:var(--tg-hint);margin-top:6px;text-align:center">Нажмите для копирования</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Текущий администратор</div>
+    <div id="settings-me">—</div>
+  </div>
+</div>
+
+<!-- ── Bottom navigation ──────────────────────────────────────────── -->
+<nav class="nav">
+  <button class="nav-btn active" data-screen="stats" onclick="switchTab('stats', this)">
+    <svg viewBox="0 0 24 24"><path d="M3 13h2v8H3zm4-4h2v12H7zm4-4h2v16h-2zm4 8h2v8h-2zm4-4h2v12h-2z"/></svg>
+    Обзор
+  </button>
+  <button class="nav-btn" data-screen="users" onclick="switchTab('users', this)">
+    <svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+    Клиенты
+  </button>
+  <button class="nav-btn" data-screen="settings" onclick="switchTab('settings', this)">
+    <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+    Настройки
+  </button>
+</nav>
+
+<script src="app.js"></script>
+</body>
+</html>

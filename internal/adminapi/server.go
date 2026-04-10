@@ -1,11 +1,13 @@
 package adminapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -14,24 +16,34 @@ import (
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/db"
 )
 
 // maxAdminJSONBody caps JSON bodies on mutating Admin API routes (DoS on loopback via SSH tunnel).
 const maxAdminJSONBody = 16384
 
+// TrafficQuerier is the subset of db.TrafficRepo used by the admin API.
+// nil when the DB backend is not configured.
+type TrafficQuerier interface {
+	GetMonthlyAll(ctx context.Context, year, month int) ([]db.MonthlyTotal, error)
+	GetMonthlyUser(ctx context.Context, userUUID string, year, month int) (db.MonthlyTotal, error)
+}
+
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
 type Server struct {
-	log    *slog.Logger
-	users  *auth.Manager
-	spec   *config.Spec
-	mux    *http.ServeMux
-	srv    *http.Server
-	lim    *visitorLimiter
-	tokenH [32]byte
+	log     *slog.Logger
+	users   auth.UserManager
+	traffic TrafficQuerier // nil when DB is not configured
+	spec    *config.Spec
+	mux     *http.ServeMux
+	srv     *http.Server
+	lim     *visitorLimiter
+	tokenH  [32]byte
 }
 
 // NewServer validates listen address is loopback.
-func NewServer(listen, token string, users *auth.Manager, spec *config.Spec, log *slog.Logger) (*Server, error) {
+// traffic may be nil when the PostgreSQL backend is not configured.
+func NewServer(listen, token string, users auth.UserManager, traffic TrafficQuerier, spec *config.Spec, log *slog.Logger) (*Server, error) {
 	if token == "" {
 		return nil, errors.New("adminapi: empty admin token")
 	}
@@ -46,12 +58,13 @@ func NewServer(listen, token string, users *auth.Manager, spec *config.Spec, log
 		log = slog.Default()
 	}
 	s := &Server{
-		log:    log,
-		users:  users,
-		spec:   spec,
-		mux:    http.NewServeMux(),
-		lim:    newVisitorLimiter(30, 60, 256),
-		tokenH: sha256.Sum256([]byte(token)),
+		log:     log,
+		users:   users,
+		traffic: traffic,
+		spec:    spec,
+		mux:     http.NewServeMux(),
+		lim:     newVisitorLimiter(30, 60, 256),
+		tokenH:  sha256.Sum256([]byte(token)),
 	}
 	if err := s.routes(); err != nil {
 		return nil, err
@@ -94,6 +107,8 @@ func (s *Server) routes() error {
 	s.mux.HandleFunc("DELETE /v1/users/{uuid}", s.handleDeleteUser)
 	s.mux.HandleFunc("POST /v1/users", s.handlePostUser)
 	s.mux.HandleFunc("GET /v1/users/{uuid}/client", s.handleGetClient)
+	s.mux.HandleFunc("GET /v1/users/{uuid}/traffic", s.handleGetUserTraffic)
+	s.mux.HandleFunc("GET /v1/traffic/monthly", s.handleGetMonthlyTraffic)
 	return nil
 }
 
@@ -263,6 +278,68 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetUserTraffic returns monthly traffic for a single user.
+// Query param: ?month=YYYY-MM (default: current month).
+func (s *Server) handleGetUserTraffic(w http.ResponseWriter, r *http.Request) {
+	if s.traffic == nil {
+		http.Error(w, "traffic stats require database backend", http.StatusNotImplemented)
+		return
+	}
+	id := r.PathValue("uuid")
+	if id == "" {
+		http.Error(w, "uuid", http.StatusBadRequest)
+		return
+	}
+	if _, ok := s.users.Lookup(id); !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	year, month := parseMonthParam(r)
+	total, err := s.traffic.GetMonthlyUser(r.Context(), id, year, month)
+	if err != nil {
+		s.log.Error("get user traffic", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(total)
+}
+
+// handleGetMonthlyTraffic returns monthly traffic for all users.
+// Query param: ?month=YYYY-MM (default: current month).
+func (s *Server) handleGetMonthlyTraffic(w http.ResponseWriter, r *http.Request) {
+	if s.traffic == nil {
+		http.Error(w, "traffic stats require database backend", http.StatusNotImplemented)
+		return
+	}
+	year, month := parseMonthParam(r)
+	totals, err := s.traffic.GetMonthlyAll(r.Context(), year, month)
+	if err != nil {
+		s.log.Error("get monthly traffic", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	if totals == nil {
+		totals = []db.MonthlyTotal{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(totals)
+}
+
+// parseMonthParam parses ?month=YYYY-MM from the request, defaulting to the current month.
+func parseMonthParam(r *http.Request) (year, month int) {
+	now := time.Now()
+	y, m, _ := now.Date()
+	year, month = y, int(m)
+	if s := r.URL.Query().Get("month"); s != "" {
+		var yy, mm int
+		if _, err := fmt.Sscanf(s, "%d-%02d", &yy, &mm); err == nil && yy > 0 && mm >= 1 && mm <= 12 {
+			year, month = yy, mm
+		}
+	}
+	return year, month
 }
 
 // Start runs the HTTP server (non-TLS).

@@ -44,3 +44,6 @@ jobs:
 
       - name: Build ultra-install
         run: make build-install
+
+      - name: Build ultra-bot
+        run: make build-bot
