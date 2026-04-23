@@ -25,32 +25,55 @@ func BuildExitXRayJSON(spec *Spec, strat mimic.Strategy, xrayLogLevel string) ([
 	if xrayLogLevel == "" {
 		xrayLogLevel = "warning"
 	}
-	inStream := splithttpInboundStream(spec, strat, w)
+	var inStream map[string]any
+	if spec.UsesGRPC() {
+		inStream = grpcInboundStream(spec, strat)
+	} else {
+		inStream = splithttpInboundStream(spec, strat, w)
+	}
 
 	warpEnabled := spec.AntiCensor != nil && spec.AntiCensor.WARPProxy
 
-	// Build the "direct" outbound: freedom normally, SOCKS5→WARP when WARPProxy is on.
-	var directOutbound map[string]any
+	// Build outbounds and routing rules.
+	// WARP proxy mode is TCP-only; UDP must bypass it via a plain freedom outbound.
+	var outbounds []any
+	var routingRules []any
 	if warpEnabled {
-		// Route all exit connections through WARP's local SOCKS5 proxy so destination
-		// servers see a Cloudflare IP instead of the VPS datacenter IP.
-		directOutbound = map[string]any{
-			"tag":      w.OutboundDirectTag,
-			"protocol": "socks",
-			"settings": map[string]any{
-				"servers": []any{
-					map[string]any{
-						"address": "127.0.0.1",
-						"port":    warpProxyPort(spec),
+		outbounds = []any{
+			// TCP traffic → WARP SOCKS5 so destination servers see a Cloudflare IP.
+			map[string]any{
+				"tag":      w.OutboundDirectTag,
+				"protocol": "socks",
+				"settings": map[string]any{
+					"servers": []any{
+						map[string]any{
+							"address": "127.0.0.1",
+							"port":    warpProxyPort(spec),
+						},
 					},
 				},
 			},
+			// UDP traffic (DNS, QUIC) → plain freedom; WARP SOCKS5 doesn't support UDP relay.
+			map[string]any{
+				"tag":      "direct-udp",
+				"protocol": "freedom",
+				"settings": map[string]any{},
+			},
+		}
+		routingRules = []any{
+			map[string]any{"type": "field", "network": "udp", "outboundTag": "direct-udp"},
+			map[string]any{"type": "field", "network": "tcp", "outboundTag": w.OutboundDirectTag},
 		}
 	} else {
-		directOutbound = map[string]any{
-			"tag":      w.OutboundDirectTag,
-			"protocol": "freedom",
-			"settings": map[string]any{},
+		outbounds = []any{
+			map[string]any{
+				"tag":      w.OutboundDirectTag,
+				"protocol": "freedom",
+				"settings": map[string]any{},
+			},
+		}
+		routingRules = []any{
+			map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": w.OutboundDirectTag},
 		}
 	}
 
@@ -78,12 +101,10 @@ func BuildExitXRayJSON(spec *Spec, strat mimic.Strategy, xrayLogLevel string) ([
 				},
 			},
 		},
-		"outbounds": []any{directOutbound},
+		"outbounds": outbounds,
 		"routing": map[string]any{
 			"domainStrategy": "AsIs",
-			"rules": []any{
-				map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": w.OutboundDirectTag},
-			},
+			"rules":          routingRules,
 		},
 	}
 

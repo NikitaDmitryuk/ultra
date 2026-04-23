@@ -254,3 +254,49 @@ func TestBuildBridgeSOCKS5DefaultListenNotPublicVLESSBind(t *testing.T) {
 		t.Fatalf("vless listen: got %#v", vless["listen"])
 	}
 }
+
+func TestBuildBridgeGRPCJSON(t *testing.T) {
+	spec := &Spec{
+		Role:            RoleBridge,
+		ListenAddress:   "127.0.0.1",
+		VLESSPort:       10447,
+		PublicHost:      "example.com",
+		DevMode:         true,
+		SplitRouting:    BoolPtr(false),
+		TunnelTransport: TunnelTransportGRPC,
+		SplithttpPath:   "/relay/v1/tunnel",
+		Exit: ExitTunnelSpec{
+			Address:    "10.0.0.2",
+			Port:       443,
+			TunnelUUID: "11111111-2222-3333-4444-555555555555",
+		},
+	}
+	s, err := mimic.New("apijson")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := BuildBridgeXRayJSON(spec, nil, s, "warning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
+	}
+	outbounds, _ := root["outbounds"].([]any)
+	if len(outbounds) < 1 {
+		t.Fatal("expected outbounds")
+	}
+	exitOut, _ := outbounds[0].(map[string]any)
+	ss, _ := exitOut["streamSettings"].(map[string]any)
+	if ss["network"] != "grpc" {
+		t.Fatalf("expected grpc network, got %v", ss["network"])
+	}
+	grpcCfg, _ := ss["grpcSettings"].(map[string]any)
+	if grpcCfg["serviceName"] != "relay/v1/tunnel" {
+		t.Fatalf("unexpected serviceName: %v", grpcCfg["serviceName"])
+	}
+	if grpcCfg["multiMode"] != true {
+		t.Fatalf("expected multiMode true, got %v", grpcCfg["multiMode"])
+	}
+}

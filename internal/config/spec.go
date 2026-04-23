@@ -23,6 +23,15 @@ const (
 	TunnelTLSSelfSigned TunnelTLSProvision = "self_signed"
 )
 
+// TunnelTransport selects the transport protocol for the bridge→exit internal tunnel.
+// Empty/omitted defaults to splithttp (backward compatible).
+type TunnelTransport string
+
+const (
+	TunnelTransportSplitHTTP TunnelTransport = "splithttp"
+	TunnelTransportGRPC      TunnelTransport = "grpc"
+)
+
 // Role selects bridge (outer) or exit (upstream-facing) node profile.
 type Role string
 
@@ -77,6 +86,11 @@ type AntiCensorSpec struct {
 	// DisableDOH disables the built-in DNS over HTTPS resolver in Xray (default: DoH is enabled).
 	// When false (default), Xray uses DoH servers to hide DNS queries from the local ISP.
 	DisableDOH bool `json:"disable_doh,omitempty"`
+
+	// GRPCInitialWindowSize is the HTTP/2 per-stream flow-control window size in bytes for the
+	// gRPC bridge→exit tunnel (default 4 MiB). Increase if upload latency under load is high;
+	// decrease only to reduce memory usage per connection.
+	GRPCInitialWindowSize int `json:"grpc_initial_window_size,omitempty"`
 
 	// WARPProxy routes all exit outbound traffic through a local Cloudflare WARP SOCKS5 proxy
 	// on WARPProxyPort (default 40000). This changes the exit IP seen by destination servers
@@ -145,6 +159,10 @@ type Spec struct {
 	// SplithttpHost is the HTTP Host header for splithttp (bridge→exit). When set, it overrides mimic.Strategy.Host()
 	// so bridge and exit agree even if each process would otherwise instantiate the strategy differently.
 	SplithttpHost string `json:"splithttp_host,omitempty"`
+
+	// TunnelTransport selects bridge→exit tunnel transport: "splithttp" (default) or "grpc".
+	// Must be identical on bridge and exit. Empty defaults to splithttp.
+	TunnelTransport TunnelTransport `json:"tunnel_transport,omitempty"`
 
 	// ExitCertPaths are required on the exit node when using TLS on splithttp inbound.
 	ExitCertPaths CertPaths `json:"exit_cert"`
@@ -271,6 +289,9 @@ func (s *Spec) requireGeoAssetFilesIfNeeded() error {
 	}
 	return nil
 }
+
+// UsesGRPC reports whether the bridge→exit tunnel is configured to use gRPC transport.
+func (s *Spec) UsesGRPC() bool { return s.TunnelTransport == TunnelTransportGRPC }
 
 // SplitRoutingEnabled returns the effective split-routing flag for the bridge.
 // Omitted split_routing in JSON means true.
