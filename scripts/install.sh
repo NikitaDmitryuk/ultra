@@ -327,6 +327,14 @@ case "${DOH_DISABLE:-n}" in
 y | Y | true | 1 | yes) ARGS+=(-disable-doh) ;;
 esac
 
+# ── Transport: bridge→exit tunnel protocol ───────────────────────────────────
+# TRANSPORT=grpc     — HTTP/2 gRPC persistent stream (по умолчанию; меньше накладных расходов).
+# TRANSPORT=splithttp — HTTP chunked transfer; для сетей, где gRPC блокируется промежуточными узлами.
+TRANSPORT="${TRANSPORT:-grpc}"
+if [[ "${TRANSPORT}" == "splithttp" ]]; then
+	ARGS+=(-transport splithttp)
+fi
+
 # ── Connection tuning options ────────────────────────────────────────────────
 # FRAGMENT_DISABLE=y — отключить фрагментацию TLS ClientHello (по умолчанию включена).
 case "${FRAGMENT_DISABLE:-n}" in

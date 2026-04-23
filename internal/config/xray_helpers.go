@@ -4,6 +4,7 @@ import (
 	"math/rand"
 	"net"
 	"strconv"
+	"strings"
 
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 )
@@ -243,5 +244,80 @@ func splithttpInboundStream(spec *Spec, strat mimic.Strategy, w xrayWireResolved
 			"fingerprint": tlsFP,
 		},
 		"splithttpSettings": splithttpCfg,
+	}
+}
+
+const defaultGRPCInitialWindowSize = 4 * 1024 * 1024 // 4 MiB — eliminates flow-control stalls at 47 ms RTT
+
+// grpcInitialWindowSize returns the HTTP/2 per-stream window size for the gRPC tunnel.
+// The default 32 KiB Xray value causes repeated WINDOW_UPDATE round-trips on high-latency
+// links, inflating upload latency under load. 4 MiB keeps the window large enough that
+// stalls never occur at practical throughput rates.
+func grpcInitialWindowSize(spec *Spec) int {
+	if spec.AntiCensor != nil && spec.AntiCensor.GRPCInitialWindowSize > 0 {
+		return spec.AntiCensor.GRPCInitialWindowSize
+	}
+	return defaultGRPCInitialWindowSize
+}
+
+// grpcServiceName derives a gRPC serviceName from the spec.
+// Reuses SplithttpPath (stripped of leading "/") so bridge and exit agree on the same identifier.
+func grpcServiceName(spec *Spec) string {
+	p := strings.TrimPrefix(spec.SplithttpPath, "/")
+	if p != "" {
+		return p
+	}
+	return "relay.v1.Tunnel"
+}
+
+// grpcOutboundStream builds the bridge→exit outbound stream settings using gRPC transport.
+func grpcOutboundStream(spec *Spec, strat mimic.Strategy) map[string]any {
+	tlsSN, alpn, tlsFP := resolveSplithttpTLS(spec, strat)
+	tlsSettings := map[string]any{
+		"serverName":  tlsSN,
+		"alpn":        alpn,
+		"fingerprint": tlsFP,
+	}
+	if spec.TunnelTLSProvision == TunnelTLSSelfSigned {
+		tlsSettings["allowInsecure"] = true
+	}
+	out := map[string]any{
+		"network":     "grpc",
+		"security":    "tls",
+		"tlsSettings": tlsSettings,
+		"grpcSettings": map[string]any{
+			"serviceName":        grpcServiceName(spec),
+			"multiMode":          true,
+			"initialWindowsSize": grpcInitialWindowSize(spec),
+		},
+	}
+	if sockopt := buildFragmentSockopt(spec); len(sockopt) > 0 {
+		out["sockopt"] = sockopt
+	}
+	return out
+}
+
+// grpcInboundStream builds the exit node inbound stream settings using gRPC transport.
+func grpcInboundStream(spec *Spec, strat mimic.Strategy) map[string]any {
+	tlsSN, alpn, tlsFP := resolveSplithttpTLS(spec, strat)
+	return map[string]any{
+		"network":  "grpc",
+		"security": "tls",
+		"tlsSettings": map[string]any{
+			"alpn": alpn,
+			"certificates": []any{
+				map[string]any{
+					"certificateFile": spec.ExitCertPaths.CertFile,
+					"keyFile":         spec.ExitCertPaths.KeyFile,
+				},
+			},
+			"serverName":  tlsSN,
+			"fingerprint": tlsFP,
+		},
+		"grpcSettings": map[string]any{
+			"serviceName":        grpcServiceName(spec),
+			"multiMode":          true,
+			"initialWindowsSize": grpcInitialWindowSize(spec),
+		},
 	}
 }

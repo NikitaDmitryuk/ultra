@@ -44,6 +44,7 @@ func buildBridgeDNS() map[string]any {
 		"domain:sber.com",    // Sberbank international
 	}
 	return map[string]any{
+		"queryStrategy": "UseIPv4",
 		"servers": []any{
 			// Yandex DoH: serves from inside Russia — correct answers for Russian domains.
 			map[string]any{
@@ -65,6 +66,7 @@ func buildBridgeDNS() map[string]any {
 // buildExitDNS returns a DNS config routing all domains through Cloudflare DoH.
 func buildExitDNS() map[string]any {
 	return map[string]any{
+		"queryStrategy": "UseIPv4",
 		"servers": []any{
 			// Cloudflare DoH — primary: private, fast, global.
 			map[string]any{

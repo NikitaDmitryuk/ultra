@@ -47,7 +47,12 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 		xrayLogLevel = "warning"
 	}
 	inStream := bridgeInboundStream(spec)
-	outStream := splithttpOutboundStream(spec, strat, w)
+	var outStream map[string]any
+	if spec.UsesGRPC() {
+		outStream = grpcOutboundStream(spec, strat)
+	} else {
+		outStream = splithttpOutboundStream(spec, strat, w)
+	}
 
 	domainStrategy, routeRules := buildBridgeRouting(spec)
 	needsBlock := BridgeNeedsBlockOutbound(spec)

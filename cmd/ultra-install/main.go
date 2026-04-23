@@ -172,6 +172,11 @@ func main() {
 		false,
 		"enable per-connection latency tracing on the bridge (GET /v1/latency/sessions on admin API)",
 	)
+	transportFlag := flag.String(
+		"transport",
+		"grpc",
+		`bridge→exit tunnel transport: "grpc" (default, HTTP/2 persistent stream) or "splithttp" (chunked HTTP, alternative for restrictive networks)`,
+	)
 	flag.Parse()
 
 	tun := *tunnelPort
@@ -536,6 +541,11 @@ func main() {
 			KeyFile:  path.Join(*remoteDir, "privkey.pem"),
 		},
 		AntiCensor: exitAntiCensor,
+	}
+
+	if t := strings.TrimSpace(*transportFlag); t == "grpc" {
+		bridgeSpec.TunnelTransport = config.TunnelTransportGRPC
+		exitSpec.TunnelTransport = config.TunnelTransportGRPC
 	}
 
 	if err := bridgeSpec.Validate(); err != nil {
