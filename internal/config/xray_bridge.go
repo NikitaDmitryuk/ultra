@@ -42,6 +42,9 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 		if u.UUID == "" {
 			continue
 		}
+		if u.Kind == "socks5" {
+			continue
+		}
 		// When stats are enabled use the UUID as email so the stats key is
 		// "user>>>UUID>>>traffic>>>uplink/downlink" and maps back unambiguously.
 		email := u.Name
@@ -157,6 +160,32 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 			},
 		})
 	}
+	for _, u := range users {
+		if u.Kind != "socks5" || u.SocksPort == nil || *u.SocksPort <= 0 {
+			continue
+		}
+		if u.SocksUsername == "" || u.SocksPassword == "" {
+			continue
+		}
+		tag := "socks-" + u.UUID
+		inbounds = append(inbounds, map[string]any{
+			"tag":      tag,
+			"listen":   "0.0.0.0",
+			"port":     *u.SocksPort,
+			"protocol": "socks",
+			"settings": map[string]any{
+				"auth": w.SocksAuth,
+				"accounts": []any{
+					map[string]any{"user": u.SocksUsername, "pass": u.SocksPassword},
+				},
+				"udp": true,
+			},
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": w.SniffingDestOverride,
+			},
+		})
+	}
 
 	outbounds := []any{
 		map[string]any{
@@ -215,6 +244,10 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 		}
 		cfg["stats"] = map[string]any{}
 		cfg["policy"] = map[string]any{
+			"system": map[string]any{
+				"statsInboundUplink":   true,
+				"statsInboundDownlink": true,
+			},
 			"levels": map[string]any{
 				"0": map[string]any{
 					"statsUserUplink":   true,

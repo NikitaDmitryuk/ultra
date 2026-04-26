@@ -29,6 +29,7 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/users", b.handleCreateUser)
 	mux.HandleFunc("PATCH /api/users/{uuid}", b.handlePatchUser)
 	mux.HandleFunc("DELETE /api/users/{uuid}", b.handleDeleteUser)
+	mux.HandleFunc("DELETE /api/users/{uuid}/purge", b.handlePurgeUser)
 	mux.HandleFunc("POST /api/users/{uuid}/enable", b.handleEnableUser)
 	mux.HandleFunc("POST /api/users/{uuid}/rotate", b.handleRotateUser)
 	mux.HandleFunc("GET /api/users/{uuid}/config", b.handleGetUserConfig)
@@ -193,7 +194,11 @@ func (b *Bot) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name required", http.StatusBadRequest)
 		return
 	}
-	payload, _ := json.Marshal(map[string]string{"name": name})
+	kind := strings.TrimSpace(body["kind"])
+	if kind == "" {
+		kind = "vless"
+	}
+	payload, _ := json.Marshal(map[string]string{"name": name, "kind": kind})
 	resp, err := b.adminPost(r.Context(), "/v1/users", payload)
 	if err != nil {
 		b.log.Error("admin POST /v1/users", "err", err)
@@ -216,6 +221,25 @@ func (b *Bot) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := b.adminDelete(r.Context(), "/v1/users/"+uuid); err != nil {
 		b.log.Error("admin DELETE /v1/users", "uuid", uuid, "err", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handlePurgeUser proxies an irreversible delete to the admin API. All cascade
+// data (traffic, observations, leak signals, notifications) is removed.
+func (b *Bot) handlePurgeUser(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	uuid := r.PathValue("uuid")
+	if uuid == "" {
+		http.Error(w, "uuid required", http.StatusBadRequest)
+		return
+	}
+	if err := b.adminDelete(r.Context(), "/v1/users/"+uuid+"/purge"); err != nil {
+		b.log.Error("admin DELETE /v1/users/.../purge", "uuid", uuid, "err", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
@@ -394,10 +418,12 @@ func (b *Bot) handleUserLeak(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{
-		"concurrent_ips": concurrent,
-		"unique_ips_24h": unique24h,
-		"signals":        signals,
-		"suspicious":     concurrent > defaultLeakMaxConcurrent || unique24h > defaultLeakMaxUnique24h,
+		"concurrent_ips":           concurrent,
+		"concurrent_threshold":     defaultLeakMaxConcurrent,
+		"unique_ips_24h":           unique24h,
+		"unique_ips_24h_threshold": defaultLeakMaxUnique24h,
+		"signals":                  signals,
+		"suspicious":               concurrent > defaultLeakMaxConcurrent || unique24h > defaultLeakMaxUnique24h,
 	})
 }
 

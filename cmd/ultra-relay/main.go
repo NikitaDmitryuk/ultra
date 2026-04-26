@@ -19,6 +19,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/db"
+	"github.com/NikitaDmitryuk/ultra/internal/firewall"
 	"github.com/NikitaDmitryuk/ultra/internal/loglevel"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 	"github.com/NikitaDmitryuk/ultra/internal/proxy"
@@ -117,7 +118,11 @@ func main() {
 		log.Info("database connected", "dsn_prefix", dsnPrefix(spec.Database.DSN))
 
 		userRepo := db.NewUserRepo(database)
-		dbMgr, err := auth.NewDBManager(userRepo, reload, log)
+		if spec.SOCKS5 != nil && spec.SOCKS5.Enabled {
+			userRepo.SetSOCKS5BridgePorts(spec.SOCKS5.PortRangeStart, spec.SOCKS5.PortRangeEnd, spec.SOCKS5.Port)
+		}
+		fw := firewall.New()
+		dbMgr, err := auth.NewDBManager(userRepo, reload, fw, log)
 		if err != nil {
 			log.Error("db user manager", "err", err)
 			os.Exit(1)
@@ -158,7 +163,8 @@ func main() {
 		if *adminToken == "" {
 			log.Warn("Admin API disabled: set -admin-token or ULTRA_RELAY_ADMIN_TOKEN to enable user provisioning on loopback")
 		} else {
-			srv, err := adminapi.NewServer(spec.AdminListen, *adminToken, mgr, trafficRepo, spec, log)
+			statPeek := func(key string) int64 { return runner.PeekCounter(key) }
+			srv, err := adminapi.NewServer(spec.AdminListen, *adminToken, mgr, trafficRepo, spec, log, statPeek)
 			if err != nil {
 				log.Error("admin api", "err", err)
 				os.Exit(1)

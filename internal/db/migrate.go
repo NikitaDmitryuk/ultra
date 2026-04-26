@@ -30,6 +30,15 @@ var migration007 string
 //go:embed migrations/008_drop_legacy_tables.sql
 var migration008 string
 
+//go:embed migrations/009_notifications_user_cascade.sql
+var migration009 string
+
+//go:embed migrations/010_leak_global_only.sql
+var migration010 string
+
+//go:embed migrations/011_users_proxy_kind.sql
+var migration011 string
+
 func (d *DB) migrate(ctx context.Context) error {
 	_, err := d.Pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -53,6 +62,9 @@ func (d *DB) migrate(ctx context.Context) error {
 		{6, migration006},
 		{7, migration007},
 		{8, migration008},
+		{9, migration009},
+		{10, migration010},
+		{11, migration011},
 	}
 
 	for _, m := range migrations {

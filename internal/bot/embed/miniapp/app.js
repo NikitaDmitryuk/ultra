@@ -8,12 +8,19 @@ tg.expand();
 let currentUserUUID = null;
 let currentUserName = '';
 let currentUserIsActive = true;
+let currentUserKind = 'vless';
 let currentVlessURI = null;
+let currentSocks5URI = null;
 let usersCache = [];
 let monthlyChart = null;
 let usersChart = null;
 let detailTrafficChart = null;
 let detailConnectionsChart = null;
+
+// IP timeline reference line for concurrent IPs (keep in sync with defaultLeakMaxConcurrent in internal/bot/leak.go)
+const LEAK_CONCURRENT_IP_THRESHOLD = 5;
+
+const LEGACY_SOCKS_UUID = '_legacy_socks';
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 (async function init() {
@@ -59,6 +66,8 @@ function switchTab(name, btn) {
 function showAddUser() {
   showScreen('add-user');
   document.getElementById('new-user-name').value = '';
+  const vless = document.getElementById('new-user-kind-vless');
+  if (vless) vless.checked = true;
   document.getElementById('new-user-name').focus();
 }
 
@@ -172,9 +181,14 @@ async function loadUsers() {
   list.innerHTML = '';
   try {
     usersCache = await api('GET', '/api/users');
-    const wrap = document.getElementById('users-search-wrap');
-    if (wrap) {
-      wrap.style.display = usersCache.length < 10 ? 'none' : '';
+    const searchWrap = document.getElementById('users-search-wrap');
+    if (searchWrap) {
+      searchWrap.style.display = usersCache.length < 10 ? 'none' : '';
+    }
+    const toggleWrap = document.getElementById('users-toggle-disabled-wrap');
+    if (toggleWrap) {
+      const hasDisabled = usersCache.some(u => u.is_active === false);
+      toggleWrap.style.display = hasDisabled ? '' : 'none';
     }
     renderUsers(usersCache);
   } catch (e) {
@@ -188,12 +202,18 @@ function renderUsers(users) {
   const list = document.getElementById('users-list');
   list.innerHTML = '';
   const q = (document.getElementById('users-search')?.value || '').trim().toLowerCase();
+  const showDisabled = !!document.getElementById('users-toggle-disabled')?.checked;
   const filtered = (users || [])
     .filter(u => {
+      if (!showDisabled && u.is_active === false) return false;
       if (!q) return true;
       return (u.name || '').toLowerCase().includes(q);
     })
     .sort((a, b) => {
+      // Active users first, then by last_seen desc; disabled go to the bottom.
+      const da = a.is_active === false ? 1 : 0;
+      const db = b.is_active === false ? 1 : 0;
+      if (da !== db) return da - db;
       const ta = a.last_seen_at ? new Date(a.last_seen_at).getTime() : 0;
       const tb = b.last_seen_at ? new Date(b.last_seen_at).getTime() : 0;
       return tb - ta;
@@ -204,18 +224,23 @@ function renderUsers(users) {
   }
   filtered.forEach(u => {
     const item = document.createElement('div');
-    item.className = 'user-item';
+    const disabled = u.is_active === false;
+    item.className = 'user-item' + (disabled ? ' user-item-disabled' : '');
     item.onclick = () => openUserDetail(u);
     const initial = (u.name || '?')[0].toUpperCase();
     const traffic = formatBytes(u.total_bytes || 0);
     const badge = lastSeenBadge(u.last_seen_at);
-    const disabled = u.is_active === false;
     const statusChip = disabled ? '<span class="status-chip">ОТКЛЮЧЕН</span>' : '';
+    const kind = String(u.kind || 'vless').toLowerCase();
+    let kindChips = '';
+    if (kind === 'socks5') kindChips += '<span class="kind-chip">SOCKS5</span>';
+    if (u.uuid === LEGACY_SOCKS_UUID) kindChips += '<span class="system-chip">SYSTEM</span>';
     item.innerHTML = `
       <div class="user-avatar">${initial}</div>
       <div class="user-info">
         <div class="user-name-row">
           <div class="user-name">${esc(u.name)}</div>
+          ${kindChips}
           ${statusChip}
         </div>
         <div class="user-traffic">${traffic} этот месяц</div>
@@ -246,11 +271,12 @@ function lastSeenBadge(isoStr) {
 async function createUser() {
   const name = document.getElementById('new-user-name').value.trim();
   if (!name) { showToast('Введите имя.'); return; }
+  const kind = document.querySelector('input[name="new-user-kind"]:checked')?.value || 'vless';
   try {
-    await api('POST', '/api/users', { name });
+    await api('POST', '/api/users', { name, kind });
     showScreen('users');
     await loadUsers();
-    showToast(`Пользователь "${name}" создан.`);
+    showToast(kind === 'socks5' ? `SOCKS5 «${name}» создан.` : `Клиент «${name}» создан.`);
   } catch (e) {
     showToast('Ошибка: ' + e.message);
   }
@@ -261,14 +287,36 @@ async function openUserDetail(u) {
   currentUserUUID = u.uuid;
   currentUserName = u.name || '';
   currentUserIsActive = u.is_active !== false;
+  currentUserKind = String(u.kind || 'vless').toLowerCase();
   currentVlessURI = null;
+  currentSocks5URI = null;
+
+  const editBtn = document.getElementById('detail-edit-btn');
+  if (editBtn) editBtn.style.display = u.uuid === LEGACY_SOCKS_UUID ? 'none' : '';
+
+  const vlessCard = document.getElementById('detail-config-vless');
+  const socksCard = document.getElementById('detail-config-socks5');
+  if (currentUserKind === 'socks5') {
+    if (vlessCard) vlessCard.style.display = 'none';
+    if (socksCard) socksCard.style.display = '';
+    document.getElementById('detail-vless-uri').textContent = '—';
+    document.getElementById('qr-container').innerHTML = '';
+    document.getElementById('detail-socks5-uri').textContent = 'Загрузка…';
+    document.getElementById('qr-container-socks5').innerHTML = '';
+  } else {
+    if (vlessCard) vlessCard.style.display = '';
+    if (socksCard) socksCard.style.display = 'none';
+    document.getElementById('detail-vless-uri').textContent = 'Загрузка…';
+    document.getElementById('qr-container').innerHTML = '';
+    document.getElementById('detail-socks5-uri').textContent = '—';
+    document.getElementById('qr-container-socks5').innerHTML = '';
+  }
+
   document.getElementById('detail-name').textContent = (u.name || u.uuid) + (currentUserIsActive ? '' : ' · отключён');
   document.getElementById('detail-rename-input').value = u.name || '';
   document.getElementById('detail-rename-card').style.display = 'none';
-  document.getElementById('detail-enable-btn').style.display = currentUserIsActive ? 'none' : '';
+  syncDetailActions();
   document.getElementById('detail-traffic').textContent = formatBytes(u.total_bytes || 0) + ' этот месяц';
-  document.getElementById('detail-vless-uri').textContent = 'Загрузка…';
-  document.getElementById('qr-container').innerHTML = '';
   document.getElementById('detail-month-input').value = currentMonthInputValue();
   showScreen('user-detail');
 
@@ -277,21 +325,47 @@ async function openUserDetail(u) {
 
   try {
     const cfg = await api('GET', `/api/users/${u.uuid}/config`);
-    currentVlessURI = cfg.vless_uri || '';
-    document.getElementById('detail-vless-uri').textContent = currentVlessURI;
-    if (currentVlessURI && window.QRCode) {
-      QRCode.toCanvas(currentVlessURI, { width: 220, margin: 2, color: { dark: '#000000', light: '#ffffff' } },
-        (err, canvas) => {
-          if (!err) document.getElementById('qr-container').appendChild(canvas);
-        });
+    currentVlessURI = cfg.vless_uri || cfg.VLESSURI || '';
+    currentSocks5URI = cfg.socks5_uri || cfg.Socks5URI || '';
+    if (currentUserKind === 'socks5') {
+      document.getElementById('detail-socks5-uri').textContent = currentSocks5URI || '—';
+      const meta = document.getElementById('detail-socks5-meta');
+      if (meta) {
+        const parts = [];
+        const user = cfg.username || cfg.Username;
+        const port = cfg.port || cfg.Port;
+        if (user) parts.push('User: ' + user);
+        if (port) parts.push('Port: ' + port);
+        meta.textContent = parts.join(' · ');
+      }
+      if (currentSocks5URI && window.QRCode) {
+        const wrap = document.getElementById('qr-container-socks5');
+        wrap.innerHTML = '';
+        QRCode.toCanvas(currentSocks5URI, { width: 220, margin: 2, color: { dark: '#000000', light: '#ffffff' } },
+          (err, canvas) => {
+            if (!err) wrap.appendChild(canvas);
+          });
+      }
+    } else {
+      document.getElementById('detail-vless-uri').textContent = currentVlessURI;
+      if (currentVlessURI && window.QRCode) {
+        QRCode.toCanvas(currentVlessURI, { width: 220, margin: 2, color: { dark: '#000000', light: '#ffffff' } },
+          (err, canvas) => {
+            if (!err) document.getElementById('qr-container').appendChild(canvas);
+          });
+      }
     }
   } catch (e) {
-    document.getElementById('detail-vless-uri').textContent = 'Ошибка загрузки конфигурации.';
+    if (currentUserKind === 'socks5') {
+      document.getElementById('detail-socks5-uri').textContent = 'Ошибка загрузки конфигурации.';
+    } else {
+      document.getElementById('detail-vless-uri').textContent = 'Ошибка загрузки конфигурации.';
+    }
   }
 }
 
 function beginRenameUser() {
-  if (!currentUserUUID) return;
+  if (!currentUserUUID || currentUserUUID === LEGACY_SOCKS_UUID) return;
   const card = document.getElementById('detail-rename-card');
   card.style.display = '';
   const input = document.getElementById('detail-rename-input');
@@ -351,7 +425,9 @@ async function loadCurrentUserLeak() {
   const list = document.getElementById('detail-leak-signals');
   try {
     const data = await api('GET', `/api/users/${currentUserUUID}/leak?limit=5`);
-    summary.textContent = `Concurrent IPs: ${data.concurrent_ips} · Unique IPs 24h: ${data.unique_ips_24h}` +
+    const cTh = data.concurrent_threshold ?? LEAK_CONCURRENT_IP_THRESHOLD;
+    const uTh = data.unique_ips_24h_threshold ?? 10;
+    summary.textContent = `Concurrent: ${data.concurrent_ips} (алерт >${cTh}) · Unique 24ч: ${data.unique_ips_24h} (алерт >${uTh})` +
       (data.suspicious ? ' · подозрение' : ' · норма');
     const signals = data.signals || [];
     if (!signals.length) {
@@ -397,13 +473,65 @@ async function enableCurrentUser() {
     const idx = usersCache.findIndex(u => u.uuid === currentUserUUID);
     if (idx >= 0) usersCache[idx] = { ...usersCache[idx], is_active: true, disabled_at: null };
     currentUserIsActive = true;
-    document.getElementById('detail-enable-btn').style.display = 'none';
+    syncDetailActions();
     document.getElementById('detail-name').textContent = currentUserName;
     showToast('Пользователь включён.');
     renderUsers(usersCache);
   } catch (e) {
     showToast('Ошибка включения: ' + e.message);
   }
+}
+
+// syncDetailActions toggles which action group is visible in the user-detail
+// screen: rotate/disable for active users, enable/purge for disabled.
+function syncDetailActions() {
+  const active = document.getElementById('detail-actions-active');
+  const disabled = document.getElementById('detail-actions-disabled');
+  if (!active || !disabled) return;
+  if (currentUserUUID === LEGACY_SOCKS_UUID) {
+    active.style.display = 'none';
+    disabled.style.display = 'none';
+    return;
+  }
+  active.style.display = currentUserIsActive ? '' : 'none';
+  disabled.style.display = currentUserIsActive ? 'none' : '';
+  const rotateBtn = document.getElementById('detail-rotate-btn');
+  if (rotateBtn) {
+    rotateBtn.textContent = currentUserKind === 'socks5' ? 'Перевыпустить пароль' : 'Перевыпустить ключ';
+  }
+}
+
+// purgeCurrentUser permanently removes a disabled user (UUID + traffic + leak
+// signals + IP observations + notifications). Requires double confirmation.
+async function purgeCurrentUser() {
+  if (!currentUserUUID) return;
+  if (currentUserIsActive) {
+    showToast('Сначала отключите пользователя.');
+    return;
+  }
+  const uuid = currentUserUUID;
+  const name = currentUserName || uuid;
+  tg.showConfirm(`Удалить пользователя "${name}" навсегда? Все данные о трафике будут потеряны.`, confirmed1 => {
+    if (!confirmed1) return;
+    tg.showConfirm('Это действие необратимо. Точно продолжить?', async confirmed2 => {
+      if (!confirmed2) return;
+      try {
+        await api('DELETE', `/api/users/${uuid}/purge`);
+        usersCache = usersCache.filter(u => u.uuid !== uuid);
+        currentUserUUID = null;
+        showToast('Пользователь удалён.');
+        showScreen('users');
+        renderUsers(usersCache);
+        const toggleWrap = document.getElementById('users-toggle-disabled-wrap');
+        if (toggleWrap) {
+          const hasDisabled = usersCache.some(u => u.is_active === false);
+          toggleWrap.style.display = hasDisabled ? '' : 'none';
+        }
+      } catch (e) {
+        showToast('Ошибка удаления: ' + e.message);
+      }
+    });
+  });
 }
 
 function rotateCurrentUserUUID() {
@@ -470,8 +598,7 @@ function renderConnectionsChart(points) {
   }
   const labels = points.map(p => formatTime(p.BucketStart || p.bucket_start));
   const values = points.map(p => Number(p.IPs || p.ips || 0));
-  const user = usersCache.find(u => u.uuid === currentUserUUID) || {};
-  const threshold = Number(user.leak_max_concurrent_ips || 2);
+  const threshold = LEAK_CONCURRENT_IP_THRESHOLD;
   detailConnectionsChart = new Chart(ctx, {
     type: 'line',
     data: {
@@ -510,6 +637,36 @@ function copyVlessURI() {
   );
 }
 
+function copySocks5URI() {
+  if (!currentSocks5URI) return;
+  navigator.clipboard.writeText(currentSocks5URI).then(
+    () => showToast('SOCKS5 строка скопирована.'),
+    () => showToast('Не удалось скопировать.'),
+  );
+}
+
+function rotateCurrentUserCredentials() {
+  if (!currentUserUUID) return;
+  if (currentUserKind === 'socks5') {
+    tg.showConfirm('Новый пароль: старые подключения перестанут работать. Продолжить?', async confirmed => {
+      if (!confirmed) return;
+      try {
+        const res = await api('POST', `/api/users/${currentUserUUID}/rotate`);
+        const uri = res.socks5_uri || res.Socks5URI;
+        if (uri) currentSocks5URI = uri;
+        showToast('Пароль перевыпущен.');
+        const idx = usersCache.findIndex(x => x.uuid === currentUserUUID);
+        if (idx >= 0) usersCache[idx] = { ...usersCache[idx] };
+        await openUserDetail(usersCache[idx] || { uuid: currentUserUUID, name: currentUserName, is_active: currentUserIsActive, kind: 'socks5' });
+      } catch (e) {
+        showToast('Ошибка ротации: ' + e.message);
+      }
+    });
+    return;
+  }
+  rotateCurrentUserUUID();
+}
+
 async function deleteCurrentUser() {
   if (!currentUserUUID) return;
   const user = usersCache.find(u => u.uuid === currentUserUUID);
@@ -524,6 +681,8 @@ async function deleteCurrentUser() {
       }
       showScreen('users');
       renderUsers(usersCache);
+      const toggleWrap = document.getElementById('users-toggle-disabled-wrap');
+      if (toggleWrap) toggleWrap.style.display = '';
     } catch (e) {
       showToast('Ошибка отключения: ' + e.message);
     }

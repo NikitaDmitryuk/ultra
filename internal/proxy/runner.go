@@ -77,3 +77,22 @@ func (r *Runner) GetStatsManager() stats.Manager {
 	sm, _ := f.(stats.Manager)
 	return sm
 }
+
+// PeekCounter returns the current value of a named stats counter without resetting it.
+func (r *Runner) PeekCounter(name string) int64 {
+	sm := r.GetStatsManager()
+	if sm == nil {
+		return 0
+	}
+	c := sm.GetCounter(name)
+	if c == nil {
+		return 0
+	}
+	if v, ok := c.(interface{ Value() int64 }); ok {
+		return v.Value()
+	}
+	if a, ok := c.(interface{ Add(int64) int64 }); ok {
+		return a.Add(0)
+	}
+	return 0
+}

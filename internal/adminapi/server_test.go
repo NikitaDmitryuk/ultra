@@ -15,11 +15,12 @@ import (
 )
 
 type fakeUserManager struct {
-	users       map[string]auth.User
-	renameCalls int
-	enableCalls int
-	rotateCalls int
-	lastRename  struct {
+	users            map[string]auth.User
+	renameCalls      int
+	enableCalls      int
+	rotateCalls      int
+	rotateSocksCalls int
+	lastRename       struct {
 		id   string
 		name string
 	}
@@ -28,13 +29,18 @@ type fakeUserManager struct {
 func newFakeUserManager() *fakeUserManager {
 	return &fakeUserManager{
 		users: map[string]auth.User{
-			"u1": {UUID: "u1", Name: "Alice", IsActive: true},
-			"u2": {UUID: "u2", Name: "Bob", IsActive: false},
+			"u1": {UUID: "u1", Name: "Alice", IsActive: true, Kind: "vless"},
+			"u2": {UUID: "u2", Name: "Bob", IsActive: false, Kind: "vless"},
 		},
 	}
 }
 
-func (m *fakeUserManager) AddUser(name string) (auth.User, error) { return auth.User{}, nil }
+func (m *fakeUserManager) AddUser(kind, name string) (auth.User, error) {
+	if kind == "" {
+		kind = "vless"
+	}
+	return auth.User{UUID: "new", Name: name, Kind: kind, IsActive: true}, nil
+}
 func (m *fakeUserManager) RenameUser(id, name string) (auth.User, error) {
 	m.renameCalls++
 	m.lastRename.id = id
@@ -48,6 +54,13 @@ func (m *fakeUserManager) RenameUser(id, name string) (auth.User, error) {
 	return u, nil
 }
 func (m *fakeUserManager) RemoveUser(id string) error { return nil }
+func (m *fakeUserManager) PurgeUser(id string) error {
+	if _, ok := m.users[id]; !ok {
+		return auth.ErrUserNotFound
+	}
+	delete(m.users, id)
+	return nil
+}
 func (m *fakeUserManager) EnableUser(id string) error {
 	m.enableCalls++
 	u, ok := m.users[id]
@@ -64,11 +77,25 @@ func (m *fakeUserManager) RotateUUID(id string) (string, error) {
 	if !ok {
 		return "", auth.ErrUserNotFound
 	}
+	if u.Kind == "socks5" {
+		return "", auth.ErrUnsupportedForKind
+	}
 	delete(m.users, id)
 	newID := id + "-rotated"
 	u.UUID = newID
 	m.users[newID] = u
 	return newID, nil
+}
+
+func (m *fakeUserManager) RotateSocksPassword(id string) (string, error) {
+	m.rotateSocksCalls++
+	u, ok := m.users[id]
+	if !ok || u.Kind != "socks5" {
+		return "", auth.ErrUserNotFound
+	}
+	u.SocksPassword = "new-socks-pass"
+	m.users[id] = u
+	return u.SocksPassword, nil
 }
 func (m *fakeUserManager) List() []auth.User {
 	var out []auth.User
@@ -94,7 +121,7 @@ func (m *fakeUserManager) Close() {}
 
 func newHTTPTestServer(t *testing.T, users auth.UserManager, spec *config.Spec) *httptest.Server {
 	t.Helper()
-	s, err := NewServer("127.0.0.1:0", "secret", users, nil, spec, slog.Default())
+	s, err := NewServer("127.0.0.1:0", "secret", users, nil, spec, slog.Default(), nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -180,6 +207,48 @@ func TestEnableAndRotateEndpoints(t *testing.T) {
 	}
 	if mgr.rotateCalls != 1 {
 		t.Fatalf("expected rotateCalls=1, got %d", mgr.rotateCalls)
+	}
+}
+
+func TestListUsersPrependsLegacySocksWhenEnabled(t *testing.T) {
+	mgr := newFakeUserManager()
+	spec := &config.Spec{
+		PublicHost: "vpn.example",
+		SOCKS5:     &config.BridgeSOCKS5Spec{Enabled: true, Port: 1080, Username: "u", Password: "p"},
+		Exit:       config.ExitTunnelSpec{Address: "127.0.0.1", Port: 65535},
+	}
+	ts := newHTTPTestServer(t, mgr, spec)
+	defer ts.Close()
+
+	resp, body := doAuthedJSON(t, ts.Client(), http.MethodGet, ts.URL+"/v1/users", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, body=%s", resp.StatusCode, string(body))
+	}
+	var users []map[string]any
+	if err := json.Unmarshal(body, &users); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(users) < 1 {
+		t.Fatal("expected users")
+	}
+	if users[0]["uuid"] != auth.LegacySocksUserUUID {
+		t.Fatalf("expected legacy first, got %#v", users[0])
+	}
+}
+
+func TestPatchLegacySocksUserIsProtected(t *testing.T) {
+	mgr := newFakeUserManager()
+	spec := &config.Spec{
+		PublicHost: "vpn.example",
+		SOCKS5:     &config.BridgeSOCKS5Spec{Enabled: true, Port: 1080, Username: "u", Password: "p"},
+		Exit:       config.ExitTunnelSpec{Address: "127.0.0.1", Port: 65535},
+	}
+	ts := newHTTPTestServer(t, mgr, spec)
+	defer ts.Close()
+
+	resp, body := doAuthedJSON(t, ts.Client(), http.MethodPatch, ts.URL+"/v1/users/"+auth.LegacySocksUserUUID, map[string]any{"name": "x"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status: got %d, body=%s", resp.StatusCode, string(body))
 	}
 }
 

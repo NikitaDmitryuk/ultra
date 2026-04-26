@@ -61,6 +61,10 @@
   <div id="users-search-wrap" class="detail-month-row" style="margin-bottom:10px">
     <input class="form-input" id="users-search" type="text" placeholder="Поиск по имени" oninput="renderUsers(usersCache)">
   </div>
+  <label class="users-toggle" id="users-toggle-disabled-wrap" style="display:none">
+    <input type="checkbox" id="users-toggle-disabled" onchange="renderUsers(usersCache)">
+    <span>Показать отключённых</span>
+  </label>
   <div id="users-loader" class="loader">Загрузка…</div>
   <div id="users-list"></div>
 </div>
@@ -68,9 +72,16 @@
 <div id="screen-add-user" class="screen">
   <div class="screen-header">
     <button class="back-btn" onclick="showScreen('users')">← Назад</button>
-    <span class="screen-title">Новый пользователь</span>
+    <span class="screen-title">Новый клиент</span>
   </div>
   <div class="card">
+    <div class="form-group">
+      <span class="form-label">Тип</span>
+      <div class="kind-radio-row">
+        <label class="kind-radio"><input type="radio" name="new-user-kind" id="new-user-kind-vless" value="vless" checked> VLESS</label>
+        <label class="kind-radio"><input type="radio" name="new-user-kind" id="new-user-kind-socks5" value="socks5"> SOCKS5</label>
+      </div>
+    </div>
     <div class="form-group">
       <label class="form-label" for="new-user-name">Имя</label>
       <input class="form-input" id="new-user-name" type="text" placeholder="Иван Иванов" autocomplete="off">
@@ -127,16 +138,26 @@
     </div>
     <canvas id="detail-connections-chart" height="180"></canvas>
   </div>
-  <div class="card">
-    <div class="card-title">Конфигурация</div>
+  <div class="card" id="detail-config-vless">
+    <div class="card-title">Конфигурация (VLESS)</div>
     <div id="qr-container"></div>
     <button class="btn secondary" onclick="copyVlessURI()" style="margin-bottom:8px">Скопировать VLESS URI</button>
     <div class="config-uri" id="detail-vless-uri">Загрузка…</div>
   </div>
-  <div style="margin-top:8px">
-    <button class="btn" id="detail-enable-btn" style="display:none;margin-bottom:8px" onclick="enableCurrentUser()">Включить пользователя</button>
-    <button class="btn secondary" onclick="rotateCurrentUserUUID()" style="margin-bottom:8px">Перевыпустить ключ</button>
+  <div class="card" id="detail-config-socks5" style="display:none">
+    <div class="card-title">Конфигурация (SOCKS5)</div>
+    <div id="qr-container-socks5"></div>
+    <button class="btn secondary" onclick="copySocks5URI()" style="margin-bottom:8px">Скопировать SOCKS5 строку</button>
+    <div class="config-uri" id="detail-socks5-uri">—</div>
+    <div class="socks5-meta" id="detail-socks5-meta"></div>
+  </div>
+  <div style="margin-top:8px" id="detail-actions-active">
+    <button class="btn secondary" id="detail-rotate-btn" onclick="rotateCurrentUserCredentials()" style="margin-bottom:8px">Перевыпустить ключ</button>
     <button class="btn danger" onclick="deleteCurrentUser()">Отключить пользователя</button>
+  </div>
+  <div style="margin-top:8px;display:none" id="detail-actions-disabled">
+    <button class="btn" onclick="enableCurrentUser()" style="margin-bottom:8px">Включить пользователя</button>
+    <button class="btn danger" onclick="purgeCurrentUser()">Удалить пользователя навсегда</button>
   </div>
 </div>
 

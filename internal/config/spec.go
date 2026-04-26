@@ -373,6 +373,19 @@ func (s *Spec) Validate() error {
 			if s.SOCKS5.Password == "" {
 				return errors.New("config: socks5.password required when socks5.enabled")
 			}
+			if s.SOCKS5.PortRangeStart == 0 {
+				s.SOCKS5.PortRangeStart = 10810
+			}
+			if s.SOCKS5.PortRangeEnd == 0 {
+				s.SOCKS5.PortRangeEnd = 10899
+			}
+			if s.SOCKS5.PortRangeStart < 1 || s.SOCKS5.PortRangeEnd > 65535 ||
+				s.SOCKS5.PortRangeStart > s.SOCKS5.PortRangeEnd {
+				return errors.New("config: socks5.port_range_start/end invalid")
+			}
+			if s.SOCKS5.Port >= s.SOCKS5.PortRangeStart && s.SOCKS5.Port <= s.SOCKS5.PortRangeEnd {
+				return errors.New("config: socks5.port must not fall inside socks5.port_range (reserved for per-client inbounds)")
+			}
 		}
 	case RoleExit:
 		if s.SOCKS5 != nil && s.SOCKS5.Enabled {

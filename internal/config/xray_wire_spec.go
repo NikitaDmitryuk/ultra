@@ -130,3 +130,8 @@ func resolveXrayWire(s *Spec) xrayWireResolved {
 	}
 	return r
 }
+
+// LegacyBridgeSOCKSInboundTag returns the Xray inbound tag for the global spec.socks5 listener.
+func LegacyBridgeSOCKSInboundTag(spec *Spec) string {
+	return resolveXrayWire(spec).InboundSocksTag
+}

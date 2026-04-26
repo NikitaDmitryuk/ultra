@@ -126,6 +126,11 @@ func (c *Collector) collect(at time.Time) {
 		}
 		upKey := "user>>>" + u.UUID + ">>>traffic>>>uplink"
 		downKey := "user>>>" + u.UUID + ">>>traffic>>>downlink"
+		if u.Kind == "socks5" {
+			tag := "socks-" + u.UUID
+			upKey = "inbound>>>" + tag + ">>>traffic>>>uplink"
+			downKey = "inbound>>>" + tag + ">>>traffic>>>downlink"
+		}
 
 		var upBytes, downBytes int64
 		if cnt := sm.GetCounter(upKey); cnt != nil {
