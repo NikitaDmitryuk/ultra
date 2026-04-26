@@ -59,6 +59,21 @@ body {
   margin-bottom: var(--gap);
 }
 .screen-title { font-size: 18px; font-weight: 700; }
+.detail-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.icon-btn {
+  border: 1px solid rgba(255,255,255,0.14);
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+  border-radius: 8px;
+  width: 30px;
+  height: 30px;
+  cursor: pointer;
+  font-size: 15px;
+}
 
 /* ── Card ── */
 .card {
@@ -115,6 +130,19 @@ body {
 }
 .user-info { flex: 1; min-width: 0; }
 .user-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.user-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.status-chip {
+  font-size: 10px;
+  font-weight: 700;
+  color: #ffb74d;
+  border: 1px solid rgba(255,183,77,0.45);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
 .user-traffic { font-size: 12px; color: var(--tg-hint); margin-top: 2px; }
 .user-chevron { color: var(--tg-hint); flex-shrink: 0; }
 
@@ -153,6 +181,22 @@ body {
   outline: none;
 }
 .form-input:focus { border-color: var(--tg-btn); }
+textarea.form-input {
+  resize: vertical;
+  min-height: 76px;
+}
+.detail-actions-row {
+  display: flex;
+  gap: 8px;
+}
+.detail-actions-row .btn {
+  width: 50%;
+}
+.detail-month-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
 
 /* ── Config screen ── */
 .config-uri {
@@ -210,3 +254,51 @@ body {
 
 /* ── Charts ── */
 #chart-monthly, #chart-users { max-height: 200px; }
+#detail-traffic-chart { max-height: 220px; }
+
+/* ── Diagnostics ── */
+.diag-status {
+  font-size: 14px;
+  color: var(--tg-text);
+}
+.diag-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.diag-item {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.02);
+}
+.diag-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.diag-item-meta {
+  font-size: 12px;
+  color: var(--tg-hint);
+}
+
+/* ── Toast ── */
+.toast-box {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 92px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 200;
+  pointer-events: none;
+}
+.toast {
+  background: rgba(20, 24, 30, 0.94);
+  border: 1px solid rgba(255,255,255,0.12);
+  color: var(--tg-text);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+}

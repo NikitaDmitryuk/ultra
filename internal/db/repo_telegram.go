@@ -235,3 +235,29 @@ func (r *TelegramRepo) MarkNotificationSent(ctx context.Context, id int64) error
 	)
 	return err
 }
+
+// RecentNotifications returns last notifications regardless of sent status.
+func (r *TelegramRepo) RecentNotifications(ctx context.Context, limit int) ([]Notification, error) {
+	rows, err := r.db.Pool.Query(ctx,
+		`SELECT id, user_uuid, telegram_id, type, payload, sent_at, created_at
+		 FROM notifications ORDER BY created_at DESC LIMIT $1`,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Notification
+	for rows.Next() {
+		var n Notification
+		var payloadRaw []byte
+		if err := rows.Scan(&n.ID, &n.UserUUID, &n.TelegramID, &n.Type, &payloadRaw, &n.SentAt, &n.CreatedAt); err != nil {
+			return nil, err
+		}
+		if len(payloadRaw) > 0 {
+			_ = json.Unmarshal(payloadRaw, &n.Payload)
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}

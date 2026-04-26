@@ -118,12 +118,15 @@ func (s *Server) routes() error {
 	s.mux.HandleFunc("GET /v1/users", s.handleListUsers)
 	s.mux.HandleFunc("PATCH /v1/users/{uuid}", s.handlePatchUser)
 	s.mux.HandleFunc("DELETE /v1/users/{uuid}", s.handleDeleteUser)
+	s.mux.HandleFunc("POST /v1/users/{uuid}/enable", s.handleEnableUser)
+	s.mux.HandleFunc("POST /v1/users/{uuid}/rotate", s.handleRotateUser)
 	s.mux.HandleFunc("POST /v1/users", s.handlePostUser)
 	s.mux.HandleFunc("GET /v1/users/{uuid}/client", s.handleGetClient)
 	s.mux.HandleFunc("GET /v1/users/{uuid}/traffic", s.handleGetUserTraffic)
 	s.mux.HandleFunc("GET /v1/traffic/monthly", s.handleGetMonthlyTraffic)
 	s.mux.HandleFunc("GET /v1/traffic/history", s.handleGetTrafficHistory)
 	s.mux.HandleFunc("GET /v1/traffic/last-seen", s.handleGetLastSeen)
+	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
 	s.mux.HandleFunc("GET /v1/latency/probe", s.handleLatencyProbe)
 	s.mux.HandleFunc("GET /v1/latency/sessions", s.handleLatencySessions)
 	return nil
@@ -232,13 +235,22 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
+	includeDisabled := false
+	switch strings.TrimSpace(strings.ToLower(r.URL.Query().Get("include_disabled"))) {
+	case "1", "true", "yes", "y":
+		includeDisabled = true
+	}
 	users := s.users.List()
+	if includeDisabled {
+		users = s.users.ListAll()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(users)
 }
 
 type patchUserReq struct {
-	Name string `json:"name"`
+	Name *string `json:"name"`
+	Note *string `json:"note"`
 }
 
 func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
@@ -255,19 +267,41 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 	if !s.decodeAdminJSON(w, r, &body) {
 		return
 	}
-	u, err := s.users.RenameUser(id, body.Name)
-	if errors.Is(err, auth.ErrUserNotFound) {
-		http.Error(w, "not found", http.StatusNotFound)
+	if body.Name == nil && body.Note == nil {
+		http.Error(w, "nothing to update", http.StatusBadRequest)
 		return
 	}
-	if errors.Is(err, auth.ErrEmptyUserName) {
-		http.Error(w, "bad name", http.StatusBadRequest)
-		return
+	var (
+		u   auth.User
+		err error
+	)
+	if body.Name != nil {
+		u, err = s.users.RenameUser(id, *body.Name)
+		if errors.Is(err, auth.ErrUserNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, auth.ErrEmptyUserName) {
+			http.Error(w, "bad name", http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			s.log.Error("rename user", "err", err)
+			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
 	}
-	if err != nil {
-		s.log.Error("rename user", "err", err)
-		http.Error(w, "internal", http.StatusInternalServerError)
-		return
+	if body.Note != nil {
+		u, err = s.users.SetNote(id, *body.Note)
+		if errors.Is(err, auth.ErrUserNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			s.log.Error("set user note", "err", err)
+			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
@@ -295,6 +329,52 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleEnableUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.PathValue("uuid")
+	if id == "" {
+		http.Error(w, "uuid", http.StatusBadRequest)
+		return
+	}
+	if err := s.users.EnableUser(id); err != nil {
+		if errors.Is(err, auth.ErrUserNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		s.log.Error("enable user", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleRotateUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.PathValue("uuid")
+	if id == "" {
+		http.Error(w, "uuid", http.StatusBadRequest)
+		return
+	}
+	newUUID, err := s.users.RotateUUID(id)
+	if errors.Is(err, auth.ErrUserNotFound) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		s.log.Error("rotate user UUID", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"uuid": newUUID})
 }
 
 // handleGetUserTraffic returns monthly traffic for a single user.
@@ -407,6 +487,36 @@ func (s *Server) handleGetLastSeen(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(seen)
+}
+
+// handleHealth returns a compact bridge↔exit health snapshot.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	exitAddr := fmt.Sprintf("%s:%d", s.spec.Exit.Address, s.spec.Exit.Port)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	type healthResp struct {
+		Bridge        string `json:"bridge"`
+		Exit          string `json:"exit"`
+		ExitLatencyMS int64  `json:"exit_latency_ms,omitempty"`
+		CheckedAt     string `json:"checked_at"`
+		Error         string `json:"error,omitempty"`
+	}
+	res := healthResp{
+		Bridge:    "ok",
+		CheckedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	rtt, err := probe.DialTCP(ctx, exitAddr)
+	if err != nil {
+		res.Exit = "down"
+		res.Error = err.Error()
+	} else {
+		res.Exit = "ok"
+		res.ExitLatencyMS = rtt.Milliseconds()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(res)
 }
 
 // handleLatencyProbe measures bridge→exit TCP round-trip and returns the result as JSON.

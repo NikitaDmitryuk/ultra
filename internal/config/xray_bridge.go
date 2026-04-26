@@ -185,6 +185,7 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 				"0": map[string]any{
 					"statsUserUplink":   true,
 					"statsUserDownlink": true,
+					"statsUserOnline":   true,
 				},
 			},
 		}

@@ -11,8 +11,12 @@ import (
 type DBUserRepo interface {
 	Add(ctx context.Context, name string) (User, error)
 	Rename(ctx context.Context, id, name string) (User, error)
+	SetNote(ctx context.Context, id, note string) (User, error)
 	Remove(ctx context.Context, id string) error
+	Enable(ctx context.Context, id string) error
+	RotateUUID(ctx context.Context, id string) (string, error)
 	List(ctx context.Context) ([]User, error)
+	ListAll(ctx context.Context) ([]User, error)
 	Lookup(ctx context.Context, id string) (User, bool, error)
 }
 
@@ -24,8 +28,9 @@ type DBManager struct {
 	repo DBUserRepo
 	log  *slog.Logger
 
-	cache []User
-	byID  map[string]User
+	cacheActive []User
+	cacheAll    []User
+	byID        map[string]User
 
 	onChange func([]User)
 }
@@ -53,16 +58,21 @@ func NewDBManager(repo DBUserRepo, onChange func([]User), log *slog.Logger) (*DB
 
 // refresh reloads the full user list from the DB into the in-memory cache.
 func (m *DBManager) refresh(ctx context.Context) error {
-	users, err := m.repo.List(ctx)
+	users, err := m.repo.ListAll(ctx)
 	if err != nil {
 		return err
 	}
 	byID := make(map[string]User, len(users))
+	active := make([]User, 0, len(users))
 	for _, u := range users {
 		byID[u.UUID] = u
+		if u.IsActive {
+			active = append(active, u)
+		}
 	}
 	m.mu.Lock()
-	m.cache = users
+	m.cacheAll = users
+	m.cacheActive = active
 	m.byID = byID
 	m.mu.Unlock()
 	return nil
@@ -73,7 +83,7 @@ func (m *DBManager) notify() {
 		return
 	}
 	m.mu.RLock()
-	cp := append([]User(nil), m.cache...)
+	cp := append([]User(nil), m.cacheActive...)
 	m.mu.RUnlock()
 	m.onChange(cp)
 }
@@ -104,6 +114,19 @@ func (m *DBManager) RenameUser(id, name string) (User, error) {
 	return u, nil
 }
 
+// SetNote updates the user note and triggers an Xray reload.
+func (m *DBManager) SetNote(id, note string) (User, error) {
+	u, err := m.repo.SetNote(context.Background(), id, note)
+	if err != nil {
+		return User{}, err
+	}
+	if err := m.refresh(context.Background()); err != nil {
+		m.log.Warn("db refresh after SetNote failed", "err", err)
+	}
+	m.notify()
+	return u, nil
+}
+
 // RemoveUser soft-deletes a user and triggers an Xray reload.
 func (m *DBManager) RemoveUser(id string) error {
 	if err := m.repo.Remove(context.Background(), id); err != nil {
@@ -116,12 +139,46 @@ func (m *DBManager) RemoveUser(id string) error {
 	return nil
 }
 
+// EnableUser restores a disabled user and triggers an Xray reload.
+func (m *DBManager) EnableUser(id string) error {
+	if err := m.repo.Enable(context.Background(), id); err != nil {
+		return err
+	}
+	if err := m.refresh(context.Background()); err != nil {
+		m.log.Warn("db refresh after EnableUser failed", "err", err)
+	}
+	m.notify()
+	return nil
+}
+
+// RotateUUID reissues a user's UUID and triggers an Xray reload.
+func (m *DBManager) RotateUUID(id string) (string, error) {
+	newUUID, err := m.repo.RotateUUID(context.Background(), id)
+	if err != nil {
+		return "", err
+	}
+	if err := m.refresh(context.Background()); err != nil {
+		m.log.Warn("db refresh after RotateUUID failed", "err", err)
+	}
+	m.notify()
+	return newUUID, nil
+}
+
 // List returns a copy of the cached user list (non-blocking).
 func (m *DBManager) List() []User {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := make([]User, len(m.cache))
-	copy(out, m.cache)
+	out := make([]User, len(m.cacheActive))
+	copy(out, m.cacheActive)
+	return out
+}
+
+// ListAll returns both active and disabled users.
+func (m *DBManager) ListAll() []User {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]User, len(m.cacheAll))
+	copy(out, m.cacheAll)
 	return out
 }
 

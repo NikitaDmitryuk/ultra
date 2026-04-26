@@ -29,6 +29,10 @@
     </div>
   </div>
   <div id="stats-loader" class="loader">Загрузка…</div>
+  <div class="card">
+    <div class="card-title">Состояние узлов</div>
+    <div id="health-status" class="diag-status">Проверка…</div>
+  </div>
   <div class="card" id="chart-history-card" style="display:none">
     <div class="card-title">Трафик по месяцам</div>
     <canvas id="chart-monthly" height="180"></canvas>
@@ -43,6 +47,17 @@
   <div class="screen-header">
     <span class="screen-title">Пользователи</span>
     <button class="btn" style="width:auto;padding:8px 14px;font-size:13px" onclick="showAddUser()">+ Добавить</button>
+  </div>
+  <label class="form-label" style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+    <input id="users-show-disabled" type="checkbox" onchange="renderUsers(usersCache)">
+    Показывать отключённых
+  </label>
+  <div class="detail-month-row" style="margin-bottom:10px">
+    <input class="form-input" id="users-search" type="text" placeholder="Поиск по имени или заметке" oninput="renderUsers(usersCache)">
+    <label class="form-label" style="display:flex;align-items:center;gap:6px;white-space:nowrap;margin:0">
+      <input id="users-only-suspicious" type="checkbox" onchange="renderUsers(usersCache)">
+      Подозрительные
+    </label>
   </div>
   <div id="users-loader" class="loader">Загрузка…</div>
   <div id="users-list"></div>
@@ -65,11 +80,55 @@
 <div id="screen-user-detail" class="screen">
   <div class="screen-header">
     <button class="back-btn" onclick="showScreen('users')">← Назад</button>
-    <span class="screen-title" id="detail-name"></span>
+    <div class="detail-title-wrap">
+      <span class="screen-title" id="detail-name"></span>
+      <button class="icon-btn" id="detail-edit-btn" onclick="beginRenameUser()" title="Переименовать">✎</button>
+    </div>
+  </div>
+  <div class="card" id="detail-rename-card" style="display:none">
+    <div class="form-group" style="margin-bottom:8px">
+      <label class="form-label" for="detail-rename-input">Имя клиента</label>
+      <input class="form-input" id="detail-rename-input" type="text" autocomplete="off">
+    </div>
+    <div class="detail-actions-row">
+      <button class="btn secondary" onclick="cancelRenameUser()">Отмена</button>
+      <button class="btn" onclick="saveRenameUser()">Сохранить</button>
+    </div>
   </div>
   <div class="card">
     <div class="card-title">Статистика (текущий месяц)</div>
     <div id="detail-traffic" style="font-size:22px;font-weight:700">—</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Трафик по месяцам</div>
+    <div class="detail-month-row">
+      <input class="form-input" id="detail-month-input" type="month">
+      <button class="btn secondary" style="width:auto;padding:10px 14px" onclick="loadCurrentUserTrafficByMonth()">Обновить</button>
+    </div>
+    <canvas id="detail-traffic-chart" height="180"></canvas>
+  </div>
+  <div class="card">
+    <div class="card-title">Заметка администратора</div>
+    <textarea id="detail-note-input" class="form-input" rows="3" placeholder="Примечание по клиенту"></textarea>
+    <div class="form-label" id="detail-note-status" style="margin-top:6px">—</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Подозрительная активность</div>
+    <div id="detail-leak-summary" class="diag-status">Загрузка…</div>
+    <div id="detail-leak-signals" class="diag-list empty" style="margin-top:10px">Нет сигналов.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Concurrent IPs timeline</div>
+    <div class="detail-month-row">
+      <select id="detail-connections-window" class="form-input" onchange="loadCurrentUserConnectionsChart()">
+        <option value="1h">1ч</option>
+        <option value="24h" selected>24ч</option>
+        <option value="7d">7д</option>
+        <option value="30d">30д</option>
+      </select>
+      <button class="btn secondary" style="width:auto;padding:10px 14px" onclick="loadCurrentUserConnectionsChart()">Обновить</button>
+    </div>
+    <canvas id="detail-connections-chart" height="180"></canvas>
   </div>
   <div class="card">
     <div class="card-title">Конфигурация</div>
@@ -78,7 +137,29 @@
     <div class="config-uri" id="detail-vless-uri">Загрузка…</div>
   </div>
   <div style="margin-top:8px">
-    <button class="btn danger" onclick="deleteCurrentUser()">Удалить пользователя</button>
+    <button class="btn" id="detail-enable-btn" style="display:none;margin-bottom:8px" onclick="enableCurrentUser()">Включить пользователя</button>
+    <button class="btn secondary" onclick="rotateCurrentUserUUID()" style="margin-bottom:8px">Перевыпустить ключ</button>
+    <button class="btn danger" onclick="deleteCurrentUser()">Отключить пользователя</button>
+  </div>
+</div>
+
+<div id="screen-diag" class="screen">
+  <div class="screen-header">
+    <span class="screen-title">Диагностика</span>
+    <button class="btn" style="width:auto;padding:8px 14px;font-size:13px" onclick="runProbe()">Замерить</button>
+  </div>
+  <div class="card">
+    <div class="card-title">Bridge ↔ Exit probe</div>
+    <div id="diag-probe-status" class="diag-status">Нет замеров.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Последние сессии latency</div>
+    <div id="diag-loader" class="loader" style="padding:16px;display:none">Загрузка…</div>
+    <div id="diag-sessions-list" class="diag-list empty">Пока нет данных.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Последние алерты</div>
+    <div id="diag-alerts-list" class="diag-list empty">Пока нет данных.</div>
   </div>
 </div>
 
@@ -101,6 +182,21 @@
     <div class="card-title">Текущий администратор</div>
     <div id="settings-me">—</div>
   </div>
+  <div class="card">
+    <div class="card-title">Администраторы</div>
+    <div id="settings-admins-list" class="diag-list empty">Загрузка…</div>
+  </div>
+</div>
+
+<div id="screen-history" class="screen">
+  <div class="screen-header">
+    <span class="screen-title">История</span>
+    <button class="btn" style="width:auto;padding:8px 14px;font-size:13px" onclick="loadAuditHistory()">Обновить</button>
+  </div>
+  <div class="card">
+    <div class="card-title">Действия админов</div>
+    <div id="history-list" class="diag-list empty">Загрузка…</div>
+  </div>
 </div>
 
 <!-- ── Bottom navigation ──────────────────────────────────────────── -->
@@ -116,6 +212,14 @@
   <button class="nav-btn" data-screen="settings" onclick="switchTab('settings', this)">
     <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
     Настройки
+  </button>
+  <button class="nav-btn" data-screen="diag" onclick="switchTab('diag', this)">
+    <svg viewBox="0 0 24 24"><path d="M3 4h18v2H3zm2 4h4v10H5zm5 4h4v6h-4zm5-6h4v12h-4z"/></svg>
+    Диагностика
+  </button>
+  <button class="nav-btn" data-screen="history" onclick="switchTab('history', this)">
+    <svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 109 9h-2a7 7 0 11-7-7V3zm1 5h-2v6l5.25 3.15 1-1.64-4.25-2.51z"/></svg>
+    История
   </button>
 </nav>
 

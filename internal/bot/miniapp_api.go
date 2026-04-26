@@ -6,9 +6,11 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,11 +27,24 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/me", b.handleMe)
 	mux.HandleFunc("GET /api/users", b.handleListUsers)
 	mux.HandleFunc("POST /api/users", b.handleCreateUser)
+	mux.HandleFunc("PATCH /api/users/{uuid}", b.handlePatchUser)
 	mux.HandleFunc("DELETE /api/users/{uuid}", b.handleDeleteUser)
+	mux.HandleFunc("POST /api/users/{uuid}/enable", b.handleEnableUser)
+	mux.HandleFunc("POST /api/users/{uuid}/rotate", b.handleRotateUser)
 	mux.HandleFunc("GET /api/users/{uuid}/config", b.handleGetUserConfig)
+	mux.HandleFunc("GET /api/users/{uuid}/traffic", b.handleGetUserTraffic)
+	mux.HandleFunc("GET /api/users/{uuid}/connections", b.handleUserConnections)
+	mux.HandleFunc("GET /api/users/{uuid}/leak", b.handleUserLeak)
 	mux.HandleFunc("GET /api/stats", b.handleStats)
 	mux.HandleFunc("GET /api/stats/history", b.handleStatsHistory)
+	mux.HandleFunc("GET /api/health", b.handleHealth)
+	mux.HandleFunc("GET /api/diag/probe", b.handleDiagProbe)
+	mux.HandleFunc("GET /api/diag/sessions", b.handleDiagSessions)
+	mux.HandleFunc("GET /api/alerts/recent", b.handleRecentAlerts)
 	mux.HandleFunc("POST /api/admin/invite", b.handleGenerateInvite)
+	mux.HandleFunc("GET /api/admins", b.handleListAdmins)
+	mux.HandleFunc("POST /api/admins/{telegram_id}/remove", b.handleRemoveAdmin)
+	mux.HandleFunc("GET /api/audit/history", b.handleAuditHistory)
 }
 
 // ── auth middleware ────────────────────────────────────────────────────────────
@@ -101,7 +116,7 @@ func (b *Bot) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Fetch users, monthly traffic, and last-seen from the admin API.
-	users, err := b.adminGet(r.Context(), "/v1/users")
+	users, err := b.adminGet(r.Context(), "/v1/users?include_disabled=1")
 	if err != nil {
 		b.log.Error("admin GET /v1/users", "err", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
@@ -167,7 +182,8 @@ func (b *Bot) handleListUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Bot) handleCreateUser(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.mustAdmin(w, r); !ok {
+	actx, ok := b.mustAdmin(w, r)
+	if !ok {
 		return
 	}
 	var body map[string]string
@@ -190,10 +206,12 @@ func (b *Bot) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_, _ = w.Write(resp)
+	b.auditAction(r.Context(), actx.user.ID, "user_create", nil, map[string]any{"name": name})
 }
 
 func (b *Bot) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.mustAdmin(w, r); !ok {
+	actx, ok := b.mustAdmin(w, r)
+	if !ok {
 		return
 	}
 	uuid := r.PathValue("uuid")
@@ -207,6 +225,232 @@ func (b *Bot) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+	b.auditAction(r.Context(), actx.user.ID, "user_disable", &uuid, nil)
+}
+
+func (b *Bot) handleEnableUser(w http.ResponseWriter, r *http.Request) {
+	actx, ok := b.mustAdmin(w, r)
+	if !ok {
+		return
+	}
+	uuid := r.PathValue("uuid")
+	if uuid == "" {
+		http.Error(w, "uuid required", http.StatusBadRequest)
+		return
+	}
+	if _, err := b.adminPost(r.Context(), "/v1/users/"+uuid+"/enable", nil); err != nil {
+		var apiErr *adminAPIError
+		if errors.As(err, &apiErr) {
+			http.Error(w, apiErr.body, apiErr.code)
+			return
+		}
+		b.log.Error("admin POST /v1/users/{uuid}/enable", "uuid", uuid, "err", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+	b.auditAction(r.Context(), actx.user.ID, "user_enable", &uuid, nil)
+}
+
+func (b *Bot) handleRotateUser(w http.ResponseWriter, r *http.Request) {
+	actx, ok := b.mustAdmin(w, r)
+	if !ok {
+		return
+	}
+	uuid := r.PathValue("uuid")
+	if uuid == "" {
+		http.Error(w, "uuid required", http.StatusBadRequest)
+		return
+	}
+	resp, err := b.adminPost(r.Context(), "/v1/users/"+uuid+"/rotate", nil)
+	if err != nil {
+		var apiErr *adminAPIError
+		if errors.As(err, &apiErr) {
+			http.Error(w, apiErr.body, apiErr.code)
+			return
+		}
+		b.log.Error("admin POST /v1/users/{uuid}/rotate", "uuid", uuid, "err", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(resp)
+	b.auditAction(r.Context(), actx.user.ID, "user_rotate", &uuid, nil)
+}
+
+// handlePatchUser proxies partial-update to the admin API.
+// Accepts JSON body {"name": "...", "note": "..."} — all fields optional.
+func (b *Bot) handlePatchUser(w http.ResponseWriter, r *http.Request) {
+	actx, ok := b.mustAdmin(w, r)
+	if !ok {
+		return
+	}
+	uuid := r.PathValue("uuid")
+	if uuid == "" {
+		http.Error(w, "uuid required", http.StatusBadRequest)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	resp, err := b.adminPatch(r.Context(), "/v1/users/"+uuid, body)
+	if err != nil {
+		var apiErr *adminAPIError
+		if errors.As(err, &apiErr) {
+			http.Error(w, apiErr.body, apiErr.code)
+			return
+		}
+		b.log.Error("admin PATCH /v1/users", "uuid", uuid, "err", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(resp)
+	b.auditAction(r.Context(), actx.user.ID, "user_patch", &uuid, map[string]any{"body": string(body)})
+}
+
+// handleGetUserTraffic proxies the per-user monthly traffic endpoint.
+// Accepts ?month=YYYY-MM (default: current month).
+func (b *Bot) handleGetUserTraffic(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	uuid := r.PathValue("uuid")
+	if uuid == "" {
+		http.Error(w, "uuid required", http.StatusBadRequest)
+		return
+	}
+	path := "/v1/users/" + uuid + "/traffic"
+	if m := r.URL.Query().Get("month"); m != "" {
+		path += "?month=" + m
+	}
+	resp, err := b.adminGet(r.Context(), path)
+	if err != nil {
+		b.log.Error("admin GET user traffic", "uuid", uuid, "err", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(resp)
+}
+
+func (b *Bot) handleUserConnections(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	if b.teleRepo == nil {
+		http.Error(w, "db backend is disabled", http.StatusNotImplemented)
+		return
+	}
+	uuid := r.PathValue("uuid")
+	if uuid == "" {
+		http.Error(w, "uuid required", http.StatusBadRequest)
+		return
+	}
+	window, err := parseWindow(r.URL.Query().Get("window"))
+	if err != nil {
+		http.Error(w, "bad window", http.StatusBadRequest)
+		return
+	}
+	bucket := r.URL.Query().Get("bucket")
+	if bucket == "" {
+		bucket = defaultBucketForWindow(window)
+	}
+	points, err := b.teleRepo.ConnectionsByBuckets(r.Context(), uuid, window, bucket)
+	if err != nil {
+		b.log.Error("load connection buckets", "uuid", uuid, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{
+		"window": window.String(),
+		"bucket": bucket,
+		"points": points,
+	})
+}
+
+func (b *Bot) handleUserLeak(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	if b.teleRepo == nil {
+		http.Error(w, "db backend is disabled", http.StatusNotImplemented)
+		return
+	}
+	uuid := r.PathValue("uuid")
+	if uuid == "" {
+		http.Error(w, "uuid required", http.StatusBadRequest)
+		return
+	}
+	concurrent, err := b.teleRepo.CountConcurrentIPs(r.Context(), uuid, time.Minute)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	unique24h, err := b.teleRepo.CountUniqueIPs(r.Context(), uuid, 24*time.Hour)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	limit := 10
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, _ := strconv.Atoi(v); n > 0 && n <= 100 {
+			limit = n
+		}
+	}
+	signals, err := b.teleRepo.RecentUserLeakSignals(r.Context(), uuid, limit)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{
+		"concurrent_ips": concurrent,
+		"unique_ips_24h": unique24h,
+		"signals":        signals,
+		"suspicious":     concurrent > defaultLeakMaxConcurrent || unique24h > defaultLeakMaxUnique24h,
+	})
+}
+
+// handleDiagProbe proxies a one-shot bridge↔exit TCP latency probe.
+func (b *Bot) handleDiagProbe(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	resp, err := b.adminGet(r.Context(), "/v1/latency/probe")
+	if err != nil {
+		b.log.Error("admin GET /v1/latency/probe", "err", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(resp)
+}
+
+// handleDiagSessions proxies the recent per-connection latency traces.
+// 501 from upstream is forwarded as-is so the UI can hint how to enable tracing.
+func (b *Bot) handleDiagSessions(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	path := "/v1/latency/sessions"
+	if l := r.URL.Query().Get("limit"); l != "" {
+		path += "?limit=" + l
+	}
+	resp, err := b.adminGet(r.Context(), path)
+	if err != nil {
+		var apiErr *adminAPIError
+		if errors.As(err, &apiErr) {
+			http.Error(w, apiErr.body, apiErr.code)
+			return
+		}
+		b.log.Error("admin GET /v1/latency/sessions", "err", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(resp)
 }
 
 func (b *Bot) handleGetUserConfig(w http.ResponseWriter, r *http.Request) {
@@ -279,8 +523,23 @@ func (b *Bot) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-func (b *Bot) handleGenerateInvite(w http.ResponseWriter, r *http.Request) {
+func (b *Bot) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	data, err := b.adminGet(r.Context(), "/v1/health")
+	if err != nil {
+		b.log.Error("admin GET /v1/health", "err", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
+}
+
+func (b *Bot) handleGenerateInvite(w http.ResponseWriter, r *http.Request) {
+	actx, ok := b.mustAdmin(w, r)
+	if !ok {
 		return
 	}
 	token, err := generateToken()
@@ -295,6 +554,106 @@ func (b *Bot) handleGenerateInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]string{"token": token})
+	b.auditAction(r.Context(), actx.user.ID, "admin_invite_create", nil, nil)
+}
+
+func (b *Bot) handleRecentAlerts(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	if b.teleRepo == nil {
+		http.Error(w, "notifications backend is disabled", http.StatusNotImplemented)
+		return
+	}
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 && n <= 100 {
+			limit = n
+		}
+	}
+	rows, err := b.teleRepo.RecentNotifications(r.Context(), limit)
+	if err != nil {
+		b.log.Error("recent alerts", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, rows)
+}
+
+func (b *Bot) handleListAdmins(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	admins, err := b.adminRepo.ListAdmins(r.Context())
+	if err != nil {
+		b.log.Error("list admins", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, admins)
+}
+
+func (b *Bot) handleRemoveAdmin(w http.ResponseWriter, r *http.Request) {
+	actx, ok := b.mustAdmin(w, r)
+	if !ok {
+		return
+	}
+	idRaw := strings.TrimSpace(r.PathValue("telegram_id"))
+	id, err := strconv.ParseInt(idRaw, 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid telegram_id", http.StatusBadRequest)
+		return
+	}
+	if id == actx.user.ID {
+		http.Error(w, "cannot remove yourself", http.StatusBadRequest)
+		return
+	}
+	admins, err := b.adminRepo.ListAdmins(r.Context())
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if len(admins) <= 1 {
+		http.Error(w, "cannot remove last admin", http.StatusBadRequest)
+		return
+	}
+	if err := b.adminRepo.RemoveAdmin(r.Context(), id); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	b.auditAction(r.Context(), actx.user.ID, "admin_remove", nil, map[string]any{"removed_telegram_id": id})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (b *Bot) handleAuditHistory(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	if b.teleRepo == nil {
+		http.Error(w, "db backend is disabled", http.StatusNotImplemented)
+		return
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, _ := strconv.Atoi(v); n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+	var tgID *int64
+	if v := strings.TrimSpace(r.URL.Query().Get("telegram_id")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			tgID = &n
+		}
+	}
+	action := strings.TrimSpace(r.URL.Query().Get("action"))
+	rows, err := b.teleRepo.ListAdminAudit(r.Context(), limit, tgID, action)
+	if err != nil {
+		b.log.Error("audit history", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, rows)
 }
 
 // ── Admin API client helpers ──────────────────────────────────────────────────
@@ -344,6 +703,28 @@ func (b *Bot) adminPost(ctx context.Context, path string, payload []byte) ([]byt
 	return body, nil
 }
 
+func (b *Bot) adminPatch(ctx context.Context, path string, payload []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, b.adminAPIURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+b.adminAPIToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := adminHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		return nil, &adminAPIError{code: resp.StatusCode, body: string(body)}
+	}
+	return body, nil
+}
+
 func (b *Bot) adminDelete(ctx context.Context, path string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, b.adminAPIURL+path, nil)
 	if err != nil {
@@ -373,7 +754,53 @@ func (e *adminAPIError) Error() string {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+func (b *Bot) auditAction(
+	ctx context.Context,
+	telegramID int64,
+	action string,
+	targetUUID *string,
+	payload map[string]any,
+) {
+	if b.teleRepo == nil {
+		return
+	}
+	if err := b.teleRepo.LogAdminAction(ctx, telegramID, action, targetUUID, payload); err != nil {
+		b.log.Warn("write admin audit log failed", "action", action, "err", err)
+	}
+}
+
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func parseWindow(s string) (time.Duration, error) {
+	if s == "" {
+		return 24 * time.Hour, nil
+	}
+	switch s {
+	case "1h":
+		return time.Hour, nil
+	case "24h":
+		return 24 * time.Hour, nil
+	case "7d":
+		return 7 * 24 * time.Hour, nil
+	case "30d":
+		return 30 * 24 * time.Hour, nil
+	default:
+		return 0, errors.New("unsupported window")
+	}
+}
+
+func defaultBucketForWindow(window time.Duration) string {
+	switch {
+	case window <= 24*time.Hour:
+		return "5m"
+	case window <= 7*24*time.Hour:
+		return "1h"
+	case window <= 30*24*time.Hour:
+		return "6h"
+	default:
+		return "1d"
+	}
 }

@@ -22,6 +22,7 @@ type Bot struct {
 	api        *tgbotapi.BotAPI
 	botToken   string
 	adminRepo  *db.BotAdminRepo
+	teleRepo   *db.TelegramRepo
 	miniAppURL string // public HTTPS URL of the Mini App (e.g. https://bot.example.com:8444)
 
 	// Admin API proxy settings (ultra-relay admin HTTP API on loopback)
@@ -34,7 +35,12 @@ type Bot struct {
 // New creates a Bot connected to the Telegram Bot API.
 // adminAPIURL is the base URL of the ultra-relay admin API (e.g. "http://127.0.0.1:8443").
 // miniAppURL is the public HTTPS URL serving the embedded web frontend.
-func New(botToken, adminAPIURL, adminAPIToken, miniAppURL string, adminRepo *db.BotAdminRepo, log *slog.Logger) (*Bot, error) {
+func New(
+	botToken, adminAPIURL, adminAPIToken, miniAppURL string,
+	adminRepo *db.BotAdminRepo,
+	teleRepo *db.TelegramRepo,
+	log *slog.Logger,
+) (*Bot, error) {
 	if botToken == "" {
 		return nil, fmt.Errorf("bot: empty bot token")
 	}
@@ -50,6 +56,7 @@ func New(botToken, adminAPIURL, adminAPIToken, miniAppURL string, adminRepo *db.
 		api:           api,
 		botToken:      botToken,
 		adminRepo:     adminRepo,
+		teleRepo:      teleRepo,
 		miniAppURL:    miniAppURL,
 		adminAPIURL:   adminAPIURL,
 		adminAPIToken: adminAPIToken,
