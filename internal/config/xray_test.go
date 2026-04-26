@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
@@ -74,6 +75,16 @@ func TestBuildBridgeEmptyClients(t *testing.T) {
 	clients, _ := settings["clients"].([]any)
 	if clients == nil || len(clients) != 0 {
 		t.Fatalf("expected empty clients, got %v", clients)
+	}
+}
+
+func TestSocks5ClientURI(t *testing.T) {
+	u := Socks5ClientURI("vpn.example.com", 1080, "user1", "p@ss/word")
+	if u == "" {
+		t.Fatal("empty uri")
+	}
+	if !strings.HasPrefix(u, "socks5://") {
+		t.Fatalf("want socks5 scheme: %s", u)
 	}
 }
 
@@ -200,12 +211,19 @@ func TestBuildBridgeSOCKS5SecondInbound(t *testing.T) {
 		t.Fatal(err)
 	}
 	inbounds, _ := root["inbounds"].([]any)
-	if len(inbounds) != 2 {
-		t.Fatalf("expected 2 inbounds, got %d", len(inbounds))
+	if len(inbounds) < 2 {
+		t.Fatalf("expected at least 2 inbounds, got %d", len(inbounds))
 	}
-	socks, _ := inbounds[1].(map[string]any)
-	if socks["protocol"] != "socks" {
-		t.Fatalf("second inbound: %v", socks["protocol"])
+	var socks map[string]any
+	for _, ib := range inbounds {
+		m, _ := ib.(map[string]any)
+		if m != nil && m["protocol"] == "socks" {
+			socks = m
+			break
+		}
+	}
+	if socks == nil {
+		t.Fatalf("socks inbound not found among %d inbounds", len(inbounds))
 	}
 	if socks["listen"] != "127.0.0.1" {
 		t.Fatalf("socks listen: got %#v want 127.0.0.1", socks["listen"])
@@ -245,9 +263,22 @@ func TestBuildBridgeSOCKS5DefaultListenNotPublicVLESSBind(t *testing.T) {
 		t.Fatal(err)
 	}
 	inbounds, _ := root["inbounds"].([]any)
-	socks, _ := inbounds[1].(map[string]any)
+	var socks map[string]any
+	for _, ib := range inbounds {
+		m, _ := ib.(map[string]any)
+		if m != nil && m["protocol"] == "socks" {
+			socks = m
+			break
+		}
+	}
+	if socks == nil {
+		t.Fatalf("socks inbound not found")
+	}
 	if socks["listen"] != "127.0.0.1" {
 		t.Fatalf("socks listen with public vless bind: got %#v want 127.0.0.1", socks["listen"])
+	}
+	if socks["tag"] != "socks-in" {
+		t.Fatalf("legacy socks tag: got %#v", socks["tag"])
 	}
 	vless, _ := inbounds[0].(map[string]any)
 	if vless["listen"] != "0.0.0.0" {
@@ -298,5 +329,77 @@ func TestBuildBridgeGRPCJSON(t *testing.T) {
 	}
 	if grpcCfg["multiMode"] != true {
 		t.Fatalf("expected multiMode true, got %v", grpcCfg["multiMode"])
+	}
+}
+
+func TestBuildBridgePerClientSOCKS5Inbound(t *testing.T) {
+	port := 10850
+	spec := &Spec{
+		Role:          RoleBridge,
+		ListenAddress: "127.0.0.1",
+		VLESSPort:     10443,
+		PublicHost:    "example.com",
+		DevMode:       true,
+		SplitRouting:  BoolPtr(false),
+		SOCKS5: &BridgeSOCKS5Spec{
+			Enabled:  true,
+			Port:     1080,
+			Username: "legacy",
+			Password: "legacy-secret",
+		},
+		Exit: ExitTunnelSpec{
+			Address:    "10.0.0.2",
+			Port:       443,
+			TunnelUUID: "11111111-2222-3333-4444-555555555555",
+		},
+	}
+	s, err := mimic.New("apijson")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	users := []auth.User{
+		{UUID: uid, Name: "c1", Kind: "socks5", IsActive: true,
+			SocksUsername: uid, SocksPassword: "pw", SocksPort: &port},
+	}
+	b, err := BuildBridgeXRayJSON(spec, users, s, "warning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
+	}
+	inbounds, _ := root["inbounds"].([]any)
+	var legacy, perClient map[string]any
+	for _, ib := range inbounds {
+		m, _ := ib.(map[string]any)
+		if m == nil || m["protocol"] != "socks" {
+			continue
+		}
+		switch m["tag"] {
+		case "socks-in":
+			legacy = m
+		case "socks-" + uid:
+			perClient = m
+		}
+	}
+	if legacy == nil {
+		t.Fatal("legacy socks-in missing")
+	}
+	if perClient == nil {
+		t.Fatal("per-client socks inbound missing")
+	}
+	if int(perClient["port"].(float64)) != port {
+		t.Fatalf("per-client port: got %v want %d", perClient["port"], port)
+	}
+	vless, _ := inbounds[0].(map[string]any)
+	settings, _ := vless["settings"].(map[string]any)
+	clients, _ := settings["clients"].([]any)
+	for _, c := range clients {
+		cm, _ := c.(map[string]any)
+		if cm["id"] == uid {
+			t.Fatalf("socks5 user must not appear in VLESS clients: %#v", clients)
+		}
 	}
 }

@@ -167,11 +167,6 @@ func main() {
 		40000,
 		"local SOCKS5 port for WARP proxy on exit node (default 40000)",
 	)
-	traceLatency := flag.Bool(
-		"trace-latency",
-		false,
-		"enable per-connection latency tracing on the bridge (GET /v1/latency/sessions on admin API)",
-	)
 	transportFlag := flag.String(
 		"transport",
 		"grpc",
@@ -418,7 +413,6 @@ func main() {
 		AdminListen:        "127.0.0.1:8443",
 		PublicHost:         pub,
 		DevMode:            false,
-		TraceLatency:       *traceLatency,
 		Reality:            realitySpec,
 		Exit: config.ExitTunnelSpec{
 			Address:    exitDialAddr,

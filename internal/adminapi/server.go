@@ -18,7 +18,8 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/db"
 	"github.com/NikitaDmitryuk/ultra/internal/probe"
-	"github.com/NikitaDmitryuk/ultra/internal/trace"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // maxAdminJSONBody caps JSON bodies on mutating Admin API routes (DoS on loopback via SSH tunnel).
@@ -35,26 +36,27 @@ type TrafficQuerier interface {
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
 type Server struct {
-	log        *slog.Logger
-	users      auth.UserManager
-	traffic    TrafficQuerier // nil when DB is not configured
-	traceStore *trace.Store   // nil when trace_latency is disabled
-	spec       *config.Spec
-	mux        *http.ServeMux
-	srv        *http.Server
-	lim        *visitorLimiter
-	tokenH     [32]byte
+	log     *slog.Logger
+	users   auth.UserManager
+	traffic TrafficQuerier // nil when DB is not configured
+	spec    *config.Spec
+	// statPeek reads a cumulative Xray stats counter by name (optional; used for legacy SOCKS5 traffic).
+	statPeek func(string) int64
+	mux      *http.ServeMux
+	srv      *http.Server
+	lim      *visitorLimiter
+	tokenH   [32]byte
 }
 
 // NewServer validates listen address is loopback.
-// traffic and traceStore may be nil when those features are not configured.
+// traffic may be nil when the DB backend is not configured.
 func NewServer(
 	listen, token string,
 	users auth.UserManager,
 	traffic TrafficQuerier,
-	traceStore *trace.Store,
 	spec *config.Spec,
 	log *slog.Logger,
+	statPeek func(string) int64,
 ) (*Server, error) {
 	if token == "" {
 		return nil, errors.New("adminapi: empty admin token")
@@ -70,14 +72,14 @@ func NewServer(
 		log = slog.Default()
 	}
 	s := &Server{
-		log:        log,
-		users:      users,
-		traffic:    traffic,
-		traceStore: traceStore,
-		spec:       spec,
-		mux:        http.NewServeMux(),
-		lim:        newVisitorLimiter(30, 60, 256),
-		tokenH:     sha256.Sum256([]byte(token)),
+		log:      log,
+		users:    users,
+		traffic:  traffic,
+		spec:     spec,
+		statPeek: statPeek,
+		mux:      http.NewServeMux(),
+		lim:      newVisitorLimiter(30, 60, 256),
+		tokenH:   sha256.Sum256([]byte(token)),
 	}
 	if err := s.routes(); err != nil {
 		return nil, err
@@ -118,14 +120,16 @@ func (s *Server) routes() error {
 	s.mux.HandleFunc("GET /v1/users", s.handleListUsers)
 	s.mux.HandleFunc("PATCH /v1/users/{uuid}", s.handlePatchUser)
 	s.mux.HandleFunc("DELETE /v1/users/{uuid}", s.handleDeleteUser)
+	s.mux.HandleFunc("DELETE /v1/users/{uuid}/purge", s.handlePurgeUser)
+	s.mux.HandleFunc("POST /v1/users/{uuid}/enable", s.handleEnableUser)
+	s.mux.HandleFunc("POST /v1/users/{uuid}/rotate", s.handleRotateUser)
 	s.mux.HandleFunc("POST /v1/users", s.handlePostUser)
 	s.mux.HandleFunc("GET /v1/users/{uuid}/client", s.handleGetClient)
 	s.mux.HandleFunc("GET /v1/users/{uuid}/traffic", s.handleGetUserTraffic)
 	s.mux.HandleFunc("GET /v1/traffic/monthly", s.handleGetMonthlyTraffic)
 	s.mux.HandleFunc("GET /v1/traffic/history", s.handleGetTrafficHistory)
 	s.mux.HandleFunc("GET /v1/traffic/last-seen", s.handleGetLastSeen)
-	s.mux.HandleFunc("GET /v1/latency/probe", s.handleLatencyProbe)
-	s.mux.HandleFunc("GET /v1/latency/sessions", s.handleLatencySessions)
+	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
 	return nil
 }
 
@@ -155,6 +159,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 type postUserReq struct {
 	Name string `json:"name"`
+	Kind string `json:"kind"` // "vless" (default) or "socks5"
 }
 
 type postUserResp struct {
@@ -175,7 +180,19 @@ func (s *Server) handlePostUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad name", http.StatusBadRequest)
 		return
 	}
-	u, err := s.users.AddUser(name)
+	kind := strings.TrimSpace(strings.ToLower(body.Kind))
+	if kind == "" {
+		kind = "vless"
+	}
+	u, err := s.users.AddUser(kind, name)
+	if errors.Is(err, auth.ErrInvalidUserKind) {
+		http.Error(w, "invalid kind", http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, auth.ErrSocksPortsExhausted) {
+		http.Error(w, "no free socks5 port", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		s.log.Error("add user", "err", err)
 		http.Error(w, "internal", http.StatusInternalServerError)
@@ -186,9 +203,14 @@ func (s *Server) handlePostUser(w http.ResponseWriter, r *http.Request) {
 }
 
 type getClientResp struct {
-	XrayClientJSON   map[string]any `json:"xray_client_json"`
-	VLESSURI         string         `json:"vless_uri"`
+	XrayClientJSON   map[string]any `json:"xray_client_json,omitempty"`
+	VLESSURI         string         `json:"vless_uri,omitempty"`
 	FullConfigBase64 string         `json:"full_xray_config_base64,omitempty"`
+	Socks5URI        string         `json:"socks5_uri,omitempty"`
+	Host             string         `json:"host,omitempty"`
+	Port             int            `json:"port,omitempty"`
+	Username         string         `json:"username,omitempty"`
+	Password         string         `json:"password,omitempty"`
 }
 
 func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
@@ -201,9 +223,40 @@ func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "uuid", http.StatusBadRequest)
 		return
 	}
+	if id == auth.LegacySocksUserUUID {
+		s5 := s.spec.SOCKS5
+		if s5 == nil || !s5.Enabled {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		host := strings.TrimSpace(s.spec.PublicHost)
+		uri := config.Socks5ClientURI(host, s5.Port, s5.Username, s5.Password)
+		resp := getClientResp{
+			Socks5URI: uri, Host: host, Port: s5.Port,
+			Username: s5.Username, Password: s5.Password,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
 	u, ok := s.users.Lookup(id)
 	if !ok {
 		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if u.Kind == "socks5" {
+		if u.SocksPort == nil || *u.SocksPort <= 0 || u.SocksUsername == "" || u.SocksPassword == "" {
+			http.Error(w, "incomplete socks5 user", http.StatusInternalServerError)
+			return
+		}
+		host := strings.TrimSpace(s.spec.PublicHost)
+		uri := config.Socks5ClientURI(host, *u.SocksPort, u.SocksUsername, u.SocksPassword)
+		resp := getClientResp{
+			Socks5URI: uri, Host: host, Port: *u.SocksPort,
+			Username: u.SocksUsername, Password: u.SocksPassword,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
 		return
 	}
 	exp, err := config.BuildClientExport(s.spec, u)
@@ -232,15 +285,32 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
+	includeDisabled := false
+	switch strings.TrimSpace(strings.ToLower(r.URL.Query().Get("include_disabled"))) {
+	case "1", "true", "yes", "y":
+		includeDisabled = true
+	}
 	users := s.users.List()
+	if includeDisabled {
+		users = s.users.ListAll()
+	}
+	if s.spec.SOCKS5 != nil && s.spec.SOCKS5.Enabled {
+		users = append([]auth.User{{
+			UUID:     auth.LegacySocksUserUUID,
+			Name:     "Legacy SOCKS5",
+			Kind:     "socks5",
+			IsActive: true,
+		}}, users...)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(users)
 }
 
 type patchUserReq struct {
-	Name string `json:"name"`
+	Name *string `json:"name"`
 }
 
+// handlePatchUser performs a partial update of a user. Currently only rename is supported.
 func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -251,11 +321,19 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "uuid", http.StatusBadRequest)
 		return
 	}
+	if id == auth.LegacySocksUserUUID {
+		http.Error(w, "protected user", http.StatusConflict)
+		return
+	}
 	var body patchUserReq
 	if !s.decodeAdminJSON(w, r, &body) {
 		return
 	}
-	u, err := s.users.RenameUser(id, body.Name)
+	if body.Name == nil {
+		http.Error(w, "nothing to update", http.StatusBadRequest)
+		return
+	}
+	u, err := s.users.RenameUser(id, *body.Name)
 	if errors.Is(err, auth.ErrUserNotFound) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -285,6 +363,10 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "uuid", http.StatusBadRequest)
 		return
 	}
+	if id == auth.LegacySocksUserUUID {
+		http.Error(w, "protected user", http.StatusConflict)
+		return
+	}
 	if err := s.users.RemoveUser(id); err != nil {
 		if errors.Is(err, auth.ErrUserNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -297,11 +379,11 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleGetUserTraffic returns monthly traffic for a single user.
-// Query param: ?month=YYYY-MM (default: current month).
-func (s *Server) handleGetUserTraffic(w http.ResponseWriter, r *http.Request) {
-	if s.traffic == nil {
-		http.Error(w, "traffic stats require database backend", http.StatusNotImplemented)
+// handlePurgeUser permanently deletes a user (and cascades all their stats).
+// Distinct from soft-delete (DELETE /v1/users/{uuid}) which only flips is_active.
+func (s *Server) handlePurgeUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
 	id := r.PathValue("uuid")
@@ -309,11 +391,144 @@ func (s *Server) handleGetUserTraffic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "uuid", http.StatusBadRequest)
 		return
 	}
+	if id == auth.LegacySocksUserUUID {
+		http.Error(w, "protected user", http.StatusConflict)
+		return
+	}
+	if err := s.users.PurgeUser(id); err != nil {
+		if errors.Is(err, auth.ErrUserNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		s.log.Error("purge user", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleEnableUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.PathValue("uuid")
+	if id == "" {
+		http.Error(w, "uuid", http.StatusBadRequest)
+		return
+	}
+	if id == auth.LegacySocksUserUUID {
+		http.Error(w, "protected user", http.StatusConflict)
+		return
+	}
+	if err := s.users.EnableUser(id); err != nil {
+		if errors.Is(err, auth.ErrUserNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		s.log.Error("enable user", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleRotateUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.PathValue("uuid")
+	if id == "" {
+		http.Error(w, "uuid", http.StatusBadRequest)
+		return
+	}
+	if id == auth.LegacySocksUserUUID {
+		http.Error(w, "protected user", http.StatusConflict)
+		return
+	}
+	u, ok := s.users.Lookup(id)
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if u.Kind == "socks5" {
+		pass, err := s.users.RotateSocksPassword(id)
+		if errors.Is(err, auth.ErrUserNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			s.log.Error("rotate socks password", "err", err)
+			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
+		host := strings.TrimSpace(s.spec.PublicHost)
+		if u.SocksPort == nil {
+			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
+		uri := config.Socks5ClientURI(host, *u.SocksPort, u.SocksUsername, pass)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"socks5_uri": uri, "password": pass})
+		return
+	}
+	newUUID, err := s.users.RotateUUID(id)
+	if errors.Is(err, auth.ErrUserNotFound) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, auth.ErrUnsupportedForKind) {
+		http.Error(w, "unsupported for kind", http.StatusConflict)
+		return
+	}
+	if err != nil {
+		s.log.Error("rotate user UUID", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"uuid": newUUID})
+}
+
+// handleGetUserTraffic returns monthly traffic for a single user.
+// Query param: ?month=YYYY-MM (default: current month).
+func (s *Server) handleGetUserTraffic(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("uuid")
+	if id == "" {
+		http.Error(w, "uuid", http.StatusBadRequest)
+		return
+	}
+	year, month := parseMonthParam(r)
+	if id == auth.LegacySocksUserUUID {
+		if s.spec.SOCKS5 == nil || !s.spec.SOCKS5.Enabled {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		now := time.Now()
+		cy, cm, _ := now.Date()
+		var total db.MonthlyTotal
+		total.UserUUID = auth.LegacySocksUserUUID
+		total.Year, total.Month = year, month
+		if year == cy && int(cm) == month && s.statPeek != nil {
+			tag := config.LegacyBridgeSOCKSInboundTag(s.spec)
+			up := s.statPeek("inbound>>>" + tag + ">>>traffic>>>uplink")
+			down := s.statPeek("inbound>>>" + tag + ">>>traffic>>>downlink")
+			total.UplinkBytes, total.DownlinkBytes = up, down
+			total.TotalBytes = up + down
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(total)
+		return
+	}
+	if s.traffic == nil {
+		http.Error(w, "traffic stats require database backend", http.StatusNotImplemented)
+		return
+	}
 	if _, ok := s.users.Lookup(id); !ok {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	year, month := parseMonthParam(r)
 	total, err := s.traffic.GetMonthlyUser(r.Context(), id, year, month)
 	if err != nil {
 		s.log.Error("get user traffic", "err", err)
@@ -409,70 +624,64 @@ func (s *Server) handleGetLastSeen(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(seen)
 }
 
-// handleLatencyProbe measures bridge→exit TCP round-trip and returns the result as JSON.
-// It is available on bridge role only (exit spec has no Exit.Address/Port set in that direction).
-func (s *Server) handleLatencyProbe(w http.ResponseWriter, r *http.Request) {
+// handleHealth probes bridge and exit connectivity (bridge process, tunnel, exit internet).
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	exitAddr := fmt.Sprintf("%s:%d", s.spec.Exit.Address, s.spec.Exit.Port)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	rtt, err := probe.DialTCP(ctx, exitAddr)
+	type nodeHealth struct {
+		Reachable         bool  `json:"reachable"`
+		InternetOK        bool  `json:"internet_ok"`
+		InternetLatencyMS int64 `json:"internet_latency_ms,omitempty"`
+		TunnelLatencyMS   int64 `json:"tunnel_latency_ms,omitempty"`
+	}
+	type healthResp struct {
+		CheckedAt string     `json:"checked_at"`
+		Bridge    nodeHealth `json:"bridge"`
+		Exit      nodeHealth `json:"exit"`
+	}
+	res := healthResp{
+		CheckedAt: time.Now().UTC().Format(time.RFC3339),
+		Bridge:    nodeHealth{Reachable: true},
+	}
 
-	type probeResult struct {
-		BridgeToExitTCPMs int64  `json:"bridge_to_exit_tcp_ms"`
-		ExitAddr          string `json:"exit_addr"`
-		Error             string `json:"error,omitempty"`
-		MeasuredAt        string `json:"measured_at"`
-	}
-	res := probeResult{
-		ExitAddr:   exitAddr,
-		MeasuredAt: time.Now().UTC().Format(time.RFC3339),
-	}
-	if err != nil {
-		res.Error = err.Error()
-	} else {
-		res.BridgeToExitTCPMs = rtt.Milliseconds()
-	}
+	var g errgroup.Group
+
+	g.Go(func() error {
+		rtt, err := probe.DialTCP(ctx, "1.1.1.1:443")
+		if err != nil {
+			return err
+		}
+		res.Bridge.InternetOK = true
+		res.Bridge.InternetLatencyMS = rtt.Milliseconds()
+		return nil
+	})
+
+	g.Go(func() error {
+		rtt, err := probe.DialTCP(ctx, exitAddr)
+		if err != nil {
+			return err
+		}
+		res.Exit.Reachable = true
+		res.Exit.TunnelLatencyMS = rtt.Milliseconds()
+		return nil
+	})
+
+	g.Go(func() error {
+		rtt, err := probe.DialTCP(ctx, config.HealthProbeListenIPPort)
+		if err != nil {
+			return err
+		}
+		res.Exit.InternetOK = true
+		res.Exit.InternetLatencyMS = rtt.Milliseconds()
+		return nil
+	})
+
+	_ = g.Wait()
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(res)
-}
-
-// handleLatencySessions returns recent per-connection timing traces.
-// Returns 501 when trace_latency is not enabled in spec.
-func (s *Server) handleLatencySessions(w http.ResponseWriter, r *http.Request) {
-	if s.traceStore == nil {
-		http.Error(w, `trace_latency not enabled — set "trace_latency": true in spec.json`, http.StatusNotImplemented)
-		return
-	}
-	limit := 20
-	if v := r.URL.Query().Get("limit"); v != "" {
-		var n int
-		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 && n <= 200 {
-			limit = n
-		}
-	}
-
-	sessions := s.traceStore.Recent(limit)
-
-	type sessionJSON struct {
-		SessionID   uint32           `json:"session_id"`
-		StartedAt   string           `json:"started_at"`
-		Destination string           `json:"destination"`
-		OutboundTag string           `json:"outbound_tag,omitempty"`
-		StagesUS    map[string]int64 `json:"stages_us"`
-	}
-	out := make([]sessionJSON, 0, len(sessions))
-	for _, s := range sessions {
-		out = append(out, sessionJSON{
-			SessionID:   s.ID,
-			StartedAt:   s.StartedAt.UTC().Format(time.RFC3339Nano),
-			Destination: s.Destination,
-			OutboundTag: s.OutboundTag,
-			StagesUS:    s.StageDeltasUS(),
-		})
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(out)
 }
 
 // Start runs the HTTP server (non-TLS).

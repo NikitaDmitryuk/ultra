@@ -1,5 +1,24 @@
 package config
 
+import (
+	"net"
+	"net/url"
+	"strconv"
+)
+
+// Socks5ClientURI builds a socks5:// connection string for clients (RFC-style URL).
+func Socks5ClientURI(host string, port int, username, password string) string {
+	if host == "" || port <= 0 {
+		return ""
+	}
+	u := &url.URL{
+		Scheme: "socks5",
+		User:   url.UserPassword(username, password),
+		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
+	}
+	return u.String()
+}
+
 // BridgeSOCKS5Spec enables a password-authenticated SOCKS5 inbound on the bridge.
 // Traffic uses the same routing rules as VLESS (split to exit or direct).
 type BridgeSOCKS5Spec struct {
@@ -11,6 +30,10 @@ type BridgeSOCKS5Spec struct {
 	Port          int    `json:"port"`
 	Username      string `json:"username"`
 	Password      string `json:"password"`
+	// PortRangeStart/End define TCP ports allocated for per-client SOCKS5 users (kind=socks5).
+	// When zero and socks5.enabled, Validate sets 10810..10899. Must not include Port (legacy inbound).
+	PortRangeStart int `json:"port_range_start,omitempty"`
+	PortRangeEnd   int `json:"port_range_end,omitempty"`
 	// UDP nil or true enables UDP associate (default true). Explicit false disables.
 	UDP *bool `json:"udp,omitempty"`
 }

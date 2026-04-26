@@ -4,8 +4,6 @@ import (
 	"context"
 	"sync"
 
-	"github.com/NikitaDmitryuk/ultra/internal/trace"
-	xraylog "github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/stats"
 )
@@ -14,17 +12,7 @@ import (
 type Runner struct {
 	mu sync.Mutex
 
-	inst       *core.Instance
-	traceStore *trace.Store // nil when tracing is disabled
-}
-
-// SetTraceStore configures a trace store whose LogHandler will be registered
-// as xray's global log handler after every (re)start.
-// Must be called before the first StartJSON / Reload.
-func (r *Runner) SetTraceStore(s *trace.Store) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.traceStore = s
+	inst *core.Instance
 }
 
 // StartJSON parses JSON, starts xray (caller must import distro/all in main).
@@ -40,12 +28,6 @@ func (r *Runner) StartJSON(jsonCfg []byte) error {
 		return err
 	}
 	r.inst = inst
-	// Register the trace log handler AFTER xray has set up its own handler so
-	// ours replaces it. Our handler tees all messages back to stderr, so no
-	// log output is lost.
-	if r.traceStore != nil {
-		xraylog.RegisterHandler(trace.NewLogHandler(r.traceStore))
-	}
 	return nil
 }
 
@@ -94,4 +76,23 @@ func (r *Runner) GetStatsManager() stats.Manager {
 	}
 	sm, _ := f.(stats.Manager)
 	return sm
+}
+
+// PeekCounter returns the current value of a named stats counter without resetting it.
+func (r *Runner) PeekCounter(name string) int64 {
+	sm := r.GetStatsManager()
+	if sm == nil {
+		return 0
+	}
+	c := sm.GetCounter(name)
+	if c == nil {
+		return 0
+	}
+	if v, ok := c.(interface{ Value() int64 }); ok {
+		return v.Value()
+	}
+	if a, ok := c.(interface{ Add(int64) int64 }); ok {
+		return a.Add(0)
+	}
+	return 0
 }

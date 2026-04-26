@@ -92,6 +92,7 @@ func main() {
 	defer database.Close()
 
 	adminRepo := db.NewBotAdminRepo(database)
+	teleRepo := db.NewTelegramRepo(database)
 
 	// ── Mini App URL ──────────────────────────────────────────────────────────
 	miniAppURL := ""
@@ -108,11 +109,12 @@ func main() {
 	}
 
 	// ── Bot ───────────────────────────────────────────────────────────────────
-	b, err := bot.New(botToken, *adminAPIURL, adminToken, miniAppURL, adminRepo, log)
+	b, err := bot.New(botToken, *adminAPIURL, adminToken, miniAppURL, adminRepo, teleRepo, log)
 	if err != nil {
 		log.Error("create bot", "err", err)
 		os.Exit(1)
 	}
+	b.StartWorkers(ctx)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	srv := &http.Server{Handler: b.Handler()}

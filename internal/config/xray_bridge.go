@@ -16,6 +16,17 @@ func statsAPIListen(spec *Spec) string {
 	return "127.0.0.1:10085"
 }
 
+// HealthProbe* are the loopback dokodemo-door coordinates the bridge spawns so that
+// the admin API can measure exit→internet latency over the full tunnel.
+const (
+	HealthProbeInboundTag   = "health-probe"
+	HealthProbeListenAddr   = "127.0.0.1"
+	HealthProbePort         = 11800
+	HealthProbeTargetHost   = "1.1.1.1"
+	HealthProbeTargetPort   = 443
+	HealthProbeListenIPPort = "127.0.0.1:11800"
+)
+
 // BuildBridgeXRayJSON returns a full xray JSON config for the bridge role.
 // xrayLogLevel is passed to Xray's log.loglevel (e.g. debug, warning, none); empty means warning.
 // When spec.Stats is set, per-user traffic stats and the Xray gRPC API inbound are enabled.
@@ -29,6 +40,9 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 	clients := make([]map[string]any, 0, len(users))
 	for _, u := range users {
 		if u.UUID == "" {
+			continue
+		}
+		if u.Kind == "socks5" {
 			continue
 		}
 		// When stats are enabled use the UUID as email so the stats key is
@@ -67,6 +81,15 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 		routeRules = append([]any{apiRule}, routeRules...)
 	}
 
+	// Prepend a health-probe routing rule that forces dokodemo-door traffic onto the
+	// bridge→exit tunnel, regardless of split routing.
+	probeRule := map[string]any{
+		"type":        "field",
+		"inboundTag":  []any{HealthProbeInboundTag},
+		"outboundTag": w.OutboundExitTag,
+	}
+	routeRules = append([]any{probeRule}, routeRules...)
+
 	routing := map[string]any{
 		"domainStrategy": domainStrategy,
 		"rules":          routeRules,
@@ -104,6 +127,20 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 			"settings": map[string]any{"address": apiListenHost},
 		})
 	}
+
+	// Internal dokodemo-door forwarding to a stable internet target through the
+	// bridge→exit tunnel; used by /v1/health to verify exit's internet access.
+	inbounds = append(inbounds, map[string]any{
+		"tag":      HealthProbeInboundTag,
+		"listen":   HealthProbeListenAddr,
+		"port":     HealthProbePort,
+		"protocol": "dokodemo-door",
+		"settings": map[string]any{
+			"address": HealthProbeTargetHost,
+			"port":    HealthProbeTargetPort,
+			"network": "tcp",
+		},
+	})
 	if s := spec.bridgeSOCKS5(); s != nil {
 		inbounds = append(inbounds, map[string]any{
 			"tag":      w.InboundSocksTag,
@@ -116,6 +153,32 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 					map[string]any{"user": s.Username, "pass": s.Password},
 				},
 				"udp": socks5UDPEnabled(s),
+			},
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": w.SniffingDestOverride,
+			},
+		})
+	}
+	for _, u := range users {
+		if u.Kind != "socks5" || u.SocksPort == nil || *u.SocksPort <= 0 {
+			continue
+		}
+		if u.SocksUsername == "" || u.SocksPassword == "" {
+			continue
+		}
+		tag := "socks-" + u.UUID
+		inbounds = append(inbounds, map[string]any{
+			"tag":      tag,
+			"listen":   "0.0.0.0",
+			"port":     *u.SocksPort,
+			"protocol": "socks",
+			"settings": map[string]any{
+				"auth": w.SocksAuth,
+				"accounts": []any{
+					map[string]any{"user": u.SocksUsername, "pass": u.SocksPassword},
+				},
+				"udp": true,
 			},
 			"sniffing": map[string]any{
 				"enabled":      true,
@@ -181,10 +244,15 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 		}
 		cfg["stats"] = map[string]any{}
 		cfg["policy"] = map[string]any{
+			"system": map[string]any{
+				"statsInboundUplink":   true,
+				"statsInboundDownlink": true,
+			},
 			"levels": map[string]any{
 				"0": map[string]any{
 					"statsUserUplink":   true,
 					"statsUserDownlink": true,
+					"statsUserOnline":   true,
 				},
 			},
 		}
