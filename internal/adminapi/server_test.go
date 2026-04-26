@@ -15,18 +15,13 @@ import (
 )
 
 type fakeUserManager struct {
-	users        map[string]auth.User
-	renameCalls  int
-	setNoteCalls int
-	enableCalls  int
-	rotateCalls  int
-	lastRename   struct {
+	users       map[string]auth.User
+	renameCalls int
+	enableCalls int
+	rotateCalls int
+	lastRename  struct {
 		id   string
 		name string
-	}
-	lastNote struct {
-		id   string
-		note string
 	}
 }
 
@@ -49,18 +44,6 @@ func (m *fakeUserManager) RenameUser(id, name string) (auth.User, error) {
 		return auth.User{}, auth.ErrUserNotFound
 	}
 	u.Name = name
-	m.users[id] = u
-	return u, nil
-}
-func (m *fakeUserManager) SetNote(id, note string) (auth.User, error) {
-	m.setNoteCalls++
-	m.lastNote.id = id
-	m.lastNote.note = note
-	u, ok := m.users[id]
-	if !ok {
-		return auth.User{}, auth.ErrUserNotFound
-	}
-	u.Note = note
 	m.users[id] = u
 	return u, nil
 }
@@ -111,7 +94,7 @@ func (m *fakeUserManager) Close() {}
 
 func newHTTPTestServer(t *testing.T, users auth.UserManager, spec *config.Spec) *httptest.Server {
 	t.Helper()
-	s, err := NewServer("127.0.0.1:0", "secret", users, nil, nil, spec, slog.Default())
+	s, err := NewServer("127.0.0.1:0", "secret", users, nil, spec, slog.Default())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -155,20 +138,15 @@ func doAuthedJSON(
 	return resp, respBody
 }
 
-func TestPatchUserUpdatesNoteWithoutRename(t *testing.T) {
+func TestPatchUserRequiresName(t *testing.T) {
 	mgr := newFakeUserManager()
 	spec := &config.Spec{Exit: config.ExitTunnelSpec{Address: "127.0.0.1", Port: 65535}}
 	ts := newHTTPTestServer(t, mgr, spec)
 	defer ts.Close()
 
-	resp, body := doAuthedJSON(t, ts.Client(), http.MethodPatch, ts.URL+"/v1/users/u1", map[string]any{
-		"note": "vip client",
-	})
-	if resp.StatusCode != http.StatusOK {
+	resp, body := doAuthedJSON(t, ts.Client(), http.MethodPatch, ts.URL+"/v1/users/u1", map[string]any{})
+	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status: got %d, body=%s", resp.StatusCode, string(body))
-	}
-	if mgr.setNoteCalls != 1 {
-		t.Fatalf("expected setNoteCalls=1, got %d", mgr.setNoteCalls)
 	}
 	if mgr.renameCalls != 0 {
 		t.Fatalf("expected renameCalls=0, got %d", mgr.renameCalls)
@@ -226,10 +204,18 @@ func TestHealthEndpointRespondsJSON(t *testing.T) {
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("decode health: %v", err)
 	}
-	if out["bridge"] != "ok" {
-		t.Fatalf("expected bridge=ok, got %#v", out["bridge"])
+	bridge, ok := out["bridge"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected bridge object, got %#v", out["bridge"])
 	}
-	if _, ok := out["exit"]; !ok {
-		t.Fatalf("expected exit field in response")
+	if _, ok := bridge["reachable"]; !ok {
+		t.Fatalf("expected bridge.reachable field")
+	}
+	exit, ok := out["exit"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected exit object, got %#v", out["exit"])
+	}
+	if _, ok := exit["reachable"]; !ok {
+		t.Fatalf("expected exit.reachable field")
 	}
 }

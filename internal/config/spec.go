@@ -139,12 +139,6 @@ type Spec struct {
 	// DevMode uses cleartext TCP for the public inbound (local testing only).
 	DevMode bool `json:"dev_mode"`
 
-	// TraceLatency enables per-connection latency tracing via xray log interception.
-	// When true, the relay captures timing events for each connection and exposes
-	// them via GET /v1/latency/sessions on the admin API.
-	// Incurs ~200 KB for the ring buffer and negligible CPU overhead.
-	TraceLatency bool `json:"trace_latency,omitempty"`
-
 	Reality RealitySpec `json:"reality"`
 
 	Exit ExitTunnelSpec `json:"exit"`

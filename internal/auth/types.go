@@ -9,7 +9,6 @@ import (
 type User struct {
 	UUID                 string     `json:"uuid"`
 	Name                 string     `json:"name"`
-	Note                 string     `json:"note,omitempty"`
 	IsActive             bool       `json:"is_active"`
 	DisabledAt           *time.Time `json:"disabled_at,omitempty"`
 	LeakPolicy           string     `json:"leak_policy,omitempty"`

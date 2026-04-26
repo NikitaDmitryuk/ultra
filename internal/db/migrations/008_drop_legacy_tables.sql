@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS payments;
+DROP TABLE IF EXISTS subscriptions;
+DROP TABLE IF EXISTS plans;
+DROP TABLE IF EXISTS bot_sessions;
+DROP TABLE IF EXISTS vpn_keys;

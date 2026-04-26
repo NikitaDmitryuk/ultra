@@ -303,13 +303,6 @@ if [[ -n "${GEO_RELEASE_TAG// }" ]]; then
 	ARGS+=(-geo-release-tag "$GEO_RELEASE_TAG")
 fi
 
-# ── Latency tracing ─────────────────────────────────────────────────────────
-# TRACE_LATENCY=y — включить per-connection трейсинг на bridge.
-# Данные доступны через GET /v1/latency/sessions и make latency-profile.
-case "${TRACE_LATENCY:-n}" in
-y | Y | true | 1 | yes) ARGS+=(-trace-latency) ;;
-esac
-
 # ── WARP: Cloudflare proxy на exit-ноде ──────────────────────────────────────
 # WARP_ENABLE=y — установить warp-cli на exit-ноде и проксировать через Cloudflare.
 # При включении destination-сайты видят IP Cloudflare вместо IP датацентра.

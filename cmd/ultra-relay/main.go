@@ -23,7 +23,6 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 	"github.com/NikitaDmitryuk/ultra/internal/proxy"
 	"github.com/NikitaDmitryuk/ultra/internal/stats"
-	"github.com/NikitaDmitryuk/ultra/internal/trace"
 
 	_ "github.com/xtls/xray-core/main/distro/all"
 )
@@ -71,15 +70,6 @@ func main() {
 	}
 
 	runner := new(proxy.Runner)
-
-	// Latency tracing: allocate store and register log handler when enabled in spec.
-	var traceStore *trace.Store
-	if spec.TraceLatency {
-		traceStore = trace.NewStore()
-		defer traceStore.Close()
-		runner.SetTraceStore(traceStore)
-		log.Info("latency tracing enabled (GET /v1/latency/sessions)")
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -168,7 +158,7 @@ func main() {
 		if *adminToken == "" {
 			log.Warn("Admin API disabled: set -admin-token or ULTRA_RELAY_ADMIN_TOKEN to enable user provisioning on loopback")
 		} else {
-			srv, err := adminapi.NewServer(spec.AdminListen, *adminToken, mgr, trafficRepo, traceStore, spec, log)
+			srv, err := adminapi.NewServer(spec.AdminListen, *adminToken, mgr, trafficRepo, spec, log)
 			if err != nil {
 				log.Error("admin api", "err", err)
 				os.Exit(1)

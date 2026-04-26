@@ -19,13 +19,14 @@ const (
 )
 
 func (b *Bot) StartWorkers(ctx context.Context) {
-	if b.teleRepo == nil {
+	if b.alertsTele == nil {
 		b.log.Warn("alerts worker disabled: telegram repo is nil")
 		return
 	}
 	go b.runAlertsWorker(ctx)
 	go b.runOutboxSender(ctx)
 	go b.runLeakDetector(ctx)
+	go b.runMaintenance(ctx)
 }
 
 func (b *Bot) runAlertsWorker(ctx context.Context) {
@@ -73,16 +74,18 @@ func (b *Bot) probeExitState(ctx context.Context) string {
 		return ""
 	}
 	var h struct {
-		Exit string `json:"exit"`
+		Exit struct {
+			Reachable bool `json:"reachable"`
+		} `json:"exit"`
 	}
 	if err := json.Unmarshal(body, &h); err != nil {
 		b.log.Warn("alerts: decode /v1/health", "err", err)
 		return ""
 	}
-	if h.Exit == "" {
-		return ""
+	if !h.Exit.Reachable {
+		return "down"
 	}
-	return h.Exit
+	return "up"
 }
 
 func (b *Bot) captureTrafficSnapshot(ctx context.Context, dst map[string]int64) {
@@ -139,7 +142,7 @@ func (b *Bot) enqueueAdminAlert(ctx context.Context, typ string, payload map[str
 		return
 	}
 	for _, a := range admins {
-		if err := b.teleRepo.EnqueueNotification(ctx, db.Notification{
+		if err := b.alertsTele.EnqueueNotification(ctx, db.Notification{
 			TelegramID: a.TelegramID,
 			Type:       typ,
 			Payload:    payload,
@@ -163,18 +166,18 @@ func (b *Bot) runOutboxSender(ctx context.Context) {
 }
 
 func (b *Bot) flushOutboxOnce(ctx context.Context) {
-	list, err := b.teleRepo.PendingNotifications(ctx, 50)
+	list, err := b.alertsTele.PendingNotifications(ctx, 50)
 	if err != nil {
 		b.log.Warn("outbox: pending notifications", "err", err)
 		return
 	}
 	for _, n := range list {
 		msg := tgbotapi.NewMessage(n.TelegramID, formatNotificationText(n))
-		_, sendErr := b.api.Send(msg)
+		_, sendErr := b.msgSender.Send(msg)
 		if sendErr != nil {
 			b.log.Warn("outbox: telegram send failed", "id", n.ID, "tg_id", n.TelegramID, "err", sendErr)
 		}
-		if err := b.teleRepo.MarkNotificationSent(ctx, n.ID); err != nil {
+		if err := b.alertsTele.MarkNotificationSent(ctx, n.ID); err != nil {
 			b.log.Warn("outbox: mark sent failed", "id", n.ID, "err", err)
 		}
 	}
@@ -194,6 +197,8 @@ func formatNotificationText(n db.Notification) string {
 		return "Обнаружен резкий рост трафика."
 	case "token_leak":
 		return "Обнаружена подозрительная активность по токену."
+	case "test_alert":
+		return "Тестовое уведомление от Mini App."
 	default:
 		return "Новое событие мониторинга."
 	}

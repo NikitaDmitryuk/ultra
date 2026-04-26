@@ -200,12 +200,19 @@ func TestBuildBridgeSOCKS5SecondInbound(t *testing.T) {
 		t.Fatal(err)
 	}
 	inbounds, _ := root["inbounds"].([]any)
-	if len(inbounds) != 2 {
-		t.Fatalf("expected 2 inbounds, got %d", len(inbounds))
+	if len(inbounds) < 2 {
+		t.Fatalf("expected at least 2 inbounds, got %d", len(inbounds))
 	}
-	socks, _ := inbounds[1].(map[string]any)
-	if socks["protocol"] != "socks" {
-		t.Fatalf("second inbound: %v", socks["protocol"])
+	var socks map[string]any
+	for _, ib := range inbounds {
+		m, _ := ib.(map[string]any)
+		if m != nil && m["protocol"] == "socks" {
+			socks = m
+			break
+		}
+	}
+	if socks == nil {
+		t.Fatalf("socks inbound not found among %d inbounds", len(inbounds))
 	}
 	if socks["listen"] != "127.0.0.1" {
 		t.Fatalf("socks listen: got %#v want 127.0.0.1", socks["listen"])
@@ -245,7 +252,17 @@ func TestBuildBridgeSOCKS5DefaultListenNotPublicVLESSBind(t *testing.T) {
 		t.Fatal(err)
 	}
 	inbounds, _ := root["inbounds"].([]any)
-	socks, _ := inbounds[1].(map[string]any)
+	var socks map[string]any
+	for _, ib := range inbounds {
+		m, _ := ib.(map[string]any)
+		if m != nil && m["protocol"] == "socks" {
+			socks = m
+			break
+		}
+	}
+	if socks == nil {
+		t.Fatalf("socks inbound not found")
+	}
 	if socks["listen"] != "127.0.0.1" {
 		t.Fatalf("socks listen with public vless bind: got %#v want 127.0.0.1", socks["listen"])
 	}

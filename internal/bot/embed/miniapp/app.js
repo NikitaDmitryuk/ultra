@@ -14,7 +14,6 @@ let monthlyChart = null;
 let usersChart = null;
 let detailTrafficChart = null;
 let detailConnectionsChart = null;
-let noteSaveTimer = null;
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 (async function init() {
@@ -55,7 +54,6 @@ function switchTab(name, btn) {
   if (name === 'users') loadUsers();
   if (name === 'diag') loadDiagnostics();
   if (name === 'settings') loadSettingsMe();
-  if (name === 'history') loadAuditHistory();
 }
 
 function showAddUser() {
@@ -174,6 +172,10 @@ async function loadUsers() {
   list.innerHTML = '';
   try {
     usersCache = await api('GET', '/api/users');
+    const wrap = document.getElementById('users-search-wrap');
+    if (wrap) {
+      wrap.style.display = usersCache.length < 10 ? 'none' : '';
+    }
     renderUsers(usersCache);
   } catch (e) {
     list.innerHTML = `<div class="empty">Ошибка загрузки: ${e.message}</div>`;
@@ -185,15 +187,11 @@ async function loadUsers() {
 function renderUsers(users) {
   const list = document.getElementById('users-list');
   list.innerHTML = '';
-  const showDisabled = document.getElementById('users-show-disabled')?.checked || false;
-  const onlySuspicious = document.getElementById('users-only-suspicious')?.checked || false;
   const q = (document.getElementById('users-search')?.value || '').trim().toLowerCase();
   const filtered = (users || [])
-    .filter(u => showDisabled || u.is_active !== false)
-    .filter(u => !onlySuspicious || !!u._suspicious)
     .filter(u => {
       if (!q) return true;
-      return `${u.name || ''} ${u.note || ''}`.toLowerCase().includes(q);
+      return (u.name || '').toLowerCase().includes(q);
     })
     .sort((a, b) => {
       const ta = a.last_seen_at ? new Date(a.last_seen_at).getTime() : 0;
@@ -271,10 +269,6 @@ async function openUserDetail(u) {
   document.getElementById('detail-traffic').textContent = formatBytes(u.total_bytes || 0) + ' этот месяц';
   document.getElementById('detail-vless-uri').textContent = 'Загрузка…';
   document.getElementById('qr-container').innerHTML = '';
-  const noteInput = document.getElementById('detail-note-input');
-  noteInput.value = u.note || '';
-  noteInput.oninput = scheduleCurrentUserNoteSave;
-  document.getElementById('detail-note-status').textContent = u.note ? 'Сохранено' : 'Без заметки';
   document.getElementById('detail-month-input').value = currentMonthInputValue();
   showScreen('user-detail');
 
@@ -336,30 +330,6 @@ async function saveRenameUser() {
   }
 }
 
-function scheduleCurrentUserNoteSave() {
-  const status = document.getElementById('detail-note-status');
-  status.textContent = 'Сохраняем...';
-  if (noteSaveTimer) clearTimeout(noteSaveTimer);
-  noteSaveTimer = setTimeout(saveCurrentUserNote, 500);
-}
-
-async function saveCurrentUserNote() {
-  if (!currentUserUUID) return;
-  const note = document.getElementById('detail-note-input').value;
-  const status = document.getElementById('detail-note-status');
-  try {
-    const res = await api('PATCH', `/api/users/${currentUserUUID}`, { note });
-    const updated = (res && res.user) ? res.user : null;
-    const idx = usersCache.findIndex(u => u.uuid === currentUserUUID);
-    if (idx >= 0) {
-      usersCache[idx] = { ...usersCache[idx], note: updated ? updated.note : note };
-    }
-    status.textContent = 'Сохранено';
-  } catch (e) {
-    status.textContent = 'Ошибка сохранения';
-  }
-}
-
 async function loadCurrentUserTrafficByMonth() {
   if (!currentUserUUID) return;
   const month = document.getElementById('detail-month-input').value || currentMonthInputValue();
@@ -400,9 +370,6 @@ async function loadCurrentUserLeak() {
       `;
       list.appendChild(item);
     });
-    const idx = usersCache.findIndex(u => u.uuid === currentUserUUID);
-    if (idx >= 0) usersCache[idx] = { ...usersCache[idx], _suspicious: !!data.suspicious };
-    renderUsers(usersCache);
   } catch (e) {
     summary.textContent = 'Leak-данные недоступны: ' + e.message;
     list.className = 'diag-list empty';
@@ -565,63 +532,37 @@ async function deleteCurrentUser() {
 
 // ── Diagnostics ───────────────────────────────────────────────────────────────
 async function loadDiagnostics() {
-  const loader = document.getElementById('diag-loader');
-  const list = document.getElementById('diag-sessions-list');
-  loader.style.display = 'block';
   try {
-    const [sessions, alerts] = await Promise.all([
-      api('GET', '/api/diag/sessions?limit=20'),
-      api('GET', '/api/alerts/recent?limit=20').catch(() => []),
-    ]);
-    renderDiagSessions(sessions || []);
+    const alerts = await api('GET', '/api/alerts/recent?limit=20').catch(() => []);
     renderDiagAlerts(alerts || []);
   } catch (e) {
-    list.className = 'diag-list empty';
-    list.textContent = `Сессии недоступны: ${e.message}`;
-  } finally {
-    loader.style.display = 'none';
+    const list = document.getElementById('diag-alerts-list');
+    if (list) {
+      list.className = 'diag-list empty';
+      list.textContent = `Алерты недоступны: ${e.message}`;
+    }
   }
 }
 
 async function runProbe() {
-  const status = document.getElementById('diag-probe-status');
-  status.textContent = 'Выполняем замер...';
+  const summary = document.getElementById('diag-health-summary');
+  if (summary) summary.textContent = 'Выполняем замер...';
   try {
-    const data = await api('GET', '/api/diag/probe');
-    if (data.error) {
-      status.textContent = `Ошибка: ${data.error}`;
-    } else {
-      const when = formatTime(data.measured_at || data.MeasuredAt);
-      status.textContent = `Exit ${data.exit_addr || data.ExitAddr}: ${data.bridge_to_exit_tcp_ms || data.BridgeToExitTCPMs} ms · ${when}`;
-    }
+    await loadHealth();
     await loadDiagnostics();
   } catch (e) {
-    status.textContent = `Ошибка замера: ${e.message}`;
+    if (summary) summary.textContent = `Ошибка замера: ${e.message}`;
   }
 }
 
-function renderDiagSessions(sessions) {
-  const list = document.getElementById('diag-sessions-list');
-  if (!Array.isArray(sessions) || sessions.length === 0) {
-    list.className = 'diag-list empty';
-    list.textContent = 'Пока нет данных.';
-    return;
+async function sendTestAlert() {
+  try {
+    await api('POST', '/api/alerts/test');
+    showToast('Тестовый алерт поставлен в очередь (доставка ~10 сек).');
+    await loadDiagnostics();
+  } catch (e) {
+    showToast('Ошибка: ' + e.message);
   }
-  list.className = 'diag-list';
-  list.innerHTML = '';
-  sessions.forEach(s => {
-    const item = document.createElement('div');
-    item.className = 'diag-item';
-    const started = formatTime(s.started_at || s.StartedAt);
-    const destination = s.destination || s.Destination || '—';
-    const stageStr = formatStages(s.stages_us || s.StagesUS || {});
-    item.innerHTML = `
-      <div class="diag-item-title">#${esc(String(s.session_id || s.SessionID || ''))} · ${esc(destination)}</div>
-      <div class="diag-item-meta">${esc(started)}</div>
-      <div class="diag-item-meta">${esc(stageStr)}</div>
-    `;
-    list.appendChild(item);
-  });
 }
 
 function renderDiagAlerts(alerts) {
@@ -647,28 +588,84 @@ function renderDiagAlerts(alerts) {
   });
 }
 
-async function loadHealth() {
-  const status = document.getElementById('health-status');
-  if (!status) return;
-  try {
-    const h = await api('GET', '/api/health');
-    const latency = h.exit_latency_ms || h.ExitLatencyMS;
+function pickNode(h, key) {
+  const modern = h && h[key];
+  if (modern && typeof modern === 'object') return modern;
+  return null;
+}
+
+function setDot(el, ok) {
+  if (!el) return;
+  el.classList.remove('ok', 'down');
+  el.classList.add(ok ? 'ok' : 'down');
+}
+
+function fmtMs(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  return String(Math.round(n));
+}
+
+function applyHealthUI(h) {
+  const bridge = pickNode(h, 'bridge') || {};
+  const exit = pickNode(h, 'exit') || {};
+
+  const bridgeInternetOk = !!bridge.internet_ok;
+  const exitTunnelOk = !!exit.reachable;
+  const exitInternetOk = !!exit.internet_ok;
+
+  setDot(document.getElementById('overview-bridge-dot'), bridgeInternetOk);
+  setDot(document.getElementById('overview-exit-dot'), exitTunnelOk && exitInternetOk);
+
+  const overviewSummary = document.getElementById('overview-health-summary');
+  if (overviewSummary) {
+    const parts = [];
+    if (!bridgeInternetOk) parts.push('Bridge: нет выхода в интернет');
+    if (!exitTunnelOk) parts.push('Tunnel: exit недоступен');
+    if (exitTunnelOk && !exitInternetOk) parts.push('Exit: нет выхода в интернет через туннель');
+    overviewSummary.textContent = parts.length ? parts.join(' · ') : 'Всё ок';
+  }
+
+  setDot(document.getElementById('diag-bridge-dot'), bridgeInternetOk);
+  setDot(document.getElementById('diag-exit-dot'), exitTunnelOk && exitInternetOk);
+
+  const bInet = document.getElementById('diag-bridge-internet');
+  if (bInet) {
+    const ms = fmtMs(bridge.internet_latency_ms ?? bridge.InternetLatencyMS);
+    bInet.textContent = ms ? `Internet ${ms} ms` : (bridgeInternetOk ? 'Internet OK' : 'Internet —');
+  }
+  const eTun = document.getElementById('diag-exit-tunnel');
+  if (eTun) {
+    const ms = fmtMs(exit.tunnel_latency_ms ?? exit.TunnelLatencyMS);
+    eTun.textContent = ms ? `Tunnel ${ms} ms` : (exitTunnelOk ? 'Tunnel OK' : 'Tunnel —');
+  }
+  const eInet = document.getElementById('diag-exit-internet');
+  if (eInet) {
+    const ms = fmtMs(exit.internet_latency_ms ?? exit.InternetLatencyMS);
+    eInet.textContent = ms ? `Internet ${ms} ms` : (exitInternetOk ? 'Internet OK' : 'Internet —');
+  }
+
+  const diagSummary = document.getElementById('diag-health-summary');
+  if (diagSummary) {
     const checked = formatTime(h.checked_at || h.CheckedAt);
-    status.textContent = `Bridge ${h.bridge || h.Bridge} · Exit ${h.exit || h.Exit}` +
-      (latency ? ` · ${latency} ms` : '') +
-      (checked ? ` · ${checked}` : '');
-  } catch (e) {
-    status.textContent = 'Health недоступен: ' + e.message;
+    diagSummary.textContent = checked ? `Обновлено: ${checked}` : 'Готово';
   }
 }
 
-function formatStages(stages) {
-  const entries = Object.entries(stages || {});
-  if (entries.length === 0) return 'Без этапов';
-  return entries
-    .slice(0, 4)
-    .map(([k, v]) => `${k}: ${(Number(v) / 1000).toFixed(2)}ms`)
-    .join(' · ');
+async function loadHealth() {
+  try {
+    const h = await api('GET', '/api/health');
+    applyHealthUI(h);
+  } catch (e) {
+    const overviewSummary = document.getElementById('overview-health-summary');
+    if (overviewSummary) overviewSummary.textContent = 'Health недоступен: ' + e.message;
+    setDot(document.getElementById('overview-bridge-dot'), false);
+    setDot(document.getElementById('overview-exit-dot'), false);
+    setDot(document.getElementById('diag-bridge-dot'), false);
+    setDot(document.getElementById('diag-exit-dot'), false);
+    const diagSummary = document.getElementById('diag-health-summary');
+    if (diagSummary) diagSummary.textContent = 'Health недоступен: ' + e.message;
+  }
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
@@ -727,35 +724,6 @@ function removeAdmin(telegramID) {
       showToast('Ошибка удаления: ' + e.message);
     }
   });
-}
-
-async function loadAuditHistory() {
-  const list = document.getElementById('history-list');
-  if (!list) return;
-  list.className = 'diag-list empty';
-  list.textContent = 'Загрузка…';
-  try {
-    const rows = await api('GET', '/api/audit/history?limit=100');
-    if (!rows || rows.length === 0) {
-      list.className = 'diag-list empty';
-      list.textContent = 'История пуста.';
-      return;
-    }
-    list.className = 'diag-list';
-    list.innerHTML = '';
-    rows.forEach(r => {
-      const item = document.createElement('div');
-      item.className = 'diag-item';
-      item.innerHTML = `
-        <div class="diag-item-title">${esc(r.Action || r.action)}</div>
-        <div class="diag-item-meta">admin: ${esc(String(r.TelegramID || r.telegram_id))} · ${esc(formatTime(r.CreatedAt || r.created_at))}</div>
-      `;
-      list.appendChild(item);
-    });
-  } catch (e) {
-    list.className = 'diag-list empty';
-    list.textContent = 'Ошибка загрузки истории: ' + e.message;
-  }
 }
 
 async function generateInvite() {

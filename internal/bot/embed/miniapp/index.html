@@ -31,7 +31,17 @@
   <div id="stats-loader" class="loader">Загрузка…</div>
   <div class="card">
     <div class="card-title">Состояние узлов</div>
-    <div id="health-status" class="diag-status">Проверка…</div>
+    <div id="overview-health-pills" class="health-pills">
+      <div class="health-pill" id="overview-bridge-pill">
+        <span class="health-dot" id="overview-bridge-dot"></span>
+        <span>Bridge</span>
+      </div>
+      <div class="health-pill" id="overview-exit-pill">
+        <span class="health-dot" id="overview-exit-dot"></span>
+        <span>Exit</span>
+      </div>
+    </div>
+    <div id="overview-health-summary" class="health-summary">Проверка…</div>
   </div>
   <div class="card" id="chart-history-card" style="display:none">
     <div class="card-title">Трафик по месяцам</div>
@@ -48,16 +58,8 @@
     <span class="screen-title">Пользователи</span>
     <button class="btn" style="width:auto;padding:8px 14px;font-size:13px" onclick="showAddUser()">+ Добавить</button>
   </div>
-  <label class="form-label" style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-    <input id="users-show-disabled" type="checkbox" onchange="renderUsers(usersCache)">
-    Показывать отключённых
-  </label>
-  <div class="detail-month-row" style="margin-bottom:10px">
-    <input class="form-input" id="users-search" type="text" placeholder="Поиск по имени или заметке" oninput="renderUsers(usersCache)">
-    <label class="form-label" style="display:flex;align-items:center;gap:6px;white-space:nowrap;margin:0">
-      <input id="users-only-suspicious" type="checkbox" onchange="renderUsers(usersCache)">
-      Подозрительные
-    </label>
+  <div id="users-search-wrap" class="detail-month-row" style="margin-bottom:10px">
+    <input class="form-input" id="users-search" type="text" placeholder="Поиск по имени" oninput="renderUsers(usersCache)">
   </div>
   <div id="users-loader" class="loader">Загрузка…</div>
   <div id="users-list"></div>
@@ -108,11 +110,6 @@
     <canvas id="detail-traffic-chart" height="180"></canvas>
   </div>
   <div class="card">
-    <div class="card-title">Заметка администратора</div>
-    <textarea id="detail-note-input" class="form-input" rows="3" placeholder="Примечание по клиенту"></textarea>
-    <div class="form-label" id="detail-note-status" style="margin-top:6px">—</div>
-  </div>
-  <div class="card">
     <div class="card-title">Подозрительная активность</div>
     <div id="detail-leak-summary" class="diag-status">Загрузка…</div>
     <div id="detail-leak-signals" class="diag-list empty" style="margin-top:10px">Нет сигналов.</div>
@@ -149,17 +146,32 @@
     <button class="btn" style="width:auto;padding:8px 14px;font-size:13px" onclick="runProbe()">Замерить</button>
   </div>
   <div class="card">
-    <div class="card-title">Bridge ↔ Exit probe</div>
-    <div id="diag-probe-status" class="diag-status">Нет замеров.</div>
-  </div>
-  <div class="card">
-    <div class="card-title">Последние сессии latency</div>
-    <div id="diag-loader" class="loader" style="padding:16px;display:none">Загрузка…</div>
-    <div id="diag-sessions-list" class="diag-list empty">Пока нет данных.</div>
-  </div>
-  <div class="card">
-    <div class="card-title">Последние алерты</div>
+    <div class="diag-alerts-header">
+      <div class="card-title" style="margin-bottom:0">Последние алерты</div>
+      <button class="btn secondary" style="width:auto;padding:8px 12px;font-size:12px" onclick="sendTestAlert()">Тестовый алерт</button>
+    </div>
     <div id="diag-alerts-list" class="diag-list empty">Пока нет данных.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Состояние сети</div>
+    <div class="node-stack">
+      <div class="node-card" id="diag-bridge-card">
+        <div class="node-card-top">
+          <span class="health-dot" id="diag-bridge-dot"></span>
+          <div class="node-card-title">Bridge</div>
+        </div>
+        <div class="node-metric" id="diag-bridge-internet">Internet —</div>
+      </div>
+      <div class="node-card" id="diag-exit-card">
+        <div class="node-card-top">
+          <span class="health-dot" id="diag-exit-dot"></span>
+          <div class="node-card-title">Exit</div>
+        </div>
+        <div class="node-metric" id="diag-exit-tunnel">Tunnel —</div>
+        <div class="node-metric" id="diag-exit-internet">Internet —</div>
+      </div>
+    </div>
+    <div id="diag-health-summary" class="health-summary" style="margin-top:10px">Нет замеров.</div>
   </div>
 </div>
 
@@ -188,17 +200,6 @@
   </div>
 </div>
 
-<div id="screen-history" class="screen">
-  <div class="screen-header">
-    <span class="screen-title">История</span>
-    <button class="btn" style="width:auto;padding:8px 14px;font-size:13px" onclick="loadAuditHistory()">Обновить</button>
-  </div>
-  <div class="card">
-    <div class="card-title">Действия админов</div>
-    <div id="history-list" class="diag-list empty">Загрузка…</div>
-  </div>
-</div>
-
 <!-- ── Bottom navigation ──────────────────────────────────────────── -->
 <nav class="nav">
   <button class="nav-btn active" data-screen="stats" onclick="switchTab('stats', this)">
@@ -216,10 +217,6 @@
   <button class="nav-btn" data-screen="diag" onclick="switchTab('diag', this)">
     <svg viewBox="0 0 24 24"><path d="M3 4h18v2H3zm2 4h4v10H5zm5 4h4v6h-4zm5-6h4v12h-4z"/></svg>
     Диагностика
-  </button>
-  <button class="nav-btn" data-screen="history" onclick="switchTab('history', this)">
-    <svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 109 9h-2a7 7 0 11-7-7V3zm1 5h-2v6l5.25 3.15 1-1.64-4.25-2.51z"/></svg>
-    История
   </button>
 </nav>
 

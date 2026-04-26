@@ -18,7 +18,8 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/db"
 	"github.com/NikitaDmitryuk/ultra/internal/probe"
-	"github.com/NikitaDmitryuk/ultra/internal/trace"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // maxAdminJSONBody caps JSON bodies on mutating Admin API routes (DoS on loopback via SSH tunnel).
@@ -35,24 +36,22 @@ type TrafficQuerier interface {
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
 type Server struct {
-	log        *slog.Logger
-	users      auth.UserManager
-	traffic    TrafficQuerier // nil when DB is not configured
-	traceStore *trace.Store   // nil when trace_latency is disabled
-	spec       *config.Spec
-	mux        *http.ServeMux
-	srv        *http.Server
-	lim        *visitorLimiter
-	tokenH     [32]byte
+	log     *slog.Logger
+	users   auth.UserManager
+	traffic TrafficQuerier // nil when DB is not configured
+	spec    *config.Spec
+	mux     *http.ServeMux
+	srv     *http.Server
+	lim     *visitorLimiter
+	tokenH  [32]byte
 }
 
 // NewServer validates listen address is loopback.
-// traffic and traceStore may be nil when those features are not configured.
+// traffic may be nil when the DB backend is not configured.
 func NewServer(
 	listen, token string,
 	users auth.UserManager,
 	traffic TrafficQuerier,
-	traceStore *trace.Store,
 	spec *config.Spec,
 	log *slog.Logger,
 ) (*Server, error) {
@@ -70,14 +69,13 @@ func NewServer(
 		log = slog.Default()
 	}
 	s := &Server{
-		log:        log,
-		users:      users,
-		traffic:    traffic,
-		traceStore: traceStore,
-		spec:       spec,
-		mux:        http.NewServeMux(),
-		lim:        newVisitorLimiter(30, 60, 256),
-		tokenH:     sha256.Sum256([]byte(token)),
+		log:     log,
+		users:   users,
+		traffic: traffic,
+		spec:    spec,
+		mux:     http.NewServeMux(),
+		lim:     newVisitorLimiter(30, 60, 256),
+		tokenH:  sha256.Sum256([]byte(token)),
 	}
 	if err := s.routes(); err != nil {
 		return nil, err
@@ -127,8 +125,6 @@ func (s *Server) routes() error {
 	s.mux.HandleFunc("GET /v1/traffic/history", s.handleGetTrafficHistory)
 	s.mux.HandleFunc("GET /v1/traffic/last-seen", s.handleGetLastSeen)
 	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
-	s.mux.HandleFunc("GET /v1/latency/probe", s.handleLatencyProbe)
-	s.mux.HandleFunc("GET /v1/latency/sessions", s.handleLatencySessions)
 	return nil
 }
 
@@ -250,9 +246,9 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 
 type patchUserReq struct {
 	Name *string `json:"name"`
-	Note *string `json:"note"`
 }
 
+// handlePatchUser performs a partial update of a user. Currently only rename is supported.
 func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -267,41 +263,23 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 	if !s.decodeAdminJSON(w, r, &body) {
 		return
 	}
-	if body.Name == nil && body.Note == nil {
+	if body.Name == nil {
 		http.Error(w, "nothing to update", http.StatusBadRequest)
 		return
 	}
-	var (
-		u   auth.User
-		err error
-	)
-	if body.Name != nil {
-		u, err = s.users.RenameUser(id, *body.Name)
-		if errors.Is(err, auth.ErrUserNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		if errors.Is(err, auth.ErrEmptyUserName) {
-			http.Error(w, "bad name", http.StatusBadRequest)
-			return
-		}
-		if err != nil {
-			s.log.Error("rename user", "err", err)
-			http.Error(w, "internal", http.StatusInternalServerError)
-			return
-		}
+	u, err := s.users.RenameUser(id, *body.Name)
+	if errors.Is(err, auth.ErrUserNotFound) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
 	}
-	if body.Note != nil {
-		u, err = s.users.SetNote(id, *body.Note)
-		if errors.Is(err, auth.ErrUserNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		if err != nil {
-			s.log.Error("set user note", "err", err)
-			http.Error(w, "internal", http.StatusInternalServerError)
-			return
-		}
+	if errors.Is(err, auth.ErrEmptyUserName) {
+		http.Error(w, "bad name", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		s.log.Error("rename user", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
@@ -489,100 +467,64 @@ func (s *Server) handleGetLastSeen(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(seen)
 }
 
-// handleHealth returns a compact bridge↔exit health snapshot.
+// handleHealth probes bridge and exit connectivity (bridge process, tunnel, exit internet).
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	exitAddr := fmt.Sprintf("%s:%d", s.spec.Exit.Address, s.spec.Exit.Port)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
+	type nodeHealth struct {
+		Reachable         bool  `json:"reachable"`
+		InternetOK        bool  `json:"internet_ok"`
+		InternetLatencyMS int64 `json:"internet_latency_ms,omitempty"`
+		TunnelLatencyMS   int64 `json:"tunnel_latency_ms,omitempty"`
+	}
 	type healthResp struct {
-		Bridge        string `json:"bridge"`
-		Exit          string `json:"exit"`
-		ExitLatencyMS int64  `json:"exit_latency_ms,omitempty"`
-		CheckedAt     string `json:"checked_at"`
-		Error         string `json:"error,omitempty"`
+		CheckedAt string     `json:"checked_at"`
+		Bridge    nodeHealth `json:"bridge"`
+		Exit      nodeHealth `json:"exit"`
 	}
 	res := healthResp{
-		Bridge:    "ok",
 		CheckedAt: time.Now().UTC().Format(time.RFC3339),
+		Bridge:    nodeHealth{Reachable: true},
 	}
 
-	rtt, err := probe.DialTCP(ctx, exitAddr)
-	if err != nil {
-		res.Exit = "down"
-		res.Error = err.Error()
-	} else {
-		res.Exit = "ok"
-		res.ExitLatencyMS = rtt.Milliseconds()
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(res)
-}
+	var g errgroup.Group
 
-// handleLatencyProbe measures bridge→exit TCP round-trip and returns the result as JSON.
-// It is available on bridge role only (exit spec has no Exit.Address/Port set in that direction).
-func (s *Server) handleLatencyProbe(w http.ResponseWriter, r *http.Request) {
-	exitAddr := fmt.Sprintf("%s:%d", s.spec.Exit.Address, s.spec.Exit.Port)
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-
-	rtt, err := probe.DialTCP(ctx, exitAddr)
-
-	type probeResult struct {
-		BridgeToExitTCPMs int64  `json:"bridge_to_exit_tcp_ms"`
-		ExitAddr          string `json:"exit_addr"`
-		Error             string `json:"error,omitempty"`
-		MeasuredAt        string `json:"measured_at"`
-	}
-	res := probeResult{
-		ExitAddr:   exitAddr,
-		MeasuredAt: time.Now().UTC().Format(time.RFC3339),
-	}
-	if err != nil {
-		res.Error = err.Error()
-	} else {
-		res.BridgeToExitTCPMs = rtt.Milliseconds()
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(res)
-}
-
-// handleLatencySessions returns recent per-connection timing traces.
-// Returns 501 when trace_latency is not enabled in spec.
-func (s *Server) handleLatencySessions(w http.ResponseWriter, r *http.Request) {
-	if s.traceStore == nil {
-		http.Error(w, `trace_latency not enabled — set "trace_latency": true in spec.json`, http.StatusNotImplemented)
-		return
-	}
-	limit := 20
-	if v := r.URL.Query().Get("limit"); v != "" {
-		var n int
-		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 && n <= 200 {
-			limit = n
+	g.Go(func() error {
+		rtt, err := probe.DialTCP(ctx, "1.1.1.1:443")
+		if err != nil {
+			return err
 		}
-	}
+		res.Bridge.InternetOK = true
+		res.Bridge.InternetLatencyMS = rtt.Milliseconds()
+		return nil
+	})
 
-	sessions := s.traceStore.Recent(limit)
+	g.Go(func() error {
+		rtt, err := probe.DialTCP(ctx, exitAddr)
+		if err != nil {
+			return err
+		}
+		res.Exit.Reachable = true
+		res.Exit.TunnelLatencyMS = rtt.Milliseconds()
+		return nil
+	})
 
-	type sessionJSON struct {
-		SessionID   uint32           `json:"session_id"`
-		StartedAt   string           `json:"started_at"`
-		Destination string           `json:"destination"`
-		OutboundTag string           `json:"outbound_tag,omitempty"`
-		StagesUS    map[string]int64 `json:"stages_us"`
-	}
-	out := make([]sessionJSON, 0, len(sessions))
-	for _, s := range sessions {
-		out = append(out, sessionJSON{
-			SessionID:   s.ID,
-			StartedAt:   s.StartedAt.UTC().Format(time.RFC3339Nano),
-			Destination: s.Destination,
-			OutboundTag: s.OutboundTag,
-			StagesUS:    s.StageDeltasUS(),
-		})
-	}
+	g.Go(func() error {
+		rtt, err := probe.DialTCP(ctx, config.HealthProbeListenIPPort)
+		if err != nil {
+			return err
+		}
+		res.Exit.InternetOK = true
+		res.Exit.InternetLatencyMS = rtt.Milliseconds()
+		return nil
+	})
+
+	_ = g.Wait()
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(out)
+	_ = json.NewEncoder(w).Encode(res)
 }
 
 // Start runs the HTTP server (non-TLS).

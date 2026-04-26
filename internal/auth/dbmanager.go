@@ -11,7 +11,6 @@ import (
 type DBUserRepo interface {
 	Add(ctx context.Context, name string) (User, error)
 	Rename(ctx context.Context, id, name string) (User, error)
-	SetNote(ctx context.Context, id, note string) (User, error)
 	Remove(ctx context.Context, id string) error
 	Enable(ctx context.Context, id string) error
 	RotateUUID(ctx context.Context, id string) (string, error)
@@ -109,19 +108,6 @@ func (m *DBManager) RenameUser(id, name string) (User, error) {
 	}
 	if err := m.refresh(context.Background()); err != nil {
 		m.log.Warn("db refresh after RenameUser failed", "err", err)
-	}
-	m.notify()
-	return u, nil
-}
-
-// SetNote updates the user note and triggers an Xray reload.
-func (m *DBManager) SetNote(id, note string) (User, error) {
-	u, err := m.repo.SetNote(context.Background(), id, note)
-	if err != nil {
-		return User{}, err
-	}
-	if err := m.refresh(context.Background()); err != nil {
-		m.log.Warn("db refresh after SetNote failed", "err", err)
 	}
 	m.notify()
 	return u, nil

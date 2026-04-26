@@ -282,6 +282,78 @@ textarea.form-input {
   color: var(--tg-hint);
 }
 
+.diag-alerts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.health-pills {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.health-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.03);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tg-text);
+}
+.health-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--tg-hint);
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.06);
+}
+.health-dot.ok {
+  background: var(--tg-link);
+}
+.health-dot.down {
+  background: #e53935;
+}
+.health-summary {
+  font-size: 12px;
+  color: var(--tg-hint);
+  line-height: 1.35;
+}
+
+.node-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.node-card {
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  padding: 12px;
+  background: rgba(255,255,255,0.02);
+}
+.node-card-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.node-card-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+.node-metric {
+  font-size: 13px;
+  color: var(--tg-hint);
+  margin-top: 2px;
+}
+
 /* ── Toast ── */
 .toast-box {
   position: fixed;

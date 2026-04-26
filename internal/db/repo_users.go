@@ -45,29 +45,11 @@ func (r *UserRepo) Rename(ctx context.Context, id, name string) (auth.User, erro
 	var u auth.User
 	err := r.db.Pool.QueryRow(ctx,
 		`UPDATE users SET name=$1 WHERE uuid=$2
-		 RETURNING uuid, name, COALESCE(note, ''), is_active, disabled_at,
+		 RETURNING uuid, name, is_active, disabled_at,
 		           leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h`,
 		name, id,
 	).Scan(
-		&u.UUID, &u.Name, &u.Note, &u.IsActive, &u.DisabledAt,
-		&u.LeakPolicy, &u.LeakMaxConcurrentIPs, &u.LeakMaxUniqueIPs24h,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return auth.User{}, auth.ErrUserNotFound
-	}
-	return u, err
-}
-
-// SetNote updates an operator note for a user.
-func (r *UserRepo) SetNote(ctx context.Context, id, note string) (auth.User, error) {
-	var u auth.User
-	err := r.db.Pool.QueryRow(ctx,
-		`UPDATE users SET note=$1 WHERE uuid=$2
-		 RETURNING uuid, name, COALESCE(note, ''), is_active, disabled_at,
-		           leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h`,
-		strings.TrimSpace(note), id,
-	).Scan(
-		&u.UUID, &u.Name, &u.Note, &u.IsActive, &u.DisabledAt,
+		&u.UUID, &u.Name, &u.IsActive, &u.DisabledAt,
 		&u.LeakPolicy, &u.LeakMaxConcurrentIPs, &u.LeakMaxUniqueIPs24h,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -125,11 +107,11 @@ func (r *UserRepo) RotateUUID(ctx context.Context, id string) (string, error) {
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO users(
-			uuid, name, telegram_id, telegram_username, created_at, is_active, note, disabled_at,
+			uuid, name, telegram_id, telegram_username, created_at, is_active, disabled_at,
 			leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h
 		)
 		SELECT
-			$2, name, telegram_id, telegram_username, created_at, is_active, note, disabled_at,
+			$2, name, telegram_id, telegram_username, created_at, is_active, disabled_at,
 			leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h
 		FROM users WHERE uuid=$1
 	`, id, newUUID); err != nil {
@@ -137,12 +119,11 @@ func (r *UserRepo) RotateUUID(ctx context.Context, id string) (string, error) {
 	}
 
 	updateTables := []string{
-		"UPDATE vpn_keys SET user_uuid=$2 WHERE user_uuid=$1",
 		"UPDATE traffic_stats SET user_uuid=$2 WHERE user_uuid=$1",
 		"UPDATE monthly_traffic SET user_uuid=$2 WHERE user_uuid=$1",
-		"UPDATE subscriptions SET user_uuid=$2 WHERE user_uuid=$1",
-		"UPDATE payments SET user_uuid=$2 WHERE user_uuid=$1",
 		"UPDATE notifications SET user_uuid=$2 WHERE user_uuid=$1",
+		"UPDATE user_ip_observations SET user_uuid=$2 WHERE user_uuid=$1",
+		"UPDATE user_leak_signals SET user_uuid=$2 WHERE user_uuid=$1",
 	}
 	for _, q := range updateTables {
 		if _, err := tx.Exec(ctx, q, id, newUUID); err != nil {
@@ -162,7 +143,7 @@ func (r *UserRepo) RotateUUID(ctx context.Context, id string) (string, error) {
 // List returns all active users ordered by creation time.
 func (r *UserRepo) List(ctx context.Context) ([]auth.User, error) {
 	rows, err := r.db.Pool.Query(ctx,
-		`SELECT uuid, name, COALESCE(note, ''), is_active, disabled_at,
+		`SELECT uuid, name, is_active, disabled_at,
 		        leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h
 		 FROM users WHERE is_active=true ORDER BY created_at`,
 	)
@@ -174,7 +155,7 @@ func (r *UserRepo) List(ctx context.Context) ([]auth.User, error) {
 	for rows.Next() {
 		var u auth.User
 		if err := rows.Scan(
-			&u.UUID, &u.Name, &u.Note, &u.IsActive, &u.DisabledAt,
+			&u.UUID, &u.Name, &u.IsActive, &u.DisabledAt,
 			&u.LeakPolicy, &u.LeakMaxConcurrentIPs, &u.LeakMaxUniqueIPs24h,
 		); err != nil {
 			return nil, err
@@ -187,7 +168,7 @@ func (r *UserRepo) List(ctx context.Context) ([]auth.User, error) {
 // ListAll returns active and disabled users ordered by creation time.
 func (r *UserRepo) ListAll(ctx context.Context) ([]auth.User, error) {
 	rows, err := r.db.Pool.Query(ctx,
-		`SELECT uuid, name, COALESCE(note, ''), is_active, disabled_at,
+		`SELECT uuid, name, is_active, disabled_at,
 		        leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h
 		 FROM users ORDER BY created_at`,
 	)
@@ -199,7 +180,7 @@ func (r *UserRepo) ListAll(ctx context.Context) ([]auth.User, error) {
 	for rows.Next() {
 		var u auth.User
 		if err := rows.Scan(
-			&u.UUID, &u.Name, &u.Note, &u.IsActive, &u.DisabledAt,
+			&u.UUID, &u.Name, &u.IsActive, &u.DisabledAt,
 			&u.LeakPolicy, &u.LeakMaxConcurrentIPs, &u.LeakMaxUniqueIPs24h,
 		); err != nil {
 			return nil, err
@@ -213,12 +194,12 @@ func (r *UserRepo) ListAll(ctx context.Context) ([]auth.User, error) {
 func (r *UserRepo) Lookup(ctx context.Context, id string) (auth.User, bool, error) {
 	var u auth.User
 	err := r.db.Pool.QueryRow(ctx,
-		`SELECT uuid, name, COALESCE(note, ''), is_active, disabled_at
-		 , leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h
+		`SELECT uuid, name, is_active, disabled_at,
+		        leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h
 		 FROM users WHERE uuid=$1`,
 		id,
 	).Scan(
-		&u.UUID, &u.Name, &u.Note, &u.IsActive, &u.DisabledAt,
+		&u.UUID, &u.Name, &u.IsActive, &u.DisabledAt,
 		&u.LeakPolicy, &u.LeakMaxConcurrentIPs, &u.LeakMaxUniqueIPs24h,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {

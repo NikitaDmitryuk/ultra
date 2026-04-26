@@ -4,14 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
 	xraycmd "github.com/xtls/xray-core/app/stats/command"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/protobuf/encoding/protojson"
 )
 
 const (
@@ -20,11 +18,6 @@ const (
 	defaultLeakMaxConcurrent  = 2
 	defaultLeakMaxUnique24h   = 5
 	defaultStatsAPIListenAddr = "127.0.0.1:10085"
-)
-
-var (
-	ipv4Re = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
-	uuidRe = regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)
 )
 
 func (b *Bot) runLeakDetector(ctx context.Context) {
@@ -161,64 +154,58 @@ func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs [
 	}
 }
 
+// statsIPClient is the subset of xray-core StatsServiceClient used by the leak
+// detector. It is split off to make collectOnlineIPList testable via a stubbed
+// implementation (gRPC bufconn or plain mock).
+type statsIPClient interface {
+	GetAllOnlineUsers(
+		ctx context.Context,
+		in *xraycmd.GetAllOnlineUsersRequest,
+		opts ...grpc.CallOption,
+	) (*xraycmd.GetAllOnlineUsersResponse, error)
+	GetStatsOnlineIpList(
+		ctx context.Context,
+		in *xraycmd.GetStatsRequest,
+		opts ...grpc.CallOption,
+	) (*xraycmd.GetStatsOnlineIpListResponse, error)
+}
+
+// fetchOnlineIPList dials Xray's StatsService and returns currently online users
+// mapped to their active client IPs.
 func fetchOnlineIPList(ctx context.Context, apiAddr string) (map[string][]string, error) {
 	conn, err := grpc.NewClient(apiAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close() //nolint:errcheck
+	return collectOnlineIPList(ctx, xraycmd.NewStatsServiceClient(conn))
+}
 
-	client := xraycmd.NewStatsServiceClient(conn)
-	resp, err := client.GetStatsOnlineIpList(ctx, &xraycmd.GetStatsRequest{Name: "user>>>"})
+// collectOnlineIPList enumerates all online users via GetAllOnlineUsers and then
+// fetches the IP list for each one via GetStatsOnlineIpList. The user identity
+// (`email` field of the VLESS client config) equals the UUID in our setup.
+func collectOnlineIPList(ctx context.Context, client statsIPClient) (map[string][]string, error) {
+	all, err := client.GetAllOnlineUsers(ctx, &xraycmd.GetAllOnlineUsersRequest{})
 	if err != nil {
 		return nil, err
 	}
-	raw, err := protojson.Marshal(resp)
-	if err != nil {
-		return nil, err
-	}
-	var root any
-	if err := json.Unmarshal(raw, &root); err != nil {
-		return nil, err
-	}
-	out := map[string][]string{}
-	extractUUIDIPs(root, out)
-	return out, nil
-}
-
-func extractUUIDIPs(v any, out map[string][]string) {
-	switch x := v.(type) {
-	case map[string]any:
-		joined, _ := json.Marshal(x)
-		text := string(joined)
-		uuids := uuidRe.FindAllString(text, -1)
-		ips := ipv4Re.FindAllString(text, -1)
-		if len(uuids) > 0 && len(ips) > 0 {
-			uniq := uniqueStrings(ips)
-			for _, u := range uuids {
-				out[u] = append(out[u], uniq...)
-				out[u] = uniqueStrings(out[u])
-			}
-		}
-		for _, vv := range x {
-			extractUUIDIPs(vv, out)
-		}
-	case []any:
-		for _, vv := range x {
-			extractUUIDIPs(vv, out)
-		}
-	}
-}
-
-func uniqueStrings(in []string) []string {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if _, ok := seen[s]; ok {
+	users := all.GetUsers()
+	out := make(map[string][]string, len(users))
+	for _, email := range users {
+		email = strings.TrimSpace(email)
+		if email == "" {
 			continue
 		}
-		seen[s] = struct{}{}
-		out = append(out, s)
+		resp, err := client.GetStatsOnlineIpList(ctx, &xraycmd.GetStatsRequest{Name: email})
+		if err != nil {
+			continue
+		}
+		ipsMap := resp.GetIps()
+		ips := make([]string, 0, len(ipsMap))
+		for ip := range ipsMap {
+			ips = append(ips, ip)
+		}
+		out[email] = ips
 	}
-	return out
+	return out, nil
 }

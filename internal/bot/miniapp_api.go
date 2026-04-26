@@ -38,13 +38,11 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stats", b.handleStats)
 	mux.HandleFunc("GET /api/stats/history", b.handleStatsHistory)
 	mux.HandleFunc("GET /api/health", b.handleHealth)
-	mux.HandleFunc("GET /api/diag/probe", b.handleDiagProbe)
-	mux.HandleFunc("GET /api/diag/sessions", b.handleDiagSessions)
 	mux.HandleFunc("GET /api/alerts/recent", b.handleRecentAlerts)
+	mux.HandleFunc("POST /api/alerts/test", b.handleTestAlert)
 	mux.HandleFunc("POST /api/admin/invite", b.handleGenerateInvite)
 	mux.HandleFunc("GET /api/admins", b.handleListAdmins)
 	mux.HandleFunc("POST /api/admins/{telegram_id}/remove", b.handleRemoveAdmin)
-	mux.HandleFunc("GET /api/audit/history", b.handleAuditHistory)
 }
 
 // ── auth middleware ────────────────────────────────────────────────────────────
@@ -182,8 +180,7 @@ func (b *Bot) handleListUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Bot) handleCreateUser(w http.ResponseWriter, r *http.Request) {
-	actx, ok := b.mustAdmin(w, r)
-	if !ok {
+	if _, ok := b.mustAdmin(w, r); !ok {
 		return
 	}
 	var body map[string]string
@@ -206,12 +203,10 @@ func (b *Bot) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_, _ = w.Write(resp)
-	b.auditAction(r.Context(), actx.user.ID, "user_create", nil, map[string]any{"name": name})
 }
 
 func (b *Bot) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	actx, ok := b.mustAdmin(w, r)
-	if !ok {
+	if _, ok := b.mustAdmin(w, r); !ok {
 		return
 	}
 	uuid := r.PathValue("uuid")
@@ -225,12 +220,10 @@ func (b *Bot) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-	b.auditAction(r.Context(), actx.user.ID, "user_disable", &uuid, nil)
 }
 
 func (b *Bot) handleEnableUser(w http.ResponseWriter, r *http.Request) {
-	actx, ok := b.mustAdmin(w, r)
-	if !ok {
+	if _, ok := b.mustAdmin(w, r); !ok {
 		return
 	}
 	uuid := r.PathValue("uuid")
@@ -249,12 +242,10 @@ func (b *Bot) handleEnableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-	b.auditAction(r.Context(), actx.user.ID, "user_enable", &uuid, nil)
 }
 
 func (b *Bot) handleRotateUser(w http.ResponseWriter, r *http.Request) {
-	actx, ok := b.mustAdmin(w, r)
-	if !ok {
+	if _, ok := b.mustAdmin(w, r); !ok {
 		return
 	}
 	uuid := r.PathValue("uuid")
@@ -275,14 +266,12 @@ func (b *Bot) handleRotateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(resp)
-	b.auditAction(r.Context(), actx.user.ID, "user_rotate", &uuid, nil)
 }
 
-// handlePatchUser proxies partial-update to the admin API.
-// Accepts JSON body {"name": "...", "note": "..."} — all fields optional.
+// handlePatchUser proxies a partial user update to the admin API.
+// Accepts JSON body {"name": "..."}.
 func (b *Bot) handlePatchUser(w http.ResponseWriter, r *http.Request) {
-	actx, ok := b.mustAdmin(w, r)
-	if !ok {
+	if _, ok := b.mustAdmin(w, r); !ok {
 		return
 	}
 	uuid := r.PathValue("uuid")
@@ -308,7 +297,6 @@ func (b *Bot) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(resp)
-	b.auditAction(r.Context(), actx.user.ID, "user_patch", &uuid, map[string]any{"body": string(body)})
 }
 
 // handleGetUserTraffic proxies the per-user monthly traffic endpoint.
@@ -413,46 +401,6 @@ func (b *Bot) handleUserLeak(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleDiagProbe proxies a one-shot bridge↔exit TCP latency probe.
-func (b *Bot) handleDiagProbe(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.mustAdmin(w, r); !ok {
-		return
-	}
-	resp, err := b.adminGet(r.Context(), "/v1/latency/probe")
-	if err != nil {
-		b.log.Error("admin GET /v1/latency/probe", "err", err)
-		http.Error(w, "upstream error", http.StatusBadGateway)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(resp)
-}
-
-// handleDiagSessions proxies the recent per-connection latency traces.
-// 501 from upstream is forwarded as-is so the UI can hint how to enable tracing.
-func (b *Bot) handleDiagSessions(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.mustAdmin(w, r); !ok {
-		return
-	}
-	path := "/v1/latency/sessions"
-	if l := r.URL.Query().Get("limit"); l != "" {
-		path += "?limit=" + l
-	}
-	resp, err := b.adminGet(r.Context(), path)
-	if err != nil {
-		var apiErr *adminAPIError
-		if errors.As(err, &apiErr) {
-			http.Error(w, apiErr.body, apiErr.code)
-			return
-		}
-		b.log.Error("admin GET /v1/latency/sessions", "err", err)
-		http.Error(w, "upstream error", http.StatusBadGateway)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(resp)
-}
-
 func (b *Bot) handleGetUserConfig(w http.ResponseWriter, r *http.Request) {
 	if _, ok := b.mustAdmin(w, r); !ok {
 		return
@@ -538,8 +486,7 @@ func (b *Bot) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Bot) handleGenerateInvite(w http.ResponseWriter, r *http.Request) {
-	actx, ok := b.mustAdmin(w, r)
-	if !ok {
+	if _, ok := b.mustAdmin(w, r); !ok {
 		return
 	}
 	token, err := generateToken()
@@ -554,7 +501,6 @@ func (b *Bot) handleGenerateInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]string{"token": token})
-	b.auditAction(r.Context(), actx.user.ID, "admin_invite_create", nil, nil)
 }
 
 func (b *Bot) handleRecentAlerts(w http.ResponseWriter, r *http.Request) {
@@ -579,6 +525,26 @@ func (b *Bot) handleRecentAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, rows)
+}
+
+func (b *Bot) handleTestAlert(w http.ResponseWriter, r *http.Request) {
+	actx, ok := b.mustAdmin(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if b.teleRepo == nil {
+		http.Error(w, "notifications backend is disabled", http.StatusNotImplemented)
+		return
+	}
+	b.enqueueAdminAlert(r.Context(), "test_alert", map[string]any{
+		"text": "Тестовое уведомление",
+		"from": actx.user.DisplayName(),
+	})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (b *Bot) handleListAdmins(w http.ResponseWriter, r *http.Request) {
@@ -622,38 +588,7 @@ func (b *Bot) handleRemoveAdmin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	b.auditAction(r.Context(), actx.user.ID, "admin_remove", nil, map[string]any{"removed_telegram_id": id})
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (b *Bot) handleAuditHistory(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.mustAdmin(w, r); !ok {
-		return
-	}
-	if b.teleRepo == nil {
-		http.Error(w, "db backend is disabled", http.StatusNotImplemented)
-		return
-	}
-	limit := 50
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, _ := strconv.Atoi(v); n > 0 && n <= 200 {
-			limit = n
-		}
-	}
-	var tgID *int64
-	if v := strings.TrimSpace(r.URL.Query().Get("telegram_id")); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			tgID = &n
-		}
-	}
-	action := strings.TrimSpace(r.URL.Query().Get("action"))
-	rows, err := b.teleRepo.ListAdminAudit(r.Context(), limit, tgID, action)
-	if err != nil {
-		b.log.Error("audit history", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	jsonOK(w, rows)
 }
 
 // ── Admin API client helpers ──────────────────────────────────────────────────
@@ -753,21 +688,6 @@ func (e *adminAPIError) Error() string {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-func (b *Bot) auditAction(
-	ctx context.Context,
-	telegramID int64,
-	action string,
-	targetUUID *string,
-	payload map[string]any,
-) {
-	if b.teleRepo == nil {
-		return
-	}
-	if err := b.teleRepo.LogAdminAction(ctx, telegramID, action, targetUUID, payload); err != nil {
-		b.log.Warn("write admin audit log failed", "action", action, "err", err)
-	}
-}
 
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

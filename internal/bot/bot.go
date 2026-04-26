@@ -21,8 +21,10 @@ import (
 type Bot struct {
 	api        *tgbotapi.BotAPI
 	botToken   string
-	adminRepo  *db.BotAdminRepo
+	adminRepo  botAdminRepo
 	teleRepo   *db.TelegramRepo
+	alertsTele alertsTeleRepo
+	msgSender  messageSender
 	miniAppURL string // public HTTPS URL of the Mini App (e.g. https://bot.example.com:8444)
 
 	// Admin API proxy settings (ultra-relay admin HTTP API on loopback)
@@ -37,7 +39,7 @@ type Bot struct {
 // miniAppURL is the public HTTPS URL serving the embedded web frontend.
 func New(
 	botToken, adminAPIURL, adminAPIToken, miniAppURL string,
-	adminRepo *db.BotAdminRepo,
+	adminRepo botAdminRepo,
 	teleRepo *db.TelegramRepo,
 	log *slog.Logger,
 ) (*Bot, error) {
@@ -52,16 +54,19 @@ func New(
 		log = slog.Default()
 	}
 	log.Info("bot authenticated", "username", api.Self.UserName)
-	return &Bot{
+	bot := &Bot{
 		api:           api,
 		botToken:      botToken,
 		adminRepo:     adminRepo,
 		teleRepo:      teleRepo,
+		alertsTele:    teleRepo,
+		msgSender:     api,
 		miniAppURL:    miniAppURL,
 		adminAPIURL:   adminAPIURL,
 		adminAPIToken: adminAPIToken,
 		log:           log,
-	}, nil
+	}
+	return bot, nil
 }
 
 // RunPolling starts Telegram long polling and blocks until ctx is cancelled.
