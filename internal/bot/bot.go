@@ -9,10 +9,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"golang.org/x/net/proxy"
 
 	"github.com/NikitaDmitryuk/ultra/internal/db"
 )
@@ -46,7 +49,18 @@ func New(
 	if botToken == "" {
 		return nil, fmt.Errorf("bot: empty bot token")
 	}
-	api, err := tgbotapi.NewBotAPI(botToken)
+	var api *tgbotapi.BotAPI
+	var err error
+	if socks := os.Getenv("ULTRA_BOT_TELEGRAM_SOCKS5"); socks != "" {
+		client, clientErr := telegramHTTPClient(socks)
+		if clientErr != nil {
+			return nil, clientErr
+		}
+		log.Info("telegram_api_proxy", "proxy", "socks5://"+socks)
+		api, err = tgbotapi.NewBotAPIWithClient(botToken, tgbotapi.APIEndpoint, client)
+	} else {
+		api, err = tgbotapi.NewBotAPI(botToken)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("bot: connect to Telegram API: %w", err)
 	}
@@ -103,4 +117,23 @@ func withTimeout(d time.Duration, next http.Handler) http.Handler {
 		defer cancel()
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func telegramHTTPClient(socksAddr string) (*http.Client, error) {
+	if _, _, err := net.SplitHostPort(socksAddr); err != nil {
+		return nil, fmt.Errorf("bot: invalid ULTRA_BOT_TELEGRAM_SOCKS5 %q: %w", socksAddr, err)
+	}
+	dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
+	if err != nil {
+		return nil, fmt.Errorf("bot: socks5 dialer: %w", err)
+	}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if ctxDialer, ok := dialer.(proxy.ContextDialer); ok {
+				return ctxDialer.DialContext(ctx, network, addr)
+			}
+			return dialer.Dial(network, addr)
+		},
+	}
+	return &http.Client{Transport: transport, Timeout: 60 * time.Second}, nil
 }

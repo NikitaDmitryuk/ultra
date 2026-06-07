@@ -121,7 +121,7 @@ func (m *fakeUserManager) Close() {}
 
 func newHTTPTestServer(t *testing.T, users auth.UserManager, spec *config.Spec) *httptest.Server {
 	t.Helper()
-	s, err := NewServer("127.0.0.1:0", "secret", users, nil, spec, slog.Default(), nil)
+	s, err := NewServer("127.0.0.1:0", "secret", users, nil, spec, nil, nil, nil, slog.Default(), nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

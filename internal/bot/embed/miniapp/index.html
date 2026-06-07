@@ -38,7 +38,7 @@
       </div>
       <div class="health-pill" id="overview-exit-pill">
         <span class="health-dot" id="overview-exit-dot"></span>
-        <span>Exit</span>
+        <span id="overview-exit-label">Exit</span>
       </div>
     </div>
     <div id="overview-health-summary" class="health-summary">Проверка…</div>
@@ -186,7 +186,7 @@
       <div class="node-card" id="diag-exit-card">
         <div class="node-card-top">
           <span class="health-dot" id="diag-exit-dot"></span>
-          <div class="node-card-title">Exit</div>
+          <div class="node-card-title" id="diag-exit-title">Exit</div>
         </div>
         <div class="node-metric" id="diag-exit-tunnel">Tunnel —</div>
         <div class="node-metric" id="diag-exit-internet">Internet —</div>
@@ -199,6 +199,36 @@
 <div id="screen-settings" class="screen">
   <div class="screen-header">
     <span class="screen-title">Настройки</span>
+  </div>
+  <div class="card">
+    <div class="card-title">Exit-ноды</div>
+    <p style="font-size:13px;color:var(--tg-hint);margin-bottom:10px">
+      Управление upstream exit для failover. После добавления задеплойте VPS командой из ответа.
+    </p>
+    <div id="exits-list" class="diag-list empty">Загрузка…</div>
+    <div class="form-group" style="margin-top:12px">
+      <label class="form-label" for="new-exit-name">Имя</label>
+      <input class="form-input" id="new-exit-name" type="text" placeholder="backup-fra" autocomplete="off">
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="new-exit-address">Адрес (dial с bridge)</label>
+      <input class="form-input" id="new-exit-address" type="text" placeholder="203.0.113.10" autocomplete="off">
+    </div>
+    <div class="detail-month-row">
+      <div class="form-group" style="flex:1;margin-bottom:0">
+        <label class="form-label" for="new-exit-port">Порт</label>
+        <input class="form-input" id="new-exit-port" type="number" placeholder="8443">
+      </div>
+      <div class="form-group" style="flex:1;margin-bottom:0">
+        <label class="form-label" for="new-exit-priority">Priority</label>
+        <input class="form-input" id="new-exit-priority" type="number" placeholder="100" value="100">
+      </div>
+    </div>
+    <button class="btn" onclick="createExitNode()" style="margin-top:8px">Добавить exit</button>
+    <div id="exit-deploy-result" style="display:none;margin-top:10px">
+      <div class="card-title" style="font-size:13px">Deploy</div>
+      <div class="config-uri" id="exit-deploy-text"></div>
+    </div>
   </div>
   <div class="card">
     <div class="card-title">Добавить администратора</div>

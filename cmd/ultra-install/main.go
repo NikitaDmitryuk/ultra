@@ -17,6 +17,7 @@ import (
 	"github.com/xtls/xray-core/common/uuid"
 
 	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/install"
 	"github.com/NikitaDmitryuk/ultra/internal/loglevel"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
@@ -65,6 +66,14 @@ func main() {
 		"",
 		"hostname or IP for bridge→exit splithttp dial in spec (default: same as -exit); use DNS name when dial by IP breaks Host validation",
 	)
+	exit2Host := flag.String("exit2", "", "optional second exit VPS for failover (same install as -exit)")
+	exit2Dial := flag.String(
+		"exit2-dial",
+		"",
+		"bridge dial address for -exit2 (default: same as -exit2)",
+	)
+	exit2Priority := flag.Int("exit2-priority", 200, "failover priority for -exit2 (lower = preferred; primary -exit uses 100)")
+	exit2Name := flag.String("exit2-name", "backup", "display name for -exit2 in PostgreSQL exit_nodes")
 	sshUser := flag.String("ssh-user", "root", "SSH user (key auth; avoid password automation)")
 	identity := flag.String("identity", "", "path to SSH private key (optional if ssh uses agent)")
 	publicHost := flag.String("public-host", "", "hostname or IP clients use to reach the bridge (default: -bridge)")
@@ -169,8 +178,33 @@ func main() {
 	)
 	transportFlag := flag.String(
 		"transport",
-		"grpc",
-		`bridge→exit tunnel transport: "grpc" (default, HTTP/2 persistent stream) or "splithttp" (chunked HTTP, alternative for restrictive networks)`,
+		"splithttp",
+		`bridge→exit tunnel transport: "splithttp" (default, XHTTP stream-up H2) or "grpc" (deprecated in Xray 26)`,
+	)
+	vlessFlowFlag := flag.String(
+		"vless-flow",
+		config.DefaultVLESSFlow,
+		`VLESS flow for public REALITY clients (default xtls-rprx-vision); use with -disable-vless-flow to opt out`,
+	)
+	disableVLESSFlow := flag.Bool(
+		"disable-vless-flow",
+		false,
+		"omit flow on public REALITY inbound and client exports (legacy clients; Xray 26 warnings remain)",
+	)
+	exitOnly := flag.Bool(
+		"exit-only",
+		false,
+		"deploy only an exit VPS (register exit in bridge Admin API first; requires -bridge, -exit, -tunnel-uuid)",
+	)
+	tunnelUUIDFlag := flag.String(
+		"tunnel-uuid",
+		"",
+		"VLESS tunnel UUID for this exit (required with -exit-only; from POST /v1/exits deploy hints)",
+	)
+	botTelegramProxy := flag.Bool(
+		"bot-telegram-proxy",
+		false,
+		"enable local SOCKS5 inbound on bridge for ultra-bot Telegram API via active exit",
 	)
 	flag.Parse()
 
@@ -181,6 +215,37 @@ func main() {
 	if tun <= 0 || tun > 65535 {
 		fmt.Fprintln(os.Stderr, "ultra-install: -tunnel-port must be 1..65535 or 0 to match -vless-port")
 		os.Exit(1)
+	}
+
+	logLevelNorm := strings.TrimSpace(*logLevel)
+	if _, _, err := loglevel.ParseRelayLogLevel(logLevelNorm); err != nil {
+		fmt.Fprintln(os.Stderr, "ultra-install:", err)
+		os.Exit(2)
+	}
+
+	if *exitOnly {
+		runExitOnly(exitOnlyOpts{
+			bridgeHost:      *bridgeHost,
+			exitHost:        *exitHost,
+			sshUser:         *sshUser,
+			identity:        *identity,
+			remoteDir:       *remoteDir,
+			projectRoot:     *projectRoot,
+			binaryPath:      *binaryPath,
+			tunnelUUID:      *tunnelUUIDFlag,
+			tunnelPort:      tun,
+			logLevel:        logLevelNorm,
+			generateExitTLS: *generateExitTLS,
+			warp:            *warpFlag,
+			warpPort:        *warpPort,
+			disableDOH:      *disableDOH,
+			transport:       strings.TrimSpace(*transportFlag),
+			splithttpHost:   *splithttpHostFlag,
+			splithttpPath:   *splithttpPathFlag,
+			dryRun:          *dryRun,
+			writeLocal:      *writeLocal,
+		})
+		return
 	}
 
 	if *bridgeHost == "" || *exitHost == "" {
@@ -204,12 +269,6 @@ func main() {
 	routingModeStr := strings.TrimSpace(*routingMode)
 	if routingModeStr != "" && routingModeStr != config.RoutingModeBlocklist && routingModeStr != config.RoutingModeRUDirect {
 		fmt.Fprintln(os.Stderr, "ultra-install: -routing-mode must be blocklist or ru_direct")
-		os.Exit(2)
-	}
-
-	logLevelNorm := strings.TrimSpace(*logLevel)
-	if _, _, err := loglevel.ParseRelayLogLevel(logLevelNorm); err != nil {
-		fmt.Fprintln(os.Stderr, "ultra-install:", err)
 		os.Exit(2)
 	}
 
@@ -240,6 +299,10 @@ func main() {
 	exitDialAddr := strings.TrimSpace(*exitDial)
 	if exitDialAddr == "" {
 		exitDialAddr = *exitHost
+	}
+	exit2DialAddr := strings.TrimSpace(*exit2Dial)
+	if exit2DialAddr == "" {
+		exit2DialAddr = strings.TrimSpace(*exit2Host)
 	}
 
 	var (
@@ -398,8 +461,24 @@ func main() {
 	}
 
 	genExitTLS := *generateExitTLS
-	if reused && tlsProv == config.TunnelTLSSelfSigned {
-		genExitTLS = false
+
+	var priorBootstrap []exits.BootstrapEntry
+	if *reuseBridgeSpec {
+		priorBootstrap = loadRemoteBootstrapEntries(*sshUser, *bridgeHost, *identity, *remoteDir)
+	}
+
+	var tunnelUUID2 string
+	if strings.TrimSpace(*exit2Host) != "" {
+		if strings.TrimSpace(*exit2Host) == strings.TrimSpace(*exitHost) {
+			fmt.Fprintln(os.Stderr, "ultra-install: -exit2 must differ from -exit")
+			os.Exit(2)
+		}
+		exit2Host := strings.TrimSpace(*exit2Host)
+		tunnelUUID2 = resolveExitTunnelUUID(priorBootstrap, *sshUser, exit2Host, *identity, *remoteDir, exit2DialAddr, tun)
+		if tunnelUUID2 == "" && install.SSHReachable(*sshUser, exit2Host, *identity) {
+			tid2 := uuid.New()
+			tunnelUUID2 = (&tid2).String()
+		}
 	}
 
 	bridgeSpec := &config.Spec{
@@ -482,6 +561,10 @@ func main() {
 			}
 			bridgeSpec.SOCKS5 = &cpy
 		}
+		if bridgeOverlay.BotTelegramProxy != nil {
+			cpy := *bridgeOverlay.BotTelegramProxy
+			bridgeSpec.BotTelegramProxy = &cpy
+		}
 		if len(bridgeOverlay.GeositeBlockTags) > 0 {
 			bridgeSpec.GeositeBlockTags = append([]string(nil), bridgeOverlay.GeositeBlockTags...)
 		}
@@ -502,6 +585,13 @@ func main() {
 	if s := strings.TrimSpace(*geositeBlockTags); s != "" {
 		bridgeSpec.GeositeBlockTags = splitCommaNonEmpty(s)
 	}
+	if *botTelegramProxy {
+		if bridgeSpec.BotTelegramProxy == nil {
+			bridgeSpec.BotTelegramProxy = &config.BotTelegramProxySpec{Enabled: true}
+		} else {
+			bridgeSpec.BotTelegramProxy.Enabled = true
+		}
+	}
 
 	exitAntiCensor := &config.AntiCensorSpec{}
 	if *disableDOH {
@@ -512,42 +602,48 @@ func main() {
 		exitAntiCensor.WARPProxyPort = *warpPort
 	}
 
-	exitSpec := &config.Spec{
-		SchemaVersion:      config.CurrentSpecSchemaVersion,
-		Role:               config.RoleExit,
-		MimicPreset:        strat.Name(),
-		SplithttpHost:      mimicHost,
-		TunnelTLSProvision: tlsProv,
-		ListenAddress:      "0.0.0.0",
-		VLESSPort:          tun,
-		PublicHost:         "",
-		DevMode:            false,
-		Reality:            config.RealitySpec{},
-		Exit: config.ExitTunnelSpec{
-			Address:    "",
-			Port:       0,
-			TunnelUUID: tunnelUUID,
-		},
-		SplithttpPath: splitPath,
-		SplitHTTPTLS:  splitTLS,
-		ExitCertPaths: config.CertPaths{
-			CertFile: path.Join(*remoteDir, "fullchain.pem"),
-			KeyFile:  path.Join(*remoteDir, "privkey.pem"),
-		},
-		AntiCensor: exitAntiCensor,
+	var tunnelTransport config.TunnelTransport
+	switch strings.TrimSpace(*transportFlag) {
+	case "", "splithttp":
+		bridgeSpec.TunnelTransport = config.TunnelTransportSplitHTTP
+		tunnelTransport = config.TunnelTransportSplitHTTP
+	case "grpc":
+		fmt.Fprintln(os.Stderr, "WARNING: gRPC transport deprecated in Xray 26; use -transport splithttp (XHTTP stream-up H2)")
+		bridgeSpec.TunnelTransport = config.TunnelTransportGRPC
+		tunnelTransport = config.TunnelTransportGRPC
+	default:
+		fmt.Fprintf(os.Stderr, "ultra-install: unsupported -transport %q (use splithttp or grpc)\n", *transportFlag)
+		os.Exit(2)
 	}
 
-	if t := strings.TrimSpace(*transportFlag); t == "grpc" {
-		bridgeSpec.TunnelTransport = config.TunnelTransportGRPC
-		exitSpec.TunnelTransport = config.TunnelTransportGRPC
+	if *disableVLESSFlow {
+		bridgeSpec.VLESSFlow = "none"
+	} else if f := strings.TrimSpace(*vlessFlowFlag); f != "" {
+		bridgeSpec.VLESSFlow = f
+	} else {
+		bridgeSpec.VLESSFlow = config.DefaultVLESSFlow
+	}
+
+	exitJSON, err := buildExitSpecJSON(
+		*remoteDir, tun, tunnelUUID, strat.Name(), mimicHost, splitPath, splitTLS, tlsProv, tunnelTransport, exitAntiCensor,
+	)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "exit spec:", err)
+		os.Exit(1)
+	}
+	var exit2JSON []byte
+	if tunnelUUID2 != "" {
+		exit2JSON, err = buildExitSpecJSON(
+			*remoteDir, tun, tunnelUUID2, strat.Name(), mimicHost, splitPath, splitTLS, tlsProv, tunnelTransport, exitAntiCensor,
+		)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "exit2 spec:", err)
+			os.Exit(1)
+		}
 	}
 
 	if err := bridgeSpec.Validate(); err != nil {
 		fmt.Fprintln(os.Stderr, "bridge spec:", err)
-		os.Exit(1)
-	}
-	if err := exitSpec.Validate(); err != nil {
-		fmt.Fprintln(os.Stderr, "exit spec:", err)
 		os.Exit(1)
 	}
 
@@ -556,13 +652,47 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	exitJSON, err := json.MarshalIndent(exitSpec, "", "  ")
+
+	exitPlans := []exitDeployPlan{{
+		Label:      "primary",
+		SSHHost:    *exitHost,
+		DialAddr:   exitDialAddr,
+		Port:       tun,
+		Name:       "primary",
+		Priority:   100,
+		TunnelUUID: tunnelUUID,
+		SpecJSON:   exitJSON,
+	}}
+	if tunnelUUID2 != "" {
+		name2 := strings.TrimSpace(*exit2Name)
+		if name2 == "" {
+			name2 = "backup"
+		}
+		pri2 := *exit2Priority
+		if pri2 <= 0 {
+			pri2 = 200
+		}
+		exitPlans = append(exitPlans, exitDeployPlan{
+			Label:      "backup",
+			SSHHost:    strings.TrimSpace(*exit2Host),
+			DialAddr:   exit2DialAddr,
+			Port:       tun,
+			Name:       name2,
+			Priority:   pri2,
+			TunnelUUID: tunnelUUID2,
+			SpecJSON:   exit2JSON,
+		})
+	}
+	previewOutcomes := previewExitOutcomes(exitPlans, *sshUser, *identity)
+	bootstrapEntries := buildBootstrapEntries(exitPlans, priorBootstrap, previewOutcomes)
+	bootstrapJSON, err := json.MarshalIndent(bootstrapEntries, "", "  ")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
 	// ── PostgreSQL configuration (if requested) ─────────────────────────────
+	var installWarn installWarnings
 	var pgCfg *install.PostgresConfig
 	var dbDSN string
 	if *dbHost != "" || (*dbHost == "" && *dbReplica != "") {
@@ -622,11 +752,16 @@ func main() {
 				fmt.Fprintln(os.Stderr, "system setup (primary):", err)
 				os.Exit(1)
 			}
-			if replicaHost != "" && replicaHost != primaryHost {
+			replicaReachable := replicaHost != "" && replicaHost != primaryHost
+			if replicaReachable && !install.SSHReachable(dbSSH, replicaHost, *identity) {
+				installWarn.add("PostgreSQL replica (%s): SSH недоступен — пропуск", replicaHost)
+				replicaReachable = false
+			}
+			if replicaReachable {
 				fmt.Printf("Configuring system locale/timezone on %s …\n", replicaHost)
 				if err := install.SetupSystem(dbSSH, replicaHost, *identity); err != nil {
-					fmt.Fprintln(os.Stderr, "system setup (replica):", err)
-					os.Exit(1)
+					installWarn.add("PostgreSQL replica (%s): SSH недоступен — %v", replicaHost, err)
+					replicaReachable = false
 				}
 			}
 			fmt.Printf("Setting up PostgreSQL primary on %s …\n", primaryHost)
@@ -636,13 +771,13 @@ func main() {
 			}
 			fmt.Println("PostgreSQL primary ready.")
 
-			if replicaHost != "" {
+			if replicaReachable {
 				fmt.Printf("Setting up PostgreSQL replica on %s …\n", replicaHost)
 				if err := install.SetupReplicaPostgres(dbSSH, replicaHost, *identity, *pc, primaryHost); err != nil {
-					fmt.Fprintln(os.Stderr, "postgres replica setup:", err)
-					os.Exit(1)
+					installWarn.add("PostgreSQL replica (%s): установка не выполнена — %v", replicaHost, err)
+				} else {
+					fmt.Println("PostgreSQL replica ready.")
 				}
-				fmt.Println("PostgreSQL replica ready.")
 			}
 		}
 	}
@@ -653,14 +788,23 @@ func main() {
 		}
 		fmt.Println("=== bridge spec ===")
 		fmt.Println(string(bridgeJSON))
-		fmt.Println("=== exit spec ===")
+		fmt.Println("=== exit spec (primary) ===")
 		fmt.Println(string(exitJSON))
+		if len(exit2JSON) > 0 {
+			fmt.Println("=== exit spec (exit2) ===")
+			fmt.Println(string(exit2JSON))
+		}
+		fmt.Println("=== exit_nodes.bootstrap.json ===")
+		fmt.Println(string(bootstrapJSON))
 		if *warpFlag {
 			fmt.Printf("=== WARP: would install on exit, proxy port %d ===\n", *warpPort)
 		}
 		fmt.Println("=== one-time values (store securely) ===")
 		fmt.Println("admin_token:", adminToken)
 		fmt.Println("tunnel_uuid:", tunnelUUID)
+		if tunnelUUID2 != "" {
+			fmt.Println("tunnel_uuid2:", tunnelUUID2)
+		}
 		fmt.Println("splithttp_path:", splitPath)
 		if dbDSN != "" {
 			fmt.Println("db_dsn:", dbDSN)
@@ -684,8 +828,22 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		if len(exit2JSON) > 0 {
+			if err := os.WriteFile(filepath.Join(*writeLocal, "exit2-spec.json"), exit2JSON, 0o600); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(*writeLocal, exits.BootstrapFileName), bootstrapJSON, 0o600); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		fmt.Println("Wrote", filepath.Join(*writeLocal, "bridge-spec.json"))
 		fmt.Println("Wrote", filepath.Join(*writeLocal, "exit-spec.json"))
+		if len(exit2JSON) > 0 {
+			fmt.Println("Wrote", filepath.Join(*writeLocal, "exit2-spec.json"))
+		}
+		fmt.Println("Wrote", filepath.Join(*writeLocal, exits.BootstrapFileName))
 		return
 	}
 
@@ -699,16 +857,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// If DB setup was on separate hosts, bridge/exit may not have had system setup yet.
-	// Run SetupSystem on bridge and exit unconditionally — it is idempotent.
 	fmt.Printf("Configuring system locale/timezone on bridge %s …\n", *bridgeHost)
 	if err := install.SetupSystem(*sshUser, *bridgeHost, *identity); err != nil {
 		fmt.Fprintln(os.Stderr, "system setup (bridge):", err)
-		os.Exit(1)
-	}
-	fmt.Printf("Configuring system locale/timezone on exit %s …\n", *exitHost)
-	if err := install.SetupSystem(*sshUser, *exitHost, *identity); err != nil {
-		fmt.Fprintln(os.Stderr, "system setup (exit):", err)
 		os.Exit(1)
 	}
 
@@ -728,77 +879,81 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	exitPrep := fmt.Sprintf(
-		`set -euo pipefail; REMOTE_DIR=%q; mkdir -p "$REMOTE_DIR" && chmod 700 "$REMOTE_DIR"; id -u ultra-relay >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin ultra-relay`,
-		*remoteDir,
-	)
-	if err := install.RunSSH(*sshUser, *exitHost, *identity, exitPrep); err != nil {
-		fmt.Fprintln(os.Stderr, "exit prepare:", err)
+
+	exitCommon := exitDeployCommon{
+		sshUser:      *sshUser,
+		identity:     *identity,
+		remoteDir:    *remoteDir,
+		binaryPath:   *binaryPath,
+		systemdLocal: systemdLocal,
+		logLevel:     logLevelNorm,
+		mimicHost:    mimicHost,
+		genExitTLS:   genExitTLS,
+		warp:         *warpFlag,
+		warpPort:     *warpPort,
+	}
+	deployOutcomes := make(map[string]exitDeployOutcome, len(exitPlans))
+	for _, plan := range exitPlans {
+		if !install.SSHReachable(exitCommon.sshUser, plan.SSHHost, exitCommon.identity) {
+			installWarn.add("exit %s (%s): SSH недоступен — деплой пропущен", plan.Label, plan.SSHHost)
+			deployOutcomes[plan.Label] = exitDeployOutcome{}
+			continue
+		}
+		certPin, err := deployExitNode(exitCommon, plan)
+		if err != nil {
+			installWarn.add("exit %s (%s): деплой не выполнен — %v", plan.Label, plan.SSHHost, err)
+			deployOutcomes[plan.Label] = exitDeployOutcome{}
+			continue
+		}
+		deployOutcomes[plan.Label] = exitDeployOutcome{Deployed: true, CertPin: certPin}
+		fmt.Printf("Exit node %s deployed: %s\n", plan.Label, plan.SSHHost)
+	}
+	if countDeployedOutcomes(deployOutcomes) == 0 {
+		fmt.Fprintln(os.Stderr, "ultra-install: ни один exit не задеployed — установка прервана")
+		os.Exit(1)
+	}
+	bootstrapEntries = buildBootstrapEntries(exitPlans, priorBootstrap, deployOutcomes)
+	bootstrapJSON, err = json.MarshalIndent(bootstrapEntries, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
-	if *warpFlag {
-		fmt.Printf("exit: installing Cloudflare WARP (proxy mode → 127.0.0.1:%d) …\n", *warpPort)
-		if err := install.SetupWARP(*sshUser, *exitHost, *identity, *warpPort); err != nil {
-			fmt.Fprintln(os.Stderr, "warp setup:", err)
-			os.Exit(1)
-		}
-		fmt.Println("WARP proxy ready on exit node.")
-		fmt.Printf("exit: installing WARP watchdog timer (checks every 5 min) …\n")
-		if err := install.SetupWARPWatchdog(*sshUser, *exitHost, *identity, *warpPort); err != nil {
-			fmt.Fprintln(os.Stderr, "warp watchdog setup:", err)
-			os.Exit(1)
-		}
-		fmt.Println("WARP watchdog timer active on exit node.")
-	}
-
-	if genExitTLS {
-		// SAN required: Go 1.23+ x509 rejects hostname verify when cert has only legacy CN (bridge splithttp client).
-		ssl := fmt.Sprintf(
-			`set -euo pipefail; REMOTE_DIR=%q; CN=%q; openssl req -x509 -newkey rsa:2048 -keyout "$REMOTE_DIR/privkey.pem" -out "$REMOTE_DIR/fullchain.pem" -days 3650 -nodes -subj "/CN=$CN" -addext "subjectAltName=DNS:$CN"; chown ultra-relay:ultra-relay "$REMOTE_DIR/privkey.pem" "$REMOTE_DIR/fullchain.pem"; chmod 600 "$REMOTE_DIR/privkey.pem" "$REMOTE_DIR/fullchain.pem"`,
-			*remoteDir,
-			mimicHost,
-		)
-		if err := install.RunSSH(*sshUser, *exitHost, *identity, ssl); err != nil {
-			fmt.Fprintln(os.Stderr, "exit tls:", err)
-			os.Exit(1)
-		}
-	}
-
 	tmpBridge := filepath.Join(os.TempDir(), "ultra-bridge-spec.json")
-	tmpExit := filepath.Join(os.TempDir(), "ultra-exit-spec.json")
+	tmpBootstrap := filepath.Join(os.TempDir(), exits.BootstrapFileName)
 	tmpEnv := filepath.Join(os.TempDir(), "ultra-relay.env")
-	tmpEnvExit := filepath.Join(os.TempDir(), "ultra-relay-exit.env")
 	bridgeEnv := fmt.Sprintf("ULTRA_RELAY_ADMIN_TOKEN=%s\nULTRA_RELAY_LOG_LEVEL=%s\n", adminToken, logLevelNorm)
 	if dbDSN != "" {
 		bridgeEnv += install.FormatDBEnvLine(dbDSN)
 	}
-	exitEnv := fmt.Sprintf("ULTRA_RELAY_LOG_LEVEL=%s\n", logLevelNorm)
-	_ = os.WriteFile(tmpBridge, bridgeJSON, 0o600)
-	_ = os.WriteFile(tmpExit, exitJSON, 0o600)
-	_ = os.WriteFile(tmpEnv, []byte(bridgeEnv), 0o600)
-	_ = os.WriteFile(tmpEnvExit, []byte(exitEnv), 0o600)
+	if err := os.WriteFile(tmpBridge, bridgeJSON, 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(tmpBootstrap, bootstrapJSON, 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(tmpEnv, []byte(bridgeEnv), 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	defer func() {
 		_ = os.Remove(tmpBridge)
-		_ = os.Remove(tmpExit)
+		_ = os.Remove(tmpBootstrap)
 		_ = os.Remove(tmpEnv)
-		_ = os.Remove(tmpEnvExit)
 	}()
 
 	for _, fn := range []func() error{
 		func() error { return install.SCP(*identity, *binaryPath, *sshUser, *bridgeHost, "/tmp/ultra-relay") },
-		func() error { return install.SCP(*identity, *binaryPath, *sshUser, *exitHost, "/tmp/ultra-relay") },
 		func() error {
 			return install.SCP(*identity, tmpBridge, *sshUser, *bridgeHost, path.Join(*remoteDir, "spec.json"))
 		},
 		func() error {
-			return install.SCP(*identity, tmpExit, *sshUser, *exitHost, path.Join(*remoteDir, "spec.json"))
+			return install.SCP(*identity, tmpBootstrap, *sshUser, *bridgeHost, path.Join(*remoteDir, exits.BootstrapFileName))
 		},
 		func() error {
 			return install.SCP(*identity, tmpEnv, *sshUser, *bridgeHost, path.Join(*remoteDir, "environment.tmp"))
-		},
-		func() error {
-			return install.SCP(*identity, tmpEnvExit, *sshUser, *exitHost, path.Join(*remoteDir, "environment.tmp"))
 		},
 	} {
 		if err := fn(); err != nil {
@@ -816,27 +971,12 @@ rm -f "$REMOTE_DIR/environment.tmp"
 chown -R ultra-relay:ultra-relay "$REMOTE_DIR"
 chmod 700 "$REMOTE_DIR"
 chmod 600 "$REMOTE_DIR/spec.json" || true
+chmod 600 "$REMOTE_DIR/%s" || true
 chmod 600 /etc/ultra-relay/environment
-`, *remoteDir)
+`, *remoteDir, exits.BootstrapFileName)
 
 	if err := install.RunSSH(*sshUser, *bridgeHost, *identity, remoteFinalize); err != nil {
 		fmt.Fprintln(os.Stderr, "bridge finalize:", err)
-		os.Exit(1)
-	}
-
-	exitFinalize := fmt.Sprintf(`set -euo pipefail
-REMOTE_DIR=%q
-install -m 755 /tmp/ultra-relay /usr/local/bin/ultra-relay
-rm -f /tmp/ultra-relay
-install -m 600 "$REMOTE_DIR/environment.tmp" /etc/ultra-relay/environment
-rm -f "$REMOTE_DIR/environment.tmp"
-chmod 600 /etc/ultra-relay/environment
-chown -R ultra-relay:ultra-relay "$REMOTE_DIR"
-chmod 700 "$REMOTE_DIR"
-chmod 600 "$REMOTE_DIR/spec.json" || true
-`, *remoteDir)
-	if err := install.RunSSH(*sshUser, *exitHost, *identity, exitFinalize); err != nil {
-		fmt.Fprintln(os.Stderr, "exit finalize:", err)
 		os.Exit(1)
 	}
 
@@ -852,19 +992,23 @@ chmod 600 "$REMOTE_DIR/spec.json" || true
 	}
 	defer func() { _ = os.Remove(tmpUnit) }()
 
-	for _, h := range []string{*bridgeHost, *exitHost} {
-		if err := install.SCP(*identity, tmpUnit, *sshUser, h, "/tmp/ultra-relay.service"); err != nil {
-			fmt.Fprintln(os.Stderr, "unit scp:", err)
-			os.Exit(1)
-		}
-		unitMv := `mv /tmp/ultra-relay.service /etc/systemd/system/ultra-relay.service && systemctl daemon-reload && systemctl enable ultra-relay && systemctl restart ultra-relay`
-		if err := install.RunSSH(*sshUser, h, *identity, unitMv); err != nil {
-			fmt.Fprintln(os.Stderr, "systemctl:", err)
-			os.Exit(1)
-		}
+	if err := install.SCP(*identity, tmpUnit, *sshUser, *bridgeHost, "/tmp/ultra-relay.service"); err != nil {
+		fmt.Fprintln(os.Stderr, "unit scp:", err)
+		os.Exit(1)
+	}
+	unitMv := `mv /tmp/ultra-relay.service /etc/systemd/system/ultra-relay.service && systemctl daemon-reload && systemctl enable ultra-relay && systemctl restart ultra-relay`
+	if err := install.RunSSH(*sshUser, *bridgeHost, *identity, unitMv); err != nil {
+		fmt.Fprintln(os.Stderr, "systemctl:", err)
+		os.Exit(1)
 	}
 
 	fmt.Println("Install finished.")
+	fmt.Println("Exit nodes (bootstrap on bridge):", *exitHost)
+	if tunnelUUID2 != "" {
+		fmt.Println("  backup:", strings.TrimSpace(*exit2Host))
+		fmt.Println("  bootstrap:", path.Join(*remoteDir, exits.BootstrapFileName))
+	}
+	installWarn.printSummary()
 	if reused {
 		fmt.Println("Preserved front inbound keys, tunnel UUID, and splithttp settings from existing bridge spec (-reuse-bridge-spec).")
 	}

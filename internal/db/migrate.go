@@ -39,6 +39,12 @@ var migration010 string
 //go:embed migrations/011_users_proxy_kind.sql
 var migration011 string
 
+//go:embed migrations/012_exit_nodes.sql
+var migration012 string
+
+//go:embed migrations/013_exit_nodes_cert_pin.sql
+var migration013 string
+
 func (d *DB) migrate(ctx context.Context) error {
 	_, err := d.Pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -65,6 +71,8 @@ func (d *DB) migrate(ctx context.Context) error {
 		{9, migration009},
 		{10, migration010},
 		{11, migration011},
+		{12, migration012},
+		{13, migration013},
 	}
 
 	for _, m := range migrations {

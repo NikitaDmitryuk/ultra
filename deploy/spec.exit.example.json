@@ -10,9 +10,10 @@
   "dev_mode": false,
   "reality": {},
   "exit": {
+    "_doc": "Unique tunnel_uuid per exit VPS (from POST /v1/exits or ultra-install -tunnel-uuid). Must match bridge exit_nodes row.",
     "address": "",
     "port": 0,
-    "tunnel_uuid": "SHARED_TUNNEL_UUID_BRIDGE_AND_EXIT"
+    "tunnel_uuid": "UNIQUE_TUNNEL_UUID_FOR_THIS_EXIT"
   },
   "splithttp_path": "/api/v1/subscription",
   "splithttp_host": "splithttp.invalid",

@@ -17,6 +17,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/db"
+	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/probe"
 
 	"golang.org/x/sync/errgroup"
@@ -36,10 +37,13 @@ type TrafficQuerier interface {
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
 type Server struct {
-	log     *slog.Logger
-	users   auth.UserManager
-	traffic TrafficQuerier // nil when DB is not configured
-	spec    *config.Spec
+	log          *slog.Logger
+	users        auth.UserManager
+	traffic      TrafficQuerier // nil when DB is not configured
+	spec         *config.Spec
+	exits        *exits.Manager
+	selector     *exits.Selector
+	onExitChange func()
 	// statPeek reads a cumulative Xray stats counter by name (optional; used for legacy SOCKS5 traffic).
 	statPeek func(string) int64
 	mux      *http.ServeMux
@@ -55,6 +59,9 @@ func NewServer(
 	users auth.UserManager,
 	traffic TrafficQuerier,
 	spec *config.Spec,
+	exitMgr *exits.Manager,
+	selector *exits.Selector,
+	onExitChange func(),
 	log *slog.Logger,
 	statPeek func(string) int64,
 ) (*Server, error) {
@@ -72,14 +79,17 @@ func NewServer(
 		log = slog.Default()
 	}
 	s := &Server{
-		log:      log,
-		users:    users,
-		traffic:  traffic,
-		spec:     spec,
-		statPeek: statPeek,
-		mux:      http.NewServeMux(),
-		lim:      newVisitorLimiter(30, 60, 256),
-		tokenH:   sha256.Sum256([]byte(token)),
+		log:          log,
+		users:        users,
+		traffic:      traffic,
+		spec:         spec,
+		exits:        exitMgr,
+		selector:     selector,
+		onExitChange: onExitChange,
+		statPeek:     statPeek,
+		mux:          http.NewServeMux(),
+		lim:          newVisitorLimiter(30, 60, 256),
+		tokenH:       sha256.Sum256([]byte(token)),
 	}
 	if err := s.routes(); err != nil {
 		return nil, err
@@ -130,6 +140,10 @@ func (s *Server) routes() error {
 	s.mux.HandleFunc("GET /v1/traffic/history", s.handleGetTrafficHistory)
 	s.mux.HandleFunc("GET /v1/traffic/last-seen", s.handleGetLastSeen)
 	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
+	s.mux.HandleFunc("GET /v1/exits", s.handleListExits)
+	s.mux.HandleFunc("POST /v1/exits", s.handlePostExit)
+	s.mux.HandleFunc("PATCH /v1/exits/{id}", s.handlePatchExit)
+	s.mux.HandleFunc("DELETE /v1/exits/{id}", s.handleDeleteExit)
 	return nil
 }
 
@@ -626,20 +640,25 @@ func (s *Server) handleGetLastSeen(w http.ResponseWriter, r *http.Request) {
 
 // handleHealth probes bridge and exit connectivity (bridge process, tunnel, exit internet).
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	exitAddr := fmt.Sprintf("%s:%d", s.spec.Exit.Address, s.spec.Exit.Port)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
 	type nodeHealth struct {
-		Reachable         bool  `json:"reachable"`
-		InternetOK        bool  `json:"internet_ok"`
-		InternetLatencyMS int64 `json:"internet_latency_ms,omitempty"`
-		TunnelLatencyMS   int64 `json:"tunnel_latency_ms,omitempty"`
+		ID                string `json:"id,omitempty"`
+		Name              string `json:"name,omitempty"`
+		Reachable         bool   `json:"reachable"`
+		InternetOK        bool   `json:"internet_ok"`
+		InternetLatencyMS int64  `json:"internet_latency_ms,omitempty"`
+		TunnelLatencyMS   int64  `json:"tunnel_latency_ms,omitempty"`
+		Active            bool   `json:"active,omitempty"`
 	}
 	type healthResp struct {
-		CheckedAt string     `json:"checked_at"`
-		Bridge    nodeHealth `json:"bridge"`
-		Exit      nodeHealth `json:"exit"`
+		CheckedAt         string       `json:"checked_at"`
+		Bridge            nodeHealth   `json:"bridge"`
+		Exit              nodeHealth   `json:"exit"`
+		Exits             []nodeHealth `json:"exits,omitempty"`
+		ActiveExitID      string       `json:"active_exit_id,omitempty"`
+		SelectionDegraded bool         `json:"selection_degraded,omitempty"`
 	}
 	res := healthResp{
 		CheckedAt: time.Now().UTC().Format(time.RFC3339),
@@ -658,25 +677,66 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	g.Go(func() error {
-		rtt, err := probe.DialTCP(ctx, exitAddr)
-		if err != nil {
-			return err
-		}
-		res.Exit.Reachable = true
-		res.Exit.TunnelLatencyMS = rtt.Milliseconds()
-		return nil
-	})
+	active, exitsHealth, activeID := s.probeExitsHealth(ctx)
+	res.ActiveExitID = activeID
 
-	g.Go(func() error {
-		rtt, err := probe.DialTCP(ctx, config.HealthProbeListenIPPort)
-		if err != nil {
-			return err
+	if s.exits != nil && len(s.exits.ListEnabled()) > 0 {
+		allNodes := s.exits.List()
+		nameByID := make(map[string]string, len(allNodes))
+		for _, n := range allNodes {
+			nameByID[n.ID] = n.Name
 		}
-		res.Exit.InternetOK = true
-		res.Exit.InternetLatencyMS = rtt.Milliseconds()
-		return nil
-	})
+		for _, h := range exitsHealth {
+			res.Exits = append(res.Exits, nodeHealth{
+				ID:                h.ID,
+				Name:              nameByID[h.ID],
+				Reachable:         h.Reachable,
+				InternetOK:        h.InternetOK,
+				InternetLatencyMS: h.InternetLatencyMS,
+				TunnelLatencyMS:   h.TunnelLatencyMS,
+				Active:            h.Active,
+			})
+		}
+		if active.ID != "" {
+			res.Exit = nodeHealth{
+				ID:         active.ID,
+				Name:       active.Name,
+				Reachable:  false,
+				InternetOK: false,
+			}
+			for _, h := range exitsHealth {
+				if h.ID == active.ID {
+					res.Exit.Reachable = h.Reachable
+					res.Exit.InternetOK = h.InternetOK
+					res.Exit.InternetLatencyMS = h.InternetLatencyMS
+					res.Exit.TunnelLatencyMS = h.TunnelLatencyMS
+					res.Exit.Active = true
+					res.SelectionDegraded = !h.Reachable
+					break
+				}
+			}
+		}
+	} else {
+		exitAddr := fmt.Sprintf("%s:%d", s.spec.Exit.Address, s.spec.Exit.Port)
+		g.Go(func() error {
+			rtt, err := probe.DialTCP(ctx, exitAddr)
+			if err != nil {
+				return err
+			}
+			res.Exit.Reachable = true
+			res.Exit.TunnelLatencyMS = rtt.Milliseconds()
+			return nil
+		})
+		g.Go(func() error {
+			rtt, err := probe.DialTCP(ctx, config.HealthProbeListenIPPort)
+			if err != nil {
+				return err
+			}
+			res.Exit.InternetOK = true
+			res.Exit.InternetLatencyMS = rtt.Milliseconds()
+			return nil
+		})
+	}
 
 	_ = g.Wait()
 

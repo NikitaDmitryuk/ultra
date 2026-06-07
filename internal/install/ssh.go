@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
+
+const defaultSSHConnectTimeoutSec = 10
 
 // strictHostKeyChecking returns OpenSSH StrictHostKeyChecking value.
 // ULTRA_INSTALL_SSH_STRICT_HOST_KEY=yes|1|true|strict uses "yes" (hosts must be in known_hosts).
@@ -21,8 +24,32 @@ func strictHostKeyChecking() string {
 	}
 }
 
+// sshConnectTimeoutSec returns ConnectTimeout for OpenSSH from ULTRA_SSH_CONNECT_TIMEOUT (default 10).
+func sshConnectTimeoutSec() int {
+	v := strings.TrimSpace(os.Getenv("ULTRA_SSH_CONNECT_TIMEOUT"))
+	if v == "" {
+		return defaultSSHConnectTimeoutSec
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return defaultSSHConnectTimeoutSec
+	}
+	return n
+}
+
+func sshBaseOpts() []string {
+	sec := sshConnectTimeoutSec()
+	return []string{
+		"-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=" + strictHostKeyChecking(),
+		"-o", fmt.Sprintf("ConnectTimeout=%d", sec),
+		"-o", "ServerAliveInterval=5",
+		"-o", "ServerAliveCountMax=2",
+	}
+}
+
 func sshArgs(user, host, identity string, remoteWords ...string) []string {
-	args := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=" + strictHostKeyChecking()}
+	args := append([]string(nil), sshBaseOpts()...)
 	if identity != "" {
 		args = append(args, "-i", identity)
 	}
@@ -34,6 +61,12 @@ func sshArgs(user, host, identity string, remoteWords ...string) []string {
 // shellSingleQuote wraps s in single quotes for a POSIX shell (-lc) argument.
 func shellSingleQuote(s string) string {
 	return `'` + strings.ReplaceAll(s, `'`, `'"'"'`) + `'`
+}
+
+// SSHReachable reports whether SSH (BatchMode) to host succeeds within ConnectTimeout.
+func SSHReachable(user, host, identity string) bool {
+	cmd := exec.Command("ssh", sshArgs(user, host, identity, "true")...)
+	return cmd.Run() == nil
 }
 
 // RunSSH runs ssh with one remote argv: login bash executes script as a single -c string.
@@ -58,7 +91,7 @@ func RunSSHOutput(user, host, identity string, script string) ([]byte, error) {
 
 // SCP copies a local file to remotePath (full remote path like /etc/ultra-relay/spec.json).
 func SCP(identity, local, user, host, remotePath string) error {
-	args := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=" + strictHostKeyChecking()}
+	args := append([]string(nil), sshBaseOpts()...)
 	if identity != "" {
 		args = append(args, "-i", identity)
 	}

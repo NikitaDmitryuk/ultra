@@ -173,7 +173,7 @@ func bridgeInboundStream(spec *Spec) map[string]any {
 	return inStream
 }
 
-func splithttpOutboundStream(spec *Spec, strat mimic.Strategy, w xrayWireResolved) map[string]any {
+func splithttpOutboundStream(spec *Spec, strat mimic.Strategy, w xrayWireResolved, pinnedPeerCertSHA256 string) map[string]any {
 	tlsSN, alpn, tlsFP := resolveSplithttpTLS(spec, strat)
 	path := resolveSplithttpPath(spec, strat)
 	headers := strat.ExtraHeaders()
@@ -183,10 +183,7 @@ func splithttpOutboundStream(spec *Spec, strat mimic.Strategy, w xrayWireResolve
 		"alpn":        alpn,
 		"fingerprint": tlsFP,
 	}
-	// Self-signed on exit is not in the public trust store; bridge client must skip CA verify (see deploy/TLS.md).
-	if spec.TunnelTLSProvision == TunnelTLSSelfSigned {
-		tlsSettings["allowInsecure"] = true
-	}
+	applySelfSignedTunnelTLSClient(tlsSettings, spec.TunnelTLSProvision, pinnedPeerCertSHA256)
 
 	splithttpCfg := map[string]any{
 		"host":    host,
@@ -271,16 +268,14 @@ func grpcServiceName(spec *Spec) string {
 }
 
 // grpcOutboundStream builds the bridge→exit outbound stream settings using gRPC transport.
-func grpcOutboundStream(spec *Spec, strat mimic.Strategy) map[string]any {
+func grpcOutboundStream(spec *Spec, strat mimic.Strategy, pinnedPeerCertSHA256 string) map[string]any {
 	tlsSN, alpn, tlsFP := resolveSplithttpTLS(spec, strat)
 	tlsSettings := map[string]any{
 		"serverName":  tlsSN,
 		"alpn":        alpn,
 		"fingerprint": tlsFP,
 	}
-	if spec.TunnelTLSProvision == TunnelTLSSelfSigned {
-		tlsSettings["allowInsecure"] = true
-	}
+	applySelfSignedTunnelTLSClient(tlsSettings, spec.TunnelTLSProvision, pinnedPeerCertSHA256)
 	out := map[string]any{
 		"network":     "grpc",
 		"security":    "tls",

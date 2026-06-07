@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 )
 
@@ -28,9 +29,17 @@ const (
 )
 
 // BuildBridgeXRayJSON returns a full xray JSON config for the bridge role.
+// exitNodes lists enabled upstream exits; activeExitID selects routing target (empty uses legacy to-exit / spec.Exit).
 // xrayLogLevel is passed to Xray's log.loglevel (e.g. debug, warning, none); empty means warning.
 // When spec.Stats is set, per-user traffic stats and the Xray gRPC API inbound are enabled.
-func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xrayLogLevel string) ([]byte, error) {
+func BuildBridgeXRayJSON(
+	spec *Spec,
+	users []auth.User,
+	exitNodes []exits.Node,
+	activeExitID string,
+	strat mimic.Strategy,
+	xrayLogLevel string,
+) ([]byte, error) {
 	if spec.Role != RoleBridge {
 		return nil, fmt.Errorf("config: expected bridge role")
 	}
@@ -51,25 +60,30 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 		if email == "" || statsEnabled {
 			email = u.UUID
 		}
-		clients = append(clients, map[string]any{
+		client := map[string]any{
 			"id":    u.UUID,
 			"email": email,
-		})
+		}
+		if flow := spec.PublicVLESSFlow(); flow != "" {
+			client["flow"] = flow
+		}
+		clients = append(clients, client)
 	}
 
 	if xrayLogLevel == "" {
 		xrayLogLevel = "warning"
 	}
 	inStream := bridgeInboundStream(spec)
-	var outStream map[string]any
-	if spec.UsesGRPC() {
-		outStream = grpcOutboundStream(spec, strat)
-	} else {
-		outStream = splithttpOutboundStream(spec, strat, w)
+	buildOutStream := func(pinnedPeerCertSHA256 string) map[string]any {
+		if spec.UsesGRPC() {
+			return grpcOutboundStream(spec, strat, pinnedPeerCertSHA256)
+		}
+		return splithttpOutboundStream(spec, strat, w, pinnedPeerCertSHA256)
 	}
 
-	domainStrategy, routeRules := buildBridgeRouting(spec)
+	domainStrategy, routeRules := buildBridgeRouting(spec, resolveActiveExitTag(activeExitID, w))
 	needsBlock := BridgeNeedsBlockOutbound(spec)
+	activeTag := resolveActiveExitTag(activeExitID, w)
 
 	// Prepend the API routing rule when stats are enabled.
 	if statsEnabled {
@@ -86,9 +100,18 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 	probeRule := map[string]any{
 		"type":        "field",
 		"inboundTag":  []any{HealthProbeInboundTag},
-		"outboundTag": w.OutboundExitTag,
+		"outboundTag": activeTag,
 	}
 	routeRules = append([]any{probeRule}, routeRules...)
+
+	if p := spec.botTelegramProxy(); p != nil {
+		botRule := map[string]any{
+			"type":        "field",
+			"inboundTag":  []any{BotTelegramProxyInboundTag},
+			"outboundTag": activeTag,
+		}
+		routeRules = append([]any{botRule}, routeRules...)
+	}
 
 	routing := map[string]any{
 		"domainStrategy": domainStrategy,
@@ -160,6 +183,18 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 			},
 		})
 	}
+	if p := spec.botTelegramProxy(); p != nil {
+		inbounds = append(inbounds, map[string]any{
+			"tag":      BotTelegramProxyInboundTag,
+			"listen":   botTelegramProxyListen(p),
+			"port":     botTelegramProxyPort(p),
+			"protocol": "socks",
+			"settings": map[string]any{
+				"auth": "noauth",
+				"udp":  false,
+			},
+		})
+	}
 	for _, u := range users {
 		if u.Kind != "socks5" || u.SocksPort == nil || *u.SocksPort <= 0 {
 			continue
@@ -187,32 +222,14 @@ func BuildBridgeXRayJSON(spec *Spec, users []auth.User, strat mimic.Strategy, xr
 		})
 	}
 
-	outbounds := []any{
-		map[string]any{
-			"tag":      w.OutboundExitTag,
-			"protocol": "vless",
-			"settings": map[string]any{
-				"vnext": []any{
-					map[string]any{
-						"address": spec.Exit.Address,
-						"port":    spec.Exit.Port,
-						"users": []any{
-							map[string]any{
-								"id":         spec.Exit.TunnelUUID,
-								"encryption": w.VLESSEncryption,
-							},
-						},
-					},
-				},
-			},
-			"streamSettings": outStream,
-		},
+	outbounds := buildBridgeExitOutbounds(spec, exitNodes, activeExitID, w, buildOutStream)
+	outbounds = append(outbounds,
 		map[string]any{
 			"tag":      w.OutboundDirectTag,
 			"protocol": "freedom",
 			"settings": map[string]any{},
 		},
-	}
+	)
 	if statsEnabled {
 		outbounds = append(outbounds, map[string]any{
 			"tag":      "api",

@@ -35,7 +35,9 @@ func (b *Bot) runAlertsWorker(ctx context.Context) {
 	spikeTicker := time.NewTicker(trafficSpikeInterval)
 	defer spikeTicker.Stop()
 
-	var lastExitState string
+	var lastActiveReachable bool
+	var lastActiveExitID string
+	var hadActiveState bool
 	prevTotals := map[string]int64{}
 
 	b.captureTrafficSnapshot(ctx, prevTotals)
@@ -45,47 +47,66 @@ func (b *Bot) runAlertsWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-exitTicker.C:
-			state := b.probeExitState(ctx)
-			if state == "" {
-				continue
-			}
-			if lastExitState != "" && state != lastExitState {
-				if state == "down" {
-					b.enqueueAdminAlert(ctx, "exit_down", map[string]any{
-						"text": "Exit-нода недоступна (bridge↔exit probe failed).",
-					})
-				} else {
-					b.enqueueAdminAlert(ctx, "exit_up", map[string]any{
-						"text": "Exit-нода снова доступна.",
-					})
-				}
-			}
-			lastExitState = state
+			b.probeExitAlerts(ctx, &lastActiveReachable, &lastActiveExitID, &hadActiveState)
 		case <-spikeTicker.C:
 			b.checkTrafficSpikes(ctx, prevTotals)
 		}
 	}
 }
 
-func (b *Bot) probeExitState(ctx context.Context) string {
+func (b *Bot) probeExitAlerts(ctx context.Context, lastReachable *bool, lastActiveID *string, hadState *bool) {
 	body, err := b.adminGet(ctx, "/v1/health")
 	if err != nil {
 		b.log.Warn("alerts: /v1/health failed", "err", err)
-		return ""
+		return
 	}
 	var h struct {
-		Exit struct {
-			Reachable bool `json:"reachable"`
+		ActiveExitID string `json:"active_exit_id"`
+		Exit         struct {
+			ID        string `json:"id"`
+			Name      string `json:"name"`
+			Reachable bool   `json:"reachable"`
 		} `json:"exit"`
 	}
 	if err := json.Unmarshal(body, &h); err != nil {
 		b.log.Warn("alerts: decode /v1/health", "err", err)
-		return ""
+		return
 	}
-	if !h.Exit.Reachable {
-		return "down"
+	activeID := h.ActiveExitID
+	if activeID == "" {
+		activeID = h.Exit.ID
 	}
-	return "up"
+	exitName := h.Exit.Name
+	if exitName == "" {
+		exitName = "exit"
+	}
+	reachable := h.Exit.Reachable
+
+	if *hadState && *lastActiveID != "" && activeID != "" && *lastActiveID != activeID {
+		b.enqueueAdminAlert(ctx, "exit_failover", map[string]any{
+			"text": fmt.Sprintf("Active exit переключена: %s → %s.", *lastActiveID, activeID),
+			"from": *lastActiveID,
+			"to":   activeID,
+		})
+	}
+
+	if *hadState && reachable != *lastReachable {
+		if !reachable {
+			b.enqueueAdminAlert(ctx, "exit_down", map[string]any{
+				"text":    fmt.Sprintf("Exit «%s» недоступна (bridge↔exit probe failed).", exitName),
+				"exit_id": activeID,
+			})
+		} else {
+			b.enqueueAdminAlert(ctx, "exit_up", map[string]any{
+				"text":    fmt.Sprintf("Exit «%s» снова доступна.", exitName),
+				"exit_id": activeID,
+			})
+		}
+	}
+
+	*lastReachable = reachable
+	*lastActiveID = activeID
+	*hadState = true
 }
 
 func (b *Bot) captureTrafficSnapshot(ctx context.Context, dst map[string]int64) {
@@ -193,6 +214,8 @@ func formatNotificationText(n db.Notification) string {
 		return "Exit-нода недоступна."
 	case "exit_up":
 		return "Exit-нода снова доступна."
+	case "exit_failover":
+		return "Active exit переключена на резервную."
 	case "traffic_spike":
 		return "Обнаружен резкий рост трафика."
 	case "token_leak":

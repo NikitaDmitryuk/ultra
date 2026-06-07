@@ -123,6 +123,7 @@ func TestFormatNotificationTextKnownTypes(t *testing.T) {
 	}{
 		{"exit_down", "Exit-нода недоступна."},
 		{"exit_up", "Exit-нода снова доступна."},
+		{"exit_failover", "Active exit переключена на резервную."},
 		{"traffic_spike", "Обнаружен резкий рост трафика."},
 		{"token_leak", "Обнаружена подозрительная активность по токену."},
 		{"test_alert", "Тестовое уведомление от Mini App."},

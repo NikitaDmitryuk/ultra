@@ -3,7 +3,7 @@ package config
 import "testing"
 
 func TestBuildBridgeRoutingAllViaExit(t *testing.T) {
-	ds, rules := buildBridgeRouting(&Spec{SplitRouting: BoolPtr(false)})
+	ds, rules := buildBridgeRouting(&Spec{SplitRouting: BoolPtr(false)}, "")
 	if ds != "AsIs" {
 		t.Fatalf("domainStrategy: got %q", ds)
 	}
@@ -17,7 +17,7 @@ func TestBuildBridgeRoutingBlocklistDefaultGeosite(t *testing.T) {
 		SplitRouting: BoolPtr(true),
 		RoutingMode:  RoutingModeBlocklist,
 		GeoAssetsDir: "/tmp/geo",
-	})
+	}, "")
 	if ds != "AsIs" {
 		t.Fatalf("domainStrategy: got %q", ds)
 	}
@@ -45,7 +45,7 @@ func TestBuildRUDirectRouting(t *testing.T) {
 		SplitRouting: BoolPtr(true),
 		RoutingMode:  RoutingModeRUDirect,
 		GeoAssetsDir: "/tmp/geo",
-	})
+	}, "")
 	if ds != "AsIs" {
 		t.Fatalf("domainStrategy: got %q", ds)
 	}
@@ -101,7 +101,7 @@ func TestBuildRUDirectRoutingExplicitGeosite(t *testing.T) {
 		RoutingMode:       RoutingModeRUDirect,
 		GeoAssetsDir:      "/tmp/geo",
 		GeositeDirectTags: []string{"ru"},
-	})
+	}, "")
 	var sawGeositeRU bool
 	for _, r := range rules {
 		m, ok := r.(map[string]any)
@@ -130,7 +130,7 @@ func TestBuildRUDirectRoutingGeositeDirectDisabled(t *testing.T) {
 		GeositeDirectTags: empty,
 		RuDirectTLDRegex:  BoolPtr(false),
 		GeoipDirectTags:   []string{"ru"},
-	})
+	}, "")
 	for _, r := range rules {
 		m, ok := r.(map[string]any)
 		if !ok {
@@ -152,7 +152,7 @@ func TestBuildBlocklistPrependsBlockRule(t *testing.T) {
 		RoutingMode:      RoutingModeBlocklist,
 		GeoAssetsDir:     "/tmp/geo",
 		GeositeBlockTags: []string{"category-ads-all"},
-	})
+	}, "")
 	if len(rules) < 2 {
 		t.Fatalf("expected block + other rules: %#v", rules)
 	}
@@ -171,7 +171,7 @@ func TestBuildRUDirectPrependsBlockRule(t *testing.T) {
 		RoutingMode:      RoutingModeRUDirect,
 		GeoAssetsDir:     "/tmp/geo",
 		GeositeBlockTags: []string{"category-ads-all"},
-	})
+	}, "")
 	first, ok := rules[0].(map[string]any)
 	if !ok {
 		t.Fatal("first rule type")
