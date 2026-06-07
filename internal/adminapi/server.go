@@ -653,12 +653,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Active            bool   `json:"active,omitempty"`
 	}
 	type healthResp struct {
-		CheckedAt          string       `json:"checked_at"`
-		Bridge             nodeHealth   `json:"bridge"`
-		Exit               nodeHealth   `json:"exit"`
-		Exits              []nodeHealth `json:"exits,omitempty"`
-		ActiveExitID       string       `json:"active_exit_id,omitempty"`
-		SelectionDegraded  bool         `json:"selection_degraded,omitempty"`
+		CheckedAt         string       `json:"checked_at"`
+		Bridge            nodeHealth   `json:"bridge"`
+		Exit              nodeHealth   `json:"exit"`
+		Exits             []nodeHealth `json:"exits,omitempty"`
+		ActiveExitID      string       `json:"active_exit_id,omitempty"`
+		SelectionDegraded bool         `json:"selection_degraded,omitempty"`
 	}
 	res := healthResp{
 		CheckedAt: time.Now().UTC().Format(time.RFC3339),
@@ -680,7 +680,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	active, exitsHealth, activeID := s.probeExitsHealth(ctx)
 	res.ActiveExitID = activeID
 
-		if s.exits != nil && len(s.exits.ListEnabled()) > 0 {
+	if s.exits != nil && len(s.exits.ListEnabled()) > 0 {
 		allNodes := s.exits.List()
 		nameByID := make(map[string]string, len(allNodes))
 		for _, n := range allNodes {
@@ -699,10 +699,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		if active.ID != "" {
 			res.Exit = nodeHealth{
-				ID:                active.ID,
-				Name:              active.Name,
-				Reachable:         false,
-				InternetOK:        false,
+				ID:         active.ID,
+				Name:       active.Name,
+				Reachable:  false,
+				InternetOK: false,
 			}
 			for _, h := range exitsHealth {
 				if h.ID == active.ID {

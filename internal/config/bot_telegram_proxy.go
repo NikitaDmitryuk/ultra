@@ -7,7 +7,7 @@ import (
 
 const (
 	// BotTelegramProxyInboundTag is the Xray inbound for ultra-bot → Telegram API via active exit.
-	BotTelegramProxyInboundTag = "bot-telegram-socks"
+	BotTelegramProxyInboundTag  = "bot-telegram-socks"
 	botTelegramProxyDefaultPort = 10809
 )
 

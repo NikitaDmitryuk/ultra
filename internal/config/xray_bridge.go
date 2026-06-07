@@ -32,7 +32,14 @@ const (
 // exitNodes lists enabled upstream exits; activeExitID selects routing target (empty uses legacy to-exit / spec.Exit).
 // xrayLogLevel is passed to Xray's log.loglevel (e.g. debug, warning, none); empty means warning.
 // When spec.Stats is set, per-user traffic stats and the Xray gRPC API inbound are enabled.
-func BuildBridgeXRayJSON(spec *Spec, users []auth.User, exitNodes []exits.Node, activeExitID string, strat mimic.Strategy, xrayLogLevel string) ([]byte, error) {
+func BuildBridgeXRayJSON(
+	spec *Spec,
+	users []auth.User,
+	exitNodes []exits.Node,
+	activeExitID string,
+	strat mimic.Strategy,
+	xrayLogLevel string,
+) ([]byte, error) {
 	if spec.Role != RoleBridge {
 		return nil, fmt.Errorf("config: expected bridge role")
 	}

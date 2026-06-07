@@ -253,7 +253,9 @@ func runExitOnly(o exitOnlyOpts) {
 		func() error {
 			return install.SCP(o.identity, tmpEnvExit, o.sshUser, o.exitHost, path.Join(o.remoteDir, "environment.tmp"))
 		},
-		func() error { return install.SCP(o.identity, systemdLocal, o.sshUser, o.exitHost, "/etc/systemd/system/ultra-relay.service") },
+		func() error {
+			return install.SCP(o.identity, systemdLocal, o.sshUser, o.exitHost, "/etc/systemd/system/ultra-relay.service")
+		},
 	} {
 		if err := fn(); err != nil {
 			fmt.Fprintln(os.Stderr, "exit-only deploy:", err)

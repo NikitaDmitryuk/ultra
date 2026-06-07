@@ -52,9 +52,9 @@ func New(
 	var api *tgbotapi.BotAPI
 	var err error
 	if socks := os.Getenv("ULTRA_BOT_TELEGRAM_SOCKS5"); socks != "" {
-		client, err := telegramHTTPClient(socks)
-		if err != nil {
-			return nil, err
+		client, clientErr := telegramHTTPClient(socks)
+		if clientErr != nil {
+			return nil, clientErr
 		}
 		log.Info("telegram_api_proxy", "proxy", "socks5://"+socks)
 		api, err = tgbotapi.NewBotAPIWithClient(botToken, tgbotapi.APIEndpoint, client)

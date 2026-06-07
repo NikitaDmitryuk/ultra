@@ -11,17 +11,17 @@ import (
 func TestGRPCSelfSignedUsesPinnedPeerCertSha256(t *testing.T) {
 	const pin = "e8e2d387fdbffeb38e9c9065cf30a97ee23c0e3d32ee6f78ffae40966befccc9"
 	spec := &Spec{
-		Role:                 RoleBridge,
-		ListenAddress:        "127.0.0.1",
-		VLESSPort:            443,
-		PublicHost:           "example.com",
-		DevMode:              true,
-		SplitRouting:         BoolPtr(false),
-		TunnelTransport:      TunnelTransportGRPC,
-		TunnelTLSProvision:   TunnelTLSSelfSigned,
-		SplithttpPath:        "/relay/v1/tunnel",
-		SplitHTTPTLS:         SplitHTTPTLSSpec{ServerName: "store.steampowered.com", Alpn: []string{"h2"}, Fingerprint: "chrome"},
-		SplithttpHost:        "store.steampowered.com",
+		Role:               RoleBridge,
+		ListenAddress:      "127.0.0.1",
+		VLESSPort:          443,
+		PublicHost:         "example.com",
+		DevMode:            true,
+		SplitRouting:       BoolPtr(false),
+		TunnelTransport:    TunnelTransportGRPC,
+		TunnelTLSProvision: TunnelTLSSelfSigned,
+		SplithttpPath:      "/relay/v1/tunnel",
+		SplitHTTPTLS:       SplitHTTPTLSSpec{ServerName: "store.steampowered.com", Alpn: []string{"h2"}, Fingerprint: "chrome"},
+		SplithttpHost:      "store.steampowered.com",
 	}
 	strat, err := mimic.New("steamlike")
 	if err != nil {

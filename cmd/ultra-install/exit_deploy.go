@@ -46,7 +46,11 @@ func mergePriorBootstrapEntry(entry *exits.BootstrapEntry, prior []exits.Bootstr
 	}
 }
 
-func buildBootstrapEntries(plans []exitDeployPlan, prior []exits.BootstrapEntry, outcomes map[string]exitDeployOutcome) []exits.BootstrapEntry {
+func buildBootstrapEntries(
+	plans []exitDeployPlan,
+	prior []exits.BootstrapEntry,
+	outcomes map[string]exitDeployOutcome,
+) []exits.BootstrapEntry {
 	out := make([]exits.BootstrapEntry, 0, len(plans))
 	for _, plan := range plans {
 		entry := exits.BootstrapEntry{
@@ -259,12 +263,4 @@ chmod 600 "$REMOTE_DIR/spec.json" || true
 		return "", fmt.Errorf("exit cert pin (%s): %w", host, err)
 	}
 	return certPin, nil
-}
-
-func writeBootstrapEntries(path string, entries []exits.BootstrapEntry) error {
-	b, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, b, 0o600)
 }

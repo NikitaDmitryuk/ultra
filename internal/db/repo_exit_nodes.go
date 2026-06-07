@@ -14,10 +14,10 @@ import (
 )
 
 var (
-	ErrExitNotFound        = errors.New("exit node not found")
-	ErrExitLastEnabled     = errors.New("cannot remove or disable the last enabled exit node")
-	ErrExitDuplicateAddr   = errors.New("enabled exit with this address and port already exists")
-	ErrExitDuplicateUUID   = errors.New("exit with this tunnel_uuid already exists")
+	ErrExitNotFound      = errors.New("exit node not found")
+	ErrExitLastEnabled   = errors.New("cannot remove or disable the last enabled exit node")
+	ErrExitDuplicateAddr = errors.New("enabled exit with this address and port already exists")
+	ErrExitDuplicateUUID = errors.New("exit with this tunnel_uuid already exists")
 )
 
 // ExitNodeRepo manages exit_nodes rows on the bridge PostgreSQL.
@@ -33,7 +33,18 @@ const exitNodeCols = `id, name, address, port, tunnel_uuid, pinned_peer_cert_sha
 
 func scanExitNode(row pgx.Row) (exits.Node, error) {
 	var n exits.Node
-	err := row.Scan(&n.ID, &n.Name, &n.Address, &n.Port, &n.TunnelUUID, &n.PinnedPeerCertSHA256, &n.Priority, &n.Enabled, &n.CreatedAt, &n.UpdatedAt)
+	err := row.Scan(
+		&n.ID,
+		&n.Name,
+		&n.Address,
+		&n.Port,
+		&n.TunnelUUID,
+		&n.PinnedPeerCertSHA256,
+		&n.Priority,
+		&n.Enabled,
+		&n.CreatedAt,
+		&n.UpdatedAt,
+	)
 	return n, err
 }
 
