@@ -4,11 +4,15 @@ import (
 	"strings"
 )
 
-func buildBridgeRouting(spec *Spec) (domainStrategy string, rules []any) {
+func buildBridgeRouting(spec *Spec, activeExitTag string) (domainStrategy string, rules []any) {
 	w := resolveXrayWire(spec)
+	exitTag := activeExitTag
+	if exitTag == "" {
+		exitTag = w.OutboundExitTag
+	}
 	if !spec.SplitRoutingEnabled() {
 		return "AsIs", []any{
-			map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": w.OutboundExitTag},
+			map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": exitTag},
 		}
 	}
 	mode := spec.RoutingMode
@@ -17,12 +21,12 @@ func buildBridgeRouting(spec *Spec) (domainStrategy string, rules []any) {
 	}
 	switch mode {
 	case RoutingModeBlocklist:
-		return buildBlocklistRouting(spec, w)
+		return buildBlocklistRouting(spec, w, exitTag)
 	case RoutingModeRUDirect:
-		return buildRUDirectRouting(spec, w)
+		return buildRUDirectRouting(spec, w, exitTag)
 	default:
 		return "AsIs", []any{
-			map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": w.OutboundExitTag},
+			map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": exitTag},
 		}
 	}
 }
@@ -40,7 +44,7 @@ func prependGeositeBlockRules(spec *Spec, w xrayWireResolved, rules []any) []any
 	return append([]any{blockRule}, rules...)
 }
 
-func buildBlocklistRouting(spec *Spec, w xrayWireResolved) (string, []any) {
+func buildBlocklistRouting(spec *Spec, w xrayWireResolved, exitTag string) (string, []any) {
 	var rules []any
 	for _, d := range spec.DomainDirect {
 		d = strings.TrimSpace(d)
@@ -57,7 +61,7 @@ func buildBlocklistRouting(spec *Spec, w xrayWireResolved) (string, []any) {
 			continue
 		}
 		rules = append(rules, map[string]any{
-			"type": "field", "domain": []string{d}, "outboundTag": w.OutboundExitTag,
+			"type": "field", "domain": []string{d}, "outboundTag": exitTag,
 		})
 	}
 	tags := spec.GeositeExitTags
@@ -66,12 +70,12 @@ func buildBlocklistRouting(spec *Spec, w xrayWireResolved) (string, []any) {
 	}
 	if doms := normalizeGeositeDomains(tags); len(doms) > 0 {
 		rules = append(rules, map[string]any{
-			"type": "field", "domain": doms, "outboundTag": w.OutboundExitTag,
+			"type": "field", "domain": doms, "outboundTag": exitTag,
 		})
 	}
 	if ips := normalizeGeoipIPs(spec.GeoipExitTags); len(ips) > 0 {
 		rules = append(rules, map[string]any{
-			"type": "field", "ip": ips, "outboundTag": w.OutboundExitTag,
+			"type": "field", "ip": ips, "outboundTag": exitTag,
 		})
 	}
 	rules = append(rules, map[string]any{
@@ -153,7 +157,7 @@ func ruDirectDefaultServiceDomains() []string {
 	}
 }
 
-func buildRUDirectRouting(spec *Spec, w xrayWireResolved) (string, []any) {
+func buildRUDirectRouting(spec *Spec, w xrayWireResolved, exitTag string) (string, []any) {
 	var rules []any
 	for _, d := range spec.DomainExit {
 		d = strings.TrimSpace(d)
@@ -161,7 +165,7 @@ func buildRUDirectRouting(spec *Spec, w xrayWireResolved) (string, []any) {
 			continue
 		}
 		rules = append(rules, map[string]any{
-			"type": "field", "domain": []string{d}, "outboundTag": w.OutboundExitTag,
+			"type": "field", "domain": []string{d}, "outboundTag": exitTag,
 		})
 	}
 	for _, d := range spec.DomainDirect {
@@ -198,7 +202,7 @@ func buildRUDirectRouting(spec *Spec, w xrayWireResolved) (string, []any) {
 		})
 	}
 	rules = append(rules, map[string]any{
-		"type": "field", "network": "tcp,udp", "outboundTag": w.OutboundExitTag,
+		"type": "field", "network": "tcp,udp", "outboundTag": exitTag,
 	})
 	rules = prependGeositeBlockRules(spec, w, rules)
 	return "AsIs", rules

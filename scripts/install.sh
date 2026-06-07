@@ -44,6 +44,97 @@ check_port() {
 	fi
 }
 
+# check_bot_dns DOMAIN EXPECTED_IP
+# Warns when BOT_DOMAIN A record does not resolve to the bridge IP (common Mini App failure).
+check_bot_dns() {
+	local domain="$1" expected="$2"
+	if [[ -z "${domain// }" || -z "${expected// }" ]]; then
+		return 0
+	fi
+	if ! command -v dig >/dev/null 2>&1; then
+		echo "  ? DNS ($domain) — dig не найден, проверка пропущена"
+		return 0
+	fi
+	local resolved
+	resolved=$(dig +timeout=3 +tries=1 +short "$domain" A 2>/dev/null | head -1 || true)
+	resolved=${resolved// /}
+	if [[ -z "$resolved" ]]; then
+		echo "  ✗ DNS A для $domain — не найдена (Mini App: ERR_TIMED_OUT в Telegram)" >&2
+		return 1
+	fi
+	if [[ "$resolved" == "$expected" ]]; then
+		echo "  ✓ DNS $domain → $resolved"
+		return 0
+	fi
+	echo "  ✗ DNS $domain → $resolved (ожидался bridge $expected)" >&2
+	echo "    Mini App открывается по домену, не по IP bridge — исправьте A-запись в DNS." >&2
+	echo "    Сейчас WebView идёт на $resolved:${BOT_PORT:-8444} → ERR_TIMED_OUT." >&2
+	return 1
+}
+
+# bot_env_file — путь к локальному .env с TELEGRAM_BOT_TOKEN.
+bot_env_file() {
+	echo "${BOT_ENV_FILE:-${ROOT}/.env}"
+}
+
+# read_telegram_bot_token FILE — выводит значение TELEGRAM_BOT_TOKEN или пустую строку.
+read_telegram_bot_token() {
+	local env_file="$1" line key val
+	[[ -f "$env_file" ]] || return 0
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		line="${line%%#*}"
+		line="${line#"${line%%[![:space:]]*}"}"
+		line="${line%"${line##*[![:space:]]}"}"
+		[[ -n "$line" ]] || continue
+		key="${line%%=*}"
+		val="${line#*=}"
+		key="${key%"${key##*[![:space:]]}"}"
+		val="${val#"${val%%[![:space:]]*}"}"
+		val="${val%"${val##*[![:space:]]}"}"
+		if [[ "$key" != "TELEGRAM_BOT_TOKEN" ]]; then
+			continue
+		fi
+		if [[ ${#val} -ge 2 ]]; then
+			case "$val" in
+			\"*) val="${val:1:${#val}-2}" ;;
+			\'*) val="${val:1:${#val}-2}" ;;
+			esac
+		fi
+		printf '%s' "$val"
+		return 0
+	done <"$env_file"
+}
+
+# require_bot_prerequisites — exit 1 если BOT_ENABLE=y без BOT_DOMAIN или TELEGRAM_BOT_TOKEN.
+require_bot_prerequisites() {
+	case "${BOT_ENABLE:-n}" in
+	y | Y | true | 1 | yes) ;;
+	*) return 0 ;;
+	esac
+	if [[ -z "${BOT_DOMAIN// }" ]]; then
+		echo >&2
+		echo "ultra: ошибка — BOT_ENABLE=y, но BOT_DOMAIN не задан." >&2
+		echo "  Укажите FQDN с DNS A-записью на bridge ($FRONT) в install.config или в интерактиве." >&2
+		echo "  См. раздел «Домен для Mini App» в README.md." >&2
+		exit 1
+	fi
+	local env_file token
+	env_file="$(bot_env_file)"
+	if [[ ! -f "$env_file" ]]; then
+		echo >&2
+		echo "ultra: BOT_ENABLE=y, но файл $env_file не найден." >&2
+		echo "  Скопируйте .env.sample → .env и вставьте TELEGRAM_BOT_TOKEN из @BotFather." >&2
+		exit 1
+	fi
+	token="$(read_telegram_bot_token "$env_file")"
+	if [[ -z "${token// }" ]]; then
+		echo >&2
+		echo "ultra: в $env_file нет непустого TELEGRAM_BOT_TOKEN." >&2
+		echo "  Скопируйте .env.sample → .env и вставьте токен из @BotFather." >&2
+		exit 1
+	fi
+}
+
 FROM_CONFIG=0
 CONFIG_FILE=""
 if [[ -n "${ULTRA_INSTALL_CONFIG:-}" ]]; then
@@ -171,6 +262,24 @@ else
 		DB_USER=${DB_USER:-ultra}
 		;;
 	esac
+
+	echo
+	echo "Telegram Mini App (ultra-bot): веб-интерфейс администратора в Telegram."
+	read -r -p "Развернуть ultra-bot? [y/N]: " BOT_ENABLE_INTERACTIVE
+	BOT_ENABLE="${BOT_ENABLE_INTERACTIVE:-n}"
+	BOT_DOMAIN=""
+	BOT_PORT="8444"
+	case "${BOT_ENABLE}" in
+	y | Y | true | 1 | yes)
+		read -r -p "Домен Mini App (FQDN, DNS A → bridge) [обязательно]: " BOT_DOMAIN
+		if [[ -z "${BOT_DOMAIN// }" ]]; then
+			echo "ultra: домен обязателен при включении ultra-bot." >&2
+			exit 1
+		fi
+		read -r -p "HTTPS-порт Mini App [8444]: " BOT_PORT
+		BOT_PORT=${BOT_PORT:-8444}
+		;;
+	esac
 fi
 
 PRESET=${PRESET:-apijson}
@@ -183,10 +292,62 @@ if [[ -z "${FRONT// }" || -z "${BACK// }" ]]; then
 fi
 
 EXIT_DIAL=${EXIT_DIAL:-}
+EXIT2=${EXIT2:-}
+EXIT2_DIAL=${EXIT2_DIAL:-}
+EXIT2_PRIORITY=${EXIT2_PRIORITY:-}
+EXIT2_NAME=${EXIT2_NAME:-}
 
 BOT_ENABLE="${BOT_ENABLE:-n}"
 BOT_DOMAIN="${BOT_DOMAIN:-}"
 BOT_PORT="${BOT_PORT:-8444}"
+
+require_bot_prerequisites
+
+# ssh_reachable HOST — exit 0 если SSH (BatchMode + ConnectTimeout) отвечает.
+ssh_reachable() {
+	local host="$1"
+	local id_args=()
+	if [[ -n "${IDENTITY// }" ]]; then
+		id_args=(-i "$IDENTITY")
+	fi
+	ssh -o BatchMode=yes \
+		-o ConnectTimeout="${ULTRA_SSH_CONNECT_TIMEOUT:-10}" \
+		-o StrictHostKeyChecking=accept-new \
+		"${id_args[@]}" "${SSH_USER}@${host}" true 2>/dev/null
+}
+
+# ssh_opts_for_install — общие опции SSH/SCP для bot-блока (массив в _ssh_opts).
+ssh_opts_for_install() {
+	_ssh_opts=(
+		-o BatchMode=yes
+		-o StrictHostKeyChecking=accept-new
+		-o "ConnectTimeout=${ULTRA_SSH_CONNECT_TIMEOUT:-10}"
+		-o ServerAliveInterval=5
+		-o ServerAliveCountMax=2
+	)
+}
+
+echo
+echo "Проверка SSH-доступности узлов (ConnectTimeout=${ULTRA_SSH_CONNECT_TIMEOUT:-10}s)…"
+if ! ssh_reachable "$FRONT"; then
+	echo "ultra: bridge ($FRONT) недоступен по SSH — установка прервана." >&2
+	exit 1
+fi
+echo "  ✓ bridge ($FRONT)"
+if [[ -n "${BACK// }" ]]; then
+	if ssh_reachable "$BACK"; then
+		echo "  ✓ exit primary ($BACK)"
+	else
+		echo "  ! exit primary ($BACK) — SSH недоступен, деплой будет пропущен" >&2
+	fi
+fi
+if [[ -n "${EXIT2// }" && "$EXIT2" != "$BACK" ]]; then
+	if ssh_reachable "$EXIT2"; then
+		echo "  ✓ exit backup ($EXIT2)"
+	else
+		echo "  ! exit backup ($EXIT2) — SSH недоступен, деплой будет пропущен" >&2
+	fi
+fi
 
 # Получить TLS-сертификат для ultra-bot через certbot HTTP-01 на сервере.
 # Пропускает, если сертификат уже свежий (>7 дней до истечения).
@@ -206,6 +367,21 @@ obtain_bot_cert() {
 	fi
 
 	echo "  Запрашиваю сертификат через certbot HTTP-01 на ${FRONT}…"
+	if ! "${_ssh_base[@]}" "
+		set -e
+		if ! command -v certbot >/dev/null 2>&1; then
+			DEBIAN_FRONTEND=noninteractive apt-get update -q
+			DEBIAN_FRONTEND=noninteractive apt-get install -y -q certbot
+		fi
+		systemctl stop ultra-bot 2>/dev/null || true
+		if command -v ss >/dev/null 2>&1 && ss -ltn 'sport = :80' 2>/dev/null | grep -q ':80'; then
+			echo '  WARNING: порт 80/tcp уже занят — certbot --standalone может не сработать.' >&2
+			ss -ltnp 'sport = :80' 2>&1 >&2 || true
+		fi
+	"; then
+		echo "ultra: не удалось подготовить certbot на bridge ${FRONT}." >&2
+		return 1
+	fi
 	if "${_ssh_base[@]}" "certbot certonly --standalone -d '${domain}' \
 		--non-interactive --agree-tos --email 'admin@${domain}' 2>&1"; then
 		echo "  Сертификат получен."
@@ -215,8 +391,8 @@ obtain_bot_cert() {
 	echo >&2
 	echo "ultra: certbot не смог получить сертификат для ${domain}." >&2
 	echo "  Проверьте:" >&2
-	echo "    • DNS A-запись для ${domain} указывает на IP exit-ноды ${BACK}" >&2
-	echo "    • Порт 80/tcp открыт на exit-ноде ${BACK}" >&2
+	echo "    • DNS A-запись для ${domain} указывает на IP bridge ${FRONT}" >&2
+	echo "    • Порт 80/tcp открыт на bridge ${FRONT}" >&2
 	echo "  После исправления запустите: make bot-cert" >&2
 	return 1
 }
@@ -265,6 +441,19 @@ fi
 
 if [[ -n "${EXIT_DIAL// }" ]]; then
 	ARGS+=(-exit-dial "$EXIT_DIAL")
+fi
+
+if [[ -n "${EXIT2// }" ]]; then
+	ARGS+=(-exit2 "$EXIT2")
+fi
+if [[ -n "${EXIT2_DIAL// }" ]]; then
+	ARGS+=(-exit2-dial "$EXIT2_DIAL")
+fi
+if [[ -n "${EXIT2_PRIORITY// }" ]]; then
+	ARGS+=(-exit2-priority "$EXIT2_PRIORITY")
+fi
+if [[ -n "${EXIT2_NAME// }" ]]; then
+	ARGS+=(-exit2-name "$EXIT2_NAME")
 fi
 
 case "${REUSE_BRIDGE_SPEC:-y}" in
@@ -321,12 +510,35 @@ y | Y | true | 1 | yes) ARGS+=(-disable-doh) ;;
 esac
 
 # ── Transport: bridge→exit tunnel protocol ───────────────────────────────────
-# TRANSPORT=grpc     — HTTP/2 gRPC persistent stream (по умолчанию; меньше накладных расходов).
-# TRANSPORT=splithttp — HTTP chunked transfer; для сетей, где gRPC блокируется промежуточными узлами.
-TRANSPORT="${TRANSPORT:-grpc}"
-if [[ "${TRANSPORT}" == "splithttp" ]]; then
+# TRANSPORT=splithttp — XHTTP stream-up H2 (рекомендуется, замена gRPC в Xray 26).
+# TRANSPORT=grpc      — устарело в Xray 26; только если splithttp блокируется в вашей сети.
+TRANSPORT="${TRANSPORT:-splithttp}"
+case "${TRANSPORT}" in
+grpc)
+	echo "WARNING: TRANSPORT=grpc deprecated in Xray 26; use TRANSPORT=splithttp" >&2
+	ARGS+=(-transport grpc)
+	;;
+splithttp)
 	ARGS+=(-transport splithttp)
-fi
+	;;
+*)
+	echo "install.config: unsupported TRANSPORT=${TRANSPORT} (use splithttp or grpc)" >&2
+	exit 1
+	;;
+esac
+
+# ── VLESS flow (public REALITY clients) ──────────────────────────────────────
+# По умолчанию xtls-rprx-vision (Xray 26). После смены — переимпорт подписки в HAPP.
+# Отключить для legacy-клиентов: VLESS_FLOW=  и  DISABLE_VLESS_FLOW=y
+VLESS_FLOW="${VLESS_FLOW:-xtls-rprx-vision}"
+case "${DISABLE_VLESS_FLOW:-n}" in
+y | Y | true | 1 | yes) ARGS+=(-disable-vless-flow) ;;
+*)
+	if [[ -n "${VLESS_FLOW// }" ]]; then
+		ARGS+=(-vless-flow "$VLESS_FLOW")
+	fi
+	;;
+esac
 
 # ── Connection tuning options ────────────────────────────────────────────────
 # FRAGMENT_DISABLE=y — отключить фрагментацию TLS ClientHello (по умолчанию включена).
@@ -363,6 +575,10 @@ y | Y | true | 1 | yes)
 	;;
 esac
 
+case "${BOT_ENABLE:-n}" in
+y | Y | true | 1 | yes) ARGS+=(-bot-telegram-proxy) ;;
+esac
+
 RUN_VERIFY=0
 if [[ "$FROM_CONFIG" -eq 1 ]]; then
 	case "${VERIFY_AFTER_INSTALL:-n}" in
@@ -390,39 +606,42 @@ fi
 # ── Bot deployment ────────────────────────────────────────────────────────────
 case "${BOT_ENABLE:-n}" in
 y | Y | true | 1 | yes)
-	if [[ -z "${BOT_DOMAIN// }" ]]; then
-		echo >&2
-		echo "ultra: ошибка — BOT_ENABLE=y, но BOT_DOMAIN не задан." >&2
-		echo >&2
-		echo "  Telegram Mini App требует публичного домена с HTTPS (Let's Encrypt)." >&2
-		echo "  Как получить домен — см. раздел «Домен для Mini App» в README.md." >&2
-		echo >&2
-		echo "  Укажите в install.config:" >&2
-		echo "    BOT_DOMAIN=bot.example.com   # FQDN с DNS A-записью на bridge ($FRONT)" >&2
-		echo >&2
-		echo "  Затем повторите: make install" >&2
-		exit 1
-	elif [[ ! -f "$BOT_BIN" ]]; then
+	if [[ ! -f "$BOT_BIN" ]]; then
 		echo "ultra: не найден $BOT_BIN — пропускаю деплой бота." >&2
 	else
-		# ── Проверка портов ───────────────────────────────────────────────────
-		# Mini App доступна через exit-ноду (nginx TCP-прокси → bridge).
-		# Let's Encrypt HTTP-01 также идёт через exit (nginx → bridge:80).
+		_bot_ports_ok=1
+		_bot_warn=()
+
 		echo
-		echo "Проверка доступности портов на exit ($BACK) для Mini App…"
-		_ports_ok=1
-		check_port "$BACK" 80 "Let's Encrypt ACME HTTP-01 (через exit)" || _ports_ok=0
-		check_port "$BACK" "${BOT_PORT}" "Mini App HTTPS (через exit)" || _ports_ok=0
-		if [[ "$_ports_ok" -eq 0 ]]; then
+		echo "Проверка доступности портов на bridge ($FRONT) для Mini App…"
+		check_port "$FRONT" 80 "Let's Encrypt ACME HTTP-01" || _bot_ports_ok=0
+		check_port "$FRONT" "${BOT_PORT}" "Mini App HTTPS" || _bot_ports_ok=0
+		if [[ -n "${BOT_DOMAIN// }" ]]; then
+			echo "Проверка DNS Mini App (${BOT_DOMAIN} → ${FRONT})…"
+			_bot_dns_ok=1
+			check_bot_dns "$BOT_DOMAIN" "$FRONT" || { _bot_dns_ok=0; _bot_ports_ok=0; }
+			# Если DNS → bridge и IP:port уже OK, проверка hostname избыточна (кэш resolver / flaky nc).
+			if [[ "$_bot_dns_ok" -eq 1 ]] && command -v nc >/dev/null 2>&1; then
+				echo "  ✓ Mini App HTTPS (по домену) — пропуск: DNS → ${FRONT}, порт на IP уже проверен"
+			elif command -v nc >/dev/null 2>&1; then
+				check_port "$BOT_DOMAIN" "${BOT_PORT}" "Mini App HTTPS (по домену)" || _bot_ports_ok=0
+			fi
+		fi
+		if [[ "$_bot_ports_ok" -eq 0 ]]; then
+			if [[ "${_bot_dns_ok:-1}" -eq 0 ]]; then
+				_bot_warn+=("DNS A-запись ${BOT_DOMAIN} должна указывать на bridge ${FRONT} (не на exit)")
+			fi
+			_bot_warn+=("откройте порты 80/${BOT_PORT} на bridge ${FRONT} в firewall/security group")
+		fi
+
+		if [[ ${#_bot_warn[@]} -gt 0 ]]; then
 			echo >&2
-			echo "ultra: ошибка — необходимые порты недоступны на exit ($BACK)." >&2
+			echo "========== Предупреждения Mini App ==========" >&2
+			for _w in "${_bot_warn[@]}"; do
+				echo " • $_w" >&2
+			done
+			echo "Установка продолжается (ultra-bot на bridge)." >&2
 			echo >&2
-			echo "  Откройте входящие правила в firewall / security group:" >&2
-			echo "    80/tcp          — для получения TLS-сертификата (Let's Encrypt HTTP-01)" >&2
-			echo "    ${BOT_PORT}/tcp — для Mini App HTTPS" >&2
-			echo >&2
-			echo "  После открытия портов повторите: make install" >&2
-			exit 1
 		fi
 
 		echo
@@ -431,67 +650,9 @@ y | Y | true | 1 | yes)
 		if [[ -n "${IDENTITY// }" ]]; then
 			_ssh_id_args=(-i "$IDENTITY")
 		fi
-		_ssh_base=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${_ssh_id_args[@]}" "${SSH_USER}@${FRONT}")
-		_scp_base=(scp -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${_ssh_id_args[@]}")
-		_ssh_exit_bot=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${_ssh_id_args[@]}" "${SSH_USER}@${BACK}")
-
-		# ── nginx TCP-прокси на exit для Mini App ─────────────────────────────
-		# Mini App (HTTPS) и Let's Encrypt HTTP-01 проходят через exit-ноду:
-		#   exit:BOT_PORT  → TCP passthrough → bridge:BOT_PORT  (TLS на bridge)
-		#   exit:80 (/.well-known/acme-challenge/) → HTTP proxy → bridge:80  (certbot standalone)
-		# Это позволяет держать DNS A-запись на exit и работать в сетях,
-		# которые не могут напрямую достучаться до bridge (напр. Cloudflare WARP → Yandex Cloud).
-		echo
-		echo "Настройка nginx на exit ($BACK) для Mini App…"
-		if "${_ssh_exit_bot[@]}" "
-			set -e
-			# Установить nginx и модуль stream, если отсутствуют.
-			if ! command -v nginx >/dev/null 2>&1; then
-				DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nginx libnginx-mod-stream
-			elif ! dpkg -l libnginx-mod-stream 2>/dev/null | grep -q '^ii'; then
-				DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libnginx-mod-stream
-			fi
-			# Добавить блок stream в nginx.conf, если его ещё нет.
-			grep -q 'stream\.d' /etc/nginx/nginx.conf || printf '\nstream {\n    include /etc/nginx/stream.d/*.conf;\n}\n' >> /etc/nginx/nginx.conf
-			mkdir -p /etc/nginx/stream.d
-
-			# TCP passthrough: BOT_PORT → bridge.
-			cat > /etc/nginx/stream.d/bot-proxy.conf << 'EOSTREAM'
-server {
-    listen ${BOT_PORT};
-    listen [::]:${BOT_PORT};
-    proxy_pass ${FRONT}:${BOT_PORT};
-    proxy_connect_timeout 10s;
-    proxy_timeout 300s;
-}
-EOSTREAM
-
-			# HTTP proxy для ACME HTTP-01 certbot renewal на bridge.
-			cat > /etc/nginx/conf.d/acme-proxy.conf << 'EOACME'
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${BOT_DOMAIN};
-
-    location /.well-known/acme-challenge/ {
-        proxy_pass http://${FRONT}:80;
-        proxy_set_header Host \$host;
-        proxy_connect_timeout 10s;
-        proxy_read_timeout 30s;
-    }
-
-    location / {
-        return 301 https://\$host:${BOT_PORT}\$request_uri;
-    }
-}
-EOACME
-
-			nginx -t && systemctl enable nginx && { systemctl reload nginx 2>/dev/null || systemctl start nginx; }
-		"; then
-			echo "  nginx на exit настроен."
-		else
-			echo "ultra: ошибка настройки nginx на exit — Mini App будет доступна только напрямую через bridge ($FRONT)." >&2
-		fi
+		ssh_opts_for_install
+		_ssh_base=(ssh "${_ssh_opts[@]}" "${_ssh_id_args[@]}" "${SSH_USER}@${FRONT}")
+		_scp_base=(scp "${_ssh_opts[@]}" "${_ssh_id_args[@]}")
 
 		# Stop the bot before replacing the binary (running process locks the file on Linux).
 		"${_ssh_base[@]}" "systemctl stop ultra-bot 2>/dev/null || true"
@@ -502,20 +663,14 @@ EOACME
 
 		# bot.env contains only TELEGRAM_BOT_TOKEN; everything else comes from
 		# /etc/ultra-relay/environment (admin token) and spec.json (DB DSN).
-		_bot_env_src="${BOT_ENV_FILE:-${ROOT}/.env}"
-		if [[ -f "$_bot_env_src" ]]; then
-			"${_scp_base[@]}" "$_bot_env_src" "${SSH_USER}@${FRONT}:/etc/ultra-relay/bot.env"
-			"${_ssh_base[@]}" "chmod 600 /etc/ultra-relay/bot.env"
-		else
-			echo "ultra: файл .env не найден ($ROOT/.env)." >&2
-			echo "ultra: создайте /etc/ultra-relay/bot.env на сервере с содержимым:" >&2
-			echo "       TELEGRAM_BOT_TOKEN=<ваш токен>" >&2
-		fi
+		_bot_env_src="$(bot_env_file)"
+		"${_scp_base[@]}" "$_bot_env_src" "${SSH_USER}@${FRONT}:/etc/ultra-relay/bot.env"
+		"${_ssh_base[@]}" "chmod 600 /etc/ultra-relay/bot.env"
 
-		# Write ULTRA_BOT_DOMAIN and ULTRA_BOT_PORT into the shared environment file.
+		# Write ULTRA_BOT_* into the shared environment file (Telegram API via bridge Xray SOCKS).
 		"${_ssh_base[@]}" "
 			grep -v '^ULTRA_BOT_' /etc/ultra-relay/environment > /tmp/env.tmp 2>/dev/null || true
-			printf 'ULTRA_BOT_DOMAIN=%s\nULTRA_BOT_PORT=%s\n' '${BOT_DOMAIN}' '${BOT_PORT}' >> /tmp/env.tmp
+			printf 'ULTRA_BOT_DOMAIN=%s\nULTRA_BOT_PORT=%s\nULTRA_BOT_TELEGRAM_SOCKS5=127.0.0.1:10809\n' '${BOT_DOMAIN}' '${BOT_PORT}' >> /tmp/env.tmp
 			mv /tmp/env.tmp /etc/ultra-relay/environment
 			chmod 600 /etc/ultra-relay/environment
 		"
@@ -547,11 +702,11 @@ EOACME
 		echo "╔══════════════════════════════════════════════════════════════════╗"
 		echo "║                    DNS ДЛЯ MINI APP                             ║"
 		echo "╠══════════════════════════════════════════════════════════════════╣"
-		echo "║  Укажите A-запись для домена Mini App на IP exit-ноды:          ║"
+		echo "║  Укажите A-запись для домена Mini App на IP bridge:             ║"
 		echo "║                                                                  ║"
-		printf  "║    %-62s║\n" "${BOT_DOMAIN}  →  ${BACK}"
+		printf  "║    %-62s║\n" "${BOT_DOMAIN}  →  ${FRONT}"
 		echo "║                                                                  ║"
-		echo "║  Mini App доступна через exit (nginx TCP-прокси → bridge).      ║"
+		echo "║  Mini App на bridge; Telegram API — через active exit (SOCKS).  ║"
 		echo "╚══════════════════════════════════════════════════════════════════╝"
 		echo
 
@@ -617,7 +772,7 @@ if [[ "$RUN_VERIFY" -eq 1 ]]; then
 				LOG_ARGS+=(-i "$IDENTITY")
 			fi
 		fi
-		bash "$ROOT/scripts/collect-relay-logs.sh" "${LOG_ARGS[@]}" "$FRONT" "$BACK" >&2 || true
+		bash "$ROOT/scripts/collect-relay-logs.sh" "${LOG_ARGS[@]}" >&2 || true
 		exit 1
 	fi
 fi

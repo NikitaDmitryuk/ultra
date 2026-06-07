@@ -1,4 +1,4 @@
-.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 clean
+.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 clean
 
 BINARY=ultra-relay
 INSTALL_BINARY=ultra-install
@@ -49,22 +49,23 @@ install:
 bot-cert:
 	@bash "$(CURDIR)/scripts/bot-cert.sh"
 
-# С journalctl: либо BRIDGE и EXIT, либо корневой install.config (см. install.config.sample).
-# Опции: IDENTITY, SSH_USER, LINES, INSTALL_CONFIG (путь к конфигу вместо install.config).
+# Проверка DNS и HTTPS Mini App (BOT_DOMAIN → bridge, не exit). См. README «Домен для Mini App».
+verify-miniapp:
+	@bash "$(CURDIR)/scripts/verify-miniapp.sh" $(if $(INSTALL_CONFIG),-c '$(INSTALL_CONFIG)',)
+
+# С journalctl: bridge + exit-ноды из install.config (EXIT, EXIT2).
+# Недоступные exit пропускаются с WARNING; код выхода 1 только если недоступен bridge.
+# Опции: IDENTITY, SSH_USER, LINES, INSTALL_CONFIG, SINCE_RESTART=1 (-s).
 relay-logs:
-	@if [ -n "$(BRIDGE)" ] && [ -n "$(EXIT)" ]; then \
-		bash "$(CURDIR)/scripts/collect-relay-logs.sh" \
-			$(if $(IDENTITY),-i '$(IDENTITY)',) \
-			$(if $(SSH_USER),-u '$(SSH_USER)',) \
-			$(if $(LINES),-n '$(LINES)',) \
-			"$(BRIDGE)" "$(EXIT)"; \
-	else \
-		bash "$(CURDIR)/scripts/collect-relay-logs.sh" \
-			$(if $(INSTALL_CONFIG),-c '$(INSTALL_CONFIG)',) \
-			$(if $(IDENTITY),-i '$(IDENTITY)',) \
-			$(if $(SSH_USER),-u '$(SSH_USER)',) \
-			$(if $(LINES),-n '$(LINES)',); \
-	fi
+	@bash "$(CURDIR)/scripts/collect-relay-logs.sh" \
+		$(if $(INSTALL_CONFIG),-c '$(INSTALL_CONFIG)',) \
+		$(if $(IDENTITY),-i '$(IDENTITY)',) \
+		$(if $(SSH_USER),-u '$(SSH_USER)',) \
+		$(if $(LINES),-n '$(LINES)',) \
+		$(if $(filter 1 y Y yes true,$(SINCE_RESTART)),-s,) \
+		$(if $(BRIDGE),"$(BRIDGE)",) \
+		$(if $(EXIT),"$(EXIT)",) \
+		$(if $(EXIT2),"$(EXIT2)",)
 
 # Интеграционная проверка (локальный xray + SOCKS). Нужен VERIFY_IP_URL. См. README.
 # Опции: VERIFY_USER_UUID, VERIFY_SOCKS_PORT, VERIFY_IP_URL (передайте make … VAR=…).

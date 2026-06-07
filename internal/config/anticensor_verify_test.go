@@ -44,7 +44,7 @@ func TestAntiCensorDefaults(t *testing.T) {
 	strat, _ := mimic.New("steamlike")
 	users := []auth.User{{Name: "alice", UUID: "aaaaaaaa-0000-0000-0000-000000000001"}}
 
-	b, err := BuildBridgeXRayJSON(spec, users, strat, "info")
+	b, err := BuildBridgeXRayJSON(spec, users, nil, "", strat, "info")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestAntiCensorFragmentDisable(t *testing.T) {
 	}
 	strat, _ := mimic.New("steamlike")
 
-	b, _ := BuildBridgeXRayJSON(spec, nil, strat, "info")
+	b, _ := BuildBridgeXRayJSON(spec, nil, nil, "", strat, "info")
 	var cfg map[string]any
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		t.Fatal(err)
@@ -113,7 +113,7 @@ func TestAntiCensorPaddingDisable(t *testing.T) {
 	}
 	strat, _ := mimic.New("steamlike")
 
-	b, _ := BuildBridgeXRayJSON(spec, nil, strat, "info")
+	b, _ := BuildBridgeXRayJSON(spec, nil, nil, "", strat, "info")
 	var cfg map[string]any
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		t.Fatal(err)
@@ -138,7 +138,7 @@ func TestAntiCensorFingerprintPool(t *testing.T) {
 	}
 	strat, _ := mimic.New("steamlike")
 
-	b, err := BuildBridgeXRayJSON(spec, nil, strat, "info")
+	b, err := BuildBridgeXRayJSON(spec, nil, nil, "", strat, "info")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestDoHInBridgeConfig(t *testing.T) {
 	spec.DevMode = false
 	strat, _ := mimic.New("steamlike")
 
-	b, err := BuildBridgeXRayJSON(spec, nil, strat, "info")
+	b, err := BuildBridgeXRayJSON(spec, nil, nil, "", strat, "info")
 	if err != nil {
 		t.Fatal(err)
 	}

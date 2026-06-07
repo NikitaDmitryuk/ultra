@@ -60,7 +60,10 @@ function switchTab(name, btn) {
   if (name === 'stats') loadStats();
   if (name === 'users') loadUsers();
   if (name === 'diag') loadDiagnostics();
-  if (name === 'settings') loadSettingsMe();
+  if (name === 'settings') {
+    loadSettingsMe();
+    loadExits();
+  }
 }
 
 function showAddUser() {
@@ -768,6 +771,7 @@ function fmtMs(v) {
 function applyHealthUI(h) {
   const bridge = pickNode(h, 'bridge') || {};
   const exit = pickNode(h, 'exit') || {};
+  const exitLabel = exit.name || exit.Name || 'Exit';
 
   const bridgeInternetOk = !!bridge.internet_ok;
   const exitTunnelOk = !!exit.reachable;
@@ -776,17 +780,30 @@ function applyHealthUI(h) {
   setDot(document.getElementById('overview-bridge-dot'), bridgeInternetOk);
   setDot(document.getElementById('overview-exit-dot'), exitTunnelOk && exitInternetOk);
 
+  const overviewExitLabel = document.getElementById('overview-exit-label');
+  if (overviewExitLabel) {
+    overviewExitLabel.textContent = exitLabel + (exit.active ? ' · active' : '');
+  }
+
   const overviewSummary = document.getElementById('overview-health-summary');
   if (overviewSummary) {
     const parts = [];
     if (!bridgeInternetOk) parts.push('Bridge: нет выхода в интернет');
-    if (!exitTunnelOk) parts.push('Tunnel: exit недоступен');
-    if (exitTunnelOk && !exitInternetOk) parts.push('Exit: нет выхода в интернет через туннель');
+    if (!exitTunnelOk) parts.push(`Tunnel: ${exitLabel} недоступен`);
+    if (exitTunnelOk && !exitInternetOk) parts.push(`${exitLabel}: нет выхода в интернет через туннель`);
+    const allExits = h.exits || h.Exits;
+    if (Array.isArray(allExits) && allExits.length > 1) {
+      const down = allExits.filter(e => !e.reachable && !e.Reachable);
+      if (down.length) parts.push(`Standby down: ${down.length}`);
+    }
     overviewSummary.textContent = parts.length ? parts.join(' · ') : 'Всё ок';
   }
 
   setDot(document.getElementById('diag-bridge-dot'), bridgeInternetOk);
   setDot(document.getElementById('diag-exit-dot'), exitTunnelOk && exitInternetOk);
+
+  const diagExitTitle = document.getElementById('diag-exit-title');
+  if (diagExitTitle) diagExitTitle.textContent = exitLabel + (exit.active ? ' (active)' : '');
 
   const bInet = document.getElementById('diag-bridge-internet');
   if (bInet) {
@@ -825,6 +842,112 @@ async function loadHealth() {
     const diagSummary = document.getElementById('diag-health-summary');
     if (diagSummary) diagSummary.textContent = 'Health недоступен: ' + e.message;
   }
+}
+
+// ── Exit nodes ───────────────────────────────────────────────────────────────
+let exitsCache = [];
+
+async function loadExits() {
+  const list = document.getElementById('exits-list');
+  if (!list) return;
+  try {
+    const data = await api('GET', '/api/exits');
+    exitsCache = data.exits || data.Exits || [];
+    renderExits(exitsCache, data.active_exit_id || data.activeExitID || '');
+  } catch (e) {
+    list.className = 'diag-list empty';
+    list.textContent = 'Exit-ноды недоступны: ' + e.message;
+  }
+}
+
+function renderExits(items, activeID) {
+  const list = document.getElementById('exits-list');
+  if (!list) return;
+  if (!items.length) {
+    list.className = 'diag-list empty';
+    list.textContent = 'Нет exit-нод.';
+    return;
+  }
+  list.className = 'diag-list';
+  list.innerHTML = '';
+  items.forEach(n => {
+    const item = document.createElement('div');
+    item.className = 'diag-item';
+    const id = n.id || n.ID;
+    const active = id === activeID || n.active;
+    const enabled = n.enabled !== false && n.Enabled !== false;
+    item.innerHTML = `
+      <div class="diag-item-title">${esc(n.name || n.Name)}${active ? ' · active' : ''}${!enabled ? ' · off' : ''}</div>
+      <div class="diag-item-meta">${esc(n.address || n.Address)}:${esc(String(n.port || n.Port))} · priority ${esc(String(n.priority || n.Priority))}</div>
+    `;
+    const row = document.createElement('div');
+    row.className = 'detail-actions-row';
+    row.style.marginTop = '8px';
+    const toggleBtn = document.createElement('button');
+    toggleBtn.className = 'btn secondary';
+    toggleBtn.style.padding = '6px 10px';
+    toggleBtn.style.fontSize = '12px';
+    toggleBtn.textContent = enabled ? 'Отключить' : 'Включить';
+    toggleBtn.onclick = () => patchExitNode(id, { enabled: !enabled });
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn danger';
+    delBtn.style.padding = '6px 10px';
+    delBtn.style.fontSize = '12px';
+    delBtn.textContent = 'Удалить';
+    delBtn.onclick = () => deleteExitNode(id, n.name || n.Name);
+    row.appendChild(toggleBtn);
+    row.appendChild(delBtn);
+    item.appendChild(row);
+    list.appendChild(item);
+  });
+}
+
+async function createExitNode() {
+  const name = document.getElementById('new-exit-name')?.value?.trim();
+  const address = document.getElementById('new-exit-address')?.value?.trim();
+  const port = parseInt(document.getElementById('new-exit-port')?.value, 10);
+  const priority = parseInt(document.getElementById('new-exit-priority')?.value, 10) || 100;
+  if (!name || !address || !port) {
+    showToast('Заполните имя, адрес и порт.');
+    return;
+  }
+  try {
+    const res = await api('POST', '/api/exits', { name, address, port, priority });
+    const deploy = res.deploy || {};
+    const box = document.getElementById('exit-deploy-result');
+    const text = document.getElementById('exit-deploy-text');
+    if (box && text) {
+      text.textContent = deploy.install_example || JSON.stringify(deploy, null, 2);
+      box.style.display = 'block';
+    }
+    showToast('Exit добавлена. Задеплойте VPS.');
+    await loadExits();
+  } catch (e) {
+    showToast('Ошибка: ' + e.message);
+  }
+}
+
+async function patchExitNode(id, patch) {
+  try {
+    await api('PATCH', `/api/exits/${id}`, patch);
+    await loadExits();
+    showToast('Exit обновлена.');
+  } catch (e) {
+    showToast('Ошибка: ' + e.message);
+  }
+}
+
+function deleteExitNode(id, name) {
+  tg.showConfirm(`Удалить exit «${name}»?`, async confirmed => {
+    if (!confirmed) return;
+    try {
+      await api('DELETE', `/api/exits/${id}`);
+      await loadExits();
+      showToast('Exit удалена.');
+    } catch (e) {
+      showToast('Ошибка: ' + e.message);
+    }
+  });
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
@@ -905,7 +1028,7 @@ function copyInviteToken() {
 }
 
 // ── API helper ───────────────────────────────────────────────────────────────
-async function api(method, path, body) {
+async function api(method, path, body, timeoutMs = 20000) {
   const opts = {
     method,
     headers: {
@@ -916,7 +1039,20 @@ async function api(method, path, body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(path, opts);
+  const controller = new AbortController();
+  opts.signal = controller.signal;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(path, opts);
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      throw new Error('Таймаут запроса');
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   if (res.status === 204) return null;
   const text = await res.text();
   if (!res.ok) throw new Error(text || res.statusText);

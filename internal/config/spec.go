@@ -139,6 +139,10 @@ type Spec struct {
 	// DevMode uses cleartext TCP for the public inbound (local testing only).
 	DevMode bool `json:"dev_mode"`
 
+	// VLESSFlow sets flow on the public REALITY inbound and client exports (default xtls-rprx-vision).
+	// Use "none" to disable flow (legacy clients; Xray 26 deprecation warnings remain).
+	VLESSFlow string `json:"vless_flow,omitempty"`
+
 	Reality RealitySpec `json:"reality"`
 
 	Exit ExitTunnelSpec `json:"exit"`
@@ -212,6 +216,9 @@ type Spec struct {
 	// SOCKS5 is an optional password SOCKS inbound on the bridge; same routing as VLESS when split_routing is on.
 	SOCKS5 *BridgeSOCKS5Spec `json:"socks5,omitempty"`
 
+	// BotTelegramProxy is a local SOCKS5 inbound for ultra-bot Telegram API traffic (routed to active exit).
+	BotTelegramProxy *BotTelegramProxySpec `json:"bot_telegram_proxy,omitempty"`
+
 	// Database configures the PostgreSQL backend for user storage and traffic stats (required on bridge).
 	Database *DatabaseSpec `json:"database,omitempty"`
 
@@ -237,6 +244,8 @@ type ExitTunnelSpec struct {
 	Address    string `json:"address"`
 	Port       int    `json:"port"`
 	TunnelUUID string `json:"tunnel_uuid"` // shared tunnel identity bridge→exit
+	// PinnedPeerCertSHA256 is the exit leaf cert SHA-256 (hex, no colons) for bridge→exit TLS when self_signed.
+	PinnedPeerCertSHA256 string `json:"pinned_peer_cert_sha256,omitempty"`
 }
 
 type SplitHTTPTLSSpec struct {
@@ -387,9 +396,24 @@ func (s *Spec) Validate() error {
 				return errors.New("config: socks5.port must not fall inside socks5.port_range (reserved for per-client inbounds)")
 			}
 		}
+		if s.BotTelegramProxy != nil && s.BotTelegramProxy.Enabled {
+			port := botTelegramProxyPort(s.BotTelegramProxy)
+			if port == s.VLESSPort {
+				return errors.New("config: bot_telegram_proxy.port must differ from vless_port")
+			}
+			if port == HealthProbePort {
+				return errors.New("config: bot_telegram_proxy.port conflicts with health probe port")
+			}
+			if s.SOCKS5 != nil && s.SOCKS5.Enabled && port == s.SOCKS5.Port {
+				return errors.New("config: bot_telegram_proxy.port must differ from socks5.port")
+			}
+		}
 	case RoleExit:
 		if s.SOCKS5 != nil && s.SOCKS5.Enabled {
 			return errors.New("config: socks5 is only valid on bridge role")
+		}
+		if s.BotTelegramProxy != nil && s.BotTelegramProxy.Enabled {
+			return errors.New("config: bot_telegram_proxy is only valid on bridge role")
 		}
 		if s.Exit.TunnelUUID == "" {
 			return errors.New("config: exit requires exit.tunnel_uuid for inbound tunnel")

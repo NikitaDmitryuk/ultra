@@ -5,6 +5,8 @@
 
 BRIDGE=203.0.113.10
 EXIT=203.0.113.11
+# Вторая exit VPS для failover (primary EXIT priority=100, backup EXIT2 priority=200).
+EXIT2=203.0.113.12
 SSH_USER=root
 IDENTITY=/Users/you/.ssh/id_ed25519
 PUBLIC_HOST=203.0.113.10
@@ -33,20 +35,43 @@ GENERATE_EXIT_TLS=y
 REUSE_BRIDGE_SPEC=y
 
 # Транспортный протокол внутреннего туннеля bridge→exit.
-# grpc      — HTTP/2 gRPC persistent stream; ниже накладные расходы на фреймирование,
-#             лучше поддержка параллельных потоков. Значение по умолчанию.
-# splithttp — HTTP chunked transfer; используйте, если gRPC блокируется промежуточными
-#             сетевыми устройствами в вашей инфраструктуре.
-TRANSPORT=grpc
+# splithttp — XHTTP stream-up H2 (рекомендуется; замена gRPC в Xray 26). Значение по умолчанию.
+# grpc      — устарело в Xray 26; только если splithttp блокируется промежуточными узлами.
+TRANSPORT=splithttp
 
-# При необходимости: DNS/IP для dial к exit (если отличается от EXIT).
+# VLESS flow для публичного REALITY inbound и клиентских URI (Xray 26).
+# По умолчанию xtls-rprx-vision — после включения переимпортируйте подписку в HAPP/Mini App.
+VLESS_FLOW=xtls-rprx-vision
+# Отключить flow для legacy-клиентов (предупреждения Xray останутся):
+# DISABLE_VLESS_FLOW=y
+
+# При необходимости: DNS/IP для dial с bridge (если отличается от EXIT / EXIT2).
 # EXIT_DIAL=exit.example.com
+# EXIT2_DIAL=exit2.example.com
+# EXIT2_PRIORITY=200
+# EXIT2_NAME=backup
 
 # Переопределение hostname/path сегмента splithttp (SAN self-signed и splithttp_tls под host).
 # SPLITHTTP_HOST=
 # SPLITHTTP_PATH=
 
+# --- Несколько exit-нод (failover) ---
+#
+# При make install ultra-install ставит обе exit VPS (EXIT + EXIT2), генерирует tunnel UUID
+# для каждой и кладёт exit_nodes.bootstrap.json на bridge рядом с spec.json.
+# При первом старте bridge импортирует обе строки в PostgreSQL (exit_nodes).
+# Управление после установки: Mini App → Настройки → Exit-ноды, или Admin API GET/POST /v1/exits.
+#
+# Добавить третью exit или заменить упавшую VPS позже:
+#   1. Mini App → добавить exit (имя, address dial с bridge, port, priority)
+#   2. make build-linux-amd64 build-install
+#   3. ./ultra-install -exit-only -bridge $BRIDGE -exit NEW_EXIT_IP \
+#        -tunnel-uuid '<UUID из ответа POST /v1/exits>' -identity $IDENTITY
+#
 # --- Проверка цепочки после установки (нужны локально xray, jq или python3) ---
+# Если exit недоступен по SSH, ultra-install помечает его enabled=false в bootstrap/PostgreSQL.
+# Установка завершится с ошибкой, только если не задеployed ни одна exit.
+# Если exit-ноды ещё недоступны, VERIFY упадёт на SOCKS/curl — отключите: VERIFY_AFTER_INSTALL=n
 VERIFY_AFTER_INSTALL=y
 VERIFY_IP_URL=https://api.ipify.org
 VERIFY_SOCKS_PORT=10808
@@ -93,16 +118,20 @@ VERIFY_FAIL_LOG_LINES=400
 # --- Telegram Mini App (ultra-bot) ---
 # Чтобы развернуть Telegram-бота с веб-интерфейсом администратора:
 #   1. Создайте бота через https://t.me/BotFather и получите токен.
-#   2. Запишите токен и другие секреты в .env (см. .env.sample).
+#   2. ОБЯЗАТЕЛЬНО: скопируйте .env.sample → .env и вставьте TELEGRAM_BOT_TOKEN
+#      (make install завершится ошибкой при BOT_ENABLE=y без .env).
 #   3. Укажите домен, на котором будет доступна Mini App (FQDN; нужен DNS A-запись на bridge).
-#      Let's Encrypt сертификат будет выпущен автоматически.
+#      A-запись → IP bridge (BRIDGE), не на exit — иначе Mini App: ERR_TIMED_OUT в Telegram.
+#      Проверка: make verify-miniapp
 #   4. Установите BOT_ENABLE=y и запустите make install.
 #   В конце установки будет выведен токен для регистрации первого администратора.
 #
 # BOT_ENABLE=y
-# BOT_DOMAIN=admin.example.com   # FQDN с DNS A-записью на BRIDGE
+# BOT_DOMAIN=admin.example.com   # FQDN; A-запись на bridge
 # BOT_PORT=8444                       # HTTPS порт Mini App (по умолчанию 8444)
 #
+# Telegram API (long polling, алерты): ultra-bot использует ULTRA_BOT_TELEGRAM_SOCKS5
+# (127.0.0.1:10809 по умолчанию) — локальный SOCKS inbound в bridge Xray → active exit.
 # TLS-сертификат получается автоматически через certbot (HTTP-01) при make install.
 # Бесплатный поддомен: https://freedns.afraid.org/ — надёжно работает с Let's Encrypt.
 
@@ -121,6 +150,8 @@ DB_ENABLE=y
 # DB_USER=ultra
 
 # --- Прочее (по умолчанию можно не трогать) ---
+# Таймаут SSH при make install / ultra-install / relay-logs (секунды; по умолчанию 10):
+# export ULTRA_SSH_CONNECT_TIMEOUT=10
 # Geo на bridge при установке (скачивание с GitHub): по умолчанию выполняется по SSH.
 # SKIP_GEO_DOWNLOAD=y — не качать (положите geoip.dat и geosite.dat сами в geo_assets_dir).
 # Синоним устаревшего имени: SKIP_RUNETFREEDOM_GEO=y

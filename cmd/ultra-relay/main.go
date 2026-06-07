@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/db"
+	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/firewall"
 	"github.com/NikitaDmitryuk/ultra/internal/loglevel"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
@@ -91,18 +93,17 @@ func main() {
 			log.Info("split routing enabled", "geo_assets_dir", spec.GeoAssetsDir, "routing_mode", rm)
 		}
 
-		reload := func(users []auth.User) {
-			b, err := config.BuildBridgeXRayJSON(spec, users, strat, xrayLogLevel)
-			if err != nil {
-				log.Error("build bridge config", "err", err)
-				return
+		var mgr auth.UserManager
+		var exitMgr *exits.Manager
+		var exitSelector *exits.Selector
+		var reloadBridge func([]auth.User)
+
+		exitSelector = exits.NewSelector(func(prevID, nextID string) {
+			log.Info("exit failover", "from", prevID, "to", nextID)
+			if reloadBridge != nil {
+				reloadBridge(nil)
 			}
-			if err := runner.Reload(b); err != nil {
-				log.Error("xray reload", "err", err)
-				return
-			}
-			log.Info("xray config reloaded", "users", len(users))
-		}
+		})
 
 		// Database is required for user storage.
 		if spec.Database == nil || spec.Database.DSN == "" {
@@ -117,17 +118,67 @@ func main() {
 		defer database.Close()
 		log.Info("database connected", "dsn_prefix", dsnPrefix(spec.Database.DSN))
 
+		exitRepo := db.NewExitNodeRepo(database)
+		bootstrapPath := filepath.Join(filepath.Dir(*specPath), exits.BootstrapFileName)
+		if err := exitRepo.Bootstrap(ctx, spec, bootstrapPath); err != nil {
+			log.Error("bootstrap exit nodes", "err", err)
+			os.Exit(1)
+		}
+
+		exitMgr, err = exits.NewManager(exitRepo, func(_ []exits.Node) {
+			if reloadBridge != nil {
+				reloadBridge(nil)
+			}
+		}, log)
+		if err != nil {
+			log.Error("exit manager", "err", err)
+			os.Exit(1)
+		}
+
 		userRepo := db.NewUserRepo(database)
 		if spec.SOCKS5 != nil && spec.SOCKS5.Enabled {
 			userRepo.SetSOCKS5BridgePorts(spec.SOCKS5.PortRangeStart, spec.SOCKS5.PortRangeEnd, spec.SOCKS5.Port)
 		}
 		fw := firewall.New()
-		dbMgr, err := auth.NewDBManager(userRepo, reload, fw, log)
+
+		reloadBridge = func(users []auth.User) {
+			if users == nil {
+				users = mgr.List()
+			}
+			exitNodes := exitMgr.List()
+			enabled := exits.FilterEnabled(exitNodes)
+			activeID := exitSelector.ActiveID()
+			activeStillEnabled := false
+			for _, n := range enabled {
+				if n.ID == activeID {
+					activeStillEnabled = true
+					break
+				}
+			}
+			if activeID == "" || !activeStillEnabled {
+				probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				active, _ := exitSelector.ProbeAndSelect(probeCtx, enabled)
+				cancel()
+				activeID = active.ID
+			}
+			b, err := config.BuildBridgeXRayJSON(spec, users, exitNodes, activeID, strat, xrayLogLevel)
+			if err != nil {
+				log.Error("build bridge config", "err", err)
+				return
+			}
+			if err := runner.Reload(b); err != nil {
+				log.Error("xray reload", "err", err)
+				return
+			}
+			log.Info("xray config reloaded", "users", len(users), "active_exit", activeID)
+		}
+
+		dbMgr, err := auth.NewDBManager(userRepo, reloadBridge, fw, log)
 		if err != nil {
 			log.Error("db user manager", "err", err)
 			os.Exit(1)
 		}
-		var mgr auth.UserManager = dbMgr
+		mgr = dbMgr
 
 		tRepo := db.NewTrafficRepo(database)
 		var trafficRepo adminapi.TrafficQuerier = tRepo
@@ -145,8 +196,18 @@ func main() {
 		}
 
 		if spec.SplitRoutingEnabled() {
-			registerSplitRoutingUSR1(log, reload, mgr)
+			registerSplitRoutingUSR1(log, reloadBridge, mgr)
 		}
+
+		probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
+		exitSelector.ProbeAndSelect(probeCtx, exitMgr.ListEnabled())
+		probeCancel()
+
+		go exitSelector.RunWorker(ctx, 30*time.Second, func(c context.Context) ([]exits.Node, error) {
+			return exitMgr.ListEnabled(), nil
+		}, func() {
+			reloadBridge(nil)
+		})
 
 		users := mgr.List()
 		if len(users) == 0 && *adminToken == "" {
@@ -164,7 +225,9 @@ func main() {
 			log.Warn("Admin API disabled: set -admin-token or ULTRA_RELAY_ADMIN_TOKEN to enable user provisioning on loopback")
 		} else {
 			statPeek := func(key string) int64 { return runner.PeekCounter(key) }
-			srv, err := adminapi.NewServer(spec.AdminListen, *adminToken, mgr, trafficRepo, spec, log, statPeek)
+			srv, err := adminapi.NewServer(spec.AdminListen, *adminToken, mgr, trafficRepo, spec, exitMgr, exitSelector, func() {
+				reloadBridge(nil)
+			}, log, statPeek)
 			if err != nil {
 				log.Error("admin api", "err", err)
 				os.Exit(1)
@@ -182,7 +245,7 @@ func main() {
 			}()
 		}
 
-		reload(users)
+		reloadBridge(mgr.List())
 
 	case config.RoleExit:
 		b, err := config.BuildExitXRayJSON(spec, strat, xrayLogLevel)

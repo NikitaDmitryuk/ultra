@@ -15,6 +15,18 @@ type ClientExport struct {
 }
 
 // BuildClientExport builds a minimal outbound fragment and a connection URI for one user.
+func vlessUserFields(spec *Spec, userUUID string) map[string]any {
+	u := map[string]any{
+		"id":         userUUID,
+		"encryption": resolveXrayWire(spec).VLESSEncryption,
+	}
+	if flow := spec.PublicVLESSFlow(); flow != "" {
+		u["flow"] = flow
+	}
+	return u
+}
+
+// BuildClientExport builds a minimal outbound fragment and a connection URI for one user.
 func BuildClientExport(spec *Spec, user auth.User) (*ClientExport, error) {
 	w := resolveXrayWire(spec)
 	enc := w.VLESSEncryption
@@ -27,10 +39,7 @@ func BuildClientExport(spec *Spec, user auth.User) (*ClientExport, error) {
 						"address": spec.PublicHost,
 						"port":    spec.VLESSPort,
 						"users": []any{
-							map[string]any{
-								"id":         user.UUID,
-								"encryption": enc,
-							},
+							vlessUserFields(spec, user.UUID),
 						},
 					},
 				},
@@ -41,8 +50,12 @@ func BuildClientExport(spec *Spec, user auth.User) (*ClientExport, error) {
 			},
 			"tag": w.ClientOutboundTag,
 		}
-		uri := fmt.Sprintf("vless://%s@%s:%d?encryption=%s&security=none&type=tcp#%s",
-			user.UUID, spec.PublicHost, spec.VLESSPort, url.QueryEscape(enc), url.PathEscape(user.Name))
+		q := url.Values{}
+		q.Set("encryption", enc)
+		q.Set("security", "none")
+		q.Set("type", "tcp")
+		uri := fmt.Sprintf("vless://%s@%s:%d?%s#%s",
+			user.UUID, spec.PublicHost, spec.VLESSPort, q.Encode(), url.PathEscape(user.Name))
 		return &ClientExport{XRayOutboundJSON: frag, VLESSURI: uri}, nil
 	}
 
@@ -68,10 +81,7 @@ func BuildClientExport(spec *Spec, user auth.User) (*ClientExport, error) {
 					"address": spec.PublicHost,
 					"port":    spec.VLESSPort,
 					"users": []any{
-						map[string]any{
-							"id":         user.UUID,
-							"encryption": enc,
-						},
+						vlessUserFields(spec, user.UUID),
 					},
 				},
 			},
@@ -100,6 +110,9 @@ func BuildClientExport(spec *Spec, user auth.User) (*ClientExport, error) {
 	q.Set("pbk", spec.Reality.PublicKey)
 	q.Set("sid", sid)
 	q.Set("spx", spx)
+	if flow := spec.PublicVLESSFlow(); flow != "" {
+		q.Set("flow", flow)
+	}
 	name := user.Name
 	if name == "" {
 		name = "user"
