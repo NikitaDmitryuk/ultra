@@ -207,6 +207,12 @@ func main() {
 		"enable local SOCKS5 inbound on bridge for ultra-bot Telegram API via active exit",
 	)
 	flag.Parse()
+	transportExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "transport" {
+			transportExplicit = true
+		}
+	})
 
 	tun := *tunnelPort
 	if tun == 0 {
@@ -239,7 +245,7 @@ func main() {
 			warp:            *warpFlag,
 			warpPort:        *warpPort,
 			disableDOH:      *disableDOH,
-			transport:       strings.TrimSpace(*transportFlag),
+			transport:       exitOnlyTransportValue(*transportFlag, transportExplicit),
 			splithttpHost:   *splithttpHostFlag,
 			splithttpPath:   *splithttpPathFlag,
 			dryRun:          *dryRun,

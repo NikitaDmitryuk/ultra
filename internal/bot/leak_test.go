@@ -169,3 +169,23 @@ func TestClassifyLeakBreach(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateLeakBreachStateResetsWhenStrengthChanges(t *testing.T) {
+	states := map[string]leakBreachState{}
+	userUUID := "11111111-1111-1111-1111-111111111111"
+	weak := leakDecision{Kind: "unique_ips_window", Strength: "weak"}
+	strong := leakDecision{Kind: "unique_ips_window", Strength: "strong"}
+
+	got := updateLeakBreachState(states, userUUID, weak)
+	if got.Streak != 1 {
+		t.Fatalf("weak first sample streak=%d want 1", got.Streak)
+	}
+	got = updateLeakBreachState(states, userUUID, strong)
+	if got.Streak != 1 {
+		t.Fatalf("strong sample after weak must start a new confirmation streak, got %d", got.Streak)
+	}
+	got = updateLeakBreachState(states, userUUID, strong)
+	if got.Streak != 2 {
+		t.Fatalf("second strong sample streak=%d want 2", got.Streak)
+	}
+}

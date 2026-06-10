@@ -33,8 +33,9 @@ const (
 )
 
 type leakBreachState struct {
-	Kind   string
-	Streak int
+	Kind     string
+	Strength string
+	Streak   int
 }
 
 func (b *Bot) runLeakDetector(ctx context.Context) {
@@ -133,22 +134,17 @@ func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs [
 	}
 	dedupeKey := "token_leak." + decision.Strength + ":" + u.UUID + ":" + decision.Kind
 
-	st := breachState[u.UUID]
-	if st.Kind == decision.Kind {
-		st.Streak++
-	} else {
-		st = leakBreachState{Kind: decision.Kind, Streak: 1}
-	}
-	breachState[u.UUID] = st
+	st := updateLeakBreachState(breachState, u.UUID, decision)
 	if st.Streak < leakConfirmSamples {
 		return
 	}
+	cooldownActive := false
 	if b.alertsTele != nil && decision.Cooldown > 0 {
 		state, _, err := b.alertsTele.GetAlertState(ctx, dedupeKey)
 		if err != nil {
 			b.log.Warn("leak: state read failed", "user_uuid", u.UUID, "kind", decision.Kind, "err", err)
 		} else if state.LastSentAt != nil && time.Since(*state.LastSentAt) < decision.Cooldown {
-			return
+			cooldownActive = true
 		}
 	}
 
@@ -160,8 +156,13 @@ func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs [
 		"current_ips":              currentIPs,
 		"policy":                   "alert",
 	}
-	if err := b.teleRepo.InsertLeakSignal(ctx, u.UUID, decision.Kind, decision.Score, detail); err != nil {
-		b.log.Warn("leak: insert signal failed", "user_uuid", u.UUID, "err", err)
+	if st.Streak == leakConfirmSamples || !cooldownActive {
+		if err := b.teleRepo.InsertLeakSignal(ctx, u.UUID, decision.Kind, decision.Score, detail); err != nil {
+			b.log.Warn("leak: insert signal failed", "user_uuid", u.UUID, "err", err)
+		}
+	}
+	if cooldownActive {
+		return
 	}
 	b.emitAlert(ctx, alertEvent{
 		DedupeKey: dedupeKey,
@@ -182,6 +183,17 @@ func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs [
 		},
 		Cooldown: decision.Cooldown,
 	})
+}
+
+func updateLeakBreachState(states map[string]leakBreachState, userUUID string, decision leakDecision) leakBreachState {
+	st := states[userUUID]
+	if st.Kind == decision.Kind && st.Strength == decision.Strength {
+		st.Streak++
+	} else {
+		st = leakBreachState{Kind: decision.Kind, Strength: decision.Strength, Streak: 1}
+	}
+	states[userUUID] = st
+	return st
 }
 
 type leakDecision struct {

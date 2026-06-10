@@ -211,6 +211,59 @@ func TestExitUpDebounceRequiresTwoSuccessfulProbes(t *testing.T) {
 	}
 }
 
+func TestExitUpDebounceUsesPersistentDownStateAfterRestart(t *testing.T) {
+	tele := &fakeAlertsTele{states: map[string]db.AlertState{
+		exitHealthStateKey("exit-a"): {
+			DedupeKey: exitHealthStateKey("exit-a"),
+			Type:      "exit_health",
+			Severity:  alertSeverityCritical,
+			Channel:   alertChannelMiniApp,
+			Status:    "down",
+		},
+	}}
+	adm := &fakeAdminLister{admins: []db.BotAdmin{{TelegramID: 1}}}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"active_exit_id":"exit-a","exit":{"id":"exit-a","name":"primary","reachable":true}}`)
+	}))
+	defer ts.Close()
+	b := &Bot{adminRepo: adm, alertsTele: tele, adminAPIURL: ts.URL}
+	var st exitAlertState
+
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 0 {
+		t.Fatalf("expected no exit_up before second successful probe, got %#v", tele.rows)
+	}
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 1 || tele.rows[0].Type != "exit_up" {
+		t.Fatalf("expected one exit_up from persisted down state, got %#v", tele.rows)
+	}
+}
+
+func TestExitDownDebounceUsesPersistentFailureStreakAfterRestart(t *testing.T) {
+	tele := &fakeAlertsTele{states: map[string]db.AlertState{
+		exitHealthStateKey("exit-a"): {
+			DedupeKey:           exitHealthStateKey("exit-a"),
+			Type:                "exit_health",
+			Severity:            alertSeverityInfo,
+			Channel:             alertChannelMiniApp,
+			Status:              "up",
+			ConsecutiveFailures: exitDownConfirmSamples - 1,
+		},
+	}}
+	adm := &fakeAdminLister{admins: []db.BotAdmin{{TelegramID: 1}}}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"active_exit_id":"exit-a","exit":{"id":"exit-a","name":"primary","reachable":false}}`)
+	}))
+	defer ts.Close()
+	b := &Bot{adminRepo: adm, alertsTele: tele, adminAPIURL: ts.URL}
+	var st exitAlertState
+
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 1 || tele.rows[0].Type != "exit_down" {
+		t.Fatalf("expected one exit_down from persisted failure streak, got %#v", tele.rows)
+	}
+}
+
 func TestAlertStateCooldownSkipsRecentMatchingNotification(t *testing.T) {
 	tele := &fakeAlertsTele{}
 	adm := &fakeAdminLister{admins: []db.BotAdmin{{TelegramID: 1}}}

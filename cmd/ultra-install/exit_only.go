@@ -36,6 +36,13 @@ type exitOnlyOpts struct {
 	writeLocal      string
 }
 
+func exitOnlyTransportValue(value string, explicit bool) string {
+	if !explicit {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
 func runExitOnly(o exitOnlyOpts) {
 	if o.exitHost == "" || strings.TrimSpace(o.tunnelUUID) == "" {
 		fmt.Fprintln(os.Stderr, "ultra-install: -exit-only requires -exit and -tunnel-uuid")
@@ -141,14 +148,21 @@ func runExitOnly(o exitOnlyOpts) {
 		},
 		AntiCensor: exitAntiCensor,
 	}
-	if bridge.TunnelTransport != "" {
-		exitSpec.TunnelTransport = bridge.TunnelTransport
-	}
-	if t := strings.TrimSpace(o.transport); t == "grpc" {
+	switch t := strings.TrimSpace(o.transport); t {
+	case "":
+		if bridge.TunnelTransport != "" {
+			exitSpec.TunnelTransport = bridge.TunnelTransport
+		} else {
+			exitSpec.TunnelTransport = config.TunnelTransportSplitHTTP
+		}
+	case "grpc":
 		fmt.Fprintln(os.Stderr, "WARNING: gRPC transport deprecated in Xray 26; use -transport splithttp (XHTTP stream-up H2)")
 		exitSpec.TunnelTransport = config.TunnelTransportGRPC
-	} else {
+	case "splithttp":
 		exitSpec.TunnelTransport = config.TunnelTransportSplitHTTP
+	default:
+		fmt.Fprintln(os.Stderr, `exit-only: -transport must be "splithttp" or "grpc"`)
+		os.Exit(2)
 	}
 
 	if err := exitSpec.Validate(); err != nil {

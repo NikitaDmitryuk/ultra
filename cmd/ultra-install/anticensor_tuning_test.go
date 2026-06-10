@@ -98,3 +98,12 @@ func TestExitOnlyCopiesBridgeSplitHTTPTuning(t *testing.T) {
 		t.Fatal("exit-only WARPProxy not preserved")
 	}
 }
+
+func TestExitOnlyTransportValuePreservesBridgeDefault(t *testing.T) {
+	if got := exitOnlyTransportValue("splithttp", false); got != "" {
+		t.Fatalf("implicit CLI default should not override bridge transport, got %q", got)
+	}
+	if got := exitOnlyTransportValue("splithttp", true); got != "splithttp" {
+		t.Fatalf("explicit transport not preserved: %q", got)
+	}
+}
