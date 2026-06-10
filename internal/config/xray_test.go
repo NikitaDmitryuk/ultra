@@ -494,6 +494,17 @@ func TestBuildClientProfilesPreservesLegacyAndAddsXHTTP(t *testing.T) {
 	if !strings.Contains(profiles[1].VLESSURI, "8443") {
 		t.Fatalf("fallback URI missing public_xhttp_port: %s", profiles[1].VLESSURI)
 	}
+	if strings.Contains(profiles[1].VLESSURI, "flow=") {
+		t.Fatalf("fallback URI must not include XTLS flow: %s", profiles[1].VLESSURI)
+	}
+	settings, _ := profiles[1].XRayOutboundJSON["settings"].(map[string]any)
+	vnext, _ := settings["vnext"].([]any)
+	node, _ := vnext[0].(map[string]any)
+	users, _ := node["users"].([]any)
+	profileUser, _ := users[0].(map[string]any)
+	if _, ok := profileUser["flow"]; ok {
+		t.Fatalf("fallback user must not include XTLS flow: %v", profileUser["flow"])
+	}
 	stream, _ := profiles[1].XRayOutboundJSON["streamSettings"].(map[string]any)
 	if stream["network"] != "xhttp" {
 		t.Fatalf("fallback network = %v", stream["network"])
@@ -534,6 +545,12 @@ func TestBuildBridgePublicXHTTPInboundWhenEnabled(t *testing.T) {
 		stream, _ := in["streamSettings"].(map[string]any)
 		if stream["network"] != "xhttp" {
 			t.Fatalf("public fallback network = %v", stream["network"])
+		}
+		settings, _ := in["settings"].(map[string]any)
+		clients, _ := settings["clients"].([]any)
+		client, _ := clients[0].(map[string]any)
+		if _, ok := client["flow"]; ok {
+			t.Fatalf("public fallback client must not include XTLS flow: %v", client["flow"])
 		}
 		found = true
 	}

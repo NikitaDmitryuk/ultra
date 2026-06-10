@@ -47,6 +47,7 @@ func BuildBridgeXRayJSON(
 
 	w := resolveXrayWire(spec)
 	clients := make([]map[string]any, 0, len(users))
+	xhttpClients := make([]map[string]any, 0, len(users))
 	for _, u := range users {
 		if u.UUID == "" {
 			continue
@@ -68,6 +69,10 @@ func BuildBridgeXRayJSON(
 			client["flow"] = flow
 		}
 		clients = append(clients, client)
+		xhttpClients = append(xhttpClients, map[string]any{
+			"id":    u.UUID,
+			"email": email,
+		})
 	}
 
 	if xrayLogLevel == "" {
@@ -155,7 +160,7 @@ func BuildBridgeXRayJSON(
 			"port":     spec.AntiCensor.PublicXHTTPPort,
 			"protocol": "vless",
 			"settings": map[string]any{
-				"clients":    clients,
+				"clients":    xhttpClients,
 				"decryption": w.VLESSEncryption,
 				"fallbacks":  []any{},
 			},

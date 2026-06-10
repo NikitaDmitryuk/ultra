@@ -45,6 +45,13 @@ func vlessUserFields(spec *Spec, userUUID string) map[string]any {
 	return u
 }
 
+func vlessUserFieldsNoFlow(spec *Spec, userUUID string) map[string]any {
+	return map[string]any{
+		"id":         userUUID,
+		"encryption": resolveXrayWire(spec).VLESSEncryption,
+	}
+}
+
 func clientRealityFingerprint(spec *Spec) string {
 	if spec.Reality.Fingerprint != "" {
 		return spec.Reality.Fingerprint
@@ -259,7 +266,7 @@ func buildFallbackXHTTPExport(spec *Spec, user auth.User) (*ClientExport, error)
 					"address": spec.PublicHost,
 					"port":    fallbackXHTTPPort(spec),
 					"users": []any{
-						vlessUserFields(spec, user.UUID),
+						vlessUserFieldsNoFlow(spec, user.UUID),
 					},
 				},
 			},
@@ -295,9 +302,6 @@ func buildFallbackXHTTPExport(spec *Spec, user auth.User) (*ClientExport, error)
 	q.Set("spx", spx)
 	q.Set("path", path)
 	q.Set("mode", "auto")
-	if flow := spec.PublicVLESSFlow(); flow != "" {
-		q.Set("flow", flow)
-	}
 	name := user.Name
 	if name == "" {
 		name = "user"
