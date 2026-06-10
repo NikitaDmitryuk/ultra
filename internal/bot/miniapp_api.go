@@ -40,6 +40,8 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stats", b.handleStats)
 	mux.HandleFunc("GET /api/stats/history", b.handleStatsHistory)
 	mux.HandleFunc("GET /api/health", b.handleHealth)
+	mux.HandleFunc("GET /api/diagnostics", b.handleDiagnostics)
+	mux.HandleFunc("GET /api/hardening", b.handleHardening)
 	mux.HandleFunc("GET /api/exits", b.handleListExits)
 	mux.HandleFunc("POST /api/exits", b.handleCreateExit)
 	mux.HandleFunc("PATCH /api/exits/{id}", b.handlePatchExit)
@@ -521,6 +523,34 @@ func (b *Bot) handleStats(w http.ResponseWriter, r *http.Request) {
 		"total_bytes_month": int64(totalBytes),
 		"stats_month":       map[string]int{"year": now.Year(), "month": int(now.Month())},
 	})
+}
+
+func (b *Bot) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	resp, err := b.adminGet(r.Context(), "/v1/diagnostics")
+	if err != nil {
+		b.log.Error("admin GET /v1/diagnostics", "err", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(resp)
+}
+
+func (b *Bot) handleHardening(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	resp, err := b.adminGet(r.Context(), "/v1/hardening")
+	if err != nil {
+		b.log.Error("admin GET /v1/hardening", "err", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(resp)
 }
 
 func (b *Bot) handleStatsHistory(w http.ResponseWriter, r *http.Request) {

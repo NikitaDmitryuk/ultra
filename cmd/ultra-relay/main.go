@@ -78,6 +78,7 @@ func main() {
 	defer stop()
 
 	var wg sync.WaitGroup
+	ensureConfiguredFirewallPorts(ctx, spec, log)
 
 	switch spec.Role {
 	case config.RoleBridge:
@@ -268,6 +269,33 @@ func main() {
 	log.Info("shutting down")
 	_ = runner.Close()
 	wg.Wait()
+}
+
+func ensureConfiguredFirewallPorts(ctx context.Context, spec *config.Spec, log *slog.Logger) {
+	fw := firewall.New()
+	openCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	open := func(port int, label string) {
+		if port <= 0 {
+			return
+		}
+		if err := fw.OpenPort(openCtx, port); err != nil {
+			log.Warn("firewall: open configured port failed", "port", port, "label", label, "err", err)
+			return
+		}
+		log.Info("firewall: configured port open", "port", port, "label", label)
+	}
+
+	switch spec.Role {
+	case config.RoleBridge:
+		open(spec.VLESSPort, "public-tcp")
+		if spec.AntiCensor != nil && spec.AntiCensor.PublicXHTTPPort > 0 {
+			open(spec.AntiCensor.PublicXHTTPPort, "public-xhttp")
+		}
+	case config.RoleExit:
+		open(spec.VLESSPort, "tunnel")
+	}
 }
 
 // dsnPrefix returns the scheme+host portion of a DSN for safe logging (no password).

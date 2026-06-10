@@ -46,6 +46,12 @@ const (
 	RoutingModeRUDirect  = "ru_direct"
 )
 
+const (
+	AntiCensorProfileFast     = "fast"
+	AntiCensorProfileBalanced = "balanced"
+	AntiCensorProfileStealth  = "stealth"
+)
+
 // FragmentSpec controls Xray sockopt.fragment on the bridge→exit outbound.
 // Splitting the TLS ClientHello across multiple TCP packets obfuscates the SNI field.
 type FragmentSpec struct {
@@ -61,6 +67,15 @@ type FragmentSpec struct {
 // AntiCensorSpec groups optional connection tuning settings. All fields have safe defaults;
 // the block may be omitted entirely and sensible values apply automatically.
 type AntiCensorSpec struct {
+	// Profile selects a coarse anti-censorship tuning profile. Empty defaults to "balanced".
+	// The legacy public TCP REALITY client profile remains unchanged by this setting.
+	Profile string `json:"profile,omitempty"`
+
+	// PublicXHTTPPort enables an additional public VLESS+REALITY+XHTTP inbound on the bridge
+	// for the fallback_xhttp_reality client profile. 0 means the profile is exported as a
+	// prepared fallback using vless_port, but no extra inbound is opened.
+	PublicXHTTPPort int `json:"public_xhttp_port,omitempty"`
+
 	// Fragment enables TLS ClientHello fragmentation on the bridge→exit outbound.
 	// When nil the feature is on with default parameters; set packets/length/interval to tune.
 	// Set to &FragmentSpec{Packets:""} (empty packets) to disable fragmentation.
@@ -406,6 +421,28 @@ func (s *Spec) Validate() error {
 			}
 			if s.SOCKS5 != nil && s.SOCKS5.Enabled && port == s.SOCKS5.Port {
 				return errors.New("config: bot_telegram_proxy.port must differ from socks5.port")
+			}
+		}
+		if s.AntiCensor != nil {
+			profile := strings.TrimSpace(s.AntiCensor.Profile)
+			if profile != "" && profile != AntiCensorProfileFast && profile != AntiCensorProfileBalanced && profile != AntiCensorProfileStealth {
+				return errors.New("config: anti_censor.profile must be fast, balanced, or stealth")
+			}
+			if p := s.AntiCensor.PublicXHTTPPort; p < 0 || p > 65535 {
+				return errors.New("config: anti_censor.public_xhttp_port must be 0..65535")
+			} else if p > 0 {
+				if p == s.VLESSPort {
+					return errors.New("config: anti_censor.public_xhttp_port must differ from vless_port")
+				}
+				if p == HealthProbePort {
+					return errors.New("config: anti_censor.public_xhttp_port conflicts with health probe port")
+				}
+				if s.SOCKS5 != nil && s.SOCKS5.Enabled && p == s.SOCKS5.Port {
+					return errors.New("config: anti_censor.public_xhttp_port must differ from socks5.port")
+				}
+				if s.BotTelegramProxy != nil && s.BotTelegramProxy.Enabled && p == botTelegramProxyPort(s.BotTelegramProxy) {
+					return errors.New("config: anti_censor.public_xhttp_port must differ from bot_telegram_proxy.port")
+				}
 			}
 		}
 	case RoleExit:

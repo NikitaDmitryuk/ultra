@@ -448,6 +448,100 @@ func TestBuildClientExportREALITYFlow(t *testing.T) {
 	}
 }
 
+func TestBuildClientProfilesPreservesLegacyAndAddsXHTTP(t *testing.T) {
+	spec := &Spec{
+		Role:       RoleBridge,
+		VLESSPort:  443,
+		PublicHost: "edge.example.com",
+		Reality: RealitySpec{
+			Dest:        "www.example.com:443",
+			ServerNames: []string{"www.example.com"},
+			PrivateKey:  "priv",
+			PublicKey:   "pub",
+			ShortIDs:    []string{"abcd"},
+		},
+		AntiCensor: &AntiCensorSpec{
+			Profile:             AntiCensorProfileBalanced,
+			PublicXHTTPPort:     8443,
+			RealityFingerprints: []string{"firefox"},
+		},
+		SplithttpPath: "/api/v1/subscription",
+	}
+	user := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", Name: "x"}
+	legacy, err := BuildClientExport(spec, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := BuildClientProfiles(spec, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 2 {
+		t.Fatalf("profiles len = %d, want 2", len(profiles))
+	}
+	if profiles[0].ID != ClientProfileFastTCPReality {
+		t.Fatalf("first profile id = %q", profiles[0].ID)
+	}
+	if profiles[0].VLESSURI != legacy.VLESSURI {
+		t.Fatalf("legacy URI changed:\n%s\n%s", profiles[0].VLESSURI, legacy.VLESSURI)
+	}
+	if profiles[1].ID != ClientProfileFallbackXHTTPReality {
+		t.Fatalf("second profile id = %q", profiles[1].ID)
+	}
+	if !strings.Contains(profiles[1].VLESSURI, "type=xhttp") {
+		t.Fatalf("fallback URI missing xhttp: %s", profiles[1].VLESSURI)
+	}
+	if !strings.Contains(profiles[1].VLESSURI, "8443") {
+		t.Fatalf("fallback URI missing public_xhttp_port: %s", profiles[1].VLESSURI)
+	}
+	stream, _ := profiles[1].XRayOutboundJSON["streamSettings"].(map[string]any)
+	if stream["network"] != "xhttp" {
+		t.Fatalf("fallback network = %v", stream["network"])
+	}
+	rs, _ := stream["realitySettings"].(map[string]any)
+	if rs["fingerprint"] != "firefox" {
+		t.Fatalf("fallback fingerprint = %v", rs["fingerprint"])
+	}
+	if rs["spiderX"] == "/" || rs["spiderX"] == "" {
+		t.Fatalf("fallback spiderX not per-profile: %v", rs["spiderX"])
+	}
+	if profiles[1].FullConfigBase64 == "" {
+		t.Fatal("fallback full config base64 missing")
+	}
+}
+
+func TestBuildBridgePublicXHTTPInboundWhenEnabled(t *testing.T) {
+	spec := bridgeSpecForAntiCensorTest()
+	spec.DevMode = false
+	spec.GeoAssetsDir = ""
+	spec.AntiCensor = &AntiCensorSpec{PublicXHTTPPort: 8443}
+	strat, _ := mimic.New("steamlike")
+	b, err := BuildBridgeXRayJSON(spec, []auth.User{{UUID: "aaaaaaaa-0000-0000-0000-000000000001"}}, nil, "", strat, "warning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
+	}
+	inbounds, _ := root["inbounds"].([]any)
+	found := false
+	for _, raw := range inbounds {
+		in, _ := raw.(map[string]any)
+		if in["port"].(float64) != 8443 {
+			continue
+		}
+		stream, _ := in["streamSettings"].(map[string]any)
+		if stream["network"] != "xhttp" {
+			t.Fatalf("public fallback network = %v", stream["network"])
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("public XHTTP inbound not found")
+	}
+}
+
 func TestBuildBridgePerClientSOCKS5Inbound(t *testing.T) {
 	port := 10850
 	spec := &Spec{

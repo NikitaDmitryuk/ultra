@@ -188,6 +188,18 @@ func TestAntiCensorFingerprintPool(t *testing.T) {
 	}
 }
 
+func TestAntiCensorProfileValidation(t *testing.T) {
+	spec := bridgeSpecForAntiCensorTest()
+	spec.AntiCensor = &AntiCensorSpec{Profile: AntiCensorProfileBalanced, PublicXHTTPPort: 8443}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("valid anti_censor profile rejected: %v", err)
+	}
+	spec.AntiCensor.Profile = "turbo"
+	if err := spec.Validate(); err == nil {
+		t.Fatal("invalid anti_censor profile accepted")
+	}
+}
+
 func TestDoHInBridgeConfig(t *testing.T) {
 	spec := bridgeSpecForAntiCensorTest()
 	spec.DevMode = false

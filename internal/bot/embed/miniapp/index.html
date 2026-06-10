@@ -141,6 +141,7 @@
   </div>
   <div class="card" id="detail-config-vless">
     <div class="card-title">Конфигурация (VLESS)</div>
+    <select id="detail-profile-select" class="form-input" style="margin-bottom:10px;display:none" onchange="selectCurrentProfile()"></select>
     <div id="qr-container"></div>
     <button class="btn secondary" onclick="copyVlessURI()" style="margin-bottom:8px">Скопировать VLESS URI</button>
     <div class="config-uri" id="detail-vless-uri">Загрузка…</div>

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -140,6 +141,8 @@ func (s *Server) routes() error {
 	s.mux.HandleFunc("GET /v1/traffic/history", s.handleGetTrafficHistory)
 	s.mux.HandleFunc("GET /v1/traffic/last-seen", s.handleGetLastSeen)
 	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
+	s.mux.HandleFunc("GET /v1/diagnostics", s.handleDiagnostics)
+	s.mux.HandleFunc("GET /v1/hardening", s.handleHardening)
 	s.mux.HandleFunc("GET /v1/exits", s.handleListExits)
 	s.mux.HandleFunc("POST /v1/exits", s.handlePostExit)
 	s.mux.HandleFunc("PATCH /v1/exits/{id}", s.handlePatchExit)
@@ -217,14 +220,15 @@ func (s *Server) handlePostUser(w http.ResponseWriter, r *http.Request) {
 }
 
 type getClientResp struct {
-	XrayClientJSON   map[string]any `json:"xray_client_json,omitempty"`
-	VLESSURI         string         `json:"vless_uri,omitempty"`
-	FullConfigBase64 string         `json:"full_xray_config_base64,omitempty"`
-	Socks5URI        string         `json:"socks5_uri,omitempty"`
-	Host             string         `json:"host,omitempty"`
-	Port             int            `json:"port,omitempty"`
-	Username         string         `json:"username,omitempty"`
-	Password         string         `json:"password,omitempty"`
+	XrayClientJSON   map[string]any               `json:"xray_client_json,omitempty"`
+	VLESSURI         string                       `json:"vless_uri,omitempty"`
+	FullConfigBase64 string                       `json:"full_xray_config_base64,omitempty"`
+	Profiles         []config.ClientProfileExport `json:"profiles,omitempty"`
+	Socks5URI        string                       `json:"socks5_uri,omitempty"`
+	Host             string                       `json:"host,omitempty"`
+	Port             int                          `json:"port,omitempty"`
+	Username         string                       `json:"username,omitempty"`
+	Password         string                       `json:"password,omitempty"`
 }
 
 func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
@@ -285,10 +289,17 @@ func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal", http.StatusInternalServerError)
 		return
 	}
+	profiles, err := config.BuildClientProfiles(s.spec, u)
+	if err != nil {
+		s.log.Error("client profiles", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
 	resp := getClientResp{
 		XrayClientJSON:   exp.XRayOutboundJSON,
 		VLESSURI:         exp.VLESSURI,
 		FullConfigBase64: base64.StdEncoding.EncodeToString(fullJSON),
+		Profiles:         profiles,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
@@ -742,6 +753,135 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(res)
+}
+
+type diagnosticCheck struct {
+	OK        bool   `json:"ok"`
+	Message   string `json:"message,omitempty"`
+	LatencyMS int64  `json:"latency_ms,omitempty"`
+}
+
+func measureApproxThroughput(ctx context.Context) map[string]any {
+	const bytesToRead = 256 * 1024
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://speed.cloudflare.com/__down?bytes=%d", bytesToRead), nil)
+	if err != nil {
+		return map[string]any{"measured": false, "message": err.Error()}
+	}
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return map[string]any{"measured": false, "message": err.Error()}
+	}
+	defer resp.Body.Close()
+	n, err := io.Copy(io.Discard, io.LimitReader(resp.Body, bytesToRead))
+	if err != nil {
+		return map[string]any{"measured": false, "message": err.Error()}
+	}
+	elapsed := time.Since(start)
+	if elapsed <= 0 || n <= 0 {
+		return map[string]any{"measured": false, "message": "empty throughput sample"}
+	}
+	mbps := (float64(n) * 8) / elapsed.Seconds() / 1_000_000
+	return map[string]any{
+		"measured":    true,
+		"bytes":       n,
+		"elapsed_ms":  elapsed.Milliseconds(),
+		"mbps":        mbps,
+		"sample_url":  "https://speed.cloudflare.com/__down",
+		"sample_note": "bridge egress sample; use scripts/benchmark-relay.sh for full client→bridge→exit throughput",
+	}
+}
+
+func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	checks := map[string]diagnosticCheck{}
+	publicAddr := fmt.Sprintf("%s:%d", strings.TrimSpace(s.spec.PublicHost), s.spec.VLESSPort)
+	if strings.TrimSpace(s.spec.PublicHost) == "" {
+		checks["public_tcp_reality"] = diagnosticCheck{OK: false, Message: "public_host is empty"}
+	} else if rtt, err := probe.DialTCP(ctx, publicAddr); err == nil {
+		checks["public_tcp_reality"] = diagnosticCheck{OK: true, Message: publicAddr, LatencyMS: rtt.Milliseconds()}
+	} else {
+		checks["public_tcp_reality"] = diagnosticCheck{OK: false, Message: err.Error()}
+	}
+
+	xhttpPort := 0
+	if s.spec.AntiCensor != nil {
+		xhttpPort = s.spec.AntiCensor.PublicXHTTPPort
+	}
+	if xhttpPort > 0 {
+		addr := fmt.Sprintf("%s:%d", strings.TrimSpace(s.spec.PublicHost), xhttpPort)
+		if rtt, err := probe.DialTCP(ctx, addr); err == nil {
+			checks["public_xhttp_reality"] = diagnosticCheck{OK: true, Message: addr, LatencyMS: rtt.Milliseconds()}
+		} else {
+			checks["public_xhttp_reality"] = diagnosticCheck{OK: false, Message: err.Error()}
+		}
+	} else {
+		checks["public_xhttp_reality"] = diagnosticCheck{OK: false, Message: "anti_censor.public_xhttp_port is not enabled"}
+	}
+
+	dohEnabled := !s.spec.DevMode && (s.spec.AntiCensor == nil || !s.spec.AntiCensor.DisableDOH)
+	checks["doh"] = diagnosticCheck{OK: dohEnabled}
+	if !checks["doh"].OK {
+		checks["doh"] = diagnosticCheck{OK: false, Message: "DoH disabled or dev_mode enabled"}
+	}
+
+	activeID := ""
+	if s.selector != nil {
+		activeID = s.selector.ActiveID()
+	}
+	if activeID == "" && s.exits == nil && s.spec.Exit.Address != "" && s.spec.Exit.Port > 0 {
+		activeID = "legacy"
+	}
+	checks["active_exit"] = diagnosticCheck{OK: activeID != "", Message: activeID}
+
+	warpEnabled := s.spec.AntiCensor != nil && s.spec.AntiCensor.WARPProxy
+	checks["warp_tcp"] = diagnosticCheck{OK: warpEnabled}
+	if warpEnabled {
+		checks["warp_tcp"] = diagnosticCheck{OK: true, Message: "TCP exit traffic is routed through WARP SOCKS5; UDP bypasses WARP"}
+	} else {
+		checks["warp_tcp"] = diagnosticCheck{OK: false, Message: "WARP proxy is disabled"}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"checked_at": time.Now().UTC().Format(time.RFC3339),
+		"checks":     checks,
+		"throughput": measureApproxThroughput(ctx),
+	})
+}
+
+func (s *Server) handleHardening(w http.ResponseWriter, r *http.Request) {
+	checks := map[string]diagnosticCheck{}
+	adminLoopback := strings.HasPrefix(s.spec.AdminListen, "127.0.0.1:") || strings.HasPrefix(s.spec.AdminListen, "localhost:")
+	checks["admin_loopback"] = diagnosticCheck{OK: adminLoopback, Message: s.spec.AdminListen}
+	checks["cert_pin"] = diagnosticCheck{
+		OK:      s.spec.TunnelTLSProvision != config.TunnelTLSSelfSigned || s.spec.Exit.PinnedPeerCertSHA256 != "",
+		Message: "self_signed bridge→exit TLS should use pinnedPeerCertSha256",
+	}
+	if s.spec.TunnelTLSProvision != config.TunnelTLSSelfSigned {
+		checks["cert_pin"] = diagnosticCheck{OK: true, Message: string(s.spec.TunnelTLSProvision)}
+	}
+	dohEnabled := !s.spec.DevMode && (s.spec.AntiCensor == nil || !s.spec.AntiCensor.DisableDOH)
+	checks["doh"] = diagnosticCheck{OK: dohEnabled}
+	checks["public_xhttp_inbound"] = diagnosticCheck{OK: s.spec.AntiCensor != nil && s.spec.AntiCensor.PublicXHTTPPort > 0}
+	if !checks["public_xhttp_inbound"].OK {
+		checks["public_xhttp_inbound"] = diagnosticCheck{OK: false, Message: "fallback profile exported, but no extra public XHTTP inbound is enabled"}
+	}
+	warpEnabled := s.spec.AntiCensor != nil && s.spec.AntiCensor.WARPProxy
+	checks["warp_udp_warning"] = diagnosticCheck{OK: !warpEnabled, Message: "WARP disabled"}
+	if warpEnabled {
+		checks["warp_udp_warning"] = diagnosticCheck{OK: false, Message: "WARP SOCKS5 is TCP-only in current config; UDP exits directly"}
+	}
+	checks["systemd_sandbox"] = diagnosticCheck{OK: false, Message: "not introspected by API; audit deploy/systemd/ultra-relay.service on host"}
+	checks["open_ports"] = diagnosticCheck{OK: false, Message: "not introspected by API; verify firewall/security group allows only required public ports"}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"checked_at": time.Now().UTC().Format(time.RFC3339),
+		"checks":     checks,
+	})
 }
 
 // Start runs the HTTP server (non-TLS).

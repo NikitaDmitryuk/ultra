@@ -274,6 +274,11 @@ func runExitOnly(o exitOnlyOpts) {
 		}
 	}
 
+	if err := install.SetupFirewallPorts(o.sshUser, o.exitHost, o.identity, []int{exitSpec.VLESSPort}); err != nil {
+		fmt.Fprintln(os.Stderr, "exit-only firewall:", err)
+		os.Exit(1)
+	}
+
 	finish := fmt.Sprintf(
 		`set -euo pipefail; REMOTE_DIR=%q; install -o ultra-relay -g ultra-relay -m 755 /tmp/ultra-relay /usr/local/bin/ultra-relay; install -o ultra-relay -g ultra-relay -m 600 "$REMOTE_DIR/environment.tmp" "$REMOTE_DIR/environment"; systemctl daemon-reload; systemctl enable ultra-relay; systemctl restart ultra-relay`,
 		o.remoteDir,

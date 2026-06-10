@@ -111,7 +111,7 @@ Telegram-алерты: `exit_down` / `exit_up` (по active exit), `exit_failove
 
 Остальные секреты (`ULTRA_RELAY_ADMIN_TOKEN`, DB DSN) берутся автоматически из `/etc/ultra-relay/environment` и `spec.json` — вручную задавать не нужно.
 
-Long polling и алерты к `api.telegram.org` с bridge идут через локальный SOCKS5 (`127.0.0.1:10809`) в Xray и далее на **active exit** (с тем же failover, что и VPN-трафик).
+Long polling и алерты к `api.telegram.org` с bridge идут через локальный SOCKS5 (`127.0.0.1:10809`) в Xray и далее на **active exit** (с тем же failover, что и пользовательский трафик).
 
 **Mini App** открывается по кнопке от бота и предоставляет:
 - Обзор: количество пользователей, трафик, состояние bridge и **active exit**.
@@ -217,8 +217,10 @@ Host ultra-back
 - `anti_censor.warp_proxy: true` — на exit использовать Cloudflare WARP в режиме прокси; destination-сайты видят Cloudflare IP вместо IP датацентра.
 - `anti_censor.disable_doh: false` (по умолчанию) — DNS over HTTPS; bridge использует Yandex DoH для `.ru`-доменов и Cloudflare для остального.
 - Фрагментация TLS ClientHello и паддинг splithttp-чанков включены по умолчанию.
+- `/client` экспортирует обратно-совместимый основной профиль `fast_tcp_reality` (старый VLESS+REALITY+TCP+Vision URI) и резервный `fallback_xhttp_reality` для Xray-compatible клиентов. Чтобы резервный XHTTP-профиль был доступен извне, задайте `PUBLIC_XHTTP_PORT` / `anti_censor.public_xhttp_port`; `make install` внесёт это в spec, а `ultra-relay` best-effort откроет локальный firewall на bridge. Старый `vless_port` при этом не меняется.
+- `anti_censor.profile`: `fast`, `balanced` (дефолт для новых fallback-настроек), `stealth`. Профиль не меняет legacy TCP URI; он влияет на параметры резервного XHTTP-профиля.
 
-**SOCKS5 на bridge:** два режима — (1) общий inbound в spec (`socks5.enabled`, по умолчанию `127.0.0.1`); (2) **per-user** `kind=socks5` в Admin API / Mini App — отдельный порт из диапазона **10810–10899**, логин = UUID, пароль в карточке пользователя (`socks5://…` в UI). Оба используют тот же routing, что VLESS. Per-user порты слушают `0.0.0.0`; откройте нужный TCP в security group. На мобильных сетях нестандартные порты (108xx, 8444) могут блокироваться — для Telegram in-app proxy или Mini App надёжнее `:443` или системный VPN (HAPP).
+**SOCKS5 на bridge:** два режима — (1) общий inbound в spec (`socks5.enabled`, по умолчанию `127.0.0.1`); (2) **per-user** `kind=socks5` в Admin API / Mini App — отдельный порт из диапазона **10810–10899**, логин = UUID, пароль в карточке пользователя (`socks5://…` в UI). Оба используют тот же routing, что VLESS. Per-user порты слушают `0.0.0.0`; `ultra-relay` best-effort открывает их в локальном firewall. На мобильных сетях нестандартные порты (108xx, 8444) могут быть менее надёжны — для Telegram in-app proxy или Mini App обычно лучше `:443`.
 
 **Тонкая настройка:** опциональный объект `xray_wire` в spec задаёт теги, шифрование, sniffing и другие параметры; пустые поля не переопределяют встроенные значения (см. `internal/config/xray_wire_spec.go`).
 

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
@@ -286,5 +287,55 @@ func TestHealthEndpointRespondsJSON(t *testing.T) {
 	}
 	if _, ok := exit["reachable"]; !ok {
 		t.Fatalf("expected exit.reachable field")
+	}
+}
+
+func TestGetClientIncludesLegacyFieldsAndProfiles(t *testing.T) {
+	mgr := newFakeUserManager()
+	spec := &config.Spec{
+		Role:       config.RoleBridge,
+		VLESSPort:  443,
+		PublicHost: "edge.example.com",
+		Reality: config.RealitySpec{
+			Dest:        "www.example.com:443",
+			ServerNames: []string{"www.example.com"},
+			PrivateKey:  "priv",
+			PublicKey:   "pub",
+			ShortIDs:    []string{"abcd"},
+		},
+		AntiCensor: &config.AntiCensorSpec{
+			PublicXHTTPPort:     8443,
+			RealityFingerprints: []string{"firefox"},
+		},
+		Exit: config.ExitTunnelSpec{Address: "127.0.0.1", Port: 65535, TunnelUUID: "tun"},
+	}
+	ts := newHTTPTestServer(t, mgr, spec)
+	defer ts.Close()
+
+	resp, body := doAuthedJSON(t, ts.Client(), http.MethodGet, ts.URL+"/v1/users/u1/client", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, body=%s", resp.StatusCode, string(body))
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out["vless_uri"] == "" || out["full_xray_config_base64"] == "" || out["xray_client_json"] == nil {
+		t.Fatalf("legacy client fields missing: %#v", out)
+	}
+	profiles, ok := out["profiles"].([]any)
+	if !ok || len(profiles) != 2 {
+		t.Fatalf("profiles = %#v, want 2 entries", out["profiles"])
+	}
+	first := profiles[0].(map[string]any)
+	if first["id"] != config.ClientProfileFastTCPReality {
+		t.Fatalf("first profile = %#v", first)
+	}
+	second := profiles[1].(map[string]any)
+	if second["id"] != config.ClientProfileFallbackXHTTPReality {
+		t.Fatalf("second profile = %#v", second)
+	}
+	if !strings.Contains(second["vless_uri"].(string), "type=xhttp") {
+		t.Fatalf("fallback profile URI = %s", second["vless_uri"])
 	}
 }

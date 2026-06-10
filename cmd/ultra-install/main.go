@@ -151,6 +151,16 @@ func main() {
 		false,
 		"disable TLS ClientHello fragmentation on bridge→exit outbound (default: enabled)",
 	)
+	antiCensorProfile := flag.String(
+		"anti-censor-profile",
+		"",
+		`network tuning profile: fast, balanced, or stealth (empty = balanced defaults)`,
+	)
+	publicXHTTPPort := flag.Int(
+		"public-xhttp-port",
+		0,
+		"optional extra public VLESS+REALITY+XHTTP port for fallback client profiles (0 = do not open)",
+	)
 	splithttpPadding := flag.String(
 		"splithttp-padding",
 		"",
@@ -510,6 +520,8 @@ func main() {
 
 	// ── Connection tuning defaults (always set; flags may override) ──────────
 	bridgeSpec.AntiCensor = buildAntiCensorSpec(antiCensorTuning{
+		Profile:                *antiCensorProfile,
+		PublicXHTTPPort:        *publicXHTTPPort,
 		DisableDOH:             *disableDOH,
 		DisableFragment:        *noFragment,
 		SplitHTTPPadding:       *splithttpPadding,
@@ -590,6 +602,7 @@ func main() {
 	}
 
 	exitAntiCensor := buildAntiCensorSpec(antiCensorTuning{
+		Profile:             *antiCensorProfile,
 		DisableDOH:          *disableDOH,
 		SplitHTTPPadding:    *splithttpPadding,
 		SplitHTTPMaxChunkKB: *splithttpMaxChunkKB,
@@ -972,6 +985,14 @@ chmod 600 /etc/ultra-relay/environment
 
 	if err := install.RunSSH(*sshUser, *bridgeHost, *identity, remoteFinalize); err != nil {
 		fmt.Fprintln(os.Stderr, "bridge finalize:", err)
+		os.Exit(1)
+	}
+	bridgePorts := []int{bridgeSpec.VLESSPort}
+	if bridgeSpec.AntiCensor != nil && bridgeSpec.AntiCensor.PublicXHTTPPort > 0 {
+		bridgePorts = append(bridgePorts, bridgeSpec.AntiCensor.PublicXHTTPPort)
+	}
+	if err := install.SetupFirewallPorts(*sshUser, *bridgeHost, *identity, bridgePorts); err != nil {
+		fmt.Fprintln(os.Stderr, "bridge firewall:", err)
 		os.Exit(1)
 	}
 

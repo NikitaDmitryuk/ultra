@@ -541,6 +541,16 @@ y | Y | true | 1 | yes) ARGS+=(-disable-vless-flow) ;;
 esac
 
 # ── Connection tuning options ────────────────────────────────────────────────
+# ANTI_CENSOR_PROFILE — coarse defaults for fallback profile tuning: fast, balanced, stealth.
+ANTI_CENSOR_PROFILE="${ANTI_CENSOR_PROFILE:-}"
+if [[ -n "${ANTI_CENSOR_PROFILE// }" ]]; then
+	ARGS+=(-anti-censor-profile "$ANTI_CENSOR_PROFILE")
+fi
+# PUBLIC_XHTTP_PORT — optional extra public VLESS+REALITY+XHTTP fallback inbound on bridge.
+PUBLIC_XHTTP_PORT="${PUBLIC_XHTTP_PORT:-0}"
+if [[ "${PUBLIC_XHTTP_PORT}" -gt 0 ]] 2>/dev/null; then
+	ARGS+=(-public-xhttp-port "$PUBLIC_XHTTP_PORT")
+fi
 # FRAGMENT_DISABLE=y — отключить фрагментацию TLS ClientHello (по умолчанию включена).
 case "${FRAGMENT_DISABLE:-n}" in
 y | Y | true | 1 | yes) ARGS+=(-no-fragment) ;;

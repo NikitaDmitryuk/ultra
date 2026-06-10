@@ -141,6 +141,31 @@ func BuildBridgeXRayJSON(
 			},
 		},
 	}
+	if spec.AntiCensor != nil && spec.AntiCensor.PublicXHTTPPort > 0 && !spec.DevMode {
+		xhttpStream := bridgeInboundStream(spec)
+		xhttpStream["network"] = "xhttp"
+		xhttpStream["xhttpSettings"] = map[string]any{
+			"path":         fallbackXHTTPPath(spec),
+			"mode":         "auto",
+			"xPaddingSize": fallbackXHTTPPadding(spec),
+		}
+		inbounds = append(inbounds, map[string]any{
+			"tag":      w.InboundVLESSTag + "-xhttp",
+			"listen":   spec.ListenAddress,
+			"port":     spec.AntiCensor.PublicXHTTPPort,
+			"protocol": "vless",
+			"settings": map[string]any{
+				"clients":    clients,
+				"decryption": w.VLESSEncryption,
+				"fallbacks":  []any{},
+			},
+			"streamSettings": xhttpStream,
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": w.SniffingDestOverride,
+			},
+		})
+	}
 	if statsEnabled {
 		inbounds = append(inbounds, map[string]any{
 			"tag":      "api",
