@@ -47,6 +47,7 @@ func BuildBridgeXRayJSON(
 
 	w := resolveXrayWire(spec)
 	clients := make([]map[string]any, 0, len(users))
+	xhttpClients := make([]map[string]any, 0, len(users))
 	for _, u := range users {
 		if u.UUID == "" {
 			continue
@@ -68,6 +69,10 @@ func BuildBridgeXRayJSON(
 			client["flow"] = flow
 		}
 		clients = append(clients, client)
+		xhttpClients = append(xhttpClients, map[string]any{
+			"id":    u.UUID,
+			"email": email,
+		})
 	}
 
 	if xrayLogLevel == "" {
@@ -140,6 +145,31 @@ func BuildBridgeXRayJSON(
 				"destOverride": w.SniffingDestOverride,
 			},
 		},
+	}
+	if spec.AntiCensor != nil && spec.AntiCensor.PublicXHTTPPort > 0 && !spec.DevMode {
+		xhttpStream := bridgeInboundStream(spec)
+		xhttpStream["network"] = "xhttp"
+		xhttpStream["xhttpSettings"] = map[string]any{
+			"path":         fallbackXHTTPPath(spec),
+			"mode":         "auto",
+			"xPaddingSize": fallbackXHTTPPadding(spec),
+		}
+		inbounds = append(inbounds, map[string]any{
+			"tag":      w.InboundVLESSTag + "-xhttp",
+			"listen":   spec.ListenAddress,
+			"port":     spec.AntiCensor.PublicXHTTPPort,
+			"protocol": "vless",
+			"settings": map[string]any{
+				"clients":    xhttpClients,
+				"decryption": w.VLESSEncryption,
+				"fallbacks":  []any{},
+			},
+			"streamSettings": xhttpStream,
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": w.SniffingDestOverride,
+			},
+		})
 	}
 	if statsEnabled {
 		inbounds = append(inbounds, map[string]any{

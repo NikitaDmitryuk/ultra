@@ -11,6 +11,7 @@ let currentUserIsActive = true;
 let currentUserKind = 'vless';
 let currentVlessURI = null;
 let currentSocks5URI = null;
+let currentProfiles = [];
 let usersCache = [];
 let monthlyChart = null;
 let usersChart = null;
@@ -293,6 +294,7 @@ async function openUserDetail(u) {
   currentUserKind = String(u.kind || 'vless').toLowerCase();
   currentVlessURI = null;
   currentSocks5URI = null;
+  currentProfiles = [];
 
   const editBtn = document.getElementById('detail-edit-btn');
   if (editBtn) editBtn.style.display = u.uuid === LEGACY_SOCKS_UUID ? 'none' : '';
@@ -304,6 +306,11 @@ async function openUserDetail(u) {
     if (socksCard) socksCard.style.display = '';
     document.getElementById('detail-vless-uri').textContent = '—';
     document.getElementById('qr-container').innerHTML = '';
+    const profileSelect = document.getElementById('detail-profile-select');
+    if (profileSelect) {
+      profileSelect.style.display = 'none';
+      profileSelect.innerHTML = '';
+    }
     document.getElementById('detail-socks5-uri').textContent = 'Загрузка…';
     document.getElementById('qr-container-socks5').innerHTML = '';
   } else {
@@ -311,6 +318,11 @@ async function openUserDetail(u) {
     if (socksCard) socksCard.style.display = 'none';
     document.getElementById('detail-vless-uri').textContent = 'Загрузка…';
     document.getElementById('qr-container').innerHTML = '';
+    const profileSelect = document.getElementById('detail-profile-select');
+    if (profileSelect) {
+      profileSelect.style.display = 'none';
+      profileSelect.innerHTML = '';
+    }
     document.getElementById('detail-socks5-uri').textContent = '—';
     document.getElementById('qr-container-socks5').innerHTML = '';
   }
@@ -329,6 +341,7 @@ async function openUserDetail(u) {
   try {
     const cfg = await api('GET', `/api/users/${u.uuid}/config`);
     currentVlessURI = cfg.vless_uri || cfg.VLESSURI || '';
+    currentProfiles = Array.isArray(cfg.profiles) ? cfg.profiles : [];
     currentSocks5URI = cfg.socks5_uri || cfg.Socks5URI || '';
     if (currentUserKind === 'socks5') {
       document.getElementById('detail-socks5-uri').textContent = currentSocks5URI || '—';
@@ -350,13 +363,8 @@ async function openUserDetail(u) {
           });
       }
     } else {
-      document.getElementById('detail-vless-uri').textContent = currentVlessURI;
-      if (currentVlessURI && window.QRCode) {
-        QRCode.toCanvas(currentVlessURI, { width: 220, margin: 2, color: { dark: '#000000', light: '#ffffff' } },
-          (err, canvas) => {
-            if (!err) document.getElementById('qr-container').appendChild(canvas);
-          });
-      }
+      renderProfileSelector();
+      renderCurrentVlessProfile();
     }
   } catch (e) {
     if (currentUserKind === 'socks5') {
@@ -365,6 +373,52 @@ async function openUserDetail(u) {
       document.getElementById('detail-vless-uri').textContent = 'Ошибка загрузки конфигурации.';
     }
   }
+}
+
+function renderProfileSelector() {
+  const select = document.getElementById('detail-profile-select');
+  if (!select) return;
+  select.innerHTML = '';
+  if (!currentProfiles.length) {
+    select.style.display = 'none';
+    return;
+  }
+  currentProfiles.forEach((p, idx) => {
+    const opt = document.createElement('option');
+    opt.value = String(idx);
+    opt.textContent = p.name || p.id || ('Профиль ' + (idx + 1));
+    select.appendChild(opt);
+  });
+  select.value = '0';
+  select.style.display = currentProfiles.length > 1 ? '' : 'none';
+}
+
+function selectedProfileURI() {
+  const select = document.getElementById('detail-profile-select');
+  if (select && currentProfiles.length) {
+    const idx = Number(select.value || 0);
+    const profile = currentProfiles[idx] || currentProfiles[0];
+    if (profile && profile.vless_uri) return profile.vless_uri;
+  }
+  return currentVlessURI || '';
+}
+
+function renderCurrentVlessProfile() {
+  const uri = selectedProfileURI();
+  currentVlessURI = uri;
+  document.getElementById('detail-vless-uri').textContent = uri || '—';
+  const wrap = document.getElementById('qr-container');
+  wrap.innerHTML = '';
+  if (uri && window.QRCode) {
+    QRCode.toCanvas(uri, { width: 220, margin: 2, color: { dark: '#000000', light: '#ffffff' } },
+      (err, canvas) => {
+        if (!err) wrap.appendChild(canvas);
+      });
+  }
+}
+
+function selectCurrentProfile() {
+  renderCurrentVlessProfile();
 }
 
 function beginRenameUser() {
@@ -661,8 +715,9 @@ function renderActivityChart(points) {
 }
 
 function copyVlessURI() {
-  if (!currentVlessURI) return;
-  navigator.clipboard.writeText(currentVlessURI).then(
+  const uri = selectedProfileURI();
+  if (!uri) return;
+  navigator.clipboard.writeText(uri).then(
     () => showToast('VLESS URI скопирован.'),
     () => showToast('Не удалось скопировать.'),
   );

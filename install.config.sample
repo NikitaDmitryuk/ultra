@@ -84,6 +84,10 @@ VERIFY_FAIL_LOG_LINES=400
 
 # Опционально: geosite-теги в blackhole (нужен тег в вашем geosite.dat), например реклама.
 # GEOSITE_BLOCK_TAGS=category-ads-all
+#
+# Домены, которые должны оставаться на bridge direct. BOT_DOMAIN добавляется сюда автоматически
+# при BOT_ENABLE=y, чтобы Mini App не уходила через active exit.
+# DOMAIN_DIRECT=domain:example.com,domain:another.example.com
 
 # --- Выходной IP (Cloudflare WARP на exit) ---
 #
@@ -97,6 +101,15 @@ VERIFY_FAIL_LOG_LINES=400
 # DOH_DISABLE=y   # раскомментируйте, чтобы использовать системный DNS
 
 # --- Тонкая настройка протокола (все опции имеют рабочие значения по умолчанию) ---
+#
+# Профиль сетевых настроек для резервных профилей клиента: fast, balanced, stealth.
+# Пусто = balanced-дефолты. Основной старый TCP+REALITY URI от этого не меняется.
+# ANTI_CENSOR_PROFILE=balanced
+#
+# Дополнительный публичный порт на bridge для резервного VLESS+REALITY+XHTTP профиля.
+# Старый VLESS_PORT продолжает обслуживать TCP+REALITY. make install внесёт порт в spec,
+# а ultra-relay best-effort откроет локальный firewall. 0/пусто = не открывать дополнительный inbound.
+# PUBLIC_XHTTP_PORT=8445
 #
 # Фрагментация TLS ClientHello на исходящем соединении bridge→exit.
 # Разбивает первый TLS-пакет на несколько TCP-сегментов. По умолчанию включена.

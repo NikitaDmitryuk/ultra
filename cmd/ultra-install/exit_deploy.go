@@ -240,6 +240,9 @@ chmod 600 "$REMOTE_DIR/spec.json" || true
 	if err := install.RunSSH(c.sshUser, host, c.identity, exitFinalize); err != nil {
 		return "", fmt.Errorf("exit finalize (%s): %w", host, err)
 	}
+	if err := install.SetupFirewallPorts(c.sshUser, host, c.identity, []int{plan.Port}); err != nil {
+		return "", fmt.Errorf("exit firewall (%s): %w", host, err)
+	}
 
 	tmpUnit := filepath.Join(os.TempDir(), "ultra-relay.service")
 	unitBytes, err := os.ReadFile(c.systemdLocal)

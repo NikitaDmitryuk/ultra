@@ -482,6 +482,22 @@ GEOSITE_BLOCK_TAGS="${GEOSITE_BLOCK_TAGS:-}"
 if [[ -n "${GEOSITE_BLOCK_TAGS// }" ]]; then
 	ARGS+=(-geosite-block-tags "$GEOSITE_BLOCK_TAGS")
 fi
+_domain_direct_items=()
+DOMAIN_DIRECT="${DOMAIN_DIRECT:-}"
+if [[ -n "${DOMAIN_DIRECT// }" ]]; then
+	_domain_direct_items+=("$DOMAIN_DIRECT")
+fi
+case "${BOT_ENABLE:-n}" in
+y | Y | true | 1 | yes)
+	if [[ -n "${BOT_DOMAIN// }" ]]; then
+		_domain_direct_items+=("domain:${BOT_DOMAIN}")
+	fi
+	;;
+esac
+if [[ ${#_domain_direct_items[@]} -gt 0 ]]; then
+	_domain_direct_csv="$(IFS=,; echo "${_domain_direct_items[*]}")"
+	ARGS+=(-domain-direct "$_domain_direct_csv")
+fi
 
 case "${SKIP_GEO_DOWNLOAD:-${SKIP_RUNETFREEDOM_GEO:-n}}" in
 y | Y | true | 1 | yes) ARGS+=(-skip-geo-download) ;;
@@ -541,6 +557,16 @@ y | Y | true | 1 | yes) ARGS+=(-disable-vless-flow) ;;
 esac
 
 # ── Connection tuning options ────────────────────────────────────────────────
+# ANTI_CENSOR_PROFILE — coarse defaults for fallback profile tuning: fast, balanced, stealth.
+ANTI_CENSOR_PROFILE="${ANTI_CENSOR_PROFILE:-}"
+if [[ -n "${ANTI_CENSOR_PROFILE// }" ]]; then
+	ARGS+=(-anti-censor-profile "$ANTI_CENSOR_PROFILE")
+fi
+# PUBLIC_XHTTP_PORT — optional extra public VLESS+REALITY+XHTTP fallback inbound on bridge.
+PUBLIC_XHTTP_PORT="${PUBLIC_XHTTP_PORT:-0}"
+if [[ "${PUBLIC_XHTTP_PORT}" -gt 0 ]] 2>/dev/null; then
+	ARGS+=(-public-xhttp-port "$PUBLIC_XHTTP_PORT")
+fi
 # FRAGMENT_DISABLE=y — отключить фрагментацию TLS ClientHello (по умолчанию включена).
 case "${FRAGMENT_DISABLE:-n}" in
 y | Y | true | 1 | yes) ARGS+=(-no-fragment) ;;

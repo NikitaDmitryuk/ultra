@@ -188,6 +188,27 @@ func TestAntiCensorFingerprintPool(t *testing.T) {
 	}
 }
 
+func TestAntiCensorProfileValidation(t *testing.T) {
+	spec := bridgeSpecForAntiCensorTest()
+	spec.AntiCensor = &AntiCensorSpec{Profile: AntiCensorProfileBalanced, PublicXHTTPPort: 8445}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("valid anti_censor profile rejected: %v", err)
+	}
+	spec.AntiCensor.Profile = "turbo"
+	if err := spec.Validate(); err == nil {
+		t.Fatal("invalid anti_censor profile accepted")
+	}
+}
+
+func TestPublicXHTTPPortConflictsWithAdminListen(t *testing.T) {
+	spec := bridgeSpecForAntiCensorTest()
+	spec.AdminListen = "127.0.0.1:8443"
+	spec.AntiCensor = &AntiCensorSpec{PublicXHTTPPort: 8443}
+	if err := spec.Validate(); err == nil {
+		t.Fatal("public_xhttp_port matching admin_listen port accepted")
+	}
+}
+
 func TestDoHInBridgeConfig(t *testing.T) {
 	spec := bridgeSpecForAntiCensorTest()
 	spec.DevMode = false

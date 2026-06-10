@@ -35,6 +35,38 @@ func splitCommaNonEmpty(s string) []string {
 	return out
 }
 
+func normalizeDomainMatchers(items []string) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if strings.Contains(item, ":") {
+			out = append(out, item)
+		} else {
+			out = append(out, "domain:"+item)
+		}
+	}
+	return out
+}
+
+func appendUniqueStrings(base []string, add ...string) []string {
+	seen := make(map[string]bool, len(base)+len(add))
+	out := append([]string(nil), base...)
+	for _, v := range base {
+		seen[v] = true
+	}
+	for _, v := range add {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
 // realityServerNames builds inbound server_names; sni defaults to the host part of dest.
 func realityServerNames(dest, sni string) []string {
 	if strings.TrimSpace(sni) != "" {
@@ -140,6 +172,11 @@ func main() {
 		"",
 		"optional comma-separated geosite category names (no geosite: prefix) routed to blackhole on bridge",
 	)
+	domainDirect := flag.String(
+		"domain-direct",
+		"",
+		"optional comma-separated Xray domain matchers forced to direct on bridge (plain names become domain:name)",
+	)
 	// ── Connection tuning flags ───────────────────────────────────────────────
 	disableDOH := flag.Bool(
 		"disable-doh",
@@ -150,6 +187,16 @@ func main() {
 		"no-fragment",
 		false,
 		"disable TLS ClientHello fragmentation on bridge→exit outbound (default: enabled)",
+	)
+	antiCensorProfile := flag.String(
+		"anti-censor-profile",
+		"",
+		`network tuning profile: fast, balanced, or stealth (empty = balanced defaults)`,
+	)
+	publicXHTTPPort := flag.Int(
+		"public-xhttp-port",
+		0,
+		"optional extra public VLESS+REALITY+XHTTP port for fallback client profiles (0 = do not open)",
 	)
 	splithttpPadding := flag.String(
 		"splithttp-padding",
@@ -510,6 +557,8 @@ func main() {
 
 	// ── Connection tuning defaults (always set; flags may override) ──────────
 	bridgeSpec.AntiCensor = buildAntiCensorSpec(antiCensorTuning{
+		Profile:                *antiCensorProfile,
+		PublicXHTTPPort:        *publicXHTTPPort,
 		DisableDOH:             *disableDOH,
 		DisableFragment:        *noFragment,
 		SplitHTTPPadding:       *splithttpPadding,
@@ -581,6 +630,9 @@ func main() {
 	if s := strings.TrimSpace(*geositeBlockTags); s != "" {
 		bridgeSpec.GeositeBlockTags = splitCommaNonEmpty(s)
 	}
+	if s := strings.TrimSpace(*domainDirect); s != "" {
+		bridgeSpec.DomainDirect = appendUniqueStrings(bridgeSpec.DomainDirect, normalizeDomainMatchers(splitCommaNonEmpty(s))...)
+	}
 	if *botTelegramProxy {
 		if bridgeSpec.BotTelegramProxy == nil {
 			bridgeSpec.BotTelegramProxy = &config.BotTelegramProxySpec{Enabled: true}
@@ -590,6 +642,7 @@ func main() {
 	}
 
 	exitAntiCensor := buildAntiCensorSpec(antiCensorTuning{
+		Profile:             *antiCensorProfile,
 		DisableDOH:          *disableDOH,
 		SplitHTTPPadding:    *splithttpPadding,
 		SplitHTTPMaxChunkKB: *splithttpMaxChunkKB,
@@ -972,6 +1025,14 @@ chmod 600 /etc/ultra-relay/environment
 
 	if err := install.RunSSH(*sshUser, *bridgeHost, *identity, remoteFinalize); err != nil {
 		fmt.Fprintln(os.Stderr, "bridge finalize:", err)
+		os.Exit(1)
+	}
+	bridgePorts := []int{bridgeSpec.VLESSPort}
+	if bridgeSpec.AntiCensor != nil && bridgeSpec.AntiCensor.PublicXHTTPPort > 0 {
+		bridgePorts = append(bridgePorts, bridgeSpec.AntiCensor.PublicXHTTPPort)
+	}
+	if err := install.SetupFirewallPorts(*sshUser, *bridgeHost, *identity, bridgePorts); err != nil {
+		fmt.Fprintln(os.Stderr, "bridge firewall:", err)
 		os.Exit(1)
 	}
 

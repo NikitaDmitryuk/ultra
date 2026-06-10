@@ -7,6 +7,8 @@ import (
 )
 
 type antiCensorTuning struct {
+	Profile                string
+	PublicXHTTPPort        int
 	DisableDOH             bool
 	DisableFragment        bool
 	SplitHTTPPadding       string
@@ -18,6 +20,12 @@ type antiCensorTuning struct {
 
 func buildAntiCensorSpec(t antiCensorTuning) *config.AntiCensorSpec {
 	a := &config.AntiCensorSpec{}
+	if p := strings.TrimSpace(t.Profile); p != "" {
+		a.Profile = p
+	}
+	if t.PublicXHTTPPort > 0 {
+		a.PublicXHTTPPort = t.PublicXHTTPPort
+	}
 	if t.DisableDOH {
 		a.DisableDOH = true
 	}
