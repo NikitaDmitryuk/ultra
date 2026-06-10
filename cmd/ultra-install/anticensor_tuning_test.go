@@ -37,6 +37,32 @@ func TestBuildAntiCensorSpecIncludesSplitHTTPTuning(t *testing.T) {
 	}
 }
 
+func TestNormalizeDomainMatchers(t *testing.T) {
+	got := normalizeDomainMatchers([]string{"example.com", "domain:kept.example", "regexp:.*\\.example$"})
+	want := []string{"domain:example.com", "domain:kept.example", "regexp:.*\\.example$"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestAppendUniqueStrings(t *testing.T) {
+	got := appendUniqueStrings([]string{"domain:a"}, "domain:b", "domain:a", "")
+	want := []string{"domain:a", "domain:b"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestBuildExitSpecJSONCarriesSplitHTTPTuning(t *testing.T) {
 	exitAnti := buildAntiCensorSpec(antiCensorTuning{
 		SplitHTTPPadding:    "0",

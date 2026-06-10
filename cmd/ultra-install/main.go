@@ -35,6 +35,38 @@ func splitCommaNonEmpty(s string) []string {
 	return out
 }
 
+func normalizeDomainMatchers(items []string) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if strings.Contains(item, ":") {
+			out = append(out, item)
+		} else {
+			out = append(out, "domain:"+item)
+		}
+	}
+	return out
+}
+
+func appendUniqueStrings(base []string, add ...string) []string {
+	seen := make(map[string]bool, len(base)+len(add))
+	out := append([]string(nil), base...)
+	for _, v := range base {
+		seen[v] = true
+	}
+	for _, v := range add {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
 // realityServerNames builds inbound server_names; sni defaults to the host part of dest.
 func realityServerNames(dest, sni string) []string {
 	if strings.TrimSpace(sni) != "" {
@@ -139,6 +171,11 @@ func main() {
 		"geosite-block-tags",
 		"",
 		"optional comma-separated geosite category names (no geosite: prefix) routed to blackhole on bridge",
+	)
+	domainDirect := flag.String(
+		"domain-direct",
+		"",
+		"optional comma-separated Xray domain matchers forced to direct on bridge (plain names become domain:name)",
 	)
 	// ── Connection tuning flags ───────────────────────────────────────────────
 	disableDOH := flag.Bool(
@@ -592,6 +629,9 @@ func main() {
 	}
 	if s := strings.TrimSpace(*geositeBlockTags); s != "" {
 		bridgeSpec.GeositeBlockTags = splitCommaNonEmpty(s)
+	}
+	if s := strings.TrimSpace(*domainDirect); s != "" {
+		bridgeSpec.DomainDirect = appendUniqueStrings(bridgeSpec.DomainDirect, normalizeDomainMatchers(splitCommaNonEmpty(s))...)
 	}
 	if *botTelegramProxy {
 		if bridgeSpec.BotTelegramProxy == nil {

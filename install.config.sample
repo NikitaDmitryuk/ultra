@@ -84,6 +84,10 @@ VERIFY_FAIL_LOG_LINES=400
 
 # Опционально: geosite-теги в blackhole (нужен тег в вашем geosite.dat), например реклама.
 # GEOSITE_BLOCK_TAGS=category-ads-all
+#
+# Домены, которые должны оставаться на bridge direct. BOT_DOMAIN добавляется сюда автоматически
+# при BOT_ENABLE=y, чтобы Mini App не уходила через active exit.
+# DOMAIN_DIRECT=domain:example.com,domain:another.example.com
 
 # --- Выходной IP (Cloudflare WARP на exit) ---
 #

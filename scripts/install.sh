@@ -482,6 +482,22 @@ GEOSITE_BLOCK_TAGS="${GEOSITE_BLOCK_TAGS:-}"
 if [[ -n "${GEOSITE_BLOCK_TAGS// }" ]]; then
 	ARGS+=(-geosite-block-tags "$GEOSITE_BLOCK_TAGS")
 fi
+_domain_direct_items=()
+DOMAIN_DIRECT="${DOMAIN_DIRECT:-}"
+if [[ -n "${DOMAIN_DIRECT// }" ]]; then
+	_domain_direct_items+=("$DOMAIN_DIRECT")
+fi
+case "${BOT_ENABLE:-n}" in
+y | Y | true | 1 | yes)
+	if [[ -n "${BOT_DOMAIN// }" ]]; then
+		_domain_direct_items+=("domain:${BOT_DOMAIN}")
+	fi
+	;;
+esac
+if [[ ${#_domain_direct_items[@]} -gt 0 ]]; then
+	_domain_direct_csv="$(IFS=,; echo "${_domain_direct_items[*]}")"
+	ARGS+=(-domain-direct "$_domain_direct_csv")
+fi
 
 case "${SKIP_GEO_DOWNLOAD:-${SKIP_RUNETFREEDOM_GEO:-n}}" in
 y | Y | true | 1 | yes) ARGS+=(-skip-geo-download) ;;
