@@ -99,8 +99,10 @@ func (b *Bot) probeExitAlerts(ctx context.Context, st *exitAlertState) {
 	if !st.initialized {
 		st.initialized = true
 		st.activeID = activeID
-		st.reachable = reachable
-		return
+		st.reachable = true
+		if reachable {
+			return
+		}
 	}
 
 	if st.activeID == "" && activeID != "" {
@@ -121,10 +123,15 @@ func (b *Bot) probeExitAlerts(ctx context.Context, st *exitAlertState) {
 				"from": st.activeID,
 				"to":   activeID,
 			}
-			b.enqueueAdminAlertWithCooldown(ctx, "exit_failover", payload, map[string]any{
-				"from": st.activeID,
-				"to":   activeID,
-			}, failoverAlertCooldown)
+			b.emitAlert(ctx, alertEvent{
+				DedupeKey: "exit.active.failover:" + st.activeID + ":" + activeID,
+				Type:      "exit_failover",
+				Severity:  alertSeverityCritical,
+				Channel:   alertChannelTelegram,
+				Status:    "fired",
+				Payload:   payload,
+				Cooldown:  failoverAlertCooldown,
+			})
 			st.activeID = activeID
 			st.reachable = reachable
 			st.downStreak = 0
@@ -148,12 +155,18 @@ func (b *Bot) probeExitAlerts(ctx context.Context, st *exitAlertState) {
 		if st.downStreak < exitDownConfirmSamples {
 			return
 		}
-		b.enqueueAdminAlertWithCooldown(ctx, "exit_down", map[string]any{
-			"text":    fmt.Sprintf("Exit «%s» недоступна (bridge↔exit probe failed).", exitName),
-			"exit_id": activeID,
-		}, map[string]any{
-			"exit_id": activeID,
-		}, exitAlertCooldown)
+		b.emitAlert(ctx, alertEvent{
+			DedupeKey: "exit.active.down:" + activeID,
+			Type:      "exit_down",
+			Severity:  alertSeverityCritical,
+			Channel:   alertChannelTelegram,
+			Status:    "fired",
+			Payload: map[string]any{
+				"text":    fmt.Sprintf("Exit «%s» недоступна (bridge↔exit probe failed).", exitName),
+				"exit_id": activeID,
+			},
+			Cooldown: exitAlertCooldown,
+		})
 		st.reachable = false
 		st.downStreak = 0
 		return
@@ -164,12 +177,18 @@ func (b *Bot) probeExitAlerts(ctx context.Context, st *exitAlertState) {
 	if st.upStreak < exitUpConfirmSamples {
 		return
 	}
-	b.enqueueAdminAlertWithCooldown(ctx, "exit_up", map[string]any{
-		"text":    fmt.Sprintf("Exit «%s» снова доступна.", exitName),
-		"exit_id": activeID,
-	}, map[string]any{
-		"exit_id": activeID,
-	}, exitAlertCooldown)
+	b.emitAlert(ctx, alertEvent{
+		DedupeKey: "exit.active.up:" + activeID,
+		Type:      "exit_up",
+		Severity:  alertSeverityInfo,
+		Channel:   alertChannelTelegram,
+		Status:    "resolved",
+		Payload: map[string]any{
+			"text":    fmt.Sprintf("Exit «%s» снова доступна.", exitName),
+			"exit_id": activeID,
+		},
+		Cooldown: exitAlertCooldown,
+	})
 	st.reachable = true
 	st.upStreak = 0
 }
@@ -218,28 +237,16 @@ func (b *Bot) checkTrafficSpikes(ctx context.Context, prev map[string]int64) {
 			"delta_bytes": delta,
 			"text":        fmt.Sprintf("Резкий рост трафика: %s за последний час.", humanBytes(delta)),
 		}
-		b.enqueueAdminAlertWithCooldown(ctx, "traffic_spike", payload, map[string]any{
-			"user_uuid": r.UserUUID,
-		}, trafficSpikeCooldown)
+		b.emitAlert(ctx, alertEvent{
+			DedupeKey: "traffic_spike:" + r.UserUUID,
+			Type:      "traffic_spike",
+			Severity:  alertSeverityWarning,
+			Channel:   alertChannelMiniApp,
+			Status:    "fired",
+			Payload:   payload,
+			Cooldown:  trafficSpikeCooldown,
+		})
 	}
-}
-
-func (b *Bot) enqueueAdminAlertWithCooldown(
-	ctx context.Context,
-	typ string,
-	payload map[string]any,
-	cooldownMatch map[string]any,
-	cooldown time.Duration,
-) {
-	if cooldown > 0 && b.alertsTele != nil {
-		recent, err := b.alertsTele.HasRecentNotification(ctx, typ, cooldownMatch, cooldown)
-		if err != nil {
-			b.log.Warn("alerts: cooldown check failed", "type", typ, "err", err)
-		} else if recent {
-			return
-		}
-	}
-	b.enqueueAdminAlert(ctx, typ, payload)
 }
 
 func (b *Bot) enqueueAdminAlert(ctx context.Context, typ string, payload map[string]any) {

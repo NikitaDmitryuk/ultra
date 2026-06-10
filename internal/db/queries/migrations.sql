@@ -1,0 +1,2 @@
+-- Migration lifecycle stays in internal/db/migrate.go because migration SQL is embedded
+-- and executed as schema-changing statements, not ordinary repository operations.

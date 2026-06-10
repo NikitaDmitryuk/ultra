@@ -34,6 +34,7 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/users/{uuid}/rotate", b.handleRotateUser)
 	mux.HandleFunc("GET /api/users/{uuid}/config", b.handleGetUserConfig)
 	mux.HandleFunc("GET /api/users/{uuid}/traffic", b.handleGetUserTraffic)
+	mux.HandleFunc("GET /api/users/{uuid}/traffic/timeline", b.handleUserTrafficTimeline)
 	mux.HandleFunc("GET /api/users/{uuid}/connections", b.handleUserConnections)
 	mux.HandleFunc("GET /api/users/{uuid}/leak", b.handleUserLeak)
 	mux.HandleFunc("GET /api/stats", b.handleStats)
@@ -350,6 +351,45 @@ func (b *Bot) handleGetUserTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(resp)
+}
+
+func (b *Bot) handleUserTrafficTimeline(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	if b.teleRepo == nil {
+		http.Error(w, "db backend is disabled", http.StatusNotImplemented)
+		return
+	}
+	uuid := r.PathValue("uuid")
+	if uuid == "" {
+		http.Error(w, "uuid required", http.StatusBadRequest)
+		return
+	}
+	windowLabel := r.URL.Query().Get("window")
+	window, err := parseWindow(windowLabel)
+	if err != nil {
+		http.Error(w, "bad window", http.StatusBadRequest)
+		return
+	}
+	bucket := r.URL.Query().Get("bucket")
+	if bucket == "" {
+		bucket = defaultTrafficBucketForWindow(window)
+	}
+	points, err := b.teleRepo.TrafficTimelineByBuckets(r.Context(), uuid, window, bucket)
+	if err != nil {
+		b.log.Error("load traffic timeline", "uuid", uuid, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if windowLabel == "" {
+		windowLabel = "24h"
+	}
+	jsonOK(w, map[string]any{
+		"window": windowLabel,
+		"bucket": bucket,
+		"points": points,
+	})
 }
 
 func (b *Bot) handleUserConnections(w http.ResponseWriter, r *http.Request) {
@@ -811,6 +851,19 @@ func defaultBucketForWindow(window time.Duration) string {
 	case window <= 7*24*time.Hour:
 		return "1h"
 	case window <= 30*24*time.Hour:
+		return "6h"
+	default:
+		return "1d"
+	}
+}
+
+func defaultTrafficBucketForWindow(window time.Duration) string {
+	switch {
+	case window <= time.Hour:
+		return "5m"
+	case window <= 24*time.Hour:
+		return "1h"
+	case window <= 7*24*time.Hour:
 		return "6h"
 	default:
 		return "1d"

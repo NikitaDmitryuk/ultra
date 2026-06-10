@@ -126,17 +126,18 @@
     <div id="detail-leak-signals" class="diag-list empty" style="margin-top:10px">Нет сигналов.</div>
   </div>
   <div class="card">
-    <div class="card-title">Concurrent IPs timeline</div>
+    <div class="card-title">Активность по времени</div>
     <div class="detail-month-row">
-      <select id="detail-connections-window" class="form-input" onchange="loadCurrentUserConnectionsChart()">
+      <select id="detail-activity-window" class="form-input" onchange="loadCurrentUserActivityChart()">
         <option value="1h">1ч</option>
         <option value="24h" selected>24ч</option>
         <option value="7d">7д</option>
         <option value="30d">30д</option>
       </select>
-      <button class="btn secondary" style="width:auto;padding:10px 14px" onclick="loadCurrentUserConnectionsChart()">Обновить</button>
+      <button class="btn secondary" style="width:auto;padding:10px 14px" onclick="loadCurrentUserActivityChart()">Обновить</button>
     </div>
-    <canvas id="detail-connections-chart" height="180"></canvas>
+    <div id="detail-activity-empty" class="diag-list empty" style="display:none;margin-top:10px">Нет трафика за выбранный период.</div>
+    <canvas id="detail-activity-chart" height="180"></canvas>
   </div>
   <div class="card" id="detail-config-vless">
     <div class="card-title">Конфигурация (VLESS)</div>
@@ -186,6 +187,7 @@
       </div>
     </div>
     <div id="diag-health-summary" class="health-summary" style="margin-top:10px">Нет замеров.</div>
+    <div id="diag-exits-health-list" class="diag-list empty" style="margin-top:10px;display:none"></div>
   </div>
   <div class="card">
     <div class="diag-alerts-header">

@@ -22,6 +22,7 @@ const (
 	leakHeartbeatInterval     = 5 * time.Minute
 	defaultLeakMaxConcurrent  = 5
 	defaultLeakMaxUnique24h   = 20
+	strongLeakMaxUnique24h    = 30
 	defaultStatsAPIListenAddr = "127.0.0.1:10085"
 
 	// onlineKey* match the format Xray's dispatcher uses to register online maps:
@@ -125,34 +126,28 @@ func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs [
 		return
 	}
 
-	score := 60
-	kind := "concurrent_ips"
-	cooldown := leakConcurrentCooldown
-	if unique24h > maxUnique24h {
-		score = 80
-		kind = "unique_ips_window"
-		cooldown = leakUniqueWindowCooldown
+	decision, ok := classifyLeakBreach(concurrent, unique24h, maxConcurrent, maxUnique24h)
+	if !ok {
+		delete(breachState, u.UUID)
+		return
 	}
+	dedupeKey := "token_leak." + decision.Strength + ":" + u.UUID + ":" + decision.Kind
 
 	st := breachState[u.UUID]
-	if st.Kind == kind {
+	if st.Kind == decision.Kind {
 		st.Streak++
 	} else {
-		st = leakBreachState{Kind: kind, Streak: 1}
+		st = leakBreachState{Kind: decision.Kind, Streak: 1}
 	}
 	breachState[u.UUID] = st
 	if st.Streak < leakConfirmSamples {
 		return
 	}
-	cooldownMatch := map[string]any{
-		"user_uuid": u.UUID,
-		"kind":      kind,
-	}
-	if b.alertsTele != nil {
-		recent, err := b.alertsTele.HasRecentNotification(ctx, "token_leak", cooldownMatch, cooldown)
+	if b.alertsTele != nil && decision.Cooldown > 0 {
+		state, _, err := b.alertsTele.GetAlertState(ctx, dedupeKey)
 		if err != nil {
-			b.log.Warn("leak: cooldown check failed", "user_uuid", u.UUID, "kind", kind, "err", err)
-		} else if recent {
+			b.log.Warn("leak: state read failed", "user_uuid", u.UUID, "kind", decision.Kind, "err", err)
+		} else if state.LastSentAt != nil && time.Since(*state.LastSentAt) < decision.Cooldown {
 			return
 		}
 	}
@@ -165,19 +160,71 @@ func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs [
 		"current_ips":              currentIPs,
 		"policy":                   "alert",
 	}
-	if err := b.teleRepo.InsertLeakSignal(ctx, u.UUID, kind, score, detail); err != nil {
+	if err := b.teleRepo.InsertLeakSignal(ctx, u.UUID, decision.Kind, decision.Score, detail); err != nil {
 		b.log.Warn("leak: insert signal failed", "user_uuid", u.UUID, "err", err)
 	}
-	b.enqueueAdminAlertWithCooldown(ctx, "token_leak", map[string]any{
-		"text":                     "Подозрительная активность токена: " + u.Name,
-		"user_uuid":                u.UUID,
-		"kind":                     kind,
-		"score":                    score,
-		"concurrent_ips":           concurrent,
-		"concurrent_threshold":     maxConcurrent,
-		"unique_ips_24h":           unique24h,
-		"unique_ips_24h_threshold": maxUnique24h,
-	}, cooldownMatch, cooldown)
+	b.emitAlert(ctx, alertEvent{
+		DedupeKey: dedupeKey,
+		Type:      "token_leak",
+		Severity:  decision.Severity,
+		Channel:   decision.Channel,
+		Status:    "fired",
+		Payload: map[string]any{
+			"text":                            "Подозрительная активность токена: " + u.Name,
+			"user_uuid":                       u.UUID,
+			"kind":                            decision.Kind,
+			"score":                           decision.Score,
+			"concurrent_ips":                  concurrent,
+			"concurrent_threshold":            maxConcurrent,
+			"unique_ips_24h":                  unique24h,
+			"unique_ips_24h_threshold":        maxUnique24h,
+			"strong_unique_ips_24h_threshold": strongLeakMaxUnique24h,
+		},
+		Cooldown: decision.Cooldown,
+	})
+}
+
+type leakDecision struct {
+	Kind     string
+	Strength string
+	Score    int
+	Severity string
+	Channel  string
+	Cooldown time.Duration
+}
+
+func classifyLeakBreach(concurrent, unique24h, maxConcurrent, maxUnique24h int) (leakDecision, bool) {
+	if unique24h > strongLeakMaxUnique24h {
+		return leakDecision{
+			Kind:     "unique_ips_window",
+			Strength: "strong",
+			Score:    80,
+			Severity: alertSeverityCritical,
+			Channel:  alertChannelTelegram,
+			Cooldown: leakUniqueWindowCooldown,
+		}, true
+	}
+	if concurrent > maxConcurrent {
+		return leakDecision{
+			Kind:     "concurrent_ips",
+			Strength: "strong",
+			Score:    60,
+			Severity: alertSeverityCritical,
+			Channel:  alertChannelTelegram,
+			Cooldown: leakConcurrentCooldown,
+		}, true
+	}
+	if unique24h > maxUnique24h {
+		return leakDecision{
+			Kind:     "unique_ips_window",
+			Strength: "weak",
+			Score:    60,
+			Severity: alertSeverityWarning,
+			Channel:  alertChannelMiniApp,
+			Cooldown: leakUniqueWindowCooldown,
+		}, true
+	}
+	return leakDecision{}, false
 }
 
 // statsIPClient is the subset of xray-core StatsServiceClient used by the leak

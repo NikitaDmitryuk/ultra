@@ -15,9 +15,10 @@ import (
 )
 
 type fakeAlertsTele struct {
-	mu   sync.Mutex
-	next int64
-	rows []db.Notification
+	mu     sync.Mutex
+	next   int64
+	rows   []db.Notification
+	states map[string]db.AlertState
 }
 
 func (f *fakeAlertsTele) EnqueueNotification(_ context.Context, n db.Notification) error {
@@ -32,31 +33,24 @@ func (f *fakeAlertsTele) EnqueueNotification(_ context.Context, n db.Notificatio
 	return nil
 }
 
-func (f *fakeAlertsTele) HasRecentNotification(
-	_ context.Context,
-	typ string,
-	payloadContains map[string]any,
-	within time.Duration,
-) (bool, error) {
+func (f *fakeAlertsTele) GetAlertState(_ context.Context, dedupeKey string) (db.AlertState, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	cutoff := time.Now().Add(-within)
-	for _, n := range f.rows {
-		if n.Type != typ || n.CreatedAt.Before(cutoff) {
-			continue
-		}
-		matches := true
-		for k, want := range payloadContains {
-			if n.Payload == nil || n.Payload[k] != want {
-				matches = false
-				break
-			}
-		}
-		if matches {
-			return true, nil
-		}
+	if f.states == nil {
+		return db.AlertState{}, false, nil
 	}
-	return false, nil
+	s, ok := f.states[dedupeKey]
+	return s, ok, nil
+}
+
+func (f *fakeAlertsTele) UpsertAlertState(_ context.Context, s db.AlertState) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.states == nil {
+		f.states = map[string]db.AlertState{}
+	}
+	f.states[s.DedupeKey] = s
+	return nil
 }
 
 func (f *fakeAlertsTele) PendingNotifications(_ context.Context, limit int) ([]db.Notification, error) {
@@ -217,22 +211,22 @@ func TestExitUpDebounceRequiresTwoSuccessfulProbes(t *testing.T) {
 	}
 }
 
-func TestAlertCooldownSkipsRecentMatchingNotification(t *testing.T) {
+func TestAlertStateCooldownSkipsRecentMatchingNotification(t *testing.T) {
 	tele := &fakeAlertsTele{}
 	adm := &fakeAdminLister{admins: []db.BotAdmin{{TelegramID: 1}}}
 	b := &Bot{adminRepo: adm, alertsTele: tele}
 	ctx := context.Background()
 
-	b.enqueueAdminAlertWithCooldown(ctx, "token_leak", map[string]any{
-		"text":      "x",
-		"user_uuid": "u1",
-		"kind":      "unique_ips_window",
-	}, map[string]any{"user_uuid": "u1", "kind": "unique_ips_window"}, time.Hour)
-	b.enqueueAdminAlertWithCooldown(ctx, "token_leak", map[string]any{
-		"text":      "x",
-		"user_uuid": "u1",
-		"kind":      "unique_ips_window",
-	}, map[string]any{"user_uuid": "u1", "kind": "unique_ips_window"}, time.Hour)
+	ev := alertEvent{
+		DedupeKey: "token_leak.strong:u1:unique_ips_window",
+		Type:      "token_leak",
+		Severity:  alertSeverityCritical,
+		Channel:   alertChannelTelegram,
+		Payload:   map[string]any{"text": "x", "user_uuid": "u1", "kind": "unique_ips_window"},
+		Cooldown:  time.Hour,
+	}
+	b.emitAlert(ctx, ev)
+	b.emitAlert(ctx, ev)
 
 	if len(tele.rows) != 1 {
 		t.Fatalf("expected cooldown to keep one notification, got %d", len(tele.rows))

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"time"
 
+	"github.com/NikitaDmitryuk/ultra/internal/db/sqlc"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // ErrInvalidToken is returned when an invite token does not exist or is already used.
@@ -28,66 +30,40 @@ func NewBotAdminRepo(db *DB) *BotAdminRepo { return &BotAdminRepo{db: db} }
 
 // IsAdmin returns true if telegramID is a registered bot admin.
 func (r *BotAdminRepo) IsAdmin(ctx context.Context, telegramID int64) (bool, error) {
-	var exists bool
-	err := r.db.Pool.QueryRow(ctx,
-		"SELECT EXISTS(SELECT 1 FROM bot_admins WHERE telegram_id=$1)", telegramID,
-	).Scan(&exists)
-	return exists, err
+	return r.db.Queries.IsBotAdmin(ctx, telegramID)
 }
 
 // AddAdmin registers a Telegram user as a bot admin.
 func (r *BotAdminRepo) AddAdmin(ctx context.Context, telegramID int64, name string) error {
-	_, err := r.db.Pool.Exec(ctx,
-		`INSERT INTO bot_admins(telegram_id, telegram_name) VALUES($1, $2)
-		 ON CONFLICT(telegram_id) DO UPDATE SET telegram_name=$2`,
-		telegramID, name,
-	)
-	return err
+	return r.db.Queries.UpsertBotAdmin(ctx, sqlc.UpsertBotAdminParams{TelegramID: telegramID, TelegramName: name})
 }
 
 // ListAdmins returns all registered bot admins.
 func (r *BotAdminRepo) ListAdmins(ctx context.Context) ([]BotAdmin, error) {
-	rows, err := r.db.Pool.Query(ctx,
-		"SELECT telegram_id, telegram_name, added_at FROM bot_admins ORDER BY added_at",
-	)
+	rows, err := r.db.Queries.ListBotAdmins(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []BotAdmin
-	for rows.Next() {
-		var a BotAdmin
-		if err := rows.Scan(&a.TelegramID, &a.TelegramName, &a.AddedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, a)
+	out := make([]BotAdmin, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, BotAdmin{TelegramID: a.TelegramID, TelegramName: a.TelegramName, AddedAt: timeFromPG(a.AddedAt)})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // RemoveAdmin removes a Telegram user from bot admins.
 func (r *BotAdminRepo) RemoveAdmin(ctx context.Context, telegramID int64) error {
-	_, err := r.db.Pool.Exec(ctx,
-		"DELETE FROM bot_admins WHERE telegram_id=$1", telegramID,
-	)
-	return err
+	return r.db.Queries.RemoveBotAdmin(ctx, telegramID)
 }
 
 // HasAnyAdmin returns true when at least one admin is registered.
 func (r *BotAdminRepo) HasAnyAdmin(ctx context.Context) (bool, error) {
-	var exists bool
-	err := r.db.Pool.QueryRow(ctx,
-		"SELECT EXISTS(SELECT 1 FROM bot_admins)",
-	).Scan(&exists)
-	return exists, err
+	return r.db.Queries.HasAnyBotAdmin(ctx)
 }
 
 // CreateInviteToken stores a new single-use invite token.
 func (r *BotAdminRepo) CreateInviteToken(ctx context.Context, token string) error {
-	_, err := r.db.Pool.Exec(ctx,
-		"INSERT INTO bot_invite_tokens(token) VALUES($1)", token,
-	)
-	return err
+	return r.db.Queries.CreateInviteToken(ctx, token)
 }
 
 // ConsumeInviteToken validates the token, registers telegramID as admin, and marks the token used.
@@ -99,32 +75,23 @@ func (r *BotAdminRepo) ConsumeInviteToken(ctx context.Context, token string, tel
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	var usedBy *int64
-	err = tx.QueryRow(ctx,
-		"SELECT used_by FROM bot_invite_tokens WHERE token=$1", token,
-	).Scan(&usedBy)
+	qtx := r.db.Queries.WithTx(tx)
+	usedBy, err := qtx.GetInviteTokenUsedBy(ctx, token)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrInvalidToken
 	}
 	if err != nil {
 		return err
 	}
-	if usedBy != nil {
+	if usedBy.Valid {
 		return ErrInvalidToken
 	}
 
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO bot_admins(telegram_id, telegram_name) VALUES($1, $2)
-		 ON CONFLICT(telegram_id) DO UPDATE SET telegram_name=$2`,
-		telegramID, name,
-	); err != nil {
+	if err := qtx.UpsertBotAdmin(ctx, sqlc.UpsertBotAdminParams{TelegramID: telegramID, TelegramName: name}); err != nil {
 		return err
 	}
 
-	if _, err := tx.Exec(ctx,
-		"UPDATE bot_invite_tokens SET used_by=$1, used_at=NOW() WHERE token=$2",
-		telegramID, token,
-	); err != nil {
+	if err := qtx.MarkInviteTokenUsed(ctx, sqlc.MarkInviteTokenUsedParams{UsedBy: pgtype.Int8{Int64: telegramID, Valid: true}, Token: token}); err != nil {
 		return err
 	}
 
