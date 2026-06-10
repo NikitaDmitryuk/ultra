@@ -70,7 +70,7 @@ func buildFragmentSockopt(spec *Spec) map[string]any {
 }
 
 // splithttpExtraSettings returns optional splithttp performance/obfuscation overrides.
-// Default padding "100-1000" obscures chunk sizes; set SplitHTTPPadding="0" to disable.
+// Default padding "0-100" obscures chunk sizes; set SplitHTTPPadding="0" to disable.
 func splithttpExtraSettings(spec *Spec) map[string]any {
 	extra := map[string]any{}
 

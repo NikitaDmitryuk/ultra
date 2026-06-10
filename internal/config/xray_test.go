@@ -331,6 +331,9 @@ func TestBuildBridgeGRPCJSON(t *testing.T) {
 	if grpcCfg["multiMode"] != true {
 		t.Fatalf("expected multiMode true, got %v", grpcCfg["multiMode"])
 	}
+	if got := int(grpcCfg["initialWindowsSize"].(float64)); got != defaultGRPCInitialWindowSize {
+		t.Fatalf("initialWindowsSize = %d, want %d", got, defaultGRPCInitialWindowSize)
+	}
 }
 
 func TestBuildBridgeSplitHTTPJSON(t *testing.T) {

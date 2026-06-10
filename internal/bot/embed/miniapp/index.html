@@ -167,13 +167,6 @@
     <button class="btn" style="width:auto;padding:8px 14px;font-size:13px" onclick="runProbe()">Замерить</button>
   </div>
   <div class="card">
-    <div class="diag-alerts-header">
-      <div class="card-title" style="margin-bottom:0">Последние алерты</div>
-      <button class="btn secondary" style="width:auto;padding:8px 12px;font-size:12px" onclick="sendTestAlert()">Тестовый алерт</button>
-    </div>
-    <div id="diag-alerts-list" class="diag-list empty">Пока нет данных.</div>
-  </div>
-  <div class="card">
     <div class="card-title">Состояние сети</div>
     <div class="node-stack">
       <div class="node-card" id="diag-bridge-card">
@@ -193,6 +186,13 @@
       </div>
     </div>
     <div id="diag-health-summary" class="health-summary" style="margin-top:10px">Нет замеров.</div>
+  </div>
+  <div class="card">
+    <div class="diag-alerts-header">
+      <div class="card-title" style="margin-bottom:0">Последние алерты</div>
+      <button class="btn secondary" style="width:auto;padding:8px 12px;font-size:12px" onclick="sendTestAlert()">Тестовый алерт</button>
+    </div>
+    <div id="diag-alerts-list" class="diag-list empty">Пока нет данных.</div>
   </div>
 </div>
 

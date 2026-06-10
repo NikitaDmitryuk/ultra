@@ -16,10 +16,12 @@ import (
 
 const (
 	leakPollInterval          = 30 * time.Second
-	leakAlertCooldown         = 6 * time.Hour
+	leakConcurrentCooldown    = 6 * time.Hour
+	leakUniqueWindowCooldown  = 24 * time.Hour
+	leakConfirmSamples        = 2
 	leakHeartbeatInterval     = 5 * time.Minute
 	defaultLeakMaxConcurrent  = 5
-	defaultLeakMaxUnique24h   = 10
+	defaultLeakMaxUnique24h   = 20
 	defaultStatsAPIListenAddr = "127.0.0.1:10085"
 
 	// onlineKey* match the format Xray's dispatcher uses to register online maps:
@@ -28,6 +30,11 @@ const (
 	onlineKeyPrefix = "user>>>"
 	onlineKeySuffix = ">>>online"
 )
+
+type leakBreachState struct {
+	Kind   string
+	Streak int
+}
 
 func (b *Bot) runLeakDetector(ctx context.Context) {
 	t := time.NewTicker(leakPollInterval)
@@ -39,7 +46,7 @@ func (b *Bot) runLeakDetector(ctx context.Context) {
 	if statsAddr == "" {
 		statsAddr = defaultStatsAPIListenAddr
 	}
-	lastAlertAt := map[string]time.Time{}
+	breachState := map[string]leakBreachState{}
 	var lastOnline int
 
 	for {
@@ -70,7 +77,7 @@ func (b *Bot) runLeakDetector(ctx context.Context) {
 						b.log.Warn("leak: upsert ip observation failed", "user_uuid", u.UUID, "ip", ip, "err", err)
 					}
 				}
-				b.evalLeakForUser(ctx, u, ips, lastAlertAt)
+				b.evalLeakForUser(ctx, u, ips, breachState)
 			}
 		}
 	}
@@ -94,7 +101,7 @@ type dbUserLeakCfg struct {
 	IsActive bool   `json:"is_active"`
 }
 
-func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs []string, last map[string]time.Time) {
+func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs []string, breachState map[string]leakBreachState) {
 	if !u.IsActive {
 		return
 	}
@@ -114,18 +121,42 @@ func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs [
 		return
 	}
 	if concurrent <= maxConcurrent && unique24h <= maxUnique24h {
-		return
-	}
-	if t, ok := last[u.UUID]; ok && time.Since(t) < leakAlertCooldown {
+		delete(breachState, u.UUID)
 		return
 	}
 
 	score := 60
 	kind := "concurrent_ips"
+	cooldown := leakConcurrentCooldown
 	if unique24h > maxUnique24h {
 		score = 80
 		kind = "unique_ips_window"
+		cooldown = leakUniqueWindowCooldown
 	}
+
+	st := breachState[u.UUID]
+	if st.Kind == kind {
+		st.Streak++
+	} else {
+		st = leakBreachState{Kind: kind, Streak: 1}
+	}
+	breachState[u.UUID] = st
+	if st.Streak < leakConfirmSamples {
+		return
+	}
+	cooldownMatch := map[string]any{
+		"user_uuid": u.UUID,
+		"kind":      kind,
+	}
+	if b.alertsTele != nil {
+		recent, err := b.alertsTele.HasRecentNotification(ctx, "token_leak", cooldownMatch, cooldown)
+		if err != nil {
+			b.log.Warn("leak: cooldown check failed", "user_uuid", u.UUID, "kind", kind, "err", err)
+		} else if recent {
+			return
+		}
+	}
+
 	detail := map[string]any{
 		"concurrent_ips":           concurrent,
 		"concurrent_threshold":     maxConcurrent,
@@ -137,13 +168,16 @@ func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs [
 	if err := b.teleRepo.InsertLeakSignal(ctx, u.UUID, kind, score, detail); err != nil {
 		b.log.Warn("leak: insert signal failed", "user_uuid", u.UUID, "err", err)
 	}
-	b.enqueueAdminAlert(ctx, "token_leak", map[string]any{
-		"text":      "Подозрительная активность токена: " + u.Name,
-		"user_uuid": u.UUID,
-		"kind":      kind,
-		"score":     score,
-	})
-	last[u.UUID] = time.Now()
+	b.enqueueAdminAlertWithCooldown(ctx, "token_leak", map[string]any{
+		"text":                     "Подозрительная активность токена: " + u.Name,
+		"user_uuid":                u.UUID,
+		"kind":                     kind,
+		"score":                    score,
+		"concurrent_ips":           concurrent,
+		"concurrent_threshold":     maxConcurrent,
+		"unique_ips_24h":           unique24h,
+		"unique_ips_24h_threshold": maxUnique24h,
+	}, cooldownMatch, cooldown)
 }
 
 // statsIPClient is the subset of xray-core StatsServiceClient used by the leak

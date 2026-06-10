@@ -76,7 +76,7 @@ type AntiCensorSpec struct {
 	SplitHTTPMaxChunkKB int `json:"splithttp_max_chunk_kb,omitempty"`
 
 	// SplitHTTPPadding adds random padding to each splithttp chunk.
-	// Format: "min-max" bytes, e.g. "100-1000". Empty = no padding.
+	// Format: "min-max" bytes, e.g. "0-100". Empty = default padding; "0" disables padding.
 	SplitHTTPPadding string `json:"splithttp_padding,omitempty"`
 
 	// ExitFallbackHost is the host:port the exit node forwards unrecognized TCP connections to

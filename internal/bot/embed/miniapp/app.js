@@ -695,7 +695,7 @@ async function deleteCurrentUser() {
 // ── Diagnostics ───────────────────────────────────────────────────────────────
 async function loadDiagnostics() {
   try {
-    const alerts = await api('GET', '/api/alerts/recent?limit=20').catch(() => []);
+    const alerts = await api('GET', '/api/alerts/recent?limit=5').catch(() => []);
     renderDiagAlerts(alerts || []);
   } catch (e) {
     const list = document.getElementById('diag-alerts-list');
@@ -738,13 +738,14 @@ function renderDiagAlerts(alerts) {
   list.innerHTML = '';
   alerts.forEach(a => {
     const item = document.createElement('div');
-    item.className = 'diag-item';
+    item.className = 'diag-item diag-alert-item';
     const when = formatTime(a.created_at || a.CreatedAt);
     const payload = a.payload || a.Payload || {};
+    const typ = a.type || a.Type || 'alert';
+    const text = payload.text || '';
     item.innerHTML = `
-      <div class="diag-item-title">${esc(a.type || a.Type || 'alert')}</div>
-      <div class="diag-item-meta">${esc(when)}</div>
-      <div class="diag-item-meta">${esc(payload.text || '')}</div>
+      <div class="diag-item-title">${esc(typ)} · <span class="diag-item-meta">${esc(when)}</span></div>
+      ${text ? `<div class="diag-item-meta diag-alert-text">${esc(text)}</div>` : ''}
     `;
     list.appendChild(item);
   });

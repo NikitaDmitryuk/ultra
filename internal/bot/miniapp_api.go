@@ -603,14 +603,14 @@ func (b *Bot) handleRecentAlerts(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "notifications backend is disabled", http.StatusNotImplemented)
 		return
 	}
-	limit := 20
+	limit := 5
 	if v := r.URL.Query().Get("limit"); v != "" {
 		var n int
 		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 && n <= 100 {
 			limit = n
 		}
 	}
-	rows, err := b.teleRepo.RecentNotifications(r.Context(), limit)
+	rows, err := b.teleRepo.RecentDistinctNotifications(r.Context(), limit)
 	if err != nil {
 		b.log.Error("recent alerts", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

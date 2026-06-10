@@ -12,11 +12,27 @@ import (
 )
 
 const (
-	exitProbeInterval    = 60 * time.Second
-	trafficSpikeInterval = time.Hour
-	outboxSendInterval   = 10 * time.Second
-	trafficSpikeBytes    = int64(5 * 1024 * 1024 * 1024) // 5 GiB/hour
+	exitProbeInterval       = 60 * time.Second
+	trafficSpikeInterval    = time.Hour
+	outboxSendInterval      = 10 * time.Second
+	trafficSpikeBytes       = int64(5 * 1024 * 1024 * 1024) // 5 GiB/hour
+	exitDownConfirmSamples  = 3
+	exitUpConfirmSamples    = 2
+	exitFailoverConfirmHits = 2
+	exitAlertCooldown       = 30 * time.Minute
+	failoverAlertCooldown   = 10 * time.Minute
+	trafficSpikeCooldown    = 6 * time.Hour
 )
+
+type exitAlertState struct {
+	initialized       bool
+	activeID          string
+	reachable         bool
+	downStreak        int
+	upStreak          int
+	pendingActiveID   string
+	pendingActiveHits int
+}
 
 func (b *Bot) StartWorkers(ctx context.Context) {
 	if b.alertsTele == nil {
@@ -35,9 +51,7 @@ func (b *Bot) runAlertsWorker(ctx context.Context) {
 	spikeTicker := time.NewTicker(trafficSpikeInterval)
 	defer spikeTicker.Stop()
 
-	var lastActiveReachable bool
-	var lastActiveExitID string
-	var hadActiveState bool
+	var exitState exitAlertState
 	prevTotals := map[string]int64{}
 
 	b.captureTrafficSnapshot(ctx, prevTotals)
@@ -47,14 +61,14 @@ func (b *Bot) runAlertsWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-exitTicker.C:
-			b.probeExitAlerts(ctx, &lastActiveReachable, &lastActiveExitID, &hadActiveState)
+			b.probeExitAlerts(ctx, &exitState)
 		case <-spikeTicker.C:
 			b.checkTrafficSpikes(ctx, prevTotals)
 		}
 	}
 }
 
-func (b *Bot) probeExitAlerts(ctx context.Context, lastReachable *bool, lastActiveID *string, hadState *bool) {
+func (b *Bot) probeExitAlerts(ctx context.Context, st *exitAlertState) {
 	body, err := b.adminGet(ctx, "/v1/health")
 	if err != nil {
 		b.log.Warn("alerts: /v1/health failed", "err", err)
@@ -82,31 +96,82 @@ func (b *Bot) probeExitAlerts(ctx context.Context, lastReachable *bool, lastActi
 	}
 	reachable := h.Exit.Reachable
 
-	if *hadState && *lastActiveID != "" && activeID != "" && *lastActiveID != activeID {
-		b.enqueueAdminAlert(ctx, "exit_failover", map[string]any{
-			"text": fmt.Sprintf("Active exit переключена: %s → %s.", *lastActiveID, activeID),
-			"from": *lastActiveID,
-			"to":   activeID,
-		})
+	if !st.initialized {
+		st.initialized = true
+		st.activeID = activeID
+		st.reachable = reachable
+		return
 	}
 
-	if *hadState && reachable != *lastReachable {
-		if !reachable {
-			b.enqueueAdminAlert(ctx, "exit_down", map[string]any{
-				"text":    fmt.Sprintf("Exit «%s» недоступна (bridge↔exit probe failed).", exitName),
-				"exit_id": activeID,
-			})
+	if st.activeID == "" && activeID != "" {
+		st.activeID = activeID
+		st.reachable = reachable
+	}
+
+	if st.activeID != "" && activeID != "" && st.activeID != activeID {
+		if st.pendingActiveID == activeID {
+			st.pendingActiveHits++
 		} else {
-			b.enqueueAdminAlert(ctx, "exit_up", map[string]any{
-				"text":    fmt.Sprintf("Exit «%s» снова доступна.", exitName),
-				"exit_id": activeID,
-			})
+			st.pendingActiveID = activeID
+			st.pendingActiveHits = 1
 		}
+		if st.pendingActiveHits >= exitFailoverConfirmHits {
+			payload := map[string]any{
+				"text": fmt.Sprintf("Active exit переключена: %s → %s.", st.activeID, activeID),
+				"from": st.activeID,
+				"to":   activeID,
+			}
+			b.enqueueAdminAlertWithCooldown(ctx, "exit_failover", payload, map[string]any{
+				"from": st.activeID,
+				"to":   activeID,
+			}, failoverAlertCooldown)
+			st.activeID = activeID
+			st.reachable = reachable
+			st.downStreak = 0
+			st.upStreak = 0
+			st.pendingActiveID = ""
+			st.pendingActiveHits = 0
+		}
+	} else {
+		st.pendingActiveID = ""
+		st.pendingActiveHits = 0
 	}
 
-	*lastReachable = reachable
-	*lastActiveID = activeID
-	*hadState = true
+	if reachable == st.reachable {
+		st.downStreak = 0
+		st.upStreak = 0
+		return
+	}
+	if !reachable {
+		st.downStreak++
+		st.upStreak = 0
+		if st.downStreak < exitDownConfirmSamples {
+			return
+		}
+		b.enqueueAdminAlertWithCooldown(ctx, "exit_down", map[string]any{
+			"text":    fmt.Sprintf("Exit «%s» недоступна (bridge↔exit probe failed).", exitName),
+			"exit_id": activeID,
+		}, map[string]any{
+			"exit_id": activeID,
+		}, exitAlertCooldown)
+		st.reachable = false
+		st.downStreak = 0
+		return
+	}
+
+	st.upStreak++
+	st.downStreak = 0
+	if st.upStreak < exitUpConfirmSamples {
+		return
+	}
+	b.enqueueAdminAlertWithCooldown(ctx, "exit_up", map[string]any{
+		"text":    fmt.Sprintf("Exit «%s» снова доступна.", exitName),
+		"exit_id": activeID,
+	}, map[string]any{
+		"exit_id": activeID,
+	}, exitAlertCooldown)
+	st.reachable = true
+	st.upStreak = 0
 }
 
 func (b *Bot) captureTrafficSnapshot(ctx context.Context, dst map[string]int64) {
@@ -148,12 +213,33 @@ func (b *Bot) checkTrafficSpikes(ctx context.Context, prev map[string]int64) {
 		if delta <= trafficSpikeBytes {
 			continue
 		}
-		b.enqueueAdminAlert(ctx, "traffic_spike", map[string]any{
+		payload := map[string]any{
 			"user_uuid":   r.UserUUID,
 			"delta_bytes": delta,
 			"text":        fmt.Sprintf("Резкий рост трафика: %s за последний час.", humanBytes(delta)),
-		})
+		}
+		b.enqueueAdminAlertWithCooldown(ctx, "traffic_spike", payload, map[string]any{
+			"user_uuid": r.UserUUID,
+		}, trafficSpikeCooldown)
 	}
+}
+
+func (b *Bot) enqueueAdminAlertWithCooldown(
+	ctx context.Context,
+	typ string,
+	payload map[string]any,
+	cooldownMatch map[string]any,
+	cooldown time.Duration,
+) {
+	if cooldown > 0 && b.alertsTele != nil {
+		recent, err := b.alertsTele.HasRecentNotification(ctx, typ, cooldownMatch, cooldown)
+		if err != nil {
+			b.log.Warn("alerts: cooldown check failed", "type", typ, "err", err)
+		} else if recent {
+			return
+		}
+	}
+	b.enqueueAdminAlert(ctx, typ, payload)
 }
 
 func (b *Bot) enqueueAdminAlert(ctx context.Context, typ string, payload map[string]any) {

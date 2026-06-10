@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -11,6 +12,7 @@ import (
 // alertsTeleRepo is the subset of db.TelegramRepo used by alert/outbox workers.
 type alertsTeleRepo interface {
 	EnqueueNotification(ctx context.Context, n db.Notification) error
+	HasRecentNotification(ctx context.Context, typ string, payloadContains map[string]any, within time.Duration) (bool, error)
 	PendingNotifications(ctx context.Context, limit int) ([]db.Notification, error)
 	MarkNotificationSent(ctx context.Context, id int64) error
 }

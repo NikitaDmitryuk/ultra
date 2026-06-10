@@ -2,6 +2,9 @@ package bot
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +30,33 @@ func (f *fakeAlertsTele) EnqueueNotification(_ context.Context, n db.Notificatio
 	}
 	f.rows = append(f.rows, n)
 	return nil
+}
+
+func (f *fakeAlertsTele) HasRecentNotification(
+	_ context.Context,
+	typ string,
+	payloadContains map[string]any,
+	within time.Duration,
+) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cutoff := time.Now().Add(-within)
+	for _, n := range f.rows {
+		if n.Type != typ || n.CreatedAt.Before(cutoff) {
+			continue
+		}
+		matches := true
+		for k, want := range payloadContains {
+			if n.Payload == nil || n.Payload[k] != want {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (f *fakeAlertsTele) PendingNotifications(_ context.Context, limit int) ([]db.Notification, error) {
@@ -134,5 +164,77 @@ func TestFormatNotificationTextKnownTypes(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("type %q: got %q want %q", tc.typ, got, tc.want)
 		}
+	}
+}
+
+func TestExitDownDebounceRequiresThreeFailedProbes(t *testing.T) {
+	tele := &fakeAlertsTele{}
+	adm := &fakeAdminLister{admins: []db.BotAdmin{{TelegramID: 1}}}
+	reachable := true
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"active_exit_id":"exit-a","exit":{"id":"exit-a","name":"primary","reachable":%t}}`, reachable)
+	}))
+	defer ts.Close()
+	b := &Bot{adminRepo: adm, alertsTele: tele, adminAPIURL: ts.URL}
+	var st exitAlertState
+
+	b.probeExitAlerts(context.Background(), &st)
+	reachable = false
+	b.probeExitAlerts(context.Background(), &st)
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 0 {
+		t.Fatalf("expected no alert before third failed probe, got %d", len(tele.rows))
+	}
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 1 || tele.rows[0].Type != "exit_down" {
+		t.Fatalf("expected one exit_down alert, got %#v", tele.rows)
+	}
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 1 {
+		t.Fatalf("expected no duplicate exit_down alert, got %d", len(tele.rows))
+	}
+}
+
+func TestExitUpDebounceRequiresTwoSuccessfulProbes(t *testing.T) {
+	tele := &fakeAlertsTele{}
+	adm := &fakeAdminLister{admins: []db.BotAdmin{{TelegramID: 1}}}
+	reachable := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"active_exit_id":"exit-a","exit":{"id":"exit-a","name":"primary","reachable":%t}}`, reachable)
+	}))
+	defer ts.Close()
+	b := &Bot{adminRepo: adm, alertsTele: tele, adminAPIURL: ts.URL}
+	st := exitAlertState{initialized: true, activeID: "exit-a", reachable: false}
+
+	reachable = true
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 0 {
+		t.Fatalf("expected no alert before second successful probe, got %d", len(tele.rows))
+	}
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 1 || tele.rows[0].Type != "exit_up" {
+		t.Fatalf("expected one exit_up alert, got %#v", tele.rows)
+	}
+}
+
+func TestAlertCooldownSkipsRecentMatchingNotification(t *testing.T) {
+	tele := &fakeAlertsTele{}
+	adm := &fakeAdminLister{admins: []db.BotAdmin{{TelegramID: 1}}}
+	b := &Bot{adminRepo: adm, alertsTele: tele}
+	ctx := context.Background()
+
+	b.enqueueAdminAlertWithCooldown(ctx, "token_leak", map[string]any{
+		"text":      "x",
+		"user_uuid": "u1",
+		"kind":      "unique_ips_window",
+	}, map[string]any{"user_uuid": "u1", "kind": "unique_ips_window"}, time.Hour)
+	b.enqueueAdminAlertWithCooldown(ctx, "token_leak", map[string]any{
+		"text":      "x",
+		"user_uuid": "u1",
+		"kind":      "unique_ips_window",
+	}, map[string]any{"user_uuid": "u1", "kind": "unique_ips_window"}, time.Hour)
+
+	if len(tele.rows) != 1 {
+		t.Fatalf("expected cooldown to keep one notification, got %d", len(tele.rows))
 	}
 }

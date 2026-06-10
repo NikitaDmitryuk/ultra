@@ -116,14 +116,11 @@ func runExitOnly(o exitOnlyOpts) {
 		tlsProv = config.TunnelTLSSelfSigned
 	}
 
-	exitAntiCensor := &config.AntiCensorSpec{}
-	if o.disableDOH {
-		exitAntiCensor.DisableDOH = true
-	}
-	if o.warp {
-		exitAntiCensor.WARPProxy = true
-		exitAntiCensor.WARPProxyPort = o.warpPort
-	}
+	exitAntiCensor := tunnelSplitHTTPAntiCensorFromBridge(&bridge, antiCensorTuning{
+		DisableDOH:    o.disableDOH,
+		WARPProxy:     o.warp,
+		WARPProxyPort: o.warpPort,
+	})
 
 	exitSpec := &config.Spec{
 		SchemaVersion:      config.CurrentSpecSchemaVersion,

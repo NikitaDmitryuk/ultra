@@ -99,6 +99,69 @@ func (r *TelegramRepo) RecentNotifications(ctx context.Context, limit int) ([]No
 	return out, rows.Err()
 }
 
+// RecentDistinctNotifications returns recent unique notification events grouped by
+// type and payload. Telegram fan-out creates one notification per admin; this
+// view is intended for compact UI timelines.
+func (r *TelegramRepo) RecentDistinctNotifications(ctx context.Context, limit int) ([]Notification, error) {
+	rows, err := r.db.Pool.Query(ctx,
+		`SELECT MAX(id) AS id,
+		        MIN(telegram_id) AS telegram_id,
+		        type,
+		        payload,
+		        MAX(sent_at) AS sent_at,
+		        MAX(created_at) AS created_at
+		 FROM notifications
+		 GROUP BY type, payload
+		 ORDER BY MAX(created_at) DESC
+		 LIMIT $1`,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Notification
+	for rows.Next() {
+		var n Notification
+		var payloadRaw []byte
+		if err := rows.Scan(&n.ID, &n.TelegramID, &n.Type, &payloadRaw, &n.SentAt, &n.CreatedAt); err != nil {
+			return nil, err
+		}
+		if len(payloadRaw) > 0 {
+			_ = json.Unmarshal(payloadRaw, &n.Payload)
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// HasRecentNotification reports whether a matching notification was enqueued
+// recently. payloadContains is matched as JSONB containment, so callers can
+// dedupe by stable fields such as user_uuid, exit_id, kind, from, or to.
+func (r *TelegramRepo) HasRecentNotification(
+	ctx context.Context,
+	typ string,
+	payloadContains map[string]any,
+	within time.Duration,
+) (bool, error) {
+	raw, err := json.Marshal(payloadContains)
+	if err != nil {
+		return false, err
+	}
+	var exists bool
+	err = r.db.Pool.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1
+		   FROM notifications
+		   WHERE type=$1
+		     AND payload @> $2::jsonb
+		     AND created_at >= NOW() - $3::interval
+		 )`,
+		typ, raw, intervalSQL(within),
+	).Scan(&exists)
+	return exists, err
+}
+
 // PruneMonitoringRetention deletes old monitoring rows to keep the DB small on VPS.
 // - notifications: sent rows older than 30 days
 // - user_ip_observations: rows with last_seen_at older than 30 days

@@ -104,8 +104,8 @@ VERIFY_FAIL_LOG_LINES=400
 # FRAGMENT_DISABLE=y
 #
 # Случайный паддинг каждого splithttp-чанка (актуально только при TRANSPORT=splithttp).
-# Формат "min-max" байт; "0" отключает паддинг:
-# SPLITHTTP_PADDING=100-1000
+# По умолчанию фактически "0-100"; формат "min-max" байт; "0" отключает паддинг:
+# SPLITHTTP_PADDING=0-100
 #
 # Максимальный размер тела одного POST-запроса в туннеле, КБ
 # (актуально при TRANSPORT=splithttp; 0 = умолчание Xray ≈1 МБ):
