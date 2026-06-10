@@ -131,10 +131,6 @@ func (r *TelegramRepo) ConnectionsByBuckets(
 	return out, nil
 }
 
-func intervalSQL(d time.Duration) string {
-	return fmt.Sprintf("%f seconds", d.Seconds())
-}
-
 func connectionBucketPoint(bucketStart pgtype.Timestamptz, ips int32) ConnectionBucketPoint {
 	return ConnectionBucketPoint{BucketStart: timeFromPG(bucketStart), IPs: int(ips)}
 }
