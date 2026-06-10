@@ -772,9 +772,12 @@ func measureApproxThroughput(ctx context.Context) map[string]any {
 	if err != nil {
 		return map[string]any{"measured": false, "message": err.Error()}
 	}
-	defer resp.Body.Close()
 	n, err := io.Copy(io.Discard, io.LimitReader(resp.Body, bytesToRead))
 	if err != nil {
+		_ = resp.Body.Close()
+		return map[string]any{"measured": false, "message": err.Error()}
+	}
+	if err := resp.Body.Close(); err != nil {
 		return map[string]any{"measured": false, "message": err.Error()}
 	}
 	elapsed := time.Since(start)
