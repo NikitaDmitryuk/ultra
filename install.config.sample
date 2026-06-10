@@ -105,7 +105,7 @@ VERIFY_FAIL_LOG_LINES=400
 # Дополнительный публичный порт на bridge для резервного VLESS+REALITY+XHTTP профиля.
 # Старый VLESS_PORT продолжает обслуживать TCP+REALITY. make install внесёт порт в spec,
 # а ultra-relay best-effort откроет локальный firewall. 0/пусто = не открывать дополнительный inbound.
-# PUBLIC_XHTTP_PORT=8443
+# PUBLIC_XHTTP_PORT=8445
 #
 # Фрагментация TLS ClientHello на исходящем соединении bridge→exit.
 # Разбивает первый TLS-пакет на несколько TCP-сегментов. По умолчанию включена.

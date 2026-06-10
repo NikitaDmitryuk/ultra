@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -433,6 +434,11 @@ func (s *Spec) Validate() error {
 			} else if p > 0 {
 				if p == s.VLESSPort {
 					return errors.New("config: anti_censor.public_xhttp_port must differ from vless_port")
+				}
+				if _, adminPort, err := net.SplitHostPort(s.AdminListen); err == nil && adminPort != "" {
+					if adminPort == fmt.Sprint(p) {
+						return errors.New("config: anti_censor.public_xhttp_port must differ from admin_listen port")
+					}
 				}
 				if p == HealthProbePort {
 					return errors.New("config: anti_censor.public_xhttp_port conflicts with health probe port")
