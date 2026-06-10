@@ -1,4 +1,4 @@
-.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 clean
+.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay benchmark-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 clean
 
 BINARY=ultra-relay
 INSTALL_BINARY=ultra-install
@@ -88,6 +88,23 @@ verify-relay:
 			$(if $(SSH_USER),-u '$(SSH_USER)',) \
 			$(if $(VERIFY_SOCKS_PORT),-p '$(VERIFY_SOCKS_PORT)',); \
 	fi
+
+# Read-only benchmark: локальный xray + SOCKS, /v1/health, bridge→exit TCP,
+# exit direct vs WARP curl. Опции: BENCH_USER_UUID, BENCH_SOCKS_PORT,
+# BENCH_DOWNLOAD_URL, BENCH_DOWNLOAD_URLS, BENCH_UPLOAD_URL, BENCH_UPLOAD_BYTES.
+benchmark-relay:
+	@export BENCH_USER_UUID="$(BENCH_USER_UUID)"; \
+	export BENCH_DOWNLOAD_URL="$(BENCH_DOWNLOAD_URL)"; \
+	export BENCH_DOWNLOAD_URLS="$(BENCH_DOWNLOAD_URLS)"; \
+	export BENCH_UPLOAD_URL="$(BENCH_UPLOAD_URL)"; \
+	export BENCH_UPLOAD_BYTES="$(BENCH_UPLOAD_BYTES)"; \
+	export BENCH_IP_URL="$(BENCH_IP_URL)"; \
+	export BENCH_SOCKS_PORT="$(BENCH_SOCKS_PORT)"; \
+	bash "$(CURDIR)/scripts/benchmark-relay.sh" \
+		$(if $(INSTALL_CONFIG),-c '$(INSTALL_CONFIG)',) \
+		$(if $(IDENTITY),-i '$(IDENTITY)',) \
+		$(if $(SSH_USER),-u '$(SSH_USER)',) \
+		$(if $(BENCH_SOCKS_PORT),-p '$(BENCH_SOCKS_PORT)',)
 
 build-linux-amd64:
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BINARY)-linux-amd64 ./cmd/ultra-relay

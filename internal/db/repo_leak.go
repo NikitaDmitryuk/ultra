@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/db/sqlc"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type LeakSignal struct {
@@ -22,32 +25,33 @@ type ConnectionBucketPoint struct {
 }
 
 func (r *TelegramRepo) UpsertUserIPObservation(ctx context.Context, userUUID, ip string) error {
-	_, err := r.db.Pool.Exec(ctx, `
-		INSERT INTO user_ip_observations(user_uuid, ip, first_seen_at, last_seen_at, sessions_seen)
-		VALUES($1, $2, NOW(), NOW(), 1)
-		ON CONFLICT (user_uuid, ip) DO UPDATE SET
-		  last_seen_at=NOW(),
-		  sessions_seen=user_ip_observations.sessions_seen+1
-	`, userUUID, ip)
-	return err
+	pgUUID, err := toPGUUID(userUUID)
+	if err != nil {
+		return err
+	}
+	addr, err := parseIPAddr(ip)
+	if err != nil {
+		return err
+	}
+	return r.db.Queries.UpsertUserIPObservation(ctx, sqlc.UpsertUserIPObservationParams{UserUuid: pgUUID, Ip: addr})
 }
 
 func (r *TelegramRepo) CountConcurrentIPs(ctx context.Context, userUUID string, window time.Duration) (int, error) {
-	var n int
-	err := r.db.Pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM user_ip_observations
-		WHERE user_uuid=$1 AND last_seen_at >= NOW() - $2::interval
-	`, userUUID, intervalSQL(window)).Scan(&n)
-	return n, err
+	pgUUID, err := toPGUUID(userUUID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := r.db.Queries.CountConcurrentIPs(ctx, sqlc.CountConcurrentIPsParams{UserUuid: pgUUID, Column2: toPGInterval(window)})
+	return int(n), err
 }
 
 func (r *TelegramRepo) CountUniqueIPs(ctx context.Context, userUUID string, window time.Duration) (int, error) {
-	var n int
-	err := r.db.Pool.QueryRow(ctx, `
-		SELECT COUNT(DISTINCT ip) FROM user_ip_observations
-		WHERE user_uuid=$1 AND last_seen_at >= NOW() - $2::interval
-	`, userUUID, intervalSQL(window)).Scan(&n)
-	return n, err
+	pgUUID, err := toPGUUID(userUUID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := r.db.Queries.CountUniqueIPs(ctx, sqlc.CountUniqueIPsParams{UserUuid: pgUUID, Column2: toPGInterval(window)})
+	return int(n), err
 }
 
 func (r *TelegramRepo) InsertLeakSignal(ctx context.Context, userUUID, kind string, score int, detail map[string]any) error {
@@ -55,38 +59,37 @@ func (r *TelegramRepo) InsertLeakSignal(ctx context.Context, userUUID, kind stri
 	if err != nil {
 		return err
 	}
-	_, err = r.db.Pool.Exec(ctx, `
-		INSERT INTO user_leak_signals(user_uuid, kind, score, detail)
-		VALUES($1, $2, $3, $4)
-	`, userUUID, kind, score, raw)
-	return err
+	pgUUID, err := toPGUUID(userUUID)
+	if err != nil {
+		return err
+	}
+	return r.db.Queries.InsertLeakSignal(ctx, sqlc.InsertLeakSignalParams{UserUuid: pgUUID, Kind: kind, Score: int32(score), Detail: raw})
 }
 
 func (r *TelegramRepo) RecentUserLeakSignals(ctx context.Context, userUUID string, limit int) ([]LeakSignal, error) {
-	rows, err := r.db.Pool.Query(ctx, `
-		SELECT id, user_uuid, kind, score, detail, created_at
-		FROM user_leak_signals
-		WHERE user_uuid=$1
-		ORDER BY created_at DESC
-		LIMIT $2
-	`, userUUID, limit)
+	pgUUID, err := toPGUUID(userUUID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []LeakSignal
-	for rows.Next() {
-		var s LeakSignal
-		var raw []byte
-		if err := rows.Scan(&s.ID, &s.UserUUID, &s.Kind, &s.Score, &raw, &s.CreatedAt); err != nil {
-			return nil, err
+	rows, err := r.db.Queries.RecentUserLeakSignals(ctx, sqlc.RecentUserLeakSignalsParams{UserUuid: pgUUID, Limit: int32(limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]LeakSignal, 0, len(rows))
+	for _, row := range rows {
+		s := LeakSignal{
+			ID:        row.ID,
+			UserUUID:  fromPGUUID(row.UserUuid),
+			Kind:      row.Kind,
+			Score:     int(row.Score),
+			CreatedAt: timeFromPG(row.CreatedAt),
 		}
-		if len(raw) > 0 {
-			_ = json.Unmarshal(raw, &s.Detail)
+		if len(row.Detail) > 0 {
+			_ = json.Unmarshal(row.Detail, &s.Detail)
 		}
 		out = append(out, s)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (r *TelegramRepo) ConnectionsByBuckets(
@@ -95,47 +98,79 @@ func (r *TelegramRepo) ConnectionsByBuckets(
 	window time.Duration,
 	bucket string,
 ) ([]ConnectionBucketPoint, error) {
-	expr, err := bucketExpr(bucket)
+	pgUUID, err := toPGUUID(userUUID)
 	if err != nil {
 		return nil, err
 	}
-	q := fmt.Sprintf(`
-		SELECT %s AS bucket_start, COUNT(DISTINCT ip) AS ips
-		FROM user_ip_observations
-		WHERE user_uuid=$1 AND last_seen_at >= NOW() - $2::interval
-		GROUP BY bucket_start
-		ORDER BY bucket_start
-	`, expr)
-	rows, err := r.db.Pool.Query(ctx, q, userUUID, intervalSQL(window))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	interval := toPGInterval(window)
+	var queryErr error
 	var out []ConnectionBucketPoint
-	for rows.Next() {
-		var p ConnectionBucketPoint
-		if err := rows.Scan(&p.BucketStart, &p.IPs); err != nil {
-			return nil, err
-		}
-		out = append(out, p)
+	switch bucket {
+	case "5m":
+		var rows []sqlc.ConnectionsByBuckets5mRow
+		rows, queryErr = r.db.Queries.ConnectionsByBuckets5m(ctx, sqlc.ConnectionsByBuckets5mParams{UserUuid: pgUUID, Column2: interval})
+		out = connectionBucketsFrom5m(rows)
+	case "1h":
+		var rows []sqlc.ConnectionsByBuckets1hRow
+		rows, queryErr = r.db.Queries.ConnectionsByBuckets1h(ctx, sqlc.ConnectionsByBuckets1hParams{UserUuid: pgUUID, Column2: interval})
+		out = connectionBucketsFrom1h(rows)
+	case "6h":
+		var rows []sqlc.ConnectionsByBuckets6hRow
+		rows, queryErr = r.db.Queries.ConnectionsByBuckets6h(ctx, sqlc.ConnectionsByBuckets6hParams{UserUuid: pgUUID, Column2: interval})
+		out = connectionBucketsFrom6h(rows)
+	case "1d":
+		var rows []sqlc.ConnectionsByBuckets1dRow
+		rows, queryErr = r.db.Queries.ConnectionsByBuckets1d(ctx, sqlc.ConnectionsByBuckets1dParams{UserUuid: pgUUID, Column2: interval})
+		out = connectionBucketsFrom1d(rows)
+	default:
+		return nil, fmt.Errorf("unsupported bucket: %s", bucket)
 	}
-	return out, rows.Err()
+	if queryErr != nil {
+		return nil, queryErr
+	}
+	return out, nil
 }
 
-func intervalSQL(d time.Duration) string {
-	return fmt.Sprintf("%f seconds", d.Seconds())
+func connectionBucketPoint(bucketStart pgtype.Timestamptz, ips int32) ConnectionBucketPoint {
+	return ConnectionBucketPoint{BucketStart: timeFromPG(bucketStart), IPs: int(ips)}
+}
+
+func connectionBucketsFrom5m(rows []sqlc.ConnectionsByBuckets5mRow) []ConnectionBucketPoint {
+	out := make([]ConnectionBucketPoint, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, connectionBucketPoint(row.BucketStart, row.Ips))
+	}
+	return out
+}
+
+func connectionBucketsFrom1h(rows []sqlc.ConnectionsByBuckets1hRow) []ConnectionBucketPoint {
+	out := make([]ConnectionBucketPoint, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, connectionBucketPoint(row.BucketStart, row.Ips))
+	}
+	return out
+}
+
+func connectionBucketsFrom6h(rows []sqlc.ConnectionsByBuckets6hRow) []ConnectionBucketPoint {
+	out := make([]ConnectionBucketPoint, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, connectionBucketPoint(row.BucketStart, row.Ips))
+	}
+	return out
+}
+
+func connectionBucketsFrom1d(rows []sqlc.ConnectionsByBuckets1dRow) []ConnectionBucketPoint {
+	out := make([]ConnectionBucketPoint, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, connectionBucketPoint(row.BucketStart, row.Ips))
+	}
+	return out
 }
 
 func bucketExpr(bucket string) (string, error) {
 	switch bucket {
-	case "5m":
-		return "date_trunc('hour', last_seen_at) + ((extract(minute from last_seen_at)::int / 5) * interval '5 minutes')", nil
-	case "1h":
-		return "date_trunc('hour', last_seen_at)", nil
-	case "6h":
-		return "date_trunc('day', last_seen_at) + ((extract(hour from last_seen_at)::int / 6) * interval '6 hours')", nil
-	case "1d":
-		return "date_trunc('day', last_seen_at)", nil
+	case "5m", "1h", "6h", "1d":
+		return bucket, nil
 	default:
 		return "", fmt.Errorf("unsupported bucket: %s", bucket)
 	}

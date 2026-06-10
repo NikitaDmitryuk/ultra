@@ -12,11 +12,29 @@ import (
 )
 
 const (
-	exitProbeInterval    = 60 * time.Second
-	trafficSpikeInterval = time.Hour
-	outboxSendInterval   = 10 * time.Second
-	trafficSpikeBytes    = int64(5 * 1024 * 1024 * 1024) // 5 GiB/hour
+	exitProbeInterval       = 60 * time.Second
+	trafficSpikeInterval    = time.Hour
+	outboxSendInterval      = 10 * time.Second
+	trafficSpikeBytes       = int64(5 * 1024 * 1024 * 1024) // 5 GiB/hour
+	exitDownConfirmSamples  = 3
+	exitUpConfirmSamples    = 2
+	exitFailoverConfirmHits = 2
+	exitAlertCooldown       = 30 * time.Minute
+	failoverAlertCooldown   = 10 * time.Minute
+	trafficSpikeCooldown    = 6 * time.Hour
+
+	exitHealthStatePrefix = "exit.active.health:"
 )
+
+type exitAlertState struct {
+	initialized       bool
+	activeID          string
+	reachable         bool
+	downStreak        int
+	upStreak          int
+	pendingActiveID   string
+	pendingActiveHits int
+}
 
 func (b *Bot) StartWorkers(ctx context.Context) {
 	if b.alertsTele == nil {
@@ -35,9 +53,7 @@ func (b *Bot) runAlertsWorker(ctx context.Context) {
 	spikeTicker := time.NewTicker(trafficSpikeInterval)
 	defer spikeTicker.Stop()
 
-	var lastActiveReachable bool
-	var lastActiveExitID string
-	var hadActiveState bool
+	var exitState exitAlertState
 	prevTotals := map[string]int64{}
 
 	b.captureTrafficSnapshot(ctx, prevTotals)
@@ -47,14 +63,14 @@ func (b *Bot) runAlertsWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-exitTicker.C:
-			b.probeExitAlerts(ctx, &lastActiveReachable, &lastActiveExitID, &hadActiveState)
+			b.probeExitAlerts(ctx, &exitState)
 		case <-spikeTicker.C:
 			b.checkTrafficSpikes(ctx, prevTotals)
 		}
 	}
 }
 
-func (b *Bot) probeExitAlerts(ctx context.Context, lastReachable *bool, lastActiveID *string, hadState *bool) {
+func (b *Bot) probeExitAlerts(ctx context.Context, st *exitAlertState) {
 	body, err := b.adminGet(ctx, "/v1/health")
 	if err != nil {
 		b.log.Warn("alerts: /v1/health failed", "err", err)
@@ -82,31 +98,157 @@ func (b *Bot) probeExitAlerts(ctx context.Context, lastReachable *bool, lastActi
 	}
 	reachable := h.Exit.Reachable
 
-	if *hadState && *lastActiveID != "" && activeID != "" && *lastActiveID != activeID {
-		b.enqueueAdminAlert(ctx, "exit_failover", map[string]any{
-			"text": fmt.Sprintf("Active exit переключена: %s → %s.", *lastActiveID, activeID),
-			"from": *lastActiveID,
-			"to":   activeID,
-		})
-	}
-
-	if *hadState && reachable != *lastReachable {
-		if !reachable {
-			b.enqueueAdminAlert(ctx, "exit_down", map[string]any{
-				"text":    fmt.Sprintf("Exit «%s» недоступна (bridge↔exit probe failed).", exitName),
-				"exit_id": activeID,
-			})
-		} else {
-			b.enqueueAdminAlert(ctx, "exit_up", map[string]any{
-				"text":    fmt.Sprintf("Exit «%s» снова доступна.", exitName),
-				"exit_id": activeID,
-			})
+	if !st.initialized {
+		b.initExitAlertState(ctx, st, activeID)
+		if reachable && st.reachable {
+			b.saveExitAlertState(ctx, st)
+			return
 		}
 	}
 
-	*lastReachable = reachable
-	*lastActiveID = activeID
-	*hadState = true
+	if st.activeID == "" && activeID != "" {
+		st.activeID = activeID
+		st.reachable = reachable
+	}
+
+	if st.activeID != "" && activeID != "" && st.activeID != activeID {
+		if st.pendingActiveID == activeID {
+			st.pendingActiveHits++
+		} else {
+			st.pendingActiveID = activeID
+			st.pendingActiveHits = 1
+		}
+		if st.pendingActiveHits >= exitFailoverConfirmHits {
+			payload := map[string]any{
+				"text": fmt.Sprintf("Active exit переключена: %s → %s.", st.activeID, activeID),
+				"from": st.activeID,
+				"to":   activeID,
+			}
+			b.emitAlert(ctx, alertEvent{
+				DedupeKey: "exit.active.failover:" + st.activeID + ":" + activeID,
+				Type:      "exit_failover",
+				Severity:  alertSeverityCritical,
+				Channel:   alertChannelTelegram,
+				Status:    "fired",
+				Payload:   payload,
+				Cooldown:  failoverAlertCooldown,
+			})
+			st.activeID = activeID
+			st.reachable = reachable
+			st.downStreak = 0
+			st.upStreak = 0
+			st.pendingActiveID = ""
+			st.pendingActiveHits = 0
+			b.saveExitAlertState(ctx, st)
+		}
+	} else {
+		st.pendingActiveID = ""
+		st.pendingActiveHits = 0
+	}
+
+	if reachable == st.reachable {
+		st.downStreak = 0
+		st.upStreak = 0
+		b.saveExitAlertState(ctx, st)
+		return
+	}
+	if !reachable {
+		st.downStreak++
+		st.upStreak = 0
+		if st.downStreak < exitDownConfirmSamples {
+			b.saveExitAlertState(ctx, st)
+			return
+		}
+		b.emitAlert(ctx, alertEvent{
+			DedupeKey: "exit.active.down:" + activeID,
+			Type:      "exit_down",
+			Severity:  alertSeverityCritical,
+			Channel:   alertChannelTelegram,
+			Status:    "fired",
+			Payload: map[string]any{
+				"text":    fmt.Sprintf("Exit «%s» недоступна (bridge↔exit probe failed).", exitName),
+				"exit_id": activeID,
+			},
+			Cooldown: exitAlertCooldown,
+		})
+		st.reachable = false
+		st.downStreak = 0
+		b.saveExitAlertState(ctx, st)
+		return
+	}
+
+	st.upStreak++
+	st.downStreak = 0
+	if st.upStreak < exitUpConfirmSamples {
+		b.saveExitAlertState(ctx, st)
+		return
+	}
+	b.emitAlert(ctx, alertEvent{
+		DedupeKey: "exit.active.up:" + activeID,
+		Type:      "exit_up",
+		Severity:  alertSeverityInfo,
+		Channel:   alertChannelTelegram,
+		Status:    "resolved",
+		Payload: map[string]any{
+			"text":    fmt.Sprintf("Exit «%s» снова доступна.", exitName),
+			"exit_id": activeID,
+		},
+		Cooldown: exitAlertCooldown,
+	})
+	st.reachable = true
+	st.upStreak = 0
+	b.saveExitAlertState(ctx, st)
+}
+
+func (b *Bot) initExitAlertState(ctx context.Context, st *exitAlertState, activeID string) {
+	st.initialized = true
+	st.activeID = activeID
+	st.reachable = true
+	if b.alertsTele == nil || activeID == "" {
+		return
+	}
+	persisted, ok, err := b.alertsTele.GetAlertState(ctx, exitHealthStateKey(activeID))
+	if err != nil {
+		b.log.Warn("alerts: read exit health state failed", "exit_id", activeID, "err", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	st.reachable = persisted.Status != "down"
+	st.downStreak = persisted.ConsecutiveFailures
+	st.upStreak = persisted.ConsecutiveSuccesses
+}
+
+func (b *Bot) saveExitAlertState(ctx context.Context, st *exitAlertState) {
+	if b.alertsTele == nil || st.activeID == "" {
+		return
+	}
+	status := "up"
+	severity := alertSeverityInfo
+	if !st.reachable {
+		status = "down"
+		severity = alertSeverityCritical
+	}
+	if err := b.alertsTele.UpsertAlertState(ctx, db.AlertState{
+		DedupeKey:            exitHealthStateKey(st.activeID),
+		Type:                 "exit_health",
+		Severity:             severity,
+		Channel:              alertChannelMiniApp,
+		Status:               status,
+		ConsecutiveFailures:  st.downStreak,
+		ConsecutiveSuccesses: st.upStreak,
+		LastPayload: map[string]any{
+			"exit_id":   st.activeID,
+			"reachable": st.reachable,
+		},
+	}); err != nil {
+		b.log.Warn("alerts: save exit health state failed", "exit_id", st.activeID, "err", err)
+	}
+}
+
+func exitHealthStateKey(exitID string) string {
+	return exitHealthStatePrefix + exitID
 }
 
 func (b *Bot) captureTrafficSnapshot(ctx context.Context, dst map[string]int64) {
@@ -148,10 +290,19 @@ func (b *Bot) checkTrafficSpikes(ctx context.Context, prev map[string]int64) {
 		if delta <= trafficSpikeBytes {
 			continue
 		}
-		b.enqueueAdminAlert(ctx, "traffic_spike", map[string]any{
+		payload := map[string]any{
 			"user_uuid":   r.UserUUID,
 			"delta_bytes": delta,
 			"text":        fmt.Sprintf("Резкий рост трафика: %s за последний час.", humanBytes(delta)),
+		}
+		b.emitAlert(ctx, alertEvent{
+			DedupeKey: "traffic_spike:" + r.UserUUID,
+			Type:      "traffic_spike",
+			Severity:  alertSeverityWarning,
+			Channel:   alertChannelMiniApp,
+			Status:    "fired",
+			Payload:   payload,
+			Cooldown:  trafficSpikeCooldown,
 		})
 	}
 }

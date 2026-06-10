@@ -140,3 +140,52 @@ func TestCollectOnlineIPList_SkipsUnknownFormat(t *testing.T) {
 		t.Fatalf("expected bare UUID key, got %#v", got)
 	}
 }
+
+func TestClassifyLeakBreach(t *testing.T) {
+	cases := []struct {
+		name       string
+		concurrent int
+		unique24h  int
+		wantOK     bool
+		wantKind   string
+		wantPower  string
+		wantChan   string
+	}{
+		{name: "none", concurrent: 1, unique24h: 10, wantOK: false},
+		{name: "weak unique", concurrent: 1, unique24h: 25, wantOK: true, wantKind: "unique_ips_window", wantPower: "weak", wantChan: alertChannelMiniApp},
+		{name: "strong unique", concurrent: 1, unique24h: 31, wantOK: true, wantKind: "unique_ips_window", wantPower: "strong", wantChan: alertChannelTelegram},
+		{name: "strong concurrent", concurrent: 6, unique24h: 25, wantOK: true, wantKind: "concurrent_ips", wantPower: "strong", wantChan: alertChannelTelegram},
+	}
+	for _, tc := range cases {
+		got, ok := classifyLeakBreach(tc.concurrent, tc.unique24h, defaultLeakMaxConcurrent, defaultLeakMaxUnique24h)
+		if ok != tc.wantOK {
+			t.Fatalf("%s: ok=%v want %v", tc.name, ok, tc.wantOK)
+		}
+		if !ok {
+			continue
+		}
+		if got.Kind != tc.wantKind || got.Strength != tc.wantPower || got.Channel != tc.wantChan {
+			t.Fatalf("%s: got %#v", tc.name, got)
+		}
+	}
+}
+
+func TestUpdateLeakBreachStateResetsWhenStrengthChanges(t *testing.T) {
+	states := map[string]leakBreachState{}
+	userUUID := "11111111-1111-1111-1111-111111111111"
+	weak := leakDecision{Kind: "unique_ips_window", Strength: "weak"}
+	strong := leakDecision{Kind: "unique_ips_window", Strength: "strong"}
+
+	got := updateLeakBreachState(states, userUUID, weak)
+	if got.Streak != 1 {
+		t.Fatalf("weak first sample streak=%d want 1", got.Streak)
+	}
+	got = updateLeakBreachState(states, userUUID, strong)
+	if got.Streak != 1 {
+		t.Fatalf("strong sample after weak must start a new confirmation streak, got %d", got.Streak)
+	}
+	got = updateLeakBreachState(states, userUUID, strong)
+	if got.Streak != 2 {
+		t.Fatalf("second strong sample streak=%d want 2", got.Streak)
+	}
+}

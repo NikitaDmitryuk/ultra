@@ -16,10 +16,13 @@ import (
 
 const (
 	leakPollInterval          = 30 * time.Second
-	leakAlertCooldown         = 6 * time.Hour
+	leakConcurrentCooldown    = 6 * time.Hour
+	leakUniqueWindowCooldown  = 24 * time.Hour
+	leakConfirmSamples        = 2
 	leakHeartbeatInterval     = 5 * time.Minute
 	defaultLeakMaxConcurrent  = 5
-	defaultLeakMaxUnique24h   = 10
+	defaultLeakMaxUnique24h   = 20
+	strongLeakMaxUnique24h    = 30
 	defaultStatsAPIListenAddr = "127.0.0.1:10085"
 
 	// onlineKey* match the format Xray's dispatcher uses to register online maps:
@@ -28,6 +31,12 @@ const (
 	onlineKeyPrefix = "user>>>"
 	onlineKeySuffix = ">>>online"
 )
+
+type leakBreachState struct {
+	Kind     string
+	Strength string
+	Streak   int
+}
 
 func (b *Bot) runLeakDetector(ctx context.Context) {
 	t := time.NewTicker(leakPollInterval)
@@ -39,7 +48,7 @@ func (b *Bot) runLeakDetector(ctx context.Context) {
 	if statsAddr == "" {
 		statsAddr = defaultStatsAPIListenAddr
 	}
-	lastAlertAt := map[string]time.Time{}
+	breachState := map[string]leakBreachState{}
 	var lastOnline int
 
 	for {
@@ -70,7 +79,7 @@ func (b *Bot) runLeakDetector(ctx context.Context) {
 						b.log.Warn("leak: upsert ip observation failed", "user_uuid", u.UUID, "ip", ip, "err", err)
 					}
 				}
-				b.evalLeakForUser(ctx, u, ips, lastAlertAt)
+				b.evalLeakForUser(ctx, u, ips, breachState)
 			}
 		}
 	}
@@ -94,7 +103,7 @@ type dbUserLeakCfg struct {
 	IsActive bool   `json:"is_active"`
 }
 
-func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs []string, last map[string]time.Time) {
+func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs []string, breachState map[string]leakBreachState) {
 	if !u.IsActive {
 		return
 	}
@@ -114,18 +123,31 @@ func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs [
 		return
 	}
 	if concurrent <= maxConcurrent && unique24h <= maxUnique24h {
-		return
-	}
-	if t, ok := last[u.UUID]; ok && time.Since(t) < leakAlertCooldown {
+		delete(breachState, u.UUID)
 		return
 	}
 
-	score := 60
-	kind := "concurrent_ips"
-	if unique24h > maxUnique24h {
-		score = 80
-		kind = "unique_ips_window"
+	decision, ok := classifyLeakBreach(concurrent, unique24h, maxConcurrent, maxUnique24h)
+	if !ok {
+		delete(breachState, u.UUID)
+		return
 	}
+	dedupeKey := "token_leak." + decision.Strength + ":" + u.UUID + ":" + decision.Kind
+
+	st := updateLeakBreachState(breachState, u.UUID, decision)
+	if st.Streak < leakConfirmSamples {
+		return
+	}
+	cooldownActive := false
+	if b.alertsTele != nil && decision.Cooldown > 0 {
+		state, _, err := b.alertsTele.GetAlertState(ctx, dedupeKey)
+		if err != nil {
+			b.log.Warn("leak: state read failed", "user_uuid", u.UUID, "kind", decision.Kind, "err", err)
+		} else if state.LastSentAt != nil && time.Since(*state.LastSentAt) < decision.Cooldown {
+			cooldownActive = true
+		}
+	}
+
 	detail := map[string]any{
 		"concurrent_ips":           concurrent,
 		"concurrent_threshold":     maxConcurrent,
@@ -134,16 +156,87 @@ func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs [
 		"current_ips":              currentIPs,
 		"policy":                   "alert",
 	}
-	if err := b.teleRepo.InsertLeakSignal(ctx, u.UUID, kind, score, detail); err != nil {
-		b.log.Warn("leak: insert signal failed", "user_uuid", u.UUID, "err", err)
+	if st.Streak == leakConfirmSamples || !cooldownActive {
+		if err := b.teleRepo.InsertLeakSignal(ctx, u.UUID, decision.Kind, decision.Score, detail); err != nil {
+			b.log.Warn("leak: insert signal failed", "user_uuid", u.UUID, "err", err)
+		}
 	}
-	b.enqueueAdminAlert(ctx, "token_leak", map[string]any{
-		"text":      "Подозрительная активность токена: " + u.Name,
-		"user_uuid": u.UUID,
-		"kind":      kind,
-		"score":     score,
+	if cooldownActive {
+		return
+	}
+	b.emitAlert(ctx, alertEvent{
+		DedupeKey: dedupeKey,
+		Type:      "token_leak",
+		Severity:  decision.Severity,
+		Channel:   decision.Channel,
+		Status:    "fired",
+		Payload: map[string]any{
+			"text":                            "Подозрительная активность токена: " + u.Name,
+			"user_uuid":                       u.UUID,
+			"kind":                            decision.Kind,
+			"score":                           decision.Score,
+			"concurrent_ips":                  concurrent,
+			"concurrent_threshold":            maxConcurrent,
+			"unique_ips_24h":                  unique24h,
+			"unique_ips_24h_threshold":        maxUnique24h,
+			"strong_unique_ips_24h_threshold": strongLeakMaxUnique24h,
+		},
+		Cooldown: decision.Cooldown,
 	})
-	last[u.UUID] = time.Now()
+}
+
+func updateLeakBreachState(states map[string]leakBreachState, userUUID string, decision leakDecision) leakBreachState {
+	st := states[userUUID]
+	if st.Kind == decision.Kind && st.Strength == decision.Strength {
+		st.Streak++
+	} else {
+		st = leakBreachState{Kind: decision.Kind, Strength: decision.Strength, Streak: 1}
+	}
+	states[userUUID] = st
+	return st
+}
+
+type leakDecision struct {
+	Kind     string
+	Strength string
+	Score    int
+	Severity string
+	Channel  string
+	Cooldown time.Duration
+}
+
+func classifyLeakBreach(concurrent, unique24h, maxConcurrent, maxUnique24h int) (leakDecision, bool) {
+	if unique24h > strongLeakMaxUnique24h {
+		return leakDecision{
+			Kind:     "unique_ips_window",
+			Strength: "strong",
+			Score:    80,
+			Severity: alertSeverityCritical,
+			Channel:  alertChannelTelegram,
+			Cooldown: leakUniqueWindowCooldown,
+		}, true
+	}
+	if concurrent > maxConcurrent {
+		return leakDecision{
+			Kind:     "concurrent_ips",
+			Strength: "strong",
+			Score:    60,
+			Severity: alertSeverityCritical,
+			Channel:  alertChannelTelegram,
+			Cooldown: leakConcurrentCooldown,
+		}, true
+	}
+	if unique24h > maxUnique24h {
+		return leakDecision{
+			Kind:     "unique_ips_window",
+			Strength: "weak",
+			Score:    60,
+			Severity: alertSeverityWarning,
+			Channel:  alertChannelMiniApp,
+			Cooldown: leakUniqueWindowCooldown,
+		}, true
+	}
+	return leakDecision{}, false
 }
 
 // statsIPClient is the subset of xray-core StatsServiceClient used by the leak

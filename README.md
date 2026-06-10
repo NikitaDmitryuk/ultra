@@ -275,10 +275,11 @@ curl -H "Authorization: Bearer …" http://127.0.0.1:8443/v1/traffic/monthly
 VERIFY_IP_URL=https://YOUR_HOST/your-probe-path make verify-relay
 # или с явными хостами:
 VERIFY_IP_URL=https://api.ipify.org make verify-relay BRIDGE=… EXIT=… IDENTITY=…
+make benchmark-relay # read-only speed: client→bridge→exit→WARP, /v1/health, exit direct vs WARP
 make verify-miniapp   # DNS A → bridge и HTTPS Mini App (нужны BOT_DOMAIN, BOT_ENABLE в install.config)
 ```
 
-Скрипты: `scripts/verify-relay.sh -h`, `scripts/verify-miniapp.sh`. Быстрая проверка TLS-кандидатов: `scripts/probe-tls-sni-candidates.sh`.
+Скрипты: `scripts/verify-relay.sh -h`, `scripts/benchmark-relay.sh -h`, `scripts/verify-miniapp.sh`. `benchmark-relay` не меняет конфигурацию: прямой замер с exit нужен только для отделения проблем WARP от проблем туннеля. Для сравнения реальных сайтов задайте `BENCH_DOWNLOAD_URLS='https://…file1,https://…file2'` — скрипт сравнит локальный системный путь и экспортированный Xray SOCKS. Быстрая проверка TLS-кандидатов: `scripts/probe-tls-sni-candidates.sh`.
 
 ## Производительность и перезагрузки
 

@@ -315,7 +315,7 @@ textarea.form-input {
 
 /* ── Charts ── */
 #chart-monthly, #chart-users { max-height: 200px; }
-#detail-traffic-chart { max-height: 220px; }
+#detail-traffic-chart, #detail-activity-chart { max-height: 220px; }
 
 /* ── Diagnostics ── */
 .diag-status {
@@ -333,6 +333,9 @@ textarea.form-input {
   padding: 10px 12px;
   background: rgba(255,255,255,0.02);
 }
+.diag-alert-item {
+  padding: 8px 10px;
+}
 .diag-item-title {
   font-size: 13px;
   font-weight: 600;
@@ -341,6 +344,11 @@ textarea.form-input {
 .diag-item-meta {
   font-size: 12px;
   color: var(--tg-hint);
+}
+.diag-alert-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .diag-alerts-header {

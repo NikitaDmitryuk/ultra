@@ -15,9 +15,9 @@ let usersCache = [];
 let monthlyChart = null;
 let usersChart = null;
 let detailTrafficChart = null;
-let detailConnectionsChart = null;
+let detailActivityChart = null;
 
-// IP timeline reference line for concurrent IPs (keep in sync with defaultLeakMaxConcurrent in internal/bot/leak.go)
+// Leak summary fallback (keep in sync with defaultLeakMaxConcurrent in internal/bot/leak.go).
 const LEAK_CONCURRENT_IP_THRESHOLD = 5;
 
 const LEGACY_SOCKS_UUID = '_legacy_socks';
@@ -454,18 +454,18 @@ async function loadCurrentUserLeak() {
     list.className = 'diag-list empty';
     list.textContent = 'Нет сигналов.';
   }
-  await loadCurrentUserConnectionsChart();
+  await loadCurrentUserActivityChart();
 }
 
-async function loadCurrentUserConnectionsChart() {
+async function loadCurrentUserActivityChart() {
   if (!currentUserUUID) return;
-  const window = document.getElementById('detail-connections-window')?.value || '24h';
+  const window = document.getElementById('detail-activity-window')?.value || '24h';
   try {
-    const data = await api('GET', `/api/users/${currentUserUUID}/connections?window=${window}`);
+    const data = await api('GET', `/api/users/${currentUserUUID}/traffic/timeline?window=${window}`);
     const points = data.points || [];
-    renderConnectionsChart(points);
+    renderActivityChart(points);
   } catch (e) {
-    showToast('Ошибка загрузки connection-графика: ' + e.message);
+    showToast('Ошибка загрузки графика активности: ' + e.message);
   }
 }
 
@@ -592,42 +592,70 @@ function renderDetailTrafficChart(month, uplink, downlink, total) {
   });
 }
 
-function renderConnectionsChart(points) {
-  const ctx = document.getElementById('detail-connections-chart');
+function renderActivityChart(points) {
+  const ctx = document.getElementById('detail-activity-chart');
+  const empty = document.getElementById('detail-activity-empty');
   if (!ctx) return;
-  if (detailConnectionsChart) {
-    detailConnectionsChart.destroy();
-    detailConnectionsChart = null;
+  if (detailActivityChart) {
+    detailActivityChart.destroy();
+    detailActivityChart = null;
   }
+  if (!points.length) {
+    ctx.style.display = 'none';
+    if (empty) empty.style.display = '';
+    return;
+  }
+  ctx.style.display = '';
+  if (empty) empty.style.display = 'none';
   const labels = points.map(p => formatTime(p.BucketStart || p.bucket_start));
-  const values = points.map(p => Number(p.IPs || p.ips || 0));
-  const threshold = LEAK_CONCURRENT_IP_THRESHOLD;
-  detailConnectionsChart = new Chart(ctx, {
+  const downlink = points.map(p => Number(p.DownlinkBytes || p.downlink_bytes || 0));
+  const uplink = points.map(p => Number(p.UplinkBytes || p.uplink_bytes || 0));
+  const total = points.map(p => Number(p.TotalBytes || p.total_bytes || 0));
+  const tickColor = getComputedStyle(document.documentElement)
+    .getPropertyValue('--tg-hint').trim() || '#888';
+  const gridColor = 'rgba(136,136,136,0.15)';
+  detailActivityChart = new Chart(ctx, {
     type: 'line',
     data: {
       labels,
       datasets: [
         {
-          label: 'Concurrent IPs',
-          data: values,
+          label: 'Download',
+          data: downlink,
           borderColor: 'rgba(82,136,193,1)',
           backgroundColor: 'rgba(82,136,193,0.2)',
           tension: 0.3,
           fill: true,
         },
         {
-          label: 'Threshold',
-          data: labels.map(() => threshold),
-          borderColor: 'rgba(244,67,54,0.95)',
-          borderDash: [6, 4],
-          pointRadius: 0,
+          label: 'Upload',
+          data: uplink,
+          borderColor: 'rgba(96,180,140,1)',
+          backgroundColor: 'rgba(96,180,140,0.14)',
+          tension: 0.3,
+          fill: false,
+        },
+        {
+          label: 'Total',
+          data: total,
+          borderColor: 'rgba(255,189,89,1)',
+          backgroundColor: 'rgba(255,189,89,0.12)',
+          tension: 0.3,
+          fill: false,
         },
       ],
     },
     options: {
       responsive: true,
       plugins: { legend: { display: true } },
-      scales: { y: { beginAtZero: true } },
+      scales: {
+        x: { ticks: { color: tickColor }, grid: { display: false } },
+        y: {
+          beginAtZero: true,
+          ticks: { color: tickColor, callback: value => formatBytes(Number(value)) },
+          grid: { color: gridColor },
+        },
+      },
     },
   });
 }
@@ -695,7 +723,7 @@ async function deleteCurrentUser() {
 // ── Diagnostics ───────────────────────────────────────────────────────────────
 async function loadDiagnostics() {
   try {
-    const alerts = await api('GET', '/api/alerts/recent?limit=20').catch(() => []);
+    const alerts = await api('GET', '/api/alerts/recent?limit=5').catch(() => []);
     renderDiagAlerts(alerts || []);
   } catch (e) {
     const list = document.getElementById('diag-alerts-list');
@@ -738,13 +766,14 @@ function renderDiagAlerts(alerts) {
   list.innerHTML = '';
   alerts.forEach(a => {
     const item = document.createElement('div');
-    item.className = 'diag-item';
+    item.className = 'diag-item diag-alert-item';
     const when = formatTime(a.created_at || a.CreatedAt);
     const payload = a.payload || a.Payload || {};
+    const typ = a.type || a.Type || 'alert';
+    const text = payload.text || '';
     item.innerHTML = `
-      <div class="diag-item-title">${esc(a.type || a.Type || 'alert')}</div>
-      <div class="diag-item-meta">${esc(when)}</div>
-      <div class="diag-item-meta">${esc(payload.text || '')}</div>
+      <div class="diag-item-title">${esc(typ)} · <span class="diag-item-meta">${esc(when)}</span></div>
+      ${text ? `<div class="diag-item-meta diag-alert-text">${esc(text)}</div>` : ''}
     `;
     list.appendChild(item);
   });
@@ -826,6 +855,36 @@ function applyHealthUI(h) {
     const checked = formatTime(h.checked_at || h.CheckedAt);
     diagSummary.textContent = checked ? `Обновлено: ${checked}` : 'Готово';
   }
+  renderDiagExitHealth(h.exits || h.Exits || []);
+}
+
+function renderDiagExitHealth(exits) {
+  const list = document.getElementById('diag-exits-health-list');
+  if (!list) return;
+  if (!Array.isArray(exits) || exits.length <= 1) {
+    list.style.display = 'none';
+    list.innerHTML = '';
+    return;
+  }
+  list.style.display = '';
+  list.className = 'diag-list';
+  list.innerHTML = '';
+  exits.forEach(e => {
+    const reachable = !!(e.reachable ?? e.Reachable);
+    const internet = !!(e.internet_ok ?? e.InternetOK);
+    const active = !!(e.active ?? e.Active);
+    const item = document.createElement('div');
+    item.className = 'diag-item diag-alert-item';
+    const name = e.name || e.Name || e.id || e.ID || 'exit';
+    const tunnelMs = fmtMs(e.tunnel_latency_ms ?? e.TunnelLatencyMS);
+    const internetMs = fmtMs(e.internet_latency_ms ?? e.InternetLatencyMS);
+    const state = reachable && internet ? 'OK' : (reachable ? 'Tunnel OK · Internet down' : 'Down');
+    item.innerHTML = `
+      <div class="diag-item-title">${esc(name)}${active ? ' · active' : ''}</div>
+      <div class="diag-item-meta">${esc(state)}${tunnelMs ? ` · tunnel ${esc(tunnelMs)} ms` : ''}${internetMs ? ` · internet ${esc(internetMs)} ms` : ''}</div>
+    `;
+    list.appendChild(item);
+  });
 }
 
 async function loadHealth() {
@@ -841,6 +900,7 @@ async function loadHealth() {
     setDot(document.getElementById('diag-exit-dot'), false);
     const diagSummary = document.getElementById('diag-health-summary');
     if (diagSummary) diagSummary.textContent = 'Health недоступен: ' + e.message;
+    renderDiagExitHealth([]);
   }
 }
 

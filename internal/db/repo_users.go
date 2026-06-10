@@ -3,13 +3,14 @@ package db
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/base64"
 	"errors"
 	"strings"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/db/sqlc"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/xtls/xray-core/common/uuid"
 )
 
@@ -43,36 +44,53 @@ func (r *UserRepo) SetSOCKS5BridgePorts(rangeStart, rangeEnd, legacyPort int) {
 	r.socksLegacyPort = legacyPort
 }
 
-const userSelectCols = `uuid, name, kind, is_active, disabled_at,
-		socks_username, socks_password, socks_port,
-		leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h`
-
-func scanUser(row interface{ Scan(dest ...any) error }) (auth.User, error) {
-	var u auth.User
-	var su, spw sql.NullString
-	var sport sql.NullInt32
-	err := row.Scan(
-		&u.UUID, &u.Name, &u.Kind, &u.IsActive, &u.DisabledAt,
-		&su, &spw, &sport,
-		&u.LeakPolicy, &u.LeakMaxConcurrentIPs, &u.LeakMaxUniqueIPs24h,
-	)
-	if err != nil {
-		return auth.User{}, err
+func authUserFromFields(
+	uuid pgtype.UUID,
+	name, kind string,
+	isActive bool,
+	disabledAt pgtype.Timestamptz,
+	socksUsername, socksPassword pgtype.Text,
+	socksPort pgtype.Int4,
+	leakPolicy string,
+	leakMaxConcurrent, leakMaxUnique pgtype.Int4,
+) auth.User {
+	u := auth.User{
+		UUID:       fromPGUUID(uuid),
+		Name:       name,
+		Kind:       kind,
+		IsActive:   isActive,
+		DisabledAt: ptrFromPGTime(disabledAt),
 	}
-	if su.Valid {
-		u.SocksUsername = su.String
-	}
-	if spw.Valid {
-		u.SocksPassword = spw.String
-	}
-	if sport.Valid {
-		v := int(sport.Int32)
-		u.SocksPort = &v
-	}
+	u.SocksUsername = fromPGText(socksUsername)
+	u.SocksPassword = fromPGText(socksPassword)
+	u.SocksPort = ptrFromPGInt4(socksPort)
+	u.LeakPolicy = leakPolicy
+	u.LeakMaxConcurrentIPs = ptrFromPGInt4(leakMaxConcurrent)
+	u.LeakMaxUniqueIPs24h = ptrFromPGInt4(leakMaxUnique)
 	if u.Kind == "" {
 		u.Kind = "vless"
 	}
-	return u, nil
+	return u
+}
+
+func authUserFromGet(row sqlc.GetUserRow) auth.User {
+	return authUserFromFields(row.Uuid, row.Name, row.Kind, row.IsActive, row.DisabledAt, row.SocksUsername, row.SocksPassword, row.SocksPort, row.LeakPolicy, row.LeakMaxConcurrentIps, row.LeakMaxUniqueIps24h)
+}
+
+func authUserFromListActive(row sqlc.ListActiveUsersRow) auth.User {
+	return authUserFromFields(row.Uuid, row.Name, row.Kind, row.IsActive, row.DisabledAt, row.SocksUsername, row.SocksPassword, row.SocksPort, row.LeakPolicy, row.LeakMaxConcurrentIps, row.LeakMaxUniqueIps24h)
+}
+
+func authUserFromListAll(row sqlc.ListAllUsersRow) auth.User {
+	return authUserFromFields(row.Uuid, row.Name, row.Kind, row.IsActive, row.DisabledAt, row.SocksUsername, row.SocksPassword, row.SocksPort, row.LeakPolicy, row.LeakMaxConcurrentIps, row.LeakMaxUniqueIps24h)
+}
+
+func authUserFromRename(row sqlc.RenameUserRow) auth.User {
+	return authUserFromFields(row.Uuid, row.Name, row.Kind, row.IsActive, row.DisabledAt, row.SocksUsername, row.SocksPassword, row.SocksPort, row.LeakPolicy, row.LeakMaxConcurrentIps, row.LeakMaxUniqueIps24h)
+}
+
+func authUserFromRotateSocks(row sqlc.RotateSocksPasswordRow) auth.User {
+	return authUserFromFields(row.Uuid, row.Name, row.Kind, row.IsActive, row.DisabledAt, row.SocksUsername, row.SocksPassword, row.SocksPort, row.LeakPolicy, row.LeakMaxConcurrentIps, row.LeakMaxUniqueIps24h)
 }
 
 func randomSocksPassword() (string, error) {
@@ -96,10 +114,8 @@ func (r *UserRepo) nextSocksPort(ctx context.Context) (int, error) {
 		if r.socksLegacyPort != 0 && p == r.socksLegacyPort {
 			continue
 		}
-		var exists bool
-		if err := r.db.Pool.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM users WHERE socks_port=$1)`, p,
-		).Scan(&exists); err != nil {
+		exists, err := r.db.Queries.UserSocksPortExists(ctx, toPGInt4(int32(p)))
+		if err != nil {
 			return 0, err
 		}
 		if !exists {
@@ -131,10 +147,11 @@ func (r *UserRepo) Add(ctx context.Context, kind, name string) (auth.User, error
 			Kind:     "vless",
 			IsActive: true,
 		}
-		_, err := r.db.Pool.Exec(ctx,
-			`INSERT INTO users(uuid, name, kind) VALUES($1, $2, 'vless')`,
-			u.UUID, u.Name,
-		)
+		pgUUID, err := toPGUUID(u.UUID)
+		if err != nil {
+			return auth.User{}, err
+		}
+		err = r.db.Queries.InsertVlessUser(ctx, sqlc.InsertVlessUserParams{Uuid: pgUUID, Name: u.Name})
 		if err != nil {
 			return auth.User{}, err
 		}
@@ -157,11 +174,13 @@ func (r *UserRepo) Add(ctx context.Context, kind, name string) (auth.User, error
 			SocksPassword: pass,
 			SocksPort:     &port,
 		}
-		_, err = r.db.Pool.Exec(ctx,
-			`INSERT INTO users(uuid, name, kind, socks_username, socks_password, socks_port)
-			 VALUES($1, $2, 'socks5', $3, $4, $5)`,
-			u.UUID, u.Name, u.SocksUsername, u.SocksPassword, port,
-		)
+		err = r.db.Queries.InsertSocksUser(ctx, sqlc.InsertSocksUserParams{
+			Uuid:          mustPGUUID(u.UUID),
+			Name:          u.Name,
+			SocksUsername: toPGText(u.SocksUsername),
+			SocksPassword: toPGText(u.SocksPassword),
+			SocksPort:     toPGInt4(int32(port)),
+		})
 		if err != nil {
 			return auth.User{}, err
 		}
@@ -177,19 +196,18 @@ func (r *UserRepo) RotateSocksPassword(ctx context.Context, id string) (auth.Use
 	if err != nil {
 		return auth.User{}, err
 	}
-	row := r.db.Pool.QueryRow(ctx,
-		`UPDATE users SET socks_password=$1 WHERE uuid=$2 AND kind='socks5' AND is_active=true
-		 RETURNING `+userSelectCols,
-		pass, id,
-	)
-	u, err := scanUser(row)
+	pgUUID, err := toPGUUID(id)
+	if err != nil {
+		return auth.User{}, err
+	}
+	row, err := r.db.Queries.RotateSocksPassword(ctx, sqlc.RotateSocksPasswordParams{SocksPassword: toPGText(pass), Uuid: pgUUID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, auth.ErrUserNotFound
 	}
 	if err != nil {
 		return auth.User{}, err
 	}
-	return u, nil
+	return authUserFromRotateSocks(row), nil
 }
 
 // Rename updates the display name of a user.
@@ -198,27 +216,28 @@ func (r *UserRepo) Rename(ctx context.Context, id, name string) (auth.User, erro
 	if name == "" {
 		return auth.User{}, auth.ErrEmptyUserName
 	}
-	row := r.db.Pool.QueryRow(ctx,
-		`UPDATE users SET name=$1 WHERE uuid=$2
-		 RETURNING `+userSelectCols,
-		name, id,
-	)
-	u, err := scanUser(row)
+	pgUUID, err := toPGUUID(id)
+	if err != nil {
+		return auth.User{}, err
+	}
+	row, err := r.db.Queries.RenameUser(ctx, sqlc.RenameUserParams{Name: name, Uuid: pgUUID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, auth.ErrUserNotFound
 	}
-	return u, err
+	return authUserFromRename(row), err
 }
 
 // Remove soft-deletes a user by UUID (sets is_active=false).
 func (r *UserRepo) Remove(ctx context.Context, id string) error {
-	tag, err := r.db.Pool.Exec(ctx,
-		"UPDATE users SET is_active=false, disabled_at=NOW() WHERE uuid=$1 AND is_active=true", id,
-	)
+	pgUUID, err := toPGUUID(id)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	affected, err := r.db.Queries.DisableUser(ctx, pgUUID)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
 		return auth.ErrUserNotFound
 	}
 	return nil
@@ -228,11 +247,15 @@ func (r *UserRepo) Remove(ctx context.Context, id string) error {
 // (traffic_stats, monthly_traffic, notifications, user_ip_observations,
 // user_leak_signals) wipes related history.
 func (r *UserRepo) Purge(ctx context.Context, id string) error {
-	tag, err := r.db.Pool.Exec(ctx, "DELETE FROM users WHERE uuid=$1", id)
+	pgUUID, err := toPGUUID(id)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	affected, err := r.db.Queries.DeleteUser(ctx, pgUUID)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
 		return auth.ErrUserNotFound
 	}
 	return nil
@@ -240,13 +263,15 @@ func (r *UserRepo) Purge(ctx context.Context, id string) error {
 
 // Enable restores a disabled user by UUID.
 func (r *UserRepo) Enable(ctx context.Context, id string) error {
-	tag, err := r.db.Pool.Exec(ctx,
-		"UPDATE users SET is_active=true, disabled_at=NULL WHERE uuid=$1", id,
-	)
+	pgUUID, err := toPGUUID(id)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	affected, err := r.db.Queries.EnableUser(ctx, pgUUID)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
 		return auth.ErrUserNotFound
 	}
 	return nil
@@ -274,34 +299,28 @@ func (r *UserRepo) RotateUUID(ctx context.Context, id string) (string, error) {
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO users(
-			uuid, name, telegram_id, telegram_username, created_at, is_active, disabled_at,
-			leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-			kind, socks_username, socks_password, socks_port
-		)
-		SELECT
-			$2, name, telegram_id, telegram_username, created_at, is_active, disabled_at,
-			leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-			kind, socks_username, socks_password, socks_port
-		FROM users WHERE uuid=$1
-	`, id, newUUID); err != nil {
+	qtx := r.db.Queries.WithTx(tx)
+	oldPGUUID := mustPGUUID(id)
+	newPGUUID := mustPGUUID(newUUID)
+	if err := qtx.CloneUserForUUIDRotation(ctx, sqlc.CloneUserForUUIDRotationParams{Uuid: oldPGUUID, Uuid_2: newPGUUID}); err != nil {
 		return "", err
 	}
-
-	updateTables := []string{
-		"UPDATE traffic_stats SET user_uuid=$2 WHERE user_uuid=$1",
-		"UPDATE monthly_traffic SET user_uuid=$2 WHERE user_uuid=$1",
-		"UPDATE notifications SET user_uuid=$2 WHERE user_uuid=$1",
-		"UPDATE user_ip_observations SET user_uuid=$2 WHERE user_uuid=$1",
-		"UPDATE user_leak_signals SET user_uuid=$2 WHERE user_uuid=$1",
+	if err := qtx.MoveTrafficStatsUserUUID(ctx, sqlc.MoveTrafficStatsUserUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
+		return "", err
 	}
-	for _, q := range updateTables {
-		if _, err := tx.Exec(ctx, q, id, newUUID); err != nil {
-			return "", err
-		}
+	if err := qtx.MoveMonthlyTrafficUserUUID(ctx, sqlc.MoveMonthlyTrafficUserUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
+		return "", err
 	}
-	if _, err := tx.Exec(ctx, "DELETE FROM users WHERE uuid=$1", id); err != nil {
+	if err := qtx.MoveNotificationsUserUUID(ctx, sqlc.MoveNotificationsUserUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
+		return "", err
+	}
+	if err := qtx.MoveIPObservationsUserUUID(ctx, sqlc.MoveIPObservationsUserUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
+		return "", err
+	}
+	if err := qtx.MoveLeakSignalsUserUUID(ctx, sqlc.MoveLeakSignalsUserUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
+		return "", err
+	}
+	if _, err := qtx.DeleteUser(ctx, oldPGUUID); err != nil {
 		return "", err
 	}
 
@@ -313,57 +332,42 @@ func (r *UserRepo) RotateUUID(ctx context.Context, id string) (string, error) {
 
 // List returns all active users ordered by creation time.
 func (r *UserRepo) List(ctx context.Context) ([]auth.User, error) {
-	rows, err := r.db.Pool.Query(ctx,
-		`SELECT `+userSelectCols+`
-		 FROM users WHERE is_active=true ORDER BY created_at`,
-	)
+	rows, err := r.db.Queries.ListActiveUsers(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var users []auth.User
-	for rows.Next() {
-		u, err := scanUser(rows)
-		if err != nil {
-			return nil, err
-		}
-		users = append(users, u)
+	users := make([]auth.User, 0, len(rows))
+	for _, row := range rows {
+		users = append(users, authUserFromListActive(row))
 	}
-	return users, rows.Err()
+	return users, nil
 }
 
 // ListAll returns active and disabled users ordered by creation time.
 func (r *UserRepo) ListAll(ctx context.Context) ([]auth.User, error) {
-	rows, err := r.db.Pool.Query(ctx,
-		`SELECT `+userSelectCols+`
-		 FROM users ORDER BY created_at`,
-	)
+	rows, err := r.db.Queries.ListAllUsers(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var users []auth.User
-	for rows.Next() {
-		u, err := scanUser(rows)
-		if err != nil {
-			return nil, err
-		}
-		users = append(users, u)
+	users := make([]auth.User, 0, len(rows))
+	for _, row := range rows {
+		users = append(users, authUserFromListAll(row))
 	}
-	return users, rows.Err()
+	return users, nil
 }
 
 // Lookup returns a single user by UUID (active or disabled).
 func (r *UserRepo) Lookup(ctx context.Context, id string) (auth.User, bool, error) {
-	row := r.db.Pool.QueryRow(ctx,
-		`SELECT `+userSelectCols+` FROM users WHERE uuid=$1`, id,
-	)
-	u, err := scanUser(row)
+	pgUUID, err := toPGUUID(id)
+	if err != nil {
+		return auth.User{}, false, err
+	}
+	row, err := r.db.Queries.GetUser(ctx, pgUUID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, false, nil
 	}
 	if err != nil {
 		return auth.User{}, false, err
 	}
-	return u, true, nil
+	return authUserFromGet(row), true, nil
 }

@@ -11,6 +11,8 @@ import (
 // alertsTeleRepo is the subset of db.TelegramRepo used by alert/outbox workers.
 type alertsTeleRepo interface {
 	EnqueueNotification(ctx context.Context, n db.Notification) error
+	GetAlertState(ctx context.Context, dedupeKey string) (db.AlertState, bool, error)
+	UpsertAlertState(ctx context.Context, s db.AlertState) error
 	PendingNotifications(ctx context.Context, limit int) ([]db.Notification, error)
 	MarkNotificationSent(ctx context.Context, id int64) error
 }

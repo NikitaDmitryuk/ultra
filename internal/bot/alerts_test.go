@@ -2,6 +2,9 @@ package bot
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -12,9 +15,10 @@ import (
 )
 
 type fakeAlertsTele struct {
-	mu   sync.Mutex
-	next int64
-	rows []db.Notification
+	mu     sync.Mutex
+	next   int64
+	rows   []db.Notification
+	states map[string]db.AlertState
 }
 
 func (f *fakeAlertsTele) EnqueueNotification(_ context.Context, n db.Notification) error {
@@ -26,6 +30,26 @@ func (f *fakeAlertsTele) EnqueueNotification(_ context.Context, n db.Notificatio
 		n.CreatedAt = time.Now()
 	}
 	f.rows = append(f.rows, n)
+	return nil
+}
+
+func (f *fakeAlertsTele) GetAlertState(_ context.Context, dedupeKey string) (db.AlertState, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.states == nil {
+		return db.AlertState{}, false, nil
+	}
+	s, ok := f.states[dedupeKey]
+	return s, ok, nil
+}
+
+func (f *fakeAlertsTele) UpsertAlertState(_ context.Context, s db.AlertState) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.states == nil {
+		f.states = map[string]db.AlertState{}
+	}
+	f.states[s.DedupeKey] = s
 	return nil
 }
 
@@ -134,5 +158,130 @@ func TestFormatNotificationTextKnownTypes(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("type %q: got %q want %q", tc.typ, got, tc.want)
 		}
+	}
+}
+
+func TestExitDownDebounceRequiresThreeFailedProbes(t *testing.T) {
+	tele := &fakeAlertsTele{}
+	adm := &fakeAdminLister{admins: []db.BotAdmin{{TelegramID: 1}}}
+	reachable := true
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"active_exit_id":"exit-a","exit":{"id":"exit-a","name":"primary","reachable":%t}}`, reachable)
+	}))
+	defer ts.Close()
+	b := &Bot{adminRepo: adm, alertsTele: tele, adminAPIURL: ts.URL}
+	var st exitAlertState
+
+	b.probeExitAlerts(context.Background(), &st)
+	reachable = false
+	b.probeExitAlerts(context.Background(), &st)
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 0 {
+		t.Fatalf("expected no alert before third failed probe, got %d", len(tele.rows))
+	}
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 1 || tele.rows[0].Type != "exit_down" {
+		t.Fatalf("expected one exit_down alert, got %#v", tele.rows)
+	}
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 1 {
+		t.Fatalf("expected no duplicate exit_down alert, got %d", len(tele.rows))
+	}
+}
+
+func TestExitUpDebounceRequiresTwoSuccessfulProbes(t *testing.T) {
+	tele := &fakeAlertsTele{}
+	adm := &fakeAdminLister{admins: []db.BotAdmin{{TelegramID: 1}}}
+	reachable := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"active_exit_id":"exit-a","exit":{"id":"exit-a","name":"primary","reachable":%t}}`, reachable)
+	}))
+	defer ts.Close()
+	b := &Bot{adminRepo: adm, alertsTele: tele, adminAPIURL: ts.URL}
+	st := exitAlertState{initialized: true, activeID: "exit-a", reachable: false}
+
+	reachable = true
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 0 {
+		t.Fatalf("expected no alert before second successful probe, got %d", len(tele.rows))
+	}
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 1 || tele.rows[0].Type != "exit_up" {
+		t.Fatalf("expected one exit_up alert, got %#v", tele.rows)
+	}
+}
+
+func TestExitUpDebounceUsesPersistentDownStateAfterRestart(t *testing.T) {
+	tele := &fakeAlertsTele{states: map[string]db.AlertState{
+		exitHealthStateKey("exit-a"): {
+			DedupeKey: exitHealthStateKey("exit-a"),
+			Type:      "exit_health",
+			Severity:  alertSeverityCritical,
+			Channel:   alertChannelMiniApp,
+			Status:    "down",
+		},
+	}}
+	adm := &fakeAdminLister{admins: []db.BotAdmin{{TelegramID: 1}}}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"active_exit_id":"exit-a","exit":{"id":"exit-a","name":"primary","reachable":true}}`)
+	}))
+	defer ts.Close()
+	b := &Bot{adminRepo: adm, alertsTele: tele, adminAPIURL: ts.URL}
+	var st exitAlertState
+
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 0 {
+		t.Fatalf("expected no exit_up before second successful probe, got %#v", tele.rows)
+	}
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 1 || tele.rows[0].Type != "exit_up" {
+		t.Fatalf("expected one exit_up from persisted down state, got %#v", tele.rows)
+	}
+}
+
+func TestExitDownDebounceUsesPersistentFailureStreakAfterRestart(t *testing.T) {
+	tele := &fakeAlertsTele{states: map[string]db.AlertState{
+		exitHealthStateKey("exit-a"): {
+			DedupeKey:           exitHealthStateKey("exit-a"),
+			Type:                "exit_health",
+			Severity:            alertSeverityInfo,
+			Channel:             alertChannelMiniApp,
+			Status:              "up",
+			ConsecutiveFailures: exitDownConfirmSamples - 1,
+		},
+	}}
+	adm := &fakeAdminLister{admins: []db.BotAdmin{{TelegramID: 1}}}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"active_exit_id":"exit-a","exit":{"id":"exit-a","name":"primary","reachable":false}}`)
+	}))
+	defer ts.Close()
+	b := &Bot{adminRepo: adm, alertsTele: tele, adminAPIURL: ts.URL}
+	var st exitAlertState
+
+	b.probeExitAlerts(context.Background(), &st)
+	if len(tele.rows) != 1 || tele.rows[0].Type != "exit_down" {
+		t.Fatalf("expected one exit_down from persisted failure streak, got %#v", tele.rows)
+	}
+}
+
+func TestAlertStateCooldownSkipsRecentMatchingNotification(t *testing.T) {
+	tele := &fakeAlertsTele{}
+	adm := &fakeAdminLister{admins: []db.BotAdmin{{TelegramID: 1}}}
+	b := &Bot{adminRepo: adm, alertsTele: tele}
+	ctx := context.Background()
+
+	ev := alertEvent{
+		DedupeKey: "token_leak.strong:u1:unique_ips_window",
+		Type:      "token_leak",
+		Severity:  alertSeverityCritical,
+		Channel:   alertChannelTelegram,
+		Payload:   map[string]any{"text": "x", "user_uuid": "u1", "kind": "unique_ips_window"},
+		Cooldown:  time.Hour,
+	}
+	b.emitAlert(ctx, ev)
+	b.emitAlert(ctx, ev)
+
+	if len(tele.rows) != 1 {
+		t.Fatalf("expected cooldown to keep one notification, got %d", len(tele.rows))
 	}
 }

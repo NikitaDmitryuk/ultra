@@ -128,6 +128,38 @@ func TestAntiCensorPaddingDisable(t *testing.T) {
 	}
 }
 
+func TestExitPaddingDisable(t *testing.T) {
+	spec := &Spec{
+		SchemaVersion: 1,
+		Role:          RoleExit,
+		VLESSPort:     51001,
+		ListenAddress: "0.0.0.0",
+		Exit:          ExitTunnelSpec{TunnelUUID: "aaaaaaaa-0000-0000-0000-000000000001"},
+		SplithttpPath: "/api/v1",
+		SplitHTTPTLS:  SplitHTTPTLSSpec{ServerName: "store.steampowered.com", Alpn: []string{"h2"}, Fingerprint: "chrome"},
+		ExitCertPaths: CertPaths{CertFile: "/tmp/cert.pem", KeyFile: "/tmp/key.pem"},
+		AntiCensor: &AntiCensorSpec{
+			SplitHTTPPadding: "0",
+		},
+	}
+	strat, _ := mimic.New("steamlike")
+	b, err := BuildExitXRayJSON(spec, strat, "info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	inbounds := cfg["inbounds"].([]any)
+	in := inbounds[0].(map[string]any)
+	stream := in["streamSettings"].(map[string]any)
+	sph := stream["splithttpSettings"].(map[string]any)
+	if sph["xPaddingSize"] != nil {
+		t.Errorf("exit xPaddingSize should be absent when SplitHTTPPadding=0, got %v", sph["xPaddingSize"])
+	}
+}
+
 func TestAntiCensorFingerprintPool(t *testing.T) {
 	spec := bridgeSpecForAntiCensorTest()
 	spec.DevMode = false // use REALITY inbound

@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/NikitaDmitryuk/ultra/internal/db/sqlc"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // DB wraps a pgxpool.Pool and owns the migration lifecycle.
 type DB struct {
-	Pool *pgxpool.Pool
+	Pool    *pgxpool.Pool
+	Queries *sqlc.Queries
 }
 
 // Open connects to PostgreSQL using dsn, pings, and runs embedded migrations.
@@ -33,7 +35,7 @@ func Open(ctx context.Context, dsn string) (*DB, error) {
 		pool.Close()
 		return nil, fmt.Errorf("db: ping: %w", err)
 	}
-	d := &DB{Pool: pool}
+	d := &DB{Pool: pool, Queries: sqlc.New(pool)}
 	if err := d.migrate(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("db: migrate: %w", err)

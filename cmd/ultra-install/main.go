@@ -154,7 +154,7 @@ func main() {
 	splithttpPadding := flag.String(
 		"splithttp-padding",
 		"",
-		`random-padding byte range for each splithttp chunk, e.g. "100-1000" (default "100-1000"); "0" disables`,
+		`random-padding byte range for each splithttp chunk, e.g. "0-100" (default "0-100"); "0" disables`,
 	)
 	splithttpMaxChunkKB := flag.Int(
 		"splithttp-max-chunk-kb",
@@ -207,6 +207,12 @@ func main() {
 		"enable local SOCKS5 inbound on bridge for ultra-bot Telegram API via active exit",
 	)
 	flag.Parse()
+	transportExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "transport" {
+			transportExplicit = true
+		}
+	})
 
 	tun := *tunnelPort
 	if tun == 0 {
@@ -239,7 +245,7 @@ func main() {
 			warp:            *warpFlag,
 			warpPort:        *warpPort,
 			disableDOH:      *disableDOH,
-			transport:       strings.TrimSpace(*transportFlag),
+			transport:       exitOnlyTransportValue(*transportFlag, transportExplicit),
 			splithttpHost:   *splithttpHostFlag,
 			splithttpPath:   *splithttpPathFlag,
 			dryRun:          *dryRun,
@@ -503,23 +509,13 @@ func main() {
 	}
 
 	// ── Connection tuning defaults (always set; flags may override) ──────────
-	antiCensor := &config.AntiCensorSpec{}
-	if *disableDOH {
-		antiCensor.DisableDOH = true
-	}
-	if *noFragment {
-		antiCensor.Fragment = &config.FragmentSpec{} // Packets="" → disabled in buildFragmentSockopt
-	}
-	if p := strings.TrimSpace(*splithttpPadding); p != "" {
-		antiCensor.SplitHTTPPadding = p
-	}
-	if *splithttpMaxChunkKB > 0 {
-		antiCensor.SplitHTTPMaxChunkKB = *splithttpMaxChunkKB
-	}
-	if fps := splitCommaNonEmpty(*realityFPs); len(fps) > 0 {
-		antiCensor.RealityFingerprints = fps
-	}
-	bridgeSpec.AntiCensor = antiCensor
+	bridgeSpec.AntiCensor = buildAntiCensorSpec(antiCensorTuning{
+		DisableDOH:             *disableDOH,
+		DisableFragment:        *noFragment,
+		SplitHTTPPadding:       *splithttpPadding,
+		SplitHTTPMaxChunkKB:    *splithttpMaxChunkKB,
+		RealityFingerprintsCSV: *realityFPs,
+	})
 
 	bridgeSpec.GeoAssetsDir = path.Join(*remoteDir, "geo")
 	bridgeSpec.GeositeExitTags = []string{"ru-blocked-all"}
@@ -593,14 +589,13 @@ func main() {
 		}
 	}
 
-	exitAntiCensor := &config.AntiCensorSpec{}
-	if *disableDOH {
-		exitAntiCensor.DisableDOH = true
-	}
-	if *warpFlag {
-		exitAntiCensor.WARPProxy = true
-		exitAntiCensor.WARPProxyPort = *warpPort
-	}
+	exitAntiCensor := buildAntiCensorSpec(antiCensorTuning{
+		DisableDOH:          *disableDOH,
+		SplitHTTPPadding:    *splithttpPadding,
+		SplitHTTPMaxChunkKB: *splithttpMaxChunkKB,
+		WARPProxy:           *warpFlag,
+		WARPProxyPort:       *warpPort,
+	})
 
 	var tunnelTransport config.TunnelTransport
 	switch strings.TrimSpace(*transportFlag) {

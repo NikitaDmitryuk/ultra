@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/db/sqlc"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	xrayuuid "github.com/xtls/xray-core/common/uuid"
 )
 
@@ -29,41 +31,47 @@ func NewExitNodeRepo(db *DB) *ExitNodeRepo {
 	return &ExitNodeRepo{db: db}
 }
 
-const exitNodeCols = `id, name, address, port, tunnel_uuid, pinned_peer_cert_sha256, priority, enabled, created_at, updated_at`
+func exitNodeFromFields(id pgtype.UUID, name, address string, port int32, tunnelUUID, pin string, priority int32, enabled bool, createdAt, updatedAt pgtype.Timestamptz) exits.Node {
+	return exits.Node{
+		ID:                   fromPGUUID(id),
+		Name:                 name,
+		Address:              address,
+		Port:                 int(port),
+		TunnelUUID:           tunnelUUID,
+		PinnedPeerCertSHA256: pin,
+		Priority:             int(priority),
+		Enabled:              enabled,
+		CreatedAt:            timeFromPG(createdAt),
+		UpdatedAt:            timeFromPG(updatedAt),
+	}
+}
 
-func scanExitNode(row pgx.Row) (exits.Node, error) {
-	var n exits.Node
-	err := row.Scan(
-		&n.ID,
-		&n.Name,
-		&n.Address,
-		&n.Port,
-		&n.TunnelUUID,
-		&n.PinnedPeerCertSHA256,
-		&n.Priority,
-		&n.Enabled,
-		&n.CreatedAt,
-		&n.UpdatedAt,
-	)
-	return n, err
+func exitNodeFromList(row sqlc.ListExitNodesRow) exits.Node {
+	return exitNodeFromFields(row.ID, row.Name, row.Address, row.Port, row.TunnelUuid, row.PinnedPeerCertSha256, row.Priority, row.Enabled, row.CreatedAt, row.UpdatedAt)
+}
+
+func exitNodeFromGet(row sqlc.GetExitNodeRow) exits.Node {
+	return exitNodeFromFields(row.ID, row.Name, row.Address, row.Port, row.TunnelUuid, row.PinnedPeerCertSha256, row.Priority, row.Enabled, row.CreatedAt, row.UpdatedAt)
+}
+
+func exitNodeFromInsert(row sqlc.InsertExitNodeRow) exits.Node {
+	return exitNodeFromFields(row.ID, row.Name, row.Address, row.Port, row.TunnelUuid, row.PinnedPeerCertSha256, row.Priority, row.Enabled, row.CreatedAt, row.UpdatedAt)
+}
+
+func exitNodeFromUpdate(row sqlc.UpdateExitNodeRow) exits.Node {
+	return exitNodeFromFields(row.ID, row.Name, row.Address, row.Port, row.TunnelUuid, row.PinnedPeerCertSha256, row.Priority, row.Enabled, row.CreatedAt, row.UpdatedAt)
 }
 
 func (r *ExitNodeRepo) List(ctx context.Context) ([]exits.Node, error) {
-	rows, err := r.db.Pool.Query(ctx, `
-		SELECT `+exitNodeCols+` FROM exit_nodes ORDER BY priority ASC, created_at ASC`)
+	rows, err := r.db.Queries.ListExitNodes(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []exits.Node
-	for rows.Next() {
-		n, err := scanExitNode(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, n)
+	out := make([]exits.Node, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, exitNodeFromList(row))
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (r *ExitNodeRepo) ListEnabled(ctx context.Context) ([]exits.Node, error) {
@@ -75,18 +83,20 @@ func (r *ExitNodeRepo) ListEnabled(ctx context.Context) ([]exits.Node, error) {
 }
 
 func (r *ExitNodeRepo) Get(ctx context.Context, id string) (exits.Node, error) {
-	row := r.db.Pool.QueryRow(ctx, `SELECT `+exitNodeCols+` FROM exit_nodes WHERE id=$1`, id)
-	n, err := scanExitNode(row)
+	pgID, err := toPGUUID(id)
+	if err != nil {
+		return exits.Node{}, err
+	}
+	row, err := r.db.Queries.GetExitNode(ctx, pgID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return exits.Node{}, ErrExitNotFound
 	}
-	return n, err
+	return exitNodeFromGet(row), err
 }
 
 func (r *ExitNodeRepo) CountEnabled(ctx context.Context) (int, error) {
-	var n int
-	err := r.db.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM exit_nodes WHERE enabled=TRUE`).Scan(&n)
-	return n, err
+	n, err := r.db.Queries.CountEnabledExitNodes(ctx)
+	return int(n), err
 }
 
 // Bootstrap imports exit nodes from bootstrap file (preferred) or spec.exit, merging new rows.
@@ -131,23 +141,17 @@ func (r *ExitNodeRepo) mergeBootstrapEntry(ctx context.Context, e exits.Bootstra
 	now := time.Now().UTC()
 
 	if address != "" && e.Port > 0 {
-		var id string
-		err := r.db.Pool.QueryRow(ctx,
-			`SELECT id FROM exit_nodes WHERE address=$1 AND port=$2`, address, e.Port,
-		).Scan(&id)
+		id, err := r.db.Queries.FindExitNodeByAddressPort(ctx, sqlc.FindExitNodeByAddressPortParams{Address: address, Port: int32(e.Port)})
 		if err == nil {
-			_, err := r.db.Pool.Exec(ctx, `
-				UPDATE exit_nodes SET
-					name=$2,
-					tunnel_uuid=CASE WHEN $3<>'' THEN $3 ELSE tunnel_uuid END,
-					pinned_peer_cert_sha256=CASE WHEN $4<>'' THEN $4 ELSE pinned_peer_cert_sha256 END,
-					priority=CASE WHEN $5>0 THEN $5 ELSE priority END,
-					enabled=$6,
-					updated_at=$7
-				WHERE id=$1`,
-				id, name, tunnelUUID, pin, priority, enabled, now,
-			)
-			return err
+			return r.db.Queries.MergeExitByAddressPort(ctx, sqlc.MergeExitByAddressPortParams{
+				ID:        id,
+				Name:      name,
+				Column3:   tunnelUUID,
+				Column4:   pin,
+				Column5:   priority,
+				Enabled:   enabled,
+				UpdatedAt: toPGTime(now),
+			})
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return err
@@ -155,22 +159,16 @@ func (r *ExitNodeRepo) mergeBootstrapEntry(ctx context.Context, e exits.Bootstra
 	}
 
 	if tunnelUUID != "" {
-		var id string
-		err := r.db.Pool.QueryRow(ctx,
-			`SELECT id FROM exit_nodes WHERE tunnel_uuid=$1`, tunnelUUID,
-		).Scan(&id)
+		id, err := r.db.Queries.FindExitNodeByTunnelUUID(ctx, tunnelUUID)
 		if err == nil {
-			_, err := r.db.Pool.Exec(ctx, `
-				UPDATE exit_nodes SET
-					name=$2,
-					pinned_peer_cert_sha256=CASE WHEN $3<>'' THEN $3 ELSE pinned_peer_cert_sha256 END,
-					priority=CASE WHEN $4>0 THEN $4 ELSE priority END,
-					enabled=$5,
-					updated_at=$6
-				WHERE id=$1`,
-				id, name, pin, priority, enabled, now,
-			)
-			return err
+			return r.db.Queries.MergeExitByTunnelUUID(ctx, sqlc.MergeExitByTunnelUUIDParams{
+				ID:        id,
+				Name:      name,
+				Column3:   pin,
+				Column4:   priority,
+				Enabled:   enabled,
+				UpdatedAt: toPGTime(now),
+			})
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return err
@@ -218,20 +216,20 @@ func (r *ExitNodeRepo) Add(ctx context.Context, p exits.AddParams) (exits.Node, 
 	if id == "" {
 		id = uuid.NewString()
 	}
+	pgID, err := toPGUUID(id)
+	if err != nil {
+		return exits.Node{}, err
+	}
 
-	var exists int
-	if err := r.db.Pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM exit_nodes WHERE tunnel_uuid=$1`, tunnelUUID,
-	).Scan(&exists); err != nil {
+	exists, err := r.db.Queries.CountExitNodesByTunnelUUID(ctx, tunnelUUID)
+	if err != nil {
 		return exits.Node{}, err
 	}
 	if exists > 0 {
 		return exits.Node{}, ErrExitDuplicateUUID
 	}
-	if err := r.db.Pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM exit_nodes WHERE enabled=TRUE AND address=$1 AND port=$2`,
-		address, p.Port,
-	).Scan(&exists); err != nil {
+	exists, err = r.db.Queries.CountEnabledExitNodesByAddressPort(ctx, sqlc.CountEnabledExitNodesByAddressPortParams{Address: address, Port: int32(p.Port)})
+	if err != nil {
 		return exits.Node{}, err
 	}
 	if exists > 0 {
@@ -243,13 +241,20 @@ func (r *ExitNodeRepo) Add(ctx context.Context, p exits.AddParams) (exits.Node, 
 		enabled = *p.Enabled
 	}
 
-	row := r.db.Pool.QueryRow(ctx, `
-		INSERT INTO exit_nodes(id, name, address, port, tunnel_uuid, pinned_peer_cert_sha256, priority, enabled)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-		RETURNING `+exitNodeCols,
-		id, name, address, p.Port, tunnelUUID, strings.TrimSpace(p.PinnedPeerCertSHA256), priority, enabled,
-	)
-	return scanExitNode(row)
+	row, err := r.db.Queries.InsertExitNode(ctx, sqlc.InsertExitNodeParams{
+		ID:                   pgID,
+		Name:                 name,
+		Address:              address,
+		Port:                 int32(p.Port),
+		TunnelUuid:           tunnelUUID,
+		PinnedPeerCertSha256: strings.TrimSpace(p.PinnedPeerCertSHA256),
+		Priority:             int32(priority),
+		Enabled:              enabled,
+	})
+	if err != nil {
+		return exits.Node{}, err
+	}
+	return exitNodeFromInsert(row), nil
 }
 
 func (r *ExitNodeRepo) Update(ctx context.Context, id string, patch exits.UpdatePatch) (exits.Node, error) {
@@ -299,11 +304,16 @@ func (r *ExitNodeRepo) Update(ctx context.Context, id string, patch exits.Update
 		}
 	}
 	if enabled {
-		var dup int
-		if err := r.db.Pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM exit_nodes WHERE enabled=TRUE AND address=$1 AND port=$2 AND id<>$3`,
-			address, port, id,
-		).Scan(&dup); err != nil {
+		pgID, err := toPGUUID(id)
+		if err != nil {
+			return exits.Node{}, err
+		}
+		dup, err := r.db.Queries.CountEnabledExitNodeDuplicate(ctx, sqlc.CountEnabledExitNodeDuplicateParams{
+			Address: address,
+			Port:    int32(port),
+			ID:      pgID,
+		})
+		if err != nil {
 			return exits.Node{}, err
 		}
 		if dup > 0 {
@@ -311,13 +321,23 @@ func (r *ExitNodeRepo) Update(ctx context.Context, id string, patch exits.Update
 		}
 	}
 
-	row := r.db.Pool.QueryRow(ctx, `
-		UPDATE exit_nodes SET name=$2, address=$3, port=$4, priority=$5, enabled=$6, updated_at=$7
-		WHERE id=$1
-		RETURNING `+exitNodeCols,
-		id, name, address, port, priority, enabled, time.Now().UTC(),
-	)
-	return scanExitNode(row)
+	pgID, err := toPGUUID(id)
+	if err != nil {
+		return exits.Node{}, err
+	}
+	row, err := r.db.Queries.UpdateExitNode(ctx, sqlc.UpdateExitNodeParams{
+		ID:        pgID,
+		Name:      name,
+		Address:   address,
+		Port:      int32(port),
+		Priority:  int32(priority),
+		Enabled:   enabled,
+		UpdatedAt: toPGTime(time.Now().UTC()),
+	})
+	if err != nil {
+		return exits.Node{}, err
+	}
+	return exitNodeFromUpdate(row), nil
 }
 
 func (r *ExitNodeRepo) Delete(ctx context.Context, id string) error {
@@ -334,11 +354,15 @@ func (r *ExitNodeRepo) Delete(ctx context.Context, id string) error {
 			return ErrExitLastEnabled
 		}
 	}
-	tag, err := r.db.Pool.Exec(ctx, `DELETE FROM exit_nodes WHERE id=$1`, id)
+	pgID, err := toPGUUID(id)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	affected, err := r.db.Queries.DeleteExitNode(ctx, pgID)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
 		return ErrExitNotFound
 	}
 	return nil
