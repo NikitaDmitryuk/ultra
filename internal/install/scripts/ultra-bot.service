@@ -1,0 +1,40 @@
+[Unit]
+Description=Ultra Relay Telegram Bot
+Documentation=https://github.com/NikitaDmitryuk/ultra
+After=network-online.target ultra-relay.service
+Wants=network-online.target
+Requires=ultra-relay.service
+
+[Service]
+Type=simple
+WorkingDirectory=/etc/ultra-relay
+
+# Main relay token and log level are shared with ultra-relay via this file.
+EnvironmentFile=/etc/ultra-relay/environment
+
+# Bot-specific secrets (only TELEGRAM_BOT_TOKEN).
+EnvironmentFile=/etc/ultra-relay/bot.env
+
+ExecStart=/usr/local/bin/ultra-bot \
+    -spec /etc/ultra-relay/spec.json \
+    -admin-api-url http://127.0.0.1:8443 \
+    -domain ${ULTRA_BOT_DOMAIN} \
+    -port ${ULTRA_BOT_PORT} \
+    -cert-file /etc/letsencrypt/live/${ULTRA_BOT_DOMAIN}/fullchain.pem \
+    -key-file /etc/letsencrypt/live/${ULTRA_BOT_DOMAIN}/privkey.pem \
+    -data-dir /var/lib/ultra-bot \
+    -log-level ${ULTRA_RELAY_LOG_LEVEL}
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ultra-bot
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ultra-bot /etc/ultra-relay
+ReadOnlyPaths=/etc/letsencrypt
+
+[Install]
+WantedBy=multi-user.target

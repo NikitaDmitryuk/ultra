@@ -763,7 +763,12 @@ type diagnosticCheck struct {
 
 func measureApproxThroughput(ctx context.Context) map[string]any {
 	const bytesToRead = 256 * 1024
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://speed.cloudflare.com/__down?bytes=%d", bytesToRead), nil)
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		fmt.Sprintf("https://speed.cloudflare.com/__down?bytes=%d", bytesToRead),
+		nil,
+	)
 	if err != nil {
 		return map[string]any{"measured": false, "message": err.Error()}
 	}
@@ -870,15 +875,24 @@ func (s *Server) handleHardening(w http.ResponseWriter, r *http.Request) {
 	checks["doh"] = diagnosticCheck{OK: dohEnabled}
 	checks["public_xhttp_inbound"] = diagnosticCheck{OK: s.spec.AntiCensor != nil && s.spec.AntiCensor.PublicXHTTPPort > 0}
 	if !checks["public_xhttp_inbound"].OK {
-		checks["public_xhttp_inbound"] = diagnosticCheck{OK: false, Message: "fallback profile exported, but no extra public XHTTP inbound is enabled"}
+		checks["public_xhttp_inbound"] = diagnosticCheck{
+			OK:      false,
+			Message: "fallback profile exported, but no extra public XHTTP inbound is enabled",
+		}
 	}
 	warpEnabled := s.spec.AntiCensor != nil && s.spec.AntiCensor.WARPProxy
 	checks["warp_udp_warning"] = diagnosticCheck{OK: !warpEnabled, Message: "WARP disabled"}
 	if warpEnabled {
 		checks["warp_udp_warning"] = diagnosticCheck{OK: false, Message: "WARP SOCKS5 is TCP-only in current config; UDP exits directly"}
 	}
-	checks["systemd_sandbox"] = diagnosticCheck{OK: false, Message: "not introspected by API; audit deploy/systemd/ultra-relay.service on host"}
-	checks["open_ports"] = diagnosticCheck{OK: false, Message: "not introspected by API; verify firewall/security group allows only required public ports"}
+	checks["systemd_sandbox"] = diagnosticCheck{
+		OK:      false,
+		Message: "not introspected by API; audit deploy/systemd/ultra-relay.service on host",
+	}
+	checks["open_ports"] = diagnosticCheck{
+		OK:      false,
+		Message: "not introspected by API; verify firewall/security group allows only required public ports",
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{

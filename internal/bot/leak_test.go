@@ -152,9 +152,33 @@ func TestClassifyLeakBreach(t *testing.T) {
 		wantChan   string
 	}{
 		{name: "none", concurrent: 1, unique24h: 10, wantOK: false},
-		{name: "weak unique", concurrent: 1, unique24h: 25, wantOK: true, wantKind: "unique_ips_window", wantPower: "weak", wantChan: alertChannelMiniApp},
-		{name: "strong unique", concurrent: 1, unique24h: 31, wantOK: true, wantKind: "unique_ips_window", wantPower: "strong", wantChan: alertChannelTelegram},
-		{name: "strong concurrent", concurrent: 6, unique24h: 25, wantOK: true, wantKind: "concurrent_ips", wantPower: "strong", wantChan: alertChannelTelegram},
+		{
+			name:       "weak unique",
+			concurrent: 1,
+			unique24h:  25,
+			wantOK:     true,
+			wantKind:   "unique_ips_window",
+			wantPower:  "weak",
+			wantChan:   alertChannelMiniApp,
+		},
+		{
+			name:       "strong unique",
+			concurrent: 1,
+			unique24h:  31,
+			wantOK:     true,
+			wantKind:   "unique_ips_window",
+			wantPower:  "strong",
+			wantChan:   alertChannelTelegram,
+		},
+		{
+			name:       "strong concurrent",
+			concurrent: 6,
+			unique24h:  25,
+			wantOK:     true,
+			wantKind:   "concurrent_ips",
+			wantPower:  "strong",
+			wantChan:   alertChannelTelegram,
+		},
 	}
 	for _, tc := range cases {
 		got, ok := classifyLeakBreach(tc.concurrent, tc.unique24h, defaultLeakMaxConcurrent, defaultLeakMaxUnique24h)

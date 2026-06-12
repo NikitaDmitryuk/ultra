@@ -31,7 +31,15 @@ func NewExitNodeRepo(db *DB) *ExitNodeRepo {
 	return &ExitNodeRepo{db: db}
 }
 
-func exitNodeFromFields(id pgtype.UUID, name, address string, port int32, tunnelUUID, pin string, priority int32, enabled bool, createdAt, updatedAt pgtype.Timestamptz) exits.Node {
+func exitNodeFromFields(
+	id pgtype.UUID,
+	name, address string,
+	port int32,
+	tunnelUUID, pin string,
+	priority int32,
+	enabled bool,
+	createdAt, updatedAt pgtype.Timestamptz,
+) exits.Node {
 	return exits.Node{
 		ID:                   fromPGUUID(id),
 		Name:                 name,
@@ -47,19 +55,63 @@ func exitNodeFromFields(id pgtype.UUID, name, address string, port int32, tunnel
 }
 
 func exitNodeFromList(row sqlc.ListExitNodesRow) exits.Node {
-	return exitNodeFromFields(row.ID, row.Name, row.Address, row.Port, row.TunnelUuid, row.PinnedPeerCertSha256, row.Priority, row.Enabled, row.CreatedAt, row.UpdatedAt)
+	return exitNodeFromFields(
+		row.ID,
+		row.Name,
+		row.Address,
+		row.Port,
+		row.TunnelUuid,
+		row.PinnedPeerCertSha256,
+		row.Priority,
+		row.Enabled,
+		row.CreatedAt,
+		row.UpdatedAt,
+	)
 }
 
 func exitNodeFromGet(row sqlc.GetExitNodeRow) exits.Node {
-	return exitNodeFromFields(row.ID, row.Name, row.Address, row.Port, row.TunnelUuid, row.PinnedPeerCertSha256, row.Priority, row.Enabled, row.CreatedAt, row.UpdatedAt)
+	return exitNodeFromFields(
+		row.ID,
+		row.Name,
+		row.Address,
+		row.Port,
+		row.TunnelUuid,
+		row.PinnedPeerCertSha256,
+		row.Priority,
+		row.Enabled,
+		row.CreatedAt,
+		row.UpdatedAt,
+	)
 }
 
 func exitNodeFromInsert(row sqlc.InsertExitNodeRow) exits.Node {
-	return exitNodeFromFields(row.ID, row.Name, row.Address, row.Port, row.TunnelUuid, row.PinnedPeerCertSha256, row.Priority, row.Enabled, row.CreatedAt, row.UpdatedAt)
+	return exitNodeFromFields(
+		row.ID,
+		row.Name,
+		row.Address,
+		row.Port,
+		row.TunnelUuid,
+		row.PinnedPeerCertSha256,
+		row.Priority,
+		row.Enabled,
+		row.CreatedAt,
+		row.UpdatedAt,
+	)
 }
 
 func exitNodeFromUpdate(row sqlc.UpdateExitNodeRow) exits.Node {
-	return exitNodeFromFields(row.ID, row.Name, row.Address, row.Port, row.TunnelUuid, row.PinnedPeerCertSha256, row.Priority, row.Enabled, row.CreatedAt, row.UpdatedAt)
+	return exitNodeFromFields(
+		row.ID,
+		row.Name,
+		row.Address,
+		row.Port,
+		row.TunnelUuid,
+		row.PinnedPeerCertSha256,
+		row.Priority,
+		row.Enabled,
+		row.CreatedAt,
+		row.UpdatedAt,
+	)
 }
 
 func (r *ExitNodeRepo) List(ctx context.Context) ([]exits.Node, error) {
@@ -228,7 +280,10 @@ func (r *ExitNodeRepo) Add(ctx context.Context, p exits.AddParams) (exits.Node, 
 	if exists > 0 {
 		return exits.Node{}, ErrExitDuplicateUUID
 	}
-	exists, err = r.db.Queries.CountEnabledExitNodesByAddressPort(ctx, sqlc.CountEnabledExitNodesByAddressPortParams{Address: address, Port: int32(p.Port)})
+	exists, err = r.db.Queries.CountEnabledExitNodesByAddressPort(
+		ctx,
+		sqlc.CountEnabledExitNodesByAddressPortParams{Address: address, Port: int32(p.Port)},
+	)
 	if err != nil {
 		return exits.Node{}, err
 	}

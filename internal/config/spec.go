@@ -426,7 +426,8 @@ func (s *Spec) Validate() error {
 		}
 		if s.AntiCensor != nil {
 			profile := strings.TrimSpace(s.AntiCensor.Profile)
-			if profile != "" && profile != AntiCensorProfileFast && profile != AntiCensorProfileBalanced && profile != AntiCensorProfileStealth {
+			if profile != "" && profile != AntiCensorProfileFast && profile != AntiCensorProfileBalanced &&
+				profile != AntiCensorProfileStealth {
 				return errors.New("config: anti_censor.profile must be fast, balanced, or stealth")
 			}
 			if p := s.AntiCensor.PublicXHTTPPort; p < 0 || p > 65535 {

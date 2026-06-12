@@ -80,6 +80,13 @@ func realityServerNames(dest, sni string) []string {
 }
 
 func main() {
+	if handlePlanSubcommand(os.Args[1:]) {
+		return
+	}
+	legacyMain()
+}
+
+func legacyMain() {
 	bridgeHost := flag.String("bridge", "", "bridge VPS hostname or IP (SSH target)")
 	exitHost := flag.String("exit", "", "exit VPS hostname or IP (SSH target)")
 
