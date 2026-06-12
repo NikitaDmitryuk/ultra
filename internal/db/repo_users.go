@@ -53,13 +53,15 @@ func authUserFromFields(
 	socksPort pgtype.Int4,
 	leakPolicy string,
 	leakMaxConcurrent, leakMaxUnique pgtype.Int4,
+	preferredExitID pgtype.UUID,
 ) auth.User {
 	u := auth.User{
-		UUID:       fromPGUUID(uuid),
-		Name:       name,
-		Kind:       kind,
-		IsActive:   isActive,
-		DisabledAt: ptrFromPGTime(disabledAt),
+		UUID:            fromPGUUID(uuid),
+		Name:            name,
+		Kind:            kind,
+		IsActive:        isActive,
+		DisabledAt:      ptrFromPGTime(disabledAt),
+		PreferredExitID: ptrFromPGUUID(preferredExitID),
 	}
 	u.SocksUsername = fromPGText(socksUsername)
 	u.SocksPassword = fromPGText(socksPassword)
@@ -86,6 +88,7 @@ func authUserFromGet(row sqlc.GetUserRow) auth.User {
 		row.LeakPolicy,
 		row.LeakMaxConcurrentIps,
 		row.LeakMaxUniqueIps24h,
+		row.PreferredExitID,
 	)
 }
 
@@ -102,6 +105,7 @@ func authUserFromListActive(row sqlc.ListActiveUsersRow) auth.User {
 		row.LeakPolicy,
 		row.LeakMaxConcurrentIps,
 		row.LeakMaxUniqueIps24h,
+		row.PreferredExitID,
 	)
 }
 
@@ -118,6 +122,7 @@ func authUserFromListAll(row sqlc.ListAllUsersRow) auth.User {
 		row.LeakPolicy,
 		row.LeakMaxConcurrentIps,
 		row.LeakMaxUniqueIps24h,
+		row.PreferredExitID,
 	)
 }
 
@@ -134,6 +139,7 @@ func authUserFromRename(row sqlc.RenameUserRow) auth.User {
 		row.LeakPolicy,
 		row.LeakMaxConcurrentIps,
 		row.LeakMaxUniqueIps24h,
+		row.PreferredExitID,
 	)
 }
 
@@ -150,6 +156,24 @@ func authUserFromRotateSocks(row sqlc.RotateSocksPasswordRow) auth.User {
 		row.LeakPolicy,
 		row.LeakMaxConcurrentIps,
 		row.LeakMaxUniqueIps24h,
+		row.PreferredExitID,
+	)
+}
+
+func authUserFromSetPreferredExit(row sqlc.SetUserPreferredExitRow) auth.User {
+	return authUserFromFields(
+		row.Uuid,
+		row.Name,
+		row.Kind,
+		row.IsActive,
+		row.DisabledAt,
+		row.SocksUsername,
+		row.SocksPassword,
+		row.SocksPort,
+		row.LeakPolicy,
+		row.LeakMaxConcurrentIps,
+		row.LeakMaxUniqueIps24h,
+		row.PreferredExitID,
 	)
 }
 
@@ -335,6 +359,29 @@ func (r *UserRepo) Enable(ctx context.Context, id string) error {
 		return auth.ErrUserNotFound
 	}
 	return nil
+}
+
+// SetPreferredExit stores the user's preferred exit node. nil means Auto.
+func (r *UserRepo) SetPreferredExit(ctx context.Context, id string, exitID *string) (auth.User, error) {
+	pgUUID, err := toPGUUID(id)
+	if err != nil {
+		return auth.User{}, err
+	}
+	pgExitID, err := toPGUUIDPtr(exitID)
+	if err != nil {
+		return auth.User{}, err
+	}
+	row, err := r.db.Queries.SetUserPreferredExit(ctx, sqlc.SetUserPreferredExitParams{
+		Uuid:            pgUUID,
+		PreferredExitID: pgExitID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return auth.User{}, auth.ErrUserNotFound
+	}
+	if err != nil {
+		return auth.User{}, err
+	}
+	return authUserFromSetPreferredExit(row), nil
 }
 
 // RotateUUID replaces a user's UUID and updates references in related tables.

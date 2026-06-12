@@ -8,6 +8,10 @@ type AddParams struct {
 	Port                 int
 	TunnelUUID           string
 	PinnedPeerCertSHA256 string
+	CountryCode          string
+	CountryName          string
+	City                 string
+	DisplayName          string
 	Priority             int
 	Enabled              *bool
 }

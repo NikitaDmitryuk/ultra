@@ -72,6 +72,15 @@ func (m *fakeUserManager) EnableUser(id string) error {
 	m.users[id] = u
 	return nil
 }
+func (m *fakeUserManager) SetPreferredExit(id string, exitID *string) (auth.User, error) {
+	u, ok := m.users[id]
+	if !ok {
+		return auth.User{}, auth.ErrUserNotFound
+	}
+	u.PreferredExitID = exitID
+	m.users[id] = u
+	return u, nil
+}
 func (m *fakeUserManager) RotateUUID(id string) (string, error) {
 	m.rotateCalls++
 	u, ok := m.users[id]

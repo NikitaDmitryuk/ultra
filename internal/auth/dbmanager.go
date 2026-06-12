@@ -16,6 +16,7 @@ type DBUserRepo interface {
 	Remove(ctx context.Context, id string) error
 	Purge(ctx context.Context, id string) error
 	Enable(ctx context.Context, id string) error
+	SetPreferredExit(ctx context.Context, id string, exitID *string) (User, error)
 	RotateUUID(ctx context.Context, id string) (string, error)
 	RotateSocksPassword(ctx context.Context, id string) (User, error)
 	List(ctx context.Context) ([]User, error)
@@ -200,6 +201,19 @@ func (m *DBManager) EnableUser(id string) error {
 	}
 	m.notify()
 	return nil
+}
+
+// SetPreferredExit updates a VLESS user's preferred exit location and triggers an Xray reload.
+func (m *DBManager) SetPreferredExit(id string, exitID *string) (User, error) {
+	u, err := m.repo.SetPreferredExit(context.Background(), id, exitID)
+	if err != nil {
+		return User{}, err
+	}
+	if err := m.refresh(context.Background()); err != nil {
+		m.log.Warn("db refresh after SetPreferredExit failed", "err", err)
+	}
+	m.notify()
+	return u, nil
 }
 
 // RotateUUID reissues a user's UUID and triggers an Xray reload.

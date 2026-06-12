@@ -8,23 +8,32 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/db"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 )
 
 type postExitReq struct {
-	Name     string `json:"name"`
-	Address  string `json:"address"`
-	Port     int    `json:"port"`
-	Priority int    `json:"priority"`
+	Name        string `json:"name"`
+	Address     string `json:"address"`
+	Port        int    `json:"port"`
+	CountryCode string `json:"country_code"`
+	CountryName string `json:"country_name"`
+	City        string `json:"city"`
+	DisplayName string `json:"display_name"`
+	Priority    int    `json:"priority"`
 }
 
 type patchExitReq struct {
-	Name     *string `json:"name"`
-	Address  *string `json:"address"`
-	Port     *int    `json:"port"`
-	Priority *int    `json:"priority"`
-	Enabled  *bool   `json:"enabled"`
+	Name        *string `json:"name"`
+	Address     *string `json:"address"`
+	Port        *int    `json:"port"`
+	CountryCode *string `json:"country_code"`
+	CountryName *string `json:"country_name"`
+	City        *string `json:"city"`
+	DisplayName *string `json:"display_name"`
+	Priority    *int    `json:"priority"`
+	Enabled     *bool   `json:"enabled"`
 }
 
 type exitDeployHints struct {
@@ -106,10 +115,14 @@ func (s *Server) handlePostExit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, err := s.exits.Add(r.Context(), exits.AddParams{
-		Name:     body.Name,
-		Address:  body.Address,
-		Port:     body.Port,
-		Priority: body.Priority,
+		Name:        body.Name,
+		Address:     body.Address,
+		Port:        body.Port,
+		CountryCode: body.CountryCode,
+		CountryName: body.CountryName,
+		City:        body.City,
+		DisplayName: body.DisplayName,
+		Priority:    body.Priority,
 	})
 	if err != nil {
 		s.writeExitError(w, err)
@@ -140,11 +153,15 @@ func (s *Server) handlePatchExit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, err := s.exits.Update(r.Context(), id, exits.UpdatePatch{
-		Name:     body.Name,
-		Address:  body.Address,
-		Port:     body.Port,
-		Priority: body.Priority,
-		Enabled:  body.Enabled,
+		Name:        body.Name,
+		Address:     body.Address,
+		Port:        body.Port,
+		CountryCode: body.CountryCode,
+		CountryName: body.CountryName,
+		City:        body.City,
+		DisplayName: body.DisplayName,
+		Priority:    body.Priority,
+		Enabled:     body.Enabled,
 	})
 	if err != nil {
 		s.writeExitError(w, err)
@@ -155,6 +172,164 @@ func (s *Server) handlePatchExit(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"exit": n})
+}
+
+type clientExitItem struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	CountryCode string `json:"country_code,omitempty"`
+	CountryName string `json:"country_name,omitempty"`
+	City        string `json:"city,omitempty"`
+	Reachable   bool   `json:"reachable"`
+	LatencyMS   int64  `json:"latency_ms,omitempty"`
+	Selected    bool   `json:"selected"`
+	Effective   bool   `json:"effective"`
+}
+
+func (s *Server) validateClientUser(w http.ResponseWriter, uuid string) (u auth.User, ok bool) {
+	if uuid == "" {
+		http.Error(w, "uuid", http.StatusBadRequest)
+		return auth.User{}, false
+	}
+	u, found := s.users.Lookup(uuid)
+	if !found {
+		http.Error(w, "unknown client", http.StatusUnauthorized)
+		return auth.User{}, false
+	}
+	if !u.IsActive {
+		http.Error(w, "inactive client", http.StatusForbidden)
+		return auth.User{}, false
+	}
+	if u.Kind != "" && u.Kind != "vless" {
+		http.Error(w, "unsupported client kind", http.StatusForbidden)
+		return auth.User{}, false
+	}
+	return u, true
+}
+
+func (s *Server) clientExitSelection(u auth.User) (selectedID *string, effectiveID string, health map[string]exits.Health, nodes []exits.Node) {
+	if s.exits == nil {
+		return u.PreferredExitID, "", nil, nil
+	}
+	nodes = s.exits.ListEnabled()
+	if s.selector != nil {
+		health = s.selector.HealthSnapshot()
+		effectiveID = s.selector.ActiveID()
+	}
+	if effectiveID == "" {
+		candidate, _ := exits.SelectActive(nodes, nil)
+		effectiveID = candidate.ID
+	}
+	if u.PreferredExitID != nil && *u.PreferredExitID != "" {
+		for _, n := range nodes {
+			if n.ID != *u.PreferredExitID {
+				continue
+			}
+			if h, ok := health[n.ID]; !ok || h.Reachable {
+				effectiveID = n.ID
+			}
+			break
+		}
+	}
+	return u.PreferredExitID, effectiveID, health, nodes
+}
+
+func (s *Server) handleClientListExits(w http.ResponseWriter, r *http.Request) {
+	if s.exits == nil {
+		http.Error(w, "exit management requires database backend", http.StatusNotImplemented)
+		return
+	}
+	u, ok := s.validateClientUser(w, strings.TrimSpace(r.PathValue("uuid")))
+	if !ok {
+		return
+	}
+	selectedID, effectiveID, health, nodes := s.clientExitSelection(u)
+	items := make([]clientExitItem, 0, len(nodes))
+	for _, n := range nodes {
+		h := health[n.ID]
+		items = append(items, clientExitItem{
+			ID:          n.ID,
+			DisplayName: n.LocationLabel(),
+			CountryCode: n.CountryCode,
+			CountryName: n.CountryName,
+			City:        n.City,
+			Reachable:   h.Reachable,
+			LatencyMS:   h.TunnelLatencyMS,
+			Selected:    selectedID != nil && *selectedID == n.ID,
+			Effective:   effectiveID == n.ID,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"selected_exit_id":  selectedID,
+		"effective_exit_id": effectiveID,
+		"exits":             items,
+	})
+}
+
+type clientSetExitSelectionReq struct {
+	ExitID *string `json:"exit_id"`
+}
+
+func (s *Server) handleClientSetExitSelection(w http.ResponseWriter, r *http.Request) {
+	if s.exits == nil {
+		http.Error(w, "exit management requires database backend", http.StatusNotImplemented)
+		return
+	}
+	u, ok := s.validateClientUser(w, strings.TrimSpace(r.PathValue("uuid")))
+	if !ok {
+		return
+	}
+	var body clientSetExitSelectionReq
+	if !s.decodeAdminJSON(w, r, &body) {
+		return
+	}
+	var exitID *string
+	if body.ExitID != nil {
+		id := strings.TrimSpace(*body.ExitID)
+		if id == "" {
+			http.Error(w, "bad exit_id", http.StatusBadRequest)
+			return
+		}
+		n, found := s.exits.Get(id)
+		if !found {
+			http.Error(w, "exit not found", http.StatusNotFound)
+			return
+		}
+		if !n.Enabled {
+			http.Error(w, "exit disabled", http.StatusBadRequest)
+			return
+		}
+		exitID = &id
+	}
+	if _, err := s.users.SetPreferredExit(u.UUID, exitID); err != nil {
+		s.log.Error("set preferred exit", "uuid", u.UUID, "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	u, _ = s.users.Lookup(u.UUID)
+	selectedID, effectiveID, health, nodes := s.clientExitSelection(u)
+	items := make([]clientExitItem, 0, len(nodes))
+	for _, n := range nodes {
+		h := health[n.ID]
+		items = append(items, clientExitItem{
+			ID:          n.ID,
+			DisplayName: n.LocationLabel(),
+			CountryCode: n.CountryCode,
+			CountryName: n.CountryName,
+			City:        n.City,
+			Reachable:   h.Reachable,
+			LatencyMS:   h.TunnelLatencyMS,
+			Selected:    selectedID != nil && *selectedID == n.ID,
+			Effective:   effectiveID == n.ID,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"selected_exit_id":  selectedID,
+		"effective_exit_id": effectiveID,
+		"exits":             items,
+	})
 }
 
 func (s *Server) handleDeleteExit(w http.ResponseWriter, r *http.Request) {

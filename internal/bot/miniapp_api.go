@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,10 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 	// Serve static frontend files embedded in the binary.
 	sub, _ := fs.Sub(miniappFS, "embed/miniapp")
 	mux.Handle("/", http.FileServer(http.FS(sub)))
+
+	// Public mobile-client API. Auth is the VLESS UUID bearer token.
+	mux.HandleFunc("GET /api/client/exits", b.handleClientListExits)
+	mux.HandleFunc("PUT /api/client/exit-selection", b.handleClientSetExitSelection)
 
 	// Mini App API — all routes require valid initData + admin status.
 	mux.HandleFunc("GET /api/me", b.handleMe)
@@ -482,10 +487,78 @@ func (b *Bot) handleGetUserConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "uuid required", http.StatusBadRequest)
 		return
 	}
-	resp, err := b.adminGet(r.Context(), "/v1/users/"+uuid+"/client")
+	path := "/v1/users/" + uuid + "/client"
+	if base := b.clientAPIBaseURL(); base != "" {
+		path += "?client_api_base_url=" + url.QueryEscape(base)
+	}
+	resp, err := b.adminGet(r.Context(), path)
 	if err != nil {
 		b.log.Error("admin GET /client", "uuid", uuid, "err", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(resp)
+}
+
+func (b *Bot) clientAPIBaseURL() string {
+	base := strings.TrimRight(strings.TrimSpace(b.miniAppURL), "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/api/client"
+}
+
+func bearerUUID(r *http.Request) string {
+	h := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(h, "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+}
+
+func writeAdminProxyError(w http.ResponseWriter, err error, fallback int) {
+	var apiErr *adminAPIError
+	if errors.As(err, &apiErr) {
+		body := strings.TrimSpace(apiErr.body)
+		if body == "" {
+			body = http.StatusText(apiErr.code)
+		}
+		http.Error(w, body, apiErr.code)
+		return
+	}
+	http.Error(w, http.StatusText(fallback), fallback)
+}
+
+func (b *Bot) handleClientListExits(w http.ResponseWriter, r *http.Request) {
+	uuid := bearerUUID(r)
+	if uuid == "" {
+		http.Error(w, "missing bearer token", http.StatusUnauthorized)
+		return
+	}
+	resp, err := b.adminGet(r.Context(), "/v1/client/users/"+url.PathEscape(uuid)+"/exits")
+	if err != nil {
+		writeAdminProxyError(w, err, http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(resp)
+}
+
+func (b *Bot) handleClientSetExitSelection(w http.ResponseWriter, r *http.Request) {
+	uuid := bearerUUID(r)
+	if uuid == "" {
+		http.Error(w, "missing bearer token", http.StatusUnauthorized)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	resp, err := b.adminPut(r.Context(), "/v1/client/users/"+url.PathEscape(uuid)+"/exit-selection", body)
+	if err != nil {
+		writeAdminProxyError(w, err, http.StatusBadGateway)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -802,6 +875,28 @@ func (b *Bot) adminPost(ctx context.Context, path string, payload []byte) ([]byt
 
 func (b *Bot) adminPatch(ctx context.Context, path string, payload []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, b.adminAPIURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+b.adminAPIToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := adminHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		return nil, &adminAPIError{code: resp.StatusCode, body: string(body)}
+	}
+	return body, nil
+}
+
+func (b *Bot) adminPut(ctx context.Context, path string, payload []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, b.adminAPIURL+path, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}

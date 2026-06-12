@@ -4,16 +4,17 @@ import (
 	"strings"
 )
 
-func buildBridgeRouting(spec *Spec, activeExitTag string) (domainStrategy string, rules []any) {
+func buildBridgeRouting(spec *Spec, activeExitTag string, userExitTags map[string]string) (domainStrategy string, rules []any) {
 	w := resolveXrayWire(spec)
 	exitTag := activeExitTag
 	if exitTag == "" {
 		exitTag = w.OutboundExitTag
 	}
 	if !spec.SplitRoutingEnabled() {
-		return "AsIs", []any{
+		rules := []any{
 			map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": exitTag},
 		}
+		return "AsIs", injectUserExitRules(rules, exitTag, userExitTags)
 	}
 	mode := spec.RoutingMode
 	if mode == "" {
@@ -21,14 +22,58 @@ func buildBridgeRouting(spec *Spec, activeExitTag string) (domainStrategy string
 	}
 	switch mode {
 	case RoutingModeBlocklist:
-		return buildBlocklistRouting(spec, w, exitTag)
+		ds, rules := buildBlocklistRouting(spec, w, exitTag)
+		return ds, injectUserExitRules(rules, exitTag, userExitTags)
 	case RoutingModeRUDirect:
-		return buildRUDirectRouting(spec, w, exitTag)
+		ds, rules := buildRUDirectRouting(spec, w, exitTag)
+		return ds, injectUserExitRules(rules, exitTag, userExitTags)
 	default:
-		return "AsIs", []any{
+		rules := []any{
 			map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": exitTag},
 		}
+		return "AsIs", injectUserExitRules(rules, exitTag, userExitTags)
 	}
+}
+
+func injectUserExitRules(rules []any, defaultExitTag string, userExitTags map[string]string) []any {
+	if len(userExitTags) == 0 {
+		return rules
+	}
+	var userRules []any
+	for _, r := range rules {
+		m, ok := r.(map[string]any)
+		if !ok || m["outboundTag"] != defaultExitTag {
+			continue
+		}
+		for user, tag := range userExitTags {
+			if tag == "" || tag == defaultExitTag {
+				continue
+			}
+			cp := make(map[string]any, len(m)+1)
+			for k, v := range m {
+				cp[k] = v
+			}
+			cp["user"] = []string{user}
+			cp["outboundTag"] = tag
+			userRules = append(userRules, cp)
+		}
+	}
+	if len(userRules) == 0 {
+		return rules
+	}
+	insertAt := len(rules)
+	for i, r := range rules {
+		m, ok := r.(map[string]any)
+		if ok && m["outboundTag"] == defaultExitTag {
+			insertAt = i
+			break
+		}
+	}
+	out := make([]any, 0, len(rules)+len(userRules))
+	out = append(out, rules[:insertAt]...)
+	out = append(out, userRules...)
+	out = append(out, rules[insertAt:]...)
+	return out
 }
 
 func prependGeositeBlockRules(spec *Spec, w xrayWireResolved, rules []any) []any {

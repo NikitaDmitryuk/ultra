@@ -991,9 +991,12 @@ function renderExits(items, activeID) {
     const id = n.id || n.ID;
     const active = id === activeID || n.active;
     const enabled = n.enabled !== false && n.Enabled !== false;
+    const city = n.city || n.City || '';
+    const country = n.country_name || n.CountryName || '';
+    const location = [city, country].filter(Boolean).join(', ');
     item.innerHTML = `
       <div class="diag-item-title">${esc(n.name || n.Name)}${active ? ' · active' : ''}${!enabled ? ' · off' : ''}</div>
-      <div class="diag-item-meta">${esc(n.address || n.Address)}:${esc(String(n.port || n.Port))} · priority ${esc(String(n.priority || n.Priority))}</div>
+      <div class="diag-item-meta">${esc(n.address || n.Address)}:${esc(String(n.port || n.Port))} · priority ${esc(String(n.priority || n.Priority))}${location ? ' · ' + esc(location) : ''}</div>
     `;
     const row = document.createElement('div');
     row.className = 'detail-actions-row';
@@ -1022,12 +1025,15 @@ async function createExitNode() {
   const address = document.getElementById('new-exit-address')?.value?.trim();
   const port = parseInt(document.getElementById('new-exit-port')?.value, 10);
   const priority = parseInt(document.getElementById('new-exit-priority')?.value, 10) || 100;
+  const country_code = document.getElementById('new-exit-country-code')?.value?.trim();
+  const country_name = document.getElementById('new-exit-country-name')?.value?.trim();
+  const city = document.getElementById('new-exit-city')?.value?.trim();
   if (!name || !address || !port) {
     showToast('Заполните имя, адрес и порт.');
     return;
   }
   try {
-    const res = await api('POST', '/api/exits', { name, address, port, priority });
+    const res = await api('POST', '/api/exits', { name, address, port, priority, country_code, country_name, city });
     const deploy = res.deploy || {};
     const box = document.getElementById('exit-deploy-result');
     const text = document.getElementById('exit-deploy-text');

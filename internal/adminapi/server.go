@@ -129,6 +129,7 @@ func (s *Server) routes() error {
 		http.Redirect(w, r, "/admin/", http.StatusFound)
 	})
 	s.mux.HandleFunc("GET /v1/users", s.handleListUsers)
+	s.mux.HandleFunc("GET /v1/users/{uuid}", s.handleGetUser)
 	s.mux.HandleFunc("PATCH /v1/users/{uuid}", s.handlePatchUser)
 	s.mux.HandleFunc("DELETE /v1/users/{uuid}", s.handleDeleteUser)
 	s.mux.HandleFunc("DELETE /v1/users/{uuid}/purge", s.handlePurgeUser)
@@ -147,6 +148,8 @@ func (s *Server) routes() error {
 	s.mux.HandleFunc("POST /v1/exits", s.handlePostExit)
 	s.mux.HandleFunc("PATCH /v1/exits/{id}", s.handlePatchExit)
 	s.mux.HandleFunc("DELETE /v1/exits/{id}", s.handleDeleteExit)
+	s.mux.HandleFunc("GET /v1/client/users/{uuid}/exits", s.handleClientListExits)
+	s.mux.HandleFunc("PUT /v1/client/users/{uuid}/exit-selection", s.handleClientSetExitSelection)
 	return nil
 }
 
@@ -224,6 +227,7 @@ type getClientResp struct {
 	VLESSURI         string                       `json:"vless_uri,omitempty"`
 	FullConfigBase64 string                       `json:"full_xray_config_base64,omitempty"`
 	Profiles         []config.ClientProfileExport `json:"profiles,omitempty"`
+	ClientAPIBaseURL string                       `json:"client_api_base_url,omitempty"`
 	Socks5URI        string                       `json:"socks5_uri,omitempty"`
 	Host             string                       `json:"host,omitempty"`
 	Port             int                          `json:"port,omitempty"`
@@ -295,14 +299,39 @@ func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal", http.StatusInternalServerError)
 		return
 	}
+	clientAPIBaseURL := strings.TrimSpace(r.URL.Query().Get("client_api_base_url"))
+	if clientAPIBaseURL != "" {
+		exp = config.WithClientAPIBaseURL(exp, clientAPIBaseURL)
+		profiles = config.WithClientAPIBaseURLProfiles(profiles, clientAPIBaseURL)
+	}
 	resp := getClientResp{
 		XrayClientJSON:   exp.XRayOutboundJSON,
 		VLESSURI:         exp.VLESSURI,
 		FullConfigBase64: base64.StdEncoding.EncodeToString(fullJSON),
 		Profiles:         profiles,
+		ClientAPIBaseURL: clientAPIBaseURL,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.PathValue("uuid")
+	if id == "" {
+		http.Error(w, "uuid", http.StatusBadRequest)
+		return
+	}
+	u, ok := s.users.Lookup(id)
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(u)
 }
 
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
