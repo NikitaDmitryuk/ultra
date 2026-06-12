@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build release assets
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build release dist
+        run: make release-dist
+
+      - name: Verify checksums
+        run: cd dist && sha256sum -c checksums.txt
+
+      - name: Sign checksums with minisign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "MINISIGN_SECRET_KEY is not set; publishing unsigned checksums"
+            exit 0
+          fi
+          sudo apt-get update -q
+          sudo apt-get install -y -q minisign
+          printf '%s' "$MINISIGN_SECRET_KEY" > minisign.key
+          chmod 600 minisign.key
+          minisign -S -s minisign.key -m dist/checksums.txt -x dist/checksums.txt.minisig -W
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ultra-install-linux-amd64
+            dist/ultra-install-linux-arm64
+            dist/ultra-relay-linux-amd64
+            dist/ultra-relay-linux-arm64
+            dist/ultra-bot-linux-amd64
+            dist/ultra-bot-linux-arm64
+            dist/mobile-bootstrap.sh
+            dist/checksums.txt
+            dist/checksums.txt.minisig
+            dist/release-manifest.json

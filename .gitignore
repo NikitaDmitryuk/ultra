@@ -48,9 +48,18 @@ examples/test-key.pem
 
 /ultra-install
 /ultra-install-linux-amd64
+/ultra-install-linux-arm64
 
 /ultra-bot
 /ultra-bot-linux-amd64
+/ultra-bot-linux-arm64
+
+/dist/
+
+# Release signing keys (never commit private signing material)
+minisign.key
+minisign.pub
+*.minisig
 
 .cursor/
 .claude/

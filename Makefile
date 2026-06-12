@@ -1,4 +1,4 @@
-.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay benchmark-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 clean
+.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay benchmark-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64 release-dist clean
 
 BINARY=ultra-relay
 INSTALL_BINARY=ultra-install
@@ -118,7 +118,25 @@ build-bot-linux-amd64:
 build-linux-arm64:
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BINARY)-linux-arm64 ./cmd/ultra-relay
 
+build-install-linux-arm64:
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(INSTALL_BINARY)-linux-arm64 ./cmd/ultra-install
+
+build-bot-linux-arm64:
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BOT_BINARY)-linux-arm64 ./cmd/ultra-bot
+
+release-dist: build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64
+	mkdir -p dist
+	cp $(BINARY)-linux-amd64 $(INSTALL_BINARY)-linux-amd64 $(BOT_BINARY)-linux-amd64 \
+	   $(BINARY)-linux-arm64 $(INSTALL_BINARY)-linux-arm64 $(BOT_BINARY)-linux-arm64 \
+	   deploy/mobile-bootstrap.sh dist/
+	(cd dist && sha256sum \
+	   $(BINARY)-linux-amd64 $(INSTALL_BINARY)-linux-amd64 $(BOT_BINARY)-linux-amd64 \
+	   $(BINARY)-linux-arm64 $(INSTALL_BINARY)-linux-arm64 $(BOT_BINARY)-linux-arm64 \
+	   mobile-bootstrap.sh > checksums.txt)
+	scripts/build-release-manifest.sh dist "$$(git describe --tags --always --dirty 2>/dev/null || true)"
+
 clean:
 	rm -f $(BINARY) $(BINARY)-linux-amd64 $(BINARY)-linux-arm64 \
-	      $(INSTALL_BINARY) $(INSTALL_BINARY)-linux-amd64 \
-	      $(BOT_BINARY) $(BOT_BINARY)-linux-amd64
+	      $(INSTALL_BINARY) $(INSTALL_BINARY)-linux-amd64 $(INSTALL_BINARY)-linux-arm64 \
+	      $(BOT_BINARY) $(BOT_BINARY)-linux-amd64 $(BOT_BINARY)-linux-arm64
+	rm -rf dist

@@ -624,14 +624,46 @@ if [[ "$RUN_VERIFY" -eq 1 ]]; then
 	export VERIFY_IP_URL
 fi
 
-echo "Запуск: $INSTALLER ${ARGS[*]}"
-if ! "$INSTALLER" "${ARGS[@]}"; then
-	exit 1
+PLAN_FLOW_USED=0
+case "${ULTRA_INSTALL_LEGACY_FLOW:-n}" in
+y | Y | true | 1 | yes) USE_PLAN_FLOW=0 ;;
+*) USE_PLAN_FLOW=1 ;;
+esac
+
+if [[ "$FROM_CONFIG" -eq 1 && "$USE_PLAN_FLOW" -eq 1 ]]; then
+	PLAN_FILE="$(mktemp)"
+	LOCAL_RELEASE_DIR=""
+	trap 'rm -f "${PLAN_FILE:-}"; [[ -z "${LOCAL_RELEASE_DIR:-}" ]] || rm -rf "$LOCAL_RELEASE_DIR"' EXIT
+	echo "Генерация install-plan: $INSTALLER plan -config $CONFIG_FILE -out $PLAN_FILE"
+	if ! "$INSTALLER" plan -config "$CONFIG_FILE" -out "$PLAN_FILE"; then
+		exit 1
+	fi
+	echo "Doctor install-plan…"
+	if ! "$INSTALLER" doctor -plan "$PLAN_FILE" -env-root "$ROOT"; then
+		exit 1
+	fi
+	LOCAL_RELEASE_DIR="$(mktemp -d)"
+	install -m 755 "$INSTALLER" "$LOCAL_RELEASE_DIR/ultra-install"
+	install -m 755 "$RELAY_BIN" "$LOCAL_RELEASE_DIR/ultra-relay"
+	if [[ -f "$BOT_BIN" ]]; then
+		install -m 755 "$BOT_BIN" "$LOCAL_RELEASE_DIR/ultra-bot"
+	fi
+	echo "Запуск mobile-equivalent install flow: $INSTALLER apply-remote -plan $PLAN_FILE -release-dir $LOCAL_RELEASE_DIR"
+	if ! "$INSTALLER" apply-remote -plan "$PLAN_FILE" -release-dir "$LOCAL_RELEASE_DIR"; then
+		exit 1
+	fi
+	PLAN_FLOW_USED=1
+else
+	echo "Запуск legacy flow: $INSTALLER ${ARGS[*]}"
+	if ! "$INSTALLER" "${ARGS[@]}"; then
+		exit 1
+	fi
 fi
 
 # ── Bot deployment ────────────────────────────────────────────────────────────
-case "${BOT_ENABLE:-n}" in
-y | Y | true | 1 | yes)
+if [[ "$PLAN_FLOW_USED" -ne 1 ]]; then
+	case "${BOT_ENABLE:-n}" in
+	y | Y | true | 1 | yes)
 	if [[ ! -f "$BOT_BIN" ]]; then
 		echo "ultra: не найден $BOT_BIN — пропускаю деплой бота." >&2
 	else
@@ -758,7 +790,8 @@ y | Y | true | 1 | yes)
 		echo
 	fi
 	;;
-esac
+	esac
+fi
 
 if [[ "$RUN_VERIFY" -eq 1 ]]; then
 	echo
