@@ -201,123 +201,6 @@ func writePlanOutput(p *installplan.InstallPlan, out, format string) {
 	fmt.Println(string(b))
 }
 
-func legacyArgsFromPlan(p *installplan.InstallPlan) []string {
-	args := []string{
-		os.Args[0],
-		"-bridge", p.Bridge.SSHHost,
-		"-exit", p.Exits[0].SSHHost,
-		"-ssh-user", p.SSH.User,
-		"-public-host", p.Bridge.PublicHost,
-		"-vless-port", fmt.Sprint(p.Bridge.VLESSPort),
-		"-tunnel-port", fmt.Sprint(p.Bridge.TunnelPort),
-		"-remote-dir", p.Bridge.RemoteDir,
-		"-log-level", p.Features.LogLevel,
-		"-preset", p.Features.Preset,
-		"-transport", p.Features.Transport,
-	}
-	if p.SSH.Identity != "" {
-		args = append(args, "-identity", p.SSH.Identity)
-	}
-	if p.Bridge.ReuseSpec {
-		args = append(args, "-reuse-bridge-spec")
-	}
-	if p.Bridge.RealityDest != "" {
-		args = append(args, "-reality-dest", p.Bridge.RealityDest)
-	}
-	if p.Bridge.RealitySNI != "" {
-		args = append(args, "-reality-sni", p.Bridge.RealitySNI)
-	}
-	if p.Exits[0].DialAddr != "" && p.Exits[0].DialAddr != p.Exits[0].SSHHost {
-		args = append(args, "-exit-dial", p.Exits[0].DialAddr)
-	}
-	if len(p.Exits) == 2 {
-		e := p.Exits[1]
-		args = append(args, "-exit2", e.SSHHost, "-exit2-name", e.Name, "-exit2-priority", fmt.Sprint(e.Priority))
-		if e.DialAddr != "" && e.DialAddr != e.SSHHost {
-			args = append(args, "-exit2-dial", e.DialAddr)
-		}
-	}
-	if !p.Features.GenerateExitTLS {
-		args = append(args, "-generate-exit-tls=false")
-	}
-	if p.Features.SkipGeoDownload {
-		args = append(args, "-skip-geo-download")
-	}
-	if p.Features.GeoReleaseTag != "" {
-		args = append(args, "-geo-release-tag", p.Features.GeoReleaseTag)
-	}
-	if p.Features.WARP {
-		args = append(args, "-warp", "-warp-port", fmt.Sprint(p.Features.WARPPort))
-	}
-	if p.Features.DisableDOH {
-		args = append(args, "-disable-doh")
-	}
-	if p.Features.DisableVLESSFlow {
-		args = append(args, "-disable-vless-flow")
-	} else if p.Features.VLESSFlow != "" {
-		args = append(args, "-vless-flow", p.Features.VLESSFlow)
-	}
-	if p.Features.AntiCensorProfile != "" {
-		args = append(args, "-anti-censor-profile", p.Features.AntiCensorProfile)
-	}
-	if p.Features.PublicXHTTPPort > 0 {
-		args = append(args, "-public-xhttp-port", fmt.Sprint(p.Features.PublicXHTTPPort))
-	}
-	if p.Features.DisableFragment {
-		args = append(args, "-no-fragment")
-	}
-	if p.Features.SplitHTTPPadding != "" {
-		args = append(args, "-splithttp-padding", p.Features.SplitHTTPPadding)
-	}
-	if p.Features.SplitHTTPMaxChunkKB > 0 {
-		args = append(args, "-splithttp-max-chunk-kb", fmt.Sprint(p.Features.SplitHTTPMaxChunkKB))
-	}
-	if p.Features.RealityFingerprintsCSV != "" {
-		args = append(args, "-reality-fingerprints", p.Features.RealityFingerprintsCSV)
-	}
-	if p.Features.GeositeBlockTags != "" {
-		args = append(args, "-geosite-block-tags", p.Features.GeositeBlockTags)
-	}
-	if p.Features.DomainDirect != "" {
-		args = append(args, "-domain-direct", p.Features.DomainDirect)
-	}
-	if p.Features.SplitHTTPHost != "" {
-		args = append(args, "-splithttp-host", p.Features.SplitHTTPHost)
-	}
-	if p.Features.SplitHTTPPath != "" {
-		args = append(args, "-splithttp-path", p.Features.SplitHTTPPath)
-	}
-	if p.Database.Enabled {
-		host := p.Database.PrimaryHost
-		if host == "" {
-			host = p.Bridge.SSHHost
-		}
-		args = append(args, "-db-host", host)
-		if p.Database.ReplicaHost != "" {
-			args = append(args, "-db-replica", p.Database.ReplicaHost)
-		}
-		if p.Database.SSHUser != "" {
-			args = append(args, "-db-ssh-user", p.Database.SSHUser)
-		}
-		if p.Database.Name != "" {
-			args = append(args, "-db-name", p.Database.Name)
-		}
-		if p.Database.User != "" {
-			args = append(args, "-db-user", p.Database.User)
-		}
-	}
-	if p.Bot.Enabled {
-		args = append(args, "-bot-telegram-proxy")
-	}
-	if p.Artifacts.ProjectRoot != "" {
-		args = append(args, "-project-root", p.Artifacts.ProjectRoot)
-	}
-	if p.Artifacts.RelayBinary != "" {
-		args = append(args, "-binary", p.Artifacts.RelayBinary)
-	}
-	return args
-}
-
 func emitInstallEvent(format string, kind installplan.EventKind, code, message, node string) {
 	ev := installplan.InstallEvent{Time: time.Now().UTC(), Kind: kind, Code: code, Message: message, Node: node}
 	if format == "jsonl" {
@@ -360,7 +243,8 @@ func sanitizeName(s string) string {
 func writeJSON(f *os.File, v any) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	exitOnErr("json", err)
-	fmt.Fprintln(f, string(b))
+	_, err = fmt.Fprintln(f, string(b))
+	exitOnErr("json write", err)
 }
 
 func exitOnErr(prefix string, err error) {

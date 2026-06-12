@@ -217,7 +217,13 @@ func (r *TrafficRepo) GetLastSeenAll(ctx context.Context) ([]UserLastSeen, error
 	return out, nil
 }
 
-func trafficTimelineByBuckets(ctx context.Context, q *sqlc.Queries, userUUID string, window time.Duration, bucket string) ([]TrafficTimelinePoint, error) {
+func trafficTimelineByBuckets(
+	ctx context.Context,
+	q *sqlc.Queries,
+	userUUID string,
+	window time.Duration,
+	bucket string,
+) ([]TrafficTimelinePoint, error) {
 	pgUUID, err := toPGUUID(userUUID)
 	if err != nil {
 		return nil, err

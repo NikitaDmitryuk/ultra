@@ -43,7 +43,14 @@ type TelegramRepo struct {
 // NewTelegramRepo creates a TelegramRepo backed by db.
 func NewTelegramRepo(db *DB) *TelegramRepo { return &TelegramRepo{db: db} }
 
-func notificationFromFields(id int64, userUUID pgtype.UUID, telegramID int64, typ string, payload []byte, sentAt, createdAt pgtype.Timestamptz) Notification {
+func notificationFromFields(
+	id int64,
+	userUUID pgtype.UUID,
+	telegramID int64,
+	typ string,
+	payload []byte,
+	sentAt, createdAt pgtype.Timestamptz,
+) Notification {
 	n := Notification{
 		ID:         id,
 		UserUUID:   ptrFromPGUUID(userUUID),

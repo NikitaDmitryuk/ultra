@@ -23,7 +23,13 @@ func applyPlanN(p *installplan.InstallPlan, format string) {
 		emitInstallEvent(format, installplan.EventStep, "", "loading existing bridge state for reuse", "bridge")
 		existing, err := loadPlanRemoteBridgeSpec(p)
 		if err != nil {
-			emitInstallEvent(format, installplan.EventWarning, "", fmt.Sprintf("existing bridge spec not available, generating fresh state: %v", err), "bridge")
+			emitInstallEvent(
+				format,
+				installplan.EventWarning,
+				"",
+				fmt.Sprintf("existing bridge spec not available, generating fresh state: %v", err),
+				"bridge",
+			)
 			p.Bridge.ReuseSpec = false
 		} else {
 			renderOpts.ExistingBridge = existing
@@ -201,16 +207,34 @@ func setupPlanDatabase(p *installplan.InstallPlan, ds *installplan.DesiredState,
 	exitOnErr("postgres primary setup", install.SetupPrimaryPostgres(dbSSH, primaryHost, p.SSH.Identity, *ds.PostgresConfig))
 	if replicaHost != "" && replicaHost != primaryHost {
 		if !install.SSHReachable(dbSSH, replicaHost, p.SSH.Identity) {
-			emitInstallEvent(format, installplan.EventWarning, installplan.CodeSSHUnreachable, fmt.Sprintf("PostgreSQL replica %s is not reachable; skipping", replicaHost), "database")
+			emitInstallEvent(
+				format,
+				installplan.EventWarning,
+				installplan.CodeSSHUnreachable,
+				fmt.Sprintf("PostgreSQL replica %s is not reachable; skipping", replicaHost),
+				"database",
+			)
 			return
 		}
 		emitInstallEvent(format, installplan.EventStep, "", fmt.Sprintf("setting up PostgreSQL replica on %s", replicaHost), "database")
 		if err := install.SetupSystem(dbSSH, replicaHost, p.SSH.Identity); err != nil {
-			emitInstallEvent(format, installplan.EventWarning, installplan.CodeSSHUnreachable, fmt.Sprintf("replica system setup failed: %v", err), "database")
+			emitInstallEvent(
+				format,
+				installplan.EventWarning,
+				installplan.CodeSSHUnreachable,
+				fmt.Sprintf("replica system setup failed: %v", err),
+				"database",
+			)
 			return
 		}
 		if err := install.SetupReplicaPostgres(dbSSH, replicaHost, p.SSH.Identity, *ds.PostgresConfig, primaryHost); err != nil {
-			emitInstallEvent(format, installplan.EventWarning, installplan.CodeRemotePackageInstallFailed, fmt.Sprintf("replica setup failed: %v", err), "database")
+			emitInstallEvent(
+				format,
+				installplan.EventWarning,
+				installplan.CodeRemotePackageInstallFailed,
+				fmt.Sprintf("replica setup failed: %v", err),
+				"database",
+			)
 		}
 	}
 }
@@ -285,7 +309,13 @@ func deployBotPlan(p *installplan.InstallPlan, format string) {
 	}
 	envFile := p.SecretsEnvFile()
 	if err := fileMustExist(envFile); err != nil {
-		emitInstallEvent(format, installplan.EventError, installplan.CodeMissingBotToken, fmt.Sprintf("secrets env file missing: %v", err), "bot")
+		emitInstallEvent(
+			format,
+			installplan.EventError,
+			installplan.CodeMissingBotToken,
+			fmt.Sprintf("secrets env file missing: %v", err),
+			"bot",
+		)
 		os.Exit(1)
 	}
 	projectRoot := p.Artifacts.ProjectRoot
@@ -356,7 +386,10 @@ func tempUnitPath(name, content string) (string, func()) {
 
 func obtainBotCertPlan(p *installplan.InstallPlan) error {
 	domain := p.Bot.Domain
-	checkFresh := fmt.Sprintf(`cert=/etc/letsencrypt/live/%s/fullchain.pem; [[ -f "$cert" ]] && openssl x509 -checkend 604800 -noout -in "$cert" >/dev/null 2>&1`, shellLiteral(domain))
+	checkFresh := fmt.Sprintf(
+		`cert=/etc/letsencrypt/live/%s/fullchain.pem; [[ -f "$cert" ]] && openssl x509 -checkend 604800 -noout -in "$cert" >/dev/null 2>&1`,
+		shellLiteral(domain),
+	)
 	if install.RunSSH(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, checkFresh) == nil {
 		return nil
 	}
@@ -369,7 +402,11 @@ systemctl stop ultra-bot 2>/dev/null || true`
 	if err := install.RunSSH(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, prep); err != nil {
 		return err
 	}
-	cmd := fmt.Sprintf(`certbot certonly --standalone -d %s --non-interactive --agree-tos --email %s`, shellLiteral(domain), shellLiteral("admin@"+domain))
+	cmd := fmt.Sprintf(
+		`certbot certonly --standalone -d %s --non-interactive --agree-tos --email %s`,
+		shellLiteral(domain),
+		shellLiteral("admin@"+domain),
+	)
 	return install.RunSSH(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, cmd)
 }
 

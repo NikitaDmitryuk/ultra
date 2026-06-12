@@ -74,23 +74,83 @@ func authUserFromFields(
 }
 
 func authUserFromGet(row sqlc.GetUserRow) auth.User {
-	return authUserFromFields(row.Uuid, row.Name, row.Kind, row.IsActive, row.DisabledAt, row.SocksUsername, row.SocksPassword, row.SocksPort, row.LeakPolicy, row.LeakMaxConcurrentIps, row.LeakMaxUniqueIps24h)
+	return authUserFromFields(
+		row.Uuid,
+		row.Name,
+		row.Kind,
+		row.IsActive,
+		row.DisabledAt,
+		row.SocksUsername,
+		row.SocksPassword,
+		row.SocksPort,
+		row.LeakPolicy,
+		row.LeakMaxConcurrentIps,
+		row.LeakMaxUniqueIps24h,
+	)
 }
 
 func authUserFromListActive(row sqlc.ListActiveUsersRow) auth.User {
-	return authUserFromFields(row.Uuid, row.Name, row.Kind, row.IsActive, row.DisabledAt, row.SocksUsername, row.SocksPassword, row.SocksPort, row.LeakPolicy, row.LeakMaxConcurrentIps, row.LeakMaxUniqueIps24h)
+	return authUserFromFields(
+		row.Uuid,
+		row.Name,
+		row.Kind,
+		row.IsActive,
+		row.DisabledAt,
+		row.SocksUsername,
+		row.SocksPassword,
+		row.SocksPort,
+		row.LeakPolicy,
+		row.LeakMaxConcurrentIps,
+		row.LeakMaxUniqueIps24h,
+	)
 }
 
 func authUserFromListAll(row sqlc.ListAllUsersRow) auth.User {
-	return authUserFromFields(row.Uuid, row.Name, row.Kind, row.IsActive, row.DisabledAt, row.SocksUsername, row.SocksPassword, row.SocksPort, row.LeakPolicy, row.LeakMaxConcurrentIps, row.LeakMaxUniqueIps24h)
+	return authUserFromFields(
+		row.Uuid,
+		row.Name,
+		row.Kind,
+		row.IsActive,
+		row.DisabledAt,
+		row.SocksUsername,
+		row.SocksPassword,
+		row.SocksPort,
+		row.LeakPolicy,
+		row.LeakMaxConcurrentIps,
+		row.LeakMaxUniqueIps24h,
+	)
 }
 
 func authUserFromRename(row sqlc.RenameUserRow) auth.User {
-	return authUserFromFields(row.Uuid, row.Name, row.Kind, row.IsActive, row.DisabledAt, row.SocksUsername, row.SocksPassword, row.SocksPort, row.LeakPolicy, row.LeakMaxConcurrentIps, row.LeakMaxUniqueIps24h)
+	return authUserFromFields(
+		row.Uuid,
+		row.Name,
+		row.Kind,
+		row.IsActive,
+		row.DisabledAt,
+		row.SocksUsername,
+		row.SocksPassword,
+		row.SocksPort,
+		row.LeakPolicy,
+		row.LeakMaxConcurrentIps,
+		row.LeakMaxUniqueIps24h,
+	)
 }
 
 func authUserFromRotateSocks(row sqlc.RotateSocksPasswordRow) auth.User {
-	return authUserFromFields(row.Uuid, row.Name, row.Kind, row.IsActive, row.DisabledAt, row.SocksUsername, row.SocksPassword, row.SocksPort, row.LeakPolicy, row.LeakMaxConcurrentIps, row.LeakMaxUniqueIps24h)
+	return authUserFromFields(
+		row.Uuid,
+		row.Name,
+		row.Kind,
+		row.IsActive,
+		row.DisabledAt,
+		row.SocksUsername,
+		row.SocksPassword,
+		row.SocksPort,
+		row.LeakPolicy,
+		row.LeakMaxConcurrentIps,
+		row.LeakMaxUniqueIps24h,
+	)
 }
 
 func randomSocksPassword() (string, error) {

@@ -108,7 +108,8 @@ func ValidatePlan(p *InstallPlan) error {
 	if p.Features.Transport != string(config.TunnelTransportSplitHTTP) && p.Features.Transport != string(config.TunnelTransportGRPC) {
 		return errors.New("features.transport must be splithttp or grpc")
 	}
-	if p.Features.RoutingMode != "" && p.Features.RoutingMode != config.RoutingModeBlocklist && p.Features.RoutingMode != config.RoutingModeRUDirect {
+	if p.Features.RoutingMode != "" && p.Features.RoutingMode != config.RoutingModeBlocklist &&
+		p.Features.RoutingMode != config.RoutingModeRUDirect {
 		return errors.New("features.routing_mode must be blocklist or ru_direct")
 	}
 	if strings.TrimSpace(p.Features.LogLevel) == "" {
