@@ -8,9 +8,10 @@ The phone is the SSH controller. It does not embed the Go installer. Instead it:
 
 1. Builds an install-plan JSON.
 2. Builds a secrets env file when sensitive values are needed.
-3. Uploads both files to the bridge VPS, for example `/tmp/ultra-plan.json` and `/tmp/ultra-secrets.env`.
-3. Runs `deploy/mobile-bootstrap.sh` on the bridge VPS over SSH.
-4. Reads `ultra-install` progress from stdout as JSON Lines.
+3. Uploads a temporary deploy SSH private key that can reach the bridge and exit nodes.
+4. Uploads all three files to the bridge VPS, for example `/tmp/ultra-plan.json`, `/tmp/ultra-secrets.env`, and `/tmp/ultra-ssh-key`.
+5. Runs `deploy/mobile-bootstrap.sh` on the bridge VPS over SSH.
+6. Reads `ultra-install` progress from stdout as JSON Lines.
 
 The bridge VPS downloads the official GitHub Release, verifies SHA-256 checksums, installs release binaries under `/opt/ultra/current`, then runs:
 
@@ -18,15 +19,18 @@ The bridge VPS downloads the official GitHub Release, verifies SHA-256 checksums
 /opt/ultra/current/ultra-install apply-remote \
   -plan /tmp/ultra-plan.json \
   -secrets /tmp/ultra-secrets.env \
+  -ssh-identity /tmp/ultra-ssh-key \
   -release-dir /opt/ultra/current \
   -format jsonl
 ```
 
-`install-plan.json` should not contain secrets. For Telegram bot installs, upload:
+`install-plan.json` should not contain secrets or private key material. For Telegram bot installs, upload:
 
 ```env
 TELEGRAM_BOT_TOKEN=...
 ```
+
+The bootstrap script removes the uploaded plan, secrets file, and temporary SSH private key after it exits. Persistent bot secrets are copied to `/etc/ultra-relay/bot.env` with `0600`.
 
 ## Release Assets
 
@@ -63,6 +67,7 @@ bash /tmp/mobile-bootstrap.sh \
   --release vX.Y.Z \
   --plan /tmp/ultra-plan.json \
   --secrets /tmp/ultra-secrets.env \
+  --ssh-identity /tmp/ultra-ssh-key \
   --minisign-pubkey 'RWQ...' \
   --require-signature yes \
   --format jsonl
@@ -71,6 +76,8 @@ bash /tmp/mobile-bootstrap.sh \
 For development or manual testing, `--release latest` follows the latest GitHub Release.
 
 The bootstrap script must run as root. The mobile app should either connect as root or perform a one-time key setup step before running the bootstrap.
+
+`--ssh-identity` overrides `ssh.identity` from the plan for this run only. If it is omitted, `ultra-install apply-remote` falls back to `plan.ssh.identity`.
 
 For development builds without a configured signing key, use `--require-signature no`. Production mobile builds should pin a release tag and require the minisign signature.
 
