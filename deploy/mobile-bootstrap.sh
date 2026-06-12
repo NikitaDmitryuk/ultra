@@ -11,10 +11,12 @@ REPO="NikitaDmitryuk/ultra"
 RELEASE="latest"
 PLAN="/tmp/ultra-plan.json"
 SECRETS=""
+SSH_IDENTITY=""
 FORMAT="jsonl"
 INSTALL_ROOT="/opt/ultra"
 MINISIGN_PUBKEY=""
 REQUIRE_SIGNATURE="auto"
+WORK=""
 
 usage() {
   cat <<EOF
@@ -25,6 +27,7 @@ Options:
   --release TAG|latest    GitHub release tag or latest (default: latest)
   --plan PATH             install-plan JSON already uploaded to this server
   --secrets PATH          secrets env file already uploaded to this server
+  --ssh-identity PATH     temporary SSH private key already uploaded to this server
   --format human|jsonl    ultra-install event output format (default: jsonl)
   --install-root PATH     release install root (default: /opt/ultra)
   --minisign-pubkey KEY   minisign public key for checksums.txt.minisig
@@ -38,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --release) RELEASE="${2:?}"; shift 2 ;;
     --plan) PLAN="${2:?}"; shift 2 ;;
     --secrets) SECRETS="${2:?}"; shift 2 ;;
+    --ssh-identity) SSH_IDENTITY="${2:?}"; shift 2 ;;
     --format) FORMAT="${2:?}"; shift 2 ;;
     --install-root) INSTALL_ROOT="${2:?}"; shift 2 ;;
     --minisign-pubkey) MINISIGN_PUBKEY="${2:?}"; shift 2 ;;
@@ -46,6 +50,20 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+cleanup() {
+  if [[ -n "${WORK:-}" ]]; then
+    rm -rf "$WORK"
+  fi
+  rm -f -- "$PLAN"
+  if [[ -n "$SECRETS" ]]; then
+    rm -f -- "$SECRETS"
+  fi
+  if [[ -n "$SSH_IDENTITY" ]]; then
+    rm -f -- "$SSH_IDENTITY"
+  fi
+}
+trap cleanup EXIT
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "mobile-bootstrap: run as root (or connect with a root SSH user)" >&2
@@ -58,6 +76,13 @@ fi
 if [[ -n "$SECRETS" && ! -f "$SECRETS" ]]; then
   echo "mobile-bootstrap: secrets file not found: $SECRETS" >&2
   exit 1
+fi
+if [[ -n "$SSH_IDENTITY" ]]; then
+  if [[ ! -f "$SSH_IDENTITY" ]]; then
+    echo "mobile-bootstrap: ssh identity file not found: $SSH_IDENTITY" >&2
+    exit 1
+  fi
+  chmod 600 "$SSH_IDENTITY"
 fi
 case "$REQUIRE_SIGNATURE" in
   auto|yes|no) ;;
@@ -87,7 +112,6 @@ case "$RELEASE" in
 esac
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
 
 download() {
   local name="$1"
@@ -148,5 +172,8 @@ APPLY_ARGS=(
 if [[ -n "$SECRETS" ]]; then
   APPLY_ARGS+=(-secrets "$SECRETS")
 fi
+if [[ -n "$SSH_IDENTITY" ]]; then
+  APPLY_ARGS+=(-ssh-identity "$SSH_IDENTITY")
+fi
 
-exec "${INSTALL_ROOT}/current/ultra-install" "${APPLY_ARGS[@]}"
+"${INSTALL_ROOT}/current/ultra-install" "${APPLY_ARGS[@]}"

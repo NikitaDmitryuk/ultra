@@ -159,12 +159,16 @@ func runApplyRemoteCommand(args []string) {
 	fs := flag.NewFlagSet("ultra-install apply-remote", flag.ExitOnError)
 	planPath := fs.String("plan", "", "install-plan JSON path on this server")
 	secretsPath := fs.String("secrets", "", "secrets env file path already available on this server")
+	sshIdentity := fs.String("ssh-identity", "", "SSH private key path already available on this server; overrides plan.ssh.identity")
 	releaseDir := fs.String("release-dir", "/opt/ultra/current", "directory containing ultra-relay and ultra-bot release binaries")
 	format := fs.String("format", "human", "human or jsonl")
 	_ = fs.Parse(args)
 	p := readPlanOrExit(*planPath)
 	if strings.TrimSpace(*secretsPath) != "" {
 		p.Secrets.EnvFile = *secretsPath
+	}
+	if strings.TrimSpace(*sshIdentity) != "" {
+		p.SSH.Identity = *sshIdentity
 	}
 	exitOnErr("apply-remote validate", installplan.ValidatePlan(p))
 	emitInstallEvent(*format, installplan.EventStep, "", "starting remote apply", "")
