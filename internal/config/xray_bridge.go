@@ -48,6 +48,7 @@ func BuildBridgeXRayJSON(
 	w := resolveXrayWire(spec)
 	clients := make([]map[string]any, 0, len(users))
 	xhttpClients := make([]map[string]any, 0, len(users))
+	userExitTags := make(map[string]string)
 	for _, u := range users {
 		if u.UUID == "" {
 			continue
@@ -55,12 +56,7 @@ func BuildBridgeXRayJSON(
 		if u.Kind == "socks5" {
 			continue
 		}
-		// When stats are enabled use the UUID as email so the stats key is
-		// "user>>>UUID>>>traffic>>>uplink/downlink" and maps back unambiguously.
-		email := u.Name
-		if email == "" || statsEnabled {
-			email = u.UUID
-		}
+		email := u.UUID
 		client := map[string]any{
 			"id":    u.UUID,
 			"email": email,
@@ -73,6 +69,9 @@ func BuildBridgeXRayJSON(
 			"id":    u.UUID,
 			"email": email,
 		})
+		if u.EffectiveExitID != "" && u.EffectiveExitID != activeExitID {
+			userExitTags[u.UUID] = exits.OutboundTag(u.EffectiveExitID)
+		}
 	}
 
 	if xrayLogLevel == "" {
@@ -86,7 +85,7 @@ func BuildBridgeXRayJSON(
 		return splithttpOutboundStream(spec, strat, w, pinnedPeerCertSHA256)
 	}
 
-	domainStrategy, routeRules := buildBridgeRouting(spec, resolveActiveExitTag(activeExitID, w))
+	domainStrategy, routeRules := buildBridgeRouting(spec, resolveActiveExitTag(activeExitID, w), userExitTags)
 	needsBlock := BridgeNeedsBlockOutbound(spec)
 	activeTag := resolveActiveExitTag(activeExitID, w)
 

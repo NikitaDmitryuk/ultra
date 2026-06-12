@@ -20,6 +20,7 @@ const (
 type ClientExport struct {
 	XRayOutboundJSON map[string]any `json:"xray_client_json"`
 	VLESSURI         string         `json:"vless_uri"`
+	ClientAPIBaseURL string         `json:"client_api_base_url,omitempty"`
 }
 
 // ClientProfileExport describes one importable client profile. Legacy clients can keep using
@@ -31,6 +32,45 @@ type ClientProfileExport struct {
 	XRayOutboundJSON map[string]any `json:"xray_client_json"`
 	VLESSURI         string         `json:"vless_uri"`
 	FullConfigBase64 string         `json:"full_xray_config_base64"`
+	ClientAPIBaseURL string         `json:"client_api_base_url,omitempty"`
+}
+
+func addClientAPIParam(vlessURI, clientAPIBaseURL string) string {
+	clientAPIBaseURL = strings.TrimSpace(clientAPIBaseURL)
+	if clientAPIBaseURL == "" || vlessURI == "" {
+		return vlessURI
+	}
+	u, err := url.Parse(vlessURI)
+	if err != nil {
+		return vlessURI
+	}
+	q := u.Query()
+	q.Set("api", clientAPIBaseURL)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func WithClientAPIBaseURL(exp *ClientExport, clientAPIBaseURL string) *ClientExport {
+	if exp == nil {
+		return nil
+	}
+	cp := *exp
+	cp.ClientAPIBaseURL = strings.TrimSpace(clientAPIBaseURL)
+	cp.VLESSURI = addClientAPIParam(cp.VLESSURI, cp.ClientAPIBaseURL)
+	return &cp
+}
+
+func WithClientAPIBaseURLProfiles(profiles []ClientProfileExport, clientAPIBaseURL string) []ClientProfileExport {
+	if strings.TrimSpace(clientAPIBaseURL) == "" {
+		return profiles
+	}
+	out := make([]ClientProfileExport, len(profiles))
+	copy(out, profiles)
+	for i := range out {
+		out[i].ClientAPIBaseURL = strings.TrimSpace(clientAPIBaseURL)
+		out[i].VLESSURI = addClientAPIParam(out[i].VLESSURI, out[i].ClientAPIBaseURL)
+	}
+	return out
 }
 
 // BuildClientExport builds a minimal outbound fragment and a connection URI for one user.

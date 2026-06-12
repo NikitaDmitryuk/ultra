@@ -18,11 +18,15 @@ type Repo interface {
 
 // UpdatePatch mirrors db.UpdatePatch without importing db.
 type UpdatePatch struct {
-	Name     *string
-	Address  *string
-	Port     *int
-	Priority *int
-	Enabled  *bool
+	Name        *string
+	Address     *string
+	Port        *int
+	CountryCode *string
+	CountryName *string
+	City        *string
+	DisplayName *string
+	Priority    *int
+	Enabled     *bool
 }
 
 // Manager caches exit nodes and notifies on changes (same pattern as auth.DBManager).

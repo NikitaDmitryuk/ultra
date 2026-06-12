@@ -3,7 +3,7 @@ package config
 import "testing"
 
 func TestBuildBridgeRoutingAllViaExit(t *testing.T) {
-	ds, rules := buildBridgeRouting(&Spec{SplitRouting: BoolPtr(false)}, "")
+	ds, rules := buildBridgeRouting(&Spec{SplitRouting: BoolPtr(false)}, "", nil)
 	if ds != "AsIs" {
 		t.Fatalf("domainStrategy: got %q", ds)
 	}
@@ -17,7 +17,7 @@ func TestBuildBridgeRoutingBlocklistDefaultGeosite(t *testing.T) {
 		SplitRouting: BoolPtr(true),
 		RoutingMode:  RoutingModeBlocklist,
 		GeoAssetsDir: "/tmp/geo",
-	}, "")
+	}, "", nil)
 	if ds != "AsIs" {
 		t.Fatalf("domainStrategy: got %q", ds)
 	}
@@ -45,7 +45,7 @@ func TestBuildRUDirectRouting(t *testing.T) {
 		SplitRouting: BoolPtr(true),
 		RoutingMode:  RoutingModeRUDirect,
 		GeoAssetsDir: "/tmp/geo",
-	}, "")
+	}, "", nil)
 	if ds != "AsIs" {
 		t.Fatalf("domainStrategy: got %q", ds)
 	}
@@ -101,7 +101,7 @@ func TestBuildRUDirectRoutingExplicitGeosite(t *testing.T) {
 		RoutingMode:       RoutingModeRUDirect,
 		GeoAssetsDir:      "/tmp/geo",
 		GeositeDirectTags: []string{"ru"},
-	}, "")
+	}, "", nil)
 	var sawGeositeRU bool
 	for _, r := range rules {
 		m, ok := r.(map[string]any)
@@ -130,7 +130,7 @@ func TestBuildRUDirectRoutingGeositeDirectDisabled(t *testing.T) {
 		GeositeDirectTags: empty,
 		RuDirectTLDRegex:  BoolPtr(false),
 		GeoipDirectTags:   []string{"ru"},
-	}, "")
+	}, "", nil)
 	for _, r := range rules {
 		m, ok := r.(map[string]any)
 		if !ok {
@@ -152,7 +152,7 @@ func TestBuildBlocklistPrependsBlockRule(t *testing.T) {
 		RoutingMode:      RoutingModeBlocklist,
 		GeoAssetsDir:     "/tmp/geo",
 		GeositeBlockTags: []string{"category-ads-all"},
-	}, "")
+	}, "", nil)
 	if len(rules) < 2 {
 		t.Fatalf("expected block + other rules: %#v", rules)
 	}
@@ -171,13 +171,33 @@ func TestBuildRUDirectPrependsBlockRule(t *testing.T) {
 		RoutingMode:      RoutingModeRUDirect,
 		GeoAssetsDir:     "/tmp/geo",
 		GeositeBlockTags: []string{"category-ads-all"},
-	}, "")
+	}, "", nil)
 	first, ok := rules[0].(map[string]any)
 	if !ok {
 		t.Fatal("first rule type")
 	}
 	if first["outboundTag"] != "block" {
 		t.Fatalf("first rule should be block, got %#v", first)
+	}
+}
+
+func TestBuildBridgeRoutingInjectsUserExitRules(t *testing.T) {
+	_, rules := buildBridgeRouting(&Spec{SplitRouting: BoolPtr(false)}, "to-exit-default", map[string]string{
+		"user-1": "to-exit-fra",
+	})
+	if len(rules) != 2 {
+		t.Fatalf("rules len: %d %#v", len(rules), rules)
+	}
+	first, ok := rules[0].(map[string]any)
+	if !ok {
+		t.Fatal("first rule type")
+	}
+	if first["outboundTag"] != "to-exit-fra" {
+		t.Fatalf("user rule outbound: %#v", first)
+	}
+	users, ok := first["user"].([]string)
+	if !ok || len(users) != 1 || users[0] != "user-1" {
+		t.Fatalf("user matcher: %#v", first)
 	}
 }
 

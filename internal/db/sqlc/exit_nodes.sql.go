@@ -106,7 +106,9 @@ func (q *Queries) FindExitNodeByTunnelUUID(ctx context.Context, tunnelUuid strin
 }
 
 const getExitNode = `-- name: GetExitNode :one
-SELECT id, name, address, port, tunnel_uuid, pinned_peer_cert_sha256, priority, enabled, created_at, updated_at
+SELECT id, name, address, port, tunnel_uuid, pinned_peer_cert_sha256,
+  country_code, country_name, city, display_name,
+  priority, enabled, created_at, updated_at
 FROM exit_nodes WHERE id=$1
 `
 
@@ -117,6 +119,10 @@ type GetExitNodeRow struct {
 	Port                 int32              `json:"port"`
 	TunnelUuid           string             `json:"tunnel_uuid"`
 	PinnedPeerCertSha256 string             `json:"pinned_peer_cert_sha256"`
+	CountryCode          string             `json:"country_code"`
+	CountryName          string             `json:"country_name"`
+	City                 string             `json:"city"`
+	DisplayName          string             `json:"display_name"`
 	Priority             int32              `json:"priority"`
 	Enabled              bool               `json:"enabled"`
 	CreatedAt            pgtype.Timestamptz `json:"created_at"`
@@ -133,6 +139,10 @@ func (q *Queries) GetExitNode(ctx context.Context, id pgtype.UUID) (GetExitNodeR
 		&i.Port,
 		&i.TunnelUuid,
 		&i.PinnedPeerCertSha256,
+		&i.CountryCode,
+		&i.CountryName,
+		&i.City,
+		&i.DisplayName,
 		&i.Priority,
 		&i.Enabled,
 		&i.CreatedAt,
@@ -142,9 +152,15 @@ func (q *Queries) GetExitNode(ctx context.Context, id pgtype.UUID) (GetExitNodeR
 }
 
 const insertExitNode = `-- name: InsertExitNode :one
-INSERT INTO exit_nodes(id, name, address, port, tunnel_uuid, pinned_peer_cert_sha256, priority, enabled)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-RETURNING id, name, address, port, tunnel_uuid, pinned_peer_cert_sha256, priority, enabled, created_at, updated_at
+INSERT INTO exit_nodes(
+  id, name, address, port, tunnel_uuid, pinned_peer_cert_sha256,
+  country_code, country_name, city, display_name,
+  priority, enabled
+)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+RETURNING id, name, address, port, tunnel_uuid, pinned_peer_cert_sha256,
+  country_code, country_name, city, display_name,
+  priority, enabled, created_at, updated_at
 `
 
 type InsertExitNodeParams struct {
@@ -154,6 +170,10 @@ type InsertExitNodeParams struct {
 	Port                 int32       `json:"port"`
 	TunnelUuid           string      `json:"tunnel_uuid"`
 	PinnedPeerCertSha256 string      `json:"pinned_peer_cert_sha256"`
+	CountryCode          string      `json:"country_code"`
+	CountryName          string      `json:"country_name"`
+	City                 string      `json:"city"`
+	DisplayName          string      `json:"display_name"`
 	Priority             int32       `json:"priority"`
 	Enabled              bool        `json:"enabled"`
 }
@@ -165,6 +185,10 @@ type InsertExitNodeRow struct {
 	Port                 int32              `json:"port"`
 	TunnelUuid           string             `json:"tunnel_uuid"`
 	PinnedPeerCertSha256 string             `json:"pinned_peer_cert_sha256"`
+	CountryCode          string             `json:"country_code"`
+	CountryName          string             `json:"country_name"`
+	City                 string             `json:"city"`
+	DisplayName          string             `json:"display_name"`
 	Priority             int32              `json:"priority"`
 	Enabled              bool               `json:"enabled"`
 	CreatedAt            pgtype.Timestamptz `json:"created_at"`
@@ -179,6 +203,10 @@ func (q *Queries) InsertExitNode(ctx context.Context, arg InsertExitNodeParams) 
 		arg.Port,
 		arg.TunnelUuid,
 		arg.PinnedPeerCertSha256,
+		arg.CountryCode,
+		arg.CountryName,
+		arg.City,
+		arg.DisplayName,
 		arg.Priority,
 		arg.Enabled,
 	)
@@ -190,6 +218,10 @@ func (q *Queries) InsertExitNode(ctx context.Context, arg InsertExitNodeParams) 
 		&i.Port,
 		&i.TunnelUuid,
 		&i.PinnedPeerCertSha256,
+		&i.CountryCode,
+		&i.CountryName,
+		&i.City,
+		&i.DisplayName,
 		&i.Priority,
 		&i.Enabled,
 		&i.CreatedAt,
@@ -199,7 +231,9 @@ func (q *Queries) InsertExitNode(ctx context.Context, arg InsertExitNodeParams) 
 }
 
 const listExitNodes = `-- name: ListExitNodes :many
-SELECT id, name, address, port, tunnel_uuid, pinned_peer_cert_sha256, priority, enabled, created_at, updated_at
+SELECT id, name, address, port, tunnel_uuid, pinned_peer_cert_sha256,
+  country_code, country_name, city, display_name,
+  priority, enabled, created_at, updated_at
 FROM exit_nodes ORDER BY priority ASC, created_at ASC
 `
 
@@ -210,6 +244,10 @@ type ListExitNodesRow struct {
 	Port                 int32              `json:"port"`
 	TunnelUuid           string             `json:"tunnel_uuid"`
 	PinnedPeerCertSha256 string             `json:"pinned_peer_cert_sha256"`
+	CountryCode          string             `json:"country_code"`
+	CountryName          string             `json:"country_name"`
+	City                 string             `json:"city"`
+	DisplayName          string             `json:"display_name"`
 	Priority             int32              `json:"priority"`
 	Enabled              bool               `json:"enabled"`
 	CreatedAt            pgtype.Timestamptz `json:"created_at"`
@@ -232,6 +270,10 @@ func (q *Queries) ListExitNodes(ctx context.Context) ([]ListExitNodesRow, error)
 			&i.Port,
 			&i.TunnelUuid,
 			&i.PinnedPeerCertSha256,
+			&i.CountryCode,
+			&i.CountryName,
+			&i.City,
+			&i.DisplayName,
 			&i.Priority,
 			&i.Enabled,
 			&i.CreatedAt,
@@ -252,9 +294,13 @@ UPDATE exit_nodes SET
   name=$2,
   tunnel_uuid=CASE WHEN $3<>'' THEN $3 ELSE tunnel_uuid END,
   pinned_peer_cert_sha256=CASE WHEN $4<>'' THEN $4 ELSE pinned_peer_cert_sha256 END,
-  priority=CASE WHEN $5>0 THEN $5 ELSE priority END,
-  enabled=$6,
-  updated_at=$7
+  country_code=CASE WHEN $5<>'' THEN $5 ELSE country_code END,
+  country_name=CASE WHEN $6<>'' THEN $6 ELSE country_name END,
+  city=CASE WHEN $7<>'' THEN $7 ELSE city END,
+  display_name=CASE WHEN $8<>'' THEN $8 ELSE display_name END,
+  priority=CASE WHEN $9>0 THEN $9 ELSE priority END,
+  enabled=$10,
+  updated_at=$11
 WHERE id=$1
 `
 
@@ -264,6 +310,10 @@ type MergeExitByAddressPortParams struct {
 	Column3   interface{}        `json:"column_3"`
 	Column4   interface{}        `json:"column_4"`
 	Column5   interface{}        `json:"column_5"`
+	Column6   interface{}        `json:"column_6"`
+	Column7   interface{}        `json:"column_7"`
+	Column8   interface{}        `json:"column_8"`
+	Column9   interface{}        `json:"column_9"`
 	Enabled   bool               `json:"enabled"`
 	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
 }
@@ -275,6 +325,10 @@ func (q *Queries) MergeExitByAddressPort(ctx context.Context, arg MergeExitByAdd
 		arg.Column3,
 		arg.Column4,
 		arg.Column5,
+		arg.Column6,
+		arg.Column7,
+		arg.Column8,
+		arg.Column9,
 		arg.Enabled,
 		arg.UpdatedAt,
 	)
@@ -285,9 +339,13 @@ const mergeExitByTunnelUUID = `-- name: MergeExitByTunnelUUID :exec
 UPDATE exit_nodes SET
   name=$2,
   pinned_peer_cert_sha256=CASE WHEN $3<>'' THEN $3 ELSE pinned_peer_cert_sha256 END,
-  priority=CASE WHEN $4>0 THEN $4 ELSE priority END,
-  enabled=$5,
-  updated_at=$6
+  country_code=CASE WHEN $4<>'' THEN $4 ELSE country_code END,
+  country_name=CASE WHEN $5<>'' THEN $5 ELSE country_name END,
+  city=CASE WHEN $6<>'' THEN $6 ELSE city END,
+  display_name=CASE WHEN $7<>'' THEN $7 ELSE display_name END,
+  priority=CASE WHEN $8>0 THEN $8 ELSE priority END,
+  enabled=$9,
+  updated_at=$10
 WHERE id=$1
 `
 
@@ -296,6 +354,10 @@ type MergeExitByTunnelUUIDParams struct {
 	Name      string             `json:"name"`
 	Column3   interface{}        `json:"column_3"`
 	Column4   interface{}        `json:"column_4"`
+	Column5   interface{}        `json:"column_5"`
+	Column6   interface{}        `json:"column_6"`
+	Column7   interface{}        `json:"column_7"`
+	Column8   interface{}        `json:"column_8"`
 	Enabled   bool               `json:"enabled"`
 	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
 }
@@ -306,6 +368,10 @@ func (q *Queries) MergeExitByTunnelUUID(ctx context.Context, arg MergeExitByTunn
 		arg.Name,
 		arg.Column3,
 		arg.Column4,
+		arg.Column5,
+		arg.Column6,
+		arg.Column7,
+		arg.Column8,
 		arg.Enabled,
 		arg.UpdatedAt,
 	)
@@ -313,19 +379,35 @@ func (q *Queries) MergeExitByTunnelUUID(ctx context.Context, arg MergeExitByTunn
 }
 
 const updateExitNode = `-- name: UpdateExitNode :one
-UPDATE exit_nodes SET name=$2, address=$3, port=$4, priority=$5, enabled=$6, updated_at=$7
+UPDATE exit_nodes SET
+  name=$2,
+  address=$3,
+  port=$4,
+  country_code=$5,
+  country_name=$6,
+  city=$7,
+  display_name=$8,
+  priority=$9,
+  enabled=$10,
+  updated_at=$11
 WHERE id=$1
-RETURNING id, name, address, port, tunnel_uuid, pinned_peer_cert_sha256, priority, enabled, created_at, updated_at
+RETURNING id, name, address, port, tunnel_uuid, pinned_peer_cert_sha256,
+  country_code, country_name, city, display_name,
+  priority, enabled, created_at, updated_at
 `
 
 type UpdateExitNodeParams struct {
-	ID        pgtype.UUID        `json:"id"`
-	Name      string             `json:"name"`
-	Address   string             `json:"address"`
-	Port      int32              `json:"port"`
-	Priority  int32              `json:"priority"`
-	Enabled   bool               `json:"enabled"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	ID          pgtype.UUID        `json:"id"`
+	Name        string             `json:"name"`
+	Address     string             `json:"address"`
+	Port        int32              `json:"port"`
+	CountryCode string             `json:"country_code"`
+	CountryName string             `json:"country_name"`
+	City        string             `json:"city"`
+	DisplayName string             `json:"display_name"`
+	Priority    int32              `json:"priority"`
+	Enabled     bool               `json:"enabled"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
 type UpdateExitNodeRow struct {
@@ -335,6 +417,10 @@ type UpdateExitNodeRow struct {
 	Port                 int32              `json:"port"`
 	TunnelUuid           string             `json:"tunnel_uuid"`
 	PinnedPeerCertSha256 string             `json:"pinned_peer_cert_sha256"`
+	CountryCode          string             `json:"country_code"`
+	CountryName          string             `json:"country_name"`
+	City                 string             `json:"city"`
+	DisplayName          string             `json:"display_name"`
 	Priority             int32              `json:"priority"`
 	Enabled              bool               `json:"enabled"`
 	CreatedAt            pgtype.Timestamptz `json:"created_at"`
@@ -347,6 +433,10 @@ func (q *Queries) UpdateExitNode(ctx context.Context, arg UpdateExitNodeParams) 
 		arg.Name,
 		arg.Address,
 		arg.Port,
+		arg.CountryCode,
+		arg.CountryName,
+		arg.City,
+		arg.DisplayName,
 		arg.Priority,
 		arg.Enabled,
 		arg.UpdatedAt,
@@ -359,6 +449,10 @@ func (q *Queries) UpdateExitNode(ctx context.Context, arg UpdateExitNodeParams) 
 		&i.Port,
 		&i.TunnelUuid,
 		&i.PinnedPeerCertSha256,
+		&i.CountryCode,
+		&i.CountryName,
+		&i.City,
+		&i.DisplayName,
 		&i.Priority,
 		&i.Enabled,
 		&i.CreatedAt,

@@ -161,6 +161,8 @@ func main() {
 				cancel()
 				activeID = active.ID
 			}
+			health := exitSelector.HealthSnapshot()
+			users = applyEffectiveUserExits(users, enabled, activeID, health)
 			b, err := config.BuildBridgeXRayJSON(spec, users, exitNodes, activeID, strat, xrayLogLevel)
 			if err != nil {
 				log.Error("build bridge config", "err", err)
@@ -281,4 +283,27 @@ func dsnPrefix(dsn string) string {
 		_ = i
 	}
 	return dsn
+}
+
+func applyEffectiveUserExits(users []auth.User, enabled []exits.Node, activeID string, health map[string]exits.Health) []auth.User {
+	if len(users) == 0 {
+		return users
+	}
+	enabledByID := make(map[string]exits.Node, len(enabled))
+	for _, n := range enabled {
+		enabledByID[n.ID] = n
+	}
+	out := append([]auth.User(nil), users...)
+	for i := range out {
+		effective := activeID
+		if pref := out[i].PreferredExitID; pref != nil && *pref != "" {
+			if _, ok := enabledByID[*pref]; ok {
+				if h, ok := health[*pref]; !ok || h.Reachable {
+					effective = *pref
+				}
+			}
+		}
+		out[i].EffectiveExitID = effective
+	}
+	return out
 }

@@ -2,6 +2,7 @@ package exits
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"time"
 
@@ -71,6 +72,7 @@ func (s *Selector) ProbeAndSelect(ctx context.Context, nodes []Node) (active Nod
 
 	s.mu.RLock()
 	prevID := s.activeID
+	prevHealth := s.health
 	s.mu.RUnlock()
 
 	if candidate.ID != "" && reachable[candidate.ID] {
@@ -84,7 +86,8 @@ func (s *Selector) ProbeAndSelect(ctx context.Context, nodes []Node) (active Nod
 	}
 
 	s.mu.Lock()
-	changed = prevID != candidate.ID
+	healthChanged := !reflect.DeepEqual(prevHealth, health)
+	changed = prevID != candidate.ID || healthChanged
 	s.activeID = candidate.ID
 	for id, h := range health {
 		h.Active = id == candidate.ID

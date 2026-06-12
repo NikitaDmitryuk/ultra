@@ -48,6 +48,10 @@ type ExitNode struct {
 	CreatedAt            pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
 	PinnedPeerCertSha256 string             `json:"pinned_peer_cert_sha256"`
+	CountryCode          string             `json:"country_code"`
+	CountryName          string             `json:"country_name"`
+	City                 string             `json:"city"`
+	DisplayName          string             `json:"display_name"`
 }
 
 type MonthlyTraffic struct {
@@ -92,6 +96,7 @@ type User struct {
 	SocksUsername        pgtype.Text        `json:"socks_username"`
 	SocksPassword        pgtype.Text        `json:"socks_password"`
 	SocksPort            pgtype.Int4        `json:"socks_port"`
+	PreferredExitID      pgtype.UUID        `json:"preferred_exit_id"`
 }
 
 type UserIpObservation struct {

@@ -36,6 +36,7 @@ func exitNodeFromFields(
 	name, address string,
 	port int32,
 	tunnelUUID, pin string,
+	countryCode, countryName, city, displayName string,
 	priority int32,
 	enabled bool,
 	createdAt, updatedAt pgtype.Timestamptz,
@@ -47,6 +48,10 @@ func exitNodeFromFields(
 		Port:                 int(port),
 		TunnelUUID:           tunnelUUID,
 		PinnedPeerCertSHA256: pin,
+		CountryCode:          countryCode,
+		CountryName:          countryName,
+		City:                 city,
+		DisplayName:          displayName,
 		Priority:             int(priority),
 		Enabled:              enabled,
 		CreatedAt:            timeFromPG(createdAt),
@@ -62,6 +67,10 @@ func exitNodeFromList(row sqlc.ListExitNodesRow) exits.Node {
 		row.Port,
 		row.TunnelUuid,
 		row.PinnedPeerCertSha256,
+		row.CountryCode,
+		row.CountryName,
+		row.City,
+		row.DisplayName,
 		row.Priority,
 		row.Enabled,
 		row.CreatedAt,
@@ -77,6 +86,10 @@ func exitNodeFromGet(row sqlc.GetExitNodeRow) exits.Node {
 		row.Port,
 		row.TunnelUuid,
 		row.PinnedPeerCertSha256,
+		row.CountryCode,
+		row.CountryName,
+		row.City,
+		row.DisplayName,
 		row.Priority,
 		row.Enabled,
 		row.CreatedAt,
@@ -92,6 +105,10 @@ func exitNodeFromInsert(row sqlc.InsertExitNodeRow) exits.Node {
 		row.Port,
 		row.TunnelUuid,
 		row.PinnedPeerCertSha256,
+		row.CountryCode,
+		row.CountryName,
+		row.City,
+		row.DisplayName,
 		row.Priority,
 		row.Enabled,
 		row.CreatedAt,
@@ -107,6 +124,10 @@ func exitNodeFromUpdate(row sqlc.UpdateExitNodeRow) exits.Node {
 		row.Port,
 		row.TunnelUuid,
 		row.PinnedPeerCertSha256,
+		row.CountryCode,
+		row.CountryName,
+		row.City,
+		row.DisplayName,
 		row.Priority,
 		row.Enabled,
 		row.CreatedAt,
@@ -190,6 +211,7 @@ func (r *ExitNodeRepo) mergeBootstrapEntry(ctx context.Context, e exits.Bootstra
 	enabled := e.EnabledOrDefault()
 	address := strings.TrimSpace(e.Address)
 	pin := strings.TrimSpace(e.PinnedPeerCertSHA256)
+	countryCode, countryName, city, displayName := "", "", "", ""
 	now := time.Now().UTC()
 
 	if address != "" && e.Port > 0 {
@@ -200,7 +222,11 @@ func (r *ExitNodeRepo) mergeBootstrapEntry(ctx context.Context, e exits.Bootstra
 				Name:      name,
 				Column3:   tunnelUUID,
 				Column4:   pin,
-				Column5:   priority,
+				Column5:   countryCode,
+				Column6:   countryName,
+				Column7:   city,
+				Column8:   displayName,
+				Column9:   priority,
 				Enabled:   enabled,
 				UpdatedAt: toPGTime(now),
 			})
@@ -217,7 +243,11 @@ func (r *ExitNodeRepo) mergeBootstrapEntry(ctx context.Context, e exits.Bootstra
 				ID:        id,
 				Name:      name,
 				Column3:   pin,
-				Column4:   priority,
+				Column4:   countryCode,
+				Column5:   countryName,
+				Column6:   city,
+				Column7:   displayName,
+				Column8:   priority,
 				Enabled:   enabled,
 				UpdatedAt: toPGTime(now),
 			})
@@ -234,6 +264,10 @@ func (r *ExitNodeRepo) mergeBootstrapEntry(ctx context.Context, e exits.Bootstra
 		Port:                 e.Port,
 		TunnelUUID:           e.TunnelUUID,
 		PinnedPeerCertSHA256: e.PinnedPeerCertSHA256,
+		CountryCode:          countryCode,
+		CountryName:          countryName,
+		City:                 city,
+		DisplayName:          displayName,
 		Priority:             priority,
 		Enabled:              &enabledPtr,
 	})
@@ -295,6 +329,10 @@ func (r *ExitNodeRepo) Add(ctx context.Context, p exits.AddParams) (exits.Node, 
 	if p.Enabled != nil {
 		enabled = *p.Enabled
 	}
+	countryCode := strings.TrimSpace(p.CountryCode)
+	countryName := strings.TrimSpace(p.CountryName)
+	city := strings.TrimSpace(p.City)
+	displayName := strings.TrimSpace(p.DisplayName)
 
 	row, err := r.db.Queries.InsertExitNode(ctx, sqlc.InsertExitNodeParams{
 		ID:                   pgID,
@@ -303,6 +341,10 @@ func (r *ExitNodeRepo) Add(ctx context.Context, p exits.AddParams) (exits.Node, 
 		Port:                 int32(p.Port),
 		TunnelUuid:           tunnelUUID,
 		PinnedPeerCertSha256: strings.TrimSpace(p.PinnedPeerCertSHA256),
+		CountryCode:          countryCode,
+		CountryName:          countryName,
+		City:                 city,
+		DisplayName:          displayName,
 		Priority:             int32(priority),
 		Enabled:              enabled,
 	})
@@ -337,6 +379,22 @@ func (r *ExitNodeRepo) Update(ctx context.Context, id string, patch exits.Update
 		if port <= 0 || port > 65535 {
 			return exits.Node{}, errors.New("invalid port")
 		}
+	}
+	countryCode := cur.CountryCode
+	if patch.CountryCode != nil {
+		countryCode = strings.TrimSpace(*patch.CountryCode)
+	}
+	countryName := cur.CountryName
+	if patch.CountryName != nil {
+		countryName = strings.TrimSpace(*patch.CountryName)
+	}
+	city := cur.City
+	if patch.City != nil {
+		city = strings.TrimSpace(*patch.City)
+	}
+	displayName := cur.DisplayName
+	if patch.DisplayName != nil {
+		displayName = strings.TrimSpace(*patch.DisplayName)
 	}
 	priority := cur.Priority
 	if patch.Priority != nil {
@@ -381,13 +439,17 @@ func (r *ExitNodeRepo) Update(ctx context.Context, id string, patch exits.Update
 		return exits.Node{}, err
 	}
 	row, err := r.db.Queries.UpdateExitNode(ctx, sqlc.UpdateExitNodeParams{
-		ID:        pgID,
-		Name:      name,
-		Address:   address,
-		Port:      int32(port),
-		Priority:  int32(priority),
-		Enabled:   enabled,
-		UpdatedAt: toPGTime(time.Now().UTC()),
+		ID:          pgID,
+		Name:        name,
+		Address:     address,
+		Port:        int32(port),
+		CountryCode: countryCode,
+		CountryName: countryName,
+		City:        city,
+		DisplayName: displayName,
+		Priority:    int32(priority),
+		Enabled:     enabled,
+		UpdatedAt:   toPGTime(time.Now().UTC()),
 	})
 	if err != nil {
 		return exits.Node{}, err

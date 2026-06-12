@@ -3,6 +3,7 @@ package exits
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -14,6 +15,10 @@ type Node struct {
 	Port                 int       `json:"port"`
 	TunnelUUID           string    `json:"tunnel_uuid"`
 	PinnedPeerCertSHA256 string    `json:"pinned_peer_cert_sha256,omitempty"`
+	CountryCode          string    `json:"country_code,omitempty"`
+	CountryName          string    `json:"country_name,omitempty"`
+	City                 string    `json:"city,omitempty"`
+	DisplayName          string    `json:"display_name,omitempty"`
 	Priority             int       `json:"priority"`
 	Enabled              bool      `json:"enabled"`
 	CreatedAt            time.Time `json:"created_at,omitempty"`
@@ -28,6 +33,25 @@ func OutboundTag(id string) string {
 // DialAddr returns host:port for TCP probes.
 func (n Node) DialAddr() string {
 	return fmt.Sprintf("%s:%d", n.Address, n.Port)
+}
+
+// LocationLabel returns the best user-facing label for this exit location.
+func (n Node) LocationLabel() string {
+	if s := strings.TrimSpace(n.DisplayName); s != "" {
+		return s
+	}
+	city := strings.TrimSpace(n.City)
+	country := strings.TrimSpace(n.CountryName)
+	switch {
+	case city != "" && country != "":
+		return city + ", " + country
+	case city != "":
+		return city
+	case country != "":
+		return country
+	default:
+		return n.Name
+	}
 }
 
 // Health holds probe results for one exit node.
