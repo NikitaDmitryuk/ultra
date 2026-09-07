@@ -26,6 +26,7 @@ type ClientExport struct {
 // ClientProfileExport describes one importable client profile. Legacy clients can keep using
 // ClientExport.VLESSURI; newer UIs can surface this list as primary/fallback choices.
 type ClientProfileExport struct {
+	EntryID          string         `json:"entry_id"`
 	ID               string         `json:"id"`
 	Name             string         `json:"name"`
 	Transport        string         `json:"transport"`
@@ -122,20 +123,7 @@ func fallbackXHTTPPort(spec *Spec) int {
 	return spec.VLESSPort
 }
 
-func fallbackXHTTPPadding(spec *Spec) string {
-	profile := AntiCensorProfileBalanced
-	if spec.AntiCensor != nil && strings.TrimSpace(spec.AntiCensor.Profile) != "" {
-		profile = strings.TrimSpace(spec.AntiCensor.Profile)
-	}
-	switch profile {
-	case AntiCensorProfileFast:
-		return "0-64"
-	case AntiCensorProfileStealth:
-		return "64-512"
-	default:
-		return "0-128"
-	}
-}
+func fallbackXHTTPPadding(spec *Spec) string { return effectivePadding(spec) }
 
 func fallbackXHTTPPath(spec *Spec) string {
 	if spec.SplithttpPath != "" {
@@ -323,9 +311,9 @@ func buildFallbackXHTTPExport(spec *Spec, user auth.User) (*ClientExport, error)
 				"spiderX":     spx,
 			},
 			"xhttpSettings": map[string]any{
-				"path":         path,
-				"mode":         "auto",
-				"xPaddingSize": padding,
+				"path":          path,
+				"mode":          "auto",
+				"xPaddingBytes": padding,
 			},
 		},
 		"tag": w.ClientOutboundTag,
@@ -342,6 +330,8 @@ func buildFallbackXHTTPExport(spec *Spec, user auth.User) (*ClientExport, error)
 	q.Set("spx", spx)
 	q.Set("path", path)
 	q.Set("mode", "auto")
+	extra, _ := json.Marshal(map[string]any{"xPaddingBytes": padding})
+	q.Set("extra", string(extra))
 	name := user.Name
 	if name == "" {
 		name = "user"
@@ -351,40 +341,72 @@ func buildFallbackXHTTPExport(spec *Spec, user auth.User) (*ClientExport, error)
 	return &ClientExport{XRayOutboundJSON: frag, VLESSURI: uri}, nil
 }
 
-// BuildClientProfiles returns the legacy primary profile plus a prepared XHTTP fallback profile.
+// BuildClientProfiles exports only configured listeners. Legacy TCP fields remain unchanged.
 func BuildClientProfiles(spec *Spec, user auth.User) ([]ClientProfileExport, error) {
 	fast, err := BuildClientExport(spec, user)
 	if err != nil {
 		return nil, err
 	}
-	fastJSON, err := fullClientXRayJSONForOutbound(spec, user, fast.XRayOutboundJSON)
-	if err != nil {
+	profiles := []ClientProfileExport{}
+	add := func(id, name, transport string, exp *ClientExport) error {
+		full, err := fullClientXRayJSONForOutbound(spec, user, exp.XRayOutboundJSON)
+		if err != nil {
+			return err
+		}
+		profiles = append(profiles, ClientProfileExport{EntryID: "primary", ID: id, Name: name, Transport: transport, XRayOutboundJSON: exp.XRayOutboundJSON, VLESSURI: exp.VLESSURI, FullConfigBase64: base64.StdEncoding.EncodeToString(full)})
+		return nil
+	}
+	if err := add(ClientProfileFastTCPReality, "Основной · TCP REALITY", "tcp", fast); err != nil {
 		return nil, err
 	}
-	fallback, err := buildFallbackXHTTPExport(spec, user)
-	if err != nil {
-		return nil, err
+	if spec.AntiCensor != nil && spec.AntiCensor.PublicXHTTPPort > 0 && !spec.DevMode {
+		fallback, err := buildFallbackXHTTPExport(spec, user)
+		if err != nil {
+			return nil, err
+		}
+		if err := add(ClientProfileFallbackXHTTPReality, "Резерв · XHTTP REALITY", "xhttp", fallback); err != nil {
+			return nil, err
+		}
 	}
-	fallbackJSON, err := fullClientXRayJSONForOutbound(spec, user, fallback.XRayOutboundJSON)
-	if err != nil {
-		return nil, err
+	if spec.PublicXHTTPTLS != nil && !spec.DevMode {
+		exp := buildPublicTLSExport(spec, user)
+		if err := add("fallback_xhttp_tls", "Резерв · XHTTP TLS", "xhttp", exp); err != nil {
+			return nil, err
+		}
 	}
-	return []ClientProfileExport{
-		{
-			ID:               ClientProfileFastTCPReality,
-			Name:             "Fast TCP REALITY",
-			Transport:        "tcp",
-			XRayOutboundJSON: fast.XRayOutboundJSON,
-			VLESSURI:         fast.VLESSURI,
-			FullConfigBase64: base64.StdEncoding.EncodeToString(fastJSON),
-		},
-		{
-			ID:               ClientProfileFallbackXHTTPReality,
-			Name:             "Fallback XHTTP REALITY",
-			Transport:        "xhttp",
-			XRayOutboundJSON: fallback.XRayOutboundJSON,
-			VLESSURI:         fallback.VLESSURI,
-			FullConfigBase64: base64.StdEncoding.EncodeToString(fallbackJSON),
-		},
-	}, nil
+	for _, entry := range spec.PublicEntries {
+		child := *spec
+		child.PublicEntries = nil
+		child.PublicHost = entry.Host
+		child.VLESSPort = entry.TCPPort
+		anti := AntiCensorSpec{}
+		if spec.AntiCensor != nil {
+			anti = *spec.AntiCensor
+		}
+		anti.PublicXHTTPPort = entry.XHTTPRealityPort
+		child.AntiCensor = &anti
+		child.PublicXHTTPTLS = nil
+		if entry.XHTTPTLSPort > 0 && spec.PublicXHTTPTLS != nil {
+			tls := *spec.PublicXHTTPTLS
+			tls.Port = entry.XHTTPTLSPort
+			child.PublicXHTTPTLS = &tls
+		}
+		extra, err := BuildClientProfiles(&child, user)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range extra {
+			p.EntryID = entry.ID
+			p.ID = entry.ID + "/" + p.ID
+			p.Name = entry.ID + " · " + p.Name
+			uri, err := url.Parse(p.VLESSURI)
+			if err != nil {
+				return nil, err
+			}
+			uri.Fragment = entry.ID + " · " + uri.Fragment
+			p.VLESSURI = uri.String()
+			profiles = append(profiles, p)
+		}
+	}
+	return profiles, nil
 }

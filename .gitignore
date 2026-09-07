@@ -64,3 +64,9 @@ minisign.pub
 .cursor/
 .claude/
 .idea/
+
+# Optional generated Graphify index and reports
+/graphify-out/
+
+/ultra-client
+/ultra-bench

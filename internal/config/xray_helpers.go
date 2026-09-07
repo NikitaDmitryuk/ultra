@@ -1,7 +1,6 @@
 package config
 
 import (
-	"math/rand"
 	"net"
 	"strconv"
 	"strings"
@@ -9,81 +8,31 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 )
 
-// defaultRealityFingerprints is the fingerprint pool used when no list is configured.
-// Rotating among realistic browser fingerprints makes REALITY traffic harder to fingerprint.
-var defaultRealityFingerprints = []string{
-	"chrome", "firefox", "safari", "ios", "android", "randomized",
-}
-
-// pickFingerprint returns a random fingerprint from the configured list (or the default pool).
-func pickFingerprint(spec *Spec) string {
-	pool := defaultRealityFingerprints
-	if spec.AntiCensor != nil && len(spec.AntiCensor.RealityFingerprints) > 0 {
-		pool = spec.AntiCensor.RealityFingerprints
-	}
-	return pool[rand.Intn(len(pool))]
-}
-
-// buildFragmentSockopt returns a sockopt map with fragment settings for the bridge→exit outbound,
-// or nil if fragmentation is disabled.
+// buildFragmentSockopt chains the opt-in freedom fragment outbound.
 func buildFragmentSockopt(spec *Spec) map[string]any {
-	if spec.AntiCensor == nil {
-		// Feature on by default with sensible params.
-		return map[string]any{
-			"fragment": map[string]any{
-				"packets":  "tlshello",
-				"length":   "100-200",
-				"interval": "1-3",
-			},
-		}
-	}
-	f := spec.AntiCensor.Fragment
-	if f == nil {
-		// AntiCensor present but fragment not set — keep default on.
-		return map[string]any{
-			"fragment": map[string]any{
-				"packets":  "tlshello",
-				"length":   "100-200",
-				"interval": "1-3",
-			},
-		}
-	}
-	if f.Packets == "" {
-		// Explicit empty packets = disabled.
+	if spec.AntiCensor == nil || spec.AntiCensor.Fragment == nil || spec.AntiCensor.Fragment.Packets == "" {
 		return nil
 	}
-	length := f.Length
-	if length == "" {
-		length = "100-200"
-	}
-	interval := f.Interval
-	if interval == "" {
-		interval = "1-3"
-	}
-	return map[string]any{
-		"fragment": map[string]any{
-			"packets":  f.Packets,
-			"length":   length,
-			"interval": interval,
-		},
-	}
+	return map[string]any{"dialerProxy": "fragment-tunnel"}
 }
 
-// splithttpExtraSettings returns optional splithttp performance/obfuscation overrides.
-// Default padding "0-100" obscures chunk sizes; set SplitHTTPPadding="0" to disable.
+func tunnelFragmentOutbound(spec *Spec) map[string]any {
+	if buildFragmentSockopt(spec) == nil {
+		return nil
+	}
+	f := *spec.AntiCensor.Fragment
+	if f.Length == "" {
+		f.Length = "100-200"
+	}
+	if f.Interval == "" {
+		f.Interval = "1-3"
+	}
+	return map[string]any{"tag": "fragment-tunnel", "protocol": "freedom", "settings": map[string]any{"fragment": f}}
+}
+
 func splithttpExtraSettings(spec *Spec) map[string]any {
-	extra := map[string]any{}
-
-	// Padding is on by default; spec may override or disable with "0".
-	padding := "0-100"
-	if spec.AntiCensor != nil && spec.AntiCensor.SplitHTTPPadding != "" {
-		padding = spec.AntiCensor.SplitHTTPPadding
-	}
-	if padding != "0" {
-		extra["xPaddingSize"] = padding
-	}
-
-	if spec.AntiCensor != nil && spec.AntiCensor.SplitHTTPMaxChunkKB > 0 {
+	extra := map[string]any{"xPaddingBytes": effectivePadding(spec)}
+	if spec.AntiCensor != nil && spec.AntiCensor.SplitHTTPMaxChunkKB > 0 && resolveXrayWire(spec).SplithttpMode == "packet-up" {
 		extra["scMaxEachPostBytes"] = spec.AntiCensor.SplitHTTPMaxChunkKB * 1024
 	}
 	return extra
@@ -113,7 +62,8 @@ func realityShortIDs(ids []string) []string {
 func resolveSplithttpPath(spec *Spec, strat mimic.Strategy) string {
 	path := spec.SplithttpPath
 	if path == "" {
-		path = strat.NextPath()
+		// Stable across rebuilds and both peers when an explicit path is absent.
+		path = "/xhttp"
 	}
 	return path
 }
@@ -150,11 +100,8 @@ func bridgeInboundStream(spec *Spec) map[string]any {
 	}
 	inStream["network"] = "tcp"
 	inStream["security"] = "reality"
-	// Prefer single configured fingerprint; fall back to random rotation from the pool.
-	fp := spec.Reality.Fingerprint
-	if fp == "" {
-		fp = pickFingerprint(spec)
-	}
+	// This server field does not control or rotate the client ClientHello.
+	fp := clientRealityFingerprint(spec)
 	rs := map[string]any{
 		"show":        false,
 		"dest":        spec.Reality.Dest,

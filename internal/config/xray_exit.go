@@ -57,7 +57,7 @@ func BuildExitXRayJSON(spec *Spec, strat mimic.Strategy, xrayLogLevel string) ([
 			map[string]any{
 				"tag":      "direct-udp",
 				"protocol": "freedom",
-				"settings": map[string]any{},
+				"settings": freedomDNSSettings(spec),
 			},
 		}
 		routingRules = []any{
@@ -69,7 +69,7 @@ func BuildExitXRayJSON(spec *Spec, strat mimic.Strategy, xrayLogLevel string) ([
 			map[string]any{
 				"tag":      w.OutboundDirectTag,
 				"protocol": "freedom",
-				"settings": map[string]any{},
+				"settings": freedomDNSSettings(spec),
 			},
 		}
 		routingRules = []any{

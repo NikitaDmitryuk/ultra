@@ -76,8 +76,12 @@ func TestExitNodeRepoUpdateEnabled(t *testing.T) {
 		t.Fatalf("name=%q", updated.Name)
 	}
 
+	// Enabling an already enabled node is valid; disabling the last one is not.
 	only := true
-	_, err = repo.Update(ctx, id2, exits.UpdatePatch{Enabled: &only})
+	if _, err = repo.Update(ctx, id2, exits.UpdatePatch{Enabled: &only}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = repo.Update(ctx, id2, exits.UpdatePatch{Enabled: &disabled})
 	if !errors.Is(err, ErrExitLastEnabled) {
 		t.Fatalf("expected ErrExitLastEnabled, got %v", err)
 	}

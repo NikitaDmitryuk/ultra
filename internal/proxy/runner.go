@@ -1,8 +1,14 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"sync"
+	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/stats"
@@ -12,28 +18,80 @@ import (
 type Runner struct {
 	mu sync.Mutex
 
-	inst *core.Instance
+	inst   *core.Instance
+	config *core.Config
+	status ReloadStatus
 }
 
-// StartJSON parses JSON, starts xray (caller must import distro/all in main).
-func (r *Runner) StartJSON(jsonCfg []byte) error {
+// ReloadStatus exposes lifecycle events without configuration or credentials.
+type ReloadStatus struct {
+	Count  uint64    `json:"count"`
+	At     time.Time `json:"at,omitempty"`
+	Reason string    `json:"reason,omitempty"`
+	Error  string    `json:"error,omitempty"`
+}
+
+func (r *Runner) Status() ReloadStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.status
+}
+
+func (r *Runner) StartJSON(data []byte) error { return r.ReloadReason(data, "configuration") }
+func (r *Runner) Reload(data []byte) error    { return r.ReloadReason(data, "configuration") }
+
+// ReloadReason validates before closing listeners and restores the last valid config on failure.
+func (r *Runner) ReloadReason(data []byte, reason string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var input any
+	if err := json.Unmarshal(data, &input); err != nil {
+		return fmt.Errorf("parse configuration: %w", err)
+	}
+	canonical, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	cfg, err := core.LoadConfig("json", bytes.NewReader(canonical))
+	if err != nil {
+		return fmt.Errorf("build configuration: %w", err)
+	}
+	if r.inst != nil && proto.Equal(cfg, r.config) {
+		r.status.Error = ""
+		return nil
+	}
+	next, err := core.New(cfg)
+	if err != nil {
+		return fmt.Errorf("prepare configuration: %w", err)
+	}
+	old := r.config
 	if r.inst != nil {
 		_ = r.inst.Close()
 		r.inst = nil
 	}
-	inst, err := core.StartInstance("json", jsonCfg)
-	if err != nil {
-		return err
+	r.status = ReloadStatus{Count: r.status.Count + 1, At: time.Now().UTC(), Reason: reason}
+	if err = next.Start(); err != nil {
+		_ = next.Close()
+		r.status.Error = "start failed"
+		if old != nil {
+			restored, restoreErr := core.New(old)
+			if restoreErr == nil {
+				restoreErr = restored.Start()
+			}
+			if restoreErr != nil {
+				if restored != nil {
+					_ = restored.Close()
+				}
+				r.status.Error = "start and restore failed"
+				return fmt.Errorf("start: %w; restore: %v", err, restoreErr)
+			}
+			r.inst = restored
+		}
+		return fmt.Errorf("start failed (previous configuration restored if available): %w", err)
 	}
-	r.inst = inst
+	r.inst = next
+	r.config = cfg
 	return nil
-}
-
-// Reload replaces the running instance with a new config.
-func (r *Runner) Reload(jsonCfg []byte) error {
-	return r.StartJSON(jsonCfg)
 }
 
 // Close stops xray.

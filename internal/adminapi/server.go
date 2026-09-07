@@ -20,6 +20,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/db"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/probe"
+	"github.com/NikitaDmitryuk/ultra/internal/proxy"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -38,13 +39,15 @@ type TrafficQuerier interface {
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
 type Server struct {
-	log          *slog.Logger
-	users        auth.UserManager
-	traffic      TrafficQuerier // nil when DB is not configured
-	spec         *config.Spec
-	exits        *exits.Manager
-	selector     *exits.Selector
-	onExitChange func()
+	ReloadStatus  func() proxy.ReloadStatus
+	Subscriptions SubscriptionStore
+	log           *slog.Logger
+	users         auth.UserManager
+	traffic       TrafficQuerier // nil when DB is not configured
+	spec          *config.Spec
+	exits         *exits.Manager
+	selector      *exits.Selector
+	onExitChange  func()
 	// statPeek reads a cumulative Xray stats counter by name (optional; used for legacy SOCKS5 traffic).
 	statPeek func(string) int64
 	mux      *http.ServeMux
@@ -128,6 +131,9 @@ func (s *Server) routes() error {
 	s.mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusFound)
 	})
+	s.mux.HandleFunc("POST /v1/users/{uuid}/subscription", s.handleRotateSubscription)
+	s.mux.HandleFunc("DELETE /v1/users/{uuid}/subscription", s.handleRevokeSubscription)
+	s.mux.HandleFunc("GET /v1/subscriptions/{token}", s.handleSubscription)
 	s.mux.HandleFunc("GET /v1/users", s.handleListUsers)
 	s.mux.HandleFunc("GET /v1/users/{uuid}", s.handleGetUser)
 	s.mux.HandleFunc("PATCH /v1/users/{uuid}", s.handlePatchUser)
@@ -684,13 +690,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	type nodeHealth struct {
-		ID                string `json:"id,omitempty"`
-		Name              string `json:"name,omitempty"`
-		Reachable         bool   `json:"reachable"`
-		InternetOK        bool   `json:"internet_ok"`
-		InternetLatencyMS int64  `json:"internet_latency_ms,omitempty"`
-		TunnelLatencyMS   int64  `json:"tunnel_latency_ms,omitempty"`
-		Active            bool   `json:"active,omitempty"`
+		ID                string              `json:"id,omitempty"`
+		Name              string              `json:"name,omitempty"`
+		Reachable         bool                `json:"reachable"`
+		InternetOK        bool                `json:"internet_ok"`
+		InternetLatencyMS int64               `json:"internet_latency_ms,omitempty"`
+		TunnelLatencyMS   int64               `json:"tunnel_latency_ms,omitempty"`
+		Active            bool                `json:"active,omitempty"`
+		Eligible          bool                `json:"eligible"`
+		PreferredReady    bool                `json:"preferred_ready"`
+		CheckedAt         time.Time           `json:"checked_at"`
+		Checks            []exits.ProbeResult `json:"checks,omitempty"`
 	}
 	type healthResp struct {
 		CheckedAt         string       `json:"checked_at"`
@@ -734,7 +744,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 				InternetOK:        h.InternetOK,
 				InternetLatencyMS: h.InternetLatencyMS,
 				TunnelLatencyMS:   h.TunnelLatencyMS,
-				Active:            h.Active,
+				Active:            h.Active, Eligible: h.Eligible, PreferredReady: h.PreferredReady, CheckedAt: h.CheckedAt, Checks: h.Checks,
 			})
 		}
 		if active.ID != "" {
@@ -751,7 +761,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 					res.Exit.InternetLatencyMS = h.InternetLatencyMS
 					res.Exit.TunnelLatencyMS = h.TunnelLatencyMS
 					res.Exit.Active = true
-					res.SelectionDegraded = !h.Reachable
+					res.Exit.Eligible = h.Eligible
+					res.Exit.PreferredReady = h.PreferredReady
+					res.Exit.CheckedAt = h.CheckedAt
+					res.Exit.Checks = h.Checks
+					res.SelectionDegraded = !h.Eligible
 					break
 				}
 			}
@@ -767,15 +781,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			res.Exit.TunnelLatencyMS = rtt.Milliseconds()
 			return nil
 		})
-		g.Go(func() error {
-			rtt, err := probe.DialTCP(ctx, config.HealthProbeListenIPPort)
-			if err != nil {
-				return err
-			}
-			res.Exit.InternetOK = true
-			res.Exit.InternetLatencyMS = rtt.Milliseconds()
-			return nil
-		})
+		// Legacy TCP-only evidence must not claim payload delivery.
+		res.SelectionDegraded = true
 	}
 
 	_ = g.Wait()
@@ -884,6 +891,12 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"checked_at": time.Now().UTC().Format(time.RFC3339),
+		"reload": func() any {
+			if s.ReloadStatus != nil {
+				return s.ReloadStatus()
+			}
+			return nil
+		}(),
 		"checks":     checks,
 		"throughput": measureApproxThroughput(ctx),
 	})
@@ -926,7 +939,13 @@ func (s *Server) handleHardening(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"checked_at": time.Now().UTC().Format(time.RFC3339),
-		"checks":     checks,
+		"reload": func() any {
+			if s.ReloadStatus != nil {
+				return s.ReloadStatus()
+			}
+			return nil
+		}(),
+		"checks": checks,
 	})
 }
 

@@ -24,6 +24,9 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Check agent context and ADRs
+        run: make harness-check
+
       - name: Verify dependencies
         run: go mod verify
 
@@ -47,3 +50,9 @@ jobs:
 
       - name: Build ultra-bot
         run: make build-bot
+
+      - name: Race tests
+        run: make test-race
+
+      - name: Build client and benchmark
+        run: make build-client build-bench

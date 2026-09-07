@@ -288,6 +288,9 @@ async function createUser() {
 
 // ── User detail ──────────────────────────────────────────────────────────────
 async function openUserDetail(u) {
+  document.getElementById("subscription-result").hidden = true;
+ document.getElementById("subscription-url").textContent = "";
+ document.getElementById("subscription-happ").removeAttribute("href");
   currentUserUUID = u.uuid;
   currentUserName = u.name || '';
   currentUserIsActive = u.is_active !== false;
@@ -872,6 +875,7 @@ function applyHealthUI(h) {
   const overviewSummary = document.getElementById('overview-health-summary');
   if (overviewSummary) {
     const parts = [];
+    if (h.selection_degraded) parts.push('Нет исправного exit · degraded');
     if (!bridgeInternetOk) parts.push('Bridge: нет выхода в интернет');
     if (!exitTunnelOk) parts.push(`Tunnel: ${exitLabel} недоступен`);
     if (exitTunnelOk && !exitInternetOk) parts.push(`${exitLabel}: нет выхода в интернет через туннель`);
@@ -1232,4 +1236,41 @@ function showToast(msg) {
   setTimeout(() => {
     toast.remove();
   }, 2600);
+}
+
+let subscriptionBusy = false;
+function setSubscriptionBusy(value) {
+  subscriptionBusy = value;
+  document.getElementById('subscription-issue').disabled = value;
+  document.getElementById('subscription-revoke').disabled = value;
+}
+async function issueSubscription() {
+  if (subscriptionBusy || !currentUserUUID) return;
+  const id = currentUserUUID;
+  setSubscriptionBusy(true);
+  try {
+    const result = await api('POST', '/api/users/' + encodeURIComponent(id) + '/subscription');
+    if (currentUserUUID !== id) return;
+    document.getElementById('subscription-url').textContent = result.url;
+    document.getElementById('subscription-happ').href = result.happ_url;
+    document.getElementById('subscription-result').hidden = false;
+  } catch (e) { showToast(e.message); }
+  finally { setSubscriptionBusy(false); }
+}
+async function copySubscription() {
+  try { await navigator.clipboard.writeText(document.getElementById('subscription-url').textContent); }
+  catch (e) { showToast('Не удалось скопировать ссылку'); }
+}
+async function revokeSubscription() {
+  if (subscriptionBusy || !currentUserUUID) return;
+  const id = currentUserUUID;
+  setSubscriptionBusy(true);
+  try {
+    await api('DELETE', '/api/users/' + encodeURIComponent(id) + '/subscription');
+    if (id !== currentUserUUID) return;
+    document.getElementById('subscription-result').hidden = true;
+    document.getElementById('subscription-url').textContent = '';
+    document.getElementById('subscription-happ').removeAttribute('href');
+  } catch (e) { showToast(e.message); }
+  finally { setSubscriptionBusy(false); }
 }

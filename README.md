@@ -22,6 +22,11 @@
 
 ## Сборка
 
+Клиенты: [Happ, подписки и домашний Linux-прокси](docs/happ.md).
+
+Для разработки: [инструкции Codex](AGENTS.md), [карта архитектуры](docs/architecture.md),
+[проверки и особенности разработки](docs/development.md), [архитектурные решения](docs/adr/README.md).
+
 ```bash
 make build               # ./ultra-relay
 make build-install       # ./ultra-install
@@ -216,9 +221,9 @@ Host ultra-back
 
 - `anti_censor.warp_proxy: true` — на exit использовать Cloudflare WARP в режиме прокси; destination-сайты видят Cloudflare IP вместо IP датацентра.
 - `anti_censor.disable_doh: false` (по умолчанию) — DNS over HTTPS; bridge использует Yandex DoH для `.ru`-доменов и Cloudflare для остального.
-- Фрагментация TLS ClientHello и паддинг splithttp-чанков включены по умолчанию.
-- `/client` экспортирует обратно-совместимый основной профиль `fast_tcp_reality` (старый VLESS+REALITY+TCP+Vision URI) и резервный `fallback_xhttp_reality` для Xray-compatible клиентов. Чтобы резервный XHTTP-профиль был доступен извне, задайте `PUBLIC_XHTTP_PORT` / `anti_censor.public_xhttp_port`; `make install` внесёт это в spec, а `ultra-relay` best-effort откроет локальный firewall на bridge. Старый `vless_port` при этом не меняется.
-- `anti_censor.profile`: `fast`, `balanced` (дефолт для новых fallback-настроек), `stealth`. Профиль не меняет legacy TCP URI; он влияет на параметры резервного XHTTP-профиля.
+- Генератор использует `xPaddingBytes` (стандарт 100–1000), сохраняя совместимость старых профилей. Фрагментация через freedom/`dialerProxy` включается только явным `anti_censor.fragment.packets`. Ограничения и проверка — в [документации обхода цензуры](docs/censorship-resistance.md).
+- `/client` экспортирует обратно-совместимый основной профиль `fast_tcp_reality` (старый VLESS+REALITY+TCP+Vision URI) и настроенные резервные профили для Xray-compatible клиентов. Чтобы резервный XHTTP-профиль был доступен извне, задайте `PUBLIC_XHTTP_PORT` / `anti_censor.public_xhttp_port`; `make install` внесёт это в spec, а `ultra-relay` best-effort откроет локальный firewall на bridge. Старый `vless_port` при этом не меняется.
+- `anti_censor.profile`: `fast`, `balanced` (дефолт для новых fallback-настроек), `stealth`. Значение сохраняется для совместимости spec; само по себе не включает фрагментацию и не меняет стандартный padding или legacy TCP URI.
 
 **SOCKS5 на bridge:** два режима — (1) общий inbound в spec (`socks5.enabled`, по умолчанию `127.0.0.1`); (2) **per-user** `kind=socks5` в Admin API / Mini App — отдельный порт из диапазона **10810–10899**, логин = UUID, пароль в карточке пользователя (`socks5://…` в UI). Оба используют тот же routing, что VLESS. Per-user порты слушают `0.0.0.0`; `ultra-relay` best-effort открывает их в локальном firewall. На мобильных сетях нестандартные порты (108xx, 8444) могут быть менее надёжны — для Telegram in-app proxy или Mini App обычно лучше `:443`.
 

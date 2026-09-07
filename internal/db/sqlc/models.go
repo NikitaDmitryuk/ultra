@@ -73,6 +73,11 @@ type Notification struct {
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
 }
 
+type SubscriptionToken struct {
+	UserUuid  pgtype.UUID `json:"user_uuid"`
+	TokenHash []byte      `json:"token_hash"`
+}
+
 type TrafficStat struct {
 	ID            int64              `json:"id"`
 	UserUuid      pgtype.UUID        `json:"user_uuid"`

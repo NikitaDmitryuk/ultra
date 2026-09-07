@@ -11,7 +11,7 @@ import (
 // DialTCP connects to addr (host:port) and returns the time-to-connect.
 // The connection is closed immediately after the handshake.
 func DialTCP(ctx context.Context, addr string) (time.Duration, error) {
-	d := &net.Dialer{}
+	d := &net.Dialer{Timeout: 3 * time.Second}
 	t0 := time.Now()
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	elapsed := time.Since(t0)
@@ -35,7 +35,7 @@ func DialSOCKS5(ctx context.Context, socksAddr, targetAddr string) (time.Duratio
 		return 0, fmt.Errorf("probe: bad target port %q: %w", portStr, err)
 	}
 
-	d := &net.Dialer{}
+	d := &net.Dialer{Timeout: 3 * time.Second}
 	t0 := time.Now()
 	conn, err := d.DialContext(ctx, "tcp", socksAddr)
 	if err != nil {

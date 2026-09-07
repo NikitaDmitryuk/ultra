@@ -149,9 +149,9 @@ func BuildBridgeXRayJSON(
 		xhttpStream := bridgeInboundStream(spec)
 		xhttpStream["network"] = "xhttp"
 		xhttpStream["xhttpSettings"] = map[string]any{
-			"path":         fallbackXHTTPPath(spec),
-			"mode":         "auto",
-			"xPaddingSize": fallbackXHTTPPadding(spec),
+			"path":          fallbackXHTTPPath(spec),
+			"mode":          "auto",
+			"xPaddingBytes": fallbackXHTTPPadding(spec),
 		}
 		inbounds = append(inbounds, map[string]any{
 			"tag":      w.InboundVLESSTag + "-xhttp",
@@ -169,6 +169,11 @@ func BuildBridgeXRayJSON(
 				"destOverride": w.SniffingDestOverride,
 			},
 		})
+	}
+	if spec.PublicXHTTPTLS != nil && !spec.DevMode {
+		inbounds = append(inbounds, map[string]any{"tag": w.InboundVLESSTag + "-xhttp-tls", "listen": spec.ListenAddress, "port": spec.PublicXHTTPTLS.Port,
+			"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption},
+			"streamSettings": publicTLSStream(spec, true)})
 	}
 	if statsEnabled {
 		inbounds = append(inbounds, map[string]any{
@@ -252,25 +257,28 @@ func BuildBridgeXRayJSON(
 	}
 
 	outbounds := buildBridgeExitOutbounds(spec, exitNodes, activeExitID, w, buildOutStream)
+	if fragment := tunnelFragmentOutbound(spec); fragment != nil {
+		outbounds = append(outbounds, fragment)
+	}
 	outbounds = append(outbounds,
 		map[string]any{
 			"tag":      w.OutboundDirectTag,
 			"protocol": "freedom",
-			"settings": map[string]any{},
+			"settings": freedomDNSSettings(spec),
 		},
 	)
 	if statsEnabled {
 		outbounds = append(outbounds, map[string]any{
 			"tag":      "api",
 			"protocol": "freedom",
-			"settings": map[string]any{},
+			"settings": freedomDNSSettings(spec),
 		})
 	}
 	if needsBlock {
 		outbounds = append(outbounds, map[string]any{
 			"tag":      w.OutboundBlockTag,
 			"protocol": "blackhole",
-			"settings": map[string]any{},
+			"settings": freedomDNSSettings(spec),
 		})
 	}
 

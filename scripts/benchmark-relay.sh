@@ -14,7 +14,7 @@ source "$SCRIPT_DIR/install-config.sh"
 
 SOCKS_PORT="${BENCH_SOCKS_PORT:-10808}"
 DOWNLOAD_URL="${BENCH_DOWNLOAD_URL:-https://speed.cloudflare.com/__down?bytes=25000000}"
-DOWNLOAD_URLS="${BENCH_DOWNLOAD_URLS:-$DOWNLOAD_URL}"
+DOWNLOAD_URLS="${BENCH_DOWNLOAD_URLS:-$DOWNLOAD_URL,https://httpbingo.org/bytes/65536,https://gemini.google.com/}"
 UPLOAD_URL="${BENCH_UPLOAD_URL:-https://speed.cloudflare.com/__up}"
 UPLOAD_BYTES="${BENCH_UPLOAD_BYTES:-5000000}"
 IP_URL="${BENCH_IP_URL:-https://api.ipify.org}"
@@ -113,11 +113,11 @@ curl_download_line() {
 	shift
 	local url=$1
 	shift
-	local line
-	line=$(curl "$@" -o /dev/null -sS -w 'time_total=%{time_total} speed_download=%{speed_download} remote_ip=%{remote_ip}' --max-time 60 "$url" || true)
+	local line rc=0
+	line=$(curl "$@" -o /dev/null -sS -w 'time_total=%{time_total} speed_download=%{speed_download} http_code=%{http_code} bytes=%{size_download} dns=%{time_namelookup} connect=%{time_connect} tls=%{time_appconnect} first=%{time_starttransfer}' --connect-timeout 3 --max-time 60 "$url") || rc=$?
 	local bps
 	bps=$(printf '%s\n' "$line" | sed -n 's/.*speed_download=\([0-9.]*\).*/\1/p')
-	echo "${label}: ${line} mbps=$(mbps_from_curl "${bps:-0}") url=${url}"
+	echo "${label}: curl_exit=${rc} ${line} mbps=$(mbps_from_curl "${bps:-0}") url=${url}"
 }
 
 CONFIG_FILE=""
@@ -301,9 +301,10 @@ for raw_url in "${_split_csv_out[@]}"; do
 done
 
 dd if=/dev/zero of="$PAYLOAD" bs="$UPLOAD_BYTES" count=1 >/dev/null 2>&1
-up_line=$(curl --socks5-hostname "127.0.0.1:${SOCKS_PORT}" -o /dev/null -sS -X POST --data-binary @"$PAYLOAD" -w 'time_total=%{time_total} speed_upload=%{speed_upload} remote_ip=%{remote_ip}' --max-time 60 "$UPLOAD_URL" || true)
+up_rc=0
+up_line=$(curl --socks5-hostname "127.0.0.1:${SOCKS_PORT}" -o /dev/null -sS -X POST --data-binary @"$PAYLOAD" -w 'http_code=%{http_code} time_total=%{time_total} speed_upload=%{speed_upload}' --connect-timeout 3 --max-time 60 "$UPLOAD_URL") || up_rc=$?
 up_bps=$(printf '%s\n' "$up_line" | sed -n 's/.*speed_upload=\([0-9.]*\).*/\1/p')
-echo "local_socks_xray_upload: ${up_line} mbps=$(mbps_from_curl "${up_bps:-0}") bytes=${UPLOAD_BYTES} url=${UPLOAD_URL}"
+echo "local_socks_xray_upload: curl_rc=${up_rc} ${up_line} mbps=$(mbps_from_curl "${up_bps:-0}") bytes=${UPLOAD_BYTES} url=${UPLOAD_URL}"
 
 remote_exit_bench() {
 	local host=$1
@@ -328,15 +329,15 @@ echo
 measure() {
 	local name=$1
 	shift
-	local line
-	line=$(curl "$@" -o /dev/null -sS -w 'time_total=%{time_total} speed_download=%{speed_download} remote_ip=%{remote_ip}' --max-time 45 "$url" || true)
+	local line rc=0
+	line=$(curl "$@" -o /dev/null -sS -w 'http_code=%{http_code} bytes=%{size_download} dns=%{time_namelookup} connect=%{time_connect} tls=%{time_appconnect} first=%{time_starttransfer} time_total=%{time_total} speed_download=%{speed_download}' --connect-timeout 3 --max-time 45 "$url") || rc=$?
 	local bps
 	bps=$(printf '%s\n' "$line" | sed -n 's/.*speed_download=\([0-9.]*\).*/\1/p')
 	local total
 	total=$(printf '%s\n' "$line" | sed -n 's/.*time_total=\([0-9.]*\).*/\1/p')
 	local mbps
 	mbps=$(awk -v bps="${bps:-0}" 'BEGIN { printf "%.2f", (bps * 8) / 1000000 }')
-	echo "${name}: ${line} mbps=${mbps}"
+	echo "${name}: curl_rc=${rc} ${line} mbps=${mbps}"
 	if [[ "$name" == "warp" ]]; then
 		printf 'SCORE_DOWNLOAD_BPS=%s\n' "${bps:-0}"
 		printf 'SCORE_WARP_TIME=%s\n' "${total:-0}"
@@ -384,7 +385,7 @@ bridge_direct_bench() {
 	"${ssh_base[@]}" bash -s "$url" <<'EOS'
 set -euo pipefail
 url=${1:?}
-line=$(curl -o /dev/null -sS -w 'time_total=%{time_total} speed_download=%{speed_download} remote_ip=%{remote_ip}' --max-time 45 "$url" || true)
+line=$(curl -o /dev/null -sS -w 'http_code=%{http_code} bytes=%{size_download} dns=%{time_namelookup} connect=%{time_connect} tls=%{time_appconnect} first=%{time_starttransfer} time_total=%{time_total} speed_download=%{speed_download}' --connect-timeout 3 --max-time 45 "$url") || rc=$?
 bps=$(printf '%s\n' "$line" | sed -n 's/.*speed_download=\([0-9.]*\).*/\1/p')
 mbps=$(awk -v bps="${bps:-0}" 'BEGIN { printf "%.2f", (bps * 8) / 1000000 }')
 echo "bridge_direct: ${line} mbps=${mbps} url=${url}"

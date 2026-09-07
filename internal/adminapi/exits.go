@@ -225,7 +225,7 @@ func (s *Server) clientExitSelection(u auth.User) (selectedID *string, effective
 			if n.ID != *u.PreferredExitID {
 				continue
 			}
-			if h, ok := health[n.ID]; !ok || h.Reachable {
+			if h, ok := health[n.ID]; !ok || h.PreferredReady {
 				effectiveID = n.ID
 			}
 			break
@@ -386,8 +386,13 @@ func (s *Server) probeExitsHealth(ctx context.Context) (active exits.Node, exits
 	}
 	nodes := s.exits.ListEnabled()
 	if s.selector != nil {
-		active, _ = s.selector.ProbeAndSelect(ctx, nodes)
-		activeID = active.ID
+		activeID = s.selector.ActiveID()
+		for _, n := range nodes {
+			if n.ID == activeID {
+				active = n
+				break
+			}
+		}
 		snap := s.selector.HealthSnapshot()
 		for _, n := range nodes {
 			h, ok := snap[n.ID]

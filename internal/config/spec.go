@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -53,7 +56,7 @@ const (
 	AntiCensorProfileStealth  = "stealth"
 )
 
-// FragmentSpec controls Xray sockopt.fragment on the bridge→exit outbound.
+// FragmentSpec controls the opt-in freedom fragment outbound for bridge→exit.
 // Splitting the TLS ClientHello across multiple TCP packets obfuscates the SNI field.
 type FragmentSpec struct {
 	// Packets selects which packets to fragment. "tlshello" targets only the TLS ClientHello.
@@ -73,18 +76,16 @@ type AntiCensorSpec struct {
 	Profile string `json:"profile,omitempty"`
 
 	// PublicXHTTPPort enables an additional public VLESS+REALITY+XHTTP inbound on the bridge
-	// for the fallback_xhttp_reality client profile. 0 means the profile is exported as a
-	// prepared fallback using vless_port, but no extra inbound is opened.
+	// for the fallback_xhttp_reality client profile. 0 disables this optional profile.
 	PublicXHTTPPort int `json:"public_xhttp_port,omitempty"`
 
 	// Fragment enables TLS ClientHello fragmentation on the bridge→exit outbound.
-	// When nil the feature is on with default parameters; set packets/length/interval to tune.
+	// Nil disables fragmentation; an explicit packets value enables it.
 	// Set to &FragmentSpec{Packets:""} (empty packets) to disable fragmentation.
 	Fragment *FragmentSpec `json:"fragment,omitempty"`
 
-	// RealityFingerprints is the list of TLS client fingerprints to rotate randomly on each
-	// Xray config build. Overrides reality.fingerprint when non-empty.
-	// Defaults to ["chrome","firefox","safari","ios","android","randomized"].
+	// RealityFingerprints supplies the first fingerprint if reality.fingerprint is absent.
+	// The default client fingerprint is chrome; server reload does not rotate ClientHello.
 	RealityFingerprints []string `json:"reality_fingerprints,omitempty"`
 
 	// SplitHTTPMaxChunkKB limits each splithttp POST body in kilobytes (e.g. 64).
@@ -92,7 +93,7 @@ type AntiCensorSpec struct {
 	SplitHTTPMaxChunkKB int `json:"splithttp_max_chunk_kb,omitempty"`
 
 	// SplitHTTPPadding adds random padding to each splithttp chunk.
-	// Format: "min-max" bytes, e.g. "0-100". Empty = default padding; "0" disables padding.
+	// Positive min-max range. Empty and legacy zero ranges use the core default 100-1000.
 	SplitHTTPPadding string `json:"splithttp_padding,omitempty"`
 
 	// ExitFallbackHost is the host:port the exit node forwards unrecognized TCP connections to
@@ -136,7 +137,10 @@ type StatsSpec struct {
 // Spec is relay deployment configuration (JSON file: -spec flag).
 type Spec struct {
 	// SchemaVersion defaults to 1 when zero (see Validate).
-	SchemaVersion int `json:"schema_version"`
+	SchemaVersion  int                 `json:"schema_version"`
+	ProbeURLs      []string            `json:"probe_urls,omitempty"`
+	PublicXHTTPTLS *PublicXHTTPTLSSpec `json:"public_xhttp_tls,omitempty"`
+	PublicEntries  []PublicEntry       `json:"public_entries,omitempty"`
 
 	Role        Role   `json:"role"`
 	MimicPreset string `json:"mimic_preset"`
@@ -327,6 +331,19 @@ func BoolPtr(b bool) *bool {
 }
 
 func (s *Spec) Validate() error {
+	if err := s.validateTransportExtensions(); err != nil {
+		return err
+	}
+	for _, target := range s.ProbeURLs {
+		u, err := url.Parse(target)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
+			return errors.New("probe_urls must be HTTPS URLs without credentials")
+		}
+	}
+	if len(s.ProbeURLs) != 0 && len(s.ProbeURLs) != 2 {
+		return errors.New("probe_urls requires two independent HTTPS targets")
+	}
+
 	ver := s.SchemaVersion
 	if ver == 0 {
 		ver = 1
@@ -464,6 +481,96 @@ func (s *Spec) Validate() error {
 		}
 		if s.ExitCertPaths.CertFile == "" || s.ExitCertPaths.KeyFile == "" {
 			return errors.New("config: exit requires exit_cert.cert_file and key_file")
+		}
+	}
+	return nil
+}
+
+// HealthTargets are fetched through each exit, never through a direct fallback.
+func (s *Spec) HealthTargets() []string {
+	if len(s.ProbeURLs) > 0 {
+		return s.ProbeURLs
+	}
+	return []string{"https://speed.cloudflare.com/__down?bytes=65536", "https://httpbingo.org/bytes/65536"}
+}
+
+func effectivePadding(s *Spec) string {
+	if s.AntiCensor == nil {
+		return "100-1000"
+	}
+	p := s.AntiCensor.SplitHTTPPadding
+	switch p {
+	case "", "0", "0-100", "0-64", "0-128":
+		return "100-1000"
+	}
+	return p
+}
+func (s *Spec) validateTransportExtensions() error {
+	if s.Role != RoleBridge && (s.PublicXHTTPTLS != nil || len(s.PublicEntries) > 0) {
+		return errors.New("public listeners and entries require bridge role")
+	}
+	ids := map[string]bool{"primary": true}
+	for _, entry := range s.PublicEntries {
+		if entry.ID == "" || strings.ContainsAny(entry.ID, "/ \t\n") || ids[entry.ID] || entry.Host == "" || strings.ContainsAny(entry.Host, "/@?# \t\r\n") || entry.TCPPort < 1 || entry.TCPPort > 65535 {
+			return errors.New("invalid or duplicate public entry")
+		}
+		ids[entry.ID] = true
+		if entry.XHTTPRealityPort < 0 || entry.XHTTPRealityPort > 65535 || entry.XHTTPTLSPort < 0 || entry.XHTTPTLSPort > 65535 {
+			return errors.New("invalid entry port")
+		}
+		if entry.XHTTPRealityPort > 0 && (s.AntiCensor == nil || s.AntiCensor.PublicXHTTPPort == 0) {
+			return errors.New("entry requires existing XHTTP REALITY listener")
+		}
+		if entry.XHTTPTLSPort > 0 && s.PublicXHTTPTLS == nil {
+			return errors.New("entry requires existing XHTTP TLS listener")
+		}
+	}
+	p := effectivePadding(s)
+	parts := strings.Split(p, "-")
+	if len(parts) > 2 {
+		return errors.New("invalid splithttp_padding")
+	}
+	lo, e := strconv.Atoi(parts[0])
+	hi := lo
+	if len(parts) == 2 {
+		var err error
+		hi, err = strconv.Atoi(parts[1])
+		if err != nil {
+			return errors.New("invalid splithttp_padding")
+		}
+	}
+	if e != nil || lo <= 0 || hi < lo || hi > 65536 {
+		return errors.New("splithttp_padding must be a positive range up to 65536 bytes")
+	}
+	if lo > 100 || hi < 1000 {
+		return errors.New("splithttp_padding must include 100-1000 for compatibility with issued Xray profiles")
+	}
+	if s.AntiCensor != nil && s.AntiCensor.SplitHTTPPadding != "" && s.AntiCensor.SplitHTTPPadding != p {
+		slog.Warn("legacy padding normalized to Xray default; issued profiles remain compatible")
+	}
+	if t := s.PublicXHTTPTLS; t != nil {
+		if t.Port <= 0 || t.Port > 65535 || t.Port == s.VLESSPort || (s.AntiCensor != nil && t.Port == s.AntiCensor.PublicXHTTPPort) {
+			return errors.New("public_xhttp_tls requires a distinct port")
+		}
+		if _, p, err := net.SplitHostPort(s.AdminListen); err == nil && p == strconv.Itoa(t.Port) {
+			return errors.New("public_xhttp_tls conflicts with admin port")
+		}
+		if t.Port == HealthProbePort || (s.SOCKS5 != nil && s.SOCKS5.Enabled && t.Port == s.SOCKS5.Port) {
+			return errors.New("public_xhttp_tls conflicts with an existing listener")
+		}
+		if t.ServerName == "" || strings.ContainsAny(t.ServerName, "/: \t\r\n") || net.ParseIP(t.ServerName) != nil || t.CertificateFile == "" || t.KeyFile == "" {
+			return errors.New("public_xhttp_tls requires server_name, certificate_file and key_file")
+		}
+		if t.Mode != "" && t.Mode != "stream-up" && t.Mode != "packet-up" {
+			return errors.New("public_xhttp_tls mode must be stream-up or packet-up")
+		}
+		if t.Path == "" || !strings.HasPrefix(t.Path, "/") {
+			return errors.New("public_xhttp_tls requires absolute HTTP path")
+		}
+		if d := t.Download; d != nil {
+			if d.Address == "" || d.ServerName == "" || d.Port <= 0 || d.Port > 65535 {
+				return errors.New("invalid XHTTP download endpoint")
+			}
 		}
 	}
 	return nil

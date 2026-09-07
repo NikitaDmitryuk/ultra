@@ -24,6 +24,9 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 	sub, _ := fs.Sub(miniappFS, "embed/miniapp")
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 
+	mux.HandleFunc("GET /sub/{token}", b.handlePublicSubscription)
+	mux.HandleFunc("POST /api/users/{uuid}/subscription", b.handleRotateSubscription)
+	mux.HandleFunc("DELETE /api/users/{uuid}/subscription", b.handleRevokeSubscription)
 	// Public mobile-client API. Auth is the VLESS UUID bearer token.
 	mux.HandleFunc("GET /api/client/exits", b.handleClientListExits)
 	mux.HandleFunc("PUT /api/client/exit-selection", b.handleClientSetExitSelection)
