@@ -51,3 +51,6 @@ require (
 	gvisor.dev/gvisor v0.0.0-20260122175437-89a5d21be8f0 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
+
+// Pinned Xray with the reviewed concurrency fixes documented in third_party/README.md.
+replace github.com/xtls/xray-core => ./third_party/xray-core
