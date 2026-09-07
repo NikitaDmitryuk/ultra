@@ -831,7 +831,7 @@ func legacyMain() {
 				if err := install.SetupReplicaPostgres(dbSSH, replicaHost, *identity, *pc, primaryHost); err != nil {
 					installWarn.add("PostgreSQL replica (%s): установка не выполнена — %v", replicaHost, err)
 				} else {
-					fmt.Println("PostgreSQL replica ready.")
+					fmt.Println("Replica worker authorized; verify synchronization status after relay startup.")
 				}
 			}
 		}

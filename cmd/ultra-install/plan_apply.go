@@ -198,14 +198,20 @@ func setupPlanDatabase(p *installplan.InstallPlan, ds *installplan.DesiredState,
 	if primaryHost == "" {
 		primaryHost = p.Bridge.SSHHost
 	}
-	replicaHost := p.Database.ReplicaHost
-	if replicaHost == "" && len(p.Exits) > 0 {
-		replicaHost = p.Exits[0].SSHHost
+	targets := map[string]bool{}
+	if p.Database.ReplicaHost != "" {
+		targets[p.Database.ReplicaHost] = true
+	}
+	for _, node := range p.Exits {
+		targets[node.SSHHost] = true
 	}
 	emitInstallEvent(format, installplan.EventStep, "", fmt.Sprintf("setting up PostgreSQL primary on %s", primaryHost), "database")
 	exitOnErr("postgres primary system setup", install.SetupSystem(dbSSH, primaryHost, p.SSH.Identity))
 	exitOnErr("postgres primary setup", install.SetupPrimaryPostgres(dbSSH, primaryHost, p.SSH.Identity, *ds.PostgresConfig))
-	if replicaHost != "" && replicaHost != primaryHost {
+	for replicaHost := range targets {
+		if replicaHost == "" || replicaHost == primaryHost {
+			continue
+		}
 		if !install.SSHReachable(dbSSH, replicaHost, p.SSH.Identity) {
 			emitInstallEvent(
 				format,
@@ -214,7 +220,7 @@ func setupPlanDatabase(p *installplan.InstallPlan, ds *installplan.DesiredState,
 				fmt.Sprintf("PostgreSQL replica %s is not reachable; skipping", replicaHost),
 				"database",
 			)
-			return
+			continue
 		}
 		emitInstallEvent(format, installplan.EventStep, "", fmt.Sprintf("setting up PostgreSQL replica on %s", replicaHost), "database")
 		if err := install.SetupSystem(dbSSH, replicaHost, p.SSH.Identity); err != nil {
@@ -225,7 +231,7 @@ func setupPlanDatabase(p *installplan.InstallPlan, ds *installplan.DesiredState,
 				fmt.Sprintf("replica system setup failed: %v", err),
 				"database",
 			)
-			return
+			continue
 		}
 		if err := install.SetupReplicaPostgres(dbSSH, replicaHost, p.SSH.Identity, *ds.PostgresConfig, primaryHost); err != nil {
 			emitInstallEvent(

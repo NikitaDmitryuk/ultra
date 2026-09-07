@@ -26,6 +26,8 @@ type ClientExport struct {
 // ClientProfileExport describes one importable client profile. Legacy clients can keep using
 // ClientExport.VLESSURI; newer UIs can surface this list as primary/fallback choices.
 type ClientProfileExport struct {
+	LocationID       string         `json:"location_id,omitempty"`
+	RouteID          string         `json:"route_id,omitempty"`
 	EntryID          string         `json:"entry_id"`
 	ID               string         `json:"id"`
 	Name             string         `json:"name"`
@@ -342,7 +344,7 @@ func buildFallbackXHTTPExport(spec *Spec, user auth.User) (*ClientExport, error)
 }
 
 // BuildClientProfiles exports only configured listeners. Legacy TCP fields remain unchanged.
-func BuildClientProfiles(spec *Spec, user auth.User) ([]ClientProfileExport, error) {
+func buildTransportProfiles(spec *Spec, user auth.User) ([]ClientProfileExport, error) {
 	fast, err := BuildClientExport(spec, user)
 	if err != nil {
 		return nil, err
@@ -391,7 +393,7 @@ func BuildClientProfiles(spec *Spec, user auth.User) ([]ClientProfileExport, err
 			tls.Port = entry.XHTTPTLSPort
 			child.PublicXHTTPTLS = &tls
 		}
-		extra, err := BuildClientProfiles(&child, user)
+		extra, err := buildTransportProfiles(&child, user)
 		if err != nil {
 			return nil, err
 		}
@@ -409,4 +411,46 @@ func BuildClientProfiles(spec *Spec, user auth.User) ([]ClientProfileExport, err
 		}
 	}
 	return profiles, nil
+}
+
+// BuildClientProfiles keeps legacy IDs and appends stable per-location credentials.
+func BuildClientProfiles(spec *Spec, user auth.User) ([]ClientProfileExport, error) {
+	base, e := buildTransportProfiles(spec, user)
+	if e != nil {
+		return nil, e
+	}
+	decorate := func(p *ClientProfileExport, prefix string) {
+		p.Name = prefix + " · " + p.Name
+		uri, err := url.Parse(p.VLESSURI)
+		if err == nil {
+			uri.Fragment = p.Name
+			p.VLESSURI = uri.String()
+		}
+	}
+	for i := range base {
+		base[i].RouteID = "default"
+		if len(user.Routes) > 0 {
+			decorate(&base[i], "Автоматически · выбор из Mini App")
+		}
+	}
+	for _, route := range user.Routes {
+		if !route.Published {
+			continue
+		}
+		alias := user
+		alias.UUID = route.UUID
+		alias.Routes = nil
+		profiles, err := buildTransportProfiles(spec, alias)
+		if err != nil {
+			return nil, err
+		}
+		for i := range profiles {
+			profiles[i].ID = "location/" + route.LocationID + "/" + profiles[i].ID
+			profiles[i].LocationID = route.LocationID
+			profiles[i].RouteID = route.LocationID
+			decorate(&profiles[i], route.Name)
+		}
+		base = append(base, profiles...)
+	}
+	return base, nil
 }

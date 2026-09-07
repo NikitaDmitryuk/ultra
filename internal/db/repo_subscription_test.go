@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionkey"
 	"testing"
 )
 
@@ -15,7 +17,7 @@ func TestSubscriptionLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = users.Purge(ctx, user.UUID) })
-	repo := NewSubscriptionRepo(d)
+	repo := NewSubscriptionRepo(d, &subscriptionkey.Ring{Active: "v1", Keys: map[string]string{"v1": base64.StdEncoding.EncodeToString(make([]byte, 32))}})
 	token, err := repo.Rotate(ctx, user.UUID)
 	if err != nil {
 		t.Fatal(err)

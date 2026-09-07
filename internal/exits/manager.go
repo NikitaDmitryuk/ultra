@@ -49,6 +49,8 @@ func NewManager(repo Repo, onChange func([]Node), log *slog.Logger) (*Manager, e
 	return m, nil
 }
 
+func (m *Manager) Refresh(ctx context.Context) error { return m.refresh(ctx) }
+
 func (m *Manager) refresh(ctx context.Context) error {
 	nodes, err := m.repo.List(ctx)
 	if err != nil {

@@ -20,6 +20,8 @@ import (
 var miniappFS embed.FS
 
 func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
+	b.memberRoutes(mux)
+	b.cloudRoutes(mux)
 	// Serve static frontend files embedded in the binary.
 	sub, _ := fs.Sub(miniappFS, "embed/miniapp")
 	mux.Handle("/", http.FileServer(http.FS(sub)))
@@ -59,9 +61,6 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/diagnostics", b.handleDiagnostics)
 	mux.HandleFunc("GET /api/hardening", b.handleHardening)
 	mux.HandleFunc("GET /api/exits", b.handleListExits)
-	mux.HandleFunc("POST /api/exits", b.handleCreateExit)
-	mux.HandleFunc("PATCH /api/exits/{id}", b.handlePatchExit)
-	mux.HandleFunc("DELETE /api/exits/{id}", b.handleDeleteExit)
 	mux.HandleFunc("GET /api/alerts/recent", b.handleRecentAlerts)
 	mux.HandleFunc("POST /api/alerts/test", b.handleTestAlert)
 	mux.HandleFunc("POST /api/admin/invite", b.handleGenerateInvite)
@@ -680,55 +679,6 @@ func (b *Bot) handleListExits(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(data)
-}
-
-func (b *Bot) handleCreateExit(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.mustAdmin(w, r); !ok {
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 16384))
-	if err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
-		return
-	}
-	data, err := b.adminPost(r.Context(), "/v1/exits", body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
-}
-
-func (b *Bot) handlePatchExit(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.mustAdmin(w, r); !ok {
-		return
-	}
-	id := strings.TrimSpace(r.PathValue("id"))
-	body, err := io.ReadAll(io.LimitReader(r.Body, 16384))
-	if err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
-		return
-	}
-	data, err := b.adminPatch(r.Context(), "/v1/exits/"+id, body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
-}
-
-func (b *Bot) handleDeleteExit(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.mustAdmin(w, r); !ok {
-		return
-	}
-	id := strings.TrimSpace(r.PathValue("id"))
-	if err := b.adminDelete(r.Context(), "/v1/exits/"+id); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (b *Bot) handleGenerateInvite(w http.ResponseWriter, r *http.Request) {

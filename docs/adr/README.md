@@ -10,8 +10,12 @@ ADR сохраняет одно значимое решение и его обо
 | --- | --- |
 | [0001 — Контекст Codex в репозитории](0001-codex-context.md) | accepted |
 | [0002 — Failover по передаче данных](0002-exit-failover.md) | accepted |
-| [0003 — Подписка Happ](0003-happ-subscription.md) | accepted |
+| [0003 — Подписка Happ](0003-happ-subscription.md) | superseded |
 | [0004 — Резерв по месту отказа](0004-reserve-topology.md) | accepted |
+| [0005 — Закрытый допуск и восстановимая подписка](0005-member-access.md) | accepted |
+| [0006 — Сохраняемые операции Vultr](0006-cloud-operations.md) | accepted |
+| [0007 — Учётные данные локаций одного доступа](0007-location-profiles.md) | accepted |
+| [0008 — Асинхронные копии БД и ручное восстановление](0008-database-recovery.md) | accepted |
 
 ## Когда нужен ADR
 

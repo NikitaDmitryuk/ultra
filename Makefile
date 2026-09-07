@@ -158,7 +158,7 @@ build-bench:
 
 .PHONY: test-ui
 test-ui:
-	node --test scripts/test-happ-import.cjs
+	node --test scripts/test-happ-import.cjs scripts/test-cabinet.cjs scripts/test-miniapp-preview.cjs
 
 test-race:
 	go test -race -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' ./...

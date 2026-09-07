@@ -2,7 +2,7 @@
 
 ## Статус
 
-accepted
+superseded
 
 ## Дата
 
@@ -46,3 +46,7 @@ accepted
 - [Admin API](../../internal/adminapi/subscriptions.go), [публичный endpoint](../../internal/bot/subscriptions.go).
 - [Генератор профилей](../../internal/config/xray_client.go), [инструкция Happ](../happ.md).
 - [Happ: управление приложением](https://github.com/HappDev/happ_su/blob/main/dev-docs/app-management.md).
+
+## Заменено
+
+[ADR 0005](0005-member-access.md) добавляет восстановимую копию токена для новых подписок. Остальной контракт публичного обновления сохраняется.

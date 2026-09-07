@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/db"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
@@ -39,15 +40,18 @@ type TrafficQuerier interface {
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
 type Server struct {
-	ReloadStatus  func() proxy.ReloadStatus
-	Subscriptions SubscriptionStore
-	log           *slog.Logger
-	users         auth.UserManager
-	traffic       TrafficQuerier // nil when DB is not configured
-	spec          *config.Spec
-	exits         *exits.Manager
-	selector      *exits.Selector
-	onExitChange  func()
+	ReplicationStatus func(context.Context) (any, error)
+	Cloud             *cloud.Service
+	Members           *MemberService
+	ReloadStatus      func() proxy.ReloadStatus
+	Subscriptions     SubscriptionStore
+	log               *slog.Logger
+	users             auth.UserManager
+	traffic           TrafficQuerier // nil when DB is not configured
+	spec              *config.Spec
+	exits             *exits.Manager
+	selector          *exits.Selector
+	onExitChange      func()
 	// statPeek reads a cumulative Xray stats counter by name (optional; used for legacy SOCKS5 traffic).
 	statPeek func(string) int64
 	mux      *http.ServeMux
@@ -123,6 +127,8 @@ func (s *Server) decodeAdminJSON(w http.ResponseWriter, r *http.Request, dst any
 }
 
 func (s *Server) routes() error {
+	s.memberRoutes()
+	s.cloudRoutes()
 	adminHandler, err := newAdminStaticHandler()
 	if err != nil {
 		return err

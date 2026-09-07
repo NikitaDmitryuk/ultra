@@ -22,6 +22,7 @@ import (
 
 // Bot orchestrates long polling and the Mini App HTTP server.
 type Bot struct {
+	picker     memberPicker
 	api        *tgbotapi.BotAPI
 	botToken   string
 	adminRepo  botAdminRepo
@@ -84,24 +85,7 @@ func New(
 }
 
 // RunPolling starts Telegram long polling and blocks until ctx is cancelled.
-func (b *Bot) RunPolling(ctx context.Context) error {
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
-	updates := b.api.GetUpdatesChan(u)
-	b.log.Info("bot polling started")
-	for {
-		select {
-		case <-ctx.Done():
-			b.api.StopReceivingUpdates()
-			return ctx.Err()
-		case update, ok := <-updates:
-			if !ok {
-				return nil
-			}
-			go b.handleUpdate(ctx, update)
-		}
-	}
-}
+func (b *Bot) RunPolling(ctx context.Context) error { return b.runMemberPolling(ctx) }
 
 // Handler returns an http.Handler serving the Mini App API and embedded frontend.
 // Call this to register routes on your HTTP server.

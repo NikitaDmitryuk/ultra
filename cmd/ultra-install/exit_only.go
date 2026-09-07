@@ -287,5 +287,8 @@ func runExitOnly(o exitOnlyOpts) {
 		fmt.Fprintln(os.Stderr, "exit-only finish:", err)
 		os.Exit(1)
 	}
+	if err := install.EnableRecoveryNode(o.sshUser, o.bridgeHost, o.exitHost, o.identity); err != nil {
+		fmt.Fprintln(os.Stderr, "Replica worker requires attention:", err)
+	}
 	fmt.Println("Exit node installed:", o.exitHost)
 }

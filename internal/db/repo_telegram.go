@@ -219,3 +219,34 @@ func (r *TelegramRepo) PruneMonitoringRetention(ctx context.Context) (notif, obs
 	}
 	return notif, obs, sig, nil
 }
+
+type MemberNotification struct {
+	MemberID, AdminID int64
+	Name, Source      string
+}
+
+func (r *TelegramRepo) ClaimMemberNotifications(ctx context.Context) ([]MemberNotification, error) {
+	rows, e := r.db.Pool.Query(ctx, `WITH due AS (
+ SELECT n.member_id,n.admin_id FROM vpn_member_notifications n JOIN users u ON u.telegram_id=n.member_id
+ WHERE n.sent_at IS NULL AND n.next_attempt<=NOW() AND NOT u.member_pending ORDER BY n.created_at LIMIT 10 FOR UPDATE OF n SKIP LOCKED
+ ), claimed AS (UPDATE vpn_member_notifications n SET attempts=attempts+1,next_attempt=NOW()+INTERVAL '1 minute'
+ FROM due WHERE n.member_id=due.member_id AND n.admin_id=due.admin_id RETURNING n.member_id,n.admin_id)
+ SELECT c.member_id,c.admin_id,u.name,u.enrollment_source FROM claimed c JOIN users u ON u.telegram_id=c.member_id`)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []MemberNotification{}
+	for rows.Next() {
+		var n MemberNotification
+		if e = rows.Scan(&n.MemberID, &n.AdminID, &n.Name, &n.Source); e != nil {
+			return nil, e
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+func (r *TelegramRepo) MemberNotificationSent(ctx context.Context, member, admin int64) error {
+	_, e := r.db.Pool.Exec(ctx, `UPDATE vpn_member_notifications SET sent_at=NOW() WHERE member_id=$1 AND admin_id=$2`, member, admin)
+	return e
+}

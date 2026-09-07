@@ -140,6 +140,14 @@ func (c *Collector) collect(at time.Time) {
 			downBytes = cnt.Set(0)
 		}
 
+		for _, route := range u.Routes {
+			if cnt := sm.GetCounter("user>>>" + route.UUID + ">>>traffic>>>uplink"); cnt != nil {
+				upBytes += cnt.Set(0)
+			}
+			if cnt := sm.GetCounter("user>>>" + route.UUID + ">>>traffic>>>downlink"); cnt != nil {
+				downBytes += cnt.Set(0)
+			}
+		}
 		samples = append(samples, db.TrafficSample{
 			UserUUID:      u.UUID,
 			CollectedAt:   at,

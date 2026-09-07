@@ -30,6 +30,9 @@ const LEGACY_SOCKS_UUID = '_legacy_socks';
     await loadStats();
     await loadUsers();
     loadSettingsMe();
+    const initial = ['diag','settings','stats'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'users';
+    showScreen(initial);
+    if (initial === 'diag') loadDiagnostics();
     setInterval(loadHealth, 30000);
   } catch (e) {
     showError(e.message || 'Ошибка инициализации');
@@ -63,7 +66,6 @@ function switchTab(name, btn) {
   if (name === 'diag') loadDiagnostics();
   if (name === 'settings') {
     loadSettingsMe();
-    loadExits();
   }
 }
 
@@ -963,119 +965,6 @@ async function loadHealth() {
   }
 }
 
-// ── Exit nodes ───────────────────────────────────────────────────────────────
-let exitsCache = [];
-
-async function loadExits() {
-  const list = document.getElementById('exits-list');
-  if (!list) return;
-  try {
-    const data = await api('GET', '/api/exits');
-    exitsCache = data.exits || data.Exits || [];
-    renderExits(exitsCache, data.active_exit_id || data.activeExitID || '');
-  } catch (e) {
-    list.className = 'diag-list empty';
-    list.textContent = 'Exit-ноды недоступны: ' + e.message;
-  }
-}
-
-function renderExits(items, activeID) {
-  const list = document.getElementById('exits-list');
-  if (!list) return;
-  if (!items.length) {
-    list.className = 'diag-list empty';
-    list.textContent = 'Нет exit-нод.';
-    return;
-  }
-  list.className = 'diag-list';
-  list.innerHTML = '';
-  items.forEach(n => {
-    const item = document.createElement('div');
-    item.className = 'diag-item';
-    const id = n.id || n.ID;
-    const active = id === activeID || n.active;
-    const enabled = n.enabled !== false && n.Enabled !== false;
-    const city = n.city || n.City || '';
-    const country = n.country_name || n.CountryName || '';
-    const location = [city, country].filter(Boolean).join(', ');
-    item.innerHTML = `
-      <div class="diag-item-title">${esc(n.name || n.Name)}${active ? ' · active' : ''}${!enabled ? ' · off' : ''}</div>
-      <div class="diag-item-meta">${esc(n.address || n.Address)}:${esc(String(n.port || n.Port))} · priority ${esc(String(n.priority || n.Priority))}${location ? ' · ' + esc(location) : ''}</div>
-    `;
-    const row = document.createElement('div');
-    row.className = 'detail-actions-row';
-    row.style.marginTop = '8px';
-    const toggleBtn = document.createElement('button');
-    toggleBtn.className = 'btn secondary';
-    toggleBtn.style.padding = '6px 10px';
-    toggleBtn.style.fontSize = '12px';
-    toggleBtn.textContent = enabled ? 'Отключить' : 'Включить';
-    toggleBtn.onclick = () => patchExitNode(id, { enabled: !enabled });
-    const delBtn = document.createElement('button');
-    delBtn.className = 'btn danger';
-    delBtn.style.padding = '6px 10px';
-    delBtn.style.fontSize = '12px';
-    delBtn.textContent = 'Удалить';
-    delBtn.onclick = () => deleteExitNode(id, n.name || n.Name);
-    row.appendChild(toggleBtn);
-    row.appendChild(delBtn);
-    item.appendChild(row);
-    list.appendChild(item);
-  });
-}
-
-async function createExitNode() {
-  const name = document.getElementById('new-exit-name')?.value?.trim();
-  const address = document.getElementById('new-exit-address')?.value?.trim();
-  const port = parseInt(document.getElementById('new-exit-port')?.value, 10);
-  const priority = parseInt(document.getElementById('new-exit-priority')?.value, 10) || 100;
-  const country_code = document.getElementById('new-exit-country-code')?.value?.trim();
-  const country_name = document.getElementById('new-exit-country-name')?.value?.trim();
-  const city = document.getElementById('new-exit-city')?.value?.trim();
-  if (!name || !address || !port) {
-    showToast('Заполните имя, адрес и порт.');
-    return;
-  }
-  try {
-    const res = await api('POST', '/api/exits', { name, address, port, priority, country_code, country_name, city });
-    const deploy = res.deploy || {};
-    const box = document.getElementById('exit-deploy-result');
-    const text = document.getElementById('exit-deploy-text');
-    if (box && text) {
-      text.textContent = deploy.install_example || JSON.stringify(deploy, null, 2);
-      box.style.display = 'block';
-    }
-    showToast('Exit добавлена. Задеплойте VPS.');
-    await loadExits();
-  } catch (e) {
-    showToast('Ошибка: ' + e.message);
-  }
-}
-
-async function patchExitNode(id, patch) {
-  try {
-    await api('PATCH', `/api/exits/${id}`, patch);
-    await loadExits();
-    showToast('Exit обновлена.');
-  } catch (e) {
-    showToast('Ошибка: ' + e.message);
-  }
-}
-
-function deleteExitNode(id, name) {
-  tg.showConfirm(`Удалить exit «${name}»?`, async confirmed => {
-    if (!confirmed) return;
-    try {
-      await api('DELETE', `/api/exits/${id}`);
-      await loadExits();
-      showToast('Exit удалена.');
-    } catch (e) {
-      showToast('Ошибка: ' + e.message);
-    }
-  });
-}
-
-// ── Settings ─────────────────────────────────────────────────────────────────
 async function loadSettingsMe() {
   try {
     const me = await api('GET', '/api/me');

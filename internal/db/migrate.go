@@ -54,8 +54,22 @@ var migration015 string
 //go:embed migrations/016_subscription_tokens.sql
 var migration016 string
 
+//go:embed migrations/017_members.sql
+var migration017 string
+
+//go:embed migrations/018_cloud.sql
+var migration018 string
+
 func (d *DB) migrate(ctx context.Context) error {
-	_, err := d.Pool.Exec(ctx, `
+	tx, err := d.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(817365004)`); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version    INT         PRIMARY KEY,
 			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -85,11 +99,13 @@ func (d *DB) migrate(ctx context.Context) error {
 		{14, migration014},
 		{15, migration015},
 		{16, migration016},
+		{17, migration017},
+		{18, migration018},
 	}
 
 	for _, m := range migrations {
 		var applied bool
-		if err := d.Pool.QueryRow(ctx,
+		if err := tx.QueryRow(ctx,
 			"SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)", m.version,
 		).Scan(&applied); err != nil {
 			return fmt.Errorf("check migration %d: %w", m.version, err)
@@ -97,14 +113,14 @@ func (d *DB) migrate(ctx context.Context) error {
 		if applied {
 			continue
 		}
-		if _, err := d.Pool.Exec(ctx, m.sql); err != nil {
+		if _, err := tx.Exec(ctx, m.sql); err != nil {
 			return fmt.Errorf("apply migration %d: %w", m.version, err)
 		}
-		if _, err := d.Pool.Exec(ctx,
+		if _, err := tx.Exec(ctx,
 			"INSERT INTO schema_migrations(version) VALUES($1)", m.version,
 		); err != nil {
 			return fmt.Errorf("record migration %d: %w", m.version, err)
 		}
 	}
-	return nil
+	return tx.Commit(ctx)
 }
