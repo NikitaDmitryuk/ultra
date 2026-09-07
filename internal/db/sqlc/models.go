@@ -213,14 +213,15 @@ type VpnGroup struct {
 }
 
 type VpnInvite struct {
-	ID          int64              `json:"id"`
-	TokenHash   []byte             `json:"token_hash"`
-	Recipient   int64              `json:"recipient"`
-	CreatedBy   int64              `json:"created_by"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
-	UsedAt      pgtype.Timestamptz `json:"used_at"`
-	CancelledAt pgtype.Timestamptz `json:"cancelled_at"`
+	ID            int64              `json:"id"`
+	TokenHash     []byte             `json:"token_hash"`
+	Recipient     int64              `json:"recipient"`
+	CreatedBy     int64              `json:"created_by"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+	UsedAt        pgtype.Timestamptz `json:"used_at"`
+	CancelledAt   pgtype.Timestamptz `json:"cancelled_at"`
+	RecipientName string             `json:"recipient_name"`
 }
 
 type VpnLocation struct {

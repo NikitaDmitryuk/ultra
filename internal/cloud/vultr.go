@@ -70,6 +70,7 @@ type CreateRequest struct {
 	DDoS     bool     `json:"ddos_protection"`
 }
 type APIError struct {
+	Action string
 	Status int
 	Code   string
 }
@@ -86,16 +87,22 @@ func NewVultr(key string) *Vultr {
 	return &Vultr{BaseURL: "https://api.vultr.com/v2", Key: key, HTTP: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 func (v *Vultr) requestOnce(ctx context.Context, method, path string, input, output any) error {
-	body, e := json.Marshal(input)
-	if e != nil {
-		return ErrUnavailable
+	var body io.Reader
+	if input != nil {
+		encoded, e := json.Marshal(input)
+		if e != nil {
+			return ErrUnavailable
+		}
+		body = bytes.NewReader(encoded)
 	}
-	req, e := http.NewRequestWithContext(ctx, method, v.BaseURL+path, bytes.NewReader(body))
+	req, e := http.NewRequestWithContext(ctx, method, v.BaseURL+path, body)
 	if e != nil {
 		return ErrUnavailable
 	}
 	req.Header.Set("Authorization", "Bearer "+v.Key)
-	req.Header.Set("Content-Type", "application/json")
+	if input != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	response, e := v.HTTP.Do(req)
 	if e != nil {
 		var timeout net.Error
@@ -299,7 +306,14 @@ func (v *Vultr) DeleteFirewall(ctx context.Context, id string) error {
 	return e
 }
 
-func (v *Vultr) request(ctx context.Context, method, path string, input, output any) error {
+func (v *Vultr) request(ctx context.Context, method, path string, input, output any) (err error) {
+	defer func() {
+		var api APIError
+		if errors.As(err, &api) {
+			api.Action = providerAction(method, path)
+			err = api
+		}
+	}()
 	for attempt := 0; ; attempt++ {
 		e := v.requestOnce(ctx, method, path, input, output)
 		if e == nil {

@@ -66,6 +66,9 @@ var migration019 string
 //go:embed migrations/020_exit_budgets.sql
 var migration020 string
 
+//go:embed migrations/021_invite_recipient_name.sql
+var migration021 string
+
 func (d *DB) migrate(ctx context.Context) error {
 	tx, err := d.Pool.Begin(ctx)
 	if err != nil {
@@ -108,7 +111,8 @@ func (d *DB) migrate(ctx context.Context) error {
 		{17, migration017},
 		{18, migration018},
 		{19, migration019},
- {20,migration020},
+		{20, migration020},
+		{21, migration021},
 	}
 
 	for _, m := range migrations {

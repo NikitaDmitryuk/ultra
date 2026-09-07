@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,13 +33,14 @@ type VPNGroup struct {
 	Enabled bool   `json:"enabled"`
 }
 type VPNInvite struct {
-	ID          int64      `json:"id"`
-	Recipient   int64      `json:"recipient"`
-	CreatedBy   int64      `json:"created_by"`
-	CreatedAt   time.Time  `json:"created_at"`
-	ExpiresAt   time.Time  `json:"expires_at"`
-	UsedAt      *time.Time `json:"used_at"`
-	CancelledAt *time.Time `json:"cancelled_at"`
+	RecipientName string     `json:"recipient_name"`
+	ID            int64      `json:"id"`
+	Recipient     int64      `json:"recipient"`
+	CreatedBy     int64      `json:"created_by"`
+	CreatedAt     time.Time  `json:"created_at"`
+	ExpiresAt     time.Time  `json:"expires_at"`
+	UsedAt        *time.Time `json:"used_at"`
+	CancelledAt   *time.Time `json:"cancelled_at"`
 }
 type MemberRepo struct{ db *DB }
 
@@ -103,7 +105,12 @@ func (r *MemberRepo) PutGroup(ctx context.Context, g VPNGroup, actor int64) (VPN
 	}
 	return g, tx.Commit(ctx)
 }
-func (r *MemberRepo) Invite(ctx context.Context, target, actor int64) (string, error) {
+func (r *MemberRepo) Invite(ctx context.Context, target, actor int64, recipientName ...string) (string, error) {
+	name := ""
+	if len(recipientName) > 0 {
+		runes := []rune(strings.TrimSpace(recipientName[0]))
+		name = string(runes[:min(256, len(runes))])
+	}
 	if target <= 0 || actor <= 0 {
 		return "", ErrEnrollmentDenied
 	}
@@ -117,7 +124,7 @@ func (r *MemberRepo) Invite(ctx context.Context, target, actor int64) (string, e
 		return "", e
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	_, e = tx.Exec(ctx, `INSERT INTO vpn_invites(token_hash,recipient,created_by,expires_at) VALUES($1,$2,$3,NOW()+INTERVAL '7 days')`, h[:], target, actor)
+	_, e = tx.Exec(ctx, `INSERT INTO vpn_invites(token_hash,recipient,created_by,expires_at,recipient_name) VALUES($1,$2,$3,NOW()+INTERVAL '7 days',$4)`, h[:], target, actor, name)
 	if e != nil {
 		return "", e
 	}
@@ -128,7 +135,7 @@ func (r *MemberRepo) Invite(ctx context.Context, target, actor int64) (string, e
 	return token, tx.Commit(ctx)
 }
 func (r *MemberRepo) Invites(ctx context.Context) ([]VPNInvite, error) {
-	rows, e := r.db.Pool.Query(ctx, `SELECT id,recipient,created_by,created_at,expires_at,used_at,cancelled_at FROM vpn_invites ORDER BY id DESC LIMIT 200`)
+	rows, e := r.db.Pool.Query(ctx, `SELECT i.id,i.recipient,i.created_by,i.created_at,i.expires_at,i.used_at,i.cancelled_at,COALESCE(NULLIF(u.name,''),i.recipient_name) FROM vpn_invites i LEFT JOIN users u ON u.telegram_id=i.recipient ORDER BY i.id DESC LIMIT 200`)
 	if e != nil {
 		return nil, e
 	}
@@ -136,7 +143,7 @@ func (r *MemberRepo) Invites(ctx context.Context) ([]VPNInvite, error) {
 	out := []VPNInvite{}
 	for rows.Next() {
 		var v VPNInvite
-		if e = rows.Scan(&v.ID, &v.Recipient, &v.CreatedBy, &v.CreatedAt, &v.ExpiresAt, &v.UsedAt, &v.CancelledAt); e != nil {
+		if e = rows.Scan(&v.ID, &v.Recipient, &v.CreatedBy, &v.CreatedAt, &v.ExpiresAt, &v.UsedAt, &v.CancelledAt, &v.RecipientName); e != nil {
 			return nil, e
 		}
 		out = append(out, v)

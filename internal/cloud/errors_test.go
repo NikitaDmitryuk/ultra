@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -80,5 +81,54 @@ func TestStageJournalIncludesFailureAndNoRepeatedUnknownSpam(t *testing.T) {
 	events, _ = s.Store.Events(ctx, offer.ID)
 	if len(events) != count || p.creates != 1 {
 		t.Fatal("unknown retry spam or duplicate purchase")
+	}
+}
+
+func TestPreparationErrorRetainsSafeSubstage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			_, _ = w.Write([]byte(`{"ssh_keys":[],"meta":{"links":{"next":""}}}`))
+			return
+		}
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"error":"unknown private provider response"}`))
+	}))
+	defer server.Close()
+	api := NewVultr("test")
+	api.BaseURL = server.URL
+	_, err := api.EnsureSSHKey(context.Background(), "test", "test-key")
+	code := ErrorCode(err)
+	if code != "provider_rejected@ssh_key_create" || !strings.Contains(ErrorMessage(code), "Регистрация SSH-ключа") {
+		t.Fatalf("missing substage: %s", code)
+	}
+	if strings.Contains(ErrorMessage(code), "private") {
+		t.Fatal("provider response leaked")
+	}
+	if providerAction("POST", "/firewalls/private-resource-id/rules") != "firewall_rule_create" {
+		t.Fatal("missing firewall substage")
+	}
+}
+
+func TestVultrReadRequestsHaveNoJSONBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		if len(data) > 0 || r.Header.Get("Content-Type") != "" {
+			t.Error("read request must not send JSON null")
+			w.WriteHeader(400)
+			return
+		}
+		if r.Method != "GET" {
+			t.Error("unexpected mutation")
+			w.WriteHeader(400)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ssh_keys":[{"id":"existing","ssh_key":"ssh-test public"}],"meta":{"links":{"next":""}}}`))
+	}))
+	defer server.Close()
+	api := NewVultr("test")
+	api.BaseURL = server.URL
+	id, e := api.EnsureSSHKey(context.Background(), "test", "ssh-test public")
+	if e != nil || id != "existing" {
+		t.Fatal("existing key lookup failed", e)
 	}
 }

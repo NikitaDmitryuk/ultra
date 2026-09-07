@@ -114,8 +114,9 @@ func (s *Server) memberInvites(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Recipient int64 `json:"recipient"`
-		Actor     int64 `json:"actor"`
+		RecipientName string `json:"recipient_name"`
+		Recipient     int64  `json:"recipient"`
+		Actor         int64  `json:"actor"`
 	}
 	if !s.decodeAdminJSON(w, r, &body) {
 		return
@@ -130,7 +131,7 @@ func (s *Server) memberInvites(w http.ResponseWriter, r *http.Request) {
 		memberJSON(w, map[string]bool{"cancelled": e == nil}, e)
 		return
 	}
-	token, e := s.Members.Repo.Invite(r.Context(), body.Recipient, body.Actor)
+	token, e := s.Members.Repo.Invite(r.Context(), body.Recipient, body.Actor, body.RecipientName)
 	memberJSON(w, map[string]string{"token": token}, e)
 }
 func (s *Server) memberEnroll(w http.ResponseWriter, r *http.Request) {

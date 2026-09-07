@@ -10,6 +10,8 @@ import (
 func providerCode(status int, message string) string {
 	m := strings.ToLower(message)
 	switch {
+	case strings.Contains(m, "invalid json"):
+		return "provider_invalid_request"
 	case strings.Contains(m, "insufficient funds") || strings.Contains(m, "insufficient credit") || strings.Contains(m, "insufficient balance") || strings.Contains(m, "not enough funds"):
 		return "insufficient_funds"
 	case strings.Contains(m, "ip") && (strings.Contains(m, "unauthorized") || strings.Contains(m, "not authorized") || strings.Contains(m, "not allowed") || strings.Contains(m, "whitelist")):
@@ -38,6 +40,9 @@ func ErrorCode(err error) string {
 	}
 	var api APIError
 	if errors.As(err, &api) && api.Code != "" {
+		if api.Action != "" {
+			return api.Code + "@" + api.Action
+		}
 		return api.Code
 	}
 	switch {
@@ -58,7 +63,13 @@ func ErrorCode(err error) string {
 	}
 }
 func ErrorMessage(code string) string {
+	if base, action, ok := strings.Cut(code, "@"); ok {
+		if label := providerActions[action]; label != "" {
+			return label + ": " + ErrorMessage(base)
+		}
+	}
 	messages := map[string]string{
+		"provider_invalid_request":         "Vultr отклонил формат запроса Ultra. Требуется исправление API-клиента; повторная оплата не поможет.",
 		"provider_timeout":                 "Vultr не ответил вовремя. Проверьте журнал: после отправки покупки сначала сверяется её результат.",
 		"provider_unreachable":             "Не удалось подключиться к API Vultr. Проверьте сеть и DNS исполнителя на bridge.",
 		"insufficient_funds":               "На аккаунте Vultr недостаточно средств. Пополните баланс и получите новое предложение цены.",
@@ -89,4 +100,36 @@ func ErrorMessage(code string) string {
 		return m
 	}
 	return "Операция временно недоступна. Проверьте её журнал и повторите действие."
+}
+
+// Only fixed operation names are retained; paths can contain resource IDs.
+var providerActions = map[string]string{
+	"ssh_key_list": "Получение SSH-ключей", "ssh_key_create": "Регистрация SSH-ключа",
+	"firewall_list": "Получение firewall", "firewall_create": "Создание firewall",
+	"firewall_rules_list": "Получение правил firewall", "firewall_rule_create": "Добавление правила firewall",
+	"os_list": "Получение образов ОС", "instance_create": "Создание VPS",
+}
+
+func providerAction(method, path string) string {
+	path, _, _ = strings.Cut(path, "?")
+	switch {
+	case path == "/ssh-keys" && method == "GET":
+		return "ssh_key_list"
+	case path == "/ssh-keys" && method == "POST":
+		return "ssh_key_create"
+	case path == "/firewalls" && method == "GET":
+		return "firewall_list"
+	case path == "/firewalls" && method == "POST":
+		return "firewall_create"
+	case strings.HasPrefix(path, "/firewalls/") && strings.HasSuffix(path, "/rules") && method == "GET":
+		return "firewall_rules_list"
+	case strings.HasPrefix(path, "/firewalls/") && strings.HasSuffix(path, "/rules") && method == "POST":
+		return "firewall_rule_create"
+	case path == "/os" && method == "GET":
+		return "os_list"
+	case path == "/instances" && method == "POST":
+		return "instance_create"
+	default:
+		return ""
+	}
 }

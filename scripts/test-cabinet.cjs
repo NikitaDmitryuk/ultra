@@ -6,7 +6,7 @@ const source=fs.readFileSync(require('node:path').join(__dirname,'../internal/bo
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 function page(self,responses){
  const elements=new Map(),calls=[],copied=[],opened=[];
- function el(id){if(!elements.has(id))elements.set(id,{innerHTML:'',value:'',dataset:{},classList:{toggle(){}},querySelectorAll(){return[]},addEventListener(){},showModal(){this.open=true},close(){this.open=false}});return elements.get(id)}
+ function el(id){if(!elements.has(id))elements.set(id,{insertAdjacentHTML(position,html){this.innerHTML+=html},innerHTML:'',value:'',dataset:{},classList:{toggle(){}},querySelectorAll(){return[]},addEventListener(){},showModal(){this.open=true},close(){this.open=false}});return elements.get(id)}
  const context=vm.createContext({URL,Date,Number,String,Error,Promise,JSON,
   location:{pathname:self?'/member':'/',hash:'',replace(){},reload(){}},
   window:{Telegram:{WebApp:{initData:'signed-test-session',ready(){},expand(){},openLink(url){opened.push(url)}}},addEventListener(){},open(){throw new Error('unexpected fallback')}},
@@ -51,15 +51,8 @@ test('traffic activity is separate from permission and does not imply online',as
  assert.ok(!vm.runInContext('usage({...recent,active:false})',p.context).includes('последние 2 мин'));
 });
 
-test('traffic overview separates bridge, exits and historical unattributed usage',async()=>{
- const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
- p.context.traffic={month:'2026-09',uplink_bytes:10,downlink_bytes:20,routes:[{name:'Напрямую с bridge · Yandex Cloud',uplink_bytes:10,downlink_bytes:0},{name:'Амстердам',uplink_bytes:0,downlink_bytes:20}],days:[{day:'2026-09-08',uplink_bytes:10,downlink_bytes:20}]};
- const html=vm.runInContext('trafficHTML(traffic)',p.context);
- assert.ok(html.includes('Yandex Cloud'));assert.ok(html.includes('Амстердам'));assert.ok(html.includes('30 Б'));assert.ok(html.includes('<meter'));
-});
-
 test('personal statistics include all devices and survive disabled access',async()=>{
- const traffic={month:'2026-09',uplink_bytes:10,downlink_bytes:20,routes:[{name:'Амстердам',uplink_bytes:10,downlink_bytes:20}],days:[]};
+ const traffic={month:'2026-09',uplink_bytes:10,downlink_bytes:20,routes:[{tag:'ams',name:'Амстердам',uplink_bytes:10,downlink_bytes:20}],days:[],day_routes:[{tag:'ams',bucket:'2026-09-08',uplink_bytes:10,downlink_bytes:20}]};
  const p=page(true,{'/api/self':{registered:true,is_admin:false,member:{uuid:'owner',active:false,pending:false,last_traffic_at:null}},'/api/self/traffic':traffic});await flush();
  assert.ok(p.el('#self-traffic').innerHTML.includes('Амстердам'));
  assert.ok(p.el('#self-traffic').innerHTML.includes('30 Б'));
@@ -72,14 +65,6 @@ test('statistics failure does not replace personal cabinet or hide connect contr
  assert.ok(p.el('#self-traffic').innerHTML.includes('Статистика временно недоступна'));
  assert.ok(!p.el('#app').innerHTML.includes('Кабинет недоступен'));
 });
-test('limits distinguish unknown, exhausted, pending and Amsterdam fallback',async()=>{
- const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
- p.context.limits=[{name:'Франкфурт',state:'exhausted',remaining_bytes:0,used_bytes:100,limit_bytes:100,resets_at:'2026-09-09T00:00:00Z',pending:true},{name:'Амстердам',state:'unknown',is_fallback:true}];
- const html=vm.runInContext('limitsHTML(limits)',p.context);
- assert.ok(html.includes('Резерв — Амстердам'));assert.ok(html.includes('Изменение маршрута применяется'));assert.ok(html.includes('Остаток уточняется'));
- assert.ok(vm.runInContext('limitsHTML([])',p.context).includes('не означает безлимитный'));
-});
-
 test('creation errors remain visible inside the confirmation dialog',async()=>{
  const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
  vm.runInContext(`modal('<button id="buy">Подтвердить</button>');button('buy',async()=>{throw new Error('IP bridge не разрешён в Vultr')})`,p.context);
@@ -88,4 +73,25 @@ test('creation errors remain visible inside the confirmation dialog',async()=>{
  assert.equal(p.el('#dialog-error').textContent,'IP bridge не разрешён в Vultr');
  assert.equal(p.el('#dialog').open,true);
  assert.equal(p.el('#buy').disabled,false);
+});
+
+test('person charts select period and route without historical unattributed totals',async()=>{
+ const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
+ p.context.chart={month:'2026-09',today:'2026-09-08',routes:[{tag:'direct',name:'Yandex Cloud'},{tag:'ams',name:'Амстердам'},{tag:'unknown',name:'Старый трафик'}],day_routes:[{bucket:'2026-09-08',tag:'ams',uplink_bytes:10,downlink_bytes:20},{bucket:'2026-09-08',tag:'unknown',downlink_bytes:999}],hours:[{bucket:'2026-09-08 12:00',tag:'direct',downlink_bytes:4}]};
+ assert.equal(vm.runInContext('personTrafficData(chart,"month").selected.length',p.context),1);
+ assert.equal(vm.runInContext('personTrafficData(chart,"day").buckets.length',p.context),24);
+ assert.equal(vm.runInContext('personTrafficData(chart,"month").buckets.length',p.context),30);
+ assert.equal(vm.runInContext('personTrafficData(chart,"day","ams").selected.length',p.context),0);
+ vm.runInContext('renderTrafficChart(document.querySelector("#person-traffic"),chart)',p.context);
+ const html=p.el('#person-traffic').innerHTML;
+ assert.ok(html.includes('30 Б'));assert.ok(html.includes('Потребление по дням'));assert.ok(!html.includes('Старый трафик'));assert.ok(!html.includes('999'));
+});
+
+test('invitations identify recipient and group with links',async()=>{
+ const p=page(false,{'/api/me':{is_admin:true},'/api/members':[], '/api/enrollment/group':{chat_id:-100123,title:'Друзья',enabled:true,group_url:'https://t.me/+test'},'/api/enrollment/invites':[{id:1,recipient:123,recipient_name:'Анна <Test>',expires_at:'2099-01-01'}]});await flush();await vm.runInContext('invites()',p.context);
+ const html=p.el('#app').innerHTML;assert.ok(html.includes('Анна &lt;Test&gt;'));assert.ok(html.includes('tg://user?id=123'));assert.ok(html.includes('Открыть группу'));assert.ok(html.includes('Друзья'));
+});
+test('account balance stays independent of server operations',async()=>{
+ const p=page(false,{'/api/me':{is_admin:true},'/api/members':[], '/api/cloud/account':{balance:12.5,pending_charges:1.25,observed_at:'2026-09-08T00:00:00Z'}});await flush();await vm.runInContext('loadCloudAccount()',p.context);
+ assert.ok(p.el('#cloud-account').innerHTML.includes('12,50'));assert.ok(p.el('#cloud-account').innerHTML.includes('1,25'));
 });

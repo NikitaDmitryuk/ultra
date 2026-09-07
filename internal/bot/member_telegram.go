@@ -101,7 +101,7 @@ func (b *Bot) inviteVPNCommand(ctx context.Context, msg *tgbotapi.Message) {
 	b.confirmPicker(ctx, msg.From.ID, request)
 }
 func (b *Bot) confirmPicker(ctx context.Context, actor int64, p pickerRequest) {
-	_ = b.telegramJSON(ctx, "sendMessage", map[string]any{"chat_id": actor, "text": fmt.Sprintf("Выдать VPN-приглашение Telegram ID %d? Срок — 7 дней, только для этого аккаунта. Административных прав оно не даёт.", p.Target), "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "Выдать приглашение", "callback_data": fmt.Sprintf("vpn_confirm:%d", p.ID)}}}}}, nil)
+	_ = b.telegramJSON(ctx, "sendMessage", map[string]any{"chat_id": actor, "text": fmt.Sprintf("Выдать VPN-приглашение %s (Telegram ID %d)? Срок — 7 дней, только для этого аккаунта. Административных прав оно не даёт.", p.Title, p.Target), "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "Выдать приглашение", "callback_data": fmt.Sprintf("vpn_confirm:%d", p.ID)}}}}}, nil)
 }
 func (b *Bot) handleMemberCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	if cb.From == nil || cb.Message == nil || cb.Message.Chat == nil || cb.Message.Chat.Type != "private" {
@@ -154,7 +154,7 @@ func (b *Bot) handleMemberCallback(ctx context.Context, cb *tgbotapi.CallbackQue
 	var result struct {
 		Token string `json:"token"`
 	}
-	_, e = b.relayJSON(ctx, "POST", "/v1/enrollment/invites", map[string]any{"recipient": p.Target, "actor": cb.From.ID}, &result)
+	_, e = b.relayJSON(ctx, "POST", "/v1/enrollment/invites", map[string]any{"recipient": p.Target, "actor": cb.From.ID, "recipient_name": p.Title}, &result)
 	if e != nil {
 		b.reply(cb.From.ID, "Не удалось выдать приглашение. Повторите выбор получателя.")
 		return
@@ -204,7 +204,9 @@ func (b *Bot) runMemberPolling(ctx context.Context) error {
 				Shared *struct {
 					RequestID int32 `json:"request_id"`
 					Users     []struct {
-						ID int64 `json:"user_id"`
+						ID        int64  `json:"user_id"`
+						FirstName string `json:"first_name"`
+						LastName  string `json:"last_name"`
 					} `json:"users"`
 				} `json:"users_shared"`
 			}
@@ -224,6 +226,7 @@ func (b *Bot) runMemberPolling(ctx context.Context) error {
 				p, ok := b.picker.pending[msg.From.ID]
 				if ok && p.Kind != "group" && p.ID == extra.Shared.RequestID && time.Now().Before(p.Expires) {
 					p.Target = extra.Shared.Users[0].ID
+					p.Title = strings.TrimSpace(extra.Shared.Users[0].FirstName + " " + extra.Shared.Users[0].LastName)
 					b.picker.pending[msg.From.ID] = p
 				} else {
 					ok = false

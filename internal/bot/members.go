@@ -423,7 +423,18 @@ func (b *Bot) adminGroup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	jsonOK(w, map[string]any{"chat_id": group.ChatID, "title": group.Title, "enabled": group.Enabled, "url": "https://t.me/" + b.api.Self.UserName + "?start=vpn_g_" + group.Code})
+	groupURL := ""
+	if group.ChatID != 0 {
+		c, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		var chat struct {
+			InviteLink string `json:"invite_link"`
+		}
+		if b.telegramJSON(c, "getChat", map[string]any{"chat_id": group.ChatID}, &chat) == nil && strings.HasPrefix(chat.InviteLink, "https://t.me/") {
+			groupURL = chat.InviteLink
+		}
+		cancel()
+	}
+	jsonOK(w, map[string]any{"chat_id": group.ChatID, "title": group.Title, "enabled": group.Enabled, "group_url": groupURL, "url": "https://t.me/" + b.api.Self.UserName + "?start=vpn_g_" + group.Code})
 }
 
 func (b *Bot) adminMemberTraffic(w http.ResponseWriter, r *http.Request) {

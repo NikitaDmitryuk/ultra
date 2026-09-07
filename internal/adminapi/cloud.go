@@ -1,6 +1,7 @@
 package adminapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,6 +12,22 @@ import (
 )
 
 func (s *Server) cloudRoutes() {
+	s.mux.HandleFunc("GET /v1/cloud/account", func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireCloud(w) {
+			return
+		}
+		api, ok := s.Cloud.API.(interface {
+			Account(context.Context) (cloud.Account, error)
+		})
+		if !ok {
+			cloudResult(w, nil, cloud.ErrUnavailable)
+			return
+		}
+		c, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		v, e := api.Account(c)
+		cloudResult(w, v, e)
+	})
 	s.mux.HandleFunc("GET /v1/cloud/quotas", func(w http.ResponseWriter, r *http.Request) {
 		if !s.requireMembers(w) {
 			return

@@ -232,6 +232,9 @@ func TestMemberTrafficRoutesAndLegacyTotals(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	if len(result.DayRoutes) != 2 || len(result.Hours) != 2 {
+		t.Fatalf("missing route chart points: %+v", result)
+	}
 	if result.Uplink != 10 || result.Downlink != 25 || len(result.Routes) != 3 || len(result.Days) != 1 {
 		t.Fatalf("incorrect breakdown: %+v", result)
 	}
@@ -246,5 +249,34 @@ func TestMemberTrafficRoutesAndLegacyTotals(t *testing.T) {
 	result, e = r.Traffic(ctx, 456, now)
 	if e != nil || result.Downlink != 25 || len(result.Routes) != 3 {
 		t.Fatal("reset lost route history", e)
+	}
+	if _, e = d.Pool.Exec(ctx, `DELETE FROM traffic_stats WHERE user_uuid=(SELECT uuid FROM users WHERE telegram_id=456)`); e != nil {
+		t.Fatal(e)
+	}
+	result, e = r.Traffic(ctx, 456, now)
+	if e != nil || len(result.DayRoutes) != 2 || len(result.Hours) != 0 {
+		t.Fatal("monthly route chart lost after raw retention", e)
+	}
+}
+
+func TestInviteRecipientNameSurvivesRestartAndUsesMemberName(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	r := NewMemberRepo(d)
+	token, e := r.Invite(ctx, 987654, 1, "Имя из Telegram")
+	if e != nil {
+		t.Fatal(e)
+	}
+	list, e := NewMemberRepo(d).Invites(ctx)
+	if e != nil || len(list) != 1 || list[0].RecipientName != "Имя из Telegram" {
+		t.Fatal("recipient name lost", e)
+	}
+	_, e = r.Enroll(ctx, 987654, "Актуальное имя", "invite", token, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	list, e = r.Invites(ctx)
+	if e != nil || list[0].RecipientName != "Актуальное имя" {
+		t.Fatal("registered name not used", e)
 	}
 }

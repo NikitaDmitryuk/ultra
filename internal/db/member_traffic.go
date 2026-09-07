@@ -17,13 +17,22 @@ type DayTraffic struct {
 	Uplink   int64  `json:"uplink_bytes"`
 	Downlink int64  `json:"downlink_bytes"`
 }
+type RoutePoint struct {
+	Bucket   string `json:"bucket"`
+	Tag      string `json:"tag"`
+	Uplink   int64  `json:"uplink_bytes"`
+	Downlink int64  `json:"downlink_bytes"`
+}
 type MemberTraffic struct {
-	Limits   []MemberLimit  `json:"limits"`
-	Month    string         `json:"month"`
-	Uplink   int64          `json:"uplink_bytes"`
-	Downlink int64          `json:"downlink_bytes"`
-	Routes   []RouteTraffic `json:"routes"`
-	Days     []DayTraffic   `json:"days"`
+	DayRoutes []RoutePoint   `json:"day_routes"`
+	Hours     []RoutePoint   `json:"hours"`
+	Today     string         `json:"today"`
+	Limits    []MemberLimit  `json:"limits"`
+	Month     string         `json:"month"`
+	Uplink    int64          `json:"uplink_bytes"`
+	Downlink  int64          `json:"downlink_bytes"`
+	Routes    []RouteTraffic `json:"routes"`
+	Days      []DayTraffic   `json:"days"`
 }
 
 // MemberTraffic returns current-month usage of enrolled accesses only. ID zero is the overview.
@@ -31,7 +40,7 @@ func (r *MemberRepo) Traffic(ctx context.Context, id int64, now time.Time) (Memb
 	now = now.UTC()
 	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	end := start.AddDate(0, 1, 0)
-	result := MemberTraffic{Month: start.Format("2006-01"), Routes: []RouteTraffic{}, Days: []DayTraffic{}}
+	result := MemberTraffic{Today: now.Format("2006-01-02"), DayRoutes: []RoutePoint{}, Hours: []RoutePoint{}, Month: start.Format("2006-01"), Routes: []RouteTraffic{}, Days: []DayTraffic{}}
 	filter := `u.enrollment_source IS NOT NULL AND ($1::bigint=0 OR u.telegram_id=$1)`
 	e := r.db.Pool.QueryRow(ctx, `SELECT COALESCE(SUM(t.uplink_bytes),0)::bigint,COALESCE(SUM(t.downlink_bytes),0)::bigint FROM monthly_traffic t JOIN users u ON u.uuid=t.user_uuid WHERE `+filter+` AND t.year=$2 AND t.month=$3`, id, now.Year(), int(now.Month())).Scan(&result.Uplink, &result.Downlink)
 	if e != nil {
@@ -86,6 +95,15 @@ func (r *MemberRepo) Traffic(ctx context.Context, id int64, now time.Time) (Memb
 		return result, e
 	}
 	rows.Close()
+	result.DayRoutes, e = r.routePoints(ctx, id, start, end, false)
+	if e != nil {
+		return result, e
+	}
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	result.Hours, e = r.routePoints(ctx, id, today, today.AddDate(0, 0, 1), true)
+	if e != nil {
+		return result, e
+	}
 	result.Limits, e = r.Limits(ctx, id, now)
 	return result, e
 }
@@ -144,4 +162,26 @@ func (r *MemberRepo) Limits(ctx context.Context, id int64, now time.Time) ([]Mem
 
 func (r *MemberRepo) Budgets(ctx context.Context) ([]ExitBudget, error) {
 	return NewQuotaRepo(r.db).Budgets(ctx)
+}
+
+func (r *MemberRepo) routePoints(ctx context.Context, id int64, start, end time.Time, hourly bool) ([]RoutePoint, error) {
+	table, stamp, bucket := "daily_route_traffic", "t.day", "t.day::text"
+	if hourly {
+		table, stamp, bucket = "traffic_stats", "t.collected_at", "to_char(t.collected_at AT TIME ZONE 'UTC','YYYY-MM-DD HH24:00')"
+	}
+	query := `SELECT ` + bucket + `,t.exit_tag,SUM(t.uplink_bytes)::bigint,SUM(t.downlink_bytes)::bigint FROM ` + table + ` t JOIN users u ON u.uuid=t.user_uuid WHERE u.enrollment_source IS NOT NULL AND ($1::bigint=0 OR u.telegram_id=$1) AND ` + stamp + ` >=$2 AND ` + stamp + ` <$3 AND t.exit_tag<>'' GROUP BY 1,2 ORDER BY 1,2`
+	rows, e := r.db.Pool.Query(ctx, query, id, start, end)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []RoutePoint{}
+	for rows.Next() {
+		var p RoutePoint
+		if e = rows.Scan(&p.Bucket, &p.Tag, &p.Uplink, &p.Downlink); e != nil {
+			return nil, e
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
