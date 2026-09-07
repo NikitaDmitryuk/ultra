@@ -286,6 +286,10 @@ func (p *Provisioner) Verify(ctx context.Context, op *cloud.Operation, instance 
 	return nil
 }
 func (p *Provisioner) Publish(ctx context.Context, op *cloud.Operation) error {
+	budget := db.NewQuotaRepo(p.DB)
+	if e := budget.EnsureVultr(ctx, op.ExitID, op.InstanceID, int64(op.Offer.Plan.Bandwidth)*1_000_000_000); e != nil {
+		return e
+	}
 	repo := db.NewExitNodeRepo(p.DB)
 	enabled := true
 	if _, e := repo.Update(ctx, op.ExitID, exits.UpdatePatch{Enabled: &enabled}); e != nil {

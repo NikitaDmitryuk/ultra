@@ -38,6 +38,7 @@ type exitAlertState struct {
 
 func (b *Bot) StartWorkers(ctx context.Context) {
 	go b.memberNotifications(ctx)
+	go b.runGroupMembership(ctx)
 	if b.alertsTele == nil {
 		b.log.Warn("alerts worker disabled: telegram repo is nil")
 		return

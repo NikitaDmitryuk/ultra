@@ -57,6 +57,8 @@ func (s *Server) memberRoutes() {
 	s.mux.HandleFunc("POST /v1/enrollment/invites/{id}/cancel", s.memberInvites)
 	s.mux.HandleFunc("POST /v1/members/enroll", s.memberEnroll)
 	s.mux.HandleFunc("GET /v1/members", s.memberRead)
+	s.mux.HandleFunc("GET /v1/members/traffic", s.memberTraffic)
+	s.mux.HandleFunc("GET /v1/members/{id}/traffic", s.memberTraffic)
 	s.mux.HandleFunc("GET /v1/members/{id}", s.memberRead)
 	s.mux.HandleFunc("POST /v1/members/{id}/action", s.memberAction)
 	s.mux.HandleFunc("POST /v1/members/{id}/subscription", s.memberSubscription)
@@ -243,4 +245,25 @@ func (s *Server) memberSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	token, e := s.Members.Subscriptions.GetOrCreate(r.Context(), m.UUID)
 	memberJSON(w, map[string]string{"token": token}, e)
+}
+
+func (s *Server) memberTraffic(w http.ResponseWriter, r *http.Request) {
+	if !s.requireMembers(w) {
+		return
+	}
+	var id int64
+	if raw := r.PathValue("id"); raw != "" {
+		var e error
+		id, e = strconv.ParseInt(raw, 10, 64)
+		if e != nil || id <= 0 {
+			http.Error(w, "invalid member", 400)
+			return
+		}
+		if _, e = s.Members.Repo.Get(r.Context(), id); e != nil {
+			memberJSON(w, nil, e)
+			return
+		}
+	}
+	result, e := s.Members.Repo.Traffic(r.Context(), id, time.Now())
+	memberJSON(w, result, e)
 }

@@ -267,6 +267,20 @@ func (q *Queries) ListAllUsers(ctx context.Context) ([]ListAllUsersRow, error) {
 	return items, nil
 }
 
+const moveDailyRouteTrafficUserUUID = `-- name: MoveDailyRouteTrafficUserUUID :exec
+UPDATE daily_route_traffic SET user_uuid=$2 WHERE user_uuid=$1
+`
+
+type MoveDailyRouteTrafficUserUUIDParams struct {
+	UserUuid   pgtype.UUID `json:"user_uuid"`
+	UserUuid_2 pgtype.UUID `json:"user_uuid_2"`
+}
+
+func (q *Queries) MoveDailyRouteTrafficUserUUID(ctx context.Context, arg MoveDailyRouteTrafficUserUUIDParams) error {
+	_, err := q.db.Exec(ctx, moveDailyRouteTrafficUserUUID, arg.UserUuid, arg.UserUuid_2)
+	return err
+}
+
 const moveIPObservationsUserUUID = `-- name: MoveIPObservationsUserUUID :exec
 UPDATE user_ip_observations SET user_uuid=$2 WHERE user_uuid=$1
 `
@@ -334,6 +348,20 @@ type MoveTrafficStatsUserUUIDParams struct {
 
 func (q *Queries) MoveTrafficStatsUserUUID(ctx context.Context, arg MoveTrafficStatsUserUUIDParams) error {
 	_, err := q.db.Exec(ctx, moveTrafficStatsUserUUID, arg.UserUuid, arg.UserUuid_2)
+	return err
+}
+
+const moveUserExitQuotasUUID = `-- name: MoveUserExitQuotasUUID :exec
+UPDATE user_exit_quotas SET user_uuid=$2 WHERE user_uuid=$1
+`
+
+type MoveUserExitQuotasUUIDParams struct {
+	UserUuid   pgtype.UUID `json:"user_uuid"`
+	UserUuid_2 pgtype.UUID `json:"user_uuid_2"`
+}
+
+func (q *Queries) MoveUserExitQuotasUUID(ctx context.Context, arg MoveUserExitQuotasUUIDParams) error {
+	_, err := q.db.Exec(ctx, moveUserExitQuotasUUID, arg.UserUuid, arg.UserUuid_2)
 	return err
 }
 

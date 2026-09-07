@@ -71,6 +71,14 @@ type CloudOperationEvent struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type DailyRouteTraffic struct {
+	UserUuid      pgtype.UUID `json:"user_uuid"`
+	Day           pgtype.Date `json:"day"`
+	ExitTag       string      `json:"exit_tag"`
+	UplinkBytes   int64       `json:"uplink_bytes"`
+	DownlinkBytes int64       `json:"downlink_bytes"`
+}
+
 type ExitNode struct {
 	ID                   pgtype.UUID        `json:"id"`
 	Name                 string             `json:"name"`
@@ -86,6 +94,19 @@ type ExitNode struct {
 	CountryName          string             `json:"country_name"`
 	City                 string             `json:"city"`
 	DisplayName          string             `json:"display_name"`
+}
+
+type ExitTrafficBudget struct {
+	ExitID                pgtype.UUID        `json:"exit_id"`
+	InstanceID            string             `json:"instance_id"`
+	MonthlyBytes          int64              `json:"monthly_bytes"`
+	Source                string             `json:"source"`
+	IsFallback            bool               `json:"is_fallback"`
+	ProviderUsedBytes     int64              `json:"provider_used_bytes"`
+	AccountRemainingBytes int64              `json:"account_remaining_bytes"`
+	ObservedAt            pgtype.Timestamptz `json:"observed_at"`
+	ProviderError         string             `json:"provider_error"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
 }
 
 type MonthlyTraffic struct {
@@ -129,6 +150,7 @@ type TrafficStat struct {
 	CollectedAt   pgtype.Timestamptz `json:"collected_at"`
 	UplinkBytes   int64              `json:"uplink_bytes"`
 	DownlinkBytes int64              `json:"downlink_bytes"`
+	ExitTag       string             `json:"exit_tag"`
 }
 
 type User struct {
@@ -151,6 +173,17 @@ type User struct {
 	EnrolledAt           pgtype.Timestamptz `json:"enrolled_at"`
 	MemberPending        bool               `json:"member_pending"`
 	MemberRevision       int64              `json:"member_revision"`
+}
+
+type UserExitQuota struct {
+	UserUuid   pgtype.UUID `json:"user_uuid"`
+	ExitID     pgtype.UUID `json:"exit_id"`
+	Day        pgtype.Date `json:"day"`
+	UsedBytes  int64       `json:"used_bytes"`
+	LimitBytes int64       `json:"limit_bytes"`
+	Blocked    bool        `json:"blocked"`
+	Applied    bool        `json:"applied"`
+	Reason     string      `json:"reason"`
 }
 
 type UserIpObservation struct {

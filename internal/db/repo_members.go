@@ -15,14 +15,15 @@ import (
 var ErrEnrollmentDenied = errors.New("enrollment unavailable")
 
 type Member struct {
-	UUID            string    `json:"uuid"`
-	TelegramID      int64     `json:"telegram_id"`
-	Name            string    `json:"name"`
-	Active          bool      `json:"active"`
-	Source          string    `json:"source"`
-	EnrolledAt      time.Time `json:"enrolled_at"`
-	Pending         bool      `json:"pending"`
-	PreferredExitID *string   `json:"preferred_exit_id"`
+	LastTrafficAt   *time.Time `json:"last_traffic_at"`
+	UUID            string     `json:"uuid"`
+	TelegramID      int64      `json:"telegram_id"`
+	Name            string     `json:"name"`
+	Active          bool       `json:"active"`
+	Source          string     `json:"source"`
+	EnrolledAt      time.Time  `json:"enrolled_at"`
+	Pending         bool       `json:"pending"`
+	PreferredExitID *string    `json:"preferred_exit_id"`
 }
 type VPNGroup struct {
 	ChatID  int64  `json:"chat_id"`
@@ -51,11 +52,11 @@ func NewOpaqueToken() (string, error) {
 }
 func (r *MemberRepo) Get(ctx context.Context, id int64) (Member, error) {
 	var m Member
-	e := r.db.Pool.QueryRow(ctx, `SELECT uuid::text,telegram_id,name,is_active,enrollment_source,enrolled_at,member_pending,preferred_exit_id::text FROM users WHERE telegram_id=$1 AND enrollment_source IS NOT NULL`, id).Scan(&m.UUID, &m.TelegramID, &m.Name, &m.Active, &m.Source, &m.EnrolledAt, &m.Pending, &m.PreferredExitID)
+	e := r.db.Pool.QueryRow(ctx, `SELECT uuid::text,telegram_id,name,is_active,enrollment_source,enrolled_at,member_pending,preferred_exit_id::text,(SELECT MAX(t.updated_at) FROM monthly_traffic t WHERE t.user_uuid=users.uuid AND t.uplink_bytes+t.downlink_bytes>0) FROM users WHERE telegram_id=$1 AND enrollment_source IS NOT NULL`, id).Scan(&m.UUID, &m.TelegramID, &m.Name, &m.Active, &m.Source, &m.EnrolledAt, &m.Pending, &m.PreferredExitID, &m.LastTrafficAt)
 	return m, e
 }
 func (r *MemberRepo) List(ctx context.Context) ([]Member, error) {
-	rows, e := r.db.Pool.Query(ctx, `SELECT uuid::text,telegram_id,name,is_active,enrollment_source,enrolled_at,member_pending,preferred_exit_id::text FROM users WHERE enrollment_source IS NOT NULL ORDER BY enrolled_at`)
+	rows, e := r.db.Pool.Query(ctx, `SELECT uuid::text,telegram_id,name,is_active,enrollment_source,enrolled_at,member_pending,preferred_exit_id::text,(SELECT MAX(t.updated_at) FROM monthly_traffic t WHERE t.user_uuid=users.uuid AND t.uplink_bytes+t.downlink_bytes>0) FROM users WHERE enrollment_source IS NOT NULL ORDER BY enrolled_at`)
 	if e != nil {
 		return nil, e
 	}
@@ -63,7 +64,7 @@ func (r *MemberRepo) List(ctx context.Context) ([]Member, error) {
 	out := []Member{}
 	for rows.Next() {
 		var m Member
-		if e = rows.Scan(&m.UUID, &m.TelegramID, &m.Name, &m.Active, &m.Source, &m.EnrolledAt, &m.Pending, &m.PreferredExitID); e != nil {
+		if e = rows.Scan(&m.UUID, &m.TelegramID, &m.Name, &m.Active, &m.Source, &m.EnrolledAt, &m.Pending, &m.PreferredExitID, &m.LastTrafficAt); e != nil {
 			return nil, e
 		}
 		out = append(out, m)

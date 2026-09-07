@@ -34,6 +34,30 @@ func (r *RouteRepo) Attach(ctx context.Context, users []auth.User) ([]auth.User,
 	for i := range users {
 		users[i].Routes = byOwner[users[i].UUID]
 	}
+	quotaRows, e := r.db.Pool.Query(ctx, `SELECT u.uuid::text,b.exit_id::text FROM users u CROSS JOIN exit_traffic_budgets b LEFT JOIN user_exit_quotas q ON q.user_uuid=u.uuid AND q.exit_id=b.exit_id WHERE q.blocked OR (b.source='vultr' AND (q.user_uuid IS NULL OR b.observed_at IS NULL OR b.observed_at<NOW()-interval '15 minutes' OR b.provider_error<>''))`)
+	if e != nil {
+		return nil, e
+	}
+	defer quotaRows.Close()
+	blocked := map[string][]string{}
+	for quotaRows.Next() {
+		var user, exit string
+		if e = quotaRows.Scan(&user, &exit); e != nil {
+			return nil, e
+		}
+		blocked[user] = append(blocked[user], exit)
+	}
+	if e = quotaRows.Err(); e != nil {
+		return nil, e
+	}
+	var fallback string
+	if e = r.db.Pool.QueryRow(ctx, `SELECT COALESCE((SELECT exit_id::text FROM exit_traffic_budgets WHERE is_fallback),'')`).Scan(&fallback); e != nil {
+		return nil, e
+	}
+	for i := range users {
+		users[i].FallbackExitID = fallback
+		users[i].ExcludedExitIDs = blocked[users[i].UUID]
+	}
 	return users, nil
 }
 func (r *RouteRepo) Publish(ctx context.Context, region, name, exitID string) error {
@@ -92,7 +116,7 @@ func (r *RouteRepo) ReplicationState(ctx context.Context, id, state string, free
 }
 
 func (r *RouteRepo) ReplicationStatuses(ctx context.Context) (any, error) {
-	rows, e := r.db.Pool.Query(ctx, `SELECT e.id::text,e.name,COALESCE(n.state,'not_configured'),COALESCE(n.free_bytes,0),COALESCE(n.required_bytes,0),n.checked_at FROM exit_nodes e LEFT JOIN node_replication n ON n.node_id=e.id ORDER BY e.name`)
+	rows, e := r.db.Pool.Query(ctx, `SELECT e.id::text,COALESCE(NULLIF(e.display_name,''),NULLIF(e.city,''),e.name),COALESCE(n.state,'not_configured'),COALESCE(n.free_bytes,0),COALESCE(n.required_bytes,0),n.checked_at FROM exit_nodes e LEFT JOIN node_replication n ON n.node_id=e.id ORDER BY e.name`)
 	if e != nil {
 		return nil, e
 	}

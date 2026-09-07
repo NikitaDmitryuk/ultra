@@ -454,3 +454,15 @@ func BuildClientProfiles(spec *Spec, user auth.User) ([]ClientProfileExport, err
 	}
 	return base, nil
 }
+
+// BuildSubscriptionExport selects one configured transport without expanding routes
+// or rendering full client configs. Legacy exports and listeners remain unchanged.
+func BuildSubscriptionExport(spec *Spec, user auth.User) (*ClientExport, error) {
+	if !spec.DevMode && spec.AntiCensor != nil && spec.AntiCensor.PublicXHTTPPort > 0 {
+		if len(spec.Reality.ServerNames) == 0 {
+			return nil, fmt.Errorf("subscription: REALITY server name is required")
+		}
+		return buildFallbackXHTTPExport(spec, user)
+	}
+	return BuildClientExport(spec, user)
+}

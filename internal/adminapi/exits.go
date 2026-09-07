@@ -235,17 +235,7 @@ func (s *Server) clientExitSelection(u auth.User) (selectedID *string, effective
 		candidate, _ := exits.SelectActive(nodes, nil)
 		effectiveID = candidate.ID
 	}
-	if u.PreferredExitID != nil && *u.PreferredExitID != "" {
-		for _, n := range nodes {
-			if n.ID != *u.PreferredExitID {
-				continue
-			}
-			if h, ok := health[n.ID]; !ok || h.PreferredReady {
-				effectiveID = n.ID
-			}
-			break
-		}
-	}
+	effectiveID = u.SelectExit(nodes, effectiveID, health)
 	return u.PreferredExitID, effectiveID, health, nodes
 }
 

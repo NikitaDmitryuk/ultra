@@ -324,21 +324,9 @@ func applyEffectiveUserExits(users []auth.User, enabled []exits.Node, activeID s
 	if len(users) == 0 {
 		return users
 	}
-	enabledByID := make(map[string]exits.Node, len(enabled))
-	for _, n := range enabled {
-		enabledByID[n.ID] = n
-	}
 	out := append([]auth.User(nil), users...)
 	for i := range out {
-		effective := activeID
-		if pref := out[i].PreferredExitID; pref != nil && *pref != "" {
-			if _, ok := enabledByID[*pref]; ok {
-				if h, ok := health[*pref]; !ok || h.PreferredReady {
-					effective = *pref
-				}
-			}
-		}
-		out[i].EffectiveExitID = effective
+		out[i].EffectiveExitID = out[i].SelectExit(enabled, activeID, health)
 	}
 	return out
 }

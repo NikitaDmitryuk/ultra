@@ -9,7 +9,7 @@ import (
 )
 
 func (b *Bot) cloudRoutes(mux *http.ServeMux) {
-	for _, route := range []string{"GET /api/cloud/operations/{id}/events", "GET /api/cloud/replicas", "GET /api/cloud/catalog", "GET /api/cloud/operations", "POST /api/cloud/offers", "POST /api/cloud/offers/{id}/confirm", "POST /api/cloud/operations/{id}/action"} {
+	for _, route := range []string{"GET /api/cloud/quotas", "GET /api/cloud/operations/{id}/events", "GET /api/cloud/replicas", "GET /api/cloud/catalog", "GET /api/cloud/operations", "POST /api/cloud/offers", "POST /api/cloud/offers/{id}/confirm", "POST /api/cloud/operations/{id}/action"} {
 		mux.HandleFunc(route, b.cloudProxy)
 	}
 }
@@ -21,6 +21,8 @@ func (b *Bot) cloudProxy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	path := ""
 	switch r.Pattern {
+	case "GET /api/cloud/quotas":
+		path = "/v1/cloud/quotas"
 	case "GET /api/cloud/operations/{id}/events":
 		path = "/v1/cloud/operations/" + url.PathEscape(r.PathValue("id")) + "/events"
 	case "GET /api/cloud/replicas":

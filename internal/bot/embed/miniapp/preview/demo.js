@@ -7,6 +7,8 @@ let group={chat_id:-100123456,title:'Друзья Ultra',enabled:true,url:'https
 const invites=[{id:1,recipient:100004,expires_at:new Date(Date.now()+5*86400000).toISOString(),created_at:now}];
 const region={id:'fra',city:'Франкфурт',country:'DE'},plan={id:'vc2-1c-1gb',bandwidth:1024},price={monthly_cost:5,hourly_cost:.007};
 const ops=[{id:'demo-fra',instance_id:'demo-instance',exit_id:'fra',offer:{region,plan,price},state:'ready',phase:'ready',charged:true}];
+const traffic={month:now.slice(0,7),uplink_bytes:2*1073741824,downlink_bytes:24*1073741824,routes:[{name:'Амстердам',uplink_bytes:1073741824,downlink_bytes:20*1073741824},{name:'Напрямую с bridge · Yandex Cloud',uplink_bytes:1073741824,downlink_bytes:4*1073741824}],days:[{day:now.slice(0,10),uplink_bytes:2*1073741824,downlink_bytes:24*1073741824}],limits:[{name:'Франкфурт',state:'available',used_bytes:1073741824,remaining_bytes:5*1073741824,limit_bytes:6*1073741824,resets_at:new Date(Date.now()+86400000).toISOString()}]};
+people[0].last_traffic_at=now;people[0].group_membership={state:'inside',checked_at:now};
 let preferred=null;
 const exits=[{id:'ams',display_name:'Нидерланды · Амстердам',reachable:true},{id:'fra',display_name:'Германия · Франкфурт',reachable:true}];
 const state=new URLSearchParams(location.search).get('state');
@@ -16,6 +18,7 @@ window.fetch=async (path,options={})=>{
  let value,status=200;
  if(path==='/api/me')value={is_admin:true};
  else if(path==='/api/self')value={registered:state!=='new',is_admin:true,member:people[0]};
+ else if(path==='/api/self/traffic'||path==='/api/members/traffic'||/^\/api\/members\/\d+\/traffic$/.test(path))value=traffic;
  else if(path==='/api/self/subscription')value={url:'https://example.invalid/demo-subscription',import_url:'https://example.invalid/demo-import'};
  else if(path==='/api/self/exits')value={exits,selected_exit_id:preferred,effective_exit_id:preferred||'ams',profiles:exits.map(e=>({name:e.display_name,effective_exit_id:e.id}))};
  else if(path==='/api/self/exit-selection'){preferred=body.exit_id;value={};}

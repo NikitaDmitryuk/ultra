@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/subscriptionkey"
 )
@@ -175,5 +176,75 @@ func TestInviteExpiryRevocationAndDisabledIdentity(t *testing.T) {
 	existing, e := r.Enroll(ctx, 997, "again", "invite", token, 0)
 	if e != nil || existing.Active || existing.UUID != m.UUID {
 		t.Fatal("disabled member reactivated", e)
+	}
+}
+
+func TestMemberActivitySurvivesSamplePruning(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	r := NewMemberRepo(d)
+	token, e := r.Invite(ctx, 789, 1)
+	if e != nil {
+		t.Fatal(e)
+	}
+	m, e := r.Enroll(ctx, 789, "activity", "invite", token, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if m.LastTrafficAt != nil {
+		t.Fatal("unused member marked active")
+	}
+	traffic := NewTrafficRepo(d)
+	if e = traffic.RecordSamples(ctx, []TrafficSample{{UserUUID: m.UUID, CollectedAt: time.Now(), UplinkBytes: 100}}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = d.Pool.Exec(ctx, `DELETE FROM traffic_stats WHERE user_uuid=$1`, m.UUID); e != nil {
+		t.Fatal(e)
+	}
+	m, e = r.Get(ctx, 789)
+	if e != nil || m.LastTrafficAt == nil {
+		t.Fatal("lost activity after pruning", e)
+	}
+	list, e := r.List(ctx)
+	if e != nil || len(list) != 1 || list[0].LastTrafficAt == nil {
+		t.Fatal("activity missing in list", e)
+	}
+}
+
+func TestMemberTrafficRoutesAndLegacyTotals(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	r := NewMemberRepo(d)
+	token, e := r.Invite(ctx, 456, 1)
+	if e != nil {
+		t.Fatal(e)
+	}
+	m, e := r.Enroll(ctx, 456, "traffic", "invite", token, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	now := time.Now().UTC()
+	traffic := NewTrafficRepo(d)
+	if e = traffic.RecordSamples(ctx, []TrafficSample{{UserUUID: m.UUID, CollectedAt: now, UplinkBytes: 10, ExitTag: "direct"}, {UserUUID: m.UUID, CollectedAt: now, DownlinkBytes: 20, ExitTag: "to-exit-test"}, {UserUUID: m.UUID, CollectedAt: now, DownlinkBytes: 5}}); e != nil {
+		t.Fatal(e)
+	}
+	result, e := r.Traffic(ctx, 456, now)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if result.Uplink != 10 || result.Downlink != 25 || len(result.Routes) != 3 || len(result.Days) != 1 {
+		t.Fatalf("incorrect breakdown: %+v", result)
+	}
+	all, e := r.Traffic(ctx, 0, now)
+	if e != nil || all.Downlink != result.Downlink {
+		t.Fatal("overview mismatch", e)
+	}
+	oldUUID := m.UUID
+	if e = r.Reset(ctx, 456, 1, oldUUID); e != nil {
+		t.Fatal(e)
+	}
+	result, e = r.Traffic(ctx, 456, now)
+	if e != nil || result.Downlink != 25 || len(result.Routes) != 3 {
+		t.Fatal("reset lost route history", e)
 	}
 }

@@ -69,3 +69,46 @@ func TestSelfOwnerAndAdminIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestSelfTrafficOwnerIsolation(t *testing.T) {
+	calls := 0
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch r.URL.Path {
+		case "/v1/members/123":
+			_ = json.NewEncoder(w).Encode(db.Member{TelegramID: 123, Active: false})
+		case "/v1/members/123/traffic":
+			_, _ = w.Write([]byte(`{"month":"2026-09","routes":[],"days":[]}`))
+		default:
+			t.Errorf("wrong owner: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer relay.Close()
+	b := &Bot{botToken: "test-token", adminRepo: &nonAdmin{}, adminAPIURL: relay.URL}
+	mux := http.NewServeMux()
+	b.registerMiniAppRoutes(mux)
+	for _, valid := range []bool{false, true} {
+		req := httptest.NewRequest("GET", "/api/self/traffic?telegram_id=456&uuid=other", nil)
+		if valid {
+			req.Header.Set(initDataHeader, signedInitData(t, b.botToken, 123))
+		} else {
+			req.Header.Set(initDataHeader, "forged")
+		}
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		want := http.StatusUnauthorized
+		if valid {
+			want = http.StatusOK
+		}
+		if w.Code != want {
+			t.Fatalf("status %d want %d", w.Code, want)
+		}
+		if w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("private statistics may be cached")
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("unexpected requests %d", calls)
+	}
+}

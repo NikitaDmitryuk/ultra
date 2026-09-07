@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-
-	"github.com/NikitaDmitryuk/ultra/internal/config"
 )
 
 type SubscriptionStore interface {
@@ -60,14 +58,11 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	profiles, err := config.BuildClientProfiles(s.spec, u)
+	_, _, health, nodes := s.clientExitSelection(u)
+	uris, err := subscriptionURIs(s.spec, u, nodes, health)
 	if err != nil {
 		http.Error(w, "configuration unavailable", http.StatusServiceUnavailable)
 		return
-	}
-	uris := make([]string, 0, len(profiles))
-	for _, p := range profiles {
-		uris = append(uris, p.VLESSURI)
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("profile-title", "ultra")

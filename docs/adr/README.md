@@ -42,3 +42,4 @@ ADR сохраняет одно значимое решение и его обо
 Источники должны позволять проверить решение: код, тесты, документация или согласование.
 
 Основа формата: [Michael Nygard — Documenting Architecture Decisions](https://www.cognitect.com/blog/2011/11/15/documenting-architecture-decisions).
+- [0009 — Учёт выходов и адаптивные бюджеты трафика](0009-traffic-budgets.md)

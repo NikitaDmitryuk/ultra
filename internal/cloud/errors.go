@@ -12,7 +12,7 @@ func providerCode(status int, message string) string {
 	switch {
 	case strings.Contains(m, "insufficient funds") || strings.Contains(m, "insufficient credit") || strings.Contains(m, "insufficient balance") || strings.Contains(m, "not enough funds"):
 		return "insufficient_funds"
-	case strings.Contains(m, "ip") && (strings.Contains(m, "not authorized") || strings.Contains(m, "not allowed") || strings.Contains(m, "whitelist")):
+	case strings.Contains(m, "ip") && (strings.Contains(m, "unauthorized") || strings.Contains(m, "not authorized") || strings.Contains(m, "not allowed") || strings.Contains(m, "whitelist")):
 		return "api_ip_denied"
 	case strings.Contains(m, "capacity") || strings.Contains(m, "out of stock") || strings.Contains(m, "not available in this location"):
 		return "region_unavailable"

@@ -3,6 +3,7 @@ package bot
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -11,6 +12,13 @@ import (
 )
 
 func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	defer func() {
+		if elapsed := time.Since(started); elapsed >= time.Second {
+			b.log.Warn("slow subscription response", "duration_ms", elapsed.Milliseconds())
+		}
+	}()
+
 	w.Header().Set("Cache-Control", "no-store")
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	fromLoopback := net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback()
@@ -40,6 +48,7 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "subscription unavailable", resp.StatusCode)
 		return
 	}
+	w.Header().Set("Server-Timing", fmt.Sprintf("relay;dur=%.1f", float64(time.Since(started).Microseconds())/1000))
 	for _, key := range []string{"Content-Type", "profile-title", "profile-update-interval"} {
 		w.Header().Set(key, resp.Header.Get(key))
 	}

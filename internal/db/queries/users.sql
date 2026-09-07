@@ -89,3 +89,9 @@ RETURNING uuid, name, kind, is_active, disabled_at,
   socks_username, socks_password, socks_port,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
   preferred_exit_id;
+
+-- name: MoveDailyRouteTrafficUserUUID :exec
+UPDATE daily_route_traffic SET user_uuid=$2 WHERE user_uuid=$1;
+
+-- name: MoveUserExitQuotasUUID :exec
+UPDATE user_exit_quotas SET user_uuid=$2 WHERE user_uuid=$1;

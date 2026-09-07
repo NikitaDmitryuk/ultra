@@ -23,6 +23,7 @@ type Runner struct {
 	inst   *core.Instance
 	config *core.Config
 	status ReloadStatus
+	meter  *routeMeter
 }
 
 // ReloadStatus exposes lifecycle events without configuration or credentials.
@@ -69,6 +70,13 @@ func (r *Runner) ReloadReason(data []byte, reason string) error {
 	if err != nil {
 		return fmt.Errorf("prepare configuration: %w", err)
 	}
+	if r.meter == nil {
+		r.meter = &routeMeter{}
+	}
+	if err = attachRouteMeter(next, r.meter); err != nil {
+		_ = next.Close()
+		return fmt.Errorf("prepare route counters: %w", err)
+	}
 	old := r.config
 	if r.inst != nil {
 		_ = r.inst.Close()
@@ -81,7 +89,10 @@ func (r *Runner) ReloadReason(data []byte, reason string) error {
 		if old != nil {
 			restored, restoreErr := core.New(old)
 			if restoreErr == nil {
-				restoreErr = restored.Start()
+				restoreErr = attachRouteMeter(restored, r.meter)
+				if restoreErr == nil {
+					restoreErr = restored.Start()
+				}
 			}
 			if restoreErr != nil {
 				if restored != nil {

@@ -30,10 +30,52 @@ test('disabled access cannot issue a subscription',async()=>{
  const p=page(true,{'/api/self':{registered:true,is_admin:false,member:{uuid:'owner',active:false,pending:false}}});await flush();
  assert.ok(p.el('#app').innerHTML.includes('Доступ приостановлен'));
  assert.ok(!p.el('#app').innerHTML.includes('id="connect"'));
- assert.equal(p.calls.length,1);
+ assert.ok(p.calls.every(c=>['/api/self','/api/self/traffic'].includes(c.path)));
 });
 test('Vultr displays server DTO price and replica state',async()=>{
  const p=page(false,{'/api/me':{is_admin:true},'/api/members':[], '/api/cloud/operations':[{id:'op',offer:{region:{city:'Frankfurt'},plan:{id:'vc2-1c-1gb'},price:{monthly_cost:5,hourly_cost:.007}},state:'ready',phase:'ready',charged:true,instance_id:'instance'}],'/api/cloud/replicas':[{name:'Amsterdam',state:'streaming',free_bytes:10*1073741824,required_bytes:5*1073741824}]});await flush();await vm.runInContext('service()',p.context);
  assert.ok(p.el('#app').innerHTML.includes('$5/месяц'));assert.ok(!p.el('#app').innerHTML.includes('$undefined'));
  assert.ok(p.el('#app').innerHTML.includes('Копия обновляется'));assert.ok(!p.el('#app').innerHTML.includes('Добавить узел вручную'));
+});
+
+test('traffic activity is separate from permission and does not imply online',async()=>{
+ const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
+ const now=Date.now();p.context.recent={active:true,pending:false,last_traffic_at:new Date(now-30000).toISOString()};
+ assert.equal(vm.runInContext('usage(recent)',p.context),'Трафик за последние 2 мин');
+ assert.ok(vm.runInContext('status(recent)',p.context).includes('Доступ разрешён'));
+ assert.equal(vm.runInContext('usage({active:true,last_traffic_at:null})',p.context),'Трафик ещё не зафиксирован');
+ p.context.old={active:true,last_traffic_at:new Date(now-3*86400000).toISOString()};
+ assert.equal(vm.runInContext('usage(old)',p.context),'Без трафика 3 дн');
+ assert.ok(vm.runInContext('status({active:false,pending:false})',p.context).includes('Доступ отозван'));
+ assert.ok(vm.runInContext('status({active:false,pending:true})',p.context).includes('Отзываем доступ'));
+ assert.ok(!vm.runInContext('usage({...recent,active:false})',p.context).includes('последние 2 мин'));
+});
+
+test('traffic overview separates bridge, exits and historical unattributed usage',async()=>{
+ const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
+ p.context.traffic={month:'2026-09',uplink_bytes:10,downlink_bytes:20,routes:[{name:'Напрямую с bridge · Yandex Cloud',uplink_bytes:10,downlink_bytes:0},{name:'Амстердам',uplink_bytes:0,downlink_bytes:20}],days:[{day:'2026-09-08',uplink_bytes:10,downlink_bytes:20}]};
+ const html=vm.runInContext('trafficHTML(traffic)',p.context);
+ assert.ok(html.includes('Yandex Cloud'));assert.ok(html.includes('Амстердам'));assert.ok(html.includes('30 Б'));assert.ok(html.includes('<meter'));
+});
+
+test('personal statistics include all devices and survive disabled access',async()=>{
+ const traffic={month:'2026-09',uplink_bytes:10,downlink_bytes:20,routes:[{name:'Амстердам',uplink_bytes:10,downlink_bytes:20}],days:[]};
+ const p=page(true,{'/api/self':{registered:true,is_admin:false,member:{uuid:'owner',active:false,pending:false,last_traffic_at:null}},'/api/self/traffic':traffic});await flush();
+ assert.ok(p.el('#self-traffic').innerHTML.includes('Амстердам'));
+ assert.ok(p.el('#self-traffic').innerHTML.includes('30 Б'));
+ assert.ok(p.el('#app').innerHTML.includes('Трафик ещё не зафиксирован'));
+ assert.ok(p.calls.every(c=>c.path.startsWith('/api/self')));
+});
+test('statistics failure does not replace personal cabinet or hide connect controls',async()=>{
+ const p=page(true,{'/api/self':{registered:true,is_admin:false,member:{uuid:'owner',active:true,pending:false}},'/api/self/exits':{exits:[],profiles:[]}});await flush();
+ assert.ok(p.el('#app').innerHTML.includes('id="connect"'));
+ assert.ok(p.el('#self-traffic').innerHTML.includes('Статистика временно недоступна'));
+ assert.ok(!p.el('#app').innerHTML.includes('Кабинет недоступен'));
+});
+test('limits distinguish unknown, exhausted, pending and Amsterdam fallback',async()=>{
+ const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
+ p.context.limits=[{name:'Франкфурт',state:'exhausted',remaining_bytes:0,used_bytes:100,limit_bytes:100,resets_at:'2026-09-09T00:00:00Z',pending:true},{name:'Амстердам',state:'unknown',is_fallback:true}];
+ const html=vm.runInContext('limitsHTML(limits)',p.context);
+ assert.ok(html.includes('Резерв — Амстердам'));assert.ok(html.includes('Изменение маршрута применяется'));assert.ok(html.includes('Остаток уточняется'));
+ assert.ok(vm.runInContext('limitsHTML([])',p.context).includes('не означает безлимитный'));
 });

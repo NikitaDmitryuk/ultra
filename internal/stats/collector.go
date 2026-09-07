@@ -118,6 +118,16 @@ func (c *Collector) collect(at time.Time) {
 	}
 
 	users := c.users.List()
+	if all, ok := c.users.(interface{ ListAll() []auth.User }); ok {
+		users = all.ListAll()
+	}
+	var measured map[string]map[string][2]int64
+	meter, hasMeter := c.xray.(interface {
+		DrainRouteTraffic() map[string]map[string][2]int64
+	})
+	if hasMeter {
+		measured = meter.DrainRouteTraffic()
+	}
 	samples := make([]db.TrafficSample, 0, len(users))
 
 	for _, u := range users {
@@ -147,6 +157,18 @@ func (c *Collector) collect(at time.Time) {
 			if cnt := sm.GetCounter("user>>>" + route.UUID + ">>>traffic>>>downlink"); cnt != nil {
 				downBytes += cnt.Set(0)
 			}
+		}
+		if hasMeter && u.Kind != "socks5" {
+			credentials := []string{u.UUID}
+			for _, route := range u.Routes {
+				credentials = append(credentials, route.UUID)
+			}
+			for _, credential := range credentials {
+				for tag, bytes := range measured[credential] {
+					samples = append(samples, db.TrafficSample{UserUUID: u.UUID, CollectedAt: at, UplinkBytes: bytes[0], DownlinkBytes: bytes[1], ExitTag: tag})
+				}
+			}
+			continue
 		}
 		samples = append(samples, db.TrafficSample{
 			UserUUID:      u.UUID,

@@ -47,14 +47,15 @@ func (p Plan) Price(region string) Cost {
 }
 
 type Instance struct {
-	ID           string   `json:"id"`
-	Region       string   `json:"region"`
-	Plan         string   `json:"plan"`
-	IP           string   `json:"main_ip"`
-	Status       string   `json:"status"`
-	PowerStatus  string   `json:"power_status"`
-	ServerStatus string   `json:"server_status"`
-	Tags         []string `json:"tags"`
+	AllowedBandwidth int64    `json:"allowed_bandwidth"`
+	ID               string   `json:"id"`
+	Region           string   `json:"region"`
+	Plan             string   `json:"plan"`
+	IP               string   `json:"main_ip"`
+	Status           string   `json:"status"`
+	PowerStatus      string   `json:"power_status"`
+	ServerStatus     string   `json:"server_status"`
+	Tags             []string `json:"tags"`
 }
 type CreateRequest struct {
 	Region   string   `json:"region"`

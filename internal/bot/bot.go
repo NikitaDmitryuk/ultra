@@ -22,14 +22,15 @@ import (
 
 // Bot orchestrates long polling and the Mini App HTTP server.
 type Bot struct {
-	picker     memberPicker
-	api        *tgbotapi.BotAPI
-	botToken   string
-	adminRepo  botAdminRepo
-	teleRepo   *db.TelegramRepo
-	alertsTele alertsTeleRepo
-	msgSender  messageSender
-	miniAppURL string // public HTTPS URL of the Mini App (e.g. https://bot.example.com:8444)
+	memberships membershipCache
+	picker      memberPicker
+	api         *tgbotapi.BotAPI
+	botToken    string
+	adminRepo   botAdminRepo
+	teleRepo    *db.TelegramRepo
+	alertsTele  alertsTeleRepo
+	msgSender   messageSender
+	miniAppURL  string // public HTTPS URL of the Mini App (e.g. https://bot.example.com:8444)
 
 	// Admin API proxy settings (ultra-relay admin HTTP API on loopback)
 	adminAPIURL   string

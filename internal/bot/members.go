@@ -170,6 +170,7 @@ func (b *Bot) selfAuth(w http.ResponseWriter, r *http.Request) (TelegramUser, bo
 }
 func (b *Bot) memberRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/enrollment/picker", b.pickerHTTP)
+	mux.HandleFunc("POST /api/enrollment/group-picker", b.pickerHTTP)
 	mux.HandleFunc("GET /member", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -178,6 +179,7 @@ func (b *Bot) memberRoutes(mux *http.ServeMux) {
 		_, _ = w.Write(page)
 	})
 	mux.HandleFunc("GET /api/self", b.selfState)
+	mux.HandleFunc("GET /api/self/traffic", b.selfTraffic)
 	mux.HandleFunc("POST /api/self/subscription", b.selfSubscription)
 	mux.HandleFunc("GET /api/self/exits", b.selfExits)
 	mux.HandleFunc("PUT /api/self/exit-selection", b.selfExits)
@@ -187,6 +189,8 @@ func (b *Bot) memberRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/enrollment/invites", b.adminMemberInvites)
 	mux.HandleFunc("POST /api/enrollment/invites/{id}/cancel", b.adminMemberInvites)
 	mux.HandleFunc("GET /api/members", b.adminMembers)
+	mux.HandleFunc("GET /api/members/traffic", b.adminMemberTraffic)
+	mux.HandleFunc("GET /api/members/{id}/traffic", b.adminMemberTraffic)
 	mux.HandleFunc("POST /api/members/{id}/action", b.adminMembers)
 }
 func memberHTTPError(w http.ResponseWriter, status int) {
@@ -313,7 +317,25 @@ func (b *Bot) adminMembers(w http.ResponseWriter, r *http.Request) {
 		memberHTTPError(w, status)
 		return
 	}
-	jsonOK(w, result)
+	if r.Method == "GET" {
+		var members []db.Member
+		if json.Unmarshal(result, &members) != nil {
+			memberHTTPError(w, 502)
+			return
+		}
+		out := make([]memberView, 0, len(members))
+		for _, m := range members {
+			out = append(out, b.memberView(m))
+		}
+		jsonOK(w, out)
+	} else {
+		var m db.Member
+		if json.Unmarshal(result, &m) != nil {
+			memberHTTPError(w, 502)
+			return
+		}
+		jsonOK(w, b.memberView(m))
+	}
 }
 func (b *Bot) adminMemberInvites(w http.ResponseWriter, r *http.Request) {
 	actor, ok := b.mustAdmin(w, r)
@@ -379,23 +401,12 @@ func (b *Bot) adminGroup(w http.ResponseWriter, r *http.Request) {
 		if group.Enabled {
 			c, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 			defer cancel()
-			var chat struct {
-				Type     string `json:"type"`
-				Title    string `json:"title"`
-				Username string `json:"username"`
-			}
-			if b.telegramJSON(c, "getChat", map[string]any{"chat_id": group.ChatID}, &chat) != nil || (chat.Type != "group" && chat.Type != "supergroup") || chat.Username != "" {
-				http.Error(w, "closed group required", http.StatusBadRequest)
+			title, err := b.validateClosedGroup(c, group.ChatID)
+			if err != nil {
+				http.Error(w, "closed group with bot administrator required", http.StatusBadRequest)
 				return
 			}
-			var member struct {
-				Status string `json:"status"`
-			}
-			if b.telegramJSON(c, "getChatMember", map[string]any{"chat_id": group.ChatID, "user_id": b.api.Self.ID}, &member) != nil || member.Status != "administrator" {
-				http.Error(w, "bot administrator required", http.StatusBadRequest)
-				return
-			}
-			group.Title = chat.Title
+			group.Title = title
 		}
 		status, e := b.relayJSON(r.Context(), "PUT", "/v1/enrollment/group", struct {
 			db.VPNGroup
@@ -413,4 +424,51 @@ func (b *Bot) adminGroup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonOK(w, map[string]any{"chat_id": group.ChatID, "title": group.Title, "enabled": group.Enabled, "url": "https://t.me/" + b.api.Self.UserName + "?start=vpn_g_" + group.Code})
+}
+
+func (b *Bot) adminMemberTraffic(w http.ResponseWriter, r *http.Request) {
+	if _, ok := b.mustAdmin(w, r); !ok {
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	path := "/v1/members/traffic"
+	if raw := r.PathValue("id"); raw != "" {
+		id, e := strconv.ParseInt(raw, 10, 64)
+		if e != nil || id <= 0 {
+			memberHTTPError(w, 400)
+			return
+		}
+		path = fmt.Sprintf("/v1/members/%d/traffic", id)
+	}
+	var result json.RawMessage
+	status, e := b.relayJSON(r.Context(), "GET", path, nil, &result)
+	if e != nil {
+		memberHTTPError(w, status)
+		return
+	}
+	jsonOK(w, result)
+}
+
+// selfTraffic derives the owner only from validated Telegram initData.
+// Disabled members retain access to their historical statistics.
+func (b *Bot) selfTraffic(w http.ResponseWriter, r *http.Request) {
+	u, ok := b.selfAuth(w, r)
+	if !ok {
+		return
+	}
+	if u.ID <= 0 {
+		memberHTTPError(w, http.StatusUnauthorized)
+		return
+	}
+	if _, status, e := b.member(r.Context(), u.ID); e != nil {
+		memberHTTPError(w, status)
+		return
+	}
+	var result json.RawMessage
+	status, e := b.relayJSON(r.Context(), "GET", fmt.Sprintf("/v1/members/%d/traffic", u.ID), nil, &result)
+	if e != nil {
+		memberHTTPError(w, status)
+		return
+	}
+	jsonOK(w, result)
 }

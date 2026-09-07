@@ -14,7 +14,7 @@ func TestProviderErrorsAreClassifiedWithoutRetainingBody(t *testing.T) {
 	for _, tc := range []struct {
 		status     int
 		body, code string
-	}{{400, "Insufficient funds for this operation", "insufficient_funds"}, {402, "payment review required", "payment_required"}, {403, "IP address not allowed", "api_ip_denied"}, {403, "Not authorized", "api_permission_denied"}, {400, "default_password=secret https://console.example/token", "provider_rejected"}, {429, "slow down", "provider_rate_limit"}} {
+	}{{401, "Unauthorized IP address", "api_ip_denied"}, {400, "Insufficient funds for this operation", "insufficient_funds"}, {402, "payment review required", "payment_required"}, {403, "IP address not allowed", "api_ip_denied"}, {403, "Not authorized", "api_permission_denied"}, {400, "default_password=secret https://console.example/token", "provider_rejected"}, {429, "slow down", "provider_rate_limit"}} {
 		t.Run(tc.code, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tc.status)

@@ -123,7 +123,7 @@ func (s *Service) Quote(ctx context.Context, actor int64, region, plan, replace 
 		return Offer{}, e
 	}
 	if !available {
-		return Offer{}, errors.New("plan unavailable in region")
+		return Offer{}, APIError{Code: "region_unavailable"}
 	}
 	offer := Offer{ID: uuid.NewString(), Actor: actor, Region: selected, Plan: tariff, Price: price, ExpiresAt: s.now().Add(5 * time.Minute), ReplaceID: replace}
 	return offer, s.Store.SaveOffer(ctx, offer)

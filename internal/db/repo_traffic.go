@@ -12,6 +12,7 @@ import (
 
 // TrafficSample is a single per-user traffic delta collected from Xray.
 type TrafficSample struct {
+	ExitTag       string
 	UserUUID      string
 	CollectedAt   time.Time
 	UplinkBytes   int64
@@ -82,6 +83,12 @@ func trafficBucketExpr(bucket string) (string, error) {
 // RecordSamples inserts raw traffic deltas and atomically updates monthly aggregates.
 // Samples with both counters at zero are skipped.
 func (r *TrafficRepo) RecordSamples(ctx context.Context, samples []TrafficSample) error {
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	q := r.db.Queries.WithTx(tx)
 	for _, s := range samples {
 		if s.UplinkBytes == 0 && s.DownlinkBytes == 0 {
 			continue
@@ -90,16 +97,23 @@ func (r *TrafficRepo) RecordSamples(ctx context.Context, samples []TrafficSample
 		if err != nil {
 			return err
 		}
-		if err := r.db.Queries.InsertTrafficSample(ctx, sqlc.InsertTrafficSampleParams{
+		if err := q.InsertTrafficSample(ctx, sqlc.InsertTrafficSampleParams{
 			UserUuid:      userUUID,
+			ExitTag:       s.ExitTag,
 			CollectedAt:   toPGTime(s.CollectedAt),
 			UplinkBytes:   s.UplinkBytes,
 			DownlinkBytes: s.DownlinkBytes,
 		}); err != nil {
 			return err
 		}
+		if s.ExitTag != "" {
+			day := time.Date(s.CollectedAt.UTC().Year(), s.CollectedAt.UTC().Month(), s.CollectedAt.UTC().Day(), 0, 0, 0, 0, time.UTC)
+			if err := q.UpsertDailyRouteTraffic(ctx, sqlc.UpsertDailyRouteTrafficParams{UserUuid: userUUID, Day: pgtype.Date{Time: day, Valid: true}, ExitTag: s.ExitTag, UplinkBytes: s.UplinkBytes, DownlinkBytes: s.DownlinkBytes}); err != nil {
+				return err
+			}
+		}
 		year, month, _ := s.CollectedAt.Date()
-		if err := r.db.Queries.UpsertMonthlyTraffic(ctx, sqlc.UpsertMonthlyTrafficParams{
+		if err := q.UpsertMonthlyTraffic(ctx, sqlc.UpsertMonthlyTrafficParams{
 			UserUuid:      userUUID,
 			Year:          int32(year),
 			Month:         int32(month),
@@ -109,7 +123,7 @@ func (r *TrafficRepo) RecordSamples(ctx context.Context, samples []TrafficSample
 			return err
 		}
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // GetMonthlyAll returns monthly totals for every user in the given year/month.

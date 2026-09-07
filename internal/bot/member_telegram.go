@@ -21,12 +21,17 @@ type memberPicker struct {
 	pending map[int64]pickerRequest
 }
 type pickerRequest struct {
+	Kind    string
+	Title   string
 	ID      int32
 	Target  int64
 	Expires time.Time
 }
 
 func (b *Bot) startPicker(ctx context.Context, id int64) error {
+	return b.startPickerKind(ctx, id, "user")
+}
+func (b *Bot) startPickerKind(ctx context.Context, id int64, kind string) error {
 	var random [4]byte
 	if _, e := rand.Read(random[:]); e != nil {
 		return e
@@ -41,8 +46,11 @@ func (b *Bot) startPicker(ctx context.Context, id int64) error {
 			delete(b.picker.pending, owner)
 		}
 	}
-	b.picker.pending[id] = pickerRequest{ID: requestID, Expires: time.Now().Add(10 * time.Minute)}
+	b.picker.pending[id] = pickerRequest{Kind: kind, ID: requestID, Expires: time.Now().Add(10 * time.Minute)}
 	b.picker.mu.Unlock()
+	if kind == "group" {
+		return b.telegramJSON(ctx, "sendMessage", map[string]any{"chat_id": id, "text": "Выберите закрытую группу, где вы и бот — администраторы. Если её нет в списке, сначала добавьте бота администратором. После выбора подтвердите включение регистрации.", "reply_markup": map[string]any{"keyboard": [][]any{{map[string]any{"text": "Выбрать закрытую группу", "request_chat": map[string]any{"request_id": requestID, "chat_is_channel": false, "chat_has_username": false, "bot_is_member": true, "user_administrator_rights": groupPickerRights(), "bot_administrator_rights": groupPickerRights(), "request_title": true}}}}, "resize_keyboard": true, "one_time_keyboard": true}}, nil)
+	}
 	return b.telegramJSON(ctx, "sendMessage", map[string]any{"chat_id": id, "text": "Выберите получателя VPN-приглашения. Затем подтвердите выдачу. Для числового ID: /invitevpn 123456789", "reply_markup": map[string]any{"keyboard": [][]any{{map[string]any{"text": "Выбрать получателя", "request_users": map[string]any{"request_id": requestID, "user_is_bot": false, "max_quantity": 1, "request_name": true}}}}, "resize_keyboard": true, "one_time_keyboard": true}}, nil)
 }
 func (b *Bot) pickerHTTP(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +58,11 @@ func (b *Bot) pickerHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if e := b.startPicker(r.Context(), actor.user.ID); e != nil {
+	kind := "user"
+	if r.URL.Path == "/api/enrollment/group-picker" {
+		kind = "group"
+	}
+	if e := b.startPickerKind(r.Context(), actor.user.ID, kind); e != nil {
 		memberHTTPError(w, 503)
 		return
 	}
@@ -116,6 +128,10 @@ func (b *Bot) handleMemberCallback(ctx context.Context, cb *tgbotapi.CallbackQue
 		}
 		return
 	}
+	if strings.HasPrefix(cb.Data, "group_confirm:") {
+		b.confirmGroupSelection(ctx, cb)
+		return
+	}
 	if !strings.HasPrefix(cb.Data, "vpn_confirm:") {
 		return
 	}
@@ -125,7 +141,7 @@ func (b *Bot) handleMemberCallback(ctx context.Context, cb *tgbotapi.CallbackQue
 	}
 	b.picker.mu.Lock()
 	p, ok := b.picker.pending[cb.From.ID]
-	if ok && p.ID == int32(requestID) && p.Target > 0 && time.Now().Before(p.Expires) {
+	if ok && p.Kind != "group" && p.ID == int32(requestID) && p.Target > 0 && time.Now().Before(p.Expires) {
 		delete(b.picker.pending, cb.From.ID)
 	} else {
 		ok = false
@@ -184,6 +200,7 @@ func (b *Bot) runMemberPolling(ctx context.Context) error {
 				continue
 			}
 			var extra struct {
+				Chat   *sharedGroup `json:"chat_shared"`
 				Shared *struct {
 					RequestID int32 `json:"request_id"`
 					Users     []struct {
@@ -191,14 +208,21 @@ func (b *Bot) runMemberPolling(ctx context.Context) error {
 					} `json:"users"`
 				} `json:"users_shared"`
 			}
-			if json.Unmarshal(update.Message, &extra) == nil && extra.Shared != nil {
+			if json.Unmarshal(update.Message, &extra) != nil {
+				continue
+			}
+			if extra.Chat != nil {
+				b.handleGroupShared(ctx, &msg, *extra.Chat)
+				continue
+			}
+			if extra.Shared != nil {
 				allowed, e := b.adminRepo.IsAdmin(ctx, msg.From.ID)
 				if e != nil || !allowed || len(extra.Shared.Users) != 1 || extra.Shared.Users[0].ID <= 0 {
 					continue
 				}
 				b.picker.mu.Lock()
 				p, ok := b.picker.pending[msg.From.ID]
-				if ok && p.ID == extra.Shared.RequestID && time.Now().Before(p.Expires) {
+				if ok && p.Kind != "group" && p.ID == extra.Shared.RequestID && time.Now().Before(p.Expires) {
 					p.Target = extra.Shared.Users[0].ID
 					b.picker.pending[msg.From.ID] = p
 				} else {

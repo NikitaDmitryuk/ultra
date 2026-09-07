@@ -437,6 +437,10 @@ func (r *UserRepo) rotateUUIDTx(ctx context.Context, tx pgx.Tx, id, newUUID stri
 	if err := qtx.MoveTrafficStatsUserUUID(ctx, sqlc.MoveTrafficStatsUserUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
 		return "", err
 	}
+ if err:=qtx.MoveUserExitQuotasUUID(ctx,sqlc.MoveUserExitQuotasUUIDParams{UserUuid:oldPGUUID,UserUuid_2:newPGUUID});err!=nil{return "",err}
+	if err := qtx.MoveDailyRouteTrafficUserUUID(ctx, sqlc.MoveDailyRouteTrafficUserUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
+		return "", err
+	}
 	if err := qtx.MoveMonthlyTrafficUserUUID(ctx, sqlc.MoveMonthlyTrafficUserUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
 		return "", err
 	}

@@ -69,7 +69,9 @@ func BuildBridgeXRayJSON(
 			"id":    u.UUID,
 			"email": email,
 		})
-		if u.EffectiveExitID != "" && u.EffectiveExitID != activeExitID {
+		if u.EffectiveExitID == auth.BlockedExit {
+			userExitTags[u.UUID] = w.OutboundBlockTag
+		} else if u.EffectiveExitID != "" && u.EffectiveExitID != activeExitID {
 			userExitTags[u.UUID] = exits.OutboundTag(u.EffectiveExitID)
 		}
 	}
@@ -87,6 +89,11 @@ func BuildBridgeXRayJSON(
 
 	domainStrategy, routeRules := buildBridgeRouting(spec, resolveActiveExitTag(activeExitID, w), userExitTags)
 	needsBlock := BridgeNeedsBlockOutbound(spec)
+	for _, tag := range userExitTags {
+		if tag == w.OutboundBlockTag {
+			needsBlock = true
+		}
+	}
 	activeTag := resolveActiveExitTag(activeExitID, w)
 
 	// Prepend the API routing rule when stats are enabled.

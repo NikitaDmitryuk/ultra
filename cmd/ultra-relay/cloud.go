@@ -66,6 +66,8 @@ func configureCloud(ctx context.Context, wg *sync.WaitGroup, srv *adminapi.Serve
 	} else {
 		log.Warn("Vultr provisioning requires replication configuration")
 	}
+	var quotaAPI *cloud.Vultr
+	defer func() { wg.Add(1); go func() { defer wg.Done(); runQuotas(ctx, database, quotaAPI, apply, log) }() }()
 	path := os.Getenv("ULTRA_VULTR_KEY_FILE")
 	if path == "" {
 		return
@@ -76,6 +78,7 @@ func configureCloud(ctx context.Context, wg *sync.WaitGroup, srv *adminapi.Serve
 		return
 	}
 	api := cloud.NewVultr(key)
+	quotaAPI = api
 	p.API = api
 	srv.Cloud = &cloud.Service{API: api, Store: store, Provisioner: p, Log: log}
 	wg.Add(1)

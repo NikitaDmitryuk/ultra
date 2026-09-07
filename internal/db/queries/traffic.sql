@@ -1,6 +1,6 @@
 -- name: InsertTrafficSample :exec
-INSERT INTO traffic_stats(user_uuid, collected_at, uplink_bytes, downlink_bytes)
-VALUES($1, $2, $3, $4);
+INSERT INTO traffic_stats(user_uuid, collected_at, uplink_bytes, downlink_bytes,exit_tag)
+VALUES($1, $2, $3, $4,$5);
 
 -- name: UpsertMonthlyTraffic :exec
 INSERT INTO monthly_traffic(user_uuid, year, month, uplink_bytes, downlink_bytes, updated_at)
@@ -71,3 +71,10 @@ FROM traffic_stats
 WHERE user_uuid=$1 AND collected_at >= NOW() - $2::interval
 GROUP BY bucket_start
 ORDER BY bucket_start;
+
+-- name: UpsertDailyRouteTraffic :exec
+INSERT INTO daily_route_traffic(user_uuid,day,exit_tag,uplink_bytes,downlink_bytes)
+VALUES($1,$2,$3,$4,$5)
+ON CONFLICT(user_uuid,day,exit_tag) DO UPDATE SET
+ uplink_bytes=daily_route_traffic.uplink_bytes+EXCLUDED.uplink_bytes,
+ downlink_bytes=daily_route_traffic.downlink_bytes+EXCLUDED.downlink_bytes;
