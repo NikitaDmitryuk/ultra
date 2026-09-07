@@ -24,7 +24,11 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 	b.cloudRoutes(mux)
 	// Serve static frontend files embedded in the binary.
 	sub, _ := fs.Sub(miniappFS, "embed/miniapp")
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	files := http.FileServer(http.FS(sub))
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		files.ServeHTTP(w, r)
+	}))
 	mux.HandleFunc("GET /happ", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")

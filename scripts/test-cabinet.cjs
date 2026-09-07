@@ -79,3 +79,13 @@ test('limits distinguish unknown, exhausted, pending and Amsterdam fallback',asy
  assert.ok(html.includes('Резерв — Амстердам'));assert.ok(html.includes('Изменение маршрута применяется'));assert.ok(html.includes('Остаток уточняется'));
  assert.ok(vm.runInContext('limitsHTML([])',p.context).includes('не означает безлимитный'));
 });
+
+test('creation errors remain visible inside the confirmation dialog',async()=>{
+ const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
+ vm.runInContext(`modal('<button id="buy">Подтвердить</button>');button('buy',async()=>{throw new Error('IP bridge не разрешён в Vultr')})`,p.context);
+ await p.el('#buy').onclick();
+ assert.equal(p.el('#dialog-error').hidden,false);
+ assert.equal(p.el('#dialog-error').textContent,'IP bridge не разрешён в Vultr');
+ assert.equal(p.el('#dialog').open,true);
+ assert.equal(p.el('#buy').disabled,false);
+});
