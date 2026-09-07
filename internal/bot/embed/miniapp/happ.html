@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Добавить ultra в Happ</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/happ.js" defer></script>
+</head>
+<body>
+  <main class="card">
+    <h1>ultra → Happ</h1>
+    <p id="import-status">Откройте эту страницу по кнопке из ultra.</p>
+    <div id="import-actions" hidden>
+      <a class="btn" id="launch-happ" rel="noreferrer">Добавить в Happ</a>
+      <p>Подтвердите открытие приложения. Если Happ не открылся, скопируйте ссылку и добавьте её в Happ через «+» → импорт из буфера.</p>
+      <button class="btn secondary" id="copy-subscription">Скопировать ссылку</button>
+      <textarea id="import-subscription" class="config-uri" readonly aria-label="Ссылка подписки"></textarea>
+    </div>
+  </main>
+</body>
+</html>

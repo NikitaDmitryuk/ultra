@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/stats"
 )
@@ -56,6 +58,9 @@ func (r *Runner) ReloadReason(data []byte, reason string) error {
 	if err != nil {
 		return fmt.Errorf("build configuration: %w", err)
 	}
+	if err := normalizeTypedMessages(cfg.ProtoReflect()); err != nil {
+		return fmt.Errorf("normalize configuration: %w", err)
+	}
 	if r.inst != nil && proto.Equal(cfg, r.config) {
 		r.status.Error = ""
 		return nil
@@ -92,6 +97,45 @@ func (r *Runner) ReloadReason(data []byte, reason string) error {
 	r.inst = next
 	r.config = cfg
 	return nil
+}
+
+// Xray stores nested settings in TypedMessage.Value. Plain proto.Equal compares
+// those bytes, whose map ordering varies even for identical JSON. Normalize the
+// nested messages too; keeping LoadConfig above still detects changed asset files.
+func normalizeTypedMessages(message protoreflect.Message) error {
+	if typed, ok := message.Interface().(*serial.TypedMessage); ok {
+		value, err := typed.GetInstance()
+		if err != nil {
+			return err
+		}
+		if err := normalizeTypedMessages(value.ProtoReflect()); err != nil {
+			return err
+		}
+		typed.Value, err = (proto.MarshalOptions{Deterministic: true}).Marshal(value)
+		return err
+	}
+	var err error
+	message.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		switch {
+		case field.IsMap():
+			if field.MapValue().Kind() == protoreflect.MessageKind {
+				value.Map().Range(func(_ protoreflect.MapKey, entry protoreflect.Value) bool {
+					err = normalizeTypedMessages(entry.Message())
+					return err == nil
+				})
+			}
+		case field.IsList():
+			if field.Kind() == protoreflect.MessageKind {
+				for i := 0; i < value.List().Len() && err == nil; i++ {
+					err = normalizeTypedMessages(value.List().Get(i).Message())
+				}
+			}
+		case field.Kind() == protoreflect.MessageKind:
+			err = normalizeTypedMessages(value.Message())
+		}
+		return err == nil
+	})
+	return err
 }
 
 // Close stops xray.

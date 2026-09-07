@@ -24,6 +24,14 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Set up Node.js for Mini App tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test Happ import flow
+        run: make test-ui
+
       - name: Check agent context and ADRs
         run: make harness-check
 

@@ -51,3 +51,20 @@ func TestPublicSubscriptionProxy(t *testing.T) {
 		t.Fatal("unauthenticated rotation", w.Code)
 	}
 }
+
+func TestHappImportPage(t *testing.T) {
+	b := &Bot{}
+	mux := http.NewServeMux()
+	b.registerMiniAppRoutes(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/happ", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `id="launch-happ"`) {
+		t.Fatal("import page unavailable", w.Code)
+	}
+	if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Fatal("import page leaks navigation state")
+	}
+	if strings.Contains(w.Body.String(), "telegram-web-app.js") {
+		t.Fatal("browser import must not depend on Telegram WebView")
+	}
+}

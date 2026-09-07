@@ -155,5 +155,10 @@ build-bench:
 # Pinned Xray Vision uses unsafe field offsets; keep race instrumentation, disable
 # checkptr only for its VLESS package (Go 1.26), not for ultra.
 .PHONY: test-race
+
+.PHONY: test-ui
+test-ui:
+	node --test scripts/test-happ-import.cjs
+
 test-race:
 	go test -race -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' ./...

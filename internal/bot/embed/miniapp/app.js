@@ -1252,10 +1252,25 @@ async function issueSubscription() {
     const result = await api('POST', '/api/users/' + encodeURIComponent(id) + '/subscription');
     if (currentUserUUID !== id) return;
     document.getElementById('subscription-url').textContent = result.url;
-    document.getElementById('subscription-happ').href = result.happ_url;
+    const subscription = new URL(result.url);
+    const importPage = new URL('/happ', subscription.origin);
+    importPage.hash = subscription.pathname.split('/').pop();
+    document.getElementById('subscription-happ').href = importPage.href;
     document.getElementById('subscription-result').hidden = false;
   } catch (e) { showToast(e.message); }
   finally { setSubscriptionBusy(false); }
+}
+function openHapp(event) {
+  event.preventDefault();
+  const link = document.getElementById('subscription-happ').getAttribute('href');
+  if (!link) return;
+  try {
+    // Telegram's WebView cannot reliably launch custom schemes. Open our HTTPS
+    // import page in the browser, where a user gesture can launch Happ.
+    tg.openLink(link, {try_instant_view: false});
+  } catch (_) {
+    window.open(link, '_blank', 'noopener,noreferrer');
+  }
 }
 async function copySubscription() {
   try { await navigator.clipboard.writeText(document.getElementById('subscription-url').textContent); }

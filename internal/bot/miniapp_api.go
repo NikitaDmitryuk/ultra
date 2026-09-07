@@ -23,6 +23,14 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 	// Serve static frontend files embedded in the binary.
 	sub, _ := fs.Sub(miniappFS, "embed/miniapp")
 	mux.Handle("/", http.FileServer(http.FS(sub)))
+	mux.HandleFunc("GET /happ", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		page, _ := miniappFS.ReadFile("embed/miniapp/happ.html")
+		_, _ = w.Write(page)
+	})
 
 	mux.HandleFunc("GET /sub/{token}", b.handlePublicSubscription)
 	mux.HandleFunc("POST /api/users/{uuid}/subscription", b.handleRotateSubscription)

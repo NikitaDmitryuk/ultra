@@ -144,7 +144,7 @@
     <button class="btn secondary" id="subscription-issue" onclick="issueSubscription()">Выдать / заменить подписку Happ</button>
     <p class="muted">Замена отключает прежнюю ссылку подписки. Уже выданные VLESS-профили сохраняются.</p>
     <div id="subscription-result" hidden>
-      <a id="subscription-happ" class="btn">Открыть в Happ</a>
+      <a id="subscription-happ" class="btn" onclick="openHapp(event)">Открыть в Happ</a>
       <button class="btn secondary" onclick="copySubscription()">Скопировать ссылку</button>
       <div id="subscription-url" class="config-uri"></div>
     </div>
@@ -296,6 +296,6 @@
   </button>
 </nav>
 
-<script src="app.js"></script>
+<script src="app.js?v=20260907-happ"></script>
 </body>
 </html>
