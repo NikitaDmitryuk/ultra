@@ -11,6 +11,7 @@ type QuotaRepo struct{ db *DB }
 func NewQuotaRepo(d *DB) *QuotaRepo { return &QuotaRepo{db: d} }
 
 type ExitBudget struct {
+	Enabled      bool       `json:"enabled"`
 	ID           string     `json:"exit_id"`
 	Name         string     `json:"name"`
 	Instance     string     `json:"-"`
@@ -24,7 +25,7 @@ type ExitBudget struct {
 }
 
 func (r *QuotaRepo) Budgets(ctx context.Context) ([]ExitBudget, error) {
-	rows, e := r.db.Pool.Query(ctx, `SELECT b.exit_id::text,COALESCE(NULLIF(n.display_name,''),NULLIF(n.city,''),n.name),b.instance_id,b.monthly_bytes,b.source,b.is_fallback,b.provider_used_bytes,b.account_remaining_bytes,b.observed_at,b.provider_error FROM exit_traffic_budgets b JOIN exit_nodes n ON n.id=b.exit_id ORDER BY n.priority,n.id`)
+	rows, e := r.db.Pool.Query(ctx, `SELECT n.enabled,b.exit_id::text,COALESCE(NULLIF(n.display_name,''),NULLIF(n.city,''),n.name),b.instance_id,b.monthly_bytes,b.source,b.is_fallback,b.provider_used_bytes,b.account_remaining_bytes,b.observed_at,b.provider_error FROM exit_traffic_budgets b JOIN exit_nodes n ON n.id=b.exit_id ORDER BY n.priority,n.id`)
 	if e != nil {
 		return nil, e
 	}
@@ -32,7 +33,7 @@ func (r *QuotaRepo) Budgets(ctx context.Context) ([]ExitBudget, error) {
 	out := []ExitBudget{}
 	for rows.Next() {
 		var b ExitBudget
-		if e = rows.Scan(&b.ID, &b.Name, &b.Instance, &b.Monthly, &b.Source, &b.Fallback, &b.ProviderUsed, &b.Remaining, &b.Observed, &b.Error); e != nil {
+		if e = rows.Scan(&b.Enabled, &b.ID, &b.Name, &b.Instance, &b.Monthly, &b.Source, &b.Fallback, &b.ProviderUsed, &b.Remaining, &b.Observed, &b.Error); e != nil {
 			return nil, e
 		}
 		out = append(out, b)
@@ -73,6 +74,9 @@ func (r *QuotaRepo) Recalculate(ctx context.Context, now time.Time) (bool, error
 	daysLeft := int64(end.Sub(day).Hours() / 24)
 	changed := false
 	for _, b := range budgets {
+		if !b.Enabled {
+			continue
+		}
 		tag := "to-exit-" + b.ID
 		var used, today int64
 		e = tx.QueryRow(ctx, `SELECT COALESCE(SUM(uplink_bytes+downlink_bytes),0)::bigint,COALESCE(SUM(uplink_bytes+downlink_bytes) FILTER(WHERE day=$3),0)::bigint FROM daily_route_traffic WHERE exit_tag=$1 AND day>=$2 AND day<$4`, tag, month, day, end).Scan(&used, &today)

@@ -89,4 +89,18 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 		t.Fatal(e)
 	}
 	check(true) // stale provider data
+	_, e = d.Pool.Exec(ctx, `UPDATE exit_nodes SET enabled=false WHERE id=$1`, fra)
+	if e != nil {
+		t.Fatal(e)
+	}
+	budgets, e := repo.Budgets(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, budget := range budgets {
+		if budget.ID == fra && budget.Enabled {
+			t.Fatal("disabled paid resource treated as routing capacity")
+		}
+	}
+
 }

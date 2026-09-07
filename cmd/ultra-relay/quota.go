@@ -52,7 +52,7 @@ func refreshBandwidth(ctx context.Context, repo *db.QuotaRepo, api *cloud.Vultr,
 	managed := []db.ExitBudget{}
 	var total int64
 	for _, b := range budgets {
-		if b.Source == "vultr" {
+		if b.Source == "vultr" && b.Enabled {
 			managed = append(managed, b)
 			total += b.Monthly
 		}
