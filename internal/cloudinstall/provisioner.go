@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -129,6 +130,16 @@ func (p *Provisioner) node(ctx context.Context, op *cloud.Operation, instance cl
 	}
 	return n, e
 }
+
+// Configure only an already enabled guest firewall; never expose the tunnel globally.
+func tunnelFirewallScript(bridgeIP string, port int) (string, error) {
+	ip := net.ParseIP(bridgeIP)
+	if ip == nil || ip.To4() == nil || port < 1 || port > 65535 {
+		return "", errors.New("invalid tunnel firewall source or port")
+	}
+	return "if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then\n ufw allow from " + quote(ip.String()) + " to any port " + strconv.Itoa(port) + " proto tcp >/dev/null\nfi\n", nil
+}
+
 func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance cloud.Instance) error {
 	c, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -202,6 +213,10 @@ install -d -o ultra-relay -g ultra-relay -m 700 /etc/ultra-relay
 	if e = remote.Upload(c, "/etc/systemd/system/ultra-relay.service", strings.NewReader(install.RelaySystemdUnit)); e != nil {
 		return e
 	}
+	firewallScript, e := tunnelFirewallScript(p.BridgeIP, node.Port)
+	if e != nil {
+		return e
+	}
 	_, e = remote.Run(c, `set -eu
 echo "`+checksum+`  /etc/ultra-relay/ultra-relay.next" | sha256sum -c - >/dev/null
 if [ ! -s /etc/ultra-relay/fullchain.pem ]; then
@@ -215,7 +230,7 @@ printf 'ULTRA_RELAY_LOG_LEVEL=info\n' > /etc/ultra-relay/environment
 chown ultra-relay:ultra-relay /etc/ultra-relay/environment
 chmod 600 /etc/ultra-relay/environment
 rm -f /etc/ultra-relay/spec.next /etc/ultra-relay/ultra-relay.next
-systemctl daemon-reload
+`+firewallScript+`systemctl daemon-reload
 systemctl enable ultra-relay >/dev/null 2>&1
 systemctl restart ultra-relay
 systemctl is-active --quiet ultra-relay

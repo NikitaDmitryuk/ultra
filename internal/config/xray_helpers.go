@@ -77,7 +77,9 @@ func splithttpHTTPHost(spec *Spec, strat mimic.Strategy) string {
 
 func resolveSplithttpTLS(spec *Spec, strat mimic.Strategy) (serverName string, alpn []string, fingerprint string) {
 	tlsSN := spec.SplitHTTPTLS.ServerName
-	if tlsSN == "" {
+	if spec.SplitHTTPTLS.OmitSNI {
+		tlsSN = ""
+	} else if tlsSN == "" {
 		tlsSN = strat.Host()
 	}
 	alpn = spec.SplitHTTPTLS.Alpn

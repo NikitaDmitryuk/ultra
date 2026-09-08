@@ -117,6 +117,9 @@ type AntiCensorSpec struct {
 
 	// WARPProxyPort is the local port where warp-cli listens in proxy mode (default 40000).
 	WARPProxyPort int `json:"warp_proxy_port,omitempty"`
+
+	// WARPDirectDomains bypasses WARP for these exact destination domains on the exit.
+	WARPDirectDomains []string `json:"warp_direct_domains,omitempty"`
 }
 
 // DatabaseSpec configures the PostgreSQL connection for user storage and traffic stats.
@@ -269,6 +272,8 @@ type ExitTunnelSpec struct {
 }
 
 type SplitHTTPTLSSpec struct {
+	// OmitSNI is permitted only for IP-addressed tunnels with pinned leaf certificates.
+	OmitSNI     bool     `json:"omit_sni,omitempty"`
 	ServerName  string   `json:"server_name"`
 	Alpn        []string `json:"alpn"`
 	Fingerprint string   `json:"fingerprint"`

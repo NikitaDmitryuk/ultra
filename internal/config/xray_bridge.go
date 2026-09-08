@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
@@ -42,6 +44,24 @@ func BuildBridgeXRayJSON(
 ) ([]byte, error) {
 	if spec.Role != RoleBridge {
 		return nil, fmt.Errorf("config: expected bridge role")
+	}
+	if spec.SplitHTTPTLS.OmitSNI {
+		if spec.TunnelTLSProvision != TunnelTLSSelfSigned {
+			return nil, fmt.Errorf("omit_sni requires pinned self-signed tunnels")
+		}
+		check := func(address, pin string) bool {
+			decoded, err := hex.DecodeString(normalizeCertSHA256(pin))
+			return net.ParseIP(address) != nil && err == nil && len(decoded) == 32
+		}
+		enabled := exits.FilterEnabled(exitNodes)
+		if len(enabled) == 0 && !check(spec.Exit.Address, spec.Exit.PinnedPeerCertSHA256) {
+			return nil, fmt.Errorf("omit_sni requires IP and certificate pin")
+		}
+		for _, node := range enabled {
+			if !check(node.Address, node.PinnedPeerCertSHA256) {
+				return nil, fmt.Errorf("omit_sni requires IP and certificate pin for every exit")
+			}
+		}
 	}
 	statsEnabled := spec.Stats != nil && spec.Database != nil
 
