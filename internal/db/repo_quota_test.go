@@ -68,9 +68,55 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 	if e = d.Pool.QueryRow(ctx, `SELECT limit_bytes FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, b, fra).Scan(&lb); e != nil {
 		t.Fatal(e)
 	}
-	if la <= lb {
-		t.Fatal("equal allocation despite different demand")
+	if la != lb || la != 200*quota.GiB {
+		t.Fatal("monthly ceilings depend on daily demand", la, lb)
 	}
+	snapshot, e := repo.Snapshot(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	// Exhaust the user's monthly quarter, including yesterday's traffic.
+	_, e = d.Pool.Exec(ctx, `UPDATE daily_route_traffic SET downlink_bytes=$2 WHERE user_uuid=$1`, a, 200*quota.GiB)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = repo.Recalculate(ctx, now); e != nil {
+		t.Fatal(e)
+	}
+	check(true)
+	if e = repo.Acknowledge(ctx, snapshot); e != nil {
+		t.Fatal(e)
+	}
+	var applied bool
+	if e = d.Pool.QueryRow(ctx, `SELECT applied FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, a, fra).Scan(&applied); e != nil || applied {
+		t.Fatal("acknowledged a newer calculation", e)
+	}
+	if e = repo.Observe(ctx, fra, 0, 1000*quota.GiB, "", now.AddDate(0, 0, 1)); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = repo.Recalculate(ctx, now.AddDate(0, 0, 1)); e != nil {
+		t.Fatal(e)
+	}
+	check(true)
+	rotated, err := NewUserRepo(d).RotateUUID(ctx, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a = rotated
+	check(true)
+	var usedAfterRotation int64
+	if e = d.Pool.QueryRow(ctx, `SELECT used_bytes FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, a, fra).Scan(&usedAfterRotation); e != nil || usedAfterRotation != 200*quota.GiB {
+		t.Fatal("rotation reset usage", e)
+	}
+	nextMonth := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	if e = repo.Observe(ctx, fra, 0, 1000*quota.GiB, "", nextMonth); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = repo.Recalculate(ctx, nextMonth); e != nil {
+		t.Fatal(e)
+	}
+	check(false)
+
 	if e = repo.Observe(ctx, fra, 0, 0, "", now); e != nil {
 		t.Fatal(e)
 	}

@@ -59,6 +59,9 @@ func (r *Runner) ReloadReason(data []byte, reason string) error {
 	if err != nil {
 		return fmt.Errorf("build configuration: %w", err)
 	}
+	if err := manageXHTTPListeners(cfg); err != nil {
+		return fmt.Errorf("prepare XHTTP lifecycle: %w", err)
+	}
 	if err := normalizeTypedMessages(cfg.ProtoReflect()); err != nil {
 		return fmt.Errorf("normalize configuration: %w", err)
 	}

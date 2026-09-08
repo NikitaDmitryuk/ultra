@@ -44,6 +44,9 @@ func buildBridgeDNS() map[string]any {
 		"domain:sber.com",    // Sberbank international
 	}
 	return map[string]any{
+		// Bootstrap the DoH endpoint without asking that endpoint to resolve itself.
+		// These are the public basic-mode addresses documented at dns.yandex.ru.
+		"hosts":         map[string]any{"common.dot.dns.yandex.net": []string{"77.88.8.8", "77.88.8.1"}},
 		"queryStrategy": "UseIPv4",
 		"servers": []any{
 			// Yandex DoH: serves from inside Russia — correct answers for Russian domains.

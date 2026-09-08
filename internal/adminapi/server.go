@@ -40,6 +40,7 @@ type TrafficQuerier interface {
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
 type Server struct {
+	RouteStatus       func(string) auth.RouteApplication
 	ReplicationStatus func(context.Context) (any, error)
 	Cloud             *cloud.Service
 	Members           *MemberService

@@ -7,7 +7,7 @@ let group={chat_id:-100123456,title:'Друзья Ultra',enabled:true,url:'https
 const invites=[{id:1,recipient:100004,recipient_name:'Анна',expires_at:new Date(Date.now()+5*86400000).toISOString(),created_at:now}];
 const region={id:'fra',city:'Франкфурт',country:'DE'},plan={id:'vc2-1c-1gb',bandwidth:1024},price={monthly_cost:5,hourly_cost:.007};
 const ops=[{id:'demo-fra',instance_id:'demo-instance',exit_id:'fra',offer:{region,plan,price},state:'ready',phase:'ready',charged:true}];
-const traffic={month:now.slice(0,7),uplink_bytes:2*1073741824,downlink_bytes:24*1073741824,routes:[{name:'Амстердам',uplink_bytes:1073741824,downlink_bytes:20*1073741824},{name:'Напрямую с bridge · Yandex Cloud',uplink_bytes:1073741824,downlink_bytes:4*1073741824}],days:[{day:now.slice(0,10),uplink_bytes:2*1073741824,downlink_bytes:24*1073741824}],limits:[{name:'Франкфурт',state:'available',used_bytes:1073741824,remaining_bytes:5*1073741824,limit_bytes:6*1073741824,resets_at:new Date(Date.now()+86400000).toISOString()}]};
+const traffic={month:now.slice(0,7),uplink_bytes:2*1073741824,downlink_bytes:24*1073741824,routes:[{name:'Амстердам',uplink_bytes:1073741824,downlink_bytes:20*1073741824},{name:'Напрямую с bridge · Yandex Cloud',uplink_bytes:1073741824,downlink_bytes:4*1073741824}],days:[{day:now.slice(0,10),uplink_bytes:2*1073741824,downlink_bytes:24*1073741824}],limits:[{period:'month',personal_limit_bytes:204800000000,name:'Франкфурт',state:'available',used_bytes:1073741824,remaining_bytes:204800000000-1073741824,limit_bytes:204800000000,resets_at:new Date(Date.UTC(new Date().getUTCFullYear(),new Date().getUTCMonth()+1,1)).toISOString()}]};
 traffic.today=now.slice(0,10);traffic.routes[0].tag='to-exit-ams';traffic.routes[1].tag='direct';
 traffic.day_routes=Array.from({length:Math.min(8,Number(now.slice(8,10)))},(_,i)=>traffic.routes.map((r,j)=>({bucket:now.slice(0,8)+String(i+1).padStart(2,'0'),tag:r.tag,uplink_bytes:(i+1)*4000000,downlink_bytes:(j===0?8:2)*(i+1)*50000000}))).flat();
 traffic.hours=Array.from({length:24},(_,i)=>traffic.routes.map((r,j)=>({bucket:now.slice(0,10)+' '+String(i).padStart(2,'0')+':00',tag:r.tag,uplink_bytes:1000000*(i%3),downlink_bytes:(j===0?6:2)*(i%5)*20000000}))).flat();
@@ -24,7 +24,7 @@ window.fetch=async (path,options={})=>{
  else if(path==='/api/members/traffic')value={...traffic,limits:[]};
  else if(path==='/api/self/traffic'||/^\/api\/members\/\d+\/traffic$/.test(path))value=traffic;
  else if(path==='/api/self/subscription')value={url:'https://example.invalid/demo-subscription',import_url:'https://example.invalid/demo-import'};
- else if(path==='/api/self/exits')value={exits,selected_exit_id:preferred,effective_exit_id:preferred||'ams',profiles:exits.map(e=>({name:e.display_name,effective_exit_id:e.id}))};
+ else if(path==='/api/self/exits')value={application:{state:'applied'},exits,selected_exit_id:preferred,effective_exit_id:preferred||'ams',profiles:exits.map(e=>({name:e.display_name,effective_exit_id:e.id}))};
  else if(path==='/api/self/exit-selection'){preferred=body.exit_id;value={};}
  else if(path==='/api/members')value=people;
  else if(/^\/api\/members\/\d+\/action$/.test(path)){const person=people.find(p=>String(p.telegram_id)===path.split('/')[3]);if(person){if(body.action==='reset')person.uuid+='-reset';else person.active=body.action==='enable';person.pending=false;value=person}else status=404;}

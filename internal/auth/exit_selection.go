@@ -21,7 +21,13 @@ func (u User) SelectExit(nodes []exits.Node, active string, health map[string]ex
 		}
 	}
 	if !slices.Contains(u.ExcludedExitIDs, selected) {
-		return selected
+		for _, n := range nodes {
+			if n.ID == selected {
+				if h, ok := health[selected]; !ok || h.Eligible || h.PreferredReady {
+					return selected
+				}
+			}
+		}
 	}
 	for _, n := range nodes {
 		if n.ID == u.FallbackExitID && !slices.Contains(u.ExcludedExitIDs, n.ID) {

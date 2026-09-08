@@ -141,12 +141,25 @@ func main() {
 		fw := firewall.New()
 
 		var reloadMu sync.Mutex
-		applyBridge = func(users []auth.User, reason string) error {
+		applications := &auth.RouteApplications{}
+		applyBridge = func(users []auth.User, reason string) (applyErr error) {
 			c, cancel := context.WithTimeout(ctx, 20*time.Second)
 			defer cancel()
 			ctx := c
 			reloadMu.Lock()
 			defer reloadMu.Unlock()
+			started := time.Now()
+			defer func() {
+				applications.Finish(applyErr)
+				if applyErr != nil {
+					log.Warn("route application failed", "reason", reason, "code", "route_apply_failed", "duration", time.Since(started))
+				}
+			}()
+			quotaRepo := db.NewQuotaRepo(database)
+			quotaSnapshot, e := quotaRepo.Snapshot(ctx)
+			if e != nil {
+				return e
+			}
 			routeRepo := db.NewRouteRepo(database)
 			if e := routeRepo.PrepareManual(ctx); e != nil {
 				return e
@@ -177,6 +190,14 @@ func main() {
 			health := exitSelector.HealthSnapshot()
 			users = auth.ExpandRoutes(users)
 			users = applyEffectiveUserExits(users, enabled, activeID, health)
+			transitions := map[[2]string]int{}
+			for _, u := range users {
+				old := applications.Status(u.UUID).EffectiveExit
+				if old != u.EffectiveExitID {
+					transitions[[2]string{old, u.EffectiveExitID}]++
+				}
+			}
+			applications.Begin(users)
 			b, err := config.BuildBridgeXRayJSON(spec, users, exitNodes, activeID, strat, xrayLogLevel)
 			if err != nil {
 				log.Error("build bridge config", "err", err)
@@ -187,8 +208,15 @@ func main() {
 				log.Error("xray reload", "err", err)
 				return err
 			}
+			applications.Finish(nil)
+			for route, count := range transitions {
+				log.Info("route transition applied", "from_exit", route[0], "to_exit", route[1], "profiles", count, "revision", applications.Status("").Revision, "reason", reason, "duration", time.Since(started))
+			}
 			if after := runner.Status(); after.Count != before {
-				log.Info("xray config reloaded", "users", len(users), "active_exit", activeID, "reload_count", after.Count, "reason", after.Reason, "at", after.At)
+				log.Info("xray config reloaded", "users", len(users), "active_exit", activeID, "reload_count", after.Count, "reason", after.Reason, "at", after.At, "duration", time.Since(started))
+			}
+			if e := quotaRepo.Acknowledge(ctx, quotaSnapshot); e != nil {
+				return e
 			}
 			if e := routeRepo.AppliedManual(ctx); e != nil {
 				return e
@@ -205,6 +233,7 @@ func main() {
 			log.Error("db user manager", "err", err)
 			os.Exit(1)
 		}
+		dbMgr.ApplyChange = func(users []auth.User) error { return applyBridge(users, "users or preferences") }
 		mgr = dbMgr
 
 		tRepo := db.NewTrafficRepo(database)
@@ -214,8 +243,9 @@ func main() {
 		if spec.Stats != nil {
 			interval := time.Duration(spec.Stats.CollectIntervalSeconds) * time.Second
 			if interval <= 0 {
-				interval = 60 * time.Second
+				interval = 30 * time.Second
 			}
+			interval = min(30*time.Second, max(10*time.Second, interval))
 			collector := stats.New(runner, tRepo, mgr, interval, log)
 			collector.Start()
 			defer collector.Close()
@@ -248,6 +278,7 @@ func main() {
 				os.Exit(1)
 			}
 			srv.ReloadStatus = runner.Status
+			srv.RouteStatus = applications.Status
 			configureCloud(ctx, &wg, srv, database, spec, exitMgr, func(c context.Context) error { return applyBridge(nil, "cloud route change") }, dbMgr.Refresh, log)
 			keys, keyErr := subscriptionkey.Load(os.Getenv("ULTRA_SUBSCRIPTION_ENCRYPTION_KEY_FILE"))
 			if keyErr != nil {
@@ -278,7 +309,7 @@ func main() {
 
 		_ = applyBridge(mgr.List(), "startup")
 		go exitSelector.RunWorker(ctx, 10*time.Second, func(c context.Context) ([]exits.Node, error) {
-			if runner.Status().Error != "" {
+			if runner.Status().Error != "" || applications.Pending() {
 				_ = applyBridge(nil, "retry failed reload")
 			}
 			return exitMgr.ListEnabled(), nil

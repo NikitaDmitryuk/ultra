@@ -19,14 +19,15 @@ type RouteCredential struct {
 }
 
 type User struct {
-	FallbackExitID  string            `json:"-"`
-	ExcludedExitIDs []string          `json:"-"`
-	Routes          []RouteCredential `json:"-"`
-	UUID            string            `json:"uuid"`
-	Name            string            `json:"name"`
-	Kind            string            `json:"kind"`
-	IsActive        bool              `json:"is_active"`
-	DisabledAt      *time.Time        `json:"disabled_at,omitempty"`
+	ExitExclusionReasons map[string]string `json:"-"`
+	FallbackExitID       string            `json:"-"`
+	ExcludedExitIDs      []string          `json:"-"`
+	Routes               []RouteCredential `json:"-"`
+	UUID                 string            `json:"uuid"`
+	Name                 string            `json:"name"`
+	Kind                 string            `json:"kind"`
+	IsActive             bool              `json:"is_active"`
+	DisabledAt           *time.Time        `json:"disabled_at,omitempty"`
 	// PreferredExitID is nil for Auto location selection.
 	PreferredExitID *string `json:"preferred_exit_id,omitempty"`
 	// EffectiveExitID is computed at config-build time and is not persisted.

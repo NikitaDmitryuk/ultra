@@ -2,6 +2,7 @@ package cloud
 
 import (
 	"context"
+	"math"
 	"net/url"
 
 	"time"
@@ -26,7 +27,11 @@ func (v *Vultr) AccountRemaining(ctx context.Context) (int64, error) {
 	if c == nil || c.Out < 0 || c.Instance < 0 || c.Free < 0 || c.Purchased < 0 {
 		return 0, ErrUnavailable
 	}
-	return max(0, int64(((c.Instance+c.Free+c.Purchased)*0.8-c.Out)*1e9)), nil
+	amount := ((c.Instance+c.Free+c.Purchased)*0.8 - c.Out) * 1e9
+	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount >= float64(math.MaxInt64) {
+		return 0, ErrUnavailable
+	}
+	return max(0, int64(amount)), nil
 }
 func (v *Vultr) InstanceBandwidth(ctx context.Context, id string, now time.Time) (int64, error) {
 	var response struct {
@@ -50,6 +55,9 @@ func (v *Vultr) InstanceBandwidth(ctx context.Context, id string, now time.Time)
 			return 0, ErrUnavailable
 		}
 		if parsed.Format("2006-01") == now.UTC().Format("2006-01") {
+			if entry.Out > math.MaxInt64-total {
+				return 0, ErrUnavailable
+			}
 			total += entry.Out
 		}
 	}

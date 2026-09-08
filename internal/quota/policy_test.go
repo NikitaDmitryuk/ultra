@@ -2,29 +2,20 @@ package quota
 
 import "testing"
 
-func TestDemandAllocationDoesNotReserveForIdleUsers(t *testing.T) {
-	active := []Demand{{ID: "frequent", Recent: 100 * GiB}, {ID: "occasional", Recent: GiB}}
-	before := Allocate(100*GiB, active)
-	for i := 0; i < 1000; i++ {
-		active = append(active, Demand{ID: string(rune(i + 1000))})
+func TestMonthlyCeiling(t *testing.T) {
+	const monthly int64 = 1024_000_000_000
+	if PersonalLimit(monthly) != 204_800_000_000 {
+		t.Fatal("wrong nominal cap")
 	}
-	after := Allocate(100*GiB, active)
-	if after["frequent"] != before["frequent"] || after["occasional"] != before["occasional"] {
-		t.Fatal("idle users reserved bandwidth")
-	}
-	if after["frequent"] <= after["occasional"] {
-		t.Fatal("demand ignored")
-	}
-	if after["frequent"] >= 100*GiB {
-		t.Fatal("frequent user monopolizes pool")
-	}
-}
-func TestAllowanceNeverExceedsRemainingPool(t *testing.T) {
-	for _, pool := range []int64{-1, 0, 1, GiB, 100 * GiB} {
-		for _, v := range Allocate(pool, []Demand{{ID: "new"}, {ID: "active", Recent: GiB}}) {
-			if v < 0 || v > max(0, pool) {
-				t.Fatalf("invalid allowance %d for %d", v, pool)
-			}
+	for _, tc := range []struct {
+		used, shared, want int64
+		fallback           bool
+	}{
+		{0, monthly, 204_800_000_000, false}, {204_800_000_000, monthly, 0, false},
+		{1, 10, 10, false}, {0, 0, 0, false}, {monthly, 100, 100, true},
+	} {
+		if got := Available(monthly, tc.used, tc.shared, tc.fallback); got != tc.want {
+			t.Fatalf("%+v: %d", tc, got)
 		}
 	}
 }

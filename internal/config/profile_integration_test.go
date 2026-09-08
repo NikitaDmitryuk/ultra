@@ -68,7 +68,24 @@ func testCertificate(t *testing.T) (string, string) {
 	return certFile, keyFile
 }
 func TestPublishedProfilesLocalTransfer(t *testing.T) {
-	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(strings.Repeat("x", 65536))) }))
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/stream" {
+			for {
+				select {
+				case <-r.Context().Done():
+					return
+				case <-time.After(time.Millisecond):
+					if _, e := w.Write([]byte(strings.Repeat("x", 1024))); e != nil {
+						return
+					}
+					w.(http.Flusher).Flush()
+				}
+			}
+		}
+		_, _ = w.Write([]byte(strings.Repeat("x", 65536)))
+	}))
+	alternate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(strings.Repeat("y", 65536))) }))
+	defer alternate.Close()
 	defer destination.Close()
 	camouflage := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	camouflage.EnableHTTP2 = true
@@ -104,7 +121,7 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 	}
 	// Exercise the public transport independently of the separately tested exit selector.
 	server["inbounds"] = server["inbounds"].([]any)[:3]
-	server["outbounds"] = []any{map[string]any{"protocol": "freedom"}}
+	server["outbounds"] = []any{map[string]any{"protocol": "freedom", "tag": "egress"}}
 	delete(server, "routing")
 	delete(server, "dns")
 	data, _ = json.Marshal(server)
@@ -168,6 +185,46 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 				}
 				if len(body) != 65536 {
 					t.Fatalf("short body: %d", len(body))
+				}
+				// Keep this client and an open stream across two server route changes.
+				stream, e := hc.Get(destination.URL + "/stream")
+				if e != nil {
+					return e
+				}
+				defer func() { _ = stream.Body.Close() }()
+				if _, e = io.ReadFull(stream.Body, make([]byte, 1024)); e != nil {
+					return e
+				}
+				server["outbounds"] = []any{map[string]any{"protocol": "freedom", "tag": "egress", "settings": map[string]any{"redirect": alternate.Listener.Addr().String()}}}
+				next, _ := json.Marshal(server)
+				if e = relay.Reload(next); e != nil {
+					return e
+				}
+				// EOF/error must arrive before the HTTP client's timeout; data is not
+				// allowed to continue on a stream from the closed server instance.
+				stopped := time.Now()
+				_, _ = io.Copy(io.Discard, stream.Body) // EOF and read errors both terminate the old stream.
+				if time.Since(stopped) > 2*time.Second {
+					t.Fatal("old transport survived reload until client timeout")
+				}
+				for _, want := range []byte{'y', 'x'} {
+					if want == 'x' {
+						if e = relay.Reload(data); e != nil {
+							return e
+						}
+					}
+					response, e := hc.Get(destination.URL)
+					if e != nil {
+						return e
+					}
+					payload, e := io.ReadAll(response.Body)
+					_ = response.Body.Close()
+					if e != nil {
+						return e
+					}
+					if len(payload) != 65536 || payload[0] != want {
+						t.Fatalf("unchanged client used old route: length=%d", len(payload))
+					}
 				}
 				return nil
 			}
