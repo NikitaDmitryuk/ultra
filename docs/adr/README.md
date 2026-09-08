@@ -47,3 +47,5 @@ ADR сохраняет одно значимое решение и его обо
 - [0010 — Месячные квоты и подтверждённое применение](0010-monthly-quotas-and-route-application.md)
 
 - [0011 — Отдельный HTTPS-вход подписок](0011-subscription-ingress.md)
+
+- [0012 — HTTPS-вход на постоянном узле](0012-permanent-subscription-ingress.md) — accepted

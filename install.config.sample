@@ -175,6 +175,8 @@ DB_ENABLE=y
 
 # Отдельный HTTPS-вход (пусто = прежняя схема domain:BOT_PORT → bridge)
 BOT_PUBLIC_URL=
+# ssh: существующий сервер с nginx; vultr: управляемый VPS с HAProxy (по умолчанию).
+BOT_INGRESS_MODE=vultr
 BOT_INGRESS_IP=
 # ID Vultr VPS, который нельзя удалять до переноса HTTPS-входа
 BOT_INGRESS_INSTANCE_ID=
