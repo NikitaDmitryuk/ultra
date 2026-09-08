@@ -76,7 +76,7 @@ async function overview(){const t=await api('/api/members/traffic');app.innerHTM
 async function loadPersonTraffic(id){try{const t=await api(`/api/members/${id}/traffic`);const target=currentPerson===id?document.querySelector('#person-traffic'):null;if(target)renderTrafficChart(target,t)}catch{const target=currentPerson===id?document.querySelector('#person-traffic'):null;if(target)target.textContent='Статистика временно недоступна. Доступ пользователя не изменён.'}}
 
 async function loadSelfTraffic(){
- const target=document.querySelector('#self-traffic');
+ const target=document.querySelector('#self-traffic');button('refresh-self-traffic',loadSelfTraffic);
  try{const t=await api('/api/self/traffic');renderTrafficChart(target,t);button('refresh-self-traffic',loadSelfTraffic)}
  catch{target.innerHTML='<p>Статистика временно недоступна. Это не означает, что VPN отключён.</p><button class="btn secondary" id="retry-self-traffic">Повторить</button>';button('retry-self-traffic',loadSelfTraffic)}
 }

@@ -64,6 +64,7 @@ test('statistics failure does not replace personal cabinet or hide connect contr
  assert.ok(p.el('#app').innerHTML.includes('id="connect"'));
  assert.ok(p.el('#self-traffic').innerHTML.includes('Статистика временно недоступна'));
  assert.ok(!p.el('#app').innerHTML.includes('Кабинет недоступен'));
+ assert.equal(typeof p.el('#refresh-self-traffic').onclick,'function');
 });
 test('creation errors remain visible inside the confirmation dialog',async()=>{
  const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
