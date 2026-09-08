@@ -104,7 +104,7 @@ func cloudResult(w http.ResponseWriter, value any, e error) {
 	if e != nil {
 		status := 503
 		switch {
-		case errors.Is(e, cloud.ErrLimit), errors.Is(e, cloud.ErrConflict), errors.Is(e, cloud.ErrPriceChanged):
+		case errors.Is(e, cloud.ErrIngressInUse), errors.Is(e, cloud.ErrLimit), errors.Is(e, cloud.ErrConflict), errors.Is(e, cloud.ErrPriceChanged):
 			status = 409
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -131,6 +131,9 @@ func (s *Server) cloudOperations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ops, e := s.Cloud.Store.List(r.Context())
+	for i := range ops {
+		ops[i].ServesSubscriptionIngress = s.Cloud.IsIngress(ops[i])
+	}
 	cloudResult(w, ops, e)
 }
 func (s *Server) cloudOffer(w http.ResponseWriter, r *http.Request) {

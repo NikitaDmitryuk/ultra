@@ -66,8 +66,8 @@ check_bot_dns() {
 		echo "  ✓ DNS $domain → $resolved"
 		return 0
 	fi
-	echo "  ✗ DNS $domain → $resolved (ожидался bridge $expected)" >&2
-	echo "    Mini App открывается по домену, не по IP bridge — исправьте A-запись в DNS." >&2
+	echo "  ✗ DNS $domain → $resolved (ожидался HTTPS-вход $expected)" >&2
+	echo "    Проверьте A-запись и BOT_INGRESS_IP; бот может оставаться на bridge." >&2
 	echo "    Сейчас WebView идёт на $resolved:${BOT_PORT:-8444} → ERR_TIMED_OUT." >&2
 	return 1
 }
@@ -299,6 +299,8 @@ EXIT2_NAME=${EXIT2_NAME:-}
 
 BOT_ENABLE="${BOT_ENABLE:-n}"
 BOT_DOMAIN="${BOT_DOMAIN:-}"
+BOT_PUBLIC_URL="${BOT_PUBLIC_URL:-}"
+BOT_INGRESS_IP="${BOT_INGRESS_IP:-}"
 BOT_PORT="${BOT_PORT:-8444}"
 
 require_bot_prerequisites
@@ -677,17 +679,12 @@ if [[ "$PLAN_FLOW_USED" -ne 1 ]]; then
 		if [[ -n "${BOT_DOMAIN// }" ]]; then
 			echo "Проверка DNS Mini App (${BOT_DOMAIN} → ${FRONT})…"
 			_bot_dns_ok=1
-			check_bot_dns "$BOT_DOMAIN" "$FRONT" || { _bot_dns_ok=0; _bot_ports_ok=0; }
-			# Если DNS → bridge и IP:port уже OK, проверка hostname избыточна (кэш resolver / flaky nc).
-			if [[ "$_bot_dns_ok" -eq 1 ]] && command -v nc >/dev/null 2>&1; then
-				echo "  ✓ Mini App HTTPS (по домену) — пропуск: DNS → ${FRONT}, порт на IP уже проверен"
-			elif command -v nc >/dev/null 2>&1; then
-				check_port "$BOT_DOMAIN" "${BOT_PORT}" "Mini App HTTPS (по домену)" || _bot_ports_ok=0
-			fi
+			check_bot_dns "$BOT_DOMAIN" "${BOT_INGRESS_IP:-$FRONT}" || { _bot_dns_ok=0; _bot_ports_ok=0; }
+			check_port "$BOT_DOMAIN" "${BOT_PORT}" "Mini App HTTPS (по домену)" || _bot_ports_ok=0
 		fi
 		if [[ "$_bot_ports_ok" -eq 0 ]]; then
 			if [[ "${_bot_dns_ok:-1}" -eq 0 ]]; then
-				_bot_warn+=("DNS A-запись ${BOT_DOMAIN} должна указывать на bridge ${FRONT} (не на exit)")
+				_bot_warn+=("DNS A-запись ${BOT_DOMAIN} должна указывать на HTTPS-вход ${BOT_INGRESS_IP:-$FRONT}")
 			fi
 			_bot_warn+=("откройте порты 80/${BOT_PORT} на bridge ${FRONT} в firewall/security group")
 		fi
@@ -727,11 +724,19 @@ if [[ "$PLAN_FLOW_USED" -ne 1 ]]; then
 
 		# Write ULTRA_BOT_* into the shared environment file (Telegram API via bridge Xray SOCKS).
 		"${_ssh_base[@]}" "
-			grep -v '^ULTRA_BOT_' /etc/ultra-relay/environment > /tmp/env.tmp 2>/dev/null || true
+			grep -Ev '^ULTRA_BOT_(DOMAIN|PORT|TELEGRAM_SOCKS5)=' /etc/ultra-relay/environment > /tmp/env.tmp 2>/dev/null || true
 			printf 'ULTRA_BOT_DOMAIN=%s\nULTRA_BOT_PORT=%s\nULTRA_BOT_TELEGRAM_SOCKS5=127.0.0.1:10809\n' '${BOT_DOMAIN}' '${BOT_PORT}' >> /tmp/env.tmp
 			mv /tmp/env.tmp /etc/ultra-relay/environment
 			chmod 600 /etc/ultra-relay/environment
 		"
+
+		# Optional override; omission preserves an existing server-side origin.
+		if [[ -n "${BOT_PUBLIC_URL:-}" ]]; then
+			[[ "$BOT_PUBLIC_URL" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?/?$ ]] || { echo "Invalid BOT_PUBLIC_URL" >&2; exit 1; }
+			"${_ssh_base[@]}" "mkdir -p /etc/systemd/system/ultra-bot.service.d; printf '[Service]\nEnvironment=ULTRA_BOT_PUBLIC_URL=%s\n' '${BOT_PUBLIC_URL}' > /etc/systemd/system/ultra-bot.service.d/public-url.conf"
+		fi
+		"${_scp_base[@]}" "$ROOT/deploy/renew-ultra-bot.sh" "${SSH_USER}@${FRONT}:/tmp/ultra-bot-renew-hook"
+		"${_ssh_base[@]}" "mkdir -p /etc/letsencrypt/renewal-hooks/deploy; install -m 755 /tmp/ultra-bot-renew-hook /etc/letsencrypt/renewal-hooks/deploy/ultra-bot; rm /tmp/ultra-bot-renew-hook"
 
 		# ── TLS-сертификат ───────────────────────────────────────────────────
 		echo

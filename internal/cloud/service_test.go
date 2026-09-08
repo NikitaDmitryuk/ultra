@@ -85,11 +85,13 @@ func (p *fakeProvider) Get(context.Context, string) (Instance, error) {
 func (p *fakeProvider) Delete(context.Context, string) error { p.deletes++; return nil }
 
 type fakeProvisioner struct {
+	prepared, unpublished   int
 	verified, published     bool
 	failVerify, failPublish bool
 }
 
 func (p *fakeProvisioner) Prepare(context.Context, *Operation) (CreateRequest, error) {
+	p.prepared++
 	return CreateRequest{}, nil
 }
 func (p *fakeProvisioner) Install(_ context.Context, o *Operation, _ Instance) error {
@@ -113,7 +115,7 @@ func (p *fakeProvisioner) Publish(context.Context, *Operation) error {
 	p.published = true
 	return nil
 }
-func (p *fakeProvisioner) Unpublish(context.Context, *Operation) error { return nil }
+func (p *fakeProvisioner) Unpublish(context.Context, *Operation) error { p.unpublished++; return nil }
 func (p *fakeProvisioner) Cleanup(context.Context, *Operation) error   { return nil }
 func testService() (*Service, *fakeProvider, *fakeProvisioner) {
 	api := &fakeProvider{monthly: 5, available: true}

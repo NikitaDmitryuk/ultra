@@ -121,3 +121,12 @@ test('changing automatic route needs neither subscription refresh nor new creden
  assert.equal(p.calls.filter(c=>c.path==='/api/self/exit-selection').length,1);
  assert.ok(!p.calls.some(c=>c.path.includes('subscription')));
 });
+
+test('subscription ingress cannot be deleted or replaced from server card', async()=>{
+ const p=page(false,{'/api/me':{is_admin:true},'/api/members':[], '/api/cloud/operations':[{id:'ingress',instance_id:'vps',state:'ready',phase:'ready',charged:true,serves_subscription_ingress:true,offer:{region:{city:'Atlanta'},plan:{id:'vc2'},price:{monthly_cost:5}}}],'/api/cloud/replicas':[]});await flush();
+ await vm.runInContext('service()',p.context);
+ const html=p.el('#app').innerHTML;
+ assert.ok(html.includes('Обслуживает подписки'));
+ assert.ok(!html.includes('data-action="delete"'));
+ assert.ok(!html.includes('data-replace='));
+});

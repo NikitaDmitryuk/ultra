@@ -109,7 +109,7 @@ Telegram-алерты: `exit_down` / `exit_up` (по active exit), `exit_failove
 4. В `install.config` раскомментировать и заполнить:
    ```
    BOT_ENABLE=y
-   BOT_DOMAIN=bot.example.com   # FQDN; DNS A-запись на bridge
+   BOT_DOMAIN=bot.example.com   # FQDN HTTPS-входа; по умолчанию bridge
    BOT_PORT=8444
    ```
 5. Запустить `make install`. В конце будет выведена команда `/start <токен>` — отправить её боту для регистрации первого администратора.
@@ -140,20 +140,20 @@ Telegram Mini App требует публичного HTTPS-адреса. Сер
 | Вариант | Стоимость | Как |
 |---------|-----------|-----|
 | Платный домен (reg.ru, namecheap и др.) | ~$10–15/год | Зарегистрировать любое доменное имя |
-| Бесплатный поддомен [afraid.org](https://freedns.afraid.org/) | Бесплатно | Выбрать поддомен, добавить A-запись на IP bridge |
+| Бесплатный поддомен [afraid.org](https://freedns.afraid.org/) | Бесплатно | Выбрать поддомен, добавить A-запись на IP HTTPS-входа |
 | Поддомен существующего домена | Бесплатно | Добавить A-запись в уже имеющийся домен |
 
 **После получения домена:**
 
-1. Добавить A-запись в DNS (**на IP bridge**, не на exit):
+1. Добавить A-запись в DNS на IP HTTPS-входа (по умолчанию bridge):
 
    ```
    bot.example.com.  A  <IP bridge-сервера>
    ```
 
-   **Важно:** A-запись должна указывать на **bridge** (где крутится `ultra-bot`), а не на exit VPS. Если домен указывает на exit — Mini App в Telegram выдаст `ERR_TIMED_OUT`.
+   При отдельном входе на exit задайте `BOT_INGRESS_IP` и `BOT_PUBLIC_URL`; настройка и защита узла описаны в [инструкции HTTPS-входа](docs/subscription-ingress.md). Бот остаётся на bridge.
 
-   Проверить: `dig +short bot.example.com` → IP bridge. Или `make verify-miniapp`.
+   Проверить: `make verify-miniapp` — публичный DNS/TLS и backend bridge проверяются отдельно.
 
 2. Убедиться, что порты открыты на bridge:
    - **80/tcp** — для HTTP-01 ACME challenge (нужен только при выдаче/обновлении сертификата)
@@ -288,7 +288,7 @@ VERIFY_IP_URL=https://YOUR_HOST/your-probe-path make verify-relay
 # или с явными хостами:
 VERIFY_IP_URL=https://api.ipify.org make verify-relay BRIDGE=… EXIT=… IDENTITY=…
 make benchmark-relay # read-only speed: client→bridge→exit→WARP, /v1/health, exit direct vs WARP
-make verify-miniapp   # DNS A → bridge и HTTPS Mini App (нужны BOT_DOMAIN, BOT_ENABLE в install.config)
+make verify-miniapp   # публичный HTTPS-вход и backend (BOT_DOMAIN, BOT_PUBLIC_URL, BOT_INGRESS_IP)
 ```
 
 Скрипты: `scripts/verify-relay.sh -h`, `scripts/benchmark-relay.sh -h`, `scripts/verify-miniapp.sh`. `benchmark-relay` не меняет конфигурацию: прямой замер с exit нужен только для отделения проблем WARP от проблем туннеля. Для сравнения реальных сайтов задайте `BENCH_DOWNLOAD_URLS='https://…file1,https://…file2'` — скрипт сравнит локальный системный путь и экспортированный Xray SOCKS. Быстрая проверка TLS-кандидатов: `scripts/probe-tls-sni-candidates.sh`.
