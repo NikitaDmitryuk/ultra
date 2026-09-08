@@ -53,7 +53,7 @@ func publicTLSStream(s *Spec, server bool) map[string]any {
 	t := s.PublicXHTTPTLS
 	tls := map[string]any{"serverName": t.ServerName, "alpn": []string{"h2"}}
 	if server {
-		tls["certificates"] = []any{map[string]any{"certificateFile": t.CertificateFile, "keyFile": t.KeyFile}}
+		tls["certificates"] = []any{map[string]any{"oneTimeLoading": true, "certificateFile": t.CertificateFile, "keyFile": t.KeyFile}}
 	} else {
 		tls["fingerprint"] = "chrome"
 	}

@@ -161,4 +161,9 @@ test-ui:
 	node --test scripts/test-happ-import.cjs scripts/test-cabinet.cjs scripts/test-miniapp-preview.cjs
 
 test-race:
-	go test -race -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' ./...
+	go test -race -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' -skip 'TestPublishedProfilesLocalTransfer/fallback_xhttp' ./...
+
+# Known upstream XHTTP races: diagnostic only, never report this as a passing full race suite.
+.PHONY: test-race-xray
+test-race-xray:
+	go test -race -tags=xray_race_diagnostics -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' -run 'TestXHTTPReaderConcurrentPublicationAndClose|TestPublishedProfilesLocalTransfer' ./internal/proxy ./internal/config

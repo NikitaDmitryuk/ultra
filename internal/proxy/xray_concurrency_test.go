@@ -1,3 +1,5 @@
+//go:build xray_race_diagnostics
+
 package proxy
 
 import (

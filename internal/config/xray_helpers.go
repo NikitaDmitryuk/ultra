@@ -180,6 +180,7 @@ func splithttpInboundStream(spec *Spec, strat mimic.Strategy, w xrayWireResolved
 			"alpn": alpn,
 			"certificates": []any{
 				map[string]any{
+					"oneTimeLoading":  true,
 					"certificateFile": spec.ExitCertPaths.CertFile,
 					"keyFile":         spec.ExitCertPaths.KeyFile,
 				},
@@ -249,6 +250,7 @@ func grpcInboundStream(spec *Spec, strat mimic.Strategy) map[string]any {
 			"alpn": alpn,
 			"certificates": []any{
 				map[string]any{
+					"oneTimeLoading":  true,
 					"certificateFile": spec.ExitCertPaths.CertFile,
 					"keyFile":         spec.ExitCertPaths.KeyFile,
 				},
