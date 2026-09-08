@@ -80,7 +80,7 @@ func configureCloud(ctx context.Context, wg *sync.WaitGroup, srv *adminapi.Serve
 	api := cloud.NewVultr(key)
 	quotaAPI = api
 	p.API = api
-	srv.Cloud = &cloud.Service{API: api, Store: store, Provisioner: p, Log: log}
+	srv.Cloud = &cloud.Service{IngressInstanceID: os.Getenv("ULTRA_SUBSCRIPTION_INGRESS_INSTANCE_ID"), API: api, Store: store, Provisioner: p, Log: log}
 	wg.Add(1)
 	go func() { defer wg.Done(); srv.Cloud.Run(ctx) }()
 }

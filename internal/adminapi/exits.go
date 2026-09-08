@@ -236,6 +236,9 @@ func (s *Server) clientExitSelection(u auth.User) (selectedID *string, effective
 		effectiveID = candidate.ID
 	}
 	effectiveID = u.SelectExit(nodes, effectiveID, health)
+	if s.RouteStatus != nil {
+		effectiveID = s.RouteStatus(u.UUID).EffectiveExit
+	}
 	return u.PreferredExitID, effectiveID, health, nodes
 }
 
@@ -266,6 +269,8 @@ func (s *Server) handleClientListExits(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
+		"application":       s.routeApplication(u),
+		"route_reason":      s.routeReason(u),
 		"selected_exit_id":  selectedID,
 		"effective_exit_id": effectiveID,
 		"exits":             items,
@@ -309,8 +314,8 @@ func (s *Server) handleClientSetExitSelection(w http.ResponseWriter, r *http.Req
 		exitID = &id
 	}
 	if _, err := s.users.SetPreferredExit(u.UUID, exitID); err != nil {
-		s.log.Error("set preferred exit", "uuid", u.UUID, "err", err)
-		http.Error(w, "internal", http.StatusInternalServerError)
+		s.log.Error("set preferred exit", "code", "route_apply_failed")
+		http.Error(w, "route_apply_failed", http.StatusServiceUnavailable)
 		return
 	}
 	u, _ = s.users.Lookup(u.UUID)
@@ -332,6 +337,8 @@ func (s *Server) handleClientSetExitSelection(w http.ResponseWriter, r *http.Req
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
+		"application":       s.routeApplication(u),
+		"route_reason":      s.routeReason(u),
 		"selected_exit_id":  selectedID,
 		"effective_exit_id": effectiveID,
 		"exits":             items,
@@ -426,8 +433,37 @@ func (s *Server) profileRoutes(u auth.User) []map[string]any {
 		}
 		alias := u
 		alias.PreferredExitID = route.ExitID
+		alias.UUID = route.UUID
 		_, effective, _, _ := s.clientExitSelection(alias)
 		out = append(out, map[string]any{"location_id": route.LocationID, "name": route.Name, "preferred_exit_id": route.ExitID, "effective_exit_id": effective})
 	}
 	return out
+}
+
+func (s *Server) routeApplication(u auth.User) auth.RouteApplication {
+	if s.RouteStatus != nil {
+		return s.RouteStatus(u.UUID)
+	}
+	return auth.RouteApplication{State: "unknown"}
+}
+
+func (s *Server) routeReason(u auth.User) string {
+	desired := ""
+	if s.selector != nil {
+		desired = s.selector.ActiveID()
+	}
+	if u.PreferredExitID != nil {
+		desired = *u.PreferredExitID
+	}
+	_, effective, _, _ := s.clientExitSelection(u)
+	if effective == auth.BlockedExit {
+		return "no_available_exit"
+	}
+	if why := u.ExitExclusionReasons[desired]; why != "" {
+		return why
+	}
+	if desired != "" && effective != desired {
+		return "exit_unavailable"
+	}
+	return ""
 }

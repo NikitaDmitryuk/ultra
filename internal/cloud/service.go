@@ -23,19 +23,20 @@ type Offer struct {
 	ReplaceID string    `json:"replace_id,omitempty"`
 }
 type Operation struct {
-	ErrorMessage     string    `json:"error_message,omitempty"`
-	HTTPStatus       int       `json:"http_status,omitempty"`
-	ReplicationState string    `json:"replication_state,omitempty"`
-	ID               string    `json:"id"`
-	Offer            Offer     `json:"offer"`
-	State            string    `json:"state"`
-	Phase            string    `json:"phase"`
-	InstanceID       string    `json:"instance_id,omitempty"`
-	ExitID           string    `json:"exit_id,omitempty"`
-	FirewallID       string    `json:"firewall_id,omitempty"`
-	Error            string    `json:"error,omitempty"`
-	Charged          bool      `json:"charged"`
-	CreatedAt        time.Time `json:"created_at"`
+	ServesSubscriptionIngress bool      `json:"serves_subscription_ingress"`
+	ErrorMessage              string    `json:"error_message,omitempty"`
+	HTTPStatus                int       `json:"http_status,omitempty"`
+	ReplicationState          string    `json:"replication_state,omitempty"`
+	ID                        string    `json:"id"`
+	Offer                     Offer     `json:"offer"`
+	State                     string    `json:"state"`
+	Phase                     string    `json:"phase"`
+	InstanceID                string    `json:"instance_id,omitempty"`
+	ExitID                    string    `json:"exit_id,omitempty"`
+	FirewallID                string    `json:"firewall_id,omitempty"`
+	Error                     string    `json:"error,omitempty"`
+	Charged                   bool      `json:"charged"`
+	CreatedAt                 time.Time `json:"created_at"`
 }
 type Store interface {
 	SaveOffer(context.Context, Offer) error
@@ -67,11 +68,12 @@ type Provisioner interface {
 	Cleanup(context.Context, *Operation) error
 }
 type Service struct {
-	Log         *slog.Logger
-	API         Provider
-	Store       Store
-	Provisioner Provisioner
-	Now         func() time.Time
+	IngressInstanceID string
+	Log               *slog.Logger
+	API               Provider
+	Store             Store
+	Provisioner       Provisioner
+	Now               func() time.Time
 }
 
 func (s *Service) now() time.Time {
@@ -91,6 +93,9 @@ func (s *Service) Catalog(ctx context.Context) ([]Region, []Plan, error) {
 func (s *Service) Quote(ctx context.Context, actor int64, region, plan, replace string) (Offer, error) {
 	if actor <= 0 {
 		return Offer{}, ErrConflict
+	}
+	if e := s.checkReplacement(ctx, replace); e != nil {
+		return Offer{}, e
 	}
 	regions, plans, e := s.Catalog(ctx)
 	if e != nil {
@@ -129,6 +134,9 @@ func (s *Service) Quote(ctx context.Context, actor int64, region, plan, replace 
 	return offer, s.Store.SaveOffer(ctx, offer)
 }
 func (s *Service) checkOffer(ctx context.Context, o Offer) error {
+	if e := s.checkReplacement(ctx, o.ReplaceID); e != nil {
+		return e
+	}
 	if !s.now().Before(o.ExpiresAt) {
 		return ErrPriceChanged
 	}
@@ -207,6 +215,9 @@ func (s *Service) Action(ctx context.Context, actor int64, id, action string) er
 		op.State = "cancelled"
 		op.Charged = false
 	case "delete":
+		if s.IsIngress(op) {
+			return ErrIngressInUse
+		}
 		if op.InstanceID == "" {
 			return ErrConflict
 		}
@@ -279,6 +290,13 @@ func (s *Service) fail(ctx context.Context, op Operation, code string, e error) 
 	return e
 }
 func (s *Service) advance(ctx context.Context, op Operation) error {
+	if e := s.checkReplacement(ctx, op.Offer.ReplaceID); e != nil {
+		return s.fail(ctx, op, ErrorCode(e), e)
+	}
+	if s.IsIngress(op) && (op.Phase == "unpublish" || op.Phase == "delete" || op.Phase == "cleanup") {
+		return s.fail(ctx, op, "ingress_in_use", ErrIngressInUse)
+	}
+
 	if s.Provisioner == nil {
 		return s.fail(ctx, op, "provisioner_unavailable", ErrUnavailable)
 	}
@@ -452,4 +470,22 @@ func (s *Service) capacity(ctx context.Context) (int, error) {
 		}
 	}
 	return occupied, nil
+}
+
+// IsIngress protects the infrastructure identity, independently of VPN health.
+func (s *Service) IsIngress(op Operation) bool {
+	return s.IngressInstanceID != "" && op.InstanceID == s.IngressInstanceID
+}
+func (s *Service) checkReplacement(ctx context.Context, id string) error {
+	if id == "" {
+		return nil
+	}
+	old, err := s.Store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if s.IsIngress(old) {
+		return ErrIngressInUse
+	}
+	return nil
 }

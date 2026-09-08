@@ -53,7 +53,7 @@ func (r *QuotaRepo) Observe(ctx context.Context, id string, used, remaining int6
 	return e
 }
 
-// Recalculate persists daily allowances. Only changed exclusions require applying Xray.
+// Recalculate persists monthly allowances. Only changed exclusions require applying Xray.
 func (r *QuotaRepo) Recalculate(ctx context.Context, now time.Time) (bool, error) {
 	budgets, e := r.Budgets(ctx)
 	if e != nil {
@@ -71,15 +71,14 @@ func (r *QuotaRepo) Recalculate(ctx context.Context, now time.Time) (bool, error
 	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	end := month.AddDate(0, 1, 0)
-	daysLeft := int64(end.Sub(day).Hours() / 24)
 	changed := false
 	for _, b := range budgets {
 		if !b.Enabled {
 			continue
 		}
 		tag := "to-exit-" + b.ID
-		var used, today int64
-		e = tx.QueryRow(ctx, `SELECT COALESCE(SUM(uplink_bytes+downlink_bytes),0)::bigint,COALESCE(SUM(uplink_bytes+downlink_bytes) FILTER(WHERE day=$3),0)::bigint FROM daily_route_traffic WHERE exit_tag=$1 AND day>=$2 AND day<$4`, tag, month, day, end).Scan(&used, &today)
+		var used int64
+		e = tx.QueryRow(ctx, `SELECT COALESCE(SUM(uplink_bytes+downlink_bytes),0)::bigint FROM daily_route_traffic WHERE exit_tag=$1 AND day>=$2 AND day<$3`, tag, month, end).Scan(&used)
 		if e != nil {
 			return false, e
 		}
@@ -96,15 +95,18 @@ func (r *QuotaRepo) Recalculate(ctx context.Context, now time.Time) (bool, error
 		if remaining == 0 && reason == "" {
 			reason = "exit_budget_exhausted"
 		}
-		pool := (remaining + today) / max(1, daysLeft)
-		rows, err := tx.Query(ctx, `SELECT u.uuid::text,COALESCE(SUM(t.uplink_bytes+t.downlink_bytes) FILTER(WHERE t.day=$2),0)::bigint,COALESCE(SUM(t.uplink_bytes+t.downlink_bytes) FILTER(WHERE t.day<$2),0)::bigint FROM users u LEFT JOIN daily_route_traffic t ON t.user_uuid=u.uuid AND t.exit_tag=$1 AND t.day>=$3 AND t.day<=$2 WHERE u.is_active AND u.kind='vless' GROUP BY u.uuid`, tag, day, day.AddDate(0, 0, -7))
+		rows, err := tx.Query(ctx, `SELECT u.uuid::text,COALESCE(SUM(t.uplink_bytes+t.downlink_bytes),0)::bigint FROM users u LEFT JOIN daily_route_traffic t ON t.user_uuid=u.uuid AND t.exit_tag=$1 AND t.day>=$2 AND t.day<$3 WHERE u.is_active AND u.kind='vless' GROUP BY u.uuid`, tag, month, end)
 		if err != nil {
 			return false, err
 		}
-		demand := []quota.Demand{}
+		type usage struct {
+			ID   string
+			Used int64
+		}
+		demand := []usage{}
 		for rows.Next() {
-			var d quota.Demand
-			if e = rows.Scan(&d.ID, &d.Today, &d.Recent); e != nil {
+			var d usage
+			if e = rows.Scan(&d.ID, &d.Used); e != nil {
 				rows.Close()
 				return false, e
 			}
@@ -115,16 +117,12 @@ func (r *QuotaRepo) Recalculate(ctx context.Context, now time.Time) (bool, error
 		if e != nil {
 			return false, e
 		}
-		allocation := quota.Allocate(pool, demand)
 		for _, d := range demand {
-			limit := allocation[d.ID]
-			if b.Fallback {
-				limit = d.Today + remaining
-			}
-			blocked := remaining == 0 || d.Today >= limit
+			limit := d.Used + quota.Available(b.Monthly, d.Used, remaining, b.Fallback)
+			blocked := remaining == 0 || d.Used >= limit
 			why := reason
 			if blocked && why == "" {
-				why = "daily_allowance_exhausted"
+				why = "monthly_user_limit_exhausted"
 			}
 			var old *bool
 			e = tx.QueryRow(ctx, `SELECT (SELECT blocked FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2)`, d.ID, b.ID).Scan(&old)
@@ -134,16 +132,76 @@ func (r *QuotaRepo) Recalculate(ctx context.Context, now time.Time) (bool, error
 			if old == nil || *old != blocked {
 				changed = true
 			}
-			_, e = tx.Exec(ctx, `INSERT INTO user_exit_quotas(user_uuid,exit_id,day,used_bytes,limit_bytes,blocked,reason) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(user_uuid,exit_id) DO UPDATE SET day=EXCLUDED.day,used_bytes=EXCLUDED.used_bytes,limit_bytes=EXCLUDED.limit_bytes,blocked=EXCLUDED.blocked,reason=EXCLUDED.reason,applied=CASE WHEN user_exit_quotas.blocked=EXCLUDED.blocked THEN user_exit_quotas.applied ELSE false END`, d.ID, b.ID, day, d.Today, limit, blocked, why)
+			_, e = tx.Exec(ctx, `INSERT INTO user_exit_quotas(user_uuid,exit_id,day,used_bytes,limit_bytes,blocked,reason) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(user_uuid,exit_id) DO UPDATE SET day=EXCLUDED.day,used_bytes=EXCLUDED.used_bytes,limit_bytes=EXCLUDED.limit_bytes,blocked=EXCLUDED.blocked,reason=EXCLUDED.reason,applied=CASE WHEN user_exit_quotas.blocked=EXCLUDED.blocked THEN user_exit_quotas.applied ELSE false END`, d.ID, b.ID, day, d.Used, limit, blocked, why)
 			if e != nil {
 				return false, e
 			}
 		}
 	}
-	return changed, tx.Commit(ctx)
+	var pending bool
+	if e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_exit_quotas WHERE NOT applied)`).Scan(&pending); e != nil {
+		return false, e
+	}
+	return changed || pending, tx.Commit(ctx)
 }
 
-func (r *QuotaRepo) Acknowledge(ctx context.Context) error {
-	_, e := r.db.Pool.Exec(ctx, `UPDATE user_exit_quotas SET applied=true WHERE NOT applied`)
-	return e
+// Snapshot makes acknowledgement conditional on the exact calculation applied.
+type QuotaSnapshot struct {
+	User, Exit  string
+	Day         time.Time
+	Used, Limit int64
+	Blocked     bool
+	Reason      string
+}
+
+func (r *QuotaRepo) Snapshot(ctx context.Context) ([]QuotaSnapshot, error) {
+	rows, err := r.db.Pool.Query(ctx, `SELECT user_uuid::text,exit_id::text,day,used_bytes,limit_bytes,blocked,reason FROM user_exit_quotas WHERE NOT applied`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []QuotaSnapshot{}
+	for rows.Next() {
+		var s QuotaSnapshot
+		if err = rows.Scan(&s.User, &s.Exit, &s.Day, &s.Used, &s.Limit, &s.Blocked, &s.Reason); err != nil {
+			return nil, err
+		}
+		result = append(result, s)
+	}
+	return result, rows.Err()
+}
+func (r *QuotaRepo) Acknowledge(ctx context.Context, snapshot []QuotaSnapshot) error {
+	for _, s := range snapshot {
+		_, err := r.db.Pool.Exec(ctx, `UPDATE user_exit_quotas SET applied=true WHERE user_uuid=$1 AND exit_id=$2 AND day=$3 AND used_bytes=$4 AND limit_bytes=$5 AND blocked=$6 AND reason=$7`, s.User, s.Exit, s.Day, s.Used, s.Limit, s.Blocked, s.Reason)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// BandwidthObservation is one provider refresh, committed with the other nodes.
+type BandwidthObservation struct {
+	ID, Instance             string
+	Monthly, Used, Remaining int64
+	Error                    string
+}
+
+func (r *QuotaRepo) SaveBandwidth(ctx context.Context, observations []BandwidthObservation, now time.Time) error {
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	for _, o := range observations {
+		if o.Error != "" {
+			_, err = tx.Exec(ctx, `UPDATE exit_traffic_budgets SET provider_error=$2,updated_at=$3 WHERE exit_id=$1`, o.ID, o.Error, now)
+		} else {
+			_, err = tx.Exec(ctx, `UPDATE exit_traffic_budgets SET monthly_bytes=$2,provider_used_bytes=$3,account_remaining_bytes=$4,observed_at=$5,updated_at=$5,provider_error='' WHERE exit_id=$1 AND instance_id=$6`, o.ID, o.Monthly, o.Used, o.Remaining, now, o.Instance)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }

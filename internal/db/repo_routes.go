@@ -34,18 +34,23 @@ func (r *RouteRepo) Attach(ctx context.Context, users []auth.User) ([]auth.User,
 	for i := range users {
 		users[i].Routes = byOwner[users[i].UUID]
 	}
-	quotaRows, e := r.db.Pool.Query(ctx, `SELECT u.uuid::text,b.exit_id::text FROM users u CROSS JOIN exit_traffic_budgets b LEFT JOIN user_exit_quotas q ON q.user_uuid=u.uuid AND q.exit_id=b.exit_id WHERE q.blocked OR (b.source='vultr' AND (q.user_uuid IS NULL OR b.observed_at IS NULL OR b.observed_at<NOW()-interval '15 minutes' OR b.provider_error<>''))`)
+	quotaRows, e := r.db.Pool.Query(ctx, `SELECT u.uuid::text,b.exit_id::text,CASE WHEN b.source='vultr' AND (b.observed_at IS NULL OR b.observed_at<NOW()-interval '15 minutes' OR b.observed_at<date_trunc('month',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' OR b.provider_error<>'') THEN 'provider_unavailable' ELSE COALESCE(q.reason,'quota_pending') END FROM users u CROSS JOIN exit_traffic_budgets b LEFT JOIN user_exit_quotas q ON q.user_uuid=u.uuid AND q.exit_id=b.exit_id WHERE q.blocked OR (b.source='vultr' AND (q.user_uuid IS NULL OR b.observed_at IS NULL OR b.observed_at<NOW()-interval '15 minutes' OR b.observed_at<date_trunc('month',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' OR b.provider_error<>''))`)
 	if e != nil {
 		return nil, e
 	}
 	defer quotaRows.Close()
 	blocked := map[string][]string{}
+	reasons := map[string]map[string]string{}
 	for quotaRows.Next() {
-		var user, exit string
-		if e = quotaRows.Scan(&user, &exit); e != nil {
+		var user, exit, reason string
+		if e = quotaRows.Scan(&user, &exit, &reason); e != nil {
 			return nil, e
 		}
 		blocked[user] = append(blocked[user], exit)
+		if reasons[user] == nil {
+			reasons[user] = map[string]string{}
+		}
+		reasons[user][exit] = reason
 	}
 	if e = quotaRows.Err(); e != nil {
 		return nil, e
@@ -57,6 +62,7 @@ func (r *RouteRepo) Attach(ctx context.Context, users []auth.User) ([]auth.User,
 	for i := range users {
 		users[i].FallbackExitID = fallback
 		users[i].ExcludedExitIDs = blocked[users[i].UUID]
+		users[i].ExitExclusionReasons = reasons[users[i].UUID]
 	}
 	return users, nil
 }

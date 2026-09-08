@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"github.com/NikitaDmitryuk/ultra/internal/quota"
 	"time"
 )
 
@@ -109,17 +110,19 @@ func (r *MemberRepo) Traffic(ctx context.Context, id int64, now time.Time) (Memb
 }
 
 type MemberLimit struct {
-	Name      string    `json:"name"`
-	ExitID    string    `json:"exit_id"`
-	Used      int64     `json:"used_bytes"`
-	Limit     int64     `json:"limit_bytes"`
-	Remaining int64     `json:"remaining_bytes"`
-	ResetsAt  time.Time `json:"resets_at"`
-	Monthly   int64     `json:"monthly_bytes"`
-	Fallback  bool      `json:"is_fallback"`
-	State     string    `json:"state"`
-	Reason    string    `json:"reason"`
-	Pending   bool      `json:"pending"`
+	Period        string    `json:"period"`
+	PersonalLimit int64     `json:"personal_limit_bytes"`
+	Name          string    `json:"name"`
+	ExitID        string    `json:"exit_id"`
+	Used          int64     `json:"used_bytes"`
+	Limit         int64     `json:"limit_bytes"`
+	Remaining     int64     `json:"remaining_bytes"`
+	ResetsAt      time.Time `json:"resets_at"`
+	Monthly       int64     `json:"monthly_bytes"`
+	Fallback      bool      `json:"is_fallback"`
+	State         string    `json:"state"`
+	Reason        string    `json:"reason"`
+	Pending       bool      `json:"pending"`
 }
 
 func (r *MemberRepo) Limits(ctx context.Context, id int64, now time.Time) ([]MemberLimit, error) {
@@ -140,12 +143,16 @@ func (r *MemberRepo) Limits(ctx context.Context, id int64, now time.Time) ([]Mem
 		if e = rows.Scan(&l.ExitID, &l.Name, &l.Monthly, &l.Fallback, &used, &limit, &day, &blocked, &applied, &l.Reason); e != nil {
 			return nil, e
 		}
+		l.Period = "month"
+		if !l.Fallback {
+			l.PersonalLimit = quota.PersonalLimit(l.Monthly)
+		}
+		l.ResetsAt = time.Date(now.UTC().Year(), now.UTC().Month()+1, 1, 0, 0, 0, 0, time.UTC)
 		l.State = "unknown"
 		if day != nil && day.Format("2006-01-02") == now.UTC().Format("2006-01-02") && used != nil && limit != nil && blocked != nil {
 			l.Used = *used
 			l.Limit = *limit
 			l.Remaining = max(0, *limit-*used)
-			l.ResetsAt = day.AddDate(0, 0, 1)
 			l.State = "available"
 			if *blocked {
 				l.State = "exhausted"

@@ -70,3 +70,6 @@ minisign.pub
 
 /ultra-client
 /ultra-bench
+
+# Python checks and local deployment helpers
+__pycache__/

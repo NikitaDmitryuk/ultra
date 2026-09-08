@@ -2,7 +2,7 @@
 
 ## Статус
 
-accepted
+superseded
 
 ## Дата
 
@@ -63,3 +63,7 @@ accepted
 - [Расчёт квот](../../internal/db/repo_quota.go)
 - [Worker](../../cmd/ultra-relay/quota.go)
 - [Правила Vultr](https://docs.vultr.com/support/platform/billing/how-are-bandwidth-caps-calculated)
+
+## Заменено
+
+[ADR 0010 — Месячные квоты и подтверждённое применение](0010-monthly-quotas-and-route-application.md).

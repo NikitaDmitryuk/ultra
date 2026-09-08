@@ -28,7 +28,12 @@ type routeCount struct {
 type meteredContext struct{}
 type measuredOutbound struct {
 	outbound.Handler
-	meter *routeMeter
+	meter     *routeMeter
+	lifecycle sync.Mutex
+	closing   bool
+	active    sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 func (m *routeMeter) acquire(user, tag string) *routeCount {
@@ -64,7 +69,38 @@ func (m *routeMeter) drain() map[string]map[string][2]int64 {
 	}
 	return out
 }
+
+// Close terminates streams owned by this instance, not just listening sockets.
+func (h *measuredOutbound) Close() error {
+	h.lifecycle.Lock()
+	h.closing = true
+	if h.cancel != nil {
+		h.cancel()
+	}
+	h.lifecycle.Unlock()
+	err := h.Handler.Close()
+	h.active.Wait()
+	return err
+}
 func (h *measuredOutbound) Dispatch(ctx context.Context, link *transport.Link) {
+	h.lifecycle.Lock()
+	if h.closing {
+		h.lifecycle.Unlock()
+		_ = common.Interrupt(link.Reader)
+		_ = common.Interrupt(link.Writer)
+		return
+	}
+	h.active.Add(1)
+	h.lifecycle.Unlock()
+	defer h.active.Done()
+	if h.ctx != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		stop := context.AfterFunc(h.ctx, func() { cancel(); _ = common.Interrupt(link.Reader); _ = common.Interrupt(link.Writer) })
+		defer stop()
+		defer cancel()
+	}
+
 	in := session.InboundFromContext(ctx)
 	if ctx.Value(meteredContext{}) != nil || in == nil || in.User == nil {
 		h.Handler.Dispatch(ctx, link)
@@ -140,7 +176,9 @@ func attachRouteMeter(inst *core.Instance, meter *routeMeter) error {
 		if e := manager.RemoveHandler(context.Background(), h.Tag()); e != nil {
 			return e
 		}
-		if e := manager.AddHandler(context.Background(), &measuredOutbound{Handler: h, meter: meter}); e != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		if e := manager.AddHandler(context.Background(), &measuredOutbound{Handler: h, meter: meter, ctx: ctx, cancel: cancel}); e != nil {
+			cancel()
 			return e
 		}
 	}

@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+var ErrIngressInUse = errors.New("subscription ingress is in use")
+
 // Provider text is used only for classification and is never retained or returned.
 func providerCode(status int, message string) string {
 	m := strings.ToLower(message)
@@ -46,6 +48,8 @@ func ErrorCode(err error) string {
 		return api.Code
 	}
 	switch {
+	case errors.Is(err, ErrIngressInUse):
+		return "ingress_in_use"
 	case errors.Is(err, ErrUnknownCreation):
 		return "creation_requires_reconciliation"
 	case errors.Is(err, ErrLimit):
@@ -63,6 +67,9 @@ func ErrorCode(err error) string {
 	}
 }
 func ErrorMessage(code string) string {
+	if code == "ingress_in_use" {
+		return "Сервер обслуживает подписки. Сначала перенесите HTTPS-вход и DNS на другой узел."
+	}
 	if base, action, ok := strings.Cut(code, "@"); ok {
 		if label := providerActions[action]; label != "" {
 			return label + ": " + ErrorMessage(base)

@@ -6,7 +6,7 @@ const path = require('node:path');
 const root = path.join(__dirname, '../internal/bot/embed/miniapp');
 const token = 'A'.repeat(43);
 
-function page(hash, protocol = 'https:') {
+function page(hash, protocol = 'https:', origin = 'https://vpn.example:8443') {
   const elements = new Map();
   const element = id => {
     if (!elements.has(id)) elements.set(id, {hidden: true, addEventListener(name, fn) {this[name] = fn;}});
@@ -14,7 +14,7 @@ function page(hash, protocol = 'https:') {
   };
   const history = [];
   vm.runInNewContext(fs.readFileSync(path.join(root, 'happ.js'), 'utf8'), {
-    window: {location: {hash, protocol, origin: 'https://vpn.example:8443', pathname: '/happ'},
+    window: {location: {hash, protocol, origin, pathname: '/happ'},
       history: {replaceState(...args) {history.push(args);}}},
     document: {getElementById: element}, navigator: {clipboard: {writeText: async () => {}}},
   });
@@ -56,4 +56,9 @@ test('Mini App opens HTTPS import page through Telegram external browser API', (
     assert.equal(opened, url);
     assert.equal(prevented, true);
   });
+});
+
+test('standard HTTPS ingress preserves token without adding the backend port', () => {
+  const {element} = page('#' + token, 'https:', 'https://vpn.example');
+  assert.equal(element('launch-happ').href, 'happ://add/https://vpn.example/sub/' + token);
 });

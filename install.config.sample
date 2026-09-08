@@ -172,3 +172,9 @@ DB_ENABLE=y
 
 # Жёсткая проверка SSH host key (нужен заранее заполненный known_hosts):
 # export ULTRA_INSTALL_SSH_STRICT_HOST_KEY=yes
+
+# Отдельный HTTPS-вход (пусто = прежняя схема domain:BOT_PORT → bridge)
+BOT_PUBLIC_URL=
+BOT_INGRESS_IP=
+# ID Vultr VPS, который нельзя удалять до переноса HTTPS-входа
+BOT_INGRESS_INSTANCE_ID=

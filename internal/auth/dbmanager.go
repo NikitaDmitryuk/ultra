@@ -38,6 +38,8 @@ type DBManager struct {
 	byID        map[string]User
 
 	onChange func([]User)
+	// ApplyChange is configured before serving requests; errors are observable by preferences API.
+	ApplyChange func([]User) error
 }
 
 // Ensure DBManager satisfies UserManager at compile time.
@@ -94,6 +96,12 @@ func (m *DBManager) refresh(ctx context.Context) error {
 }
 
 func (m *DBManager) notify() {
+	if m.ApplyChange != nil {
+		if err := m.ApplyChange(m.List()); err != nil {
+			m.log.Warn("user routing application failed", "code", "route_apply_failed")
+		}
+		return
+	}
 	if m.onChange == nil {
 		return
 	}
@@ -211,10 +219,16 @@ func (m *DBManager) SetPreferredExit(id string, exitID *string) (User, error) {
 	if err != nil {
 		return User{}, err
 	}
-	if err := m.refresh(context.Background()); err != nil {
-		m.log.Warn("db refresh after SetPreferredExit failed", "err", err)
+	if m.ApplyChange != nil {
+		if err := m.ApplyChange(m.List()); err != nil {
+			return u, ErrRouteApply
+		}
+	} else {
+		if err := m.refresh(context.Background()); err != nil {
+			return u, ErrRouteApply
+		}
+		m.notify()
 	}
-	m.notify()
 	return u, nil
 }
 
