@@ -25,7 +25,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -46,6 +45,7 @@ func main() {
 	adminAPIURL := flag.String("admin-api-url", "http://127.0.0.1:8443", "ultra-relay Admin API URL")
 	domain := flag.String("domain", "", "public domain for Mini App HTTPS (required for Telegram Mini App)")
 	port := flag.String("port", "8444", "HTTPS port for Mini App")
+	publicURL := flag.String("public-url", os.Getenv("ULTRA_BOT_PUBLIC_URL"), "public HTTPS origin (optional; independent of listen port)")
 	certFile := flag.String("cert-file", "", "path to TLS certificate file (PEM); when set, skips autocert")
 	keyFile := flag.String("key-file", "", "path to TLS private key file (PEM); when set, skips autocert")
 	dataDir := flag.String("data-dir", "/var/lib/ultra-bot", "directory for autocert cache and data")
@@ -54,6 +54,13 @@ func main() {
 	flag.Parse()
 
 	log := makeLogger(*logLevel)
+
+	// ── Mini App URL ──────────────────────────────────────────────────────────
+	miniAppURL, err := resolvePublicURL(*publicURL, *domain, *port, *devMode)
+	if err != nil {
+		log.Error("invalid public URL", "err", err)
+		os.Exit(1)
+	}
 
 	// ── Secrets ───────────────────────────────────────────────────────────────
 	// Load .env from the working directory (only sets vars not already in environment).
@@ -93,20 +100,6 @@ func main() {
 
 	adminRepo := db.NewBotAdminRepo(database)
 	teleRepo := db.NewTelegramRepo(database)
-
-	// ── Mini App URL ──────────────────────────────────────────────────────────
-	miniAppURL := ""
-	if *domain != "" {
-		scheme := "https"
-		if *devMode {
-			scheme = "http"
-		}
-		if *port == "443" || (*devMode && *port == "80") {
-			miniAppURL = fmt.Sprintf("%s://%s/", scheme, *domain)
-		} else {
-			miniAppURL = fmt.Sprintf("%s://%s:%s/", scheme, *domain, *port)
-		}
-	}
 
 	// ── Bot ───────────────────────────────────────────────────────────────────
 	b, err := bot.New(botToken, *adminAPIURL, adminToken, miniAppURL, adminRepo, teleRepo, log)
