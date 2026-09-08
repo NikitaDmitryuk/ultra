@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/json"
+	"github.com/xtls/xray-core/infra/conf"
+	"github.com/xtls/xray-core/transport/internet/splithttp"
 	"testing"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
@@ -58,29 +60,14 @@ func TestAntiCensorDefaults(t *testing.T) {
 	exitOB := outbounds[0].(map[string]any)
 	stream := exitOB["streamSettings"].(map[string]any)
 
-	// 1. sockopt.fragment must be present by default
-	sockopt, ok := stream["sockopt"].(map[string]any)
-	if !ok {
-		t.Fatal("expected sockopt in outbound streamSettings")
+	if _, ok := stream["sockopt"]; ok {
+		t.Fatal("fragmentation must be opt-in")
 	}
-	frag, ok := sockopt["fragment"].(map[string]any)
-	if !ok {
-		t.Fatal("expected fragment in sockopt")
-	}
-	if frag["packets"] != "tlshello" {
-		t.Errorf("fragment.packets = %v, want tlshello", frag["packets"])
-	}
-
-	// 2. splithttpSettings must have xPaddingSize by default
 	sph := stream["splithttpSettings"].(map[string]any)
-	if sph["xPaddingSize"] == nil {
-		t.Error("expected xPaddingSize in splithttpSettings by default")
+	if sph["xPaddingBytes"] != "100-1000" {
+		t.Fatalf("unexpected padding: %v", sph)
 	}
 
-	// 3. REALITY fingerprint must be one of the known pool values (rotation)
-	// (DevMode skips reality so we check via inbound[0] only in non-DevMode)
-	t.Log("sockopt fragment:", frag)
-	t.Log("xPaddingSize:", sph["xPaddingSize"])
 }
 
 func TestAntiCensorFragmentDisable(t *testing.T) {
@@ -105,7 +92,7 @@ func TestAntiCensorFragmentDisable(t *testing.T) {
 	}
 }
 
-func TestAntiCensorPaddingDisable(t *testing.T) {
+func TestLegacyBridgePaddingDefault(t *testing.T) {
 	spec := bridgeSpecForAntiCensorTest()
 	spec.DevMode = true
 	spec.AntiCensor = &AntiCensorSpec{
@@ -123,12 +110,12 @@ func TestAntiCensorPaddingDisable(t *testing.T) {
 	exitOB := outbounds[0].(map[string]any)
 	stream := exitOB["streamSettings"].(map[string]any)
 	sph := stream["splithttpSettings"].(map[string]any)
-	if sph["xPaddingSize"] != nil {
-		t.Errorf("xPaddingSize should be absent when SplitHTTPPadding=0, got %v", sph["xPaddingSize"])
+	if sph["xPaddingBytes"] != "100-1000" {
+		t.Errorf("xPaddingBytes must use core default for legacy SplitHTTPPadding=0, got %v", sph["xPaddingBytes"])
 	}
 }
 
-func TestExitPaddingDisable(t *testing.T) {
+func TestLegacyExitPaddingDefault(t *testing.T) {
 	spec := &Spec{
 		SchemaVersion: 1,
 		Role:          RoleExit,
@@ -155,8 +142,8 @@ func TestExitPaddingDisable(t *testing.T) {
 	in := inbounds[0].(map[string]any)
 	stream := in["streamSettings"].(map[string]any)
 	sph := stream["splithttpSettings"].(map[string]any)
-	if sph["xPaddingSize"] != nil {
-		t.Errorf("exit xPaddingSize should be absent when SplitHTTPPadding=0, got %v", sph["xPaddingSize"])
+	if sph["xPaddingBytes"] != "100-1000" {
+		t.Errorf("exit xPaddingBytes must use core default for legacy SplitHTTPPadding=0, got %v", sph["xPaddingBytes"])
 	}
 }
 
@@ -277,4 +264,34 @@ func TestWARPExitConfig(t *testing.T) {
 		t.Errorf("WARP socks server = %v:%v, want 127.0.0.1:40000", srv["address"], srv["port"])
 	}
 	t.Log("WARP outbound correct:", direct["protocol"], srv["address"], srv["port"])
+}
+
+func TestPaddingParsedByPinnedCore(t *testing.T) {
+	for _, legacy := range []string{"", "0", "0-100", "100-1000", "50-2000"} {
+		spec := bridgeSpecForAntiCensorTest()
+		spec.AntiCensor = &AntiCensorSpec{SplitHTTPPadding: legacy}
+		if err := spec.validateTransportExtensions(); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(splithttpExtraSettings(spec))
+		var c conf.SplitHTTPConfig
+		if err := json.Unmarshal(raw, &c); err != nil {
+			t.Fatal(err)
+		}
+		built, err := c.Build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := built.(*splithttp.Config).XPaddingBytes
+		if p == nil || p.From > 100 || p.To < 1000 {
+			t.Fatal("ignored padding", p)
+		}
+	}
+	for _, invalid := range []string{"10-20", "-1", "500-2", "1-999999", "garbage"} {
+		s := bridgeSpecForAntiCensorTest()
+		s.AntiCensor = &AntiCensorSpec{SplitHTTPPadding: invalid}
+		if s.validateTransportExtensions() == nil {
+			t.Fatal("invalid padding accepted", invalid)
+		}
+	}
 }

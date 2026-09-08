@@ -331,6 +331,17 @@ func (r *UserRepo) Remove(ctx context.Context, id string) error {
 // (traffic_stats, monthly_traffic, notifications, user_ip_observations,
 // user_leak_signals) wipes related history.
 func (r *UserRepo) Purge(ctx context.Context, id string) error {
+	var enrolled bool
+	if err := r.db.Pool.QueryRow(ctx, `SELECT enrollment_source IS NOT NULL FROM users WHERE uuid=$1`, id).Scan(&enrolled); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return auth.ErrUserNotFound
+		}
+		return err
+	}
+	if enrolled {
+		return errors.New("enrolled accounts must be disabled, not purged")
+	}
+
 	pgUUID, err := toPGUUID(id)
 	if err != nil {
 		return err
@@ -406,6 +417,17 @@ func (r *UserRepo) RotateUUID(ctx context.Context, id string) (string, error) {
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(817365007)`); err != nil {
+		return "", err
+	}
+	result, err := r.rotateUUIDTx(ctx, tx, id, newUUID)
+	if err != nil {
+		return "", err
+	}
+	return result, tx.Commit(ctx)
+}
+
+func (r *UserRepo) rotateUUIDTx(ctx context.Context, tx pgx.Tx, id, newUUID string) (string, error) {
 	qtx := r.db.Queries.WithTx(tx)
 	oldPGUUID := mustPGUUID(id)
 	newPGUUID := mustPGUUID(newUUID)
@@ -413,6 +435,10 @@ func (r *UserRepo) RotateUUID(ctx context.Context, id string) (string, error) {
 		return "", err
 	}
 	if err := qtx.MoveTrafficStatsUserUUID(ctx, sqlc.MoveTrafficStatsUserUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
+		return "", err
+	}
+ if err:=qtx.MoveUserExitQuotasUUID(ctx,sqlc.MoveUserExitQuotasUUIDParams{UserUuid:oldPGUUID,UserUuid_2:newPGUUID});err!=nil{return "",err}
+	if err := qtx.MoveDailyRouteTrafficUserUUID(ctx, sqlc.MoveDailyRouteTrafficUserUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
 		return "", err
 	}
 	if err := qtx.MoveMonthlyTrafficUserUUID(ctx, sqlc.MoveMonthlyTrafficUserUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
@@ -431,9 +457,6 @@ func (r *UserRepo) RotateUUID(ctx context.Context, id string) (string, error) {
 		return "", err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return "", err
-	}
 	return newUUID, nil
 }
 
@@ -460,7 +483,7 @@ func (r *UserRepo) ListAll(ctx context.Context) ([]auth.User, error) {
 	for _, row := range rows {
 		users = append(users, authUserFromListAll(row))
 	}
-	return users, nil
+	return NewRouteRepo(r.db).Attach(ctx, users)
 }
 
 // Lookup returns a single user by UUID (active or disabled).

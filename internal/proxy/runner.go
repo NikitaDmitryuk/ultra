@@ -1,9 +1,17 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"sync"
+	"time"
 
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+
+	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/stats"
 )
@@ -12,28 +20,133 @@ import (
 type Runner struct {
 	mu sync.Mutex
 
-	inst *core.Instance
+	inst   *core.Instance
+	config *core.Config
+	status ReloadStatus
+	meter  *routeMeter
 }
 
-// StartJSON parses JSON, starts xray (caller must import distro/all in main).
-func (r *Runner) StartJSON(jsonCfg []byte) error {
+// ReloadStatus exposes lifecycle events without configuration or credentials.
+type ReloadStatus struct {
+	Count  uint64    `json:"count"`
+	At     time.Time `json:"at,omitempty"`
+	Reason string    `json:"reason,omitempty"`
+	Error  string    `json:"error,omitempty"`
+}
+
+func (r *Runner) Status() ReloadStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.status
+}
+
+func (r *Runner) StartJSON(data []byte) error { return r.ReloadReason(data, "configuration") }
+func (r *Runner) Reload(data []byte) error    { return r.ReloadReason(data, "configuration") }
+
+// ReloadReason validates before closing listeners and restores the last valid config on failure.
+func (r *Runner) ReloadReason(data []byte, reason string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var input any
+	if err := json.Unmarshal(data, &input); err != nil {
+		return fmt.Errorf("parse configuration: %w", err)
+	}
+	canonical, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	cfg, err := core.LoadConfig("json", bytes.NewReader(canonical))
+	if err != nil {
+		return fmt.Errorf("build configuration: %w", err)
+	}
+	if err := normalizeTypedMessages(cfg.ProtoReflect()); err != nil {
+		return fmt.Errorf("normalize configuration: %w", err)
+	}
+	if r.inst != nil && proto.Equal(cfg, r.config) {
+		r.status.Error = ""
+		return nil
+	}
+	next, err := core.New(cfg)
+	if err != nil {
+		return fmt.Errorf("prepare configuration: %w", err)
+	}
+	if r.meter == nil {
+		r.meter = &routeMeter{}
+	}
+	if err = attachRouteMeter(next, r.meter); err != nil {
+		_ = next.Close()
+		return fmt.Errorf("prepare route counters: %w", err)
+	}
+	old := r.config
 	if r.inst != nil {
 		_ = r.inst.Close()
 		r.inst = nil
 	}
-	inst, err := core.StartInstance("json", jsonCfg)
-	if err != nil {
-		return err
+	r.status = ReloadStatus{Count: r.status.Count + 1, At: time.Now().UTC(), Reason: reason}
+	if err = next.Start(); err != nil {
+		_ = next.Close()
+		r.status.Error = "start failed"
+		if old != nil {
+			restored, restoreErr := core.New(old)
+			if restoreErr == nil {
+				restoreErr = attachRouteMeter(restored, r.meter)
+				if restoreErr == nil {
+					restoreErr = restored.Start()
+				}
+			}
+			if restoreErr != nil {
+				if restored != nil {
+					_ = restored.Close()
+				}
+				r.status.Error = "start and restore failed"
+				return fmt.Errorf("start: %w; restore: %v", err, restoreErr)
+			}
+			r.inst = restored
+		}
+		return fmt.Errorf("start failed (previous configuration restored if available): %w", err)
 	}
-	r.inst = inst
+	r.inst = next
+	r.config = cfg
 	return nil
 }
 
-// Reload replaces the running instance with a new config.
-func (r *Runner) Reload(jsonCfg []byte) error {
-	return r.StartJSON(jsonCfg)
+// Xray stores nested settings in TypedMessage.Value. Plain proto.Equal compares
+// those bytes, whose map ordering varies even for identical JSON. Normalize the
+// nested messages too; keeping LoadConfig above still detects changed asset files.
+func normalizeTypedMessages(message protoreflect.Message) error {
+	if typed, ok := message.Interface().(*serial.TypedMessage); ok {
+		value, err := typed.GetInstance()
+		if err != nil {
+			return err
+		}
+		if err := normalizeTypedMessages(value.ProtoReflect()); err != nil {
+			return err
+		}
+		typed.Value, err = (proto.MarshalOptions{Deterministic: true}).Marshal(value)
+		return err
+	}
+	var err error
+	message.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		switch {
+		case field.IsMap():
+			if field.MapValue().Kind() == protoreflect.MessageKind {
+				value.Map().Range(func(_ protoreflect.MapKey, entry protoreflect.Value) bool {
+					err = normalizeTypedMessages(entry.Message())
+					return err == nil
+				})
+			}
+		case field.IsList():
+			if field.Kind() == protoreflect.MessageKind {
+				for i := 0; i < value.List().Len() && err == nil; i++ {
+					err = normalizeTypedMessages(value.List().Get(i).Message())
+				}
+			}
+		case field.Kind() == protoreflect.MessageKind:
+			err = normalizeTypedMessages(value.Message())
+		}
+		return err == nil
+	})
+	return err
 }
 
 // Close stops xray.

@@ -32,16 +32,20 @@ DELETE FROM users WHERE uuid=$1;
 UPDATE users SET is_active=true, disabled_at=NULL WHERE uuid=$1;
 
 -- name: CloneUserForUUIDRotation :exec
+WITH original AS MATERIALIZED (SELECT users.* FROM users WHERE users.uuid=$1 FOR UPDATE),
+cleared AS (UPDATE users SET telegram_id=NULL FROM original WHERE users.uuid=original.uuid RETURNING users.uuid)
 INSERT INTO users(
   uuid, name, telegram_id, telegram_username, created_at, is_active, disabled_at,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  kind, socks_username, socks_password, socks_port, preferred_exit_id
+  kind, socks_username, socks_password, socks_port, preferred_exit_id,
+  enrollment_source, enrolled_at, member_pending
 )
 SELECT
   $2, u.name, u.telegram_id, u.telegram_username, u.created_at, u.is_active, u.disabled_at,
   u.leak_policy, u.leak_max_concurrent_ips, u.leak_max_unique_ips_24h,
-  u.kind, u.socks_username, u.socks_password, u.socks_port, u.preferred_exit_id
-FROM users u WHERE u.uuid=$1;
+  u.kind, u.socks_username, u.socks_password, u.socks_port, u.preferred_exit_id,
+  u.enrollment_source, u.enrolled_at, (u.enrollment_source IS NOT NULL)
+FROM original u CROSS JOIN cleared;
 
 -- name: MoveTrafficStatsUserUUID :exec
 UPDATE traffic_stats SET user_uuid=$2 WHERE user_uuid=$1;
@@ -85,3 +89,9 @@ RETURNING uuid, name, kind, is_active, disabled_at,
   socks_username, socks_password, socks_port,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
   preferred_exit_id;
+
+-- name: MoveDailyRouteTrafficUserUUID :exec
+UPDATE daily_route_traffic SET user_uuid=$2 WHERE user_uuid=$1;
+
+-- name: MoveUserExitQuotasUUID :exec
+UPDATE user_exit_quotas SET user_uuid=$2 WHERE user_uuid=$1;

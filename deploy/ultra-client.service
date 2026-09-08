@@ -1,0 +1,20 @@
+[Unit]
+Description=Ultra local SOCKS and HTTP proxy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ultra-client
+Group=ultra-client
+ExecStart=/usr/local/bin/ultra-client -config /etc/ultra-client/client.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

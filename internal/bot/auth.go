@@ -48,6 +48,11 @@ func ValidateInitData(rawInitData, botToken string) (TelegramUser, error) {
 	if err != nil || len(vals) == 0 {
 		return TelegramUser{}, ErrInvalidInitData
 	}
+	for _, value := range vals {
+		if len(value) != 1 {
+			return TelegramUser{}, ErrInvalidInitData
+		}
+	}
 	hash := vals.Get("hash")
 	if hash == "" {
 		return TelegramUser{}, ErrInvalidInitData
@@ -78,12 +83,12 @@ func ValidateInitData(rawInitData, botToken string) (TelegramUser, error) {
 		return TelegramUser{}, ErrInvalidInitData
 	}
 
-	// Reject stale sessions (max 24 hours).
-	if authDateStr := vals.Get("auth_date"); authDateStr != "" {
-		authDate, parseErr := strconv.ParseInt(authDateStr, 10, 64)
-		if parseErr == nil && time.Now().Unix()-authDate > 86400 {
-			return TelegramUser{}, ErrExpiredInitData
-		}
+	authDate, parseErr := strconv.ParseInt(vals.Get("auth_date"), 10, 64)
+	if parseErr != nil || authDate <= 0 || authDate > time.Now().Unix()+30 {
+		return TelegramUser{}, ErrInvalidInitData
+	}
+	if time.Now().Unix()-authDate > 86400 {
+		return TelegramUser{}, ErrExpiredInitData
 	}
 
 	userJSON := vals.Get("user")
@@ -92,6 +97,9 @@ func ValidateInitData(rawInitData, botToken string) (TelegramUser, error) {
 	}
 	var user TelegramUser
 	if err := json.Unmarshal([]byte(userJSON), &user); err != nil {
+		return TelegramUser{}, ErrInvalidInitData
+	}
+	if user.ID <= 0 {
 		return TelegramUser{}, ErrInvalidInitData
 	}
 	return user, nil

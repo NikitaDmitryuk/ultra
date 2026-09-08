@@ -12,16 +12,20 @@ import (
 )
 
 const cloneUserForUUIDRotation = `-- name: CloneUserForUUIDRotation :exec
+WITH original AS MATERIALIZED (SELECT users.uuid, users.name, users.telegram_id, users.telegram_username, users.created_at, users.is_active, users.disabled_at, users.leak_policy, users.leak_max_concurrent_ips, users.leak_max_unique_ips_24h, users.kind, users.socks_username, users.socks_password, users.socks_port, users.preferred_exit_id, users.enrollment_source, users.enrolled_at, users.member_pending, users.member_revision FROM users WHERE users.uuid=$1 FOR UPDATE),
+cleared AS (UPDATE users SET telegram_id=NULL FROM original WHERE users.uuid=original.uuid RETURNING users.uuid)
 INSERT INTO users(
   uuid, name, telegram_id, telegram_username, created_at, is_active, disabled_at,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  kind, socks_username, socks_password, socks_port, preferred_exit_id
+  kind, socks_username, socks_password, socks_port, preferred_exit_id,
+  enrollment_source, enrolled_at, member_pending
 )
 SELECT
   $2, u.name, u.telegram_id, u.telegram_username, u.created_at, u.is_active, u.disabled_at,
   u.leak_policy, u.leak_max_concurrent_ips, u.leak_max_unique_ips_24h,
-  u.kind, u.socks_username, u.socks_password, u.socks_port, u.preferred_exit_id
-FROM users u WHERE u.uuid=$1
+  u.kind, u.socks_username, u.socks_password, u.socks_port, u.preferred_exit_id,
+  u.enrollment_source, u.enrolled_at, (u.enrollment_source IS NOT NULL)
+FROM original u CROSS JOIN cleared
 `
 
 type CloneUserForUUIDRotationParams struct {
@@ -263,6 +267,20 @@ func (q *Queries) ListAllUsers(ctx context.Context) ([]ListAllUsersRow, error) {
 	return items, nil
 }
 
+const moveDailyRouteTrafficUserUUID = `-- name: MoveDailyRouteTrafficUserUUID :exec
+UPDATE daily_route_traffic SET user_uuid=$2 WHERE user_uuid=$1
+`
+
+type MoveDailyRouteTrafficUserUUIDParams struct {
+	UserUuid   pgtype.UUID `json:"user_uuid"`
+	UserUuid_2 pgtype.UUID `json:"user_uuid_2"`
+}
+
+func (q *Queries) MoveDailyRouteTrafficUserUUID(ctx context.Context, arg MoveDailyRouteTrafficUserUUIDParams) error {
+	_, err := q.db.Exec(ctx, moveDailyRouteTrafficUserUUID, arg.UserUuid, arg.UserUuid_2)
+	return err
+}
+
 const moveIPObservationsUserUUID = `-- name: MoveIPObservationsUserUUID :exec
 UPDATE user_ip_observations SET user_uuid=$2 WHERE user_uuid=$1
 `
@@ -330,6 +348,20 @@ type MoveTrafficStatsUserUUIDParams struct {
 
 func (q *Queries) MoveTrafficStatsUserUUID(ctx context.Context, arg MoveTrafficStatsUserUUIDParams) error {
 	_, err := q.db.Exec(ctx, moveTrafficStatsUserUUID, arg.UserUuid, arg.UserUuid_2)
+	return err
+}
+
+const moveUserExitQuotasUUID = `-- name: MoveUserExitQuotasUUID :exec
+UPDATE user_exit_quotas SET user_uuid=$2 WHERE user_uuid=$1
+`
+
+type MoveUserExitQuotasUUIDParams struct {
+	UserUuid   pgtype.UUID `json:"user_uuid"`
+	UserUuid_2 pgtype.UUID `json:"user_uuid_2"`
+}
+
+func (q *Queries) MoveUserExitQuotasUUID(ctx context.Context, arg MoveUserExitQuotasUUIDParams) error {
+	_, err := q.db.Exec(ctx, moveUserExitQuotasUUID, arg.UserUuid, arg.UserUuid_2)
 	return err
 }
 

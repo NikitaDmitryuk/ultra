@@ -209,3 +209,38 @@ func TestBridgeNeedsBlockOutbound(t *testing.T) {
 		t.Fatal("expected false")
 	}
 }
+
+func TestGeminiRoutePreservesExplicitDirect(t *testing.T) {
+	for _, mode := range []string{RoutingModeBlocklist, RoutingModeRUDirect} {
+		s := &Spec{SplitRouting: BoolPtr(true), RoutingMode: mode, DomainDirect: []string{"domain:gemini.google.com"}}
+		_, rules := buildBridgeRouting(s, "exit", nil)
+		first := ""
+		for _, rule := range rules {
+			m := rule.(map[string]any)
+			ds, _ := m["domain"].([]string)
+			for _, d := range ds {
+				if d == "domain:gemini.google.com" && first == "" {
+					first = m["outboundTag"].(string)
+				}
+			}
+		}
+		if first != resolveXrayWire(s).OutboundDirectTag {
+			t.Fatal(mode, first)
+		}
+		s.DomainDirect = nil
+		_, rules = buildBridgeRouting(s, "exit", nil)
+		first = ""
+		for _, rule := range rules {
+			m := rule.(map[string]any)
+			ds, _ := m["domain"].([]string)
+			for _, d := range ds {
+				if d == "domain:gemini.google.com" && first == "" {
+					first = m["outboundTag"].(string)
+				}
+			}
+		}
+		if first != "exit" {
+			t.Fatal(mode, first)
+		}
+	}
+}

@@ -20,10 +20,27 @@ import (
 var miniappFS embed.FS
 
 func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
+	b.memberRoutes(mux)
+	b.cloudRoutes(mux)
 	// Serve static frontend files embedded in the binary.
 	sub, _ := fs.Sub(miniappFS, "embed/miniapp")
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	files := http.FileServer(http.FS(sub))
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		files.ServeHTTP(w, r)
+	}))
+	mux.HandleFunc("GET /happ", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		page, _ := miniappFS.ReadFile("embed/miniapp/happ.html")
+		_, _ = w.Write(page)
+	})
 
+	mux.HandleFunc("GET /sub/{token}", b.handlePublicSubscription)
+	mux.HandleFunc("POST /api/users/{uuid}/subscription", b.handleRotateSubscription)
+	mux.HandleFunc("DELETE /api/users/{uuid}/subscription", b.handleRevokeSubscription)
 	// Public mobile-client API. Auth is the VLESS UUID bearer token.
 	mux.HandleFunc("GET /api/client/exits", b.handleClientListExits)
 	mux.HandleFunc("PUT /api/client/exit-selection", b.handleClientSetExitSelection)
@@ -48,9 +65,6 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/diagnostics", b.handleDiagnostics)
 	mux.HandleFunc("GET /api/hardening", b.handleHardening)
 	mux.HandleFunc("GET /api/exits", b.handleListExits)
-	mux.HandleFunc("POST /api/exits", b.handleCreateExit)
-	mux.HandleFunc("PATCH /api/exits/{id}", b.handlePatchExit)
-	mux.HandleFunc("DELETE /api/exits/{id}", b.handleDeleteExit)
 	mux.HandleFunc("GET /api/alerts/recent", b.handleRecentAlerts)
 	mux.HandleFunc("POST /api/alerts/test", b.handleTestAlert)
 	mux.HandleFunc("POST /api/admin/invite", b.handleGenerateInvite)
@@ -669,55 +683,6 @@ func (b *Bot) handleListExits(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(data)
-}
-
-func (b *Bot) handleCreateExit(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.mustAdmin(w, r); !ok {
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 16384))
-	if err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
-		return
-	}
-	data, err := b.adminPost(r.Context(), "/v1/exits", body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
-}
-
-func (b *Bot) handlePatchExit(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.mustAdmin(w, r); !ok {
-		return
-	}
-	id := strings.TrimSpace(r.PathValue("id"))
-	body, err := io.ReadAll(io.LimitReader(r.Body, 16384))
-	if err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
-		return
-	}
-	data, err := b.adminPatch(r.Context(), "/v1/exits/"+id, body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
-}
-
-func (b *Bot) handleDeleteExit(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.mustAdmin(w, r); !ok {
-		return
-	}
-	id := strings.TrimSpace(r.PathValue("id"))
-	if err := b.adminDelete(r.Context(), "/v1/exits/"+id); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (b *Bot) handleGenerateInvite(w http.ResponseWriter, r *http.Request) {

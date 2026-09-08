@@ -14,6 +14,7 @@ import (
 )
 
 type postExitReq struct {
+	Enabled     *bool  `json:"enabled"`
 	Name        string `json:"name"`
 	Address     string `json:"address"`
 	Port        int    `json:"port"`
@@ -115,6 +116,7 @@ func (s *Server) handlePostExit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, err := s.exits.Add(r.Context(), exits.AddParams{
+		Enabled:     body.Enabled,
 		Name:        body.Name,
 		Address:     body.Address,
 		Port:        body.Port,
@@ -212,25 +214,28 @@ func (s *Server) clientExitSelection(u auth.User) (selectedID *string, effective
 		return u.PreferredExitID, "", nil, nil
 	}
 	nodes = s.exits.ListEnabled()
+	hidden := map[string]bool{}
+	for _, route := range u.Routes {
+		if route.ExitID != nil && !route.Published {
+			hidden[*route.ExitID] = true
+		}
+	}
+	visible := nodes[:0]
+	for _, node := range nodes {
+		if !hidden[node.ID] {
+			visible = append(visible, node)
+		}
+	}
+	nodes = visible
 	if s.selector != nil {
 		health = s.selector.HealthSnapshot()
 		effectiveID = s.selector.ActiveID()
 	}
-	if effectiveID == "" {
+	if effectiveID == "" && len(health) == 0 {
 		candidate, _ := exits.SelectActive(nodes, nil)
 		effectiveID = candidate.ID
 	}
-	if u.PreferredExitID != nil && *u.PreferredExitID != "" {
-		for _, n := range nodes {
-			if n.ID != *u.PreferredExitID {
-				continue
-			}
-			if h, ok := health[n.ID]; !ok || h.Reachable {
-				effectiveID = n.ID
-			}
-			break
-		}
-	}
+	effectiveID = u.SelectExit(nodes, effectiveID, health)
 	return u.PreferredExitID, effectiveID, health, nodes
 }
 
@@ -264,6 +269,7 @@ func (s *Server) handleClientListExits(w http.ResponseWriter, r *http.Request) {
 		"selected_exit_id":  selectedID,
 		"effective_exit_id": effectiveID,
 		"exits":             items,
+		"profiles":          s.profileRoutes(u),
 	})
 }
 
@@ -329,6 +335,7 @@ func (s *Server) handleClientSetExitSelection(w http.ResponseWriter, r *http.Req
 		"selected_exit_id":  selectedID,
 		"effective_exit_id": effectiveID,
 		"exits":             items,
+		"profiles":          s.profileRoutes(u),
 	})
 }
 
@@ -386,8 +393,13 @@ func (s *Server) probeExitsHealth(ctx context.Context) (active exits.Node, exits
 	}
 	nodes := s.exits.ListEnabled()
 	if s.selector != nil {
-		active, _ = s.selector.ProbeAndSelect(ctx, nodes)
-		activeID = active.ID
+		activeID = s.selector.ActiveID()
+		for _, n := range nodes {
+			if n.ID == activeID {
+				active = n
+				break
+			}
+		}
 		snap := s.selector.HealthSnapshot()
 		for _, n := range nodes {
 			h, ok := snap[n.ID]
@@ -403,4 +415,19 @@ func (s *Server) probeExitsHealth(ctx context.Context) (active exits.Node, exits
 		activeID = active.ID
 	}
 	return active, exitsHealth, activeID
+}
+
+// profileRoutes describes server decisions, never the profile selected inside Happ.
+func (s *Server) profileRoutes(u auth.User) []map[string]any {
+	out := []map[string]any{}
+	for _, route := range u.Routes {
+		if !route.Published {
+			continue
+		}
+		alias := u
+		alias.PreferredExitID = route.ExitID
+		_, effective, _, _ := s.clientExitSelection(alias)
+		out = append(out, map[string]any{"location_id": route.LocationID, "name": route.Name, "preferred_exit_id": route.ExitID, "effective_exit_id": effective})
+	}
+	return out
 }

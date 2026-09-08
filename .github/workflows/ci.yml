@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main, develop]
 
+permissions:
+  contents: read
+
 jobs:
   lint-test-build:
     name: Lint, test, build
@@ -23,6 +26,17 @@ jobs:
 
       - name: Download dependencies
         run: go mod download
+
+      - name: Set up Node.js for Mini App tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test Happ import flow
+        run: make test-ui
+
+      - name: Check agent context and ADRs
+        run: make harness-check
 
       - name: Verify dependencies
         run: go mod verify
@@ -47,3 +61,34 @@ jobs:
 
       - name: Build ultra-bot
         run: make build-bot
+
+      - name: Race tests
+        run: make test-race
+
+      - name: Build client and benchmark
+        run: make build-client build-bench
+
+  xray-race-diagnostic:
+    name: Known upstream Xray races (non-blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Reproduce upstream races
+        id: diagnostic
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          make test-race-xray 2>&1 | tee xray-race.log
+      - name: Report diagnostic outcome
+        if: always()
+        run: |
+          echo 'Upstream Xray race diagnostic: ${{ steps.diagnostic.outcome }}. This job is non-blocking; see the attached log. A successful main job is not a successful full race run.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xray-race-diagnostic
+          path: xray-race.log

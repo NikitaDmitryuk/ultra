@@ -26,6 +26,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 	"github.com/NikitaDmitryuk/ultra/internal/proxy"
 	"github.com/NikitaDmitryuk/ultra/internal/stats"
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionkey"
 
 	_ "github.com/xtls/xray-core/main/distro/all"
 )
@@ -97,12 +98,10 @@ func main() {
 		var exitMgr *exits.Manager
 		var exitSelector *exits.Selector
 		var reloadBridge func([]auth.User)
+		var applyBridge func([]auth.User, string) error
 
-		exitSelector = exits.NewSelector(func(prevID, nextID string) {
-			log.Info("exit failover", "from", prevID, "to", nextID)
-			if reloadBridge != nil {
-				reloadBridge(nil)
-			}
+		exitSelector = exits.NewSelector(func(ctx context.Context, n exits.Node) exits.Health {
+			return runner.ProbeExit(ctx, n, spec.HealthTargets())
 		})
 
 		// Database is required for user storage.
@@ -126,8 +125,8 @@ func main() {
 		}
 
 		exitMgr, err = exits.NewManager(exitRepo, func(_ []exits.Node) {
-			if reloadBridge != nil {
-				reloadBridge(nil)
+			if applyBridge != nil {
+				_ = applyBridge(nil, "exit configuration")
 			}
 		}, log)
 		if err != nil {
@@ -141,8 +140,23 @@ func main() {
 		}
 		fw := firewall.New()
 
-		reloadBridge = func(users []auth.User) {
-			if users == nil {
+		var reloadMu sync.Mutex
+		applyBridge = func(users []auth.User, reason string) error {
+			c, cancel := context.WithTimeout(ctx, 20*time.Second)
+			defer cancel()
+			ctx := c
+			reloadMu.Lock()
+			defer reloadMu.Unlock()
+			routeRepo := db.NewRouteRepo(database)
+			if e := routeRepo.PrepareManual(ctx); e != nil {
+				return e
+			}
+			if mgr != nil {
+				if refresh, ok := mgr.(interface{ Refresh(context.Context) error }); ok {
+					if e := refresh.Refresh(ctx); e != nil {
+						return e
+					}
+				}
 				users = mgr.List()
 			}
 			exitNodes := exitMgr.List()
@@ -156,25 +170,36 @@ func main() {
 				}
 			}
 			if activeID == "" || !activeStillEnabled {
-				probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				active, _ := exitSelector.ProbeAndSelect(probeCtx, enabled)
-				cancel()
+				active, _ := exits.SelectActive(enabled, nil)
 				activeID = active.ID
+				exitSelector.SetActiveID(activeID)
 			}
 			health := exitSelector.HealthSnapshot()
+			users = auth.ExpandRoutes(users)
 			users = applyEffectiveUserExits(users, enabled, activeID, health)
 			b, err := config.BuildBridgeXRayJSON(spec, users, exitNodes, activeID, strat, xrayLogLevel)
 			if err != nil {
 				log.Error("build bridge config", "err", err)
-				return
+				return err
 			}
-			if err := runner.Reload(b); err != nil {
+			before := runner.Status().Count
+			if err := runner.ReloadReason(b, reason); err != nil {
 				log.Error("xray reload", "err", err)
-				return
+				return err
 			}
-			log.Info("xray config reloaded", "users", len(users), "active_exit", activeID)
+			if after := runner.Status(); after.Count != before {
+				log.Info("xray config reloaded", "users", len(users), "active_exit", activeID, "reload_count", after.Count, "reason", after.Reason, "at", after.At)
+			}
+			if e := routeRepo.AppliedManual(ctx); e != nil {
+				return e
+			}
+			if refresh, ok := mgr.(interface{ Refresh(context.Context) error }); ok {
+				return refresh.Refresh(ctx)
+			}
+			return nil
 		}
 
+		reloadBridge = func(users []auth.User) { _ = applyBridge(users, "users, preferences or routing configuration") }
 		dbMgr, err := auth.NewDBManager(userRepo, reloadBridge, fw, log)
 		if err != nil {
 			log.Error("db user manager", "err", err)
@@ -201,16 +226,6 @@ func main() {
 			registerSplitRoutingUSR1(log, reloadBridge, mgr)
 		}
 
-		probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
-		exitSelector.ProbeAndSelect(probeCtx, exitMgr.ListEnabled())
-		probeCancel()
-
-		go exitSelector.RunWorker(ctx, 30*time.Second, func(c context.Context) ([]exits.Node, error) {
-			return exitMgr.ListEnabled(), nil
-		}, func() {
-			reloadBridge(nil)
-		})
-
 		users := mgr.List()
 		if len(users) == 0 && *adminToken == "" {
 			log.Error(
@@ -227,13 +242,27 @@ func main() {
 			log.Warn("Admin API disabled: set -admin-token or ULTRA_RELAY_ADMIN_TOKEN to enable user provisioning on loopback")
 		} else {
 			statPeek := func(key string) int64 { return runner.PeekCounter(key) }
-			srv, err := adminapi.NewServer(spec.AdminListen, *adminToken, mgr, trafficRepo, spec, exitMgr, exitSelector, func() {
-				reloadBridge(nil)
-			}, log, statPeek)
+			srv, err := adminapi.NewServer(spec.AdminListen, *adminToken, mgr, trafficRepo, spec, exitMgr, exitSelector, nil, log, statPeek)
 			if err != nil {
 				log.Error("admin api", "err", err)
 				os.Exit(1)
 			}
+			srv.ReloadStatus = runner.Status
+			configureCloud(ctx, &wg, srv, database, spec, exitMgr, func(c context.Context) error { return applyBridge(nil, "cloud route change") }, dbMgr.Refresh, log)
+			keys, keyErr := subscriptionkey.Load(os.Getenv("ULTRA_SUBSCRIPTION_ENCRYPTION_KEY_FILE"))
+			if keyErr != nil {
+				log.Warn("subscription recovery and issuance unavailable: encryption key not configured")
+			}
+			subscriptions := db.NewSubscriptionRepo(database, keys)
+			srv.Subscriptions = subscriptions
+			srv.Members = &adminapi.MemberService{Repo: db.NewMemberRepo(database), Subscriptions: subscriptions, Apply: func(c context.Context) error {
+				if e := dbMgr.Refresh(c); e != nil {
+					return e
+				}
+				return applyBridge(nil, "member access change")
+			}}
+			wg.Add(1)
+			go func() { defer wg.Done(); srv.Members.Run(ctx) }()
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -247,7 +276,13 @@ func main() {
 			}()
 		}
 
-		reloadBridge(mgr.List())
+		_ = applyBridge(mgr.List(), "startup")
+		go exitSelector.RunWorker(ctx, 10*time.Second, func(c context.Context) ([]exits.Node, error) {
+			if runner.Status().Error != "" {
+				_ = applyBridge(nil, "retry failed reload")
+			}
+			return exitMgr.ListEnabled(), nil
+		}, func() { _ = applyBridge(nil, "exit health selection") })
 
 	case config.RoleExit:
 		b, err := config.BuildExitXRayJSON(spec, strat, xrayLogLevel)
@@ -289,21 +324,9 @@ func applyEffectiveUserExits(users []auth.User, enabled []exits.Node, activeID s
 	if len(users) == 0 {
 		return users
 	}
-	enabledByID := make(map[string]exits.Node, len(enabled))
-	for _, n := range enabled {
-		enabledByID[n.ID] = n
-	}
 	out := append([]auth.User(nil), users...)
 	for i := range out {
-		effective := activeID
-		if pref := out[i].PreferredExitID; pref != nil && *pref != "" {
-			if _, ok := enabledByID[*pref]; ok {
-				if h, ok := health[*pref]; !ok || h.Reachable {
-					effective = *pref
-				}
-			}
-		}
-		out[i].EffectiveExitID = effective
+		out[i].EffectiveExitID = out[i].SelectExit(enabled, activeID, health)
 	}
 	return out
 }

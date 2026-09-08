@@ -1,4 +1,4 @@
-.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay benchmark-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64 release-dist clean
+.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay benchmark-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64 release-dist clean harness-check
 
 BINARY=ultra-relay
 INSTALL_BINARY=ultra-install
@@ -19,6 +19,9 @@ build-bot:
 
 test:
 	CGO_ENABLED=0 go test ./...
+
+harness-check:
+	go run ./tools/harnesscheck
 
 vet:
 	go vet ./...
@@ -140,3 +143,27 @@ clean:
 	      $(INSTALL_BINARY) $(INSTALL_BINARY)-linux-amd64 $(INSTALL_BINARY)-linux-arm64 \
 	      $(BOT_BINARY) $(BOT_BINARY)-linux-amd64 $(BOT_BINARY)-linux-arm64
 	rm -rf dist
+
+.PHONY: build-client
+build-client:
+	go build -o ultra-client ./cmd/ultra-client
+
+.PHONY: build-bench
+build-bench:
+	go build -o ultra-bench ./cmd/ultra-bench
+
+# Pinned Xray Vision uses unsafe field offsets; keep race instrumentation, disable
+# checkptr only for its VLESS package (Go 1.26), not for ultra.
+.PHONY: test-race
+
+.PHONY: test-ui
+test-ui:
+	node --test scripts/test-happ-import.cjs scripts/test-cabinet.cjs scripts/test-miniapp-preview.cjs
+
+test-race:
+	go test -race -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' -skip 'TestPublishedProfilesLocalTransfer/fallback_xhttp' ./...
+
+# Known upstream XHTTP races: diagnostic only, never report this as a passing full race suite.
+.PHONY: test-race-xray
+test-race-xray:
+	go test -race -tags=xray_race_diagnostics -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' -run 'TestXHTTPReaderConcurrentPublicationAndClose|TestPublishedProfilesLocalTransfer' ./internal/proxy ./internal/config

@@ -22,6 +22,11 @@
 
 ## Сборка
 
+Клиенты: [Happ, подписки и домашний Linux-прокси](docs/happ.md).
+
+Для разработки: [инструкции Codex](AGENTS.md), [карта архитектуры](docs/architecture.md),
+[проверки и особенности разработки](docs/development.md), [архитектурные решения](docs/adr/README.md).
+
 ```bash
 make build               # ./ultra-relay
 make build-install       # ./ultra-install
@@ -64,7 +69,7 @@ make build-linux-amd64 build-install
 
 ## Несколько exit-нод (failover)
 
-При `make install` можно сразу поставить **две exit VPS** (primary + backup): в `install.config` укажите `EXIT` и `EXIT2` (см. `install.config.sample`). Установщик развернёт доступные ноды, сгенерирует отдельный `tunnel_uuid` для каждой и положит на bridge `exit_nodes.bootstrap.json` — при первом старте строки импортируются в PostgreSQL. Exit, недоступные по SSH, попадают в bootstrap с **`enabled: false`** (не маршрутизируются, пока не задеployed и не включены в Mini App). Backup обычно с `EXIT2_PRIORITY=200`, primary — `100`. Недоступные exit **не блокируют** установку, если хотя бы одна exit задеployed; иначе `ultra-install` завершится с ошибкой.
+При `make install` можно сразу поставить **две exit VPS** (primary + backup): в `install.config` укажите `EXIT` и `EXIT2` (см. `install.config.sample`). Установщик развернёт доступные ноды, сгенерирует отдельный `tunnel_uuid` для каждой и положит на bridge `exit_nodes.bootstrap.json` — при первом старте строки импортируются в PostgreSQL. Exit, недоступные по SSH, попадают в bootstrap с **`enabled: false`** (не маршрутизируются, пока не установлены и не включены через закрытый relay API). Backup обычно с `EXIT2_PRIORITY=200`, primary — `100`. Недоступные exit **не блокируют** установку, если хотя бы одна exit задеployed; иначе `ultra-install` завершится с ошибкой.
 
 | Где хранится | Что |
 |--------------|-----|
@@ -114,12 +119,17 @@ Telegram-алерты: `exit_down` / `exit_up` (по active exit), `exit_failove
 Long polling и алерты к `api.telegram.org` с bridge идут через локальный SOCKS5 (`127.0.0.1:10809`) в Xray и далее на **active exit** (с тем же failover, что и пользовательский трафик).
 
 **Mini App** открывается по кнопке от бота и предоставляет:
-- Обзор: количество пользователей, трафик, состояние bridge и **active exit**.
-- Список пользователей с трафиком; карточка пользователя с VLESS URI и QR-кодом.
-- Добавление и удаление пользователей.
-- **Exit-ноды:** список, добавление backup/новой exit, enable/disable, deploy-команда.
-- Диагностика: health по узлам, последние алерты.
-- Генерация инвайт-токенов для новых администраторов.
+
+- Личный кабинет «Мой VPN»: подписка Happ, инструкции и предпочтительная локация.
+- Администратору — переключение в свой личный кабинет, список участников,
+  отключение, включение и сброс доступа, групповую регистрацию и именные приглашения.
+- «Сервис → Серверы»: управление Vultr с подтверждением цены, состоянием операций,
+  понятными ошибками и журналом этапов; состояние копий БД.
+- Ранее выданные ручные конфиги, статистику и диагностику — в отдельном прежнем интерфейсе.
+
+Ручное добавление серверов из Mini App удалено. Установка с локального компьютера
+через `make install` и закрытый relay API сохраняется. Подробнее:
+[регистрация](docs/enrollment.md), [Vultr](docs/vultr.md), [копии БД](docs/replication.md).
 
 ### Домен для Mini App
 
@@ -216,9 +226,9 @@ Host ultra-back
 
 - `anti_censor.warp_proxy: true` — на exit использовать Cloudflare WARP в режиме прокси; destination-сайты видят Cloudflare IP вместо IP датацентра.
 - `anti_censor.disable_doh: false` (по умолчанию) — DNS over HTTPS; bridge использует Yandex DoH для `.ru`-доменов и Cloudflare для остального.
-- Фрагментация TLS ClientHello и паддинг splithttp-чанков включены по умолчанию.
-- `/client` экспортирует обратно-совместимый основной профиль `fast_tcp_reality` (старый VLESS+REALITY+TCP+Vision URI) и резервный `fallback_xhttp_reality` для Xray-compatible клиентов. Чтобы резервный XHTTP-профиль был доступен извне, задайте `PUBLIC_XHTTP_PORT` / `anti_censor.public_xhttp_port`; `make install` внесёт это в spec, а `ultra-relay` best-effort откроет локальный firewall на bridge. Старый `vless_port` при этом не меняется.
-- `anti_censor.profile`: `fast`, `balanced` (дефолт для новых fallback-настроек), `stealth`. Профиль не меняет legacy TCP URI; он влияет на параметры резервного XHTTP-профиля.
+- Генератор использует `xPaddingBytes` (стандарт 100–1000), сохраняя совместимость старых профилей. Фрагментация через freedom/`dialerProxy` включается только явным `anti_censor.fragment.packets`. Ограничения и проверка — в [документации обхода цензуры](docs/censorship-resistance.md).
+- `/client` экспортирует обратно-совместимый основной профиль `fast_tcp_reality` (старый VLESS+REALITY+TCP+Vision URI) и настроенные резервные профили для Xray-compatible клиентов. Чтобы резервный XHTTP-профиль был доступен извне, задайте `PUBLIC_XHTTP_PORT` / `anti_censor.public_xhttp_port`; `make install` внесёт это в spec, а `ultra-relay` best-effort откроет локальный firewall на bridge. Старый `vless_port` при этом не меняется.
+- `anti_censor.profile`: `fast`, `balanced` (дефолт для новых fallback-настроек), `stealth`. Значение сохраняется для совместимости spec; само по себе не включает фрагментацию и не меняет стандартный padding или legacy TCP URI.
 
 **SOCKS5 на bridge:** два режима — (1) общий inbound в spec (`socks5.enabled`, по умолчанию `127.0.0.1`); (2) **per-user** `kind=socks5` в Admin API / Mini App — отдельный порт из диапазона **10810–10899**, логин = UUID, пароль в карточке пользователя (`socks5://…` в UI). Оба используют тот же routing, что VLESS. Per-user порты слушают `0.0.0.0`; `ultra-relay` best-effort открывает их в локальном firewall. На мобильных сетях нестандартные порты (108xx, 8444) могут быть менее надёжны — для Telegram in-app proxy или Mini App обычно лучше `:443`.
 

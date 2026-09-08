@@ -10,12 +10,23 @@ import (
 const LegacySocksUserUUID = "_legacy_socks"
 
 // User is a single client identity.
+type RouteCredential struct {
+	UUID       string
+	LocationID string
+	Name       string
+	ExitID     *string
+	Published  bool
+}
+
 type User struct {
-	UUID       string     `json:"uuid"`
-	Name       string     `json:"name"`
-	Kind       string     `json:"kind"`
-	IsActive   bool       `json:"is_active"`
-	DisabledAt *time.Time `json:"disabled_at,omitempty"`
+	FallbackExitID  string            `json:"-"`
+	ExcludedExitIDs []string          `json:"-"`
+	Routes          []RouteCredential `json:"-"`
+	UUID            string            `json:"uuid"`
+	Name            string            `json:"name"`
+	Kind            string            `json:"kind"`
+	IsActive        bool              `json:"is_active"`
+	DisabledAt      *time.Time        `json:"disabled_at,omitempty"`
 	// PreferredExitID is nil for Auto location selection.
 	PreferredExitID *string `json:"preferred_exit_id,omitempty"`
 	// EffectiveExitID is computed at config-build time and is not persisted.
@@ -45,3 +56,19 @@ var ErrInvalidUserKind = errors.New("auth: invalid user kind")
 
 // ErrSocksPortsExhausted is returned when no TCP port is free in the configured SOCKS5 client range.
 var ErrSocksPortsExhausted = errors.New("auth: no free port in socks5 port range")
+
+// ExpandRoutes is used only by configuration generation; aliases are not separate account records.
+func ExpandRoutes(users []User) []User {
+	out := make([]User, 0, len(users))
+	for _, u := range users {
+		out = append(out, u)
+		for _, route := range u.Routes {
+			alias := u
+			alias.UUID = route.UUID
+			alias.Routes = nil
+			alias.PreferredExitID = route.ExitID
+			out = append(out, alias)
+		}
+	}
+	return out
+}

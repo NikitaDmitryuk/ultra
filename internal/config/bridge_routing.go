@@ -1,6 +1,8 @@
 package config
 
 import (
+	"maps"
+	"slices"
 	"strings"
 )
 
@@ -45,7 +47,8 @@ func injectUserExitRules(rules []any, defaultExitTag string, userExitTags map[st
 		if !ok || m["outboundTag"] != defaultExitTag {
 			continue
 		}
-		for user, tag := range userExitTags {
+		for _, user := range slices.Sorted(maps.Keys(userExitTags)) {
+			tag := userExitTags[user]
 			if tag == "" || tag == defaultExitTag {
 				continue
 			}
@@ -100,7 +103,7 @@ func buildBlocklistRouting(spec *Spec, w xrayWireResolved, exitTag string) (stri
 			"type": "field", "domain": []string{d}, "outboundTag": w.OutboundDirectTag,
 		})
 	}
-	for _, d := range spec.DomainExit {
+	for _, d := range append(geminiExitDomains(), spec.DomainExit...) {
 		d = strings.TrimSpace(d)
 		if d == "" {
 			continue
@@ -222,6 +225,9 @@ func buildRUDirectRouting(spec *Spec, w xrayWireResolved, exitTag string) (strin
 			"type": "field", "domain": []string{d}, "outboundTag": w.OutboundDirectTag,
 		})
 	}
+	for _, d := range geminiExitDomains() {
+		rules = append(rules, map[string]any{"type": "field", "domain": []string{d}, "outboundTag": exitTag})
+	}
 	var domainDirect []string
 	if gs := effectiveGeositeDirectTags(spec); len(gs) > 0 {
 		domainDirect = append(domainDirect, normalizeGeositeDomains(gs)...)
@@ -288,4 +294,10 @@ func normalizeGeoipIPs(tags []string) []string {
 // BridgeNeedsBlockOutbound is true when spec references geosite block rules (blackhole outbound required).
 func BridgeNeedsBlockOutbound(spec *Spec) bool {
 	return len(normalizeGeositeDomains(spec.GeositeBlockTags)) > 0
+}
+
+// Gemini and its authentication/static endpoints need a consistent foreign egress.
+// Explicit domain_direct rules still take precedence.
+func geminiExitDomains() []string {
+	return []string{"domain:gemini.google.com", "domain:aistudio.google.com", "domain:generativelanguage.googleapis.com", "domain:accounts.google.com", "domain:googleusercontent.com", "domain:gstatic.com"}
 }

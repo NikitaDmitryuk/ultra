@@ -54,14 +54,28 @@ func (n Node) LocationLabel() string {
 	}
 }
 
+// ProbeResult records a full-body HTTPS check without user traffic.
+type ProbeResult struct {
+	Target     string `json:"target"`
+	OK         bool   `json:"ok"`
+	Bytes      int64  `json:"bytes"`
+	TTFBMS     int64  `json:"ttfb_ms"`
+	DurationMS int64  `json:"duration_ms"`
+	Error      string `json:"error,omitempty"`
+}
+
 // Health holds probe results for one exit node.
 type Health struct {
-	ID                string `json:"id"`
-	Reachable         bool   `json:"reachable"`
-	InternetOK        bool   `json:"internet_ok"`
-	TunnelLatencyMS   int64  `json:"tunnel_latency_ms,omitempty"`
-	InternetLatencyMS int64  `json:"internet_latency_ms,omitempty"`
-	Active            bool   `json:"active,omitempty"`
+	Eligible          bool          `json:"eligible"`
+	PreferredReady    bool          `json:"preferred_ready"`
+	CheckedAt         time.Time     `json:"checked_at"`
+	Checks            []ProbeResult `json:"checks,omitempty"`
+	ID                string        `json:"id"`
+	Reachable         bool          `json:"reachable"`
+	InternetOK        bool          `json:"internet_ok"`
+	TunnelLatencyMS   int64         `json:"tunnel_latency_ms,omitempty"`
+	InternetLatencyMS int64         `json:"internet_latency_ms,omitempty"`
+	Active            bool          `json:"active,omitempty"`
 }
 
 // SelectActive picks the enabled exit with the lowest priority among reachable nodes.

@@ -10,9 +10,6 @@ import (
 //go:embed scripts/postgres-primary.sh
 var postgresPrimaryScriptTmpl string
 
-//go:embed scripts/postgres-replica.sh
-var postgresReplicaScriptTmpl string
-
 // PostgresConfig holds parameters for a managed PostgreSQL installation.
 type PostgresConfig struct {
 	DBName       string // database name (default: ultra_db)
@@ -73,35 +70,23 @@ func SetupPrimaryPostgres(sshUser, host, identity string, cfg PostgresConfig) er
 // streaming replication from primaryHost via pg_basebackup.
 // Must be called after SetupPrimaryPostgres (primary must be running and accessible).
 func SetupReplicaPostgres(sshUser, host, identity string, cfg PostgresConfig, primaryHost string) error {
-	return RunSSH(sshUser, host, identity, replicaSetupScript(cfg, primaryHost))
+	return EnableRecoveryNode(sshUser, primaryHost, host, identity)
 }
 
 // primarySetupScript returns the bash script that installs and configures the primary PostgreSQL node.
 // Passwords are hex strings so they are safe to embed literally in SQL single-quoted literals.
 func primarySetupScript(cfg PostgresConfig) string {
-	// WAL streaming config — only needed when a replica is expected.
-	walSection := ""
-	if cfg.ReplicaHost != "" {
-		walSection = `
-setpgconf wal_level        replica
-setpgconf max_wal_senders  10
-setpgconf wal_keep_size    256
-setpgconf listen_addresses "'*'"
+	// Replicas connect to primary loopback through authenticated SSH tunnels.
+	walSection := `
+setpgconf wal_level replica
+setpgconf max_wal_senders 10
+setpgconf max_replication_slots 10
+setpgconf max_slot_wal_keep_size "'1GB'"
 `
+	if cfg.BridgeHost != "127.0.0.1" && cfg.BridgeHost != "" {
+		walSection += "setpgconf listen_addresses \"'*'\"\n"
 	}
-
-	// pg_hba entry for replication role — only when replica host is known.
 	replHBASection := ""
-	if cfg.ReplicaHost != "" {
-		replHBASection = fmt.Sprintf(`
-# ── Replication access from replica ──────────────────────────────────────────
-grep -qF '# ultra_repl_access' "$PG_HBA" || cat >> "$PG_HBA" << 'HBAEOF'
-host    replication    %s    %s/32    scram-sha-256    # ultra_repl_access
-HBAEOF
-`,
-			cfg.ReplUser, cfg.ReplicaHost,
-		)
-	}
 
 	return fmt.Sprintf(postgresPrimaryScriptTmpl,
 		// app role: CREATE
@@ -124,17 +109,6 @@ HBAEOF
 		replHBASection,
 		// port in final echo
 		cfg.Port,
-	)
-}
-
-// replicaSetupScript returns the bash script that bootstraps a streaming replica via pg_basebackup.
-func replicaSetupScript(cfg PostgresConfig, primaryHost string) string {
-	// Passwords are hex — safe to embed in PGPASSWORD and connstring.
-	return fmt.Sprintf(postgresReplicaScriptTmpl,
-		cfg.ReplPassword,
-		primaryHost,
-		cfg.Port,
-		cfg.ReplUser,
 	)
 }
 

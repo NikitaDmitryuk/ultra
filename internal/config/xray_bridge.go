@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
@@ -43,6 +45,24 @@ func BuildBridgeXRayJSON(
 	if spec.Role != RoleBridge {
 		return nil, fmt.Errorf("config: expected bridge role")
 	}
+	if spec.SplitHTTPTLS.OmitSNI {
+		if spec.TunnelTLSProvision != TunnelTLSSelfSigned {
+			return nil, fmt.Errorf("omit_sni requires pinned self-signed tunnels")
+		}
+		check := func(address, pin string) bool {
+			decoded, err := hex.DecodeString(normalizeCertSHA256(pin))
+			return net.ParseIP(address) != nil && err == nil && len(decoded) == 32
+		}
+		enabled := exits.FilterEnabled(exitNodes)
+		if len(enabled) == 0 && !check(spec.Exit.Address, spec.Exit.PinnedPeerCertSHA256) {
+			return nil, fmt.Errorf("omit_sni requires IP and certificate pin")
+		}
+		for _, node := range enabled {
+			if !check(node.Address, node.PinnedPeerCertSHA256) {
+				return nil, fmt.Errorf("omit_sni requires IP and certificate pin for every exit")
+			}
+		}
+	}
 	statsEnabled := spec.Stats != nil && spec.Database != nil
 
 	w := resolveXrayWire(spec)
@@ -69,7 +89,9 @@ func BuildBridgeXRayJSON(
 			"id":    u.UUID,
 			"email": email,
 		})
-		if u.EffectiveExitID != "" && u.EffectiveExitID != activeExitID {
+		if u.EffectiveExitID == auth.BlockedExit {
+			userExitTags[u.UUID] = w.OutboundBlockTag
+		} else if u.EffectiveExitID != "" && u.EffectiveExitID != activeExitID {
 			userExitTags[u.UUID] = exits.OutboundTag(u.EffectiveExitID)
 		}
 	}
@@ -87,6 +109,11 @@ func BuildBridgeXRayJSON(
 
 	domainStrategy, routeRules := buildBridgeRouting(spec, resolveActiveExitTag(activeExitID, w), userExitTags)
 	needsBlock := BridgeNeedsBlockOutbound(spec)
+	for _, tag := range userExitTags {
+		if tag == w.OutboundBlockTag {
+			needsBlock = true
+		}
+	}
 	activeTag := resolveActiveExitTag(activeExitID, w)
 
 	// Prepend the API routing rule when stats are enabled.
@@ -149,9 +176,9 @@ func BuildBridgeXRayJSON(
 		xhttpStream := bridgeInboundStream(spec)
 		xhttpStream["network"] = "xhttp"
 		xhttpStream["xhttpSettings"] = map[string]any{
-			"path":         fallbackXHTTPPath(spec),
-			"mode":         "auto",
-			"xPaddingSize": fallbackXHTTPPadding(spec),
+			"path":          fallbackXHTTPPath(spec),
+			"mode":          "auto",
+			"xPaddingBytes": fallbackXHTTPPadding(spec),
 		}
 		inbounds = append(inbounds, map[string]any{
 			"tag":      w.InboundVLESSTag + "-xhttp",
@@ -169,6 +196,11 @@ func BuildBridgeXRayJSON(
 				"destOverride": w.SniffingDestOverride,
 			},
 		})
+	}
+	if spec.PublicXHTTPTLS != nil && !spec.DevMode {
+		inbounds = append(inbounds, map[string]any{"tag": w.InboundVLESSTag + "-xhttp-tls", "listen": spec.ListenAddress, "port": spec.PublicXHTTPTLS.Port,
+			"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption},
+			"streamSettings": publicTLSStream(spec, true)})
 	}
 	if statsEnabled {
 		inbounds = append(inbounds, map[string]any{
@@ -252,25 +284,28 @@ func BuildBridgeXRayJSON(
 	}
 
 	outbounds := buildBridgeExitOutbounds(spec, exitNodes, activeExitID, w, buildOutStream)
+	if fragment := tunnelFragmentOutbound(spec); fragment != nil {
+		outbounds = append(outbounds, fragment)
+	}
 	outbounds = append(outbounds,
 		map[string]any{
 			"tag":      w.OutboundDirectTag,
 			"protocol": "freedom",
-			"settings": map[string]any{},
+			"settings": freedomDNSSettings(spec),
 		},
 	)
 	if statsEnabled {
 		outbounds = append(outbounds, map[string]any{
 			"tag":      "api",
 			"protocol": "freedom",
-			"settings": map[string]any{},
+			"settings": freedomDNSSettings(spec),
 		})
 	}
 	if needsBlock {
 		outbounds = append(outbounds, map[string]any{
 			"tag":      w.OutboundBlockTag,
 			"protocol": "blackhole",
-			"settings": map[string]any{},
+			"settings": freedomDNSSettings(spec),
 		})
 	}
 

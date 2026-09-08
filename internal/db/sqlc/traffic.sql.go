@@ -162,8 +162,8 @@ func (q *Queries) GetMonthlyUser(ctx context.Context, arg GetMonthlyUserParams) 
 }
 
 const insertTrafficSample = `-- name: InsertTrafficSample :exec
-INSERT INTO traffic_stats(user_uuid, collected_at, uplink_bytes, downlink_bytes)
-VALUES($1, $2, $3, $4)
+INSERT INTO traffic_stats(user_uuid, collected_at, uplink_bytes, downlink_bytes,exit_tag)
+VALUES($1, $2, $3, $4,$5)
 `
 
 type InsertTrafficSampleParams struct {
@@ -171,6 +171,7 @@ type InsertTrafficSampleParams struct {
 	CollectedAt   pgtype.Timestamptz `json:"collected_at"`
 	UplinkBytes   int64              `json:"uplink_bytes"`
 	DownlinkBytes int64              `json:"downlink_bytes"`
+	ExitTag       string             `json:"exit_tag"`
 }
 
 func (q *Queries) InsertTrafficSample(ctx context.Context, arg InsertTrafficSampleParams) error {
@@ -179,6 +180,7 @@ func (q *Queries) InsertTrafficSample(ctx context.Context, arg InsertTrafficSamp
 		arg.CollectedAt,
 		arg.UplinkBytes,
 		arg.DownlinkBytes,
+		arg.ExitTag,
 	)
 	return err
 }
@@ -357,6 +359,33 @@ func (q *Queries) TrafficTimeline6h(ctx context.Context, arg TrafficTimeline6hPa
 		return nil, err
 	}
 	return items, nil
+}
+
+const upsertDailyRouteTraffic = `-- name: UpsertDailyRouteTraffic :exec
+INSERT INTO daily_route_traffic(user_uuid,day,exit_tag,uplink_bytes,downlink_bytes)
+VALUES($1,$2,$3,$4,$5)
+ON CONFLICT(user_uuid,day,exit_tag) DO UPDATE SET
+ uplink_bytes=daily_route_traffic.uplink_bytes+EXCLUDED.uplink_bytes,
+ downlink_bytes=daily_route_traffic.downlink_bytes+EXCLUDED.downlink_bytes
+`
+
+type UpsertDailyRouteTrafficParams struct {
+	UserUuid      pgtype.UUID `json:"user_uuid"`
+	Day           pgtype.Date `json:"day"`
+	ExitTag       string      `json:"exit_tag"`
+	UplinkBytes   int64       `json:"uplink_bytes"`
+	DownlinkBytes int64       `json:"downlink_bytes"`
+}
+
+func (q *Queries) UpsertDailyRouteTraffic(ctx context.Context, arg UpsertDailyRouteTrafficParams) error {
+	_, err := q.db.Exec(ctx, upsertDailyRouteTraffic,
+		arg.UserUuid,
+		arg.Day,
+		arg.ExitTag,
+		arg.UplinkBytes,
+		arg.DownlinkBytes,
+	)
+	return err
 }
 
 const upsertMonthlyTraffic = `-- name: UpsertMonthlyTraffic :exec

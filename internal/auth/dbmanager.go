@@ -66,6 +66,8 @@ func NewDBManager(repo DBUserRepo, onChange func([]User), fw firewall.Manager, l
 	return m, nil
 }
 
+func (m *DBManager) Refresh(ctx context.Context) error { return m.refresh(ctx) }
+
 // refresh reloads the full user list from the DB into the in-memory cache.
 func (m *DBManager) refresh(ctx context.Context) error {
 	users, err := m.repo.ListAll(ctx)

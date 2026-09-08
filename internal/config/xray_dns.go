@@ -57,8 +57,6 @@ func buildBridgeDNS() map[string]any {
 				"address":      "https://1.1.1.1/dns-query",
 				"skipFallback": false,
 			},
-			// System fallback in case DoH is unreachable.
-			"localhost",
 		},
 	}
 }
@@ -78,8 +76,13 @@ func buildExitDNS() map[string]any {
 				"address":      "https://8.8.8.8/dns-query",
 				"skipFallback": false,
 			},
-			// System fallback.
-			"localhost",
 		},
 	}
+}
+
+func freedomDNSSettings(s *Spec) map[string]any {
+	if s.DevMode || (s.AntiCensor != nil && s.AntiCensor.DisableDOH) {
+		return map[string]any{}
+	}
+	return map[string]any{"domainStrategy": "ForceIPv4"}
 }

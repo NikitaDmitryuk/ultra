@@ -18,12 +18,19 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		return
 	}
 	msg := update.Message
+	if msg.Chat == nil || msg.Chat.Type != "private" || msg.From == nil {
+		return
+	}
 	if !msg.IsCommand() {
 		return
 	}
 	switch msg.Command() {
+	case "invitevpn":
+		b.inviteVPNCommand(ctx, msg)
 	case "start":
 		b.handleStart(ctx, msg)
+	case "vpn":
+		b.sendMemberButton(msg.Chat.ID)
 	case "app":
 		b.handleApp(ctx, msg)
 	case "addadmin":
@@ -35,6 +42,10 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 
 func (b *Bot) handleStart(ctx context.Context, msg *tgbotapi.Message) {
 	token := strings.TrimSpace(msg.CommandArguments())
+	if strings.HasPrefix(token, "vpn_g_") || strings.HasPrefix(token, "vpn_i_") {
+		b.handleMemberStart(ctx, msg, token)
+		return
+	}
 	if token == "" {
 		b.handleApp(ctx, msg)
 		return
@@ -65,9 +76,10 @@ func (b *Bot) handleApp(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 	if !isAdmin {
-		b.reply(msg.Chat.ID, "Вы не являетесь администратором. Введите /start <токен> для регистрации.")
+		b.sendMemberButton(msg.Chat.ID)
 		return
 	}
+	b.sendMemberButton(msg.Chat.ID)
 	b.sendAppButton(msg.Chat.ID)
 }
 

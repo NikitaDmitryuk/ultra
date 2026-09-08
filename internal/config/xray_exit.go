@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 )
@@ -57,19 +58,29 @@ func BuildExitXRayJSON(spec *Spec, strat mimic.Strategy, xrayLogLevel string) ([
 			map[string]any{
 				"tag":      "direct-udp",
 				"protocol": "freedom",
-				"settings": map[string]any{},
+				"settings": freedomDNSSettings(spec),
 			},
 		}
 		routingRules = []any{
 			map[string]any{"type": "field", "network": "udp", "outboundTag": "direct-udp"},
 			map[string]any{"type": "field", "network": "tcp", "outboundTag": w.OutboundDirectTag},
 		}
+		domains := make([]string, 0, len(spec.AntiCensor.WARPDirectDomains))
+		for _, domain := range spec.AntiCensor.WARPDirectDomains {
+			if domain = strings.TrimSpace(domain); domain != "" {
+				domains = append(domains, "full:"+domain)
+			}
+		}
+		if len(domains) > 0 {
+			outbounds = append(outbounds, map[string]any{"tag": "warp-bypass", "protocol": "freedom", "settings": freedomDNSSettings(spec)})
+			routingRules = append([]any{map[string]any{"type": "field", "domain": domains, "outboundTag": "warp-bypass"}}, routingRules...)
+		}
 	} else {
 		outbounds = []any{
 			map[string]any{
 				"tag":      w.OutboundDirectTag,
 				"protocol": "freedom",
-				"settings": map[string]any{},
+				"settings": freedomDNSSettings(spec),
 			},
 		}
 		routingRules = []any{

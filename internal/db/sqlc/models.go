@@ -37,6 +37,48 @@ type BotInviteToken struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+type CloudAudit struct {
+	ID          int64              `json:"id"`
+	Actor       int64              `json:"actor"`
+	OperationID pgtype.UUID        `json:"operation_id"`
+	Action      string             `json:"action"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type CloudOffer struct {
+	ID        pgtype.UUID        `json:"id"`
+	Actor     int64              `json:"actor"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	Body      []byte             `json:"body"`
+}
+
+type CloudOperation struct {
+	ID           pgtype.UUID        `json:"id"`
+	State        string             `json:"state"`
+	Body         []byte             `json:"body"`
+	OccupiesSlot bool               `json:"occupies_slot"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type CloudOperationEvent struct {
+	ID          int64              `json:"id"`
+	OperationID pgtype.UUID        `json:"operation_id"`
+	Phase       string             `json:"phase"`
+	Outcome     string             `json:"outcome"`
+	Code        string             `json:"code"`
+	HttpStatus  int32              `json:"http_status"`
+	DurationMs  int64              `json:"duration_ms"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type DailyRouteTraffic struct {
+	UserUuid      pgtype.UUID `json:"user_uuid"`
+	Day           pgtype.Date `json:"day"`
+	ExitTag       string      `json:"exit_tag"`
+	UplinkBytes   int64       `json:"uplink_bytes"`
+	DownlinkBytes int64       `json:"downlink_bytes"`
+}
+
 type ExitNode struct {
 	ID                   pgtype.UUID        `json:"id"`
 	Name                 string             `json:"name"`
@@ -54,6 +96,19 @@ type ExitNode struct {
 	DisplayName          string             `json:"display_name"`
 }
 
+type ExitTrafficBudget struct {
+	ExitID                pgtype.UUID        `json:"exit_id"`
+	InstanceID            string             `json:"instance_id"`
+	MonthlyBytes          int64              `json:"monthly_bytes"`
+	Source                string             `json:"source"`
+	IsFallback            bool               `json:"is_fallback"`
+	ProviderUsedBytes     int64              `json:"provider_used_bytes"`
+	AccountRemainingBytes int64              `json:"account_remaining_bytes"`
+	ObservedAt            pgtype.Timestamptz `json:"observed_at"`
+	ProviderError         string             `json:"provider_error"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+}
+
 type MonthlyTraffic struct {
 	UserUuid      pgtype.UUID        `json:"user_uuid"`
 	Year          int32              `json:"year"`
@@ -61,6 +116,15 @@ type MonthlyTraffic struct {
 	UplinkBytes   int64              `json:"uplink_bytes"`
 	DownlinkBytes int64              `json:"downlink_bytes"`
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+type NodeReplication struct {
+	NodeID        pgtype.UUID        `json:"node_id"`
+	State         string             `json:"state"`
+	FreeBytes     int64              `json:"free_bytes"`
+	RequiredBytes int64              `json:"required_bytes"`
+	Detail        string             `json:"detail"`
+	CheckedAt     pgtype.Timestamptz `json:"checked_at"`
 }
 
 type Notification struct {
@@ -73,12 +137,20 @@ type Notification struct {
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
 }
 
+type SubscriptionToken struct {
+	UserUuid       pgtype.UUID `json:"user_uuid"`
+	TokenHash      []byte      `json:"token_hash"`
+	EncryptedToken []byte      `json:"encrypted_token"`
+	KeyVersion     pgtype.Text `json:"key_version"`
+}
+
 type TrafficStat struct {
 	ID            int64              `json:"id"`
 	UserUuid      pgtype.UUID        `json:"user_uuid"`
 	CollectedAt   pgtype.Timestamptz `json:"collected_at"`
 	UplinkBytes   int64              `json:"uplink_bytes"`
 	DownlinkBytes int64              `json:"downlink_bytes"`
+	ExitTag       string             `json:"exit_tag"`
 }
 
 type User struct {
@@ -97,6 +169,21 @@ type User struct {
 	SocksPassword        pgtype.Text        `json:"socks_password"`
 	SocksPort            pgtype.Int4        `json:"socks_port"`
 	PreferredExitID      pgtype.UUID        `json:"preferred_exit_id"`
+	EnrollmentSource     pgtype.Text        `json:"enrollment_source"`
+	EnrolledAt           pgtype.Timestamptz `json:"enrolled_at"`
+	MemberPending        bool               `json:"member_pending"`
+	MemberRevision       int64              `json:"member_revision"`
+}
+
+type UserExitQuota struct {
+	UserUuid   pgtype.UUID `json:"user_uuid"`
+	ExitID     pgtype.UUID `json:"exit_id"`
+	Day        pgtype.Date `json:"day"`
+	UsedBytes  int64       `json:"used_bytes"`
+	LimitBytes int64       `json:"limit_bytes"`
+	Blocked    bool        `json:"blocked"`
+	Applied    bool        `json:"applied"`
+	Reason     string      `json:"reason"`
 }
 
 type UserIpObservation struct {
@@ -114,4 +201,57 @@ type UserLeakSignal struct {
 	Score     int32              `json:"score"`
 	Detail    []byte             `json:"detail"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type VpnGroup struct {
+	Singleton bool   `json:"singleton"`
+	ChatID    int64  `json:"chat_id"`
+	Title     string `json:"title"`
+	Code      string `json:"code"`
+	Enabled   bool   `json:"enabled"`
+	UpdatedBy int64  `json:"updated_by"`
+}
+
+type VpnInvite struct {
+	ID            int64              `json:"id"`
+	TokenHash     []byte             `json:"token_hash"`
+	Recipient     int64              `json:"recipient"`
+	CreatedBy     int64              `json:"created_by"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+	UsedAt        pgtype.Timestamptz `json:"used_at"`
+	CancelledAt   pgtype.Timestamptz `json:"cancelled_at"`
+	RecipientName string             `json:"recipient_name"`
+}
+
+type VpnLocation struct {
+	ID             pgtype.UUID `json:"id"`
+	ProviderRegion pgtype.Text `json:"provider_region"`
+	Name           string      `json:"name"`
+	ExitID         pgtype.UUID `json:"exit_id"`
+	Published      bool        `json:"published"`
+	Applied        bool        `json:"applied"`
+}
+
+type VpnMemberAudit struct {
+	ID        int64              `json:"id"`
+	Actor     int64              `json:"actor"`
+	MemberID  pgtype.Int8        `json:"member_id"`
+	Action    string             `json:"action"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type VpnMemberNotification struct {
+	MemberID    int64              `json:"member_id"`
+	AdminID     int64              `json:"admin_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	SentAt      pgtype.Timestamptz `json:"sent_at"`
+	NextAttempt pgtype.Timestamptz `json:"next_attempt"`
+	Attempts    int32              `json:"attempts"`
+}
+
+type VpnRouteCredential struct {
+	Uuid       pgtype.UUID `json:"uuid"`
+	UserUuid   pgtype.UUID `json:"user_uuid"`
+	LocationID pgtype.UUID `json:"location_id"`
 }
