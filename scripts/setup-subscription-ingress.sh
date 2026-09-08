@@ -9,6 +9,19 @@ BRIDGE="${BRIDGE:-${FRONT:-}}"
 : "${BRIDGE:?Set BRIDGE}"
 args=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=8)
 if [[ -n "${IDENTITY:-}" ]]; then args+=(-i "${IDENTITY/#\~/$HOME}"); fi
+mode="${BOT_INGRESS_MODE:-vultr}"
+if [[ "$mode" = ssh ]]; then
+  : "${BOT_DOMAIN:?Set BOT_DOMAIN}"
+  python3 - "$ROOT" "$BRIDGE" "$BOT_DOMAIN" "$BOT_INGRESS_IP" <<'PYSSH' | ssh "${args[@]}" "${SSH_USER:-root}@${BOT_INGRESS_IP}" 'python3 -'
+import pathlib,sys,ipaddress
+root,bridge,domain,ingress=sys.argv[1:]
+ipaddress.IPv4Address(bridge);ipaddress.IPv4Address(ingress)
+print('settings = '+repr({'bridge':bridge,'domain':domain}))
+print((pathlib.Path(root)/'deploy/setup-subscription-ingress-ssh.py').read_text())
+PYSSH
+  exit
+fi
+[[ "$mode" = vultr ]] || { echo "Invalid BOT_INGRESS_MODE" >&2; exit 1; }
 python3 - "$ROOT" "$BRIDGE" "$BOT_INGRESS_IP" "${BOT_INGRESS_INSTANCE_ID:-}" <<'PY' | ssh "${args[@]}" "${SSH_USER:-root}@${BRIDGE}" 'python3 -'
 import pathlib,sys,ipaddress,json
 root,bridge,ingress,instance=sys.argv[1:]

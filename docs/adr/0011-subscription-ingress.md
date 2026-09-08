@@ -1,7 +1,7 @@
 # 0011. Отдельный HTTPS-вход подписок
 
 ## Статус
-accepted
+superseded
 
 ## Дата
 2026-09-08
@@ -31,3 +31,6 @@ exit, передавая TLS через HAProxy на bridge:8444. DNS перек
 - [Эксплуатация входа](../subscription-ingress.md)
 - [Подписка Happ](0003-happ-subscription.md)
 - [Резервная топология](0004-reserve-topology.md)
+
+## Заменено
+[ADR 0012 — HTTPS-вход на постоянном узле](0012-permanent-subscription-ingress.md).

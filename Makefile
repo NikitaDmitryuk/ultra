@@ -160,6 +160,7 @@ build-bench:
 test-ui:
 	python3 scripts/test-verify-miniapp.py
 	python3 scripts/test-ingress-setup.py
+	python3 scripts/test-ingress-ssh.py
 	node --test scripts/test-happ-import.cjs scripts/test-cabinet.cjs scripts/test-miniapp-preview.cjs
 
 test-race:

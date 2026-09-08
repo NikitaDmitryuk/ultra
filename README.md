@@ -151,7 +151,7 @@ Telegram Mini App требует публичного HTTPS-адреса. Сер
    bot.example.com.  A  <IP bridge-сервера>
    ```
 
-   При отдельном входе на exit задайте `BOT_INGRESS_IP` и `BOT_PUBLIC_URL`; настройка и защита узла описаны в [инструкции HTTPS-входа](docs/subscription-ingress.md). Бот остаётся на bridge.
+   При отдельном входе на exit задайте `BOT_INGRESS_MODE` (`ssh` для существующего nginx, `vultr` для управляемого VPS), `BOT_INGRESS_IP` и `BOT_PUBLIC_URL`; настройка и защита узла описаны в [инструкции HTTPS-входа](docs/subscription-ingress.md). Бот остаётся на bridge.
 
    Проверить: `make verify-miniapp` — публичный DNS/TLS и backend bridge проверяются отдельно.
 
