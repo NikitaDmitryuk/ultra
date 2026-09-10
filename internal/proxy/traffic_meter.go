@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/NikitaDmitryuk/ultra/internal/rtc"
 	"github.com/google/uuid"
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/common"
@@ -102,15 +103,19 @@ func (h *measuredOutbound) Dispatch(ctx context.Context, link *transport.Link) {
 	}
 
 	in := session.InboundFromContext(ctx)
-	if ctx.Value(meteredContext{}) != nil || in == nil || in.User == nil {
+	if ctx.Value(meteredContext{}) != nil || ctx.Value(rtcProbeContext{}) != nil || in == nil {
 		h.Handler.Dispatch(ctx, link)
 		return
 	}
-	if _, e := uuid.Parse(in.User.Email); e != nil {
+	owner := rtc.UserFromTag(in.Tag)
+	if owner == "" && in.User != nil {
+		owner = in.User.Email
+	}
+	if _, e := uuid.Parse(owner); e != nil {
 		h.Handler.Dispatch(ctx, link)
 		return
 	}
-	count := h.meter.acquire(in.User.Email, h.Tag())
+	count := h.meter.acquire(owner, h.Tag())
 	defer func() { h.meter.Lock(); count.refs--; h.meter.Unlock() }()
 	reader := &measuredReader{Reader: link.Reader, counter: &count.up}
 	measured := &transport.Link{Reader: reader, Writer: link.Writer}

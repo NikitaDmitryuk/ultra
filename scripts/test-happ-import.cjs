@@ -62,3 +62,19 @@ test('standard HTTPS ingress preserves token without adding the backend port', (
   const {element} = page('#' + token, 'https:', 'https://vpn.example');
   assert.equal(element('launch-happ').href, 'happ://add/https://vpn.example/sub/' + token);
 });
+
+function rtcPage(raw, protocol='https:') {
+ const elements=new Map(),history=[];
+ const element=id=>{if(!elements.has(id))elements.set(id,{hidden:true});return elements.get(id)};
+ vm.runInNewContext(fs.readFileSync(path.join(root,'rtc-import.js'),'utf8'),{
+  URL,decodeURIComponent,window:{location:{hash:'#'+encodeURIComponent(raw),protocol,origin:'https://vpn.example',pathname:'/rtc-import'},history:{replaceState(...args){history.push(args)}}},document:{getElementById:element},
+ });return {element,history};
+}
+test('RTC browser handoff validates subscription and clears private fragment without launching automatically',()=>{
+ const link='client://add-subscription?url='+encodeURIComponent('https://vpn.example/sub/'+token+'?format=olcrtc');
+ const p=rtcPage(link);assert.equal(p.element('launch-client').href,link);assert.equal(p.element('import-actions').hidden,false);assert.equal(p.history[0][2],'/rtc-import');
+ for(const bad of ['javascript:alert(1)','intent://add?url=x',link.replace('client:', 'https:'),link.replace('vpn.example','evil.example'),link.replace('add-subscription','delete'),link.replace(token,'bad')]){
+  const p=rtcPage(bad);assert.equal(p.element('launch-client').href,undefined);assert.equal(p.history.length,1);
+ }
+ assert.equal(rtcPage(link,'http:').element('launch-client').href,undefined);
+});

@@ -14,6 +14,20 @@ func ValidatePlan(p *InstallPlan) error {
 	if p == nil {
 		return errors.New("install plan is nil")
 	}
+	if err := p.RTCService.Validate(); err != nil {
+		return err
+	}
+	if p.RTCService != nil && p.RTCService.Enabled && p.RTCDeployment == nil {
+		return errors.New("rtc: pinned deployment required")
+	}
+	if p.RTC != nil {
+		return errors.New("legacy rtc bindings are read only migration input in the existing spec; use rtc_service")
+	}
+	if p.RTCService != nil && p.RTCService.Enabled && p.RTCDeployment != nil {
+		if e := p.RTCDeployment.Validate(); e != nil {
+			return e
+		}
+	}
 	if p.SchemaVersion == 0 {
 		p.SchemaVersion = CurrentSchemaVersion
 	}

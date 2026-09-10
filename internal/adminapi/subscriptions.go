@@ -58,6 +58,20 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if r.URL.Query().Get("format") == "olcrtc" {
+		if !s.rtcAvailable(w, r) {
+			return
+		}
+		body, err := s.RTC.Profile(r.Context(), u.UUID)
+		if err != nil {
+			http.Error(w, "RTC configuration unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("profile-title", "ultra RTC")
+		_, _ = w.Write([]byte(body))
+		return
+	}
 	_, _, health, nodes := s.clientExitSelection(u)
 	uris, err := subscriptionURIs(s.spec, u, nodes, health)
 	if err != nil {

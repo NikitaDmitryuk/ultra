@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/NikitaDmitryuk/ultra/internal/rtc"
 )
 
 // CurrentSpecSchemaVersion is bumped when JSON fields or semantics change incompatibly.
@@ -139,6 +141,8 @@ type StatsSpec struct {
 
 // Spec is relay deployment configuration (JSON file: -spec flag).
 type Spec struct {
+	RTCService rtc.ServiceConfig `json:"rtc_service,omitempty"`
+	RTC        []rtc.Binding     `json:"rtc,omitempty"`
 	// SchemaVersion defaults to 1 when zero (see Validate).
 	SchemaVersion  int                 `json:"schema_version"`
 	ProbeURLs      []string            `json:"probe_urls,omitempty"`
@@ -336,6 +340,9 @@ func BoolPtr(b bool) *bool {
 }
 
 func (s *Spec) Validate() error {
+	if err := s.validateRTC(); err != nil {
+		return err
+	}
 	if err := s.validateTransportExtensions(); err != nil {
 		return err
 	}

@@ -38,6 +38,15 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 		_, _ = w.Write(page)
 	})
 
+	mux.HandleFunc("GET /rtc-import", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		page, _ := miniappFS.ReadFile("embed/miniapp/rtc-import.html")
+		_, _ = w.Write(page)
+	})
+
 	mux.HandleFunc("GET /sub/{token}", b.handlePublicSubscription)
 	mux.HandleFunc("POST /api/users/{uuid}/subscription", b.handleRotateSubscription)
 	mux.HandleFunc("DELETE /api/users/{uuid}/subscription", b.handleRevokeSubscription)
@@ -133,6 +142,7 @@ func (b *Bot) handleMe(w http.ResponseWriter, r *http.Request) {
 		"name":        user.DisplayName(),
 		"username":    user.Username,
 		"is_admin":    isAdmin,
+		"features":    b.rtcFeatures(r),
 	})
 }
 

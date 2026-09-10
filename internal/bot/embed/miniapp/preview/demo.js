@@ -12,15 +12,20 @@ traffic.today=now.slice(0,10);traffic.routes[0].tag='to-exit-ams';traffic.routes
 traffic.day_routes=Array.from({length:Math.min(8,Number(now.slice(8,10)))},(_,i)=>traffic.routes.map((r,j)=>({bucket:now.slice(0,8)+String(i+1).padStart(2,'0'),tag:r.tag,uplink_bytes:(i+1)*4000000,downlink_bytes:(j===0?8:2)*(i+1)*50000000}))).flat();
 traffic.hours=Array.from({length:24},(_,i)=>traffic.routes.map((r,j)=>({bucket:now.slice(0,10)+' '+String(i).padStart(2,'0')+':00',tag:r.tag,uplink_bytes:1000000*(i%3),downlink_bytes:(j===0?6:2)*(i%5)*20000000}))).flat();
 people[0].last_traffic_at=now;people[0].group_membership={state:'inside',checked_at:now};
-let preferred=null;
+let preferred=null;let rtcState={enabled:false,state:"absent"};
 const exits=[{id:'ams',display_name:'Нидерланды · Амстердам',reachable:true},{id:'fra',display_name:'Германия · Франкфурт',reachable:true}];
-const state=new URLSearchParams(location.search).get('state');
+const state=new URLSearchParams(location.search).get('state');const features={rtc:state!=='rtc-off'};
 if(state==='disabled')people[0].active=false;if(state==='pending')people[0].pending=true;
 window.fetch=async (path,options={})=>{
  let body={};try{body=JSON.parse(options.body||'{}')||{}}catch{}
  let value,status=200;
- if(path==='/api/me')value={is_admin:true};
- else if(path==='/api/self')value={registered:state!=='new',is_admin:true,member:people[0]};
+ if(path==='/api/me')value={is_admin:true,features};
+ else if(path==='/api/self')value={registered:state!=='new',is_admin:true,features,member:people[0]};
+ else if(path==='/api/self/rtc'){if(options.method==='PUT')rtcState={enabled:true,state:'ready',last_checked_at:now};if(options.method==='DELETE')rtcState={enabled:false,state:'disabled'};value=rtcState;}
+ else if(path==='/api/self/rtc/retry'){rtcState={enabled:true,state:'ready',last_checked_at:now};value=rtcState;}
+ else if(path==='/api/self/rtc/guide')value={warning:'Рекомендуем отдельный личный аккаунт. Риск ограничений со стороны провайдера неизвестен.',steps:['Создайте личную пустую встречу в сервисе по ссылке ниже.','Отключите ожидание допуска организатором, если оно включено.','Вставьте ссылку, дождитесь проверки и сохраните профиль в приложении.'],links:[{label:'Приложение',url:'https://example.invalid/client'},{label:'Сервис встреч',url:'https://example.invalid/meeting'}],import_template:'client://add?url={url}'};
+ else if(path==='/api/self/rtc/traffic'||path==='/api/rtc/traffic')value=[{hour:now,uplink_bytes:1048576,downlink_bytes:5242880}];
+ else if(path==='/api/self/rtc/profile')value={profile:'synthetic-offline-profile'};
  else if(path==='/api/members/traffic')value={...traffic,limits:[]};
  else if(path==='/api/self/traffic'||/^\/api\/members\/\d+\/traffic$/.test(path))value=traffic;
  else if(path==='/api/self/subscription')value={url:'https://example.invalid/demo-subscription',import_url:'https://example.invalid/demo-import'};

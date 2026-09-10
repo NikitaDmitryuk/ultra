@@ -108,7 +108,16 @@ func BuildBridgeXRayJSON(
 	}
 
 	domainStrategy, routeRules := buildBridgeRouting(spec, resolveActiveExitTag(activeExitID, w), userExitTags)
-	needsBlock := BridgeNeedsBlockOutbound(spec)
+	rtcInbounds, rtcRules, err := rtcIngress(spec, users, routeRules)
+	if err != nil {
+		return nil, err
+	}
+	routeRules = append(rtcRules, routeRules...)
+	// Resolve domain targets when evaluating RTC's private-address deny rule.
+	if len(rtcInbounds) > 0 || spec.RTCService.Enabled {
+		domainStrategy = "IPOnDemand"
+	}
+	needsBlock := BridgeNeedsBlockOutbound(spec) || len(rtcInbounds) > 0
 	for _, tag := range userExitTags {
 		if tag == w.OutboundBlockTag {
 			needsBlock = true
@@ -283,6 +292,7 @@ func BuildBridgeXRayJSON(
 		})
 	}
 
+	inbounds = append(inbounds, rtcInbounds...)
 	outbounds := buildBridgeExitOutbounds(spec, exitNodes, activeExitID, w, buildOutStream)
 	if fragment := tunnelFragmentOutbound(spec); fragment != nil {
 		outbounds = append(outbounds, fragment)
@@ -330,6 +340,7 @@ func BuildBridgeXRayJSON(
 				"statsInboundDownlink": true,
 			},
 			"levels": map[string]any{
+				"1": map[string]any{"statsUserUplink": false, "statsUserDownlink": false, "statsUserOnline": false},
 				"0": map[string]any{
 					"statsUserUplink":   true,
 					"statsUserDownlink": true,

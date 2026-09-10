@@ -10,7 +10,7 @@
   или XHTTP/TLS. Смена exit не исправляет блокировку входного IP.
 - Bridge → exit: XHTTP (`splithttp`, по умолчанию `stream-up`/H2) либо gRPC.
   `mimic_preset` задаёт HTTP-форму, но не означает передачу через разрешённую инфраструктуру Steam/CDN.
-- При split routing `direct` означает выход из сети bridge, например Yandex Cloud.
+- При split routing `direct` означает выход из сети хостинг-провайдера bridge.
   `blocklist` отправляет на exit совпадения со списками; `ru_direct` меняет правило
   по умолчанию; `split_routing: false` отправляет весь пользовательский трафик на exit.
 - Gemini, AI Studio, Generative Language API, Google Accounts, googleusercontent и gstatic

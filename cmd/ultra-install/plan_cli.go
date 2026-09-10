@@ -20,6 +20,8 @@ func handlePlanSubcommand(args []string) bool {
 		return false
 	}
 	switch args[0] {
+	case "rtc":
+		exitOnErr("rtc", fmt.Errorf("legacy pilot commands retired; configure rtc_service in the install plan and manage access in the cabinet"))
 	case "plan":
 		runPlanCommand(args[1:])
 	case "doctor":

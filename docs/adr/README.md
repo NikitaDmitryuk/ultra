@@ -49,3 +49,5 @@ ADR сохраняет одно значимое решение и его обо
 - [0011 — Отдельный HTTPS-вход подписок](0011-subscription-ingress.md)
 
 - [0012 — HTTPS-вход на постоянном узле](0012-permanent-subscription-ingress.md) — accepted
+
+- [0013 — olcRTC как персональный вход на bridge](0013-rtc-ingress.md) — accepted

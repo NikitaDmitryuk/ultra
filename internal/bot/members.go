@@ -39,7 +39,7 @@ func (b *Bot) relayJSON(ctx context.Context, method, path string, input, output 
 	}
 	defer response.Body.Close() //nolint:errcheck
 	if response.StatusCode/100 != 2 {
-		if strings.HasPrefix(path, "/v1/cloud/") {
+		if strings.HasPrefix(path, "/v1/cloud/") || strings.Contains(path, "/rtc") {
 			var detail struct {
 				Code string `json:"code"`
 			}
@@ -169,6 +169,7 @@ func (b *Bot) selfAuth(w http.ResponseWriter, r *http.Request) (TelegramUser, bo
 	return u, true
 }
 func (b *Bot) memberRoutes(mux *http.ServeMux) {
+	b.rtcRoutes(mux)
 	mux.HandleFunc("POST /api/enrollment/picker", b.pickerHTTP)
 	mux.HandleFunc("POST /api/enrollment/group-picker", b.pickerHTTP)
 	mux.HandleFunc("GET /member", func(w http.ResponseWriter, r *http.Request) {
@@ -218,7 +219,7 @@ func (b *Bot) selfState(w http.ResponseWriter, r *http.Request) {
 		memberHTTPError(w, status)
 		return
 	}
-	jsonOK(w, map[string]any{"is_admin": admin, "registered": true, "member": m})
+	jsonOK(w, map[string]any{"is_admin": admin, "registered": true, "member": m, "features": b.rtcFeatures(r)})
 }
 func (b *Bot) selfSubscription(w http.ResponseWriter, r *http.Request) {
 	u, ok := b.selfAuth(w, r)

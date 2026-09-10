@@ -29,9 +29,13 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/subscriptionkey"
 
 	_ "github.com/xtls/xray-core/main/distro/all"
+
+	"github.com/NikitaDmitryuk/ultra/internal/rtc"
+	"github.com/NikitaDmitryuk/ultra/internal/rtcingress"
 )
 
 func main() {
+	checkConfig := flag.Bool("check-config", false, "validate spec and RTC secret files without starting services or opening the database")
 	specPath := flag.String("spec", "", "path to relay JSON spec (required)")
 	adminToken := flag.String(
 		"admin-token",
@@ -65,6 +69,21 @@ func main() {
 	if err != nil {
 		log.Error("load spec", "err", err)
 		os.Exit(1)
+	}
+
+	if *checkConfig {
+		for _, binding := range spec.RTC {
+			if !spec.RTCService.Enabled || !binding.Enabled {
+				continue
+			}
+			for _, name := range []string{binding.KeyFile, binding.PasswordFile} {
+				if _, err := rtc.ReadSecret(name); err != nil {
+					log.Error("RTC secret validation failed")
+					os.Exit(1)
+				}
+			}
+		}
+		return
 	}
 
 	strat, err := mimic.New(spec.MimicPreset)
@@ -283,6 +302,22 @@ func main() {
 			keys, keyErr := subscriptionkey.Load(os.Getenv("ULTRA_SUBSCRIPTION_ENCRYPTION_KEY_FILE"))
 			if keyErr != nil {
 				log.Warn("subscription recovery and issuance unavailable: encryption key not configured")
+			}
+			if spec.RTCService.Enabled {
+				content, e := rtc.LoadContent(spec.RTCService.ContentFile)
+				rtcKeys, rtcKeyErr := subscriptionkey.Load(spec.RTCService.EncryptionKeyFile)
+				if e != nil || rtcKeyErr != nil {
+					log.Error("RTC private configuration unavailable")
+					os.Exit(1)
+				}
+				service := rtcingress.New(db.NewRTCRepo(database), rtcKeys, content, runner.DialRTC, spec.RTCService.Socket)
+				if e = service.Initialize(ctx, spec.RTCService.GatewayPort, spec.RTC); e != nil {
+					log.Error("RTC initialization failed")
+					os.Exit(1)
+				}
+				srv.RTC = service
+				wg.Add(1)
+				go func() { defer wg.Done(); service.Run(ctx) }()
 			}
 			subscriptions := db.NewSubscriptionRepo(database, keys)
 			srv.Subscriptions = subscriptions

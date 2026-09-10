@@ -18,6 +18,9 @@ import (
 )
 
 func applyPlanN(p *installplan.InstallPlan, format string) {
+	if p.RTC != nil {
+		exitOnErr("apply", fmt.Errorf("explicit legacy rtc bindings are no longer accepted; use rtc_service and the cabinet"))
+	}
 	renderOpts := installplan.RenderOptions{}
 	if p.Bridge.ReuseSpec {
 		emitInstallEvent(format, installplan.EventStep, "", "loading existing bridge state for reuse", "bridge")
@@ -138,6 +141,7 @@ func applyPlanN(p *installplan.InstallPlan, format string) {
 	bootstrapEntries := buildBootstrapEntries(plans, nil, outcomes)
 	bootstrapJSON, err := json.MarshalIndent(bootstrapEntries, "", "  ")
 	exitOnErr("bootstrap", err)
+	exitOnErr("RTC service prepare", prepareRTCService(p))
 	deployBridgeArtifacts(p, ds, relayBin, systemdLocal, bootstrapJSON, format)
 	if p.Bot.Enabled {
 		deployBotPlan(p, format)

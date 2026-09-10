@@ -147,10 +147,10 @@ DB-интеграция дополнительно проверяет конку
 успех административного запроса не доказывает изоляцию владельцев.
 
 
-Bridge закрепляет bootstrap-адреса имени Yandex DoH в `dns.hosts`, сохраняя проверку
-TLS по имени. Без этого правило `domain:yandex.net` направляет разрешение имени
+Bridge закрепляет bootstrap-адреса регионального DoH в `dns.hosts`, сохраняя проверку
+TLS по имени. Без этого региональное DNS-правило направляет разрешение имени
 резолвера в него самого и Xray пишет `tries to resolve itself`. При изменении адресов
-сверяй [официальный каталог Yandex DNS](https://dns.yandex.ru/) и проверяй
+сверяй текущую [конфигурацию DNS](../internal/config/xray_dns.go) со справкой провайдера и проверяй
 [bootstrap-тест](../internal/config/xray_dns_test.go); не заменяй это незаметным
 fallback пользовательских запросов на системный DNS.
 
@@ -162,3 +162,31 @@ fallback пользовательских запросов на системны
 Этот upstream требует Go 1.27. Ultra пока сохраняет закреплённую зависимость и
 описанные выше ограничения: прохождение изолированного теста следующей версии не
 доказывает совместимость её транспортов и listener-обёртки со всем приложением.
+
+## Проверки RTC
+
+RTC требует тестов `internal/rtc`, `internal/config`, `internal/proxy`, `internal/adminapi`,
+`internal/bot`, `internal/install`, `internal/installplan`, `internal/rtcingress`,
+`internal/rtcsupervisor` и сборки relay/install/bot/supervisor.
+Тест установщика выполняет файловые операции в временном каталоге с подменённым systemctl;
+это не проверка Linux systemd. [Сборочный скрипт olcRTC](../tools/build-olcrtc.sh) запускает
+[негативный upstream-тест](../testdata/olcrtc/ultra_failclosed_test.go) на закреплённом commit.
+Файлы `testdata` не входят в `go test ./...`. Проверки Android/SFU выполняются отдельно
+по [инструкции](rtc.md); локальный успех не доказывает работу при белых списках.
+
+При первой установке `systemctl list-unit-files` с шаблоном отсутствующей RTC-службы
+возвращает код 1 и пустой вывод. Установщик запрашивает все service units, затем
+фильтрует только RTC-имена, чтобы пустой список не прерывал первое применение и
+чужие службы не попадали под отключение. См. [применение модуля](../cmd/ultra-install/rtc_service.go).
+
+WebRTC определяет интерфейсы Linux через route netlink. В RTC-unit требуется
+`AF_NETLINK` в `RestrictAddressFamilies`; без него соединение не устанавливается
+с ошибкой `address family not supported`, хотя обычный TCP-доступ bridge работает.
+Это не требует выдачи процессу `CAP_NET_ADMIN`. Проверяй реальную передачу через
+systemd-службу: запуск того же бинарника из shell не воспроизводит её ограничения.
+
+RTC вызывает `core.Dial` с доверенным `session.Inbound`: задавай `Source.Address`
+и уровень политики 1 без нативных пользовательских счётчиков. Политика online на
+уровне 0 разыменовывает адрес источника; пустой адрес приводит к panic.
+Расход учитывает существующий route meter, входной справочный счётчик — gateway.
+См. [адаптер](../internal/proxy/rtc.go) и [тест маршрутов](../internal/rtcingress/routing_test.go).

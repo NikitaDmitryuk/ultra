@@ -37,6 +37,9 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	if r.URL.Query().Get("format") == "olcrtc" {
+		req.URL.RawQuery = "format=olcrtc"
+	}
 	req.Header.Set("Authorization", "Bearer "+b.adminAPIToken)
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {

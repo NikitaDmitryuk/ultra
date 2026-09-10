@@ -3,6 +3,8 @@ package installplan
 import (
 	"bufio"
 	"fmt"
+	"github.com/NikitaDmitryuk/ultra/internal/install"
+	"github.com/NikitaDmitryuk/ultra/internal/rtc"
 	"os"
 	"strconv"
 	"strings"
@@ -25,6 +27,7 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 	tunnelPort := intDefault(v, "TUNNEL_PORT", vlessPort)
 
 	p := &InstallPlan{
+		RTCService:    &install.RTCServiceDeployment{Enabled: boolValue(v, "RTC_SERVICE_ENABLED", false), ContentFile: v["RTC_CONTENT_FILE"], SupervisorBinary: v["RTC_SUPERVISOR_BINARY"], GatewayPort: intDefault(v, "RTC_GATEWAY_PORT", 12001)},
 		SchemaVersion: CurrentSchemaVersion,
 		SSH: SSHConfig{
 			User:              sshUser,
@@ -125,6 +128,9 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 			Port:     tunnelPort,
 			Priority: intDefault(v, "EXIT2_PRIORITY", 200),
 		})
+	}
+	if p.RTCService.Enabled {
+		p.RTCDeployment = &install.RTCDeployment{Binary: v["RTC_TRANSPORT_BINARY"], SHA256: v["RTC_TRANSPORT_SHA256"], SourceCommit: rtc.SourceCommit}
 	}
 	return p
 }

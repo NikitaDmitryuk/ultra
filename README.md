@@ -220,12 +220,12 @@ Host ultra-back
 **Маршрутизация на bridge** (при `split_routing: true`, `domainStrategy: IPIfNonMatch`):
 
 - `routing_mode: blocklist` (по умолчанию) — трафик из `geosite_exit_tags` / `geoip_exit_tags` / `domain_exit` на exit, остальное прямо.
-- `routing_mode: ru_direct` — русские домены (`.ru`, `.su`, `.рф`, VK, Яндекс и т.д.) напрямую, остальное на exit. Опционально `geosite_block_tags` → blackhole.
+- `routing_mode: ru_direct` — российские домены (`.ru`, `.su`, `.рф` и категории из geo-списков) напрямую, остальное на exit. Опционально `geosite_block_tags` → blackhole.
 
 **Параметры протокола:**
 
 - `anti_censor.warp_proxy: true` — на exit использовать Cloudflare WARP в режиме прокси; destination-сайты видят Cloudflare IP вместо IP датацентра.
-- `anti_censor.disable_doh: false` (по умолчанию) — DNS over HTTPS; bridge использует Yandex DoH для `.ru`-доменов и Cloudflare для остального.
+- `anti_censor.disable_doh: false` (по умолчанию) — DNS over HTTPS; bridge использует региональный DoH для `.ru`-доменов и Cloudflare для остального. Адреса резолверов заданы в [конфигурации DNS](internal/config/xray_dns.go).
 - Генератор использует `xPaddingBytes` (стандарт 100–1000), сохраняя совместимость старых профилей. Фрагментация через freedom/`dialerProxy` включается только явным `anti_censor.fragment.packets`. Ограничения и проверка — в [документации обхода цензуры](docs/censorship-resistance.md).
 - `/client` экспортирует обратно-совместимый основной профиль `fast_tcp_reality` (старый VLESS+REALITY+TCP+Vision URI) и настроенные резервные профили для Xray-compatible клиентов. Чтобы резервный XHTTP-профиль был доступен извне, задайте `PUBLIC_XHTTP_PORT` / `anti_censor.public_xhttp_port`; `make install` внесёт это в spec, а `ultra-relay` best-effort откроет локальный firewall на bridge. Старый `vless_port` при этом не меняется.
 - `anti_censor.profile`: `fast`, `balanced` (дефолт для новых fallback-настроек), `stealth`. Значение сохраняется для совместимости spec; само по себе не включает фрагментацию и не меняет стандартный padding или legacy TCP URI.
@@ -322,3 +322,10 @@ make relay-logs
 ## Лицензия
 
 См. [LICENSE](LICENSE).
+
+### Аварийный RTC-доступ
+
+Опциональная вкладка личного кабинета для очень медленного резервного TCP-доступа.
+По умолчанию весь модуль выключен. Включение, приватный конфиг, сборка и эксплуатация:
+[RTC](docs/rtc.md). Профили выдаются отдельно через `?format=olcrtc`; существующие
+маршруты и квоты сохраняются. Входная статистика показывается справочно.

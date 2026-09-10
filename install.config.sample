@@ -97,7 +97,7 @@ VERIFY_FAIL_LOG_LINES=400
 # WARP_PORT=40000   # порт SOCKS5 (по умолчанию 40000)
 #
 # DNS over HTTPS (включён по умолчанию).
-# Bridge использует Yandex DoH для .ru/.su и Cloudflare для остального.
+# Bridge использует региональный DoH для .ru/.su и Cloudflare для остального.
 # DOH_DISABLE=y   # раскомментируйте, чтобы использовать системный DNS
 
 # --- Тонкая настройка протокола (все опции имеют рабочие значения по умолчанию) ---
@@ -180,3 +180,12 @@ BOT_INGRESS_MODE=vultr
 BOT_INGRESS_IP=
 # ID Vultr VPS, который нельзя удалять до переноса HTTPS-входа
 BOT_INGRESS_INSTANCE_ID=
+
+# Optional emergency ingress module. Disabled installations need no RTC files.
+RTC_SERVICE_ENABLED=0
+# Private JSON guide, provider URL rules and readiness probe configuration.
+# RTC_CONTENT_FILE=/absolute/private/rtc-content.json
+# RTC_SUPERVISOR_BINARY=/absolute/build/ultra-rtc-supervisor-linux-amd64
+# RTC_TRANSPORT_BINARY=/absolute/build/olcrtc-linux-amd64
+# RTC_TRANSPORT_SHA256=REPLACE_WITH_VERIFIED_BUILD_DIGEST
+# RTC_GATEWAY_PORT=12001

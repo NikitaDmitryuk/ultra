@@ -22,6 +22,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/probe"
 	"github.com/NikitaDmitryuk/ultra/internal/proxy"
+	"github.com/NikitaDmitryuk/ultra/internal/rtcingress"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -40,6 +41,7 @@ type TrafficQuerier interface {
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
 type Server struct {
+	RTC               *rtcingress.Service
 	RouteStatus       func(string) auth.RouteApplication
 	ReplicationStatus func(context.Context) (any, error)
 	Cloud             *cloud.Service
@@ -100,6 +102,7 @@ func NewServer(
 		lim:          newVisitorLimiter(30, 60, 256),
 		tokenH:       sha256.Sum256([]byte(token)),
 	}
+	s.rtcRoutes()
 	if err := s.routes(); err != nil {
 		return nil, err
 	}

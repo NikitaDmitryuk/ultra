@@ -1,21 +1,29 @@
 package installplan
 
-import "time"
+import (
+	"github.com/NikitaDmitryuk/ultra/internal/install"
+	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/rtc"
+)
 
 const CurrentSchemaVersion = 1
 
 type InstallPlan struct {
-	SchemaVersion int             `json:"schema_version"`
-	SSH           SSHConfig       `json:"ssh"`
-	Bridge        BridgeConfig    `json:"bridge"`
-	Exits         []ExitNode      `json:"exits"`
-	Database      DatabaseConfig  `json:"database,omitempty"`
-	Bot           BotConfig       `json:"bot,omitempty"`
-	Secrets       SecretsConfig   `json:"secrets,omitempty"`
-	Features      FeatureConfig   `json:"features,omitempty"`
-	Verification  Verification    `json:"verification,omitempty"`
-	Artifacts     ArtifactConfig  `json:"artifacts,omitempty"`
-	Execution     ExecutionConfig `json:"execution,omitempty"`
+	RTCService    *install.RTCServiceDeployment `json:"rtc_service,omitempty"`
+	RTC           []rtc.Binding                 `json:"rtc,omitempty"`
+	RTCDeployment *install.RTCDeployment        `json:"rtc_deployment,omitempty"`
+	SchemaVersion int                           `json:"schema_version"`
+	SSH           SSHConfig                     `json:"ssh"`
+	Bridge        BridgeConfig                  `json:"bridge"`
+	Exits         []ExitNode                    `json:"exits"`
+	Database      DatabaseConfig                `json:"database,omitempty"`
+	Bot           BotConfig                     `json:"bot,omitempty"`
+	Secrets       SecretsConfig                 `json:"secrets,omitempty"`
+	Features      FeatureConfig                 `json:"features,omitempty"`
+	Verification  Verification                  `json:"verification,omitempty"`
+	Artifacts     ArtifactConfig                `json:"artifacts,omitempty"`
+	Execution     ExecutionConfig               `json:"execution,omitempty"`
 }
 
 type SSHConfig struct {

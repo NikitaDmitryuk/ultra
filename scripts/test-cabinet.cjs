@@ -130,3 +130,22 @@ test('subscription ingress cannot be deleted or replaced from server card', asyn
  assert.ok(!html.includes('data-action="delete"'));
  assert.ok(!html.includes('data-replace='));
 });
+
+test('RTC module absent makes no requests and shows no emergency page',async()=>{const p=page(true,{'/api/self':{registered:true,member:{uuid:'test-owner',active:true}},'/api/self/exits':{exits:[],profiles:[]}});await flush();assert.ok(!p.calls.some(c=>c.path.includes('/rtc')));assert.equal(p.el('#nav').hidden,true)});
+test('RTC enabled page uses private instructions and no persistent room storage',async()=>{const p=page(true,{'/api/self':{registered:true,features:{rtc:true},member:{uuid:'test-owner',active:true}},'/api/self/exits':{exits:[],profiles:[]},'/api/self/rtc/traffic':[], '/api/self/rtc':{state:'absent',enabled:false},'/api/self/rtc/guide':{warning:'Private warning',steps:['Private step'],links:[{label:'Meeting',url:'https://meet.example'}],import_template:'client://add?url={url}'}});await flush();await vm.runInContext('rtcPage()',p.context);assert.ok(p.el('#app').innerHTML.includes('Очень медленный аварийный доступ'));assert.ok(p.el('#app').innerHTML.includes('Private step'));assert.ok(!source.includes('localStorage'));assert.ok(!source.includes('sessionStorage'))});
+
+test('RTC import prepares an HTTPS handoff before the click and profile copy explains paste',async()=>{
+ const p=page(true,{'/api/self':{registered:true,features:{rtc:true},member:{uuid:'test-owner',active:true}},'/api/self/exits':{exits:[],profiles:[]},'/api/self/rtc/traffic':[], '/api/self/rtc':{state:'ready',enabled:true},'/api/self/rtc/guide':{warning:'Private warning',steps:[],links:[],import_template:'client://add?url={url}'},'/api/self/subscription':{url:'https://vpn.example/sub/'+'A'.repeat(43)},'/api/self/rtc/profile':{profile:'synthetic-profile'}});
+ await flush();await vm.runInContext('rtcPage()',p.context);
+ const count=p.calls.length;
+ await p.el('#rtc-import').onclick();
+ assert.equal(p.calls.length,count,'click must not wait for a network request');
+ const handoff=new URL(p.opened[0]);
+ assert.equal(handoff.origin,'https://vpn.example');assert.equal(handoff.pathname,'/rtc-import');assert.equal(handoff.search,'');
+ const deep=new URL(decodeURIComponent(handoff.hash.slice(1)));
+ assert.equal(deep.searchParams.get('url'),'https://vpn.example/sub/'+'A'.repeat(43)+'?format=olcrtc');
+ assert.ok(!p.el('#app').innerHTML.includes('rtc-copy-sub'));
+ assert.ok(p.el('#app').innerHTML.includes('импорт из буфера обмена'));
+ assert.ok(p.el('#rtc-summary').innerHTML.includes('Трафик белых списков'));
+ await p.el('#rtc-copy-profile').onclick();assert.deepEqual(p.copied,['synthetic-profile']);
+});

@@ -167,6 +167,10 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 	if p.Bridge.ReuseSpec {
 		applyBridgeOverlay(bridgeSpec, opts.ExistingBridge)
 	}
+	bridgeSpec.RTCService = p.RTCService.Spec()
+	if p.RTC != nil {
+		bridgeSpec.RTC = append(p.RTC[:0:0], p.RTC...)
+	}
 	bridgeSpec.AntiCensor = buildAntiCensor(p, false)
 	if p.Features.RoutingMode != "" {
 		bridgeSpec.RoutingMode = p.Features.RoutingMode
@@ -323,6 +327,7 @@ func applyBridgeOverlay(dst *config.Spec, src *config.Spec) {
 	if src == nil {
 		return
 	}
+	dst.RTC = append(src.RTC[:0:0], src.RTC...)
 	if g := strings.TrimSpace(src.GeoAssetsDir); g != "" {
 		dst.GeoAssetsDir = g
 	}

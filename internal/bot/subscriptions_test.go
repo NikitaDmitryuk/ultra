@@ -68,3 +68,42 @@ func TestHappImportPage(t *testing.T) {
 		t.Fatal("browser import must not depend on Telegram WebView")
 	}
 }
+
+func TestPublicRTCSubscriptionFormat(t *testing.T) {
+	token := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "format=olcrtc" {
+			t.Error("RTC format lost or arbitrary query forwarded")
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("olcrtc://test\n"))
+	}))
+	defer upstream.Close()
+	b := &Bot{adminAPIURL: upstream.URL, adminAPIToken: "secret"}
+	mux := http.NewServeMux()
+	b.registerMiniAppRoutes(mux)
+	r := httptest.NewRequest("GET", "/sub/"+token+"?format=olcrtc&ignored=secret", nil)
+	r.TLS = &tls.ConnectionState{}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != 200 || w.Body.String() != "olcrtc://test\n" || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal(w.Code)
+	}
+}
+
+func TestRTCImportPage(t *testing.T) {
+	b := &Bot{}
+	mux := http.NewServeMux()
+	b.registerMiniAppRoutes(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/rtc-import", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `id="launch-client"`) {
+		t.Fatal("import page unavailable", w.Code)
+	}
+	if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Fatal("import page leaks navigation state")
+	}
+	if strings.Contains(w.Body.String(), "telegram-web-app.js") {
+		t.Fatal("browser import must not depend on Telegram WebView")
+	}
+}

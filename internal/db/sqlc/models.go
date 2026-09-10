@@ -137,6 +137,33 @@ type Notification struct {
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
 }
 
+type RtcAccess struct {
+	UserUuid        pgtype.UUID        `json:"user_uuid"`
+	Generation      pgtype.UUID        `json:"generation"`
+	RoomHash        []byte             `json:"room_hash"`
+	EncryptedConfig []byte             `json:"encrypted_config"`
+	KeyVersion      string             `json:"key_version"`
+	Enabled         bool               `json:"enabled"`
+	State           string             `json:"state"`
+	ErrorCode       string             `json:"error_code"`
+	LastCheckedAt   pgtype.Timestamptz `json:"last_checked_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type RtcIngressHourly struct {
+	UserUuid      pgtype.UUID        `json:"user_uuid"`
+	Hour          pgtype.Timestamptz `json:"hour"`
+	Epoch         pgtype.UUID        `json:"epoch"`
+	UplinkBytes   int64              `json:"uplink_bytes"`
+	DownlinkBytes int64              `json:"downlink_bytes"`
+}
+
+type RtcKeyMaterial struct {
+	Singleton    bool   `json:"singleton"`
+	EncryptedKey []byte `json:"encrypted_key"`
+	KeyVersion   string `json:"key_version"`
+}
+
 type SubscriptionToken struct {
 	UserUuid       pgtype.UUID `json:"user_uuid"`
 	TokenHash      []byte      `json:"token_hash"`
