@@ -11,6 +11,7 @@ ultra — Go-проект: relay с ролями bridge/exit, SSH-установ
 - [Разработка](docs/development.md): проверки, SQL, миграции, встроенные ресурсы.
 - [ADR](docs/adr/README.md): значимые решения, их статус и причины.
 - [README](README.md): сборка, установка, эксплуатация и API.
+- [Перенос bridge](docs/bridge-migration.md): подготовка, cutover и rollback между серверами.
 - [Мобильная установка](deploy/MOBILE_INSTALL.md) и [TLS](deploy/TLS.md).
 
 ## Рабочий цикл
