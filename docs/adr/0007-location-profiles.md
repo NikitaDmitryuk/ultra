@@ -2,7 +2,7 @@
 
 ## Статус
 
-accepted
+superseded
 
 ## Дата
 
@@ -27,3 +27,7 @@ accepted
 ## Источники
 
 [Экспорт](../../internal/config/xray_client.go), [репозиторий](../../internal/db/repo_routes.go), [тесты](../../internal/db/repo_cloud_test.go).
+
+## Заменено
+
+[ADR 0013](0013-auto-only-exit-failover.md) закрепляет локации и оставляет failover только Auto.

@@ -66,3 +66,9 @@ XHTTP Ultra владеет внешними TCP-соединениями и пе
 - [Жизненный цикл XHTTP](../../internal/proxy/xhttp_listener.go)
 - [Транспортная проверка](../../internal/config/profile_integration_test.go)
 - [Правила начисления Vultr](https://docs.vultr.com/support/platform/billing/how-are-bandwidth-caps-calculated)
+
+## Уточнено
+
+[ADR 0013](0013-auto-only-exit-failover.md) заменяет политику выбора резервного выхода:
+Auto выбирает разрешённый исправный exit по приоритету, фиксированная локация при квоте
+блокируется. Учёт, расчёт лимитов и подтверждение применения остаются по этому ADR.

@@ -100,8 +100,9 @@ test('account balance stays independent of server operations',async()=>{
 test('ready server separates operation, tunnel health and billing',async()=>{
  const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
  p.context.o={state:'ready',phase:'ready',charged:true,exit_id:'atl'};
- p.context.capacity={nodes:[{id:'atl',ready:true}]};
- assert.equal(vm.runInContext('serverStateLabel(o,capacity)',p.context),'Работает');
+ p.context.capacity={nodes:[{id:'atl',name:'Атланта',enabled:true,ready:true}],budgets:[]};
+ assert.equal(vm.runInContext('serverStateLabel(o,capacity)',p.context),'Серверная проверка HTTPS прошла');
+ assert.match(vm.runInContext('serverCapacityHTML(capacity)',p.context),/Серверная проверка HTTPS прошла/);
  assert.equal(vm.runInContext('serverBillingLabel(o)',p.context),'Оплата продолжается');
  p.context.capacity.nodes[0].ready=false;
  assert.match(vm.runInContext('serverStateLabel(o,capacity)',p.context),/туннель недоступен/);
@@ -111,15 +112,17 @@ test('ready server separates operation, tunnel health and billing',async()=>{
  assert.match(vm.runInContext("applicationLabel({state:'error'})",p.context),/Ошибка применения/);
 });
 
-test('changing automatic route needs neither subscription refresh nor new credentials',async()=>{
- const route={selected_exit_id:'atl',effective_exit_id:'ams',application:{state:'error'},route_reason:'monthly_user_limit_exhausted',exits:[{id:'ams',display_name:'Амстердам',reachable:true},{id:'atl',display_name:'Атланта',reachable:true}],profiles:[]};
- const responses={'/api/self':{registered:true,member:{active:true}},'/api/self/exits':route,'/api/self/exit-selection':{application:{state:'applied'}}};
- const p=page(true,responses);await flush();
- assert.match(p.el('#locations').innerHTML,/Ошибка применения/);
- assert.match(p.el('#locations').innerHTML,/Подтверждённый выход: <strong>Амстердам/);
- p.el('#preferred').value='ams';await p.el('#save-location').onclick();
- assert.equal(p.calls.filter(c=>c.path==='/api/self/exit-selection').length,1);
- assert.ok(!p.calls.some(c=>c.path.includes('subscription')));
+test('automatic route displays confirmed exit without a country selector',async()=>{
+ const route={selected_exit_id:'atl',effective_exit_id:'ams',application:{state:'error'},route_reason:'monthly_user_limit_exhausted',exits:[{id:'ams',display_name:'Амстердам',reachable:true},{id:'atl',display_name:'Атланта',reachable:true}],profiles:[{name:'Атланта',effective_exit_id:'atl'}]};
+ const p=page(true,{'/api/self':{registered:true,member:{active:true}},'/api/self/exits':route});await flush();
+ const html=p.el('#locations').innerHTML;
+ assert.match(html,/Ошибка применения/);
+ assert.match(html,/Подтверждённый выход: <strong>Амстердам/);
+ assert.match(html,/Атланта → Атланта/);
+ assert.match(html,/не переключается на другую страну/);
+ assert.ok(!html.includes('id="preferred"'));
+ assert.ok(!html.includes('id="save-location"'));
+ assert.ok(!p.calls.some(c=>c.path.includes('exit-selection')||c.path.includes('subscription')));
 });
 
 test('subscription ingress cannot be deleted or replaced from server card', async()=>{

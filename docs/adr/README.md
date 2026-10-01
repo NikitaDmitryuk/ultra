@@ -14,7 +14,7 @@ ADR сохраняет одно значимое решение и его обо
 | [0004 — Резерв по месту отказа](0004-reserve-topology.md) | accepted |
 | [0005 — Закрытый допуск и восстановимая подписка](0005-member-access.md) | accepted |
 | [0006 — Сохраняемые операции Vultr](0006-cloud-operations.md) | accepted |
-| [0007 — Учётные данные локаций одного доступа](0007-location-profiles.md) | accepted |
+| [0007 — Учётные данные локаций одного доступа](0007-location-profiles.md) | superseded |
 | [0008 — Асинхронные копии БД и ручное восстановление](0008-database-recovery.md) | accepted |
 
 ## Когда нужен ADR
@@ -49,3 +49,5 @@ ADR сохраняет одно значимое решение и его обо
 - [0011 — Отдельный HTTPS-вход подписок](0011-subscription-ingress.md)
 
 - [0012 — HTTPS-вход на постоянном узле](0012-permanent-subscription-ingress.md) — accepted
+
+- [0013 — Failover только автоматического профиля](0013-auto-only-exit-failover.md) — accepted

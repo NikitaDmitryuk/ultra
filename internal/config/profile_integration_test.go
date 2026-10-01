@@ -67,6 +67,17 @@ func testCertificate(t *testing.T) (string, string) {
 	}
 	return certFile, keyFile
 }
+
+// Xray 26.9.30 blocks private destinations by default for VLESS. Only these local
+// fixtures permit loopback; production configs keep the upstream protection.
+func localFreedomSettings(redirect string) map[string]any {
+	settings := map[string]any{"finalRules": []any{map[string]any{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}
+	if redirect != "" {
+		settings["redirect"] = redirect
+	}
+	return settings
+}
+
 func TestPublishedProfilesLocalTransfer(t *testing.T) {
 	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/stream" {
@@ -121,7 +132,7 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 	}
 	// Exercise the public transport independently of the separately tested exit selector.
 	server["inbounds"] = server["inbounds"].([]any)[:3]
-	server["outbounds"] = []any{map[string]any{"protocol": "freedom", "tag": "egress"}}
+	server["outbounds"] = []any{map[string]any{"protocol": "freedom", "tag": "egress", "settings": localFreedomSettings("")}}
 	delete(server, "routing")
 	delete(server, "dns")
 	data, _ = json.Marshal(server)
@@ -195,7 +206,7 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 				if _, e = io.ReadFull(stream.Body, make([]byte, 1024)); e != nil {
 					return e
 				}
-				server["outbounds"] = []any{map[string]any{"protocol": "freedom", "tag": "egress", "settings": map[string]any{"redirect": alternate.Listener.Addr().String()}}}
+				server["outbounds"] = []any{map[string]any{"protocol": "freedom", "tag": "egress", "settings": localFreedomSettings(alternate.Listener.Addr().String())}}
 				next, _ := json.Marshal(server)
 				if e = relay.Reload(next); e != nil {
 					return e

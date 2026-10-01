@@ -5,8 +5,8 @@ INSTALL_BINARY=ultra-install
 BOT_BINARY=ultra-bot
 
 # Pin tool versions (align with reproducible CI-style runs)
-GOIMPORTS_PKG=golang.org/x/tools/cmd/goimports@v0.30.0
-GOLANGCI_LINT_VERSION=v2.10.1
+GOIMPORTS_PKG=golang.org/x/tools/cmd/goimports@v0.50.0
+GOLANGCI_LINT_VERSION=v2.14.0
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BINARY) ./cmd/ultra-relay
@@ -152,8 +152,8 @@ build-client:
 build-bench:
 	go build -o ultra-bench ./cmd/ultra-bench
 
-# Pinned Xray Vision uses unsafe field offsets; keep race instrumentation, disable
-# checkptr only for its VLESS package (Go 1.26), not for ultra.
+# Vision still requires the existing VLESS-only checkptr workaround on Go 1.27.
+# Race instrumentation and all transport tests remain enabled.
 .PHONY: test-race
 
 .PHONY: test-ui
@@ -165,9 +165,4 @@ test-ui:
 	node --test scripts/test-happ-import.cjs scripts/test-cabinet.cjs scripts/test-miniapp-preview.cjs
 
 test-race:
-	go test -race -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' -skip 'TestPublishedProfilesLocalTransfer/fallback_xhttp' ./...
-
-# Known upstream XHTTP races: diagnostic only, never report this as a passing full race suite.
-.PHONY: test-race-xray
-test-race-xray:
-	go test -race -tags=xray_race_diagnostics -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' -run 'TestXHTTPReaderConcurrentPublicationAndClose|TestPublishedProfilesLocalTransfer' ./internal/proxy ./internal/config
+	go test -race -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' ./...

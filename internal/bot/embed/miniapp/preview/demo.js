@@ -24,7 +24,7 @@ window.fetch=async (path,options={})=>{
  else if(path==='/api/members/traffic')value={...traffic,limits:[]};
  else if(path==='/api/self/traffic'||/^\/api\/members\/\d+\/traffic$/.test(path))value=traffic;
  else if(path==='/api/self/subscription')value={url:'https://example.invalid/demo-subscription',import_url:'https://example.invalid/demo-import'};
- else if(path==='/api/self/exits')value={application:{state:'applied'},exits,selected_exit_id:preferred,effective_exit_id:preferred||'ams',profiles:exits.map(e=>({name:e.display_name,effective_exit_id:e.id}))};
+ else if(path==='/api/self/exits')value={application:{state:'applied'},exits,selected_exit_id:null,effective_exit_id:'ams',profiles:exits.map(e=>({name:e.display_name,effective_exit_id:e.id}))};
  else if(path==='/api/self/exit-selection'){preferred=body.exit_id;value={};}
  else if(path==='/api/members')value=people;
  else if(/^\/api\/members\/\d+\/action$/.test(path)){const person=people.find(p=>String(p.telegram_id)===path.split('/')[3]);if(person){if(body.action==='reset')person.uuid+='-reset';else person.active=body.action==='enable';person.pending=false;value=person}else status=404;}
@@ -33,6 +33,7 @@ window.fetch=async (path,options={})=>{
  else if(path.includes('/api/enrollment/invites/')&&path.endsWith('/cancel')){const i=invites.find(i=>String(i.id)===path.split('/')[4]);if(i)i.cancelled_at=now;value={};}
  else if(path==='/api/enrollment/picker'){alert('В рабочем боте здесь появится штатный выбор Telegram-аккаунта. Макет не отправляет сообщения.');value={};}
  else if(path==='/api/cloud/account')value={balance:12.50,pending_charges:1.25,observed_at:now};
+ else if(path==='/api/cloud/quotas')value={nodes:exits.map(e=>({id:e.id,name:e.display_name,enabled:true,ready:e.reachable,primary:e.id==='ams'})),budgets:[]};
  else if(path==='/api/cloud/operations')value=ops;
  else if(path==='/api/cloud/replicas')value=[{id:'ams',name:'Амстердам',state:'streaming',free_bytes:22*1073741824,required_bytes:5*1073741824},{id:'fra',name:'Франкфурт',state:'syncing',free_bytes:18*1073741824,required_bytes:5*1073741824}];
  else if(path==='/api/cloud/catalog')value={regions:[region,{id:'ams',city:'Амстердам',country:'NL'},{id:'waw',city:'Варшава',country:'PL'}],plans:[plan]};

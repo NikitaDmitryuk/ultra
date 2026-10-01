@@ -31,7 +31,7 @@ func (r *RouteApplications) Begin(users []User) {
 	next := make(map[string]routeIntent, len(users))
 	for _, u := range users {
 		intent := routeIntent{Exit: u.EffectiveExitID}
-		if u.PreferredExitID != nil {
+		if u.FixedExit && u.PreferredExitID != nil {
 			intent.Preferred = *u.PreferredExitID
 		}
 		next[u.UUID] = intent

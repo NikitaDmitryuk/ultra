@@ -41,7 +41,7 @@ func TestLocationProfilesPreserveLegacyAndDistinctCredentials(t *testing.T) {
 		t.Fatal("unapplied location published")
 	}
 	expanded := auth.ExpandRoutes([]auth.User{user})
-	if len(expanded) != 2 || expanded[1].PreferredExitID == nil || *expanded[1].PreferredExitID != exit {
+	if len(expanded) != 2 || !expanded[1].FixedExit || expanded[1].PreferredExitID == nil || *expanded[1].PreferredExitID != exit {
 		t.Fatal("explicit route not pinned")
 	}
 	if user.PreferredExitID != nil {

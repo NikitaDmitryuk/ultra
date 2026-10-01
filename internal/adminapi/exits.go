@@ -211,9 +211,21 @@ func (s *Server) validateClientUser(w http.ResponseWriter, uuid string) (u auth.
 
 func (s *Server) clientExitSelection(u auth.User) (selectedID *string, effectiveID string, health map[string]exits.Health, nodes []exits.Node) {
 	if s.exits == nil {
-		return u.PreferredExitID, "", nil, nil
+		return nil, "", nil, nil
 	}
 	nodes = s.exits.ListEnabled()
+	if s.selector != nil {
+		health = s.selector.HealthSnapshot()
+		effectiveID = s.selector.ActiveID()
+	}
+	if effectiveID == "" && len(health) == 0 {
+		candidate, _ := exits.SelectActive(nodes, nil)
+		effectiveID = candidate.ID
+	}
+	effectiveID = u.SelectExit(nodes, effectiveID, health)
+	if s.RouteStatus != nil {
+		effectiveID = s.RouteStatus(u.UUID).EffectiveExit
+	}
 	hidden := map[string]bool{}
 	for _, route := range u.Routes {
 		if route.ExitID != nil && !route.Published {
@@ -227,19 +239,10 @@ func (s *Server) clientExitSelection(u auth.User) (selectedID *string, effective
 		}
 	}
 	nodes = visible
-	if s.selector != nil {
-		health = s.selector.HealthSnapshot()
-		effectiveID = s.selector.ActiveID()
+	if u.FixedExit {
+		selectedID = u.PreferredExitID
 	}
-	if effectiveID == "" && len(health) == 0 {
-		candidate, _ := exits.SelectActive(nodes, nil)
-		effectiveID = candidate.ID
-	}
-	effectiveID = u.SelectExit(nodes, effectiveID, health)
-	if s.RouteStatus != nil {
-		effectiveID = s.RouteStatus(u.UUID).EffectiveExit
-	}
-	return u.PreferredExitID, effectiveID, health, nodes
+	return selectedID, effectiveID, health, nodes
 }
 
 func (s *Server) handleClientListExits(w http.ResponseWriter, r *http.Request) {
@@ -433,6 +436,8 @@ func (s *Server) profileRoutes(u auth.User) []map[string]any {
 		}
 		alias := u
 		alias.PreferredExitID = route.ExitID
+		alias.FixedExit = true
+		alias.Routes = nil
 		alias.UUID = route.UUID
 		_, effective, _, _ := s.clientExitSelection(alias)
 		out = append(out, map[string]any{"location_id": route.LocationID, "name": route.Name, "preferred_exit_id": route.ExitID, "effective_exit_id": effective})
@@ -452,7 +457,7 @@ func (s *Server) routeReason(u auth.User) string {
 	if s.selector != nil {
 		desired = s.selector.ActiveID()
 	}
-	if u.PreferredExitID != nil {
+	if u.FixedExit && u.PreferredExitID != nil {
 		desired = *u.PreferredExitID
 	}
 	_, effective, _, _ := s.clientExitSelection(u)
