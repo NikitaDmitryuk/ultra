@@ -33,6 +33,7 @@ window.fetch=async (path,options={})=>{
  else if(path.includes('/api/enrollment/invites/')&&path.endsWith('/cancel')){const i=invites.find(i=>String(i.id)===path.split('/')[4]);if(i)i.cancelled_at=now;value={};}
  else if(path==='/api/enrollment/picker'){alert('В рабочем боте здесь появится штатный выбор Telegram-аккаунта. Макет не отправляет сообщения.');value={};}
  else if(path==='/api/cloud/account')value={balance:12.50,pending_charges:1.25,observed_at:now};
+ else if(path==='/api/cloud/quotas')value={nodes:exits.map(e=>({id:e.id,name:e.display_name,enabled:true,ready:e.reachable,primary:e.id==='ams'})),budgets:[]};
  else if(path==='/api/cloud/operations')value=ops;
  else if(path==='/api/cloud/replicas')value=[{id:'ams',name:'Амстердам',state:'streaming',free_bytes:22*1073741824,required_bytes:5*1073741824},{id:'fra',name:'Франкфурт',state:'syncing',free_bytes:18*1073741824,required_bytes:5*1073741824}];
  else if(path==='/api/cloud/catalog')value={regions:[region,{id:'ams',city:'Амстердам',country:'NL'},{id:'waw',city:'Варшава',country:'PL'}],plans:[plan]};

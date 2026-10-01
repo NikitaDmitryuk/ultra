@@ -100,8 +100,9 @@ test('account balance stays independent of server operations',async()=>{
 test('ready server separates operation, tunnel health and billing',async()=>{
  const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
  p.context.o={state:'ready',phase:'ready',charged:true,exit_id:'atl'};
- p.context.capacity={nodes:[{id:'atl',ready:true}]};
- assert.equal(vm.runInContext('serverStateLabel(o,capacity)',p.context),'Работает');
+ p.context.capacity={nodes:[{id:'atl',name:'Атланта',enabled:true,ready:true}],budgets:[]};
+ assert.equal(vm.runInContext('serverStateLabel(o,capacity)',p.context),'Серверная проверка HTTPS прошла');
+ assert.match(vm.runInContext('serverCapacityHTML(capacity)',p.context),/Серверная проверка HTTPS прошла/);
  assert.equal(vm.runInContext('serverBillingLabel(o)',p.context),'Оплата продолжается');
  p.context.capacity.nodes[0].ready=false;
  assert.match(vm.runInContext('serverStateLabel(o,capacity)',p.context),/туннель недоступен/);

@@ -886,7 +886,7 @@ function applyHealthUI(h) {
       const down = allExits.filter(e => !e.reachable && !e.Reachable);
       if (down.length) parts.push(`Standby down: ${down.length}`);
     }
-    overviewSummary.textContent = parts.length ? parts.join(' · ') : 'Всё ок';
+    overviewSummary.textContent = parts.length ? parts.join(' · ') : 'Серверные проверки прошли · подключение устройства проверьте в Happ';
   }
 
   setDot(document.getElementById('diag-bridge-dot'), bridgeInternetOk);
