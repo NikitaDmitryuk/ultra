@@ -28,8 +28,10 @@ type User struct {
 	Kind                 string            `json:"kind"`
 	IsActive             bool              `json:"is_active"`
 	DisabledAt           *time.Time        `json:"disabled_at,omitempty"`
-	// PreferredExitID is nil for Auto location selection.
+	// PreferredExitID retains the legacy account preference; only fixed credentials use it.
 	PreferredExitID *string `json:"preferred_exit_id,omitempty"`
+	// FixedExit marks a location credential, including an unpublished or deleted location.
+	FixedExit bool `json:"-"`
 	// EffectiveExitID is computed at config-build time and is not persisted.
 	EffectiveExitID string `json:"-"`
 	// SOCKS5 client credentials (kind=socks5); never exposed in list JSON — use /client.
@@ -68,6 +70,7 @@ func ExpandRoutes(users []User) []User {
 			alias.UUID = route.UUID
 			alias.Routes = nil
 			alias.PreferredExitID = route.ExitID
+			alias.FixedExit = true
 			out = append(out, alias)
 		}
 	}

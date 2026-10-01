@@ -24,7 +24,7 @@ func TestQuotaWithoutFallbackBlocksActualTransfer(t *testing.T) {
 	defer destination.Close()
 	pref := "atl"
 	user := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", PreferredExitID: &pref, FallbackExitID: "ams", ExcludedExitIDs: []string{"atl"}}
-	user.EffectiveExitID = user.SelectExit([]exits.Node{{ID: "atl"}, {ID: "ams"}}, "atl", map[string]exits.Health{"atl": {Eligible: true, PreferredReady: true}, "ams": {}})
+	user.EffectiveExitID = user.SelectExit([]exits.Node{{ID: "atl", Enabled: true}, {ID: "ams", Enabled: true}}, "atl", map[string]exits.Health{"atl": {Eligible: true, PreferredReady: true}, "ams": {}})
 	if user.EffectiveExitID != auth.BlockedExit {
 		t.Fatal("missing fallback did not block")
 	}

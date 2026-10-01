@@ -24,7 +24,7 @@ window.fetch=async (path,options={})=>{
  else if(path==='/api/members/traffic')value={...traffic,limits:[]};
  else if(path==='/api/self/traffic'||/^\/api\/members\/\d+\/traffic$/.test(path))value=traffic;
  else if(path==='/api/self/subscription')value={url:'https://example.invalid/demo-subscription',import_url:'https://example.invalid/demo-import'};
- else if(path==='/api/self/exits')value={application:{state:'applied'},exits,selected_exit_id:preferred,effective_exit_id:preferred||'ams',profiles:exits.map(e=>({name:e.display_name,effective_exit_id:e.id}))};
+ else if(path==='/api/self/exits')value={application:{state:'applied'},exits,selected_exit_id:null,effective_exit_id:'ams',profiles:exits.map(e=>({name:e.display_name,effective_exit_id:e.id}))};
  else if(path==='/api/self/exit-selection'){preferred=body.exit_id;value={};}
  else if(path==='/api/members')value=people;
  else if(/^\/api\/members\/\d+\/action$/.test(path)){const person=people.find(p=>String(p.telegram_id)===path.split('/')[3]);if(person){if(body.action==='reset')person.uuid+='-reset';else person.active=body.action==='enable';person.pending=false;value=person}else status=404;}
