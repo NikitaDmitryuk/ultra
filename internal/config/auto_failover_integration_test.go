@@ -68,7 +68,7 @@ func testAutoFailoverTransport(t *testing.T, transport TunnelTransport) {
 			t.Fatal(e)
 		}
 		// Separate local destinations identify which real exit carried the request.
-		cfg["outbounds"].([]any)[0].(map[string]any)["settings"] = map[string]any{"redirect": destination.Listener.Addr().String()}
+		cfg["outbounds"].([]any)[0].(map[string]any)["settings"] = localFreedomSettings(destination.Listener.Addr().String())
 		exitConfigs[i], e = json.Marshal(cfg)
 		if e != nil {
 			t.Fatal(e)
