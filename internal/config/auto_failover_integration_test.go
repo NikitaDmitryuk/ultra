@@ -25,6 +25,12 @@ import (
 
 // Keep client credentials and the client core unchanged across real bridge reloads.
 func TestAutoFailoverWithFixedLocationLocalTransfer(t *testing.T) {
+	for _, transport := range []TunnelTransport{TunnelTransportGRPC, TunnelTransportSplitHTTP} {
+		t.Run(string(transport), func(t *testing.T) { testAutoFailoverTransport(t, transport) })
+	}
+}
+
+func testAutoFailoverTransport(t *testing.T, transport TunnelTransport) {
 	cert, key := testCertificate(t)
 	raw, err := os.ReadFile(cert)
 	if err != nil {
@@ -36,7 +42,7 @@ func TestAutoFailoverWithFixedLocationLocalTransfer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := &Spec{Role: RoleBridge, ListenAddress: "127.0.0.1", PublicHost: "127.0.0.1", VLESSPort: freePort(t), DevMode: true, SplitRouting: BoolPtr(false), TunnelTLSProvision: TunnelTLSSelfSigned, SplithttpPath: "/failover", SplithttpHost: "example.com", SplitHTTPTLS: SplitHTTPTLSSpec{ServerName: "example.com"}}
+	spec := &Spec{Role: RoleBridge, ListenAddress: "127.0.0.1", PublicHost: "127.0.0.1", VLESSPort: freePort(t), DevMode: true, SplitRouting: BoolPtr(false), TunnelTransport: transport, TunnelTLSProvision: TunnelTLSSelfSigned, SplithttpPath: "/failover", SplithttpHost: "example.com", SplitHTTPTLS: SplitHTTPTLSSpec{ServerName: "example.com"}}
 	nodes := []exits.Node{
 		{ID: "primary", Address: "127.0.0.1", Port: freePort(t), TunnelUUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", PinnedPeerCertSHA256: hex.EncodeToString(pin[:]), Enabled: true, Priority: 100},
 		{ID: "reserve", Address: "127.0.0.1", Port: freePort(t), TunnelUUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ef", PinnedPeerCertSHA256: hex.EncodeToString(pin[:]), Enabled: true, Priority: 200},
