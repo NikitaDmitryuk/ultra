@@ -6,6 +6,7 @@
 # JSON: jq (предпочтительно) или python3.
 # Версию клиента ориентируйте по github.com/xtls/xray-core в go.mod репозитория.
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=install-config.sh
@@ -20,6 +21,8 @@ usage() {
 	echo "  $0 [-i …] [-u …] [-p …]   # без аргументов: корневой install.config, если есть" >&2
 	echo "Переменные: VERIFY_USER_UUID, VERIFY_SOCKS_PORT, VERIFY_IP_URL (обязательно — HTTPS URL для первого GET)" >&2
 	echo "  VERIFY_SPLIT_ROUTING=n|0 — не вызывать scripts/verify-split-routing.sh (по умолчанию вызывается)" >&2
+	echo "  VERIFY_EXPECTED_EXIT_IP — требовать plain-IP ответ и совпадение с выбранным exit" >&2
+	echo "  VERIFY_SSH_SUDO=yes — читать серверные настройки через passwordless sudo" >&2
 	echo "  VERIFY_PROBE_EXIT_URL / VERIFY_PROBE_EXIT_PLAIN_URL — зонды exit для split (см. verify-split-routing.sh)" >&2
 	echo "  VERIFY_SPEC_PATH — путь к spec.json на bridge (по умолчанию /etc/ultra-relay/spec.json; для routing_mode в verify-split)" >&2
 	echo "Пример: VERIFY_IP_URL=https://… $0 -c install.config" >&2
@@ -32,9 +35,9 @@ have_cmd() {
 
 json_users_first_uuid() {
 	if have_cmd jq; then
-		jq -r '.[0].uuid // empty' "$1"
+		jq -r '[.[] | select(.is_active != false and (.kind == "vless" or .kind == null or .kind == ""))][0].uuid // empty' "$1"
 	else
-		python3 -c 'import json,sys; a=json.load(open(sys.argv[1])); print(a[0]["uuid"] if a else "")' "$1"
+		python3 -c 'import json,sys; a=json.load(open(sys.argv[1])); print(next((u["uuid"] for u in a if u.get("is_active",True) and u.get("kind","vless") in ("vless","")), ""))' "$1"
 	fi
 }
 
@@ -158,41 +161,38 @@ if ! have_cmd jq && ! have_cmd python3; then
 	exit 1
 fi
 
+SSH_STRICT_HOST_KEY="${VERIFY_SSH_STRICT_HOST_KEY:-accept-new}"
+ssh_opts=(-o BatchMode=yes -o "StrictHostKeyChecking=${SSH_STRICT_HOST_KEY}")
+[[ ${#SSH_EXTRA[@]} -eq 0 ]] || ssh_opts+=(-o IdentitiesOnly=yes)
+if [[ -n "${VERIFY_SSH_KNOWN_HOSTS:-}" ]]; then
+	ssh_opts+=(-o "UserKnownHostsFile=${VERIFY_SSH_KNOWN_HOSTS}")
+fi
 # shellcheck disable=SC2206
-ssh_base=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${SSH_EXTRA[@]}" "${SSH_USER}@${BRIDGE}")
+ssh_base=(ssh "${ssh_opts[@]}" "${SSH_EXTRA[@]}" "${SSH_USER}@${BRIDGE}")
 
 remote_curl_api() {
-	local api_path=$1
-	local out
-	# shellcheck disable=SC2029
-	if ! out=$("${ssh_base[@]}" bash -s "$api_path" <<'EOS'
-set -euo pipefail
-path=${1:?}
-ENV=/etc/ultra-relay/environment
-if [[ ! -f "$ENV" ]]; then
-	echo "relay-check: нет файла $ENV" >&2
-	exit 3
-fi
-line=$(grep -E '^ULTRA_RELAY_ADMIN_TOKEN=' "$ENV" | head -1 || true)
-if [[ -z "$line" ]]; then
-	echo "relay-check: в $ENV нет ULTRA_RELAY_ADMIN_TOKEN (Admin API выключен)." >&2
-	exit 3
-fi
-tok=${line#ULTRA_RELAY_ADMIN_TOKEN=}
-if [[ -z "$tok" ]]; then
-	echo "relay-check: пустой ULTRA_RELAY_ADMIN_TOKEN." >&2
-	exit 3
-fi
-exec curl -sS -g -H "Authorization: Bearer ${tok}" "http://127.0.0.1:8443${path}"
-EOS
-	); then
-		return 1
+	local command
+	command="bash -s -- $(printf '%q' "$1")"
+	if [[ "${VERIFY_SSH_SUDO:-no}" == yes ]]; then
+		command="if [ \"\$(id -u)\" -eq 0 ]; then exec $command; else exec sudo -n $command; fi"
 	fi
-	printf '%s' "$out"
+	{
+		printf '%s\n' 'set -euo pipefail' "settings=\$(python3 - env <<'ULTRA_VERIFY_HELPER'"
+		cat "$SCRIPT_DIR/bridge-migration-state.py"
+		# Evaluated only by remote root/sudo shell.
+# shellcheck disable=SC2016
+		printf '\n%s\n' 'ULTRA_VERIFY_HELPER' ')' 'eval "$settings"'
+		cat <<'EOS'
+[[ -n "${ULTRA_RELAY_ADMIN_TOKEN:-}" ]] || exit 3
+exec curl -fsS -g -H "Authorization: Bearer $ULTRA_RELAY_ADMIN_TOKEN" "$ADMIN_URL${1:?}" 2>/dev/null
+EOS
+	} | "${ssh_base[@]}" "$command"
 }
 
 TMPDIR_VERIFY=""
 XRAY_PID=""
+# Invoked through trap.
+# shellcheck disable=SC2329
 cleanup() {
 	if [[ -n "${XRAY_PID:-}" ]] && kill -0 "$XRAY_PID" 2>/dev/null; then
 		kill "$XRAY_PID" 2>/dev/null || true
@@ -209,14 +209,10 @@ echo "=== relay-check: bridge=${BRIDGE} (Admin API по SSH; поле EXIT в к
 REMOTE_SPEC="${VERIFY_SPEC_PATH:-/etc/ultra-relay/spec.json}"
 ULTRA_ROUTING_MODE="blocklist"
 qspec=$(printf '%q' "$REMOTE_SPEC")
-if SPEC_REMOTE_OUT=$("${ssh_base[@]}" "test -r $qspec && cat $qspec" 2>/dev/null); then
-	if have_cmd jq; then
-		_r=$(printf '%s' "$SPEC_REMOTE_OUT" | jq -r '.routing_mode // empty')
-		[[ -n "${_r// }" ]] && ULTRA_ROUTING_MODE="$_r"
-	else
-		_r=$(printf '%s' "$SPEC_REMOTE_OUT" | python3 -c 'import json,sys; m=json.load(sys.stdin).get("routing_mode"); print(m.strip() if isinstance(m,str) and m.strip() else "")')
-		[[ -n "${_r// }" ]] && ULTRA_ROUTING_MODE="$_r"
-	fi
+spec_command="python3 -c $(printf '%q' 'import json,sys; print(json.load(open(sys.argv[1])).get("routing_mode","blocklist"))') $qspec"
+if [[ "${VERIFY_SSH_SUDO:-no}" == yes ]]; then spec_command="sudo -n $spec_command"; fi
+if mode=$("${ssh_base[@]}" "$spec_command" 2>/dev/null); then
+	[[ "$mode" == blocklist || "$mode" == ru_direct ]] && ULTRA_ROUTING_MODE="$mode"
 fi
 echo "relay-check: routing_mode=${ULTRA_ROUTING_MODE} (spec на bridge: ${REMOTE_SPEC})"
 export ULTRA_ROUTING_MODE
@@ -242,7 +238,7 @@ if [[ -z "$UUID" ]]; then
 	echo "relay-check: пустой users.json — создайте запись через POST /v1/users или админку." >&2
 	exit 1
 fi
-echo "relay-check: UUID=$UUID"
+[[ "$UUID" =~ ^[A-Za-z0-9-]+$ ]] || { echo "relay-check: invalid test user ID" >&2; exit 1; }
 
 CLIENT_JSON="${TMPDIR_VERIFY}/client.json.raw"
 if ! remote_curl_api "/v1/users/${UUID}/client" >"$CLIENT_JSON"; then
@@ -281,7 +277,7 @@ if port_open 127.0.0.1 "$SOCKS_PORT"; then
 fi
 
 echo "relay-check: локальный клиент (SOCKS 127.0.0.1:${SOCKS_PORT})…"
-xray run -c "$CFG" &
+xray run -c "$CFG" >"${TMPDIR_VERIFY}/client.log" 2>&1 &
 XRAY_PID=$!
 
 ready=0
@@ -304,18 +300,26 @@ fi
 
 echo "relay-check: GET ${IP_URL} через SOCKS…"
 PROBE_BODY=""
-if ! PROBE_BODY=$(curl --socks5-hostname "127.0.0.1:${SOCKS_PORT}" -sS --max-time 40 "$IP_URL"); then
+if ! PROBE_BODY=$(curl --socks5-hostname "127.0.0.1:${SOCKS_PORT}" -fsS --max-time 40 "$IP_URL" 2>/dev/null); then
 	echo "relay-check: curl через SOCKS завершился с ошибкой." >&2
 	exit 1
 fi
 
-PROBE_BODY="$(echo "$PROBE_BODY" | tr -d '\r\n' | head -c 256)"
-if [[ -z "$PROBE_BODY" ]]; then
-	echo "relay-check: пустой ответ от ${IP_URL}." >&2
-	exit 1
+if [[ -n "${VERIFY_EXPECTED_EXIT_IP:-}" ]]; then
+	PROBE_BODY="$PROBE_BODY" python3 - "$VERIFY_EXPECTED_EXIT_IP" <<'PY'
+import ipaddress,os,sys
+try:
+    actual=ipaddress.ip_address(os.environ['PROBE_BODY'].strip())
+    expected=ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    raise SystemExit('relay-check: probe must return a plain IP address')
+if actual != expected: raise SystemExit('relay-check: external IP does not match expected exit')
+PY
+	echo "relay-check: expected exit IP confirmed"
+else
+	[[ -n "$PROBE_BODY" ]] || { echo "relay-check: empty probe response" >&2; exit 1; }
+	echo "relay-check: successful HTTP response (exit IP not checked)"
 fi
-
-echo "probe_response=${PROBE_BODY}"
 
 skip_split=0
 case "${VERIFY_SPLIT_ROUTING:-y}" in
