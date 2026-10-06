@@ -119,6 +119,15 @@ gVisor сохраняет версию, требуемую Xray: HEAD `fcb40d1a9
 Форк `apernet/quic-go` также сохраняет коммит Xray: тег `v0.62.0` объявляет
 другой module path (`github.com/quic-go/quic-go`) и не является совместимым
 обновлением этого модуля. При следующем обновлении повторить сборку этих зависимостей.
+REALITY также сохраняет точную версию Xray (`8cdf7bf9c7f0`): коммит
+`3c98159dee38` заменил `Conn.rawInput` с `bytes.Buffer` на `*bytes.Buffer`,
+а Vision закреплённого Xray обращается к этому полю через unsafe как к значению.
+Отдельное обновление REALITY нарушает этот контракт и может повреждать TLS-поток
+или вызывать неконтролируемое выделение памяти. При обновлении сверяйте версию
+с `go.mod` выбранного Xray и запускайте `TestPublishedProfilesLocalTransfer`:
+он передаёт внутренний HTTPS TLS 1.3 и проверяет reload. Обычный HTTP не включает
+переход Vision в direct copy и не доказывает совместимость этой зависимости.
+
 
 Гонка `splithttp.WaitReadCloser` исправлена upstream в
 [PR #6694](https://github.com/XTLS/Xray-core/pull/6694).

@@ -79,7 +79,7 @@ func localFreedomSettings(redirect string) map[string]any {
 }
 
 func TestPublishedProfilesLocalTransfer(t *testing.T) {
-	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	destination := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/stream" {
 			for {
 				select {
@@ -95,7 +95,14 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(strings.Repeat("x", 65536)))
 	}))
-	alternate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(strings.Repeat("y", 65536))) }))
+	// Inner TLS 1.3 exercises Vision's switch to direct copy; plain HTTP does not.
+	destination.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
+	destination.StartTLS()
+	roots := x509.NewCertPool()
+	roots.AddCert(destination.Certificate())
+	alternate := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(strings.Repeat("y", 65536))) }))
+	alternate.TLS = destination.TLS.Clone()
+	alternate.StartTLS()
 	defer alternate.Close()
 	defer destination.Close()
 	camouflage := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
@@ -176,7 +183,7 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 					return e
 				}
 				defer func() { _ = client.Close() }()
-				tr := &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					d, e := xnet.ParseDestination(network + ":" + addr)
 					if e != nil {
 						return nil, e
