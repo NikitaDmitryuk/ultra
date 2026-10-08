@@ -239,7 +239,7 @@ printf 'OS_VERSION=%s\n' "${VERSION_ID:-unknown}"
 printf 'ARCH=%s\n' "$(uname -m)"
 printf 'MACHINE_ID=%s\n' "$(cat /etc/machine-id)"
 printf 'CPU_COUNT=%s\n' "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
-printf 'MEM_BYTES=%s\n' "$(awk '/MemTotal/ {printf "%.0f\\n", $2 * 1024}' /proc/meminfo)"
+printf 'MEM_BYTES=%s\n' "$(awk '/MemTotal/ {printf "%.0f\n", $2 * 1024}' /proc/meminfo)"
 python3 - "$spec" <<'PY'
 import json, sys, urllib.parse
 d=json.load(open(sys.argv[1], encoding='utf-8'))
@@ -331,7 +331,7 @@ printf 'OS_VERSION=%s\n' "${VERSION_ID:-unknown}"
 printf 'ARCH=%s\n' "$(uname -m)"
 printf 'MACHINE_ID=%s\n' "$(cat /etc/machine-id)"
 printf 'CPU_COUNT=%s\n' "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
-printf 'MEM_BYTES=%s\n' "$(awk '/MemTotal/ {printf "%.0f\\n", $2 * 1024}' /proc/meminfo)"
+printf 'MEM_BYTES=%s\n' "$(awk '/MemTotal/ {printf "%.0f\n", $2 * 1024}' /proc/meminfo)"
 python3 - "$3" <<'PY'
 import json,pathlib,shutil,sys
 locations=json.loads(sys.argv[1])+['/var/lib/postgresql','/var/tmp','/var/backups','/etc','/usr/local']
