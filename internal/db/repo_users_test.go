@@ -98,36 +98,35 @@ func TestUserRepoPurgeCascades(t *testing.T) {
 	}
 }
 
-func TestUserRepoAddSocks5User(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
+func TestUserRepoRejectsSOCKS5(t *testing.T) {
+	repo := NewUserRepo(nil)
+	if _, err := repo.Add(context.Background(), "socks5", "archived"); !errors.Is(err, auth.ErrInvalidUserKind) {
+		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func TestArchivedSOCKSCannotBeEnabled(t *testing.T) {
+	database := openTestDB(t)
 	ctx := context.Background()
-	database, err := Open(ctx, dsn)
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(database.Close)
-
 	repo := NewUserRepo(database)
-	repo.SetSOCKS5BridgePorts(10810, 10899, 1080)
-
-	u, err := repo.Add(ctx, "socks5", "socks-repo-test")
+	user, err := repo.Add(ctx, "vless", "archived-socks-test")
 	if err != nil {
-		t.Fatalf("Add socks5: %v", err)
+		t.Fatal(err)
 	}
-	if u.Kind != "socks5" || u.SocksUsername == "" || u.SocksPassword == "" || u.SocksPort == nil {
-		t.Fatalf("unexpected user: %#v", u)
+	t.Cleanup(func() { _, _ = database.Pool.Exec(context.Background(), "DELETE FROM users WHERE uuid=$1", user.UUID) })
+	_, err = database.Pool.Exec(ctx, "UPDATE users SET kind='socks5',is_active=false,socks_username='historical',socks_password='historical',socks_port=10895 WHERE uuid=$1", user.UUID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_, _ = database.Pool.Exec(context.Background(), `DELETE FROM users WHERE uuid=$1`, u.UUID)
-	})
-
-	if _, err := repo.RotateSocksPassword(ctx, u.UUID); err != nil {
-		t.Fatalf("RotateSocksPassword: %v", err)
+	if err = repo.Enable(ctx, user.UUID); !errors.Is(err, auth.ErrUnsupportedForKind) {
+		t.Fatalf("enable: %v", err)
 	}
-	if err := repo.Purge(ctx, u.UUID); err != nil {
-		t.Fatalf("Purge: %v", err)
+	affected, err := database.Queries.EnableUser(ctx, mustPGUUID(user.UUID))
+	if err != nil || affected != 0 {
+		t.Fatalf("SQL enable affected=%d err=%v", affected, err)
+	}
+	archived, ok, err := repo.Lookup(ctx, user.UUID)
+	if err != nil || !ok || archived.IsActive || archived.Kind != "socks5" {
+		t.Fatal("archived row changed")
 	}
 }

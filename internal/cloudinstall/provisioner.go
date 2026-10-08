@@ -263,7 +263,6 @@ func (p *Provisioner) Verify(ctx context.Context, op *cloud.Operation, instance 
 	node.Enabled = true
 	spec := *p.Bridge
 	spec.Stats = nil
-	spec.SOCKS5 = nil
 	strategy, e := mimic.New(spec.MimicPreset)
 	if e != nil {
 		return e

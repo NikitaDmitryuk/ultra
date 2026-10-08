@@ -244,7 +244,7 @@ Host ultra-back
 - `/client` экспортирует обратно-совместимый основной профиль `fast_tcp_reality` (старый VLESS+REALITY+TCP+Vision URI) и настроенные резервные профили для Xray-compatible клиентов. Чтобы резервный XHTTP-профиль был доступен извне, задайте `PUBLIC_XHTTP_PORT` / `anti_censor.public_xhttp_port`; `make install` внесёт это в spec, а `ultra-relay` best-effort откроет локальный firewall на bridge. Старый `vless_port` при этом не меняется.
 - `anti_censor.profile`: `fast`, `balanced` (дефолт для новых fallback-настроек), `stealth`. Значение сохраняется для совместимости spec; само по себе не включает фрагментацию и не меняет стандартный padding или legacy TCP URI.
 
-**SOCKS5 на bridge:** два режима — (1) общий inbound в spec (`socks5.enabled`, по умолчанию `127.0.0.1`); (2) **per-user** `kind=socks5` в Admin API / Mini App — отдельный порт из диапазона **10810–10899**, логин = UUID, пароль в карточке пользователя (`socks5://…` в UI). Оба используют тот же routing, что VLESS. Per-user порты слушают `0.0.0.0`; `ultra-relay` best-effort открывает их в локальном firewall. На мобильных сетях нестандартные порты (108xx, 8444) могут быть менее надёжны — для Telegram in-app proxy или Mini App обычно лучше `:443`.
+Публичный доступ выдаётся через VLESS-подписку для Happ. SOCKS используется только внутри инфраструктуры и локальных клиентов.
 
 **Тонкая настройка:** опциональный объект `xray_wire` в spec задаёт теги, шифрование, sniffing и другие параметры; пустые поля не переопределяют встроенные значения (см. `internal/config/xray_wire_spec.go`).
 

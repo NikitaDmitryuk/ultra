@@ -73,7 +73,7 @@ func BuildBridgeXRayJSON(
 		if u.UUID == "" {
 			continue
 		}
-		if u.Kind == "socks5" {
+		if u.Kind != "" && u.Kind != "vless" {
 			continue
 		}
 		email := u.UUID
@@ -225,25 +225,7 @@ func BuildBridgeXRayJSON(
 			"network": "tcp",
 		},
 	})
-	if s := spec.bridgeSOCKS5(); s != nil {
-		inbounds = append(inbounds, map[string]any{
-			"tag":      w.InboundSocksTag,
-			"listen":   socks5ListenAddress(spec, s),
-			"port":     s.Port,
-			"protocol": "socks",
-			"settings": map[string]any{
-				"auth": w.SocksAuth,
-				"accounts": []any{
-					map[string]any{"user": s.Username, "pass": s.Password},
-				},
-				"udp": socks5UDPEnabled(s),
-			},
-			"sniffing": map[string]any{
-				"enabled":      true,
-				"destOverride": w.SniffingDestOverride,
-			},
-		})
-	}
+
 	if p := spec.botTelegramProxy(); p != nil {
 		inbounds = append(inbounds, map[string]any{
 			"tag":      BotTelegramProxyInboundTag,
@@ -253,32 +235,6 @@ func BuildBridgeXRayJSON(
 			"settings": map[string]any{
 				"auth": "noauth",
 				"udp":  false,
-			},
-		})
-	}
-	for _, u := range users {
-		if u.Kind != "socks5" || u.SocksPort == nil || *u.SocksPort <= 0 {
-			continue
-		}
-		if u.SocksUsername == "" || u.SocksPassword == "" {
-			continue
-		}
-		tag := "socks-" + u.UUID
-		inbounds = append(inbounds, map[string]any{
-			"tag":      tag,
-			"listen":   "0.0.0.0",
-			"port":     *u.SocksPort,
-			"protocol": "socks",
-			"settings": map[string]any{
-				"auth": w.SocksAuth,
-				"accounts": []any{
-					map[string]any{"user": u.SocksUsername, "pass": u.SocksPassword},
-				},
-				"udp": true,
-			},
-			"sniffing": map[string]any{
-				"enabled":      true,
-				"destOverride": w.SniffingDestOverride,
 			},
 		})
 	}

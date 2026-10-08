@@ -605,14 +605,7 @@ func legacyMain() {
 			}
 			bridgeSpec.XrayWire = &cpy
 		}
-		if bridgeOverlay.SOCKS5 != nil {
-			cpy := *bridgeOverlay.SOCKS5
-			if bridgeOverlay.SOCKS5.UDP != nil {
-				u := *bridgeOverlay.SOCKS5.UDP
-				cpy.UDP = &u
-			}
-			bridgeSpec.SOCKS5 = &cpy
-		}
+
 		if bridgeOverlay.BotTelegramProxy != nil {
 			cpy := *bridgeOverlay.BotTelegramProxy
 			bridgeSpec.BotTelegramProxy = &cpy

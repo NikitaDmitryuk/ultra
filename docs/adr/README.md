@@ -53,3 +53,5 @@ ADR сохраняет одно значимое решение и его обо
 - [0013 — Failover только автоматического профиля](0013-auto-only-exit-failover.md) — accepted
 
 - [0014 — Подтверждённый тариф Vultr для обновления квот](0014-saved-vultr-plan-for-quotas.md) — accepted
+
+- [0016 — Публичный доступ только через VLESS](0016-public-vless-only.md) — accepted

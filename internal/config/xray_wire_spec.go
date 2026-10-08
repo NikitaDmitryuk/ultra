@@ -4,7 +4,6 @@ package config
 // Omitted fields use defaults from resolveXrayWire (see deploy/spec.bridge.example.json).
 type XrayWireSpec struct {
 	InboundVLESSTag      string   `json:"inbound_vless_tag,omitempty"`
-	InboundSocksTag      string   `json:"inbound_socks_tag,omitempty"`
 	ExitInboundTunnelTag string   `json:"exit_inbound_tunnel_tag,omitempty"`
 	ExitTunnelUserLabel  string   `json:"exit_tunnel_user_label,omitempty"`
 	OutboundExitTag      string   `json:"outbound_exit_tag,omitempty"`
@@ -21,14 +20,10 @@ type XrayWireSpec struct {
 	ClientSOCKSListen     string `json:"client_local_socks_listen,omitempty"`
 	ClientSOCKSPort       int    `json:"client_local_socks_port,omitempty"`
 	ClientFullLogLevel    string `json:"client_full_config_loglevel,omitempty"`
-
-	// SocksAuth is Xray socks inbound auth mode (typically "password").
-	SocksAuth string `json:"socks_auth,omitempty"`
 }
 
 type xrayWireResolved struct {
 	InboundVLESSTag      string
-	InboundSocksTag      string
 	ExitInboundTunnelTag string
 	ExitTunnelUserLabel  string
 	OutboundExitTag      string
@@ -45,13 +40,11 @@ type xrayWireResolved struct {
 	ClientSOCKSListen     string
 	ClientSOCKSPort       int
 	ClientFullLogLevel    string
-	SocksAuth             string
 }
 
 func resolveXrayWire(s *Spec) xrayWireResolved {
 	r := xrayWireResolved{
 		InboundVLESSTag:      "vless-in",
-		InboundSocksTag:      "socks-in",
 		ExitInboundTunnelTag: "vless-splithttp",
 		ExitTunnelUserLabel:  "tunnel",
 		OutboundExitTag:      "to-exit",
@@ -68,7 +61,6 @@ func resolveXrayWire(s *Spec) xrayWireResolved {
 		ClientSOCKSListen:     "127.0.0.1",
 		ClientSOCKSPort:       10808,
 		ClientFullLogLevel:    "warning",
-		SocksAuth:             "password",
 	}
 	if s == nil || s.XrayWire == nil {
 		return r
@@ -77,9 +69,7 @@ func resolveXrayWire(s *Spec) xrayWireResolved {
 	if w.InboundVLESSTag != "" {
 		r.InboundVLESSTag = w.InboundVLESSTag
 	}
-	if w.InboundSocksTag != "" {
-		r.InboundSocksTag = w.InboundSocksTag
-	}
+
 	if w.ExitInboundTunnelTag != "" {
 		r.ExitInboundTunnelTag = w.ExitInboundTunnelTag
 	}
@@ -125,13 +115,6 @@ func resolveXrayWire(s *Spec) xrayWireResolved {
 	if w.ClientFullLogLevel != "" {
 		r.ClientFullLogLevel = w.ClientFullLogLevel
 	}
-	if w.SocksAuth != "" {
-		r.SocksAuth = w.SocksAuth
-	}
-	return r
-}
 
-// LegacyBridgeSOCKSInboundTag returns the Xray inbound tag for the global spec.socks5 listener.
-func LegacyBridgeSOCKSInboundTag(spec *Spec) string {
-	return resolveXrayWire(spec).InboundSocksTag
+	return r
 }

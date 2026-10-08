@@ -352,14 +352,7 @@ func applyBridgeOverlay(dst *config.Spec, src *config.Spec) {
 		}
 		dst.XrayWire = &cpy
 	}
-	if src.SOCKS5 != nil {
-		cpy := *src.SOCKS5
-		if src.SOCKS5.UDP != nil {
-			u := *src.SOCKS5.UDP
-			cpy.UDP = &u
-		}
-		dst.SOCKS5 = &cpy
-	}
+
 	if src.BotTelegramProxy != nil {
 		cpy := *src.BotTelegramProxy
 		dst.BotTelegramProxy = &cpy
