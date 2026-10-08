@@ -2,8 +2,11 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 	"github.com/NikitaDmitryuk/ultra/internal/quota"
+	"github.com/google/uuid"
 	"testing"
 	"time"
 )
@@ -149,4 +152,74 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 		}
 	}
 
+}
+
+func TestBudgetPlanMatchesReadyInstanceAndExit(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	id := uuid.NewString()
+	if _, err := d.Pool.Exec(ctx, `INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid) VALUES($1,'plan-test','127.0.0.1',51001,$2)`, id, id); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.Pool.Exec(ctx, `DELETE FROM exit_nodes WHERE id=$1`, id) })
+	repo := NewQuotaRepo(d)
+	if err := repo.EnsureVultr(ctx, id, "plan-instance", 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name, state, instance, exit, plan string
+		want                              bool
+	}{
+		{"ready", "ready", "plan-instance", id, "correct", true},
+		{"other instance", "ready", "other", id, "wrong", false},
+		{"other exit", "ready", "plan-instance", uuid.NewString(), "wrong", false},
+		{"incomplete", "installing", "plan-instance", id, "wrong", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			opID := uuid.NewString()
+			op := cloud.Operation{ID: opID, State: tt.state, InstanceID: tt.instance, ExitID: tt.exit, Offer: cloud.Offer{Plan: cloud.Plan{ID: tt.plan, Bandwidth: 1024}}}
+			body, err := json.Marshal(op)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = d.Pool.Exec(ctx, `INSERT INTO cloud_offers(id,actor,expires_at,body) VALUES($1,1,NOW(),'{}')`, opID); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				_, _ = d.Pool.Exec(ctx, `DELETE FROM cloud_operations WHERE id=$1`, opID)
+				_, _ = d.Pool.Exec(ctx, `DELETE FROM cloud_offers WHERE id=$1`, opID)
+			}()
+			if _, err = d.Pool.Exec(ctx, `INSERT INTO cloud_operations(id,state,body) VALUES($1,$2,$3)`, opID, tt.state, body); err != nil {
+				t.Fatal(err)
+			}
+			budgets, err := repo.Budgets(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, b := range budgets {
+				if b.ID == id {
+					if tt.want {
+						if b.PlanID != "correct" || b.PlanBandwidth != 1024 {
+							t.Fatalf("saved plan missing: %+v", b)
+						}
+					} else if b.PlanID != "" || b.PlanBandwidth != 0 {
+						t.Fatalf("unrelated plan accepted: %+v", b)
+					}
+					encoded, err := json.Marshal(b)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var public map[string]any
+					if err = json.Unmarshal(encoded, &public); err != nil {
+						t.Fatal(err)
+					}
+					if len(public) != 10 {
+						t.Fatalf("public budget changed: %s", encoded)
+					}
+					return
+				}
+			}
+			t.Fatal("budget missing")
+		})
+	}
 }

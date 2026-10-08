@@ -34,7 +34,7 @@ type User struct {
 	FixedExit bool `json:"-"`
 	// EffectiveExitID is computed at config-build time and is not persisted.
 	EffectiveExitID string `json:"-"`
-	// SOCKS5 client credentials (kind=socks5); never exposed in list JSON — use /client.
+	// Historical SOCKS5 fields are retained for archived database rows only.
 	SocksUsername string `json:"-"`
 	SocksPassword string `json:"-"`
 	SocksPort     *int   `json:"-"`
@@ -54,11 +54,8 @@ var ErrEmptyUserName = errors.New("auth: empty user name")
 // ErrUnsupportedForKind is returned when an operation does not apply to the user's kind.
 var ErrUnsupportedForKind = errors.New("auth: unsupported for this user kind")
 
-// ErrInvalidUserKind is returned when kind is not vless or socks5.
+// ErrInvalidUserKind is returned when kind is not VLESS.
 var ErrInvalidUserKind = errors.New("auth: invalid user kind")
-
-// ErrSocksPortsExhausted is returned when no TCP port is free in the configured SOCKS5 client range.
-var ErrSocksPortsExhausted = errors.New("auth: no free port in socks5 port range")
 
 // ExpandRoutes is used only by configuration generation; aliases are not separate account records.
 func ExpandRoutes(users []User) []User {

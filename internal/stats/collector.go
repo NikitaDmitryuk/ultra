@@ -131,16 +131,11 @@ func (c *Collector) collect(at time.Time) {
 	samples := make([]db.TrafficSample, 0, len(users))
 
 	for _, u := range users {
-		if u.UUID == "" {
+		if u.UUID == "" || (u.Kind != "" && u.Kind != "vless") {
 			continue
 		}
 		upKey := "user>>>" + u.UUID + ">>>traffic>>>uplink"
 		downKey := "user>>>" + u.UUID + ">>>traffic>>>downlink"
-		if u.Kind == "socks5" {
-			tag := "socks-" + u.UUID
-			upKey = "inbound>>>" + tag + ">>>traffic>>>uplink"
-			downKey = "inbound>>>" + tag + ">>>traffic>>>downlink"
-		}
 
 		var upBytes, downBytes int64
 		if cnt := sm.GetCounter(upKey); cnt != nil {
@@ -158,7 +153,7 @@ func (c *Collector) collect(at time.Time) {
 				downBytes += cnt.Set(0)
 			}
 		}
-		if hasMeter && u.Kind != "socks5" {
+		if hasMeter {
 			credentials := []string{u.UUID}
 			for _, route := range u.Routes {
 				credentials = append(credentials, route.UUID)

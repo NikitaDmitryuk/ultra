@@ -53,12 +53,10 @@ type Server struct {
 	exits             *exits.Manager
 	selector          *exits.Selector
 	onExitChange      func()
-	// statPeek reads a cumulative Xray stats counter by name (optional; used for legacy SOCKS5 traffic).
-	statPeek func(string) int64
-	mux      *http.ServeMux
-	srv      *http.Server
-	lim      *visitorLimiter
-	tokenH   [32]byte
+	mux               *http.ServeMux
+	srv               *http.Server
+	lim               *visitorLimiter
+	tokenH            [32]byte
 }
 
 // NewServer validates listen address is loopback.
@@ -72,7 +70,7 @@ func NewServer(
 	selector *exits.Selector,
 	onExitChange func(),
 	log *slog.Logger,
-	statPeek func(string) int64,
+	_ func(string) int64,
 ) (*Server, error) {
 	if token == "" {
 		return nil, errors.New("adminapi: empty admin token")
@@ -95,7 +93,6 @@ func NewServer(
 		exits:        exitMgr,
 		selector:     selector,
 		onExitChange: onExitChange,
-		statPeek:     statPeek,
 		mux:          http.NewServeMux(),
 		lim:          newVisitorLimiter(30, 60, 256),
 		tokenH:       sha256.Sum256([]byte(token)),
@@ -192,7 +189,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 type postUserReq struct {
 	Name string `json:"name"`
-	Kind string `json:"kind"` // "vless" (default) or "socks5"
+	Kind string `json:"kind"` // "vless" (default)
 }
 
 type postUserResp struct {
@@ -217,15 +214,16 @@ func (s *Server) handlePostUser(w http.ResponseWriter, r *http.Request) {
 	if kind == "" {
 		kind = "vless"
 	}
+	if kind != "vless" {
+		http.Error(w, "invalid kind", http.StatusBadRequest)
+		return
+	}
 	u, err := s.users.AddUser(kind, name)
 	if errors.Is(err, auth.ErrInvalidUserKind) {
 		http.Error(w, "invalid kind", http.StatusBadRequest)
 		return
 	}
-	if errors.Is(err, auth.ErrSocksPortsExhausted) {
-		http.Error(w, "no free socks5 port", http.StatusServiceUnavailable)
-		return
-	}
+
 	if err != nil {
 		s.log.Error("add user", "err", err)
 		http.Error(w, "internal", http.StatusInternalServerError)
@@ -241,11 +239,6 @@ type getClientResp struct {
 	FullConfigBase64 string                       `json:"full_xray_config_base64,omitempty"`
 	Profiles         []config.ClientProfileExport `json:"profiles,omitempty"`
 	ClientAPIBaseURL string                       `json:"client_api_base_url,omitempty"`
-	Socks5URI        string                       `json:"socks5_uri,omitempty"`
-	Host             string                       `json:"host,omitempty"`
-	Port             int                          `json:"port,omitempty"`
-	Username         string                       `json:"username,omitempty"`
-	Password         string                       `json:"password,omitempty"`
 }
 
 func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
@@ -259,19 +252,7 @@ func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if id == auth.LegacySocksUserUUID {
-		s5 := s.spec.SOCKS5
-		if s5 == nil || !s5.Enabled {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		host := strings.TrimSpace(s.spec.PublicHost)
-		uri := config.Socks5ClientURI(host, s5.Port, s5.Username, s5.Password)
-		resp := getClientResp{
-			Socks5URI: uri, Host: host, Port: s5.Port,
-			Username: s5.Username, Password: s5.Password,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	u, ok := s.users.Lookup(id)
@@ -279,19 +260,8 @@ func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if u.Kind == "socks5" {
-		if u.SocksPort == nil || *u.SocksPort <= 0 || u.SocksUsername == "" || u.SocksPassword == "" {
-			http.Error(w, "incomplete socks5 user", http.StatusInternalServerError)
-			return
-		}
-		host := strings.TrimSpace(s.spec.PublicHost)
-		uri := config.Socks5ClientURI(host, *u.SocksPort, u.SocksUsername, u.SocksPassword)
-		resp := getClientResp{
-			Socks5URI: uri, Host: host, Port: *u.SocksPort,
-			Username: u.SocksUsername, Password: u.SocksPassword,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+	if u.Kind != "vless" && u.Kind != "" {
+		http.Error(w, "unsupported for kind", http.StatusConflict)
 		return
 	}
 	exp, err := config.BuildClientExport(s.spec, u)
@@ -361,14 +331,7 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	if includeDisabled {
 		users = s.users.ListAll()
 	}
-	if s.spec.SOCKS5 != nil && s.spec.SOCKS5.Enabled {
-		users = append([]auth.User{{
-			UUID:     auth.LegacySocksUserUUID,
-			Name:     "Legacy SOCKS5",
-			Kind:     "socks5",
-			IsActive: true,
-		}}, users...)
-	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(users)
 }
@@ -488,6 +451,10 @@ func (s *Server) handleEnableUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "protected user", http.StatusConflict)
 		return
 	}
+	if u, ok := s.users.Lookup(id); ok && u.Kind != "" && u.Kind != "vless" {
+		http.Error(w, "unsupported for kind", http.StatusConflict)
+		return
+	}
 	if err := s.users.EnableUser(id); err != nil {
 		if errors.Is(err, auth.ErrUserNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -519,25 +486,8 @@ func (s *Server) handleRotateUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if u.Kind == "socks5" {
-		pass, err := s.users.RotateSocksPassword(id)
-		if errors.Is(err, auth.ErrUserNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		if err != nil {
-			s.log.Error("rotate socks password", "err", err)
-			http.Error(w, "internal", http.StatusInternalServerError)
-			return
-		}
-		host := strings.TrimSpace(s.spec.PublicHost)
-		if u.SocksPort == nil {
-			http.Error(w, "internal", http.StatusInternalServerError)
-			return
-		}
-		uri := config.Socks5ClientURI(host, *u.SocksPort, u.SocksUsername, pass)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"socks5_uri": uri, "password": pass})
+	if u.Kind != "vless" && u.Kind != "" {
+		http.Error(w, "unsupported for kind", http.StatusConflict)
 		return
 	}
 	newUUID, err := s.users.RotateUUID(id)
@@ -568,24 +518,7 @@ func (s *Server) handleGetUserTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 	year, month := parseMonthParam(r)
 	if id == auth.LegacySocksUserUUID {
-		if s.spec.SOCKS5 == nil || !s.spec.SOCKS5.Enabled {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		now := time.Now()
-		cy, cm, _ := now.Date()
-		var total db.MonthlyTotal
-		total.UserUUID = auth.LegacySocksUserUUID
-		total.Year, total.Month = year, month
-		if year == cy && int(cm) == month && s.statPeek != nil {
-			tag := config.LegacyBridgeSOCKSInboundTag(s.spec)
-			up := s.statPeek("inbound>>>" + tag + ">>>traffic>>>uplink")
-			down := s.statPeek("inbound>>>" + tag + ">>>traffic>>>downlink")
-			total.UplinkBytes, total.DownlinkBytes = up, down
-			total.TotalBytes = up + down
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(total)
+		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	if s.traffic == nil {

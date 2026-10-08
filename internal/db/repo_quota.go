@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/NikitaDmitryuk/ultra/internal/quota"
 	"time"
 )
@@ -11,21 +12,29 @@ type QuotaRepo struct{ db *DB }
 func NewQuotaRepo(d *DB) *QuotaRepo { return &QuotaRepo{db: d} }
 
 type ExitBudget struct {
-	Enabled      bool       `json:"enabled"`
-	ID           string     `json:"exit_id"`
-	Name         string     `json:"name"`
-	Instance     string     `json:"-"`
-	Monthly      int64      `json:"monthly_bytes"`
-	Source       string     `json:"source"`
-	Fallback     bool       `json:"is_fallback"`
-	ProviderUsed int64      `json:"provider_used_bytes"`
-	Remaining    int64      `json:"provider_remaining_bytes"`
-	Observed     *time.Time `json:"observed_at"`
-	Error        string     `json:"error"`
+	Enabled       bool       `json:"enabled"`
+	ID            string     `json:"exit_id"`
+	Name          string     `json:"name"`
+	Instance      string     `json:"-"`
+	PlanID        string     `json:"-"`
+	PlanBandwidth int64      `json:"-"`
+	Monthly       int64      `json:"monthly_bytes"`
+	Source        string     `json:"source"`
+	Fallback      bool       `json:"is_fallback"`
+	ProviderUsed  int64      `json:"provider_used_bytes"`
+	Remaining     int64      `json:"provider_remaining_bytes"`
+	Observed      *time.Time `json:"observed_at"`
+	Error         string     `json:"error"`
 }
 
 func (r *QuotaRepo) Budgets(ctx context.Context) ([]ExitBudget, error) {
-	rows, e := r.db.Pool.Query(ctx, `SELECT n.enabled,b.exit_id::text,COALESCE(NULLIF(n.display_name,''),NULLIF(n.city,''),n.name),b.instance_id,b.monthly_bytes,b.source,b.is_fallback,b.provider_used_bytes,b.account_remaining_bytes,b.observed_at,b.provider_error FROM exit_traffic_budgets b JOIN exit_nodes n ON n.id=b.exit_id ORDER BY n.priority,n.id`)
+	rows, e := r.db.Pool.Query(ctx, `SELECT n.enabled,b.exit_id::text,COALESCE(NULLIF(n.display_name,''),NULLIF(n.city,''),n.name),b.instance_id,b.monthly_bytes,b.source,b.is_fallback,b.provider_used_bytes,b.account_remaining_bytes,b.observed_at,b.provider_error,COALESCE(op.body->'offer'->'plan','{}'::jsonb)
+ FROM exit_traffic_budgets b JOIN exit_nodes n ON n.id=b.exit_id
+ LEFT JOIN LATERAL (
+ SELECT body FROM cloud_operations WHERE state='ready'
+ AND body->>'instance_id'=b.instance_id AND body->>'exit_id'=b.exit_id::text
+ ORDER BY created_at DESC,id DESC LIMIT 1
+ ) op ON true ORDER BY n.priority,n.id`)
 	if e != nil {
 		return nil, e
 	}
@@ -33,8 +42,16 @@ func (r *QuotaRepo) Budgets(ctx context.Context) ([]ExitBudget, error) {
 	out := []ExitBudget{}
 	for rows.Next() {
 		var b ExitBudget
-		if e = rows.Scan(&b.Enabled, &b.ID, &b.Name, &b.Instance, &b.Monthly, &b.Source, &b.Fallback, &b.ProviderUsed, &b.Remaining, &b.Observed, &b.Error); e != nil {
+		var planJSON []byte
+		if e = rows.Scan(&b.Enabled, &b.ID, &b.Name, &b.Instance, &b.Monthly, &b.Source, &b.Fallback, &b.ProviderUsed, &b.Remaining, &b.Observed, &b.Error, &planJSON); e != nil {
 			return nil, e
+		}
+		var plan struct {
+			ID        string `json:"id"`
+			Bandwidth int64  `json:"bandwidth"`
+		}
+		if json.Unmarshal(planJSON, &plan) == nil {
+			b.PlanID, b.PlanBandwidth = plan.ID, plan.Bandwidth
 		}
 		out = append(out, b)
 	}

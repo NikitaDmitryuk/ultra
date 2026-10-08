@@ -9,7 +9,6 @@ type UserManager interface {
 	EnableUser(id string) error
 	SetPreferredExit(id string, exitID *string) (User, error)
 	RotateUUID(id string) (string, error)
-	RotateSocksPassword(id string) (string, error)
 	List() []User
 	ListAll() []User
 	Lookup(id string) (User, bool)

@@ -10,7 +10,6 @@ let currentUserName = '';
 let currentUserIsActive = true;
 let currentUserKind = 'vless';
 let currentVlessURI = null;
-let currentSocks5URI = null;
 let currentProfiles = [];
 let usersCache = [];
 let monthlyChart = null;
@@ -21,7 +20,6 @@ let detailActivityChart = null;
 // Leak summary fallback (keep in sync with defaultLeakMaxConcurrent in internal/bot/leak.go).
 const LEAK_CONCURRENT_IP_THRESHOLD = 5;
 
-const LEGACY_SOCKS_UUID = '_legacy_socks';
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 (async function init() {
@@ -239,8 +237,6 @@ function renderUsers(users) {
     const statusChip = disabled ? '<span class="status-chip">ОТКЛЮЧЕН</span>' : '';
     const kind = String(u.kind || 'vless').toLowerCase();
     let kindChips = '';
-    if (kind === 'socks5') kindChips += '<span class="kind-chip">SOCKS5</span>';
-    if (u.uuid === LEGACY_SOCKS_UUID) kindChips += '<span class="system-chip">SYSTEM</span>';
     item.innerHTML = `
       <div class="user-avatar">${initial}</div>
       <div class="user-info">
@@ -277,12 +273,12 @@ function lastSeenBadge(isoStr) {
 async function createUser() {
   const name = document.getElementById('new-user-name').value.trim();
   if (!name) { showToast('Введите имя.'); return; }
-  const kind = document.querySelector('input[name="new-user-kind"]:checked')?.value || 'vless';
+  const kind = 'vless';
   try {
     await api('POST', '/api/users', { name, kind });
     showScreen('users');
     await loadUsers();
-    showToast(kind === 'socks5' ? `SOCKS5 «${name}» создан.` : `Клиент «${name}» создан.`);
+    showToast(`Клиент «${name}» создан.`);
   } catch (e) {
     showToast('Ошибка: ' + e.message);
   }
@@ -298,39 +294,17 @@ async function openUserDetail(u) {
   currentUserIsActive = u.is_active !== false;
   currentUserKind = String(u.kind || 'vless').toLowerCase();
   currentVlessURI = null;
-  currentSocks5URI = null;
   currentProfiles = [];
 
   const editBtn = document.getElementById('detail-edit-btn');
-  if (editBtn) editBtn.style.display = u.uuid === LEGACY_SOCKS_UUID ? 'none' : '';
+  if (editBtn) editBtn.style.display = '';
 
   const vlessCard = document.getElementById('detail-config-vless');
-  const socksCard = document.getElementById('detail-config-socks5');
-  if (currentUserKind === 'socks5') {
-    if (vlessCard) vlessCard.style.display = 'none';
-    if (socksCard) socksCard.style.display = '';
-    document.getElementById('detail-vless-uri').textContent = '—';
-    document.getElementById('qr-container').innerHTML = '';
-    const profileSelect = document.getElementById('detail-profile-select');
-    if (profileSelect) {
-      profileSelect.style.display = 'none';
-      profileSelect.innerHTML = '';
-    }
-    document.getElementById('detail-socks5-uri').textContent = 'Загрузка…';
-    document.getElementById('qr-container-socks5').innerHTML = '';
-  } else {
-    if (vlessCard) vlessCard.style.display = '';
-    if (socksCard) socksCard.style.display = 'none';
-    document.getElementById('detail-vless-uri').textContent = 'Загрузка…';
-    document.getElementById('qr-container').innerHTML = '';
-    const profileSelect = document.getElementById('detail-profile-select');
-    if (profileSelect) {
-      profileSelect.style.display = 'none';
-      profileSelect.innerHTML = '';
-    }
-    document.getElementById('detail-socks5-uri').textContent = '—';
-    document.getElementById('qr-container-socks5').innerHTML = '';
-  }
+  if (vlessCard) vlessCard.style.display = currentUserKind === 'vless' ? '' : 'none';
+  document.getElementById('detail-vless-uri').textContent = 'Загрузка…';
+  document.getElementById('qr-container').innerHTML = '';
+  const profileSelect = document.getElementById('detail-profile-select');
+  if (profileSelect) { profileSelect.style.display = 'none'; profileSelect.innerHTML = ''; }
 
   document.getElementById('detail-name').textContent = (u.name || u.uuid) + (currentUserIsActive ? '' : ' · отключён');
   document.getElementById('detail-rename-input').value = u.name || '';
@@ -342,42 +316,18 @@ async function openUserDetail(u) {
 
   await loadCurrentUserTrafficByMonth();
   await loadCurrentUserLeak();
+  if (currentUserKind !== 'vless') return;
 
   try {
     const cfg = await api('GET', `/api/users/${u.uuid}/config`);
     currentVlessURI = cfg.vless_uri || cfg.VLESSURI || '';
     currentProfiles = Array.isArray(cfg.profiles) ? cfg.profiles : [];
-    currentSocks5URI = cfg.socks5_uri || cfg.Socks5URI || '';
-    if (currentUserKind === 'socks5') {
-      document.getElementById('detail-socks5-uri').textContent = currentSocks5URI || '—';
-      const meta = document.getElementById('detail-socks5-meta');
-      if (meta) {
-        const parts = [];
-        const user = cfg.username || cfg.Username;
-        const port = cfg.port || cfg.Port;
-        if (user) parts.push('User: ' + user);
-        if (port) parts.push('Port: ' + port);
-        meta.textContent = parts.join(' · ');
-      }
-      if (currentSocks5URI && window.QRCode) {
-        const wrap = document.getElementById('qr-container-socks5');
-        wrap.innerHTML = '';
-        QRCode.toCanvas(currentSocks5URI, { width: 220, margin: 2, color: { dark: '#000000', light: '#ffffff' } },
-          (err, canvas) => {
-            if (!err) wrap.appendChild(canvas);
-          });
-      }
-    } else {
-      renderProfileSelector();
-      renderCurrentVlessProfile();
-    }
+    renderProfileSelector();
+    renderCurrentVlessProfile();
   } catch (e) {
-    if (currentUserKind === 'socks5') {
-      document.getElementById('detail-socks5-uri').textContent = 'Ошибка загрузки конфигурации.';
-    } else {
-      document.getElementById('detail-vless-uri').textContent = 'Ошибка загрузки конфигурации.';
-    }
+    document.getElementById('detail-vless-uri').textContent = 'Ошибка загрузки конфигурации.';
   }
+
 }
 
 function renderProfileSelector() {
@@ -427,7 +377,7 @@ function selectCurrentProfile() {
 }
 
 function beginRenameUser() {
-  if (!currentUserUUID || currentUserUUID === LEGACY_SOCKS_UUID) return;
+  if (!currentUserUUID) return;
   const card = document.getElementById('detail-rename-card');
   card.style.display = '';
   const input = document.getElementById('detail-rename-input');
@@ -529,6 +479,7 @@ async function loadCurrentUserActivityChart() {
 }
 
 async function enableCurrentUser() {
+  if (currentUserKind !== 'vless') { showToast('Архивный тип доступа больше не поддерживается.'); return; }
   if (!currentUserUUID) return;
   try {
     await api('POST', `/api/users/${currentUserUUID}/enable`);
@@ -547,19 +498,17 @@ async function enableCurrentUser() {
 // syncDetailActions toggles which action group is visible in the user-detail
 // screen: rotate/disable for active users, enable/purge for disabled.
 function syncDetailActions() {
+  const enableButton = document.querySelector('#detail-actions-disabled button');
+  if (enableButton) enableButton.disabled = currentUserKind !== 'vless';
   const active = document.getElementById('detail-actions-active');
   const disabled = document.getElementById('detail-actions-disabled');
   if (!active || !disabled) return;
-  if (currentUserUUID === LEGACY_SOCKS_UUID) {
-    active.style.display = 'none';
-    disabled.style.display = 'none';
-    return;
-  }
+
   active.style.display = currentUserIsActive ? '' : 'none';
   disabled.style.display = currentUserIsActive ? 'none' : '';
   const rotateBtn = document.getElementById('detail-rotate-btn');
   if (rotateBtn) {
-    rotateBtn.textContent = currentUserKind === 'socks5' ? 'Перевыпустить пароль' : 'Перевыпустить ключ';
+    rotateBtn.textContent = 'Перевыпустить ключ';
   }
 }
 
@@ -728,33 +677,9 @@ function copyVlessURI() {
   );
 }
 
-function copySocks5URI() {
-  if (!currentSocks5URI) return;
-  navigator.clipboard.writeText(currentSocks5URI).then(
-    () => showToast('SOCKS5 строка скопирована.'),
-    () => showToast('Не удалось скопировать.'),
-  );
-}
 
 function rotateCurrentUserCredentials() {
-  if (!currentUserUUID) return;
-  if (currentUserKind === 'socks5') {
-    tg.showConfirm('Новый пароль: старые подключения перестанут работать. Продолжить?', async confirmed => {
-      if (!confirmed) return;
-      try {
-        const res = await api('POST', `/api/users/${currentUserUUID}/rotate`);
-        const uri = res.socks5_uri || res.Socks5URI;
-        if (uri) currentSocks5URI = uri;
-        showToast('Пароль перевыпущен.');
-        const idx = usersCache.findIndex(x => x.uuid === currentUserUUID);
-        if (idx >= 0) usersCache[idx] = { ...usersCache[idx] };
-        await openUserDetail(usersCache[idx] || { uuid: currentUserUUID, name: currentUserName, is_active: currentUserIsActive, kind: 'socks5' });
-      } catch (e) {
-        showToast('Ошибка ротации: ' + e.message);
-      }
-    });
-    return;
-  }
+  if (!currentUserUUID || currentUserKind !== 'vless') return;
   rotateCurrentUserUUID();
 }
 
