@@ -313,7 +313,7 @@ try:
     expected=ipaddress.ip_address(sys.argv[1])
 except ValueError:
     raise SystemExit('relay-check: probe must return a plain IP address')
-if actual != expected: raise SystemExit('relay-check: external IP does not match expected exit')
+if actual != expected: raise SystemExit(f'relay-check: external IP {actual} does not match expected exit {expected}')
 PY
 	echo "relay-check: expected exit IP confirmed"
 else
