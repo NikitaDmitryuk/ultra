@@ -162,6 +162,27 @@ time.sleep(60)
         ]
         return subprocess.run(args, cwd=ROOT, env=actual, text=True, capture_output=True)
 
+    def test_inventory_memory_output_is_valid_shell_arithmetic(self):
+        result = self.run_script('preflight')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        inventories = [call for call in self.calls() if
+                       'ULTRA_MIGRATE_SOURCE_INVENTORY' in call['text'] or
+                       'ULTRA_MIGRATE_TARGET_INVENTORY' in call['text']]
+        self.assertEqual(len(inventories), 2)
+        for call in inventories:
+            with self.subTest(host=call['dest']):
+                expression = re.search(r"awk '([^']*MemTotal[^']*)' /proc/meminfo", call['text'])
+                self.assertIsNotNone(expression)
+                output = subprocess.run(['awk', expression.group(1)],
+                                        input='MemTotal: 2000000 kB\n', text=True,
+                                        capture_output=True, check=True).stdout
+                self.assertEqual(output.strip(), '2048000000')
+                arithmetic = subprocess.run(['bash', '-c',
+                                             'set -u; memory=$1; (( memory == 2048000000 ))',
+                                             'memory-check', output.strip()],
+                                            text=True, capture_output=True)
+                self.assertEqual(arithmetic.returncode, 0, arithmetic.stderr)
+
     def test_preflight_reports_capacity_and_ports_without_secrets(self):
         result = self.run_script("preflight", "--new-public-host", "203.0.113.20", "--new-bridge-ip", "203.0.113.20")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -302,6 +323,8 @@ time.sleep(60)
         result=self.activate(FAKE_EXTERNAL_IP='198.51.100.100')
         self.assertNotEqual(result.returncode,0)
         self.assertIn('does not match expected exit',result.stderr)
+        self.assertIn('198.51.100.100',result.stderr)
+        self.assertIn('203.0.113.8',result.stderr)
         self.assertFalse(any('ULTRA_MIGRATE_START_BOT' in c['text'] for c in self.calls()))
 
     def test_successful_activation_probes_client_before_bot(self):
