@@ -140,10 +140,11 @@ type StatsSpec struct {
 // Spec is relay deployment configuration (JSON file: -spec flag).
 type Spec struct {
 	// SchemaVersion defaults to 1 when zero (see Validate).
-	SchemaVersion  int                 `json:"schema_version"`
-	ProbeURLs      []string            `json:"probe_urls,omitempty"`
-	PublicXHTTPTLS *PublicXHTTPTLSSpec `json:"public_xhttp_tls,omitempty"`
-	PublicEntries  []PublicEntry       `json:"public_entries,omitempty"`
+	SchemaVersion       int                  `json:"schema_version"`
+	ProbeURLs           []string             `json:"probe_urls,omitempty"`
+	PublicXHTTPTLS      *PublicXHTTPTLSSpec  `json:"public_xhttp_tls,omitempty"`
+	PublicEntries       []PublicEntry        `json:"public_entries,omitempty"`
+	SubscriptionBridges []SubscriptionBridge `json:"subscription_bridges,omitempty"`
 
 	Role        Role   `json:"role"`
 	MimicPreset string `json:"mimic_preset"`
@@ -476,6 +477,9 @@ func effectivePadding(s *Spec) string {
 	return p
 }
 func (s *Spec) validateTransportExtensions() error {
+	if err := validateSubscriptionBridges(s.SubscriptionBridges); err != nil {
+		return err
+	}
 	if s.Role != RoleBridge && (s.PublicXHTTPTLS != nil || len(s.PublicEntries) > 0) {
 		return errors.New("public listeners and entries require bridge role")
 	}

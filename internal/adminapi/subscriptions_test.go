@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -49,6 +50,33 @@ func TestSubscriptionHTTP(t *testing.T) {
 	}
 	if w := request("GET", "/v1/subscriptions/issued", true); w.Code != 200 || !strings.Contains(w.Body.String(), "vless://u1@localhost") || w.Header().Get("Cache-Control") != "no-store" {
 		t.Fatal(w.Code, w.Body.String())
+	}
+	for _, test := range []struct {
+		format, ua string
+		json       bool
+		status     int
+	}{
+		{"", "Happ/3 Android", false, 200}, {"happ", "other", true, 200}, {"happ", "Happ/3 Android", true, 200}, {"uri", "Happ/3 Android", false, 200}, {"", "other", false, 200}, {"bad", "", false, 400},
+	} {
+		r := httptest.NewRequest("GET", "/v1/subscriptions/issued?format="+test.format, nil)
+		r.Header.Set("Authorization", "Bearer secret")
+		r.Header.Set("User-Agent", test.ua)
+		w := httptest.NewRecorder()
+		s.authMiddleware(s.mux).ServeHTTP(w, r)
+		if w.Code != test.status {
+			t.Fatal(test, w.Code)
+		}
+		if w.Code != 200 {
+			continue
+		}
+		if test.json {
+			var profiles []map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &profiles); err != nil || len(profiles) != 1 || profiles[0]["remarks"] != "Автоматически" || !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+				t.Fatal("bad JSON export", err)
+			}
+		} else if !strings.HasPrefix(w.Body.String(), "vless://") || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain") {
+			t.Fatal("URI compatibility lost")
+		}
 	}
 	u := users.users["u1"]
 	u.IsActive = false

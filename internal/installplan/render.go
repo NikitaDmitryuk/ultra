@@ -323,6 +323,7 @@ func applyBridgeOverlay(dst *config.Spec, src *config.Spec) {
 	if src == nil {
 		return
 	}
+	dst.SubscriptionBridges = append([]config.SubscriptionBridge(nil), src.SubscriptionBridges...)
 	if g := strings.TrimSpace(src.GeoAssetsDir); g != "" {
 		dst.GeoAssetsDir = g
 	}

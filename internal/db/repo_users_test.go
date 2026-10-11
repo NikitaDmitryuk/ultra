@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
@@ -14,19 +13,11 @@ import (
 // all referencing rows via ON DELETE CASCADE — that is the whole reason we can
 // implement hard delete with a single statement.
 func TestUserRepoPurgeCascades(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
 	ctx := context.Background()
-	database, err := Open(ctx, dsn)
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(database.Close)
+	database := openTestDB(t)
 
 	userUUID := uuid.NewString()
-	_, err = database.Pool.Exec(ctx, `INSERT INTO users(uuid, name) VALUES($1, $2)`, userUUID, "purge-test")
+	_, err := database.Pool.Exec(ctx, `INSERT INTO users(uuid, name) VALUES($1, $2)`, userUUID, "purge-test")
 	if err != nil {
 		t.Fatalf("insert user: %v", err)
 	}

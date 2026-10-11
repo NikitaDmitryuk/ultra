@@ -235,14 +235,11 @@ function renderUsers(users) {
     const traffic = formatBytes(u.total_bytes || 0);
     const badge = lastSeenBadge(u.last_seen_at);
     const statusChip = disabled ? '<span class="status-chip">ОТКЛЮЧЕН</span>' : '';
-    const kind = String(u.kind || 'vless').toLowerCase();
-    let kindChips = '';
     item.innerHTML = `
       <div class="user-avatar">${initial}</div>
       <div class="user-info">
         <div class="user-name-row">
           <div class="user-name">${esc(u.name)}</div>
-          ${kindChips}
           ${statusChip}
         </div>
         <div class="user-traffic">${traffic} этот месяц</div>

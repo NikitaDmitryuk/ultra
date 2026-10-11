@@ -58,14 +58,30 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	format := r.URL.Query().Get("format")
+	if format != "" && format != "happ" && format != "uri" {
+		http.Error(w, "unknown subscription format", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Vary", "User-Agent")
+	w.Header().Set("profile-title", "ultra")
+	w.Header().Set("profile-update-interval", "1")
 	_, _, health, nodes := s.clientExitSelection(u)
+	if format == "happ" {
+		profiles, err := subscriptionHapp(s.spec, u, nodes, health)
+		if err != nil {
+			http.Error(w, "configuration unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(profiles)
+		return
+	}
 	uris, err := subscriptionURIs(s.spec, u, nodes, health)
 	if err != nil {
 		http.Error(w, "configuration unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("profile-title", "ultra")
-	w.Header().Set("profile-update-interval", "1")
 	_, _ = w.Write([]byte(strings.Join(uris, "\n") + "\n"))
 }

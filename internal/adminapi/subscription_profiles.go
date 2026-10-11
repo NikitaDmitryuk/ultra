@@ -29,8 +29,27 @@ func subscriptionURIs(spec *config.Spec, user auth.User, nodes []exits.Node, hea
 		uris = append(uris, uri.String())
 		return nil
 	}
-	if err := add(user, "Автоматически"); err != nil {
+	if err := eachSubscriptionProfile(user, nodes, health, add); err != nil {
 		return nil, err
+	}
+	return uris, nil
+}
+
+func subscriptionHapp(spec *config.Spec, user auth.User, nodes []exits.Node, health map[string]exits.Health) ([]map[string]any, error) {
+	profiles := []map[string]any{}
+	err := eachSubscriptionProfile(user, nodes, health, func(u auth.User, name string) error {
+		profile, err := config.BuildHappProfile(spec, u, name)
+		if err == nil {
+			profiles = append(profiles, profile)
+		}
+		return err
+	})
+	return profiles, err
+}
+
+func eachSubscriptionProfile(user auth.User, nodes []exits.Node, health map[string]exits.Health, add func(auth.User, string) error) error {
+	if err := add(user, "Автоматически"); err != nil {
+		return err
 	}
 	nodes = append([]exits.Node(nil), nodes...)
 	sort.Slice(nodes, func(i, j int) bool {
@@ -56,11 +75,11 @@ func subscriptionURIs(spec *config.Spec, user auth.User, nodes []exits.Node, hea
 			alias := user
 			alias.UUID = route.UUID
 			if err := add(alias, name); err != nil {
-				return nil, err
+				return err
 			}
 			seen[code] = true
 			break
 		}
 	}
-	return uris, nil
+	return nil
 }

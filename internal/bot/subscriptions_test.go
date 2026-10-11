@@ -68,3 +68,27 @@ func TestHappImportPage(t *testing.T) {
 		t.Fatal("browser import must not depend on Telegram WebView")
 	}
 }
+
+func TestPublicSubscriptionForwardsFormat(t *testing.T) {
+	token := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.UserAgent() != "Happ/3 Android" || r.URL.Query().Get("format") != "happ" || r.URL.Query().Has("ignored") {
+			t.Error("missing format or UA, or forwarded arbitrary query")
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Vary", "User-Agent")
+		_, _ = w.Write([]byte(`[{"remarks":"Автоматически"}]`))
+	}))
+	defer upstream.Close()
+	b := &Bot{adminAPIURL: upstream.URL, adminAPIToken: "secret"}
+	mux := http.NewServeMux()
+	b.registerMiniAppRoutes(mux)
+	r := httptest.NewRequest("GET", "/sub/"+token+"?format=happ&ignored=secret", nil)
+	r.TLS = &tls.ConnectionState{}
+	r.Header.Set("User-Agent", "Happ/3 Android")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != 200 || w.Header().Get("Content-Type") != "application/json; charset=utf-8" || w.Header().Get("Vary") != "User-Agent" || !strings.HasPrefix(w.Body.String(), "[") {
+		t.Fatal("lost JSON response", w.Code)
+	}
+}

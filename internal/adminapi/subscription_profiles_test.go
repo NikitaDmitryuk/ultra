@@ -75,3 +75,35 @@ func TestSubscriptionUsesSingleConfiguredXHTTPTransport(t *testing.T) {
 		t.Fatal("unconfigured listener published")
 	}
 }
+
+func TestHappProfilesPreserveRouteCredentials(t *testing.T) {
+	spec := &config.Spec{DevMode: true, PublicHost: "primary.example", VLESSPort: 443, SubscriptionBridges: []config.SubscriptionBridge{
+		{ID: "a", Host: "a.example", Port: 443, PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ServerName: "example.com"},
+		{ID: "b", Host: "b.example", Port: 443, PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ServerName: "example.com"},
+	}}
+	exit := "nl"
+	user := auth.User{UUID: "owner", Routes: []auth.RouteCredential{{UUID: "country", ExitID: &exit, Published: true}}}
+	profiles, err := subscriptionHapp(spec, user, []exits.Node{{ID: exit, Enabled: true, CountryCode: "NL"}}, map[string]exits.Health{exit: {Eligible: true}})
+	if err != nil || len(profiles) != 2 {
+		t.Fatalf("profiles=%d err=%v", len(profiles), err)
+	}
+	for i, profile := range profiles {
+		for _, raw := range profile["outbounds"].([]any) {
+			out := raw.(map[string]any)
+			if out["protocol"] != "vless" {
+				continue
+			}
+			credential := out["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)["users"].([]any)[0].(map[string]any)["id"]
+			want := "owner"
+			if i == 1 {
+				want = "country"
+			}
+			if credential != want {
+				t.Fatal("changed route UUID", credential)
+			}
+		}
+	}
+	if user.UUID != "owner" || user.Routes[0].UUID != "country" {
+		t.Fatal("mutated credentials")
+	}
+}

@@ -576,6 +576,7 @@ func legacyMain() {
 	bridgeSpec.GeoAssetsDir = path.Join(*remoteDir, "geo")
 	bridgeSpec.GeositeExitTags = []string{"ru-blocked-all"}
 	if bridgeOverlay != nil {
+		bridgeSpec.SubscriptionBridges = append([]config.SubscriptionBridge(nil), bridgeOverlay.SubscriptionBridges...)
 		if g := strings.TrimSpace(bridgeOverlay.GeoAssetsDir); g != "" {
 			bridgeSpec.GeoAssetsDir = g
 		}
