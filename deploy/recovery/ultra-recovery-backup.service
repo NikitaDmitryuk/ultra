@@ -1,0 +1,15 @@
+[Unit]
+Description=Encrypted ultra recovery generations
+After=postgresql.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/ultra-recovery/recovery.py capture --config /etc/ultra-recovery/backup.json
+TimeoutStartSec=170
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=yes

@@ -2,7 +2,7 @@
 
 ## Статус
 
-accepted
+superseded
 
 ## Дата
 
@@ -50,3 +50,7 @@ Auto учитывает квоты каждого exit и может испол�
 - [Селектор](../../internal/exits/selector.go), [API маршрутов](../../internal/adminapi/exits.go).
 - [Транспортная регрессия](../../internal/config/auto_failover_integration_test.go).
 - [Happ](../happ.md), [ADR 0010](0010-monthly-quotas-and-route-application.md).
+
+## Заменено
+
+[ADR 0018](0018-autonomous-relay-and-preferred-country.md) разрешает резервирование предпочтительной страны при наличии квоты.

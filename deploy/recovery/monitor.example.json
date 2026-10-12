@@ -1,0 +1,10 @@
+{
+  "mode": "primary",
+  "node": "US",
+  "bridge_url": "https://REPLACE_DOMAIN/happ",
+  "payload_url": "https://www.cloudflare.com/cdn-cgi/trace",
+  "probe_socks": "127.0.0.1:10818",
+  "backup_status": "/var/lib/ultra-recovery/last-success.json",
+  "token_file": "/etc/ultra-recovery/primary-bot-token",
+  "chat_id": "REPLACE_ADMIN_CHAT_ID"
+}

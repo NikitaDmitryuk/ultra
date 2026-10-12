@@ -36,7 +36,8 @@ ADR фиксирует долгосрочный выбор границ комп
 | [0010 — Месячные квоты и подтверждённое применение маршрутов](0010-monthly-quotas-and-route-application.md) | accepted |
 | [0011. Отдельный HTTPS-вход подписок](0011-subscription-ingress.md) | superseded |
 | [0012. HTTPS-вход на постоянном узле](0012-permanent-subscription-ingress.md) | accepted |
-| [0013 — Failover только автоматического профиля](0013-auto-only-exit-failover.md) | accepted |
+| [0013 — Failover только автоматического профиля](0013-auto-only-exit-failover.md) | superseded |
 | [0014 — Подтверждённый тариф Vultr для обновления квот](0014-saved-vultr-plan-for-quotas.md) | accepted |
 | [0016 — Публичный доступ только через VLESS](0016-public-vless-only.md) | accepted |
 | [0017 — Постоянный HTTPS VPN и изолированный эксперимент](0017-xhttp-ingress.md) | accepted |
+| [0018 — Автономный relay и предпочтительная страна](0018-autonomous-relay-and-preferred-country.md) | accepted |

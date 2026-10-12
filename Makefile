@@ -163,6 +163,7 @@ test-ui:
 	python3 scripts/test-ingress-setup.py
 	python3 scripts/test-ingress-ssh.py
 	python3 scripts/test-migrate-bridge.py
+	python3 scripts/test-reality-reserve.py
 	node --test scripts/test-happ-import.cjs scripts/test-cabinet.cjs scripts/test-miniapp-preview.cjs
 
 test-race:

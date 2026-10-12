@@ -1,0 +1,19 @@
+{
+  "source": "bridge",
+  "repository": "/var/lib/ultra-recovery",
+  "database": "ultra_db",
+  "recipient": "REPLACE_WITH_OPERATOR_PUBLIC_AGE_RECIPIENT",
+  "identity_file": "/etc/ultra-recovery/transfer_ed25519",
+  "known_hosts": "/etc/ultra-recovery/known_hosts",
+  "destinations": [
+    {"host": "ultra-us", "required": true},
+    {"host": "ultra-exit", "required": false}
+  ],
+  "state_paths": [
+    "/etc/ultra-relay", "/etc/ultra-bot", "/etc/ultra-recovery",
+    "/etc/systemd/system/ultra-relay.service", "/etc/systemd/system/ultra-relay.service.d",
+    "/etc/systemd/system/ultra-bot.service", "/etc/nginx/sites-available/ultra-bot",
+    "/etc/letsencrypt/live/REPLACE_DOMAIN", "/etc/letsencrypt/renewal/REPLACE_DOMAIN.conf"
+  ],
+  "artifact_paths": ["/usr/local/bin/ultra-relay", "/usr/local/bin/ultra-bot", "/usr/local/bin/ultra-client"]
+}

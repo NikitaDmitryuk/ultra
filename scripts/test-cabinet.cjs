@@ -483,7 +483,8 @@ test("automatic route displays confirmed exit without a country selector", async
   assert.match(html, /Ошибка применения/);
   assert.match(html, /Подтверждённый выход: <strong>Амстердам/);
   assert.match(html, /Атланта → Атланта/);
-  assert.match(html, /не переключается на другую страну/);
+  assert.match(html, /только если на нём осталась ваша квота/);
+  assert.match(html, /возвращается к предпочтительной стране/);
   assert.ok(!html.includes('id="preferred"'));
   assert.ok(!html.includes('id="save-location"'));
   assert.ok(

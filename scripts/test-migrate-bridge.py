@@ -8,6 +8,7 @@ import pathlib
 import stat
 import subprocess
 import tempfile
+import tarfile
 import textwrap
 import unittest
 from unittest import mock
@@ -342,6 +343,43 @@ class StateArchiveTest(unittest.TestCase):
         spec=importlib.util.spec_from_file_location('migration_state', ROOT/'scripts/bridge-migration-state.py')
         self.state=importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.state)
+
+    def test_live_stage_excludes_hot_journal_but_frozen_export_preserves_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=pathlib.Path(directory)
+            data=root/'var/lib/ultra-relay';data.mkdir(parents=True)
+            (data/'runtime.db').write_bytes(b'closed-durable-accounting')
+            for live in (True,False):
+                output=io.BytesIO()
+                with mock.patch.object(self.state,'paths',return_value=[data]),mock.patch.object(self.state.sys,'stdout',mock.Mock(buffer=output)):
+                    self.state.export(root,live=live)
+                with tarfile.open(fileobj=io.BytesIO(output.getvalue())) as archive:
+                    names=archive.getnames()
+                    self.assertEqual('var/lib/ultra-relay/runtime.db' in names,not live)
+
+    def test_recovery_helper_preserves_versioned_role_and_password(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=pathlib.Path(directory);hba=root/'pg_hba.conf';hba.write_text('existing-rule\n')
+            key=root/'replication.json';config={'user':'ultra_recovery_v2','password':'b'*64,'port':5432}
+            key.write_text(json.dumps(config));key.chmod(0o600);queries=[]
+            def command(*args,**kwargs):
+                query=kwargs.get('input','');queries.append(query)
+                answer=''
+                if 'pg_is_in_recovery' in query:answer='f'
+                elif 'FROM pg_roles' in query:answer='1'
+                elif 'SHOW max_' in query:answer='10'
+                elif 'SHOW wal_level' in query:answer='replica'
+                elif 'SHOW hba_file' in query:answer=str(hba)
+                elif 'FROM pg_settings' in query:answer='0'
+                return mock.Mock(returncode=0,stdout=answer)
+            payload=re.search(r"python3 - <<'PY'\n(.*?)\nPY",(ROOT/'internal/install/scripts/recovery-primary.sh').read_text(),re.S).group(1)
+            with mock.patch.dict(os.environ,{'ULTRA_RECOVERY_CONFIG_FILE':str(key)}),mock.patch('subprocess.run',side_effect=command):
+                exec(compile(payload,'recovery-helper','exec'),{})
+            self.assertEqual(json.loads(key.read_text()),config)
+            alter=next(q for q in queries if q.startswith('ALTER ROLE '))
+            self.assertIn('ALTER ROLE ultra_recovery_v2 ',alter);self.assertIn("PASSWORD '"+config['password']+"'",alter)
+            self.assertIn('host replication ultra_recovery_v2 ',hba.read_text())
+            self.assertTrue(hba.read_text().startswith('existing-rule\n'))
 
     def test_roundtrip_preserves_keys_and_removes_stale_files_with_backup(self):
         with tempfile.TemporaryDirectory() as directory:

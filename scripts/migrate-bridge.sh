@@ -424,7 +424,7 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 apt-cache show "postgresql-$1" >/dev/null 2>&1 || { echo 'matching PostgreSQL packages unavailable; prepare target repository' >&2; exit 31; }
-apt-get install -y -q "postgresql-$1" curl python3 ca-certificates tar gzip certbot
+apt-get install -y -q "postgresql-$1" curl python3 ca-certificates tar gzip certbot nginx
 systemctl enable --now postgresql
 systemctl disable --now certbot.timer
 systemctl mask certbot.service
@@ -445,6 +445,7 @@ EOS
 
 stream_state() {
 	log "streaming selected service state; target retains a root-only backup"
+	local export_mode="${1:-export}"
 	local work import_cmd rc=0
 	work=$(remote_root target <<'EOS'
 # ULTRA_MIGRATE_IMPORT_TEMP
@@ -462,7 +463,7 @@ EOS
 	} | remote_root target "$work" || rc=1
 	import_cmd="if [ \"\$(id -u)\" -eq 0 ]; then exec python3 $(shell_quote "$work/state.py") import; else exec sudo -n python3 $(shell_quote "$work/state.py") import; fi"
 	if [[ "$rc" == 0 ]]; then
-		remote_helper source export | ssh_role target "$import_cmd" || rc=1
+		remote_helper source "$export_mode" | ssh_role target "$import_cmd" || rc=1
 	fi
 	remote_root target "$work" <<'EOS' || rc=1
 set -euo pipefail
@@ -772,7 +773,7 @@ stage() {
 		warn "supply --target-public-ip at activation for direct Mini App backend verification"
 	fi
 	install_target_dependencies
-	stream_state
+	stream_state export-live
 	prepare_renewal
 	stream_database reset
 	prepare_recovery
@@ -968,6 +969,11 @@ EOS
 # ULTRA_MIGRATE_START_RELAY
 set -euo pipefail
 systemctl daemon-reload
+if [[ -f /etc/nginx/conf.d/ultra-vpn.conf ]]; then
+ nginx -t
+ systemctl enable --now nginx
+ systemctl reload nginx
+fi
 systemctl enable ultra-relay
 systemctl restart ultra-relay
 EOS
