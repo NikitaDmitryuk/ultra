@@ -53,6 +53,17 @@ Mini App встраивается из `internal/bot/embed/miniapp`, Admin UI �
 с запущенным бинарником не обновляет embedded-ресурс. Источники:
 [Mini App embed](../internal/bot/miniapp_api.go), [Admin UI embed](../internal/adminapi/static.go).
 
+Для проверки кабинетов без Telegram и БД запусти `python3 scripts/preview-bot.py`:
+`/preview/admin.html` и `/preview/member.html` используют те же JS/CSS, что и рабочие
+экраны. [Демо-транспорт](../internal/bot/embed/miniapp/preview/demo.js) подменяет запросы
+в памяти и не отправляет их на сервер; его подключают только страницы `preview/`.
+Параметр `?state=disabled`, `pending` или `new` открывает соответствующее состояние
+личного доступа; `?theme=dark` проверяет тёмную тему. [Сервер предпросмотра](../scripts/preview-bot.py) слушает только loopback
+и отключает кеш. Копии рабочего JS/CSS в preview не создавай: иначе проверка макета
+не проверяет поставляемый интерфейс. QR-коды строит встроенный `qrcode-generator`
+1.4.4 ([исходник с лицензией MIT](../internal/bot/embed/miniapp/vendor/qrcode.js));
+для графиков и QR внешние CDN не нужны.
+
 Установочные shell-скрипты и systemd units также встраиваются из `internal/install/scripts`.
 Для изменения поведения установщика проверяй именно встроенный источник и сборку
 `ultra-install`, а не только похожий файл в `deploy/`. Источники:

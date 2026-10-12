@@ -1,146 +1,696 @@
-const {test}=require('node:test');
-const assert=require('node:assert/strict');
-const vm=require('node:vm');
-const fs=require('node:fs');
-const source=fs.readFileSync(require('node:path').join(__dirname,'../internal/bot/embed/miniapp/cabinet.js'),'utf8');
-const flush=()=>new Promise(resolve=>setImmediate(resolve));
-function page(self,responses){
- const elements=new Map(),calls=[],copied=[],opened=[];
- function el(id){if(!elements.has(id))elements.set(id,{insertAdjacentHTML(position,html){this.innerHTML+=html},innerHTML:'',value:'',dataset:{},classList:{toggle(){}},querySelectorAll(){return[]},addEventListener(){},showModal(){this.open=true},close(){this.open=false}});return elements.get(id)}
- const context=vm.createContext({URL,Date,Number,String,Error,Promise,JSON,
-  location:{pathname:self?'/member':'/',hash:'',replace(){},reload(){}},
-  window:{Telegram:{WebApp:{initData:'signed-test-session',ready(){},expand(){},openLink(url){opened.push(url)}}},addEventListener(){},open(){throw new Error('unexpected fallback')}},
-  document:{querySelector:el,getElementById:id=>el('#'+id),querySelectorAll(){return[]}},
-  navigator:{clipboard:{async writeText(text){copied.push(text)}}},
-  setTimeout(){return 1},clearTimeout(){},
-  fetch:async(path,options)=>{calls.push({path,options});if(!(path in responses))throw new Error('unexpected request '+path);return {ok:true,status:200,json:async()=>responses[path]}},
- });vm.runInContext(source,context);return {context,el,calls,copied,opened};
+const { test } = require("node:test");
+const assert = require("node:assert/strict");
+const vm = require("node:vm");
+const fs = require("node:fs");
+const dashboard = fs.readFileSync(
+  require("node:path").join(
+    __dirname,
+    "../internal/bot/embed/miniapp/dashboard.js",
+  ),
+  "utf8",
+);
+const configs = fs.readFileSync(
+  require("node:path").join(
+    __dirname,
+    "../internal/bot/embed/miniapp/configs.js",
+  ),
+  "utf8",
+);
+const source =
+  configs +
+  "\n" +
+  dashboard +
+  "\n" +
+  fs.readFileSync(
+    require("node:path").join(
+      __dirname,
+      "../internal/bot/embed/miniapp/cabinet.js",
+    ),
+    "utf8",
+  );
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+function page(self, responses) {
+  const elements = new Map(),
+    calls = [],
+    copied = [],
+    opened = [];
+  function el(id) {
+    if (!elements.has(id))
+      elements.set(id, {
+        insertAdjacentHTML(position, html) {
+          this.innerHTML += html;
+        },
+        innerHTML: "",
+        value: "",
+        dataset: {},
+        classList: { toggle() {} },
+        setAttribute() {},
+        querySelector(selector) {
+          return el(selector);
+        },
+        querySelectorAll() {
+          return [];
+        },
+        addEventListener() {},
+        showModal() {
+          this.open = true;
+        },
+        close() {
+          this.open = false;
+        },
+      });
+    return elements.get(id);
+  }
+  const context = vm.createContext({
+    URL,
+    Date,
+    Number,
+    String,
+    Error,
+    Promise,
+    JSON,
+    location: {
+      pathname: self ? "/member" : "/",
+      hash: "",
+      replace() {},
+      reload() {},
+    },
+    window: {
+      Telegram: {
+        WebApp: {
+          initData: "signed-test-session",
+          ready() {},
+          expand() {},
+          openLink(url) {
+            opened.push(url);
+          },
+        },
+      },
+      addEventListener() {},
+      open() {
+        throw new Error("unexpected fallback");
+      },
+    },
+    document: {
+      querySelector: el,
+      getElementById: (id) => el("#" + id),
+      querySelectorAll() {
+        return [];
+      },
+    },
+    navigator: {
+      clipboard: {
+        async writeText(text) {
+          copied.push(text);
+        },
+      },
+    },
+    setTimeout() {
+      return 1;
+    },
+    clearTimeout() {},
+    fetch: async (path, options) => {
+      calls.push({ path, options });
+      if (!(path in responses)) throw new Error("unexpected request " + path);
+      return { ok: true, status: 200, json: async () => responses[path] };
+    },
+  });
+  vm.runInContext(source, context);
+  return { context, el, calls, copied, opened };
 }
-test('personal cabinet reuses subscription and opens HTTPS import without admin APIs',async()=>{
- const p=page(true,{'/api/self':{registered:true,is_admin:true,member:{uuid:'owner',active:true,pending:false}},'/api/self/exits':{exits:[],profiles:[]},'/api/self/subscription':{url:'https://vpn.example/sub/test',import_url:'https://vpn.example/happ#test'}});
- await flush();await p.el('#copy-sub').onclick();await p.el('#copy-sub').onclick();await p.el('#connect').onclick();
- assert.equal(p.calls.filter(c=>c.path==='/api/self/subscription').length,1);
- assert.deepEqual(p.copied,['https://vpn.example/sub/test','https://vpn.example/sub/test']);
- assert.deepEqual(p.opened,['https://vpn.example/happ#test']);
- assert.equal(p.el('#switch').hidden,false);
- assert.ok(p.calls.every(c=>c.path.startsWith('/api/self')));
- assert.ok(p.calls.every(c=>c.options.cache==='no-store'));
+test("personal cabinet reuses subscription and opens HTTPS import without admin APIs", async () => {
+  const p = page(true, {
+    "/api/self": {
+      registered: true,
+      is_admin: true,
+      member: { uuid: "owner", active: true, pending: false },
+    },
+    "/api/self/exits": { exits: [], profiles: [] },
+    "/api/self/subscription": {
+      url: "https://vpn.example/sub/test",
+      import_url: "https://vpn.example/happ#test",
+    },
+  });
+  await flush();
+  await p.el("#copy-sub").onclick();
+  await p.el("#copy-sub").onclick();
+  await p.el("#connect").onclick();
+  assert.equal(
+    p.calls.filter((c) => c.path === "/api/self/subscription").length,
+    1,
+  );
+  assert.deepEqual(p.copied, [
+    "https://vpn.example/sub/test",
+    "https://vpn.example/sub/test",
+  ]);
+  assert.deepEqual(p.opened, ["https://vpn.example/happ#test"]);
+  assert.equal(p.el("#switch").hidden, false);
+  assert.ok(p.calls.every((c) => c.path.startsWith("/api/self")));
+  assert.ok(p.calls.every((c) => c.options.cache === "no-store"));
 });
-test('disabled access cannot issue a subscription',async()=>{
- const p=page(true,{'/api/self':{registered:true,is_admin:false,member:{uuid:'owner',active:false,pending:false}}});await flush();
- assert.ok(p.el('#app').innerHTML.includes('Доступ приостановлен'));
- assert.ok(!p.el('#app').innerHTML.includes('id="connect"'));
- assert.ok(p.calls.every(c=>['/api/self','/api/self/traffic'].includes(c.path)));
+test("disabled access cannot issue a subscription", async () => {
+  const p = page(true, {
+    "/api/self": {
+      registered: true,
+      is_admin: false,
+      member: { uuid: "owner", active: false, pending: false },
+    },
+  });
+  await flush();
+  assert.ok(p.el("#app").innerHTML.includes("Доступ приостановлен"));
+  assert.ok(!p.el("#app").innerHTML.includes('id="connect"'));
+  assert.ok(
+    p.calls.every((c) => ["/api/self", "/api/self/traffic"].includes(c.path)),
+  );
 });
-test('Vultr displays server DTO price and replica state',async()=>{
- const p=page(false,{'/api/me':{is_admin:true},'/api/members':[], '/api/cloud/operations':[{id:'op',offer:{region:{city:'Frankfurt'},plan:{id:'vc2-1c-1gb'},price:{monthly_cost:5,hourly_cost:.007}},state:'ready',phase:'ready',charged:true,instance_id:'instance'}],'/api/cloud/replicas':[{name:'Amsterdam',state:'streaming',free_bytes:10*1073741824,required_bytes:5*1073741824}]});await flush();await vm.runInContext('service()',p.context);
- assert.ok(p.el('#app').innerHTML.includes('$5/месяц'));assert.ok(!p.el('#app').innerHTML.includes('$undefined'));
- assert.ok(p.el('#app').innerHTML.includes('Копия обновляется'));assert.ok(!p.el('#app').innerHTML.includes('Добавить узел вручную'));
-});
-
-test('traffic activity is separate from permission and does not imply online',async()=>{
- const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
- const now=Date.now();p.context.recent={active:true,pending:false,last_traffic_at:new Date(now-30000).toISOString()};
- assert.equal(vm.runInContext('usage(recent)',p.context),'Трафик за последние 2 мин');
- assert.ok(vm.runInContext('status(recent)',p.context).includes('Доступ разрешён'));
- assert.equal(vm.runInContext('usage({active:true,last_traffic_at:null})',p.context),'Трафик ещё не зафиксирован');
- p.context.old={active:true,last_traffic_at:new Date(now-3*86400000).toISOString()};
- assert.equal(vm.runInContext('usage(old)',p.context),'Без трафика 3 дн');
- assert.ok(vm.runInContext('status({active:false,pending:false})',p.context).includes('Доступ отозван'));
- assert.ok(vm.runInContext('status({active:false,pending:true})',p.context).includes('Отзываем доступ'));
- assert.ok(!vm.runInContext('usage({...recent,active:false})',p.context).includes('последние 2 мин'));
-});
-
-test('personal statistics include all devices and survive disabled access',async()=>{
- const traffic={month:'2026-09',uplink_bytes:10,downlink_bytes:20,routes:[{tag:'ams',name:'Амстердам',uplink_bytes:10,downlink_bytes:20}],days:[],day_routes:[{tag:'ams',bucket:'2026-09-08',uplink_bytes:10,downlink_bytes:20}]};
- const p=page(true,{'/api/self':{registered:true,is_admin:false,member:{uuid:'owner',active:false,pending:false,last_traffic_at:null}},'/api/self/traffic':traffic});await flush();
- assert.ok(p.el('#self-traffic').innerHTML.includes('Амстердам'));
- assert.ok(p.el('#self-traffic').innerHTML.includes('30 Б'));
- assert.ok(p.el('#app').innerHTML.includes('Трафик ещё не зафиксирован'));
- assert.ok(p.calls.every(c=>c.path.startsWith('/api/self')));
-});
-test('statistics failure does not replace personal cabinet or hide connect controls',async()=>{
- const p=page(true,{'/api/self':{registered:true,is_admin:false,member:{uuid:'owner',active:true,pending:false}},'/api/self/exits':{exits:[],profiles:[]}});await flush();
- assert.ok(p.el('#app').innerHTML.includes('id="connect"'));
- assert.ok(p.el('#self-traffic').innerHTML.includes('Статистика временно недоступна'));
- assert.ok(!p.el('#app').innerHTML.includes('Кабинет недоступен'));
- assert.equal(typeof p.el('#refresh-self-traffic').onclick,'function');
-});
-test('creation errors remain visible inside the confirmation dialog',async()=>{
- const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
- vm.runInContext(`modal('<button id="buy">Подтвердить</button>');button('buy',async()=>{throw new Error('IP bridge не разрешён в Vultr')})`,p.context);
- await p.el('#buy').onclick();
- assert.equal(p.el('#dialog-error').hidden,false);
- assert.equal(p.el('#dialog-error').textContent,'IP bridge не разрешён в Vultr');
- assert.equal(p.el('#dialog').open,true);
- assert.equal(p.el('#buy').disabled,false);
-});
-
-test('person charts select period and route without historical unattributed totals',async()=>{
- const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
- p.context.chart={month:'2026-09',today:'2026-09-08',routes:[{tag:'direct',name:'Yandex Cloud'},{tag:'ams',name:'Амстердам'},{tag:'unknown',name:'Старый трафик'}],day_routes:[{bucket:'2026-09-08',tag:'ams',uplink_bytes:10,downlink_bytes:20},{bucket:'2026-09-08',tag:'unknown',downlink_bytes:999}],hours:[{bucket:'2026-09-08 12:00',tag:'direct',downlink_bytes:4}]};
- assert.equal(vm.runInContext('personTrafficData(chart,"month").selected.length',p.context),1);
- assert.equal(vm.runInContext('personTrafficData(chart,"day").buckets.length',p.context),24);
- assert.equal(vm.runInContext('personTrafficData(chart,"month").buckets.length',p.context),30);
- assert.equal(vm.runInContext('personTrafficData(chart,"day","ams").selected.length',p.context),0);
- vm.runInContext('renderTrafficChart(document.querySelector("#person-traffic"),chart)',p.context);
- const html=p.el('#person-traffic').innerHTML;
- assert.ok(html.includes('30 Б'));assert.ok(html.includes('Потребление по дням'));assert.ok(!html.includes('Старый трафик'));assert.ok(!html.includes('999'));
-});
-
-test('invitations identify recipient and group with links',async()=>{
- const p=page(false,{'/api/me':{is_admin:true},'/api/members':[], '/api/enrollment/group':{chat_id:-100123,title:'Друзья',enabled:true,group_url:'https://t.me/+test'},'/api/enrollment/invites':[{id:1,recipient:123,recipient_name:'Анна <Test>',expires_at:'2099-01-01'}]});await flush();await vm.runInContext('invites()',p.context);
- const html=p.el('#app').innerHTML;assert.ok(html.includes('Анна &lt;Test&gt;'));assert.ok(html.includes('tg://user?id=123'));assert.ok(html.includes('Открыть группу'));assert.ok(html.includes('Друзья'));
-});
-test('account balance stays independent of server operations',async()=>{
- const p=page(false,{'/api/me':{is_admin:true},'/api/members':[], '/api/cloud/account':{balance:12.5,pending_charges:1.25,observed_at:'2026-09-08T00:00:00Z'}});await flush();await vm.runInContext('loadCloudAccount()',p.context);
- assert.ok(p.el('#cloud-account').innerHTML.includes('12,50'));assert.ok(p.el('#cloud-account').innerHTML.includes('1,25'));
-});
-
-test('ready server separates operation, tunnel health and billing',async()=>{
- const p=page(false,{'/api/me':{is_admin:true},'/api/members':[]});await flush();
- p.context.o={state:'ready',phase:'ready',charged:true,exit_id:'atl'};
- p.context.capacity={nodes:[{id:'atl',name:'Атланта',enabled:true,ready:true}],budgets:[]};
- assert.equal(vm.runInContext('serverStateLabel(o,capacity)',p.context),'Серверная проверка HTTPS прошла');
- assert.match(vm.runInContext('serverCapacityHTML(capacity)',p.context),/Серверная проверка HTTPS прошла/);
- assert.equal(vm.runInContext('serverBillingLabel(o)',p.context),'Оплата продолжается');
- p.context.capacity.nodes[0].ready=false;
- assert.match(vm.runInContext('serverStateLabel(o,capacity)',p.context),/туннель недоступен/);
- p.context.o.state='unknown';assert.match(vm.runInContext('serverStateLabel(o,capacity)',p.context),/Результат создания проверяется/);
- p.context.o.state='failed';assert.match(vm.runInContext('serverStateLabel(o,capacity)',p.context),/Ошибка/);
- assert.equal(vm.runInContext('serverBillingLabel(o)',p.context),'Оплата продолжается');
- assert.match(vm.runInContext("applicationLabel({state:'error'})",p.context),/Ошибка применения/);
+test("Vultr displays server DTO price and replica state", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/cloud/operations": [
+      {
+        id: "op",
+        offer: {
+          region: { city: "Frankfurt" },
+          plan: { id: "vc2-1c-1gb" },
+          price: { monthly_cost: 5, hourly_cost: 0.007 },
+        },
+        state: "ready",
+        phase: "ready",
+        charged: true,
+        instance_id: "instance",
+      },
+    ],
+    "/api/cloud/replicas": [
+      {
+        name: "Amsterdam",
+        state: "streaming",
+        free_bytes: 10 * 1073741824,
+        required_bytes: 5 * 1073741824,
+      },
+    ],
+  });
+  await flush();
+  await vm.runInContext("service()", p.context);
+  assert.ok(p.el("#app").innerHTML.includes("$5/месяц"));
+  assert.ok(!p.el("#app").innerHTML.includes("$undefined"));
+  assert.ok(p.el("#app").innerHTML.includes("Копия обновляется"));
+  assert.ok(!p.el("#app").innerHTML.includes("Добавить узел вручную"));
 });
 
-test('automatic route displays confirmed exit without a country selector',async()=>{
- const route={selected_exit_id:'atl',effective_exit_id:'ams',application:{state:'error'},route_reason:'monthly_user_limit_exhausted',exits:[{id:'ams',display_name:'Амстердам',reachable:true},{id:'atl',display_name:'Атланта',reachable:true}],profiles:[{name:'Атланта',effective_exit_id:'atl'}]};
- const p=page(true,{'/api/self':{registered:true,member:{active:true}},'/api/self/exits':route});await flush();
- const html=p.el('#locations').innerHTML;
- assert.match(html,/Ошибка применения/);
- assert.match(html,/Подтверждённый выход: <strong>Амстердам/);
- assert.match(html,/Атланта → Атланта/);
- assert.match(html,/не переключается на другую страну/);
- assert.ok(!html.includes('id="preferred"'));
- assert.ok(!html.includes('id="save-location"'));
- assert.ok(!p.calls.some(c=>c.path.includes('exit-selection')||c.path.includes('subscription')));
+test("traffic activity is separate from permission and does not imply online", async () => {
+  const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
+  await flush();
+  const now = Date.now();
+  p.context.recent = {
+    active: true,
+    pending: false,
+    last_traffic_at: new Date(now - 30000).toISOString(),
+  };
+  assert.equal(
+    vm.runInContext("usage(recent)", p.context),
+    "Трафик за последние 2 мин",
+  );
+  assert.ok(
+    vm.runInContext("status(recent)", p.context).includes("Доступ разрешён"),
+  );
+  assert.equal(
+    vm.runInContext("usage({active:true,last_traffic_at:null})", p.context),
+    "Трафик ещё не зафиксирован",
+  );
+  p.context.old = {
+    active: true,
+    last_traffic_at: new Date(now - 3 * 86400000).toISOString(),
+  };
+  assert.equal(vm.runInContext("usage(old)", p.context), "Без трафика 3 дн");
+  assert.ok(
+    vm
+      .runInContext("status({active:false,pending:false})", p.context)
+      .includes("Доступ отозван"),
+  );
+  assert.ok(
+    vm
+      .runInContext("status({active:false,pending:true})", p.context)
+      .includes("Отзываем доступ"),
+  );
+  assert.ok(
+    !vm
+      .runInContext("usage({...recent,active:false})", p.context)
+      .includes("последние 2 мин"),
+  );
 });
 
-test('subscription ingress cannot be deleted or replaced from server card', async()=>{
- const p=page(false,{'/api/me':{is_admin:true},'/api/members':[], '/api/cloud/operations':[{id:'ingress',instance_id:'vps',state:'ready',phase:'ready',charged:true,serves_subscription_ingress:true,offer:{region:{city:'Atlanta'},plan:{id:'vc2'},price:{monthly_cost:5}}}],'/api/cloud/replicas':[]});await flush();
- await vm.runInContext('service()',p.context);
- const html=p.el('#app').innerHTML;
- assert.ok(html.includes('Обслуживает подписки'));
- assert.ok(!html.includes('data-action="delete"'));
- assert.ok(!html.includes('data-replace='));
+test("personal statistics include all devices and survive disabled access", async () => {
+  const traffic = {
+    month: "2026-09",
+    uplink_bytes: 10,
+    downlink_bytes: 20,
+    routes: [
+      { tag: "ams", name: "Амстердам", uplink_bytes: 10, downlink_bytes: 20 },
+    ],
+    days: [],
+    day_routes: [
+      {
+        tag: "ams",
+        bucket: "2026-09-08",
+        uplink_bytes: 10,
+        downlink_bytes: 20,
+      },
+    ],
+  };
+  const p = page(true, {
+    "/api/self": {
+      registered: true,
+      is_admin: false,
+      member: {
+        uuid: "owner",
+        active: false,
+        pending: false,
+        last_traffic_at: null,
+      },
+    },
+    "/api/self/traffic": traffic,
+  });
+  await flush();
+  assert.ok(p.el("#self-traffic").innerHTML.includes("Амстердам"));
+  assert.ok(p.el("#self-traffic").innerHTML.includes("30 Б"));
+  assert.ok(p.el("#app").innerHTML.includes("Трафик ещё не зафиксирован"));
+  assert.ok(p.calls.every((c) => c.path.startsWith("/api/self")));
+});
+test("statistics failure does not replace personal cabinet or hide connect controls", async () => {
+  const p = page(true, {
+    "/api/self": {
+      registered: true,
+      is_admin: false,
+      member: { uuid: "owner", active: true, pending: false },
+    },
+    "/api/self/exits": { exits: [], profiles: [] },
+  });
+  await flush();
+  assert.ok(p.el("#app").innerHTML.includes('id="connect"'));
+  assert.ok(
+    p.el("#self-traffic").innerHTML.includes("Статистика временно недоступна"),
+  );
+  assert.ok(!p.el("#app").innerHTML.includes("Кабинет недоступен"));
+  assert.equal(typeof p.el("#refresh-self-traffic").onclick, "function");
+});
+test("creation errors remain visible inside the confirmation dialog", async () => {
+  const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
+  await flush();
+  vm.runInContext(
+    `modal('<button id="buy">Подтвердить</button>');button('buy',async()=>{throw new Error('IP bridge не разрешён в Vultr')})`,
+    p.context,
+  );
+  await p.el("#buy").onclick();
+  assert.equal(p.el("#dialog-error").hidden, false);
+  assert.equal(
+    p.el("#dialog-error").textContent,
+    "IP bridge не разрешён в Vultr",
+  );
+  assert.equal(p.el("#dialog").open, true);
+  assert.equal(p.el("#buy").disabled, false);
 });
 
-test('ingress diagnostics distinguishes main and experiment without rendering server strings as HTML',()=>{
- const adminSource=fs.readFileSync(require('node:path').join(__dirname,'../internal/bot/embed/miniapp/app.js'),'utf8');
- const functionSource=adminSource.slice(adminSource.indexOf('function renderIngressHealth('));
- const children=[];const list={replaceChildren(){children.length=0},appendChild(item){children.push(item)}};
- const context=vm.createContext({document:{getElementById(id){return id==='diag-exits-health-list'?{after(){}}:list},createElement(){return {}}},formatTime(value){return value}});
- vm.runInContext(functionSource,context);
- context.states=[{id:'primary',ready:true,phase:'server_path_ready'},{id:'experimental',ready:false,phase:'<script>unsafe</script>'}];
- vm.runInContext('renderIngressHealth(states)',context);
- assert.equal(children.length,2);assert.ok(children[0].textContent.includes('Основной вход'));assert.ok(children[1].textContent.includes('Эксперимент: недоступен'));assert.equal(children[1].innerHTML,undefined);
+test("person charts select period and route without historical unattributed totals", async () => {
+  const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
+  await flush();
+  p.context.chart = {
+    month: "2026-09",
+    today: "2026-09-08",
+    routes: [
+      { tag: "direct", name: "Yandex Cloud" },
+      { tag: "ams", name: "Амстердам" },
+      { tag: "unknown", name: "Старый трафик" },
+    ],
+    day_routes: [
+      {
+        bucket: "2026-09-08",
+        tag: "ams",
+        uplink_bytes: 10,
+        downlink_bytes: 20,
+      },
+      { bucket: "2026-09-08", tag: "unknown", downlink_bytes: 999 },
+    ],
+    hours: [{ bucket: "2026-09-08 12:00", tag: "direct", downlink_bytes: 4 }],
+  };
+  assert.equal(
+    vm.runInContext(
+      'personTrafficData(chart,"month").selected.length',
+      p.context,
+    ),
+    1,
+  );
+  assert.equal(
+    vm.runInContext('personTrafficData(chart,"day").buckets.length', p.context),
+    24,
+  );
+  assert.equal(
+    vm.runInContext(
+      'personTrafficData(chart,"month").buckets.length',
+      p.context,
+    ),
+    30,
+  );
+  assert.equal(
+    vm.runInContext(
+      'personTrafficData(chart,"day","ams").selected.length',
+      p.context,
+    ),
+    0,
+  );
+  vm.runInContext(
+    'renderTrafficChart(document.querySelector("#person-traffic"),chart)',
+    p.context,
+  );
+  const html = p.el("#person-traffic").innerHTML;
+  assert.ok(html.includes("30 Б"));
+  assert.ok(html.includes("Потребление по дням"));
+  assert.ok(!html.includes("Старый трафик"));
+  assert.ok(!html.includes("999"));
+});
+
+test("invitations identify recipient and group with links", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/enrollment/group": {
+      chat_id: -100123,
+      title: "Друзья",
+      enabled: true,
+      group_url: "https://t.me/+test",
+    },
+    "/api/enrollment/invites": [
+      {
+        id: 1,
+        recipient: 123,
+        recipient_name: "Анна <Test>",
+        expires_at: "2099-01-01",
+      },
+    ],
+  });
+  await flush();
+  await vm.runInContext("invites()", p.context);
+  const html = p.el("#app").innerHTML;
+  assert.ok(html.includes("Анна &lt;Test&gt;"));
+  assert.ok(html.includes("tg://user?id=123"));
+  assert.ok(html.includes("Открыть группу"));
+  assert.ok(html.includes("Друзья"));
+});
+test("account balance stays independent of server operations", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/cloud/account": {
+      balance: 12.5,
+      pending_charges: 1.25,
+      observed_at: "2026-09-08T00:00:00Z",
+    },
+  });
+  await flush();
+  await vm.runInContext("loadCloudAccount()", p.context);
+  assert.ok(p.el("#cloud-account").innerHTML.includes("12,50"));
+  assert.ok(p.el("#cloud-account").innerHTML.includes("1,25"));
+});
+
+test("ready server separates operation, tunnel health and billing", async () => {
+  const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
+  await flush();
+  p.context.o = {
+    state: "ready",
+    phase: "ready",
+    charged: true,
+    exit_id: "atl",
+  };
+  p.context.capacity = {
+    nodes: [{ id: "atl", name: "Атланта", enabled: true, ready: true }],
+    budgets: [],
+  };
+  assert.equal(
+    vm.runInContext("serverStateLabel(o,capacity)", p.context),
+    "Серверная проверка HTTPS прошла",
+  );
+  assert.match(
+    vm.runInContext("serverCapacityHTML(capacity)", p.context),
+    /Серверная проверка HTTPS прошла/,
+  );
+  assert.equal(
+    vm.runInContext("serverBillingLabel(o)", p.context),
+    "Оплата продолжается",
+  );
+  p.context.capacity.nodes[0].ready = false;
+  assert.match(
+    vm.runInContext("serverStateLabel(o,capacity)", p.context),
+    /туннель недоступен/,
+  );
+  p.context.o.state = "unknown";
+  assert.match(
+    vm.runInContext("serverStateLabel(o,capacity)", p.context),
+    /Результат создания проверяется/,
+  );
+  p.context.o.state = "failed";
+  assert.match(
+    vm.runInContext("serverStateLabel(o,capacity)", p.context),
+    /Ошибка/,
+  );
+  assert.equal(
+    vm.runInContext("serverBillingLabel(o)", p.context),
+    "Оплата продолжается",
+  );
+  assert.match(
+    vm.runInContext("applicationLabel({state:'error'})", p.context),
+    /Ошибка применения/,
+  );
+});
+
+test("automatic route displays confirmed exit without a country selector", async () => {
+  const route = {
+    selected_exit_id: "atl",
+    effective_exit_id: "ams",
+    application: { state: "error" },
+    route_reason: "monthly_user_limit_exhausted",
+    exits: [
+      { id: "ams", display_name: "Амстердам", reachable: true },
+      { id: "atl", display_name: "Атланта", reachable: true },
+    ],
+    profiles: [{ name: "Атланта", effective_exit_id: "atl" }],
+  };
+  const p = page(true, {
+    "/api/self": { registered: true, member: { active: true } },
+    "/api/self/exits": route,
+  });
+  await flush();
+  const html = p.el("#locations").innerHTML;
+  assert.match(html, /Ошибка применения/);
+  assert.match(html, /Подтверждённый выход: <strong>Амстердам/);
+  assert.match(html, /Атланта → Атланта/);
+  assert.match(html, /не переключается на другую страну/);
+  assert.ok(!html.includes('id="preferred"'));
+  assert.ok(!html.includes('id="save-location"'));
+  assert.ok(
+    !p.calls.some(
+      (c) =>
+        c.path.includes("exit-selection") || c.path.includes("subscription"),
+    ),
+  );
+});
+
+test("subscription ingress cannot be deleted or replaced from server card", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/cloud/operations": [
+      {
+        id: "ingress",
+        instance_id: "vps",
+        state: "ready",
+        phase: "ready",
+        charged: true,
+        serves_subscription_ingress: true,
+        offer: {
+          region: { city: "Atlanta" },
+          plan: { id: "vc2" },
+          price: { monthly_cost: 5 },
+        },
+      },
+    ],
+    "/api/cloud/replicas": [],
+  });
+  await flush();
+  await vm.runInContext("service()", p.context);
+  const html = p.el("#app").innerHTML;
+  assert.ok(html.includes("Обслуживает подписки"));
+  assert.ok(!html.includes('data-action="delete"'));
+  assert.ok(!html.includes("data-replace="));
+});
+
+test("ingress diagnostics distinguishes main and experiment and escapes server strings", async () => {
+  const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
+  await flush();
+  p.context.states = [
+    { id: "primary", ready: true, phase: "server_path_ready" },
+    { id: "experimental", ready: false, phase: "<script>unsafe</script>" },
+  ];
+  const html = vm.runInContext("ingressHealthHTML(states)", p.context);
+  assert.match(html, /Основной вход/);
+  assert.match(html, /Экспериментальный вход/);
+  assert.match(html, /Недоступен/);
+  assert.ok(!html.includes("<script>"));
+  assert.ok(html.includes("&lt;script&gt;"));
+});
+
+test("overview brings monthly history and config ranking into the main cabinet", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [{ active: true, pending: false }],
+    "/api/stats": { total_bytes_month: 1024 },
+    "/api/health": {
+      bridge: { internet_ok: true },
+      exit: { reachable: true, internet_ok: true, name: "Amsterdam" },
+    },
+    "/api/stats/history?months=12": [
+      { Year: 2026, Month: 8, TotalBytes: 1024 },
+    ],
+    "/api/users": [{ uuid: "test", name: "<unsafe>", total_bytes: 1024 }],
+  });
+  await flush();
+  assert.match(p.el("#overview-history").innerHTML, /Последние 12 месяцев/);
+  assert.match(p.el("#overview-top").innerHTML, /&lt;unsafe&gt;/);
+  assert.match(p.el("#overview-health").innerHTML, /Серверные проверки прошли/);
+  assert.match(p.el("#overview-traffic").innerHTML, /временно недоступны/);
+  assert.ok(!p.el("#app").innerHTML.includes("legacy"));
+});
+test("missing overview data stays unknown rather than showing false zero or health", async () => {
+  const p = page(false, { "/api/me": { is_admin: true } });
+  await flush();
+  assert.match(p.el("#overview-summary").innerHTML, /—/);
+  assert.match(p.el("#overview-health").innerHTML, /Нет данных/);
+  assert.match(p.el("#overview-history").innerHTML, /Повторить/);
+  assert.ok(!p.el("#overview-health").innerHTML.includes("проверки прошли"));
+});
+test("failure to fetch locations preserves the personal connection action", async () => {
+  const p = page(true, {
+    "/api/self": { registered: true, member: { uuid: "owner", active: true } },
+  });
+  await flush();
+  assert.match(p.el("#app").innerHTML, /id="connect"/);
+  assert.match(p.el("#locations").innerHTML, /Маршрут временно недоступен/);
+});
+test("archive config cannot export, rotate or enable unsupported access", async () => {
+  const p = page(false, { "/api/me": { is_admin: true } });
+  await flush();
+  const html = vm.runInContext(
+    "configControls({uuid:'old',kind:'socks5',is_active:false})",
+    p.context,
+  );
+  assert.ok(html.includes("purge-config"));
+  for (const id of [
+    "export-config",
+    "rotate-config",
+    "enable-config",
+    "issue-config-sub",
+  ])
+    assert.ok(!html.includes(id));
+});
+test("purge requires typed confirmation and addresses only the selected config", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/users/old/purge": {},
+    "/api/users": [],
+  });
+  await flush();
+  vm.runInContext(
+    "bindConfigControls({uuid:'old',kind:'vless',is_active:false})",
+    p.context,
+  );
+  await p.el("#purge-config").onclick();
+  p.el("#purge-word").value = "wrong";
+  await p.el("#purge-confirm").onclick();
+  assert.ok(!p.calls.some((c) => c.options.method === "DELETE"));
+  p.el("#purge-word").value = "УДАЛИТЬ";
+  await p.el("#purge-confirm").onclick();
+  assert.equal(
+    p.calls.filter(
+      (c) => c.path === "/api/users/old/purge" && c.options.method === "DELETE",
+    ).length,
+    1,
+  );
+});
+test("config creation sends only VLESS and the entered name", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/users": {
+      user: { uuid: "created", name: "Work", kind: "vless", is_active: true },
+    },
+  });
+  await flush();
+  vm.runInContext("editConfigName(null)", p.context);
+  p.el("#config-name").value = " Work ";
+  await p.el("#save-config").onclick();
+  const call = p.calls.find(
+    (c) => c.path === "/api/users" && c.options.method === "POST",
+  );
+  assert.deepEqual(JSON.parse(call.options.body), {
+    name: "Work",
+    kind: "vless",
+  });
+});
+test("no cabinet or preview references removed interface or duplicated preview assets", () => {
+  const root = require("node:path").join(
+    __dirname,
+    "../internal/bot/embed/miniapp",
+  );
+  for (const file of [
+    "index.html",
+    "member.html",
+    "cabinet.js",
+    "dashboard.js",
+    "configs.js",
+    "preview/admin.html",
+    "preview/member.html",
+    "preview/demo.js",
+  ])
+    assert.ok(
+      !fs
+        .readFileSync(require("node:path").join(root, file), "utf8")
+        .includes("legacy.html"),
+      file,
+    );
+  for (const file of [
+    "legacy.html",
+    "app.js",
+    "style.css",
+    "preview/cabinet.js",
+    "preview/cabinet.css",
+  ])
+    assert.ok(!fs.existsSync(require("node:path").join(root, file)), file);
+  assert.match(
+    fs.readFileSync(
+      require("node:path").join(root, "preview/admin.html"),
+      "utf8",
+    ),
+    /\.\.\/cabinet.js/,
+  );
+});
+
+test("all embedded HTML assets still exist after removing the legacy UI", () => {
+  const path = require("node:path");
+  const root = path.join(__dirname, "../internal/bot/embed/miniapp");
+  for (const file of [
+    "index.html",
+    "member.html",
+    "happ.html",
+    "preview/admin.html",
+    "preview/member.html",
+  ]) {
+    const html = fs.readFileSync(path.join(root, file), "utf8");
+    for (const match of html.matchAll(
+      /(?:src|href)="([^"?#]+\.(?:js|css))(?:[?#][^"]*)?"/g,
+    )) {
+      if (/^https?:/.test(match[1])) continue;
+      const asset = match[1].startsWith("/")
+        ? path.join(root, match[1])
+        : path.resolve(root, path.dirname(file), match[1]);
+      assert.ok(fs.existsSync(asset), `${file}: ${match[1]}`);
+    }
+  }
 });
