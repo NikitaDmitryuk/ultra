@@ -3,11 +3,14 @@ package db
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 func openTestDB(t *testing.T) *DB {
@@ -17,6 +20,36 @@ func openTestDB(t *testing.T) *DB {
 		t.Skip("DATABASE_URL not set")
 	}
 	ctx := context.Background()
+	control, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect test db: %v", err)
+	}
+	schema := pgx.Identifier{"ultra_test_" + uuid.NewString()}.Sanitize()
+	if _, err = control.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		_ = control.Close(ctx)
+		t.Fatalf("create test schema: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := control.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE"); err != nil {
+			t.Errorf("drop test schema: %v", err)
+		}
+		if err := control.Close(ctx); err != nil {
+			t.Errorf("close test schema connection: %v", err)
+		}
+	})
+	// Each test owns its migrations and fixtures; never fall back to public.
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			t.Fatalf("parse test db URL: %v", err)
+		}
+		query := u.Query()
+		query.Set("search_path", schema)
+		u.RawQuery = query.Encode()
+		dsn = u.String()
+	} else {
+		dsn += " search_path='" + schema + "'"
+	}
 	database, err := Open(ctx, dsn)
 	if err != nil {
 		t.Fatalf("open db: %v", err)

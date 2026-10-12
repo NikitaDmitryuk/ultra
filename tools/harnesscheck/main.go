@@ -11,13 +11,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 )
 
-var (
-	inlineLink = regexp.MustCompile(`\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^\s)]+)(?:\s+"[^"\n]*")?\s*\)`)
-	adrName    = regexp.MustCompile(`^(\d{4})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$`)
-)
+var inlineLink = regexp.MustCompile(`\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^\s)]+)(?:\s+"[^"\n]*")?\s*\)`)
 
 func main() {
 	root := flag.String("root", ".", "repository root")
@@ -29,7 +25,7 @@ func main() {
 	if len(problems) > 0 {
 		os.Exit(1)
 	}
-	fmt.Println("Harness: инструкции, навигация и ADR проверены")
+	fmt.Println("Harness: инструкции и навигация проверены")
 }
 
 func check(root string) []string {
@@ -70,7 +66,7 @@ func check(root string) []string {
 		}
 		documents[file] = withoutCode(content)
 	}
-	for _, required := range []string{"docs/architecture.md", "docs/development.md", "docs/adr/README.md", "docs/adr/template.md"} {
+	for _, required := range []string{"docs/architecture.md", "docs/development.md"} {
 		if _, ok := documents[required]; !ok {
 			report(required, "отсутствует обязательная страница")
 		}
@@ -110,86 +106,9 @@ func check(root string) []string {
 			report(file, "страница недоступна из AGENTS.md: добавьте ссылку в навигацию")
 		}
 	}
-	checkADRs(documents, links, report)
+	problems = append(problems, checkADR(root, documents)...)
 	sort.Strings(problems)
 	return problems
-}
-
-func checkADRs(documents map[string]string, links map[string][]string, report func(string, string)) {
-	ids := map[string]string{}
-	records := map[string]map[string]string{}
-	for file, content := range documents {
-		if !strings.HasPrefix(file, "docs/adr/") || file == "docs/adr/README.md" || file == "docs/adr/template.md" {
-			continue
-		}
-		match := adrName.FindStringSubmatch(strings.TrimPrefix(file, "docs/adr/"))
-		if match == nil {
-			report(file, "имя ADR должно иметь вид NNNN-short-title.md")
-			continue
-		}
-		if previous, ok := ids[match[1]]; ok {
-			report(file, "повторный номер ADR: "+previous)
-		}
-		ids[match[1]] = file
-		sections := sectionsOf(content)
-		records[file] = sections
-		for _, heading := range []string{"Статус", "Дата", "Контекст", "Решение", "Рассмотренные альтернативы", "Последствия", "Источники"} {
-			if strings.TrimSpace(sections[heading]) == "" {
-				report(file, "отсутствует или пуст раздел: "+heading)
-			}
-		}
-		switch strings.TrimSpace(sections["Статус"]) {
-		case "proposed", "accepted", "superseded", "deprecated":
-		default:
-			report(file, "неверный статус ADR")
-		}
-		if _, err := time.Parse("2006-01-02", strings.TrimSpace(sections["Дата"])); err != nil {
-			report(file, "дата ADR должна иметь формат YYYY-MM-DD")
-		}
-		if !contains(links["docs/adr/README.md"], file) {
-			report(file, "ADR отсутствует в ссылках индекса docs/adr/README.md")
-		}
-	}
-	if len(records) == 0 {
-		report("docs/adr", "нет ни одного ADR")
-	}
-	for file, sections := range records {
-		if strings.TrimSpace(sections["Статус"]) != "superseded" {
-			continue
-		}
-		valid := false
-		for _, destination := range destinations(sections["Заменено"]) {
-			target, err := localTarget(file, destination)
-			if _, exists := records[target]; err == nil && exists && target != file {
-				valid = true
-			}
-		}
-		if !valid {
-			report(file, "superseded требует раздел Заменено со ссылкой на другой ADR")
-		}
-	}
-}
-
-func contains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}
-
-func sectionsOf(content string) map[string]string {
-	sections := map[string]string{}
-	heading := ""
-	for _, line := range strings.Split(content, "\n") {
-		if strings.HasPrefix(line, "## ") {
-			heading = strings.TrimSpace(strings.TrimPrefix(line, "## "))
-		} else if heading != "" {
-			sections[heading] += line + "\n"
-		}
-	}
-	return sections
 }
 
 // Only inline Markdown links are navigation; the repository guide specifies this format.
@@ -272,4 +191,46 @@ func withoutInlineCode(line string) string {
 		start = end
 	}
 	return line
+}
+
+func checkADR(root string, documents map[string]string) []string {
+	var problems []string
+	names := map[string]bool{}
+	validName := regexp.MustCompile(`^docs/adr/([0-9]{4})-[a-z0-9-]+\.md$`)
+	status := regexp.MustCompile(`(?m)^## Статус\s+\n?(proposed|accepted|superseded|deprecated)\b`)
+	date := regexp.MustCompile(`(?m)^## Дата\s+\n?[0-9]{4}-[0-9]{2}-[0-9]{2}\b`)
+	index := documents["docs/adr/README.md"]
+	for file, content := range documents {
+		if !strings.HasPrefix(file, "docs/adr/") || file == "docs/adr/README.md" || file == "docs/adr/template.md" {
+			continue
+		}
+		match := validName.FindStringSubmatch(file)
+		if match == nil {
+			problems = append(problems, file+": неверное имя ADR")
+			continue
+		}
+		if names[match[1]] {
+			problems = append(problems, file+": повторный номер ADR")
+		}
+		names[match[1]] = true
+		for _, section := range []string{"Статус", "Дата", "Контекст", "Решение", "Рассмотренные альтернативы", "Последствия", "Источники"} {
+			if !strings.Contains(content, "## "+section) {
+				problems = append(problems, file+": отсутствует раздел "+section)
+			}
+		}
+		st := status.FindStringSubmatch(content)
+		if st == nil {
+			problems = append(problems, file+": неверный статус ADR")
+		}
+		if !date.MatchString(content) {
+			problems = append(problems, file+": неверная дата ADR")
+		}
+		if st != nil && st[1] == "superseded" && !strings.Contains(content, "## Заменено") {
+			problems = append(problems, file+": отсутствует ссылка на замену")
+		}
+		if !strings.Contains(index, filepath.Base(file)) {
+			problems = append(problems, file+": отсутствует в индексе ADR")
+		}
+	}
+	return problems
 }

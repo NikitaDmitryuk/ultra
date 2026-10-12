@@ -140,10 +140,15 @@ type StatsSpec struct {
 // Spec is relay deployment configuration (JSON file: -spec flag).
 type Spec struct {
 	// SchemaVersion defaults to 1 when zero (see Validate).
-	SchemaVersion  int                 `json:"schema_version"`
-	ProbeURLs      []string            `json:"probe_urls,omitempty"`
-	PublicXHTTPTLS *PublicXHTTPTLSSpec `json:"public_xhttp_tls,omitempty"`
-	PublicEntries  []PublicEntry       `json:"public_entries,omitempty"`
+	SchemaVersion           int                  `json:"schema_version"`
+	ProbeURLs               []string             `json:"probe_urls,omitempty"`
+	PublicXHTTPTLS          *PublicXHTTPTLSSpec  `json:"public_xhttp_tls,omitempty"`
+	PrimaryXHTTP            *PrimaryXHTTPIngress `json:"primary_xhttp,omitempty"`
+	LegacyPublicEnabled     *bool                `json:"legacy_public_enabled,omitempty"`
+	ExperimentalProfileFile string               `json:"experimental_profile_file,omitempty"`
+	GatewayVLESSPort        int                  `json:"gateway_vless_port,omitempty"`
+	PublicEntries           []PublicEntry        `json:"public_entries,omitempty"`
+	SubscriptionBridges     []SubscriptionBridge `json:"subscription_bridges,omitempty"`
 
 	Role        Role   `json:"role"`
 	MimicPreset string `json:"mimic_preset"`
@@ -235,9 +240,6 @@ type Spec struct {
 
 	// XrayWire overrides tags and literals in generated Xray JSON (optional; see resolveXrayWire defaults).
 	XrayWire *XrayWireSpec `json:"xray_wire,omitempty"`
-
-	// SOCKS5 is an optional password SOCKS inbound on the bridge; same routing as VLESS when split_routing is on.
-	SOCKS5 *BridgeSOCKS5Spec `json:"socks5,omitempty"`
 
 	// BotTelegramProxy is a local SOCKS5 inbound for ultra-bot Telegram API traffic (routed to active exit).
 	BotTelegramProxy *BotTelegramProxySpec `json:"bot_telegram_proxy,omitempty"`
@@ -379,7 +381,7 @@ func (s *Spec) Validate() error {
 		if s.PublicHost == "" {
 			return errors.New("config: bridge requires public_host for client export")
 		}
-		if !s.DevMode {
+		if !s.DevMode && s.LegacyPublicIsEnabled() {
 			if s.Reality.PrivateKey == "" || s.Reality.PublicKey == "" {
 				return errors.New("config: bridge requires reality.private_key and reality.public_key unless dev_mode")
 			}
@@ -407,33 +409,7 @@ func (s *Spec) Validate() error {
 				return errors.New("config: routing_mode must be blocklist or ru_direct when split_routing is set")
 			}
 		}
-		if s.SOCKS5 != nil && s.SOCKS5.Enabled {
-			if s.SOCKS5.Port <= 0 || s.SOCKS5.Port > 65535 {
-				return errors.New("config: socks5.port must be 1..65535 when socks5.enabled")
-			}
-			if s.SOCKS5.Port == s.VLESSPort {
-				return errors.New("config: socks5.port must differ from vless_port")
-			}
-			if strings.TrimSpace(s.SOCKS5.Username) == "" {
-				return errors.New("config: socks5.username required when socks5.enabled")
-			}
-			if s.SOCKS5.Password == "" {
-				return errors.New("config: socks5.password required when socks5.enabled")
-			}
-			if s.SOCKS5.PortRangeStart == 0 {
-				s.SOCKS5.PortRangeStart = 10810
-			}
-			if s.SOCKS5.PortRangeEnd == 0 {
-				s.SOCKS5.PortRangeEnd = 10899
-			}
-			if s.SOCKS5.PortRangeStart < 1 || s.SOCKS5.PortRangeEnd > 65535 ||
-				s.SOCKS5.PortRangeStart > s.SOCKS5.PortRangeEnd {
-				return errors.New("config: socks5.port_range_start/end invalid")
-			}
-			if s.SOCKS5.Port >= s.SOCKS5.PortRangeStart && s.SOCKS5.Port <= s.SOCKS5.PortRangeEnd {
-				return errors.New("config: socks5.port must not fall inside socks5.port_range (reserved for per-client inbounds)")
-			}
-		}
+
 		if s.BotTelegramProxy != nil && s.BotTelegramProxy.Enabled {
 			port := botTelegramProxyPort(s.BotTelegramProxy)
 			if port == s.VLESSPort {
@@ -442,9 +418,7 @@ func (s *Spec) Validate() error {
 			if port == HealthProbePort {
 				return errors.New("config: bot_telegram_proxy.port conflicts with health probe port")
 			}
-			if s.SOCKS5 != nil && s.SOCKS5.Enabled && port == s.SOCKS5.Port {
-				return errors.New("config: bot_telegram_proxy.port must differ from socks5.port")
-			}
+
 		}
 		if s.AntiCensor != nil {
 			profile := strings.TrimSpace(s.AntiCensor.Profile)
@@ -466,18 +440,14 @@ func (s *Spec) Validate() error {
 				if p == HealthProbePort {
 					return errors.New("config: anti_censor.public_xhttp_port conflicts with health probe port")
 				}
-				if s.SOCKS5 != nil && s.SOCKS5.Enabled && p == s.SOCKS5.Port {
-					return errors.New("config: anti_censor.public_xhttp_port must differ from socks5.port")
-				}
+
 				if s.BotTelegramProxy != nil && s.BotTelegramProxy.Enabled && p == botTelegramProxyPort(s.BotTelegramProxy) {
 					return errors.New("config: anti_censor.public_xhttp_port must differ from bot_telegram_proxy.port")
 				}
 			}
 		}
 	case RoleExit:
-		if s.SOCKS5 != nil && s.SOCKS5.Enabled {
-			return errors.New("config: socks5 is only valid on bridge role")
-		}
+
 		if s.BotTelegramProxy != nil && s.BotTelegramProxy.Enabled {
 			return errors.New("config: bot_telegram_proxy is only valid on bridge role")
 		}
@@ -511,6 +481,12 @@ func effectivePadding(s *Spec) string {
 	return p
 }
 func (s *Spec) validateTransportExtensions() error {
+	if err := s.validatePrimaryIngress(); err != nil {
+		return err
+	}
+	if err := validateSubscriptionBridges(s.SubscriptionBridges); err != nil {
+		return err
+	}
 	if s.Role != RoleBridge && (s.PublicXHTTPTLS != nil || len(s.PublicEntries) > 0) {
 		return errors.New("public listeners and entries require bridge role")
 	}
@@ -526,7 +502,7 @@ func (s *Spec) validateTransportExtensions() error {
 		if entry.XHTTPRealityPort > 0 && (s.AntiCensor == nil || s.AntiCensor.PublicXHTTPPort == 0) {
 			return errors.New("entry requires existing XHTTP REALITY listener")
 		}
-		if entry.XHTTPTLSPort > 0 && s.PublicXHTTPTLS == nil {
+		if entry.XHTTPTLSPort > 0 && s.PublicXHTTPTLS == nil && !s.PrimaryXHTTPIsPublished() {
 			return errors.New("entry requires existing XHTTP TLS listener")
 		}
 	}
@@ -554,13 +530,16 @@ func (s *Spec) validateTransportExtensions() error {
 		slog.Warn("legacy padding normalized to Xray default; issued profiles remain compatible")
 	}
 	if t := s.PublicXHTTPTLS; t != nil {
+		if err := t.validateFingerprint(); err != nil {
+			return err
+		}
 		if t.Port <= 0 || t.Port > 65535 || t.Port == s.VLESSPort || (s.AntiCensor != nil && t.Port == s.AntiCensor.PublicXHTTPPort) {
 			return errors.New("public_xhttp_tls requires a distinct port")
 		}
 		if _, p, err := net.SplitHostPort(s.AdminListen); err == nil && p == strconv.Itoa(t.Port) {
 			return errors.New("public_xhttp_tls conflicts with admin port")
 		}
-		if t.Port == HealthProbePort || (s.SOCKS5 != nil && s.SOCKS5.Enabled && t.Port == s.SOCKS5.Port) {
+		if t.Port == HealthProbePort {
 			return errors.New("public_xhttp_tls conflicts with an existing listener")
 		}
 		if t.ServerName == "" || strings.ContainsAny(t.ServerName, "/: \t\r\n") || net.ParseIP(t.ServerName) != nil || t.CertificateFile == "" || t.KeyFile == "" {

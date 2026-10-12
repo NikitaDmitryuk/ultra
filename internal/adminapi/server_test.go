@@ -16,12 +16,11 @@ import (
 )
 
 type fakeUserManager struct {
-	users            map[string]auth.User
-	renameCalls      int
-	enableCalls      int
-	rotateCalls      int
-	rotateSocksCalls int
-	lastRename       struct {
+	users       map[string]auth.User
+	renameCalls int
+	enableCalls int
+	rotateCalls int
+	lastRename  struct {
 		id   string
 		name string
 	}
@@ -97,16 +96,6 @@ func (m *fakeUserManager) RotateUUID(id string) (string, error) {
 	return newID, nil
 }
 
-func (m *fakeUserManager) RotateSocksPassword(id string) (string, error) {
-	m.rotateSocksCalls++
-	u, ok := m.users[id]
-	if !ok || u.Kind != "socks5" {
-		return "", auth.ErrUserNotFound
-	}
-	u.SocksPassword = "new-socks-pass"
-	m.users[id] = u
-	return u.SocksPassword, nil
-}
 func (m *fakeUserManager) List() []auth.User {
 	var out []auth.User
 	for _, u := range m.users {
@@ -220,37 +209,10 @@ func TestEnableAndRotateEndpoints(t *testing.T) {
 	}
 }
 
-func TestListUsersPrependsLegacySocksWhenEnabled(t *testing.T) {
-	mgr := newFakeUserManager()
-	spec := &config.Spec{
-		PublicHost: "vpn.example",
-		SOCKS5:     &config.BridgeSOCKS5Spec{Enabled: true, Port: 1080, Username: "u", Password: "p"},
-		Exit:       config.ExitTunnelSpec{Address: "127.0.0.1", Port: 65535},
-	}
-	ts := newHTTPTestServer(t, mgr, spec)
-	defer ts.Close()
-
-	resp, body := doAuthedJSON(t, ts.Client(), http.MethodGet, ts.URL+"/v1/users", nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status: got %d, body=%s", resp.StatusCode, string(body))
-	}
-	var users []map[string]any
-	if err := json.Unmarshal(body, &users); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(users) < 1 {
-		t.Fatal("expected users")
-	}
-	if users[0]["uuid"] != auth.LegacySocksUserUUID {
-		t.Fatalf("expected legacy first, got %#v", users[0])
-	}
-}
-
 func TestPatchLegacySocksUserIsProtected(t *testing.T) {
 	mgr := newFakeUserManager()
 	spec := &config.Spec{
 		PublicHost: "vpn.example",
-		SOCKS5:     &config.BridgeSOCKS5Spec{Enabled: true, Port: 1080, Username: "u", Password: "p"},
 		Exit:       config.ExitTunnelSpec{Address: "127.0.0.1", Port: 65535},
 	}
 	ts := newHTTPTestServer(t, mgr, spec)
@@ -346,5 +308,31 @@ func TestGetClientIncludesLegacyFieldsAndProfiles(t *testing.T) {
 	}
 	if !strings.Contains(second["vless_uri"].(string), "type=xhttp") {
 		t.Fatalf("fallback profile URI = %s", second["vless_uri"])
+	}
+}
+
+func TestRemovedSOCKSAPI(t *testing.T) {
+	mgr := newFakeUserManager()
+	mgr.users["archived"] = auth.User{UUID: "archived", Kind: "socks5", IsActive: false}
+	ts := newHTTPTestServer(t, mgr, &config.Spec{Exit: config.ExitTunnelSpec{Address: "127.0.0.1", Port: 65535}})
+	defer ts.Close()
+	for _, test := range []struct {
+		method, path string
+		body         any
+		status       int
+	}{
+		{http.MethodPost, "/v1/users", map[string]any{"name": "removed", "kind": "socks5"}, http.StatusBadRequest},
+		{http.MethodPost, "/v1/users/archived/enable", nil, http.StatusConflict},
+		{http.MethodGet, "/v1/users/archived/client", nil, http.StatusConflict},
+		{http.MethodPost, "/v1/users/archived/rotate", nil, http.StatusConflict},
+		{http.MethodPost, "/v1/users", map[string]any{"name": "supported"}, http.StatusOK},
+	} {
+		response, _ := doAuthedJSON(t, ts.Client(), test.method, ts.URL+test.path, test.body)
+		if response.StatusCode != test.status {
+			t.Fatalf("%s %s: got %d want %d", test.method, test.path, response.StatusCode, test.status)
+		}
+	}
+	if mgr.enableCalls != 0 || mgr.rotateCalls != 0 {
+		t.Fatal("archived credentials changed")
 	}
 }

@@ -6,11 +6,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,4 +174,28 @@ func signedInitData(t *testing.T, botToken string, telegramID int64) string {
 	vals.Set("user", userJSON)
 	vals.Set("hash", hash)
 	return vals.Encode()
+}
+
+func TestCreateSOCKSUserPreservesRelayRejection(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/users" {
+			t.Errorf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
+		}
+		var payload map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload["kind"] != "socks5" {
+			t.Errorf("unexpected payload: %v, error: %v", payload, err)
+		}
+		http.Error(w, "invalid kind", http.StatusBadRequest)
+	}))
+	defer upstream.Close()
+	b := &Bot{botToken: "test-token", adminRepo: &fakeAdminLister{}, adminAPIURL: upstream.URL, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	mux := http.NewServeMux()
+	b.registerMiniAppRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/api/users", strings.NewReader(`{"name":"removed","kind":"socks5"}`))
+	req.Header.Set(initDataHeader, signedInitData(t, b.botToken, 123))
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, req)
+	if response.Code != http.StatusBadRequest || strings.TrimSpace(response.Body.String()) != "invalid kind" {
+		t.Fatalf("got status %d body %q, want 400 invalid kind", response.Code, response.Body.String())
+	}
 }

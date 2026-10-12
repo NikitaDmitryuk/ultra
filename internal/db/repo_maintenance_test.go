@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -11,22 +10,14 @@ import (
 )
 
 func TestPruneMonitoringRetention(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
 	ctx := context.Background()
-	database, err := Open(ctx, dsn)
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(database.Close)
+	database := openTestDB(t)
 
 	userUUID := uuid.NewString()
 	tg := time.Now().UnixNano()
 	repo := NewTelegramRepo(database)
 
-	_, err = database.Pool.Exec(ctx, `INSERT INTO users(uuid, name) VALUES($1, $2)`, userUUID, "maintenance-test")
+	_, err := database.Pool.Exec(ctx, `INSERT INTO users(uuid, name) VALUES($1, $2)`, userUUID, "maintenance-test")
 	if err != nil {
 		t.Fatalf("insert user: %v", err)
 	}

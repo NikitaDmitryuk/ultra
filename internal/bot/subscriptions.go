@@ -37,6 +37,8 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	req.URL.RawQuery = url.Values{"format": r.URL.Query()["format"], "transport": r.URL.Query()["transport"]}.Encode()
+	req.Header.Set("User-Agent", r.UserAgent())
 	req.Header.Set("Authorization", "Bearer "+b.adminAPIToken)
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
@@ -49,7 +51,7 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Server-Timing", fmt.Sprintf("relay;dur=%.1f", float64(time.Since(started).Microseconds())/1000))
-	for _, key := range []string{"Content-Type", "profile-title", "profile-update-interval"} {
+	for _, key := range []string{"Content-Type", "profile-title", "profile-update-interval", "Vary"} {
 		w.Header().Set(key, resp.Header.Get(key))
 	}
 	_, _ = io.Copy(w, io.LimitReader(resp.Body, 1<<20))

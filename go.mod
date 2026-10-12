@@ -6,6 +6,7 @@ require (
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/xtls/reality v0.0.0-20260908062103-8cdf7bf9c7f0
 	github.com/xtls/xray-core v1.260327.1-0.20260930074004-b26a91de4f32
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
@@ -50,7 +51,6 @@ require (
 	github.com/vishvananda/netlink v1.3.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
-	github.com/xtls/reality v0.0.0-20260921001439-3c98159dee38 // indirect
 	github.com/xyproto/randomstring v1.2.0 // indirect
 	go.uber.org/mock v0.6.0 // indirect
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb // indirect
@@ -64,3 +64,5 @@ require (
 	gvisor.dev/gvisor v0.0.0-20260122175437-89a5d21be8f0 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
+
+replace github.com/xtls/reality => github.com/xtls/reality v0.0.0-20260908045812-e1986a4d31ca

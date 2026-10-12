@@ -323,6 +323,12 @@ func applyBridgeOverlay(dst *config.Spec, src *config.Spec) {
 	if src == nil {
 		return
 	}
+	dst.SubscriptionBridges = append([]config.SubscriptionBridge(nil), src.SubscriptionBridges...)
+	dst.PrimaryXHTTP = src.PrimaryXHTTP
+	dst.LegacyPublicEnabled = src.LegacyPublicEnabled
+	dst.ExperimentalProfileFile = src.ExperimentalProfileFile
+	dst.GatewayVLESSPort = src.GatewayVLESSPort
+	dst.PublicXHTTPTLS = src.PublicXHTTPTLS
 	if g := strings.TrimSpace(src.GeoAssetsDir); g != "" {
 		dst.GeoAssetsDir = g
 	}
@@ -352,14 +358,7 @@ func applyBridgeOverlay(dst *config.Spec, src *config.Spec) {
 		}
 		dst.XrayWire = &cpy
 	}
-	if src.SOCKS5 != nil {
-		cpy := *src.SOCKS5
-		if src.SOCKS5.UDP != nil {
-			u := *src.SOCKS5.UDP
-			cpy.UDP = &u
-		}
-		dst.SOCKS5 = &cpy
-	}
+
 	if src.BotTelegramProxy != nil {
 		cpy := *src.BotTelegramProxy
 		dst.BotTelegramProxy = &cpy

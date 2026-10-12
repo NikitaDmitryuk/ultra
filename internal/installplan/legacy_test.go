@@ -1,14 +1,20 @@
 package installplan
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
+	"github.com/xtls/xray-core/core"
+	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
 func TestLegacyValuesToPlanMapsExitPair(t *testing.T) {
@@ -157,6 +163,10 @@ func TestRenderDesiredStateReusePreservesBridgeMaterial(t *testing.T) {
 		VLESSPort:     443,
 		AdminListen:   "127.0.0.1:8443",
 		PublicHost:    "203.0.113.10",
+		SubscriptionBridges: []config.SubscriptionBridge{
+			{ID: "primary", Host: "primary.example.com", Port: 443, PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ServerName: "example.com", ShortID: "ab12"},
+			{ID: "backup", Host: "backup.example.com", Port: 8443, PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ServerName: "example.com", Transport: "xhttp", Path: "/vpn"},
+		},
 		Reality: config.RealitySpec{
 			Dest:        "www.microsoft.com:443",
 			ServerNames: []string{"www.microsoft.com"},
@@ -197,6 +207,40 @@ func TestRenderDesiredStateReusePreservesBridgeMaterial(t *testing.T) {
 	}
 	if ds.BridgeSpecObject.Reality.PrivateKey != "private" {
 		t.Fatalf("reality private key not reused: %#v", ds.BridgeSpecObject.Reality)
+	}
+	if !reflect.DeepEqual(ds.BridgeSpecObject.SubscriptionBridges, existing.SubscriptionBridges) {
+		t.Fatal("reuse render dropped or changed subscription bridges")
+	}
+	var rendered config.Spec
+	if err := json.Unmarshal(ds.BridgeSpec, &rendered); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rendered.SubscriptionBridges, existing.SubscriptionBridges) {
+		t.Fatal("serialized bridge spec lost subscription publication")
+	}
+	user := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee"}
+	profile, err := config.BuildHappProfile(&rendered, user, "Автоматически")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.LoadConfig("json", bytes.NewReader(data)); err != nil {
+		t.Fatal("rendered subscription cannot load in Xray", err)
+	}
+	for _, raw := range profile["outbounds"].([]any)[1:] {
+		out := raw.(map[string]any)
+		server := out["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)
+		credential := server["users"].([]any)[0].(map[string]any)["id"]
+		if credential != user.UUID {
+			t.Fatal("rendered profile changed user credential")
+		}
+	}
+	ds.BridgeSpecObject.SubscriptionBridges[0].Host = "changed.example.com"
+	if existing.SubscriptionBridges[0].Host != "primary.example.com" {
+		t.Fatal("rendered publication aliases source slice")
 	}
 	if ds.SplitHTTPPath != "/reused" || ds.SplitHTTPHost != "reuse.example.com" {
 		t.Fatalf("splithttp not reused: host=%q path=%q", ds.SplitHTTPHost, ds.SplitHTTPPath)
@@ -242,5 +286,14 @@ func TestDoctorReportsMissingBotTokenWithoutNetwork(t *testing.T) {
 	report = Doctor(context.Background(), p, DoctorOptions{EnvRoot: dir})
 	if !report.OK {
 		t.Fatalf("doctor should pass token-only checks: %#v", report.Issues)
+	}
+}
+
+func TestReusePreservesManagedIngress(t *testing.T) {
+	src := &config.Spec{PrimaryXHTTP: &config.PrimaryXHTTPIngress{Host: "vpn.example", BackendPort: 18080}, LegacyPublicEnabled: config.BoolPtr(false), ExperimentalProfileFile: "/etc/ultra-relay/experimental-profile.json", GatewayVLESSPort: 18081}
+	dst := new(config.Spec)
+	applyBridgeOverlay(dst, src)
+	if dst.PrimaryXHTTP != src.PrimaryXHTTP || dst.LegacyPublicEnabled == nil || *dst.LegacyPublicEnabled || dst.ExperimentalProfileFile != src.ExperimentalProfileFile || dst.GatewayVLESSPort != 18081 {
+		t.Fatal("managed ingress lost during reuse")
 	}
 }

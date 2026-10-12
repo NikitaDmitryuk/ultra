@@ -20,7 +20,7 @@ func (v *Vultr) AccountRemaining(ctx context.Context) (int64, error) {
 			} `json:"current_month_to_date"`
 		} `json:"bandwidth"`
 	}
-	if e := v.requestOnce(ctx, "GET", "/account/bandwidth", nil, &response); e != nil {
+	if e := v.request(ctx, "GET", "/account/bandwidth", nil, &response); e != nil {
 		return 0, e
 	}
 	c := response.Bandwidth.Current
@@ -39,7 +39,7 @@ func (v *Vultr) InstanceBandwidth(ctx context.Context, id string, now time.Time)
 			Out int64 `json:"outgoing_bytes"`
 		} `json:"bandwidth"`
 	}
-	if e := v.requestOnce(ctx, "GET", "/instances/"+url.PathEscape(id)+"/bandwidth", nil, &response); e != nil {
+	if e := v.request(ctx, "GET", "/instances/"+url.PathEscape(id)+"/bandwidth", nil, &response); e != nil {
 		return 0, e
 	}
 	if response.Bandwidth == nil {

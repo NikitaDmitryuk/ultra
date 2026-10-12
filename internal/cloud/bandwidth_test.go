@@ -9,7 +9,13 @@ import (
 )
 
 func TestBandwidthUsesAccruedAccountCredits(t *testing.T) {
+	calls := map[string]int{}
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls[r.URL.Path]++
+		if calls[r.URL.Path] == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
 		if r.URL.Path == "/account/bandwidth" {
 			_, _ = w.Write([]byte(`{"bandwidth":{"current_month_to_date":{"gb_out":300,"instance_bandwidth_credits":100,"free_bandwidth_credits":2000,"purchased_bandwidth_credits":0}}}`))
 			return
@@ -26,5 +32,8 @@ func TestBandwidthUsesAccruedAccountCredits(t *testing.T) {
 	used, e := api.InstanceBandwidth(context.Background(), "fixture", time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC))
 	if e != nil || used != 30 {
 		t.Fatal(used, e)
+	}
+	if calls["/account/bandwidth"] != 2 || calls["/instances/fixture/bandwidth"] != 2 {
+		t.Fatal("transient GET failures were not retried", calls)
 	}
 }

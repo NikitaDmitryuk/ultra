@@ -20,6 +20,8 @@ func handlePlanSubcommand(args []string) bool {
 		return false
 	}
 	switch args[0] {
+	case "ingress":
+		runIngressCommand(args[1:])
 	case "plan":
 		runPlanCommand(args[1:])
 	case "doctor":

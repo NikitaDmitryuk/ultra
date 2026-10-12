@@ -47,19 +47,11 @@ func ptrFromPGUUID(id pgtype.UUID) *string {
 	return &v
 }
 
-func toPGText(s string) pgtype.Text {
-	return pgtype.Text{String: s, Valid: true}
-}
-
 func fromPGText(t pgtype.Text) string {
 	if !t.Valid {
 		return ""
 	}
 	return t.String
-}
-
-func toPGInt4(n int32) pgtype.Int4 {
-	return pgtype.Int4{Int32: n, Valid: true}
 }
 
 func ptrFromPGInt4(n pgtype.Int4) *int {

@@ -73,7 +73,7 @@ func BuildBridgeXRayJSON(
 		if u.UUID == "" {
 			continue
 		}
-		if u.Kind == "socks5" {
+		if u.Kind != "" && u.Kind != "vless" {
 			continue
 		}
 		email := u.UUID
@@ -153,6 +153,14 @@ func BuildBridgeXRayJSON(
 	}
 
 	apiListenHost, apiListenPort, _ := splitHostPort(statsAPIListen(spec))
+	sniffing := map[string]any{
+		"enabled":      true,
+		"destOverride": w.SniffingDestOverride,
+	}
+	if ip := net.ParseIP(spec.PublicHost); ip != nil {
+		// Preserve the bridge endpoint when another VPN connection carries its REALITY SNI.
+		sniffing["ipsExcluded"] = []string{ip.String()}
+	}
 
 	inbounds := []any{
 		map[string]any{
@@ -166,13 +174,13 @@ func BuildBridgeXRayJSON(
 				"fallbacks":  []any{},
 			},
 			"streamSettings": inStream,
-			"sniffing": map[string]any{
-				"enabled":      true,
-				"destOverride": w.SniffingDestOverride,
-			},
+			"sniffing":       sniffing,
 		},
 	}
-	if spec.AntiCensor != nil && spec.AntiCensor.PublicXHTTPPort > 0 && !spec.DevMode {
+	if !spec.LegacyPublicIsEnabled() {
+		inbounds = nil
+	}
+	if spec.LegacyPublicIsEnabled() && spec.AntiCensor != nil && spec.AntiCensor.PublicXHTTPPort > 0 && !spec.DevMode {
 		xhttpStream := bridgeInboundStream(spec)
 		xhttpStream["network"] = "xhttp"
 		xhttpStream["xhttpSettings"] = map[string]any{
@@ -191,16 +199,28 @@ func BuildBridgeXRayJSON(
 				"fallbacks":  []any{},
 			},
 			"streamSettings": xhttpStream,
-			"sniffing": map[string]any{
-				"enabled":      true,
-				"destOverride": w.SniffingDestOverride,
-			},
+			"sniffing":       sniffing,
 		})
 	}
 	if spec.PublicXHTTPTLS != nil && !spec.DevMode {
 		inbounds = append(inbounds, map[string]any{"tag": w.InboundVLESSTag + "-xhttp-tls", "listen": spec.ListenAddress, "port": spec.PublicXHTTPTLS.Port,
 			"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption},
 			"streamSettings": publicTLSStream(spec, true)})
+	}
+	if p := spec.PrimaryXHTTP; p != nil {
+		child := *spec
+		child.PublicXHTTPTLS = &p.PublicXHTTPTLSSpec
+		stream := publicTLSStream(&child, true)
+		delete(stream, "tlsSettings")
+		stream["security"] = "none"
+		stream["sockopt"] = map[string]any{"trustedXForwardedFor": []string{"X-Ultra-Proxy"}}
+		inbounds = append(inbounds, map[string]any{"tag": w.InboundVLESSTag + "-primary-xhttp", "listen": "127.0.0.1", "port": p.BackendPort,
+			"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption}, "streamSettings": stream})
+	}
+	if spec.GatewayVLESSPort > 0 {
+		inbounds = append(inbounds, map[string]any{"tag": w.InboundVLESSTag + "-gateway", "listen": "127.0.0.1", "port": spec.GatewayVLESSPort,
+			"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption},
+			"streamSettings": map[string]any{"network": "tcp", "security": "none", "sockopt": map[string]any{"acceptProxyProtocol": true}}})
 	}
 	if statsEnabled {
 		inbounds = append(inbounds, map[string]any{
@@ -225,25 +245,7 @@ func BuildBridgeXRayJSON(
 			"network": "tcp",
 		},
 	})
-	if s := spec.bridgeSOCKS5(); s != nil {
-		inbounds = append(inbounds, map[string]any{
-			"tag":      w.InboundSocksTag,
-			"listen":   socks5ListenAddress(spec, s),
-			"port":     s.Port,
-			"protocol": "socks",
-			"settings": map[string]any{
-				"auth": w.SocksAuth,
-				"accounts": []any{
-					map[string]any{"user": s.Username, "pass": s.Password},
-				},
-				"udp": socks5UDPEnabled(s),
-			},
-			"sniffing": map[string]any{
-				"enabled":      true,
-				"destOverride": w.SniffingDestOverride,
-			},
-		})
-	}
+
 	if p := spec.botTelegramProxy(); p != nil {
 		inbounds = append(inbounds, map[string]any{
 			"tag":      BotTelegramProxyInboundTag,
@@ -253,32 +255,6 @@ func BuildBridgeXRayJSON(
 			"settings": map[string]any{
 				"auth": "noauth",
 				"udp":  false,
-			},
-		})
-	}
-	for _, u := range users {
-		if u.Kind != "socks5" || u.SocksPort == nil || *u.SocksPort <= 0 {
-			continue
-		}
-		if u.SocksUsername == "" || u.SocksPassword == "" {
-			continue
-		}
-		tag := "socks-" + u.UUID
-		inbounds = append(inbounds, map[string]any{
-			"tag":      tag,
-			"listen":   "0.0.0.0",
-			"port":     *u.SocksPort,
-			"protocol": "socks",
-			"settings": map[string]any{
-				"auth": w.SocksAuth,
-				"accounts": []any{
-					map[string]any{"user": u.SocksUsername, "pass": u.SocksPassword},
-				},
-				"udp": true,
-			},
-			"sniffing": map[string]any{
-				"enabled":      true,
-				"destOverride": w.SniffingDestOverride,
 			},
 		})
 	}

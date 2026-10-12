@@ -68,3 +68,49 @@ func TestHappImportPage(t *testing.T) {
 		t.Fatal("browser import must not depend on Telegram WebView")
 	}
 }
+
+func TestPublicSubscriptionForwardsFormat(t *testing.T) {
+	token := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.UserAgent() != "Happ/3 Android" || r.URL.Query().Get("format") != "happ" || r.URL.Query().Has("ignored") {
+			t.Error("missing format or UA, or forwarded arbitrary query")
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Vary", "User-Agent")
+		_, _ = w.Write([]byte(`[{"remarks":"Автоматически"}]`))
+	}))
+	defer upstream.Close()
+	b := &Bot{adminAPIURL: upstream.URL, adminAPIToken: "secret"}
+	mux := http.NewServeMux()
+	b.registerMiniAppRoutes(mux)
+	r := httptest.NewRequest("GET", "/sub/"+token+"?format=happ&ignored=secret", nil)
+	r.TLS = &tls.ConnectionState{}
+	r.Header.Set("User-Agent", "Happ/3 Android")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != 200 || w.Header().Get("Content-Type") != "application/json; charset=utf-8" || w.Header().Get("Vary") != "User-Agent" || !strings.HasPrefix(w.Body.String(), "[") {
+		t.Fatal("lost JSON response", w.Code)
+	}
+}
+
+func TestPublicSubscriptionForwardsTransport(t *testing.T) {
+	token := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("format") != "uri" || r.URL.Query().Get("transport") != "xhttp-tls" || r.URL.Query().Has("ignored") || r.Header.Get("Authorization") != "Bearer secret" {
+			t.Error("lost transport or authorization, or forwarded arbitrary query")
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("vless://test"))
+	}))
+	defer upstream.Close()
+	b := &Bot{adminAPIURL: upstream.URL, adminAPIToken: "secret"}
+	mux := http.NewServeMux()
+	b.registerMiniAppRoutes(mux)
+	r := httptest.NewRequest("GET", "/sub/"+token+"?format=uri&transport=xhttp-tls&ignored=secret", nil)
+	r.TLS = &tls.ConnectionState{}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != 200 || w.Body.String() != "vless://test" || w.Header().Get("Content-Type") != "text/plain; charset=utf-8" {
+		t.Fatal("lost URI response", w.Code)
+	}
+}

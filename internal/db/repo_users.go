@@ -2,8 +2,6 @@ package db
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"strings"
 
@@ -17,32 +15,10 @@ import (
 // UserRepo handles user CRUD against PostgreSQL.
 type UserRepo struct {
 	db *DB
-
-	socksPortStart  int
-	socksPortEnd    int
-	socksLegacyPort int
 }
 
 // NewUserRepo creates a UserRepo backed by db.
-func NewUserRepo(db *DB) *UserRepo {
-	return &UserRepo{
-		db:             db,
-		socksPortStart: 10810,
-		socksPortEnd:   10899,
-	}
-}
-
-// SetSOCKS5BridgePorts configures TCP port pool for kind=socks5 users. legacyPort (global inbound)
-// is never auto-assigned to a new SOCKS5 client. Pass 0 when global SOCKS5 is disabled.
-func (r *UserRepo) SetSOCKS5BridgePorts(rangeStart, rangeEnd, legacyPort int) {
-	if rangeStart > 0 {
-		r.socksPortStart = rangeStart
-	}
-	if rangeEnd > 0 {
-		r.socksPortEnd = rangeEnd
-	}
-	r.socksLegacyPort = legacyPort
-}
+func NewUserRepo(db *DB) *UserRepo { return &UserRepo{db: db} }
 
 func authUserFromFields(
 	uuid pgtype.UUID,
@@ -143,23 +119,6 @@ func authUserFromRename(row sqlc.RenameUserRow) auth.User {
 	)
 }
 
-func authUserFromRotateSocks(row sqlc.RotateSocksPasswordRow) auth.User {
-	return authUserFromFields(
-		row.Uuid,
-		row.Name,
-		row.Kind,
-		row.IsActive,
-		row.DisabledAt,
-		row.SocksUsername,
-		row.SocksPassword,
-		row.SocksPort,
-		row.LeakPolicy,
-		row.LeakMaxConcurrentIps,
-		row.LeakMaxUniqueIps24h,
-		row.PreferredExitID,
-	)
-}
-
 func authUserFromSetPreferredExit(row sqlc.SetUserPreferredExitRow) auth.User {
 	return authUserFromFields(
 		row.Uuid,
@@ -177,14 +136,6 @@ func authUserFromSetPreferredExit(row sqlc.SetUserPreferredExitRow) auth.User {
 	)
 }
 
-func randomSocksPassword() (string, error) {
-	var b [24]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b[:]), nil
-}
-
 func normalizeKind(kind string) string {
 	k := strings.TrimSpace(strings.ToLower(kind))
 	if k == "" {
@@ -193,105 +144,23 @@ func normalizeKind(kind string) string {
 	return k
 }
 
-func (r *UserRepo) nextSocksPort(ctx context.Context) (int, error) {
-	for p := r.socksPortStart; p <= r.socksPortEnd; p++ {
-		if r.socksLegacyPort != 0 && p == r.socksLegacyPort {
-			continue
-		}
-		exists, err := r.db.Queries.UserSocksPortExists(ctx, toPGInt4(int32(p)))
-		if err != nil {
-			return 0, err
-		}
-		if !exists {
-			return p, nil
-		}
-	}
-	return 0, auth.ErrSocksPortsExhausted
-}
-
-// Add inserts a new user. kind is "vless" (default) or "socks5".
+// Add inserts a VLESS user; historical kinds are read-only.
 func (r *UserRepo) Add(ctx context.Context, kind, name string) (auth.User, error) {
-	kind = normalizeKind(kind)
-	if kind != "vless" && kind != "socks5" {
+	if normalizeKind(kind) != "vless" {
 		return auth.User{}, auth.ErrInvalidUserKind
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return auth.User{}, auth.ErrEmptyUserName
 	}
-
 	id := uuid.New()
-	uuidStr := (&id).String()
-
-	switch kind {
-	case "vless":
-		u := auth.User{
-			UUID:     uuidStr,
-			Name:     name,
-			Kind:     "vless",
-			IsActive: true,
-		}
-		pgUUID, err := toPGUUID(u.UUID)
-		if err != nil {
-			return auth.User{}, err
-		}
-		err = r.db.Queries.InsertVlessUser(ctx, sqlc.InsertVlessUserParams{Uuid: pgUUID, Name: u.Name})
-		if err != nil {
-			return auth.User{}, err
-		}
-		return u, nil
-	case "socks5":
-		pass, err := randomSocksPassword()
-		if err != nil {
-			return auth.User{}, err
-		}
-		port, err := r.nextSocksPort(ctx)
-		if err != nil {
-			return auth.User{}, err
-		}
-		u := auth.User{
-			UUID:          uuidStr,
-			Name:          name,
-			Kind:          "socks5",
-			IsActive:      true,
-			SocksUsername: uuidStr,
-			SocksPassword: pass,
-			SocksPort:     &port,
-		}
-		err = r.db.Queries.InsertSocksUser(ctx, sqlc.InsertSocksUserParams{
-			Uuid:          mustPGUUID(u.UUID),
-			Name:          u.Name,
-			SocksUsername: toPGText(u.SocksUsername),
-			SocksPassword: toPGText(u.SocksPassword),
-			SocksPort:     toPGInt4(int32(port)),
-		})
-		if err != nil {
-			return auth.User{}, err
-		}
-		return u, nil
-	default:
-		return auth.User{}, auth.ErrInvalidUserKind
-	}
-}
-
-// RotateSocksPassword replaces the SOCKS5 password for a socks5 user.
-func (r *UserRepo) RotateSocksPassword(ctx context.Context, id string) (auth.User, error) {
-	pass, err := randomSocksPassword()
+	u := auth.User{UUID: (&id).String(), Name: name, Kind: "vless", IsActive: true}
+	pgUUID, err := toPGUUID(u.UUID)
 	if err != nil {
 		return auth.User{}, err
 	}
-	pgUUID, err := toPGUUID(id)
-	if err != nil {
-		return auth.User{}, err
-	}
-	row, err := r.db.Queries.RotateSocksPassword(ctx, sqlc.RotateSocksPasswordParams{SocksPassword: toPGText(pass), Uuid: pgUUID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return auth.User{}, auth.ErrUserNotFound
-	}
-	if err != nil {
-		return auth.User{}, err
-	}
-	return authUserFromRotateSocks(row), nil
+	err = r.db.Queries.InsertVlessUser(ctx, sqlc.InsertVlessUserParams{Uuid: pgUUID, Name: u.Name})
+	return u, err
 }
 
 // Rename updates the display name of a user.
@@ -358,6 +227,16 @@ func (r *UserRepo) Purge(ctx context.Context, id string) error {
 
 // Enable restores a disabled user by UUID.
 func (r *UserRepo) Enable(ctx context.Context, id string) error {
+	u, ok, err := r.Lookup(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return auth.ErrUserNotFound
+	}
+	if u.Kind != "vless" {
+		return auth.ErrUnsupportedForKind
+	}
 	pgUUID, err := toPGUUID(id)
 	if err != nil {
 		return err
@@ -404,7 +283,7 @@ func (r *UserRepo) RotateUUID(ctx context.Context, id string) (string, error) {
 	if !ok {
 		return "", auth.ErrUserNotFound
 	}
-	if u.Kind == "socks5" {
+	if u.Kind != "vless" {
 		return "", auth.ErrUnsupportedForKind
 	}
 
@@ -437,7 +316,9 @@ func (r *UserRepo) rotateUUIDTx(ctx context.Context, tx pgx.Tx, id, newUUID stri
 	if err := qtx.MoveTrafficStatsUserUUID(ctx, sqlc.MoveTrafficStatsUserUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
 		return "", err
 	}
- if err:=qtx.MoveUserExitQuotasUUID(ctx,sqlc.MoveUserExitQuotasUUIDParams{UserUuid:oldPGUUID,UserUuid_2:newPGUUID});err!=nil{return "",err}
+	if err := qtx.MoveUserExitQuotasUUID(ctx, sqlc.MoveUserExitQuotasUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
+		return "", err
+	}
 	if err := qtx.MoveDailyRouteTrafficUserUUID(ctx, sqlc.MoveDailyRouteTrafficUserUUIDParams{UserUuid: oldPGUUID, UserUuid_2: newPGUUID}); err != nil {
 		return "", err
 	}

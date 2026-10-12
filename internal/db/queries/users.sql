@@ -1,19 +1,5 @@
--- name: UserSocksPortExists :one
-SELECT EXISTS(SELECT 1 FROM users WHERE socks_port=$1);
-
 -- name: InsertVlessUser :exec
 INSERT INTO users(uuid, name, kind) VALUES($1, $2, 'vless');
-
--- name: InsertSocksUser :exec
-INSERT INTO users(uuid, name, kind, socks_username, socks_password, socks_port)
-VALUES($1, $2, 'socks5', $3, $4, $5);
-
--- name: RotateSocksPassword :one
-UPDATE users SET socks_password=$1 WHERE uuid=$2 AND kind='socks5' AND is_active=true
-RETURNING uuid, name, kind, is_active, disabled_at,
-  socks_username, socks_password, socks_port,
-  leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  preferred_exit_id;
 
 -- name: RenameUser :one
 UPDATE users SET name=$1 WHERE uuid=$2
@@ -29,7 +15,7 @@ UPDATE users SET is_active=false, disabled_at=NOW() WHERE uuid=$1 AND is_active=
 DELETE FROM users WHERE uuid=$1;
 
 -- name: EnableUser :execrows
-UPDATE users SET is_active=true, disabled_at=NULL WHERE uuid=$1;
+UPDATE users SET is_active=true, disabled_at=NULL WHERE uuid=$1 AND kind='vless';
 
 -- name: CloneUserForUUIDRotation :exec
 WITH original AS MATERIALIZED (SELECT users.* FROM users WHERE users.uuid=$1 FOR UPDATE),

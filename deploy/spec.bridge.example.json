@@ -43,12 +43,5 @@
   "domain_exit": [],
   "domain_direct": [],
 
-  "xray_wire": {},
-
-  "socks5": {
-    "enabled": false,
-    "port": 1080,
-    "username": "homelab",
-    "password": "CHANGE_ME"
-  }
+  "xray_wire": {}
 }

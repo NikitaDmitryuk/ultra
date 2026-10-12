@@ -63,7 +63,7 @@ func (q *Queries) DisableUser(ctx context.Context, uuid pgtype.UUID) (int64, err
 }
 
 const enableUser = `-- name: EnableUser :execrows
-UPDATE users SET is_active=true, disabled_at=NULL WHERE uuid=$1
+UPDATE users SET is_active=true, disabled_at=NULL WHERE uuid=$1 AND kind='vless'
 `
 
 func (q *Queries) EnableUser(ctx context.Context, uuid pgtype.UUID) (int64, error) {
@@ -115,30 +115,6 @@ func (q *Queries) GetUser(ctx context.Context, uuid pgtype.UUID) (GetUserRow, er
 		&i.PreferredExitID,
 	)
 	return i, err
-}
-
-const insertSocksUser = `-- name: InsertSocksUser :exec
-INSERT INTO users(uuid, name, kind, socks_username, socks_password, socks_port)
-VALUES($1, $2, 'socks5', $3, $4, $5)
-`
-
-type InsertSocksUserParams struct {
-	Uuid          pgtype.UUID `json:"uuid"`
-	Name          string      `json:"name"`
-	SocksUsername pgtype.Text `json:"socks_username"`
-	SocksPassword pgtype.Text `json:"socks_password"`
-	SocksPort     pgtype.Int4 `json:"socks_port"`
-}
-
-func (q *Queries) InsertSocksUser(ctx context.Context, arg InsertSocksUserParams) error {
-	_, err := q.db.Exec(ctx, insertSocksUser,
-		arg.Uuid,
-		arg.Name,
-		arg.SocksUsername,
-		arg.SocksPassword,
-		arg.SocksPort,
-	)
-	return err
 }
 
 const insertVlessUser = `-- name: InsertVlessUser :exec
@@ -413,54 +389,6 @@ func (q *Queries) RenameUser(ctx context.Context, arg RenameUserParams) (RenameU
 	return i, err
 }
 
-const rotateSocksPassword = `-- name: RotateSocksPassword :one
-UPDATE users SET socks_password=$1 WHERE uuid=$2 AND kind='socks5' AND is_active=true
-RETURNING uuid, name, kind, is_active, disabled_at,
-  socks_username, socks_password, socks_port,
-  leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  preferred_exit_id
-`
-
-type RotateSocksPasswordParams struct {
-	SocksPassword pgtype.Text `json:"socks_password"`
-	Uuid          pgtype.UUID `json:"uuid"`
-}
-
-type RotateSocksPasswordRow struct {
-	Uuid                 pgtype.UUID        `json:"uuid"`
-	Name                 string             `json:"name"`
-	Kind                 string             `json:"kind"`
-	IsActive             bool               `json:"is_active"`
-	DisabledAt           pgtype.Timestamptz `json:"disabled_at"`
-	SocksUsername        pgtype.Text        `json:"socks_username"`
-	SocksPassword        pgtype.Text        `json:"socks_password"`
-	SocksPort            pgtype.Int4        `json:"socks_port"`
-	LeakPolicy           string             `json:"leak_policy"`
-	LeakMaxConcurrentIps pgtype.Int4        `json:"leak_max_concurrent_ips"`
-	LeakMaxUniqueIps24h  pgtype.Int4        `json:"leak_max_unique_ips_24h"`
-	PreferredExitID      pgtype.UUID        `json:"preferred_exit_id"`
-}
-
-func (q *Queries) RotateSocksPassword(ctx context.Context, arg RotateSocksPasswordParams) (RotateSocksPasswordRow, error) {
-	row := q.db.QueryRow(ctx, rotateSocksPassword, arg.SocksPassword, arg.Uuid)
-	var i RotateSocksPasswordRow
-	err := row.Scan(
-		&i.Uuid,
-		&i.Name,
-		&i.Kind,
-		&i.IsActive,
-		&i.DisabledAt,
-		&i.SocksUsername,
-		&i.SocksPassword,
-		&i.SocksPort,
-		&i.LeakPolicy,
-		&i.LeakMaxConcurrentIps,
-		&i.LeakMaxUniqueIps24h,
-		&i.PreferredExitID,
-	)
-	return i, err
-}
-
 const setUserPreferredExit = `-- name: SetUserPreferredExit :one
 UPDATE users SET preferred_exit_id=$2 WHERE uuid=$1 AND is_active=true
 RETURNING uuid, name, kind, is_active, disabled_at,
@@ -507,15 +435,4 @@ func (q *Queries) SetUserPreferredExit(ctx context.Context, arg SetUserPreferred
 		&i.PreferredExitID,
 	)
 	return i, err
-}
-
-const userSocksPortExists = `-- name: UserSocksPortExists :one
-SELECT EXISTS(SELECT 1 FROM users WHERE socks_port=$1)
-`
-
-func (q *Queries) UserSocksPortExists(ctx context.Context, socksPort pgtype.Int4) (bool, error) {
-	row := q.db.QueryRow(ctx, userSocksPortExists, socksPort)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
 }

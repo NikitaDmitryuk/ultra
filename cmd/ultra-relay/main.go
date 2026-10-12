@@ -2,10 +2,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/xtls/xray-core/core"
 	"log/slog"
 	"net/http"
 	"os"
@@ -21,7 +23,6 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/db"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
-	"github.com/NikitaDmitryuk/ultra/internal/firewall"
 	"github.com/NikitaDmitryuk/ultra/internal/loglevel"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 	"github.com/NikitaDmitryuk/ultra/internal/proxy"
@@ -32,6 +33,8 @@ import (
 )
 
 func main() {
+	transportPath := flag.String("transport-spec", "", "isolated experimental transport spec (no database or workers)")
+	checkOnly := flag.Bool("check", false, "validate spec and certificate without starting services")
 	specPath := flag.String("spec", "", "path to relay JSON spec (required)")
 	adminToken := flag.String(
 		"admin-token",
@@ -57,6 +60,19 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slogLvl}))
 	log.Info("ultra-relay starting", "log_level", *logLevelFlag, "xray_loglevel", xrayLogLevel)
 
+	if *transportPath != "" {
+		if *specPath != "" {
+			log.Error("spec and transport-spec are mutually exclusive")
+			os.Exit(2)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		if err := runTransport(ctx, *transportPath, *checkOnly); err != nil {
+			log.Error("transport failed", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *specPath == "" {
 		log.Error("missing -spec")
 		os.Exit(2)
@@ -71,6 +87,29 @@ func main() {
 	if err != nil {
 		log.Error("mimic preset", "err", err)
 		os.Exit(1)
+	}
+
+	if *checkOnly {
+		if spec.Role == config.RoleBridge && spec.SplitRoutingEnabled() {
+			if err := os.Setenv("XRAY_LOCATION_ASSET", spec.GeoAssetsDir); err != nil {
+				log.Error("set XRAY_LOCATION_ASSET", "err", err)
+				os.Exit(1)
+			}
+		}
+		var data []byte
+		if spec.Role == config.RoleBridge {
+			data, err = config.BuildBridgeXRayJSON(spec, nil, nil, "", strat, xrayLogLevel)
+		} else {
+			data, err = config.BuildExitXRayJSON(spec, strat, xrayLogLevel)
+		}
+		if err == nil {
+			_, err = core.LoadConfig("json", bytes.NewReader(data))
+		}
+		if err != nil {
+			log.Error("Xray configuration validation failed")
+			os.Exit(1)
+		}
+		return
 	}
 
 	runner := new(proxy.Runner)
@@ -135,10 +174,6 @@ func main() {
 		}
 
 		userRepo := db.NewUserRepo(database)
-		if spec.SOCKS5 != nil && spec.SOCKS5.Enabled {
-			userRepo.SetSOCKS5BridgePorts(spec.SOCKS5.PortRangeStart, spec.SOCKS5.PortRangeEnd, spec.SOCKS5.Port)
-		}
-		fw := firewall.New()
 
 		var reloadMu sync.Mutex
 		applications := &auth.RouteApplications{}
@@ -228,7 +263,7 @@ func main() {
 		}
 
 		reloadBridge = func(users []auth.User) { _ = applyBridge(users, "users, preferences or routing configuration") }
-		dbMgr, err := auth.NewDBManager(userRepo, reloadBridge, fw, log)
+		dbMgr, err := auth.NewDBManager(userRepo, reloadBridge, log)
 		if err != nil {
 			log.Error("db user manager", "err", err)
 			os.Exit(1)
@@ -271,8 +306,7 @@ func main() {
 		if *adminToken == "" {
 			log.Warn("Admin API disabled: set -admin-token or ULTRA_RELAY_ADMIN_TOKEN to enable user provisioning on loopback")
 		} else {
-			statPeek := func(key string) int64 { return runner.PeekCounter(key) }
-			srv, err := adminapi.NewServer(spec.AdminListen, *adminToken, mgr, trafficRepo, spec, exitMgr, exitSelector, nil, log, statPeek)
+			srv, err := adminapi.NewServer(spec.AdminListen, *adminToken, mgr, trafficRepo, spec, exitMgr, exitSelector, nil, log, nil)
 			if err != nil {
 				log.Error("admin api", "err", err)
 				os.Exit(1)

@@ -59,3 +59,61 @@ func TestSubscriptionLifecycle(t *testing.T) {
 		t.Fatal("invalid token resolved")
 	}
 }
+
+func TestSubscriptionAdminOwner(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	users := NewUserRepo(d)
+	u, err := users.Add(ctx, "vless", "admin-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := NewSubscriptionRepo(d)
+	allowed, err := repo.IsAdminOwner(ctx, u.UUID)
+	if err != nil || allowed {
+		t.Fatal("unlinked owner", allowed, err)
+	}
+	if _, err = d.Pool.Exec(ctx, `UPDATE users SET telegram_id=12345 WHERE uuid=$1`, u.UUID); err != nil {
+		t.Fatal(err)
+	}
+	admin := NewBotAdminRepo(d)
+	if err = admin.AddAdmin(ctx, 12345, "test"); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err = repo.IsAdminOwner(ctx, u.UUID)
+	if err != nil || !allowed {
+		t.Fatal("admin owner", allowed, err)
+	}
+	if err = admin.RemoveAdmin(ctx, 12345); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err = repo.IsAdminOwner(ctx, u.UUID)
+	if err != nil || allowed {
+		t.Fatal("removed admin", allowed, err)
+	}
+}
+
+func TestIngressNoticeDeduplicates(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	users := NewUserRepo(d)
+	u, err := users.Add(ctx, "vless", "notice-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = d.Pool.Exec(ctx, `UPDATE users SET telegram_id=12345 WHERE uuid=$1`, u.UUID); err != nil {
+		t.Fatal(err)
+	}
+	repo := NewSubscriptionRepo(d, &subscriptionkey.Ring{Active: "v1", Keys: map[string]string{"v1": base64.StdEncoding.EncodeToString(make([]byte, 32))}})
+	if _, err = repo.Rotate(ctx, u.UUID); err != nil {
+		t.Fatal(err)
+	}
+	n, err := repo.EnqueueIngressNotice(ctx, "test-release", "Update your existing subscription")
+	if err != nil || n != 1 {
+		t.Fatal("first notice", n, err)
+	}
+	n, err = repo.EnqueueIngressNotice(ctx, "test-release", "Update your existing subscription")
+	if err != nil || n != 0 {
+		t.Fatal("duplicate notice", n, err)
+	}
+}

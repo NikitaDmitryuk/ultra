@@ -19,6 +19,7 @@ type PublicXHTTPTLSSpec struct {
 	KeyFile         string           `json:"key_file"`
 	Path            string           `json:"path"`
 	Mode            string           `json:"mode,omitempty"`
+	Fingerprint     string           `json:"fingerprint,omitempty"`
 	XMUX            *conf.XmuxConfig `json:"xmux,omitempty"`
 	Download        *XHTTPDownload   `json:"download,omitempty"`
 }
@@ -26,6 +27,22 @@ type XHTTPDownload struct {
 	Address    string `json:"address"`
 	Port       int    `json:"port"`
 	ServerName string `json:"server_name"`
+}
+
+func (t *PublicXHTTPTLSSpec) clientFingerprint() string {
+	if t.Fingerprint == "" {
+		return "chrome"
+	}
+	return t.Fingerprint
+}
+
+func (t *PublicXHTTPTLSSpec) validateFingerprint() error {
+	switch t.clientFingerprint() {
+	case "chrome", "firefox":
+		return nil
+	default:
+		return fmt.Errorf("XHTTP TLS fingerprint must be chrome or firefox")
+	}
 }
 
 func publicTLSSettings(s *Spec, server bool) map[string]any {
@@ -44,7 +61,7 @@ func publicTLSSettings(s *Spec, server bool) map[string]any {
 	if !server && t.Download != nil {
 		d := t.Download
 		settings["downloadSettings"] = map[string]any{"address": d.Address, "port": d.Port, "network": "xhttp", "security": "tls",
-			"tlsSettings":   map[string]any{"serverName": d.ServerName, "alpn": []string{"h2"}, "fingerprint": "chrome"},
+			"tlsSettings":   map[string]any{"serverName": d.ServerName, "alpn": []string{"h2"}, "fingerprint": t.clientFingerprint()},
 			"xhttpSettings": map[string]any{"path": t.Path, "mode": mode, "xPaddingBytes": effectivePadding(s)}}
 	}
 	return settings
@@ -55,21 +72,27 @@ func publicTLSStream(s *Spec, server bool) map[string]any {
 	if server {
 		tls["certificates"] = []any{map[string]any{"oneTimeLoading": true, "certificateFile": t.CertificateFile, "keyFile": t.KeyFile}}
 	} else {
-		tls["fingerprint"] = "chrome"
+		tls["fingerprint"] = t.clientFingerprint()
 	}
 	return map[string]any{"network": "xhttp", "security": "tls", "tlsSettings": tls, "xhttpSettings": publicTLSSettings(s, server)}
 }
 func buildPublicTLSExport(s *Spec, u auth.User) *ClientExport {
-	t := s.PublicXHTTPTLS
+	return buildXHTTPTLSExport(s, u, s.PublicHost, s.PublicXHTTPTLS)
+}
+
+func buildXHTTPTLSExport(s *Spec, u auth.User, host string, t *PublicXHTTPTLSSpec) *ClientExport {
+	child := *s
+	child.PublicXHTTPTLS = t
+	s = &child
 	w := resolveXrayWire(s)
-	outbound := map[string]any{"tag": w.ClientOutboundTag, "protocol": "vless", "settings": map[string]any{"vnext": []any{map[string]any{"address": s.PublicHost, "port": t.Port, "users": []any{vlessUserFieldsNoFlow(s, u.UUID)}}}}, "streamSettings": publicTLSStream(s, false)}
+	outbound := map[string]any{"tag": w.ClientOutboundTag, "protocol": "vless", "settings": map[string]any{"vnext": []any{map[string]any{"address": host, "port": t.Port, "users": []any{vlessUserFieldsNoFlow(s, u.UUID)}}}}, "streamSettings": publicTLSStream(s, false)}
 	extra, _ := json.Marshal(publicTLSSettings(s, false))
 	mode := t.Mode
 	if mode == "" {
 		mode = "stream-up"
 	}
-	q := url.Values{"type": {"xhttp"}, "security": {"tls"}, "encryption": {"none"}, "sni": {t.ServerName}, "fp": {"chrome"}, "alpn": {"h2"}, "path": {t.Path}, "mode": {mode}, "extra": {string(extra)}}
-	uri := fmt.Sprintf("vless://%s@%s?%s#%s", u.UUID, net.JoinHostPort(s.PublicHost, strconv.Itoa(t.Port)), q.Encode(), url.PathEscape(u.Name+" XHTTP TLS"))
+	q := url.Values{"type": {"xhttp"}, "security": {"tls"}, "encryption": {"none"}, "sni": {t.ServerName}, "fp": {t.clientFingerprint()}, "alpn": {"h2"}, "path": {t.Path}, "mode": {mode}, "extra": {string(extra)}}
+	uri := fmt.Sprintf("vless://%s@%s?%s#%s", u.UUID, net.JoinHostPort(host, strconv.Itoa(t.Port)), q.Encode(), url.PathEscape(u.Name+" XHTTP TLS"))
 	return &ClientExport{VLESSURI: uri, XRayOutboundJSON: outbound}
 }
 

@@ -57,7 +57,7 @@
 
 Источники: [бот](../internal/bot/members.go), [репозиторий](../internal/db/repo_members.go),
 [применение](../internal/adminapi/members.go), [шифрование](../internal/subscriptionkey/key.go),
-[ADR](adr/0005-member-access.md).
+[хранение подписок](../internal/db/repo_subscription.go).
 
 ## Разрешение и использование
 

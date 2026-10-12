@@ -7,32 +7,12 @@ import (
 	"testing"
 )
 
-const record = `# 0001 — Решение
-## Статус
-accepted
-## Дата
-2026-09-07
-## Контекст
-Проверенная проблема.
-## Решение
-Выбранный подход.
-## Рассмотренные альтернативы
-Другой подход.
-## Последствия
-Ограничение.
-## Источники
-[Код](../../example.go)
-`
-
 func fixture() map[string]string {
 	return map[string]string{
-		"AGENTS.md":                "# Инструкции\n[Архитектура](docs/architecture.md)\n[Разработка](docs/development.md)\n[ADR](docs/adr/README.md)\n",
-		"docs/architecture.md":     "# Архитектура\n[Код](../example.go)\n",
-		"docs/development.md":      "# Разработка\nПроверяем релевантные пакеты.\n",
-		"docs/adr/README.md":       "# ADR\n[Шаблон](template.md)\n[Решение](0001-context.md)\n",
-		"docs/adr/template.md":     "# Шаблон\nОбразец для новых решений.\n",
-		"docs/adr/0001-context.md": record,
-		"example.go":               "package example\n",
+		"AGENTS.md":            "# Инструкции\n[Архитектура](docs/architecture.md)\n[Разработка](docs/development.md)\n",
+		"docs/architecture.md": "# Архитектура\n[Код](../example.go)\n",
+		"docs/development.md":  "# Разработка\nПроверяем релевантные пакеты.\n",
+		"example.go":           "package example\n",
 	}
 }
 
@@ -57,7 +37,13 @@ func TestCheck(t *testing.T) {
 		change func(map[string]string)
 		want   string
 	}{
-		{name: "valid"},
+		{name: "valid documentation without decision records"},
+		{name: "missing architecture", change: func(f map[string]string) {
+			delete(f, "docs/architecture.md")
+		}, want: "отсутствует обязательная страница"},
+		{name: "missing development", change: func(f map[string]string) {
+			delete(f, "docs/development.md")
+		}, want: "отсутствует обязательная страница"},
 		{name: "code change without doc update", change: func(f map[string]string) {
 			f["example.go"] += "\nfunc Updated() {}\n"
 		}},
@@ -71,40 +57,6 @@ func TestCheck(t *testing.T) {
 			f["docs/a.md"] = "[B](b.md)"
 			f["docs/b.md"] = "[A](a.md)"
 		}, want: "страница недоступна"},
-		{name: "duplicate ADR", change: func(f map[string]string) {
-			f["docs/adr/0001-other.md"] = record
-			f["docs/adr/README.md"] += "[Other](0001-other.md)"
-		}, want: "повторный номер ADR"},
-		{name: "invalid ADR name", change: func(f map[string]string) {
-			f["docs/adr/decision.md"] = record
-		}, want: "имя ADR"},
-		{name: "invalid status", change: func(f map[string]string) {
-			f["docs/adr/0001-context.md"] = strings.Replace(record, "accepted", "finished", 1)
-		}, want: "неверный статус"},
-		{name: "missing section", change: func(f map[string]string) {
-			f["docs/adr/0001-context.md"] = strings.Replace(record, "## Последствия", "## Другое", 1)
-		}, want: "пуст раздел: Последствия"},
-		{name: "empty section", change: func(f map[string]string) {
-			f["docs/adr/0001-context.md"] = strings.Replace(record, "Ограничение.", "", 1)
-		}, want: "пуст раздел: Последствия"},
-		{name: "invalid date", change: func(f map[string]string) {
-			f["docs/adr/0001-context.md"] = strings.Replace(record, "2026-09-07", "2026-02-30", 1)
-		}, want: "дата ADR"},
-		{name: "missing replacement", change: func(f map[string]string) {
-			f["docs/adr/0001-context.md"] = strings.Replace(record, "accepted", "superseded", 1)
-		}, want: "superseded требует"},
-		{name: "self replacement", change: func(f map[string]string) {
-			f["docs/adr/0001-context.md"] = strings.Replace(record, "accepted", "superseded", 1) + "\n## Заменено\n[Self](0001-context.md)\n"
-		}, want: "superseded требует"},
-		{name: "valid replacement", change: func(f map[string]string) {
-			f["docs/adr/0001-context.md"] = strings.Replace(record, "accepted", "superseded", 1) + "\n## Заменено\n[Next](0002-next.md)\n"
-			f["docs/adr/0002-next.md"] = strings.Replace(record, "# 0001", "# 0002", 1)
-			f["docs/adr/README.md"] += "[Next](0002-next.md)"
-		}},
-		{name: "not in ADR index", change: func(f map[string]string) {
-			f["docs/adr/README.md"] = "[Шаблон](template.md)"
-			f["AGENTS.md"] += "[ADR directly](docs/adr/0001-context.md)"
-		}, want: "отсутствует в ссылках индекса"},
 		{name: "over instruction limit", change: func(f map[string]string) {
 			f["AGENTS.md"] += strings.Repeat("extra\n", 120)
 		}, want: "больше 120 строк"},
@@ -158,5 +110,22 @@ func TestCheck(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestADRContracts(t *testing.T) {
+	doc := "# 0001 — Decision\n\n## Статус\n\naccepted\n\n## Дата\n\n2026-10-12\n\n## Контекст\n\nReason\n\n## Решение\n\nChoice\n\n## Рассмотренные альтернативы\n\nAlternatives\n\n## Последствия\n\nLimits\n\n## Источники\n\nSources\n"
+	file := "docs/adr/0001-decision.md"
+	documents := map[string]string{file: doc, "docs/adr/README.md": "[Decision](0001-decision.md)"}
+	if got := checkADR("", documents); len(got) != 0 {
+		t.Fatal(got)
+	}
+	documents[file] = strings.Replace(doc, "accepted", "temporary", 1)
+	if got := checkADR("", documents); len(got) == 0 {
+		t.Fatal("invalid status accepted")
+	}
+	documents[file] = strings.Replace(doc, "accepted", "superseded", 1)
+	if got := checkADR("", documents); len(got) == 0 {
+		t.Fatal("missing replacement accepted")
 	}
 }

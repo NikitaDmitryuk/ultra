@@ -227,6 +227,11 @@ func (b *Bot) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	payload, _ := json.Marshal(map[string]string{"name": name, "kind": kind})
 	resp, err := b.adminPost(r.Context(), "/v1/users", payload)
 	if err != nil {
+		var apiErr *adminAPIError
+		if errors.As(err, &apiErr) {
+			http.Error(w, apiErr.body, apiErr.code)
+			return
+		}
 		b.log.Error("admin POST /v1/users", "err", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return

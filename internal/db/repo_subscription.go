@@ -41,7 +41,7 @@ func (r *SubscriptionRepo) issue(ctx context.Context, id string, rotate bool) (s
 	if err != nil {
 		return "", err
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck
 	var active bool
 	err = tx.QueryRow(ctx, `SELECT is_active AND kind='vless' FROM users WHERE uuid=$1 FOR UPDATE`, id).Scan(&active)
 	if err != nil {
@@ -98,4 +98,35 @@ func (r *SubscriptionRepo) Resolve(ctx context.Context, token string) (string, e
 	err = r.db.Pool.QueryRow(ctx, `SELECT u.uuid::text FROM subscription_tokens t JOIN users u ON u.uuid=t.user_uuid
  WHERE t.token_hash=$1 AND u.is_active AND u.kind='vless' AND NOT u.member_pending`, digest[:]).Scan(&id)
 	return id, err
+}
+
+// IsAdminOwner resolves permissions from the subscription owner, never request metadata.
+func (r *SubscriptionRepo) IsAdminOwner(ctx context.Context, id string) (bool, error) {
+	var admin bool
+	err := r.db.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users u JOIN bot_admins a ON a.telegram_id=u.telegram_id WHERE u.uuid=$1)`, id).Scan(&admin)
+	return admin, err
+}
+
+// EnqueueIngressNotice deduplicates a rollout notice across retries and concurrent callers.
+func (r *SubscriptionRepo) EnqueueIngressNotice(ctx context.Context, key, text string) (int64, error) {
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "ultra-ingress:"+key); err != nil {
+		return 0, err
+	}
+	tag, err := tx.Exec(ctx, `INSERT INTO notifications(user_uuid,telegram_id,type,payload)
+ SELECT u.uuid,u.telegram_id,'ingress_migration',jsonb_build_object('text',$2::text,'dedupe_key',$1::text)
+ FROM users u JOIN subscription_tokens s ON s.user_uuid=u.uuid
+ WHERE u.is_active AND u.kind='vless' AND NOT u.member_pending AND u.telegram_id IS NOT NULL
+ AND NOT EXISTS(SELECT 1 FROM notifications n WHERE n.telegram_id=u.telegram_id AND n.type='ingress_migration' AND n.payload->>'dedupe_key'=$1)`, key, text)
+	if err != nil {
+		return 0, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }

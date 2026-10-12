@@ -576,6 +576,7 @@ func legacyMain() {
 	bridgeSpec.GeoAssetsDir = path.Join(*remoteDir, "geo")
 	bridgeSpec.GeositeExitTags = []string{"ru-blocked-all"}
 	if bridgeOverlay != nil {
+		bridgeSpec.SubscriptionBridges = append([]config.SubscriptionBridge(nil), bridgeOverlay.SubscriptionBridges...)
 		if g := strings.TrimSpace(bridgeOverlay.GeoAssetsDir); g != "" {
 			bridgeSpec.GeoAssetsDir = g
 		}
@@ -605,14 +606,7 @@ func legacyMain() {
 			}
 			bridgeSpec.XrayWire = &cpy
 		}
-		if bridgeOverlay.SOCKS5 != nil {
-			cpy := *bridgeOverlay.SOCKS5
-			if bridgeOverlay.SOCKS5.UDP != nil {
-				u := *bridgeOverlay.SOCKS5.UDP
-				cpy.UDP = &u
-			}
-			bridgeSpec.SOCKS5 = &cpy
-		}
+
 		if bridgeOverlay.BotTelegramProxy != nil {
 			cpy := *bridgeOverlay.BotTelegramProxy
 			bridgeSpec.BotTelegramProxy = &cpy
