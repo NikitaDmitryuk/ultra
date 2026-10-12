@@ -273,6 +273,7 @@ def apply(p, action):
             if changed:run(['systemctl','reload','nginx'])
             import socket,ssl
             context=ssl.create_default_context()
+            context.minimum_version=ssl.TLSVersion.TLSv1_2
             with socket.create_connection((p.get('public_host',p['domain']),public_port),timeout=5) as connection:
                 with context.wrap_socket(connection,server_hostname=p['domain']):pass
             if action=='stage':
