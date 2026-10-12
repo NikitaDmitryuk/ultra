@@ -26,10 +26,10 @@ func TestAutoAndFixedExitPolicies(t *testing.T) {
 		{name: "auto blocks when all down", active: "fra", health: map[string]exits.Health{"fra": {}, "ams": {}, "other": {}}, nodes: nodes, want: BlockedExit},
 		{name: "auto blocks when reserve excluded", active: "ams", excluded: []string{"ams"}, health: map[string]exits.Health{"fra": {}, "ams": {Eligible: true}}, nodes: nodes[:2], want: BlockedExit},
 		{name: "fixed healthy", fixed: true, active: "ams", health: healthy, nodes: nodes, want: "fra"},
-		{name: "fixed down stays pinned", fixed: true, active: "ams", health: map[string]exits.Health{"fra": {}, "ams": {Eligible: true}}, nodes: nodes, want: "fra"},
-		{name: "fixed quota blocks", fixed: true, active: "ams", excluded: []string{"fra"}, health: healthy, nodes: nodes, want: BlockedExit},
+		{name: "preferred down falls back", fixed: true, active: "ams", health: map[string]exits.Health{"fra": {}, "ams": {Eligible: true}}, nodes: nodes, want: "ams"},
+		{name: "preferred quota falls back", fixed: true, active: "ams", excluded: []string{"fra"}, health: healthy, nodes: nodes, want: "ams"},
 		{name: "fixed deleted blocks", fixed: true, active: "ams", health: healthy, nodes: nodes[1:], want: BlockedExit},
-		{name: "fixed disabled blocks", fixed: true, active: "ams", health: healthy, nodes: []exits.Node{{ID: "fra"}, nodes[1]}, want: BlockedExit},
+		{name: "fixed disabled blocks", fixed: true, active: "ams", health: healthy, nodes: []exits.Node{{ID: "fra"}, nodes[1]}, want: "ams"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			u := User{PreferredExitID: &primary, FixedExit: tt.fixed, FallbackExitID: "ams", ExcludedExitIDs: tt.excluded}

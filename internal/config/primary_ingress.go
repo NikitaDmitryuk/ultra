@@ -99,9 +99,6 @@ func (s *Spec) validatePrimaryIngress() error {
 		if err := check(p.BackendPort); err != nil {
 			return err
 		}
-		if len(s.SubscriptionBridges) > 0 {
-			return fmt.Errorf("primary XHTTP does not support REALITY subscription bridges")
-		}
 	}
 	if s.GatewayVLESSPort > 0 {
 		return check(s.GatewayVLESSPort)

@@ -130,3 +130,33 @@ func (r *SubscriptionRepo) EnqueueIngressNotice(ctx context.Context, key, text s
 	}
 	return tag.RowsAffected(), nil
 }
+
+// ListActiveTokens decrypts existing eligible subscriptions without issuing any.
+// Legacy hash-only tokens cannot be exported and are deliberately skipped.
+func (r *SubscriptionRepo) ListActiveTokens(ctx context.Context) ([]string, error) {
+	if !r.Ready() {
+		return nil, subscriptionkey.ErrUnavailable
+	}
+	rows, e := r.db.Pool.Query(ctx, `SELECT u.uuid::text,t.encrypted_token,t.key_version FROM subscription_tokens t JOIN users u ON u.uuid=t.user_uuid WHERE u.is_active AND u.kind='vless' AND NOT u.member_pending AND t.encrypted_token IS NOT NULL AND t.key_version IS NOT NULL ORDER BY u.uuid`)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id, version string
+		var encrypted []byte
+		if e := rows.Scan(&id, &encrypted, &version); e != nil {
+			return nil, e
+		}
+		if len(encrypted) == 0 {
+			continue
+		}
+		token, e := r.keys.Open(id, encrypted, version)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, token)
+	}
+	return out, rows.Err()
+}

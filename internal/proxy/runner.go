@@ -8,6 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
+
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -24,6 +27,17 @@ type Runner struct {
 	config *core.Config
 	status ReloadStatus
 	meter  *routeMeter
+}
+
+// ConfigureAccounting changes credential ownership without replacing the meter
+// shared by the current core and any subsequently reloaded core.
+func (r *Runner) ConfigureAccounting(store *runtimestate.Store, users []auth.User) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.meter == nil {
+		r.meter = &routeMeter{}
+	}
+	return r.meter.configure(store, users)
 }
 
 // ReloadStatus exposes lifecycle events without configuration or credentials.
@@ -43,27 +57,55 @@ func (r *Runner) Status() ReloadStatus {
 func (r *Runner) StartJSON(data []byte) error { return r.ReloadReason(data, "configuration") }
 func (r *Runner) Reload(data []byte) error    { return r.ReloadReason(data, "configuration") }
 
+// ValidateJSON prepares all core features without starting listeners. A durable
+// startup candidate must pass this before replacing the confirmed snapshot.
+func (r *Runner) ValidateJSON(data []byte) error {
+	cfg, err := loadCoreConfig(data)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	unchanged := r.inst != nil && proto.Equal(cfg, r.config)
+	r.mu.Unlock()
+	if unchanged {
+		return nil
+	}
+	prepared, err := core.New(cfg)
+	if err != nil {
+		return fmt.Errorf("prepare configuration: %w", err)
+	}
+	return prepared.Close()
+}
+
+func loadCoreConfig(data []byte) (*core.Config, error) {
+	var input any
+	if err := json.Unmarshal(data, &input); err != nil {
+		return nil, fmt.Errorf("parse configuration: %w", err)
+	}
+	canonical, err := json.Marshal(input)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := core.LoadConfig("json", bytes.NewReader(canonical))
+	if err != nil {
+		return nil, fmt.Errorf("build configuration: %w", err)
+	}
+	if err := manageXHTTPListeners(cfg); err != nil {
+		return nil, fmt.Errorf("prepare XHTTP lifecycle: %w", err)
+	}
+	if err := normalizeTypedMessages(cfg.ProtoReflect()); err != nil {
+		return nil, fmt.Errorf("normalize configuration: %w", err)
+	}
+	return cfg, nil
+}
+
 // ReloadReason validates before closing listeners and restores the last valid config on failure.
 func (r *Runner) ReloadReason(data []byte, reason string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var input any
-	if err := json.Unmarshal(data, &input); err != nil {
-		return fmt.Errorf("parse configuration: %w", err)
-	}
-	canonical, err := json.Marshal(input)
+	cfg, err := loadCoreConfig(data)
 	if err != nil {
 		return err
-	}
-	cfg, err := core.LoadConfig("json", bytes.NewReader(canonical))
-	if err != nil {
-		return fmt.Errorf("build configuration: %w", err)
-	}
-	if err := manageXHTTPListeners(cfg); err != nil {
-		return fmt.Errorf("prepare XHTTP lifecycle: %w", err)
-	}
-	if err := normalizeTypedMessages(cfg.ProtoReflect()); err != nil {
-		return fmt.Errorf("normalize configuration: %w", err)
 	}
 	if r.inst != nil && proto.Equal(cfg, r.config) {
 		r.status.Error = ""

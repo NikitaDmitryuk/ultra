@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 var ErrUnavailable = errors.New("cloud service unavailable")
@@ -229,7 +231,7 @@ func (v *Vultr) EnsureSSHKey(ctx context.Context, name, publicKey string) (strin
 		return "", e
 	}
 	for _, k := range keys {
-		if strings.TrimSpace(k.Key) == strings.TrimSpace(publicKey) {
+		if sameSSHKey(k.Key, publicKey) {
 			return k.ID, nil
 		}
 	}
@@ -238,6 +240,17 @@ func (v *Vultr) EnsureSSHKey(ctx context.Context, name, publicKey string) (strin
 	}
 	e = v.request(ctx, "POST", "/ssh-keys", map[string]string{"name": name, "ssh_key": publicKey}, &response)
 	return response.Key.ID, e
+}
+
+func sameSSHKey(a, b string) bool {
+	// Comments identify a workstation, not cryptographic key material. Keeping
+	// literal equality also preserves provider error handling for malformed input.
+	if strings.TrimSpace(a) == strings.TrimSpace(b) {
+		return true
+	}
+	left, _, _, leftRest, leftErr := ssh.ParseAuthorizedKey([]byte(a))
+	right, _, _, rightRest, rightErr := ssh.ParseAuthorizedKey([]byte(b))
+	return leftErr == nil && rightErr == nil && len(bytes.TrimSpace(leftRest)) == 0 && len(bytes.TrimSpace(rightRest)) == 0 && bytes.Equal(left.Marshal(), right.Marshal())
 }
 
 func (v *Vultr) EnsureFirewall(ctx context.Context, operation, bridgeIP string, tunnelPort int) (string, error) {

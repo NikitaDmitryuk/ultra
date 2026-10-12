@@ -16,18 +16,20 @@ else:
  fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
  with os.fdopen(fd,'w') as f: json.dump(cfg,f)
 import re
-if cfg['user']!='ultra_recovery' or not re.fullmatch('[a-f0-9]{64}',cfg['password']): raise SystemExit('Invalid recovery credentials')
+role=cfg.get('user','')
+if not re.fullmatch(r'ultra_recovery(?:_[a-z0-9]{1,24})?',role) or not re.fullmatch('[a-f0-9]{64}',cfg['password']): raise SystemExit('Invalid recovery credentials')
 pw=cfg['password']
-if sql("SELECT COUNT(*) FROM pg_roles WHERE rolname='ultra_recovery';")=='0': sql('CREATE ROLE ultra_recovery LOGIN REPLICATION;')
-sql("ALTER ROLE ultra_recovery WITH LOGIN REPLICATION PASSWORD '"+pw+"'; GRANT pg_monitor TO ultra_recovery;")
+if sql("SELECT COUNT(*) FROM pg_roles WHERE rolname='"+role+"';")=='0': sql('CREATE ROLE '+role+' LOGIN REPLICATION;')
+sql("ALTER ROLE "+role+" WITH LOGIN REPLICATION PASSWORD '"+pw+"'; GRANT pg_monitor TO "+role+";")
 sql("ALTER SYSTEM SET max_slot_wal_keep_size='1GB';")
 if int(sql('SHOW max_replication_slots;'))<10: sql("ALTER SYSTEM SET max_replication_slots='10';")
 if int(sql('SHOW max_wal_senders;'))<10: sql("ALTER SYSTEM SET max_wal_senders='10';")
 if sql('SHOW wal_level;') not in ('replica','logical'): sql("ALTER SYSTEM SET wal_level='replica';")
 hba=sql('SHOW hba_file;')
 with open(hba) as f: content=f.read()
-if '# ultra_recovery_loopback' not in content:
- with open(hba,'a') as f: f.write('\nhost replication ultra_recovery 127.0.0.1/32 scram-sha-256 # ultra_recovery_loopback\nhost postgres ultra_recovery 127.0.0.1/32 scram-sha-256 # ultra_recovery_loopback\n')
+marker='# '+role+'_loopback'
+if marker not in content:
+ with open(hba,'a') as f: f.write('\nhost replication '+role+' 127.0.0.1/32 scram-sha-256 '+marker+'\nhost postgres '+role+' 127.0.0.1/32 scram-sha-256 '+marker+'\n')
 sql('SELECT pg_reload_conf();')
 if sql("SELECT COUNT(*) FROM pg_settings WHERE pending_restart;")!='0':
  if os.environ.get('ULTRA_RECOVERY_ALLOW_RESTART')=='1':

@@ -3,10 +3,14 @@ package db
 import (
 	"context"
 	"errors"
+	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/google/uuid"
@@ -160,5 +164,141 @@ func TestExitNodeRepoMergeBootstrapEnabled(t *testing.T) {
 	}
 	if n.Priority != 150 {
 		t.Fatalf("priority=%d", n.Priority)
+	}
+}
+
+func TestBootstrapDoesNotResurrectDisabledOrDeletedExit(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	repo := NewExitNodeRepo(database)
+	nl, err := repo.Add(ctx, exits.AddParams{Name: "nl", Address: "203.0.113.10", Port: 51001})
+	if err != nil {
+		t.Fatal(err)
+	}
+	us, err := repo.Add(ctx, exits.AddParams{Name: "us", Address: "203.0.113.11", Port: 51001})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled := false
+	if _, err = repo.Update(ctx, us.ID, exits.UpdatePatch{Enabled: &disabled}); err != nil {
+		t.Fatal(err)
+	}
+	spec := &config.Spec{}
+	spec.Exit.Address = us.Address
+	spec.Exit.Port = us.Port
+	spec.Exit.TunnelUUID = us.TunnelUUID
+	if err = repo.Bootstrap(ctx, spec, ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.Get(ctx, us.ID)
+	if err != nil || got.Enabled {
+		t.Fatalf("bootstrap reenabled disabled exit %v %v", got, err)
+	}
+	if err = repo.Delete(ctx, us.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = repo.Bootstrap(ctx, spec, ""); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := repo.List(ctx)
+	if err != nil || len(nodes) != 1 || nodes[0].ID != nl.ID {
+		t.Fatalf("bootstrap resurrected deleted exit %v %v", nodes, err)
+	}
+}
+
+func TestDeleteExitPreservesLateAccountingAndReplacementIdentity(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	repo := NewExitNodeRepo(database)
+	_, err := repo.Add(ctx, exits.AddParams{Name: "nl", Address: "203.0.113.10", Port: 51001})
+	if err != nil {
+		t.Fatal(err)
+	}
+	us, err := repo.Add(ctx, exits.AddParams{Name: "us", Address: "203.0.113.11", Port: 51001})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := uuid.NewString()
+	at := time.Now().UTC()
+	period := at.Format("2006-01")
+	batch := runtimestate.TrafficBatch{Version: 1, NodeID: uuid.NewString(), BatchID: uuid.NewString(), CollectedAt: at, Samples: []runtimestate.Sample{{AccountID: owner, ExitID: us.ID, ExitTag: "to-exit-" + us.ID, Period: period, UplinkBytes: 10, ChargeTotalBytes: 262144}}}
+	traffic := NewTrafficRepo(database)
+	if err = traffic.RecordBatch(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	if err = repo.Delete(ctx, us.ID); err != nil {
+		t.Fatal(err)
+	}
+	batch.BatchID = uuid.NewString()
+	batch.Samples[0].ChargeTotalBytes = 524288
+	if err = traffic.RecordBatch(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := repo.Add(ctx, exits.AddParams{Name: "us-replacement", Address: us.Address, Port: us.Port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.ID == us.ID || replacement.TunnelUUID == us.TunnelUUID {
+		t.Fatal("replacement reused deleted identity")
+	}
+	var charge, up int64
+	if err = database.Pool.QueryRow(ctx, `SELECT charged_bytes,uplink_bytes FROM account_exit_usage WHERE account_id=$1 AND exit_id=$2 AND period=$3`, owner, us.ID, period).Scan(&charge, &up); err != nil || charge != 524288 || up != 20 {
+		t.Fatalf("deleted cost lost %d %d %v", charge, up, err)
+	}
+	var count int
+	if err = database.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM account_exit_usage WHERE exit_id=$1`, replacement.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("replacement stole historical accounting %d %v", count, err)
+	}
+}
+
+func TestConcurrentDeletesPreserveLastEnabledExit(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	repo := NewExitNodeRepo(database)
+	first, err := repo.Add(ctx, exits.AddParams{Name: "one", Address: "203.0.113.10", Port: 51001})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := repo.Add(ctx, exits.AddParams{Name: "two", Address: "203.0.113.11", Port: 51001})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, id := range []string{first.ID, second.ID} {
+		go func() { <-start; results <- repo.Delete(ctx, id) }()
+	}
+	close(start)
+	var successes, protected int
+	for range 2 {
+		err := <-results
+		if err == nil {
+			successes++
+		} else if errors.Is(err, ErrExitLastEnabled) {
+			protected++
+		} else {
+			t.Fatal(err)
+		}
+	}
+	count, err := repo.CountEnabled(ctx)
+	if err != nil || successes != 1 || protected != 1 || count != 1 {
+		t.Fatalf("last enabled guard raced %d %d %d %v", successes, protected, count, err)
+	}
+}
+
+func TestBootstrapImportFailureRollsBackAllEntries(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	repo := NewExitNodeRepo(database)
+	path := filepath.Join(t.TempDir(), "bootstrap.json")
+	if err := os.WriteFile(path, []byte(`[{"name":"first","address":"203.0.113.10","port":51001},{"name":"bad","address":"","port":0}]`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Bootstrap(ctx, nil, path); err == nil {
+		t.Fatal("invalid import accepted")
+	}
+	nodes, err := repo.List(ctx)
+	if err != nil || len(nodes) != 0 {
+		t.Fatalf("partial bootstrap committed %v %v", nodes, err)
 	}
 }

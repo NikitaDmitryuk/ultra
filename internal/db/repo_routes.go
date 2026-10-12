@@ -34,7 +34,9 @@ func (r *RouteRepo) Attach(ctx context.Context, users []auth.User) ([]auth.User,
 	for i := range users {
 		users[i].Routes = byOwner[users[i].UUID]
 	}
-	quotaRows, e := r.db.Pool.Query(ctx, `SELECT u.uuid::text,b.exit_id::text,CASE WHEN b.source='vultr' AND (b.observed_at IS NULL OR b.observed_at<NOW()-interval '15 minutes' OR b.observed_at<date_trunc('month',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' OR b.provider_error<>'') THEN 'provider_unavailable' ELSE COALESCE(q.reason,'quota_pending') END FROM users u CROSS JOIN exit_traffic_budgets b LEFT JOIN user_exit_quotas q ON q.user_uuid=u.uuid AND q.exit_id=b.exit_id WHERE q.blocked OR (b.source='vultr' AND (q.user_uuid IS NULL OR b.observed_at IS NULL OR b.observed_at<NOW()-interval '15 minutes' OR b.observed_at<date_trunc('month',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' OR b.provider_error<>''))`)
+	quotaRows, e := r.db.Pool.Query(ctx, `SELECT u.uuid::text,b.exit_id::text,COALESCE(NULLIF(q.reason,''),'quota_pending')
+ FROM users u CROSS JOIN exit_traffic_budgets b LEFT JOIN user_exit_quotas q ON q.user_uuid=u.uuid AND q.exit_id=b.exit_id
+ WHERE COALESCE(q.blocked,true)`)
 	if e != nil {
 		return nil, e
 	}
@@ -122,7 +124,7 @@ func (r *RouteRepo) ReplicationState(ctx context.Context, id, state string, free
 }
 
 func (r *RouteRepo) ReplicationStatuses(ctx context.Context) (any, error) {
-	rows, e := r.db.Pool.Query(ctx, `SELECT e.id::text,COALESCE(NULLIF(e.display_name,''),NULLIF(e.city,''),e.name),COALESCE(n.state,'not_configured'),COALESCE(n.free_bytes,0),COALESCE(n.required_bytes,0),n.checked_at FROM exit_nodes e LEFT JOIN node_replication n ON n.node_id=e.id ORDER BY e.name`)
+	rows, e := r.db.Pool.Query(ctx, `SELECT e.id::text,COALESCE(NULLIF(e.display_name,''),NULLIF(e.city,''),e.name),CASE WHEN n.checked_at < NOW()-INTERVAL '90 seconds' THEN 'stale' ELSE COALESCE(n.state,'not_configured') END,COALESCE(n.free_bytes,0),COALESCE(n.required_bytes,0),n.checked_at FROM exit_nodes e LEFT JOIN node_replication n ON n.node_id=e.id ORDER BY e.name`)
 	if e != nil {
 		return nil, e
 	}

@@ -20,6 +20,7 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Vary", "User-Agent")
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	fromLoopback := net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback()
 	if r.TLS == nil && (!fromLoopback || r.Header.Get("X-Forwarded-Proto") != "https") {
@@ -37,16 +38,30 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	req.URL.RawQuery = url.Values{"format": r.URL.Query()["format"], "transport": r.URL.Query()["transport"]}.Encode()
+	req.URL.RawQuery = url.Values{"format": r.URL.Query()["format"], "transport": r.URL.Query()["transport"], "preview": r.URL.Query()["preview"]}.Encode()
+	cacheKey, formatErr := b.subscriptionFallbackKey(token, r)
+	if formatErr != nil {
+		http.Error(w, formatErr.Error(), http.StatusBadRequest)
+		return
+	}
 	req.Header.Set("User-Agent", r.UserAgent())
 	req.Header.Set("Authorization", "Bearer "+b.adminAPIToken)
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
+		if b.serveSubscriptionFallback(w, cacheKey, token, r) {
+			return
+		}
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode >= 500 && b.serveSubscriptionFallback(w, cacheKey, token, r) {
+			return
+		}
+		if resp.StatusCode == 404 && b.subscriptionCache != nil {
+			b.subscriptionCache.invalidate(subscriptionDigest(token))
+		}
 		http.Error(w, "subscription unavailable", resp.StatusCode)
 		return
 	}
@@ -54,7 +69,15 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 	for _, key := range []string{"Content-Type", "profile-title", "profile-update-interval", "Vary"} {
 		w.Header().Set(key, resp.Header.Get(key))
 	}
-	_, _ = io.Copy(w, io.LimitReader(resp.Body, 1<<20))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if readErr != nil || len(body) > 1<<20 {
+		if b.serveSubscriptionFallback(w, cacheKey, token, r) {
+			return
+		}
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	_, _ = w.Write(body)
 }
 func (b *Bot) handleRotateSubscription(w http.ResponseWriter, r *http.Request) {
 	if _, ok := b.mustAdmin(w, r); !ok {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -81,9 +82,10 @@ func (b *Bot) probeExitAlerts(ctx context.Context, st *exitAlertState) {
 	var h struct {
 		ActiveExitID string `json:"active_exit_id"`
 		Exit         struct {
-			ID        string `json:"id"`
-			Name      string `json:"name"`
-			Reachable bool   `json:"reachable"`
+			ID         string `json:"id"`
+			Name       string `json:"name"`
+			Reachable  bool   `json:"reachable"`
+			InternetOK *bool  `json:"internet_ok"`
 		} `json:"exit"`
 	}
 	if err := json.Unmarshal(body, &h); err != nil {
@@ -99,6 +101,9 @@ func (b *Bot) probeExitAlerts(ctx context.Context, st *exitAlertState) {
 		exitName = "exit"
 	}
 	reachable := h.Exit.Reachable
+	if h.Exit.InternetOK != nil {
+		reachable = *h.Exit.InternetOK
+	}
 
 	if !st.initialized {
 		b.initExitAlertState(ctx, st, activeID)
@@ -339,20 +344,77 @@ func (b *Bot) runOutboxSender(ctx context.Context) {
 	}
 }
 
+type claimedNotifications interface {
+	ClaimNotifications(context.Context, int, time.Duration) ([]db.Notification, error)
+	CompleteClaim(context.Context, int64, int) error
+	RetryClaim(context.Context, int64, int, time.Time, string, bool) error
+}
+
 func (b *Bot) flushOutboxOnce(ctx context.Context) {
-	list, err := b.alertsTele.PendingNotifications(ctx, 50)
-	if err != nil {
-		b.log.Warn("outbox: pending notifications", "err", err)
-		return
+	logger := b.log
+	if logger == nil {
+		logger = slog.Default()
 	}
-	for _, n := range list {
-		msg := tgbotapi.NewMessage(n.TelegramID, formatNotificationText(n))
-		_, sendErr := b.msgSender.Send(msg)
-		if sendErr != nil {
-			b.log.Warn("outbox: telegram send failed", "id", n.ID, "tg_id", n.TelegramID, "err", sendErr)
+	durable, hasClaims := b.alertsTele.(claimedNotifications)
+	for sent := 0; sent < 50 && ctx.Err() == nil; sent++ {
+		var list []db.Notification
+		var err error
+		if hasClaims {
+			c, cancel := context.WithTimeout(ctx, 8*time.Second)
+			list, err = durable.ClaimNotifications(c, 1, 2*time.Minute)
+			cancel()
+		} else {
+			list, err = b.alertsTele.PendingNotifications(ctx, 50)
 		}
-		if err := b.alertsTele.MarkNotificationSent(ctx, n.ID); err != nil {
-			b.log.Warn("outbox: mark sent failed", "id", n.ID, "err", err)
+		if err != nil {
+			logger.Warn("outbox queue unavailable")
+			return
+		}
+		if len(list) == 0 {
+			return
+		}
+		for _, n := range list {
+			if ctx.Err() != nil {
+				return
+			}
+			msg := tgbotapi.NewMessage(n.TelegramID, formatNotificationText(n))
+			var sendErr error
+			if sender, ok := b.msgSender.(*tgbotapi.BotAPI); ok && sender == b.api {
+				c, cancel := context.WithTimeout(ctx, 8*time.Second)
+				sendErr = b.telegramJSON(c, "sendMessage", map[string]any{"chat_id": n.TelegramID, "text": msg.Text}, nil)
+				cancel()
+			} else {
+				_, sendErr = b.msgSender.Send(msg)
+			}
+			if sendErr != nil {
+				after, terminal := telegramFailure(sendErr)
+				if hasClaims {
+					c, cancel := context.WithTimeout(ctx, 8*time.Second)
+					err = durable.RetryClaim(c, n.ID, n.Attempts, time.Now().Add(retryDelay(n.Attempts, after)), "telegram_delivery_failed", terminal)
+					cancel()
+					if err != nil {
+						logger.Warn("outbox retry could not be saved", "id", n.ID)
+					}
+				}
+				logger.Warn("outbox delivery failed", "id", n.ID, "terminal", terminal)
+				if hasClaims && !terminal {
+					return
+				}
+				continue
+			}
+			if hasClaims {
+				c, cancel := context.WithTimeout(ctx, 8*time.Second)
+				err = durable.CompleteClaim(c, n.ID, n.Attempts)
+				cancel()
+			} else {
+				err = b.alertsTele.MarkNotificationSent(ctx, n.ID)
+			}
+			if err != nil {
+				logger.Warn("outbox delivery acknowledgement failed", "id", n.ID)
+			}
+		}
+		if !hasClaims {
+			return
 		}
 	}
 }

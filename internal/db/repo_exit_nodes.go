@@ -172,8 +172,19 @@ func (r *ExitNodeRepo) CountEnabled(ctx context.Context) (int, error) {
 	return int(n), err
 }
 
-// Bootstrap imports exit nodes from bootstrap file (preferred) or spec.exit, merging new rows.
+// Bootstrap initializes an empty database. Thereafter PostgreSQL owns membership
+// and enabled flags; stale installation files must not resurrect deleted nodes.
 func (r *ExitNodeRepo) Bootstrap(ctx context.Context, spec *config.Spec, bootstrapPath string) error {
+	return r.withMutation(ctx, func(repo *ExitNodeRepo) error { return repo.bootstrap(ctx, spec, bootstrapPath) })
+}
+func (r *ExitNodeRepo) bootstrap(ctx context.Context, spec *config.Spec, bootstrapPath string) error {
+	existing, err := r.List(ctx)
+	if err != nil {
+		return err
+	}
+	if len(existing) > 0 {
+		return nil
+	}
 	entries, err := exits.LoadBootstrapFile(bootstrapPath)
 	if err != nil {
 		return err
@@ -354,7 +365,11 @@ func (r *ExitNodeRepo) Add(ctx context.Context, p exits.AddParams) (exits.Node, 
 	return exitNodeFromInsert(row), nil
 }
 
-func (r *ExitNodeRepo) Update(ctx context.Context, id string, patch exits.UpdatePatch) (exits.Node, error) {
+func (r *ExitNodeRepo) Update(ctx context.Context, id string, patch exits.UpdatePatch) (node exits.Node, err error) {
+	err = r.withMutation(ctx, func(repo *ExitNodeRepo) error { var e error; node, e = repo.update(ctx, id, patch); return e })
+	return node, err
+}
+func (r *ExitNodeRepo) update(ctx context.Context, id string, patch exits.UpdatePatch) (exits.Node, error) {
 	cur, err := r.Get(ctx, id)
 	if err != nil {
 		return exits.Node{}, err
@@ -458,6 +473,9 @@ func (r *ExitNodeRepo) Update(ctx context.Context, id string, patch exits.Update
 }
 
 func (r *ExitNodeRepo) Delete(ctx context.Context, id string) error {
+	return r.withMutation(ctx, func(repo *ExitNodeRepo) error { return repo.delete(ctx, id) })
+}
+func (r *ExitNodeRepo) delete(ctx context.Context, id string) error {
 	cur, err := r.Get(ctx, id)
 	if err != nil {
 		return err
@@ -483,4 +501,21 @@ func (r *ExitNodeRepo) Delete(ctx context.Context, id string) error {
 		return ErrExitNotFound
 	}
 	return nil
+}
+
+// Serialize last-enabled checks with disabling/deleting and bootstrap imports.
+func (r *ExitNodeRepo) withMutation(ctx context.Context, fn func(*ExitNodeRepo) error) error {
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(817365010)`); err != nil {
+		return err
+	}
+	repo := &ExitNodeRepo{db: &DB{Pool: r.db.Pool, Queries: r.db.Queries.WithTx(tx)}}
+	if err = fn(repo); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

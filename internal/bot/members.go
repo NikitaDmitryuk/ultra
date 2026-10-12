@@ -82,12 +82,18 @@ func (b *Bot) telegramJSON(ctx context.Context, method string, input, output any
 	}
 	defer response.Body.Close() //nolint:errcheck
 	var envelope struct {
-		OK     bool            `json:"ok"`
-		Result json.RawMessage `json:"result"`
+		OK         bool                        `json:"ok"`
+		Code       int                         `json:"error_code"`
+		Parameters tgbotapi.ResponseParameters `json:"parameters"`
+		Result     json.RawMessage             `json:"result"`
 	}
-	if json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&envelope) != nil || !envelope.OK {
+	if json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&envelope) != nil {
 		return errors.New("telegram unavailable")
 	}
+	if !envelope.OK {
+		return tgbotapi.Error{Code: envelope.Code, Message: "telegram request failed", ResponseParameters: envelope.Parameters}
+	}
+	b.telegramLastSuccess.Store(time.Now().UnixNano())
 	if output != nil {
 		return json.Unmarshal(envelope.Result, output)
 	}
@@ -380,7 +386,7 @@ func (b *Bot) adminMemberInvites(w http.ResponseWriter, r *http.Request) {
 			memberHTTPError(w, 503)
 			return
 		}
-		jsonOK(w, map[string]string{"url": "https://t.me/" + b.api.Self.UserName + "?start=vpn_i_" + v.Token})
+		jsonOK(w, map[string]string{"url": "https://t.me/" + b.telegramSelf().UserName + "?start=vpn_i_" + v.Token})
 		return
 	}
 	jsonOK(w, result)
@@ -434,7 +440,7 @@ func (b *Bot) adminGroup(w http.ResponseWriter, r *http.Request) {
 		}
 		cancel()
 	}
-	jsonOK(w, map[string]any{"chat_id": group.ChatID, "title": group.Title, "enabled": group.Enabled, "group_url": groupURL, "url": "https://t.me/" + b.api.Self.UserName + "?start=vpn_g_" + group.Code})
+	jsonOK(w, map[string]any{"chat_id": group.ChatID, "title": group.Title, "enabled": group.Enabled, "group_url": groupURL, "url": "https://t.me/" + b.telegramSelf().UserName + "?start=vpn_g_" + group.Code})
 }
 
 func (b *Bot) adminMemberTraffic(w http.ResponseWriter, r *http.Request) {

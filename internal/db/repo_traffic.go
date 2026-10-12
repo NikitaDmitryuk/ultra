@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/db/sqlc"
@@ -97,6 +99,12 @@ func (r *TrafficRepo) RecordSamples(ctx context.Context, samples []TrafficSample
 		if err != nil {
 			return err
 		}
+
+		exitID := strings.TrimPrefix(s.ExitTag, "to-exit-")
+		_, err = tx.Exec(ctx, `INSERT INTO account_exit_usage(account_id,exit_id,period,uplink_bytes,downlink_bytes) SELECT account_id,$2,$3,$4,$5 FROM users WHERE uuid=$1 ON CONFLICT(account_id,exit_id,period) DO UPDATE SET uplink_bytes=account_exit_usage.uplink_bytes+EXCLUDED.uplink_bytes,downlink_bytes=account_exit_usage.downlink_bytes+EXCLUDED.downlink_bytes`, s.UserUUID, exitID, s.CollectedAt.UTC().Format("2006-01"), s.UplinkBytes, s.DownlinkBytes)
+		if err != nil {
+			return err
+		}
 		if err := q.InsertTrafficSample(ctx, sqlc.InsertTrafficSampleParams{
 			UserUuid:      userUUID,
 			ExitTag:       s.ExitTag,
@@ -112,7 +120,7 @@ func (r *TrafficRepo) RecordSamples(ctx context.Context, samples []TrafficSample
 				return err
 			}
 		}
-		year, month, _ := s.CollectedAt.Date()
+		year, month, _ := s.CollectedAt.UTC().Date()
 		if err := q.UpsertMonthlyTraffic(ctx, sqlc.UpsertMonthlyTrafficParams{
 			UserUuid:      userUUID,
 			Year:          int32(year),
@@ -157,10 +165,10 @@ func (r *TrafficRepo) GetMonthlyUser(ctx context.Context, userUUID string, year,
 	row, err := r.db.Queries.GetMonthlyUser(ctx, sqlc.GetMonthlyUserParams{UserUuid: pgUUID, Year: int32(year), Month: int32(month)})
 	if err != nil {
 		// No row yet → return zero value
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return MonthlyTotal{UserUUID: userUUID, Year: year, Month: month}, nil
 		}
-		return MonthlyTotal{UserUUID: userUUID, Year: year, Month: month}, nil
+		return MonthlyTotal{UserUUID: userUUID, Year: year, Month: month}, err
 	}
 	t := MonthlyTotal{
 		UserUUID:      fromPGUUID(row.UserUuid),

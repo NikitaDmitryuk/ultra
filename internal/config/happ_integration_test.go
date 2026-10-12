@@ -22,7 +22,7 @@ import (
 )
 
 func TestHappBridgeFailoverLocalTransfer(t *testing.T) {
-	for _, transport := range []string{"tcp", "xhttp"} {
+	for _, transport := range []string{"tcp", "xhttp", "mixed"} {
 		t.Run(transport, func(t *testing.T) { testHappBridgeFailover(t, transport, "chrome") })
 	}
 }
@@ -54,6 +54,7 @@ func testHappBridgeFailover(t *testing.T, transport, fingerprint string) {
 	defer camouflage.Close()
 	user := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", Kind: "vless", IsActive: true}
 	spec := &Spec{}
+	tlsCertificate := ""
 	var servers [2]proxy.Runner
 	var configs [2][]byte
 	strategy, err := mimic.New("apijson")
@@ -87,6 +88,18 @@ func testHappBridgeFailover(t *testing.T, transport, fingerprint string) {
 			bridge.AntiCensor = &AntiCensorSpec{PublicXHTTPPort: port}
 			count = 2
 		}
+		endpoint := SubscriptionBridge{ID: fmt.Sprint(i), Host: "127.0.0.1", Port: port, PublicKey: keys.PublicKey, ServerName: "example.com", Transport: transport, Path: bridge.SplithttpPath, Fingerprint: fingerprint}
+		if transport == "mixed" {
+			endpoint.Transport = "tcp"
+			if i == 0 {
+				cert, key := testCertificate(t)
+				tlsCertificate = cert
+				port = freePort(t)
+				bridge.LegacyPublicEnabled = BoolPtr(false)
+				bridge.PublicXHTTPTLS = &PublicXHTTPTLSSpec{Port: port, ServerName: "example.com", Path: "/mixed", Mode: "stream-up", CertificateFile: cert, KeyFile: key}
+				endpoint = SubscriptionBridge{ID: fmt.Sprint(i), Host: "127.0.0.1", Port: port, Security: "tls", Transport: "xhttp", ServerName: "example.com", Path: "/mixed"}
+			}
+		}
 		data, err := BuildBridgeXRayJSON(bridge, []auth.User{user}, nil, "", strategy, "error")
 		if err != nil {
 			t.Fatal(err)
@@ -108,11 +121,15 @@ func testHappBridgeFailover(t *testing.T, transport, fingerprint string) {
 			t.Fatal(err)
 		}
 		defer func() { _ = servers[i].Close() }()
-		spec.SubscriptionBridges = append(spec.SubscriptionBridges, SubscriptionBridge{ID: fmt.Sprint(i), Host: "127.0.0.1", Port: port, PublicKey: keys.PublicKey, ServerName: "example.com", Transport: transport, Path: bridge.SplithttpPath, Fingerprint: fingerprint})
+		spec.SubscriptionBridges = append(spec.SubscriptionBridges, endpoint)
 	}
 	profile, err := BuildHappProfile(spec, user, "Автоматически")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if tlsCertificate != "" {
+		out := profile["outbounds"].([]any)[1].(map[string]any)
+		out["streamSettings"].(map[string]any)["tlsSettings"].(map[string]any)["certificates"] = []any{map[string]any{"certificateFile": tlsCertificate, "usage": "verify"}}
 	}
 	profile["inbounds"].([]any)[0].(map[string]any)["port"] = freePort(t)
 	// A local HTTP probe avoids an external dependency; cadence and strategy stay unchanged.

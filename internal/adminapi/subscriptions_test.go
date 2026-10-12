@@ -1,9 +1,12 @@
 package adminapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/jackc/pgx/v5"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,7 +28,7 @@ func (s *testSubscriptions) Resolve(_ context.Context, token string) (string, er
 	if token == s.token && token != "" {
 		return "u1", nil
 	}
-	return "", errors.New("not found")
+	return "", pgx.ErrNoRows
 }
 func TestSubscriptionHTTP(t *testing.T) {
 	users := newFakeUserManager()
@@ -169,5 +172,129 @@ func TestExperimentUsesOwnerPermissionsAndLiveDescriptor(t *testing.T) {
 	permissions.err = errors.New("unavailable")
 	if strings.Contains(request(""), "experiment.example") {
 		t.Fatal("permissions failed open")
+	}
+}
+
+type cacheSubscriptions struct {
+	testSubscriptions
+	unavailable bool
+}
+
+func (s *cacheSubscriptions) ListActiveTokens(context.Context) ([]string, error) {
+	if s.unavailable {
+		return nil, errors.New("database unavailable")
+	}
+	if s.token == "" {
+		return []string{}, nil
+	}
+	return []string{s.token}, nil
+}
+func TestCompleteSubscriptionCacheRequiresConfirmedSource(t *testing.T) {
+	spec := &config.Spec{Role: config.RoleBridge, DevMode: true, PublicHost: "localhost", VLESSPort: 443}
+	server, err := NewServer("127.0.0.1:0", "admin", newFakeUserManager(), nil, spec, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &cacheSubscriptions{testSubscriptions: testSubscriptions{token: "cache-secret"}}
+	server.Subscriptions = source
+	request := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/v1/subscriptions/cache", nil)
+		req.Header.Set("Authorization", "Bearer admin")
+		w := httptest.NewRecorder()
+		server.Handler().ServeHTTP(w, req)
+		return w
+	}
+	w := request()
+	if w.Code != 200 || strings.Contains(w.Body.String(), "cache-secret") {
+		t.Fatal("cache incomplete or leaks token", w.Code)
+	}
+	var payload struct {
+		Entries map[string]subscriptionCacheEntry `json:"entries"`
+	}
+	if json.Unmarshal(w.Body.Bytes(), &payload) != nil || len(payload.Entries) != 2 {
+		t.Fatal("missing cached formats")
+	}
+	source.unavailable = true
+	if w = request(); w.Code != 503 {
+		t.Fatal("unconfirmed source extends cache", w.Code)
+	}
+	source.unavailable = false
+	source.token = ""
+	payload.Entries = nil
+	w = request()
+	if json.Unmarshal(w.Body.Bytes(), &payload) != nil || len(payload.Entries) != 0 {
+		t.Fatal("revoked subscription retained")
+	}
+}
+
+func TestSubscriptionDefaultAndRestrictedPreview(t *testing.T) {
+	spec := &config.Spec{Role: config.RoleBridge, DevMode: true, PublicHost: "localhost", VLESSPort: 443, HappDefaultJSON: true,
+		SubscriptionPreviewBridges: []config.SubscriptionBridge{{ID: "test", Host: "test.example", Port: 443, Security: "tls", Transport: "xhttp", ServerName: "test.example", Path: "/vpn", Fingerprint: "firefox"}}}
+	server, err := NewServer("127.0.0.1:0", "secret", newFakeUserManager(), nil, spec, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permissions := &adminSubscriptions{testSubscriptions: testSubscriptions{token: "issued"}}
+	server.Subscriptions = permissions
+	request := func(query, ua string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/v1/subscriptions/issued?"+query, nil)
+		r.Header.Set("Authorization", "Bearer secret")
+		r.Header.Set("User-Agent", ua)
+		w := httptest.NewRecorder()
+		server.Handler().ServeHTTP(w, r)
+		return w
+	}
+	if w := request("", "Happ/3 Android"); w.Code != 200 || !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+		t.Fatal("default not applied", w.Code)
+	}
+	if w := request("format=uri", "Happ/3"); !strings.HasPrefix(w.Body.String(), "vless://") || strings.Contains(w.Body.String(), "test.example") {
+		t.Fatal("preview leaked")
+	}
+	if w := request("format=happ&preview=reserve", "Happ/3"); w.Code != 404 {
+		t.Fatal("non-admin preview", w.Code)
+	}
+	if server.previewUACount.Load() != 0 {
+		t.Fatal("unauthorised UA captured")
+	}
+	if w := request("format=happ&preview=reserve-test", "Happ/3"); w.Code != 404 {
+		t.Fatal("unauthorised fault preview", w.Code)
+	}
+	permissions.allowed = true
+	if w := request("format=happ&preview=reserve", "Happ/3"); w.Code != 200 || !strings.Contains(w.Body.String(), "test.example") || !strings.Contains(w.Body.String(), "firefox") {
+		t.Fatal("admin preview missing", w.Code)
+	}
+	spec.SubscriptionPreviewBridges = append(spec.SubscriptionPreviewBridges, config.SubscriptionBridge{ID: "reserve", Host: "reserve.example", Port: 24443, Security: "reality", Transport: "tcp", PublicKey: strings.Repeat("A", 43), ServerName: "example.com", Fingerprint: "firefox"})
+	if w := request("format=happ&preview=reserve-test", "Happ/3"); w.Code != 200 {
+		t.Fatal("fault preview", w.Code)
+	} else {
+		var profiles []map[string]any
+		if json.Unmarshal(w.Body.Bytes(), &profiles) != nil || len(profiles) != 4 {
+			t.Fatal("missing scenarios")
+		}
+	}
+	permissions.err = errors.New("offline")
+	if w := request("format=happ&preview=reserve-test", "Happ/3"); w.Code != 503 {
+		t.Fatal("fault permission failure allowed", w.Code)
+	}
+	if w := request("format=happ&preview=reserve", "Happ/3"); w.Code != 503 {
+		t.Fatal("permission failure allowed", w.Code)
+	}
+}
+
+func TestPreviewUserAgentCaptureBounded(t *testing.T) {
+	var output bytes.Buffer
+	server := &Server{log: slog.New(slog.NewJSONHandler(&output, nil))}
+	for i := 0; i < 20; i++ {
+		server.capturePreviewUserAgent("Happ/3 " + strings.Repeat("x", 1000) + "\ncontrol")
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 8 {
+		t.Fatal("unbounded capture", len(lines))
+	}
+	for _, line := range lines {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) != nil || len(record["user_agent"].(string)) != 256 || len(record) != 4 {
+			t.Fatal("unexpected diagnostic fields")
+		}
 	}
 }

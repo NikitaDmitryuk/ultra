@@ -140,15 +140,17 @@ type StatsSpec struct {
 // Spec is relay deployment configuration (JSON file: -spec flag).
 type Spec struct {
 	// SchemaVersion defaults to 1 when zero (see Validate).
-	SchemaVersion           int                  `json:"schema_version"`
-	ProbeURLs               []string             `json:"probe_urls,omitempty"`
-	PublicXHTTPTLS          *PublicXHTTPTLSSpec  `json:"public_xhttp_tls,omitempty"`
-	PrimaryXHTTP            *PrimaryXHTTPIngress `json:"primary_xhttp,omitempty"`
-	LegacyPublicEnabled     *bool                `json:"legacy_public_enabled,omitempty"`
-	ExperimentalProfileFile string               `json:"experimental_profile_file,omitempty"`
-	GatewayVLESSPort        int                  `json:"gateway_vless_port,omitempty"`
-	PublicEntries           []PublicEntry        `json:"public_entries,omitempty"`
-	SubscriptionBridges     []SubscriptionBridge `json:"subscription_bridges,omitempty"`
+	SchemaVersion              int                  `json:"schema_version"`
+	ProbeURLs                  []string             `json:"probe_urls,omitempty"`
+	PublicXHTTPTLS             *PublicXHTTPTLSSpec  `json:"public_xhttp_tls,omitempty"`
+	PrimaryXHTTP               *PrimaryXHTTPIngress `json:"primary_xhttp,omitempty"`
+	LegacyPublicEnabled        *bool                `json:"legacy_public_enabled,omitempty"`
+	ExperimentalProfileFile    string               `json:"experimental_profile_file,omitempty"`
+	GatewayVLESSPort           int                  `json:"gateway_vless_port,omitempty"`
+	PublicEntries              []PublicEntry        `json:"public_entries,omitempty"`
+	SubscriptionBridges        []SubscriptionBridge `json:"subscription_bridges,omitempty"`
+	HappDefaultJSON            bool                 `json:"happ_default_json,omitempty"`
+	SubscriptionPreviewBridges []SubscriptionBridge `json:"subscription_preview_bridges,omitempty"`
 
 	Role        Role   `json:"role"`
 	MimicPreset string `json:"mimic_preset"`
@@ -486,6 +488,12 @@ func (s *Spec) validateTransportExtensions() error {
 	}
 	if err := validateSubscriptionBridges(s.SubscriptionBridges); err != nil {
 		return err
+	}
+	if err := validateSubscriptionBridges(s.SubscriptionPreviewBridges); err != nil {
+		return err
+	}
+	if s.Role != RoleBridge && (s.HappDefaultJSON || len(s.SubscriptionPreviewBridges) > 0) {
+		return errors.New("subscription publication requires bridge role")
 	}
 	if s.Role != RoleBridge && (s.PublicXHTTPTLS != nil || len(s.PublicEntries) > 0) {
 		return errors.New("public listeners and entries require bridge role")

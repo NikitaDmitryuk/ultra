@@ -34,13 +34,14 @@ func TestClientRoutesMatchAutoAndFixedPolicies(t *testing.T) {
 		t.Fatal("legacy preference affected Auto", selected, effective, server.routeReason(owner))
 	}
 	profiles := server.profileRoutes(owner)
-	if len(profiles) != 1 || profiles[0]["effective_exit_id"] != primary {
-		t.Fatal("fixed profile followed Auto", profiles)
+	if len(profiles) != 1 || profiles[0]["effective_exit_id"] != "reserve" {
+		t.Fatal("preferred country did not fail over", profiles)
 	}
-	owner.ExcludedExitIDs = []string{primary}
+	owner.ExcludedExitIDs = []string{primary, "reserve"}
 	if profiles = server.profileRoutes(owner); profiles[0]["effective_exit_id"] != auth.BlockedExit {
 		t.Fatal("fixed profile bypassed quota", profiles)
 	}
+	owner.ExcludedExitIDs = []string{primary}
 	var applications auth.RouteApplications
 	users := auth.ExpandRoutes([]auth.User{owner})
 	for i := range users {

@@ -209,7 +209,7 @@ async function locations() {
   const data = await api("/api/self/exits");
   const effective = data.exits.find((e) => e.id === data.effective_exit_id);
   document.querySelector("#locations").innerHTML =
-    `<p class="eyebrow">МАРШРУТИЗАЦИЯ</p><h2>Автоматический выход</h2><p class="muted">Профиль «Автоматически» выбирает доступный сервер и возвращается к основному после восстановления.</p><p>${esc(applicationLabel(data.application))}</p>${data.route_reason ? `<p class="muted">${esc(routeReasonLabel(data.route_reason))}</p>` : ""}<p>Подтверждённый выход: <strong>${esc(effective?.display_name || "Нет подтверждённого маршрута")}</strong></p><details><summary>Как работают профили</summary><small>Профиль конкретной страны в Happ закреплён за её сервером. При отказе или исчерпании лимита он не переключается на другую страну.</small>${(data.profiles || []).length ? "<h3>Маршруты профилей Happ</h3>" : ""}${(data.profiles || []).map((p) => `<p>${esc(p.name)} → ${esc(data.exits.find((e) => e.id === p.effective_exit_id)?.display_name || "Маршрут недоступен")}</p>`).join("")}<small>Кабинет не видит, какой профиль включён на устройстве.</small></details>`;
+    `<p class="eyebrow">МАРШРУТИЗАЦИЯ</p><h2>Автоматический выход</h2><p class="muted">Профиль «Автоматически» выбирает доступный сервер и возвращается к основному после восстановления.</p><p>${esc(applicationLabel(data.application))}</p>${data.route_reason ? `<p class="muted">${esc(routeReasonLabel(data.route_reason))}</p>` : ""}<p>Подтверждённый выход: <strong>${esc(effective?.display_name || "Нет подтверждённого маршрута")}</strong></p><details><summary>Как работают профили</summary><small>Профиль страны предпочитает её сервер. При отказе или исчерпании лимита он переключается на другой исправный выход, только если на нём осталась ваша квота. После восстановления возвращается к предпочтительной стране.</small>${(data.profiles || []).length ? "<h3>Маршруты профилей Happ</h3>" : ""}${(data.profiles || []).map((p) => `<p>${esc(p.name)} → ${esc(data.exits.find((e) => e.id === p.effective_exit_id)?.display_name || "Маршрут недоступен")}</p>`).join("")}<small>Кабинет не видит, какой профиль включён на устройстве.</small></details>`;
   if (data.application && data.application.state !== "applied") {
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(
@@ -777,9 +777,11 @@ function applicationLabel(a) {
 function routeReasonLabel(reason) {
   return (
     {
-      monthly_user_limit_exhausted: "Личный лимит исчерпан · используем резерв",
-      exit_budget_exhausted: "Общий бюджет узла исчерпан · используем резерв",
-      provider_unavailable: "Данные Vultr недоступны · используем резерв",
+      monthly_user_limit_exhausted: "Личный лимит этого выхода исчерпан",
+      exit_budget_exhausted: "Общий бюджет узла исчерпан",
+      provider_unavailable: "Нет подтверждённого остатка трафика провайдера",
+      provider_emergency_exhausted: "Аварийный запас трафика исчерпан",
+      runtime_authorization_expired: "Срок автономной работы истёк",
       quota_pending: "Ожидаем расчёт лимита",
       exit_unavailable: "Выбранный выход недоступен или восстанавливается",
       no_available_exit: "Нет допустимого выхода · VPN-трафик заблокирован",

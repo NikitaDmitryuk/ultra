@@ -18,12 +18,30 @@ type DB struct {
 
 // Open connects to PostgreSQL using dsn, pings, and runs embedded migrations.
 func Open(ctx context.Context, dsn string) (*DB, error) {
+	d, err := OpenLazy(ctx, dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.Pool.Ping(ctx); err != nil {
+		d.Close()
+		return nil, fmt.Errorf("db: ping: %w", err)
+	}
+	if err := d.migrate(ctx); err != nil {
+		d.Close()
+		return nil, fmt.Errorf("db: migrate: %w", err)
+	}
+	return d, nil
+}
+
+// OpenLazy constructs the pool without contacting PostgreSQL or running migrations.
+func OpenLazy(ctx context.Context, dsn string) (*DB, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("db: parse DSN: %w", err)
 	}
 	cfg.MaxConns = 10
-	cfg.MinConns = 1
+	cfg.MinConns = 0
+	cfg.ConnConfig.ConnectTimeout = 5 * time.Second
 	cfg.MaxConnLifetime = 30 * time.Minute
 	cfg.HealthCheckPeriod = time.Minute
 
@@ -31,15 +49,7 @@ func Open(ctx context.Context, dsn string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("db: connect: %w", err)
 	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("db: ping: %w", err)
-	}
 	d := &DB{Pool: pool, Queries: sqlc.New(pool)}
-	if err := d.migrate(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("db: migrate: %w", err)
-	}
 	return d, nil
 }
 

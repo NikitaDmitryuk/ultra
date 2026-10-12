@@ -69,6 +69,12 @@ var migration020 string
 //go:embed migrations/021_invite_recipient_name.sql
 var migration021 string
 
+//go:embed migrations/022_reliability.sql
+var migration022 string
+
+//go:embed migrations/023_accounting_schema.sql
+var migration023 string
+
 func (d *DB) migrate(ctx context.Context) error {
 	tx, err := d.Pool.Begin(ctx)
 	if err != nil {
@@ -113,6 +119,8 @@ func (d *DB) migrate(ctx context.Context) error {
 		{19, migration019},
 		{20, migration020},
 		{21, migration021},
+		{22, migration022},
+		{23, migration023},
 	}
 
 	for _, m := range migrations {
@@ -125,6 +133,11 @@ func (d *DB) migrate(ctx context.Context) error {
 		if applied {
 			continue
 		}
+		if m.version == 23 {
+			if err := repairAccountingSchema(ctx, tx); err != nil {
+				return fmt.Errorf("apply migration 23: %w", err)
+			}
+		}
 		if _, err := tx.Exec(ctx, m.sql); err != nil {
 			return fmt.Errorf("apply migration %d: %w", m.version, err)
 		}
@@ -133,6 +146,9 @@ func (d *DB) migrate(ctx context.Context) error {
 		); err != nil {
 			return fmt.Errorf("record migration %d: %w", m.version, err)
 		}
+	}
+	if err := validateAccountingSchema(ctx, tx); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

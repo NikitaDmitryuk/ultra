@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/crypto/acme/autocert"
 
@@ -91,9 +92,9 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	database, err := db.Open(ctx, dbDSN)
+	database, err := db.OpenLazy(ctx, dbDSN)
 	if err != nil {
-		log.Error("open database", "err", err)
+		log.Error("database configuration invalid", "code", "database_config_invalid")
 		os.Exit(1)
 	}
 	defer database.Close()
@@ -107,10 +108,18 @@ func main() {
 		log.Error("create bot", "err", err)
 		os.Exit(1)
 	}
+	b.SetDatabaseProbe(func(c context.Context) bool {
+		return database.ValidateAccountingSchema(c) == nil
+	})
+	if err = b.ConfigureSubscriptionCache(filepath.Join(*dataDir, "subscriptions.json")); err != nil {
+		log.Warn("subscription cache invalid or unavailable")
+	}
 	b.StartWorkers(ctx)
+	b.StartSubscriptionCacheWorker(ctx)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
-	srv := &http.Server{Handler: b.Handler()}
+	srv := &http.Server{Handler: b.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 35 * time.Second, WriteTimeout: 35 * time.Second, IdleTimeout: 90 * time.Second}
+	serverErrors := make(chan error, 3)
 
 	switch {
 	case *devMode:
@@ -118,7 +127,7 @@ func main() {
 		log.Info("starting HTTP server (dev mode, no TLS)", "addr", srv.Addr)
 		go func() {
 			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Error("HTTP server", "err", err)
+				serverErrors <- err
 			}
 		}()
 
@@ -128,7 +137,7 @@ func main() {
 		log.Info("starting HTTPS Mini App server (cert files)", "addr", srv.Addr, "domain", *domain, "cert", *certFile)
 		go func() {
 			if err := srv.ListenAndServeTLS(*certFile, *keyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Error("HTTPS server", "err", err)
+				serverErrors <- err
 			}
 		}()
 
@@ -146,10 +155,11 @@ func main() {
 		}
 		// HTTP-01 ACME challenge on port 80 (must be reachable from the internet).
 		go func() {
-			acmeSrv := &http.Server{Addr: ":80", Handler: m.HTTPHandler(nil)}
+			acmeSrv := &http.Server{Addr: ":80", Handler: m.HTTPHandler(nil), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second}
+			defer func() { _ = acmeSrv.Close() }()
 			log.Info("starting ACME HTTP-01 server", "addr", ":80")
 			if err := acmeSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Warn("ACME HTTP server error", "err", err)
+				serverErrors <- err
 			}
 		}()
 		srv.Addr = ":" + *port
@@ -157,7 +167,7 @@ func main() {
 		log.Info("starting HTTPS Mini App server", "addr", srv.Addr, "domain", *domain)
 		go func() {
 			if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Error("HTTPS server", "err", err)
+				serverErrors <- err
 			}
 		}()
 
@@ -172,9 +182,20 @@ func main() {
 		}
 	}()
 
-	<-ctx.Done()
-	log.Info("shutting down")
-	_ = srv.Close()
+	select {
+	case <-ctx.Done():
+		log.Info("shutting down")
+		shutdown, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		if err = srv.Shutdown(shutdown); err != nil {
+			_ = srv.Close()
+		}
+	case <-serverErrors:
+		log.Error("required HTTP listener failed")
+		cancel()
+		_ = srv.Close()
+		os.Exit(1)
+	}
 }
 
 func mustEnv(log *slog.Logger, key string) string {

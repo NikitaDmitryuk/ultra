@@ -3,7 +3,9 @@ package adminapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/jackc/pgx/v5"
 	"net/http"
 	"net/url"
 	"strings"
@@ -52,7 +54,11 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.Subscriptions.Resolve(r.Context(), r.PathValue("token"))
 	if err != nil {
-		http.NotFound(w, r)
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.NotFound(w, r)
+		} else {
+			http.Error(w, "subscription unavailable", http.StatusServiceUnavailable)
+		}
 		return
 	}
 	u, ok := s.users.Lookup(id)
@@ -60,22 +66,50 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	format := r.URL.Query().Get("format")
-	if format != "" && format != "happ" && format != "uri" {
-		http.Error(w, "unknown subscription format", http.StatusBadRequest)
+	transport := r.URL.Query().Get("transport")
+	format, err := config.ResolveSubscriptionFormat(r.URL.Query().Get("format"), transport, r.UserAgent(), s.spec.HappDefaultJSON)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	transport := r.URL.Query().Get("transport")
-	if (transport != "" && transport != "xhttp-tls") || (transport != "" && format == "happ") {
-		http.Error(w, "unsupported subscription transport or format", http.StatusBadRequest)
-		return
+	exportSpec := s.spec
+	preview := r.URL.Query().Get("preview")
+	if preview != "" {
+		if (preview != "reserve" && preview != "reserve-test") || format != "happ" || transport != "" {
+			http.Error(w, "unsupported subscription preview", http.StatusBadRequest)
+			return
+		}
+		permissions, ok := s.Subscriptions.(interface {
+			IsAdminOwner(context.Context, string) (bool, error)
+		})
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		allowed, permissionErr := permissions.IsAdminOwner(r.Context(), id)
+		if permissionErr != nil {
+			http.Error(w, "subscription unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if !allowed {
+			http.NotFound(w, r)
+			return
+		}
+		if len(s.spec.SubscriptionPreviewBridges) == 0 {
+			http.Error(w, "preview unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		s.capturePreviewUserAgent(r.UserAgent())
+		copySpec := *s.spec
+		copySpec.SubscriptionBridges = s.spec.SubscriptionPreviewBridges
+		exportSpec = &copySpec
 	}
 	w.Header().Set("Vary", "User-Agent")
 	w.Header().Set("profile-title", "ultra")
 	w.Header().Set("profile-update-interval", "1")
 	_, _, health, nodes := s.clientExitSelection(u)
 	var experiment *config.ExperimentalProfile
-	if specFile := s.spec.ExperimentalProfileFile; specFile != "" && transport == "" {
+	if specFile := s.spec.ExperimentalProfileFile; specFile != "" && transport == "" && preview == "" {
 		if permissions, ok := s.Subscriptions.(interface {
 			IsAdminOwner(context.Context, string) (bool, error)
 		}); ok {
@@ -86,7 +120,10 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if format == "happ" {
-		profiles, err := subscriptionHapp(s.spec, u, nodes, health)
+		profiles, err := subscriptionHapp(exportSpec, u, nodes, health)
+		if preview == "reserve-test" {
+			profiles, err = config.BuildHappFaultProfiles(exportSpec, u)
+		}
 		if err != nil {
 			http.Error(w, "configuration unavailable", http.StatusServiceUnavailable)
 			return
@@ -126,4 +163,22 @@ func experimentalHapp(exp *config.ClientExport, name string) map[string]any {
 	return map[string]any{"remarks": name, "log": map[string]any{"loglevel": "warning"},
 		"inbounds":  []any{map[string]any{"listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": map[string]any{"udp": true}}},
 		"outbounds": []any{exp.XRayOutboundJSON}, "routing": map[string]any{"rules": []any{map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"}}}}
+}
+
+// Only authorised acceptance requests enter this bounded diagnostic. No request
+// path, token, remote address, owner identifier or query is logged.
+func (s *Server) capturePreviewUserAgent(ua string) {
+	for {
+		n := s.previewUACount.Load()
+		if n >= 8 {
+			return
+		}
+		if s.previewUACount.CompareAndSwap(n, n+1) {
+			break
+		}
+	}
+	if len(ua) > 256 {
+		ua = ua[:256]
+	}
+	s.log.Info("subscription preview client", "user_agent", ua)
 }

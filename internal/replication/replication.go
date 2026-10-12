@@ -16,6 +16,7 @@ import (
 
 	"github.com/NikitaDmitryuk/ultra/internal/install"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const GiB int64 = 1 << 30
@@ -53,14 +54,16 @@ func Load(path string) (Config, error) {
 type Manager struct {
 	ensureMu sync.Mutex
 	Config   Config
-	ctx      context.Context
-	mu       sync.Mutex
-	tunnels  map[string]context.CancelFunc
-	Record   func(context.Context, string, string, int64, int64, string) error
+	// DatabaseName is the application database containing recovery_heartbeat.
+	DatabaseName string
+	ctx          context.Context
+	mu           sync.Mutex
+	tunnels      map[string]context.CancelFunc
+	Record       func(context.Context, string, string, int64, int64, string) error
 }
 
 func New(ctx context.Context, c Config) *Manager {
-	return &Manager{Config: c, ctx: ctx, tunnels: map[string]context.CancelFunc{}}
+	return &Manager{Config: c, DatabaseName: "ultra_db", ctx: ctx, tunnels: map[string]context.CancelFunc{}}
 }
 func (m *Manager) primary(ctx context.Context) (*pgx.Conn, error) {
 	cfg, e := pgx.ParseConfig("host=127.0.0.1 sslmode=disable dbname=postgres")
@@ -264,22 +267,55 @@ systemctl restart ultra-postgres-replica
 	m.record(c, id, "syncing", available, required, "")
 	return "syncing", nil
 }
+
+// RefreshHeartbeat is called on the application pool independently of activity.
+// It must never use the replication role or the maintenance postgres database.
+func RefreshHeartbeat(ctx context.Context, database interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}) error {
+	_, err := database.Exec(ctx, `INSERT INTO recovery_heartbeat(singleton, observed_at) VALUES(true, now()) ON CONFLICT(singleton) DO UPDATE SET observed_at=EXCLUDED.observed_at`)
+	return err
+}
+
+func heartbeatFresh(raw string, now time.Time) bool {
+	seconds, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || seconds <= 0 {
+		return false
+	}
+	age := now.Sub(time.Unix(int64(seconds), 0))
+	return age >= -30*time.Second && age <= 5*time.Minute
+}
+
 func (m *Manager) Check(ctx context.Context, id string, remote install.Remote) error {
+	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(m.DatabaseName) {
+		m.record(ctx, id, "error", 0, 0, "heartbeat_database_invalid")
+		return errors.New("heartbeat database not configured")
+	}
 	m.startTunnel(id, remote)
-	output, e := remote.Run(ctx, `set -eu
+	output, e := remote.Run(ctx, fmt.Sprintf(`set -eu
 if [ ! -f /var/lib/ultra-postgres-replica/data/PG_VERSION ]; then echo not_configured; exit 0; fi
 free=$(df -Pk /var/lib | awk 'NR==2 {print $4}')
 if [ "$free" -lt 1048576 ]; then systemctl stop ultra-postgres-replica; echo insufficient_space; exit 0; fi
 runuser -u postgres -- psql -p 5433 -At -d postgres -c "SELECT CASE WHEN pg_is_in_recovery() THEN 'replica' ELSE 'unexpected_primary' END"
-`)
+runuser -u postgres -- psql -p 5433 -XAtq -v ON_ERROR_STOP=1 -d '%s' -c "SELECT extract(epoch from observed_at) FROM recovery_heartbeat WHERE singleton"
+`, m.DatabaseName))
 	if e != nil {
 		m.record(ctx, id, "error", 0, 0, "health_check_failed")
 		return e
 	}
-	state := strings.TrimSpace(string(output))
+	fields := strings.Fields(string(output))
+	state := "error"
+	if len(fields) > 0 {
+		state = fields[0]
+	}
+	heartbeat := ""
+	if len(fields) > 1 {
+		heartbeat = fields[1]
+	}
 	if state == "replica" {
 		conn, e := m.primary(ctx)
 		if e != nil {
+			m.record(ctx, id, "error", 0, 0, "primary_check_failed")
 			return e
 		}
 		defer conn.Close(ctx) //nolint:errcheck
@@ -288,7 +324,7 @@ runuser -u postgres -- psql -p 5433 -At -d postgres -c "SELECT CASE WHEN pg_is_i
 		e = conn.QueryRow(ctx, `SELECT state='streaming',COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(),replay_lsn),9223372036854775807)::bigint FROM pg_stat_replication WHERE application_name=$1`, "ultra_"+strings.ReplaceAll(id, "-", "")).Scan(&streaming, &lag)
 		if e != nil || !streaming {
 			state = "disconnected"
-		} else if lag > 16*1024*1024 {
+		} else if lag > 16*1024*1024 || !heartbeatFresh(heartbeat, time.Now()) {
 			state = "lagging"
 		} else {
 			state = "streaming"

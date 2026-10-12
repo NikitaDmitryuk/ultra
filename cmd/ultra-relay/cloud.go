@@ -44,6 +44,26 @@ func configureCloud(ctx context.Context, wg *sync.WaitGroup, srv *adminapi.Serve
 		stateDir = "/var/lib/ultra-relay/vultr"
 	}
 	routes := db.NewRouteRepo(database)
+	srv.ReplicationStatus = routes.ReplicationStatuses
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			c, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := replication.RefreshHeartbeat(c, database.Pool)
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				log.Warn("recovery heartbeat unavailable", "code", "heartbeat_failed")
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 	store := db.NewCloudRepo(database)
 	binary, e := os.Executable()
 	if e != nil {
@@ -53,11 +73,11 @@ func configureCloud(ctx context.Context, wg *sync.WaitGroup, srv *adminapi.Serve
 	replicaConfig, e := replication.Load(os.Getenv("ULTRA_REPLICATION_KEY_FILE"))
 	if e == nil {
 		replicas := replication.New(ctx, replicaConfig)
+		replicas.DatabaseName = database.Pool.Config().ConnConfig.Database
 		replicas.Record = routes.ReplicationState
 		p.Replica = replicas.Ensure
 		p.CheckReady = replicas.Ready
 		p.RemoveReplica = replicas.RemoveSlot
-		srv.ReplicationStatus = routes.ReplicationStatuses
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -65,6 +85,11 @@ func configureCloud(ctx context.Context, wg *sync.WaitGroup, srv *adminapi.Serve
 		}()
 	} else {
 		log.Warn("Vultr provisioning requires replication configuration")
+		c, cancel := context.WithTimeout(ctx, 5*time.Second)
+		for _, node := range exitMgr.List() {
+			_ = routes.ReplicationState(c, node.ID, "error", 0, 0, "configuration_unavailable")
+		}
+		cancel()
 	}
 	var quotaAPI *cloud.Vultr
 	defer func() { wg.Add(1); go func() { defer wg.Done(); runQuotas(ctx, database, quotaAPI, apply, log) }() }()
@@ -101,7 +126,7 @@ func runReplicaMonitor(ctx context.Context, database *db.DB, exitMgr *exits.Mana
 				cloudNodes[op.ID] = op.State
 			}
 			for _, node := range exitMgr.List() {
-				if net.ParseIP(node.Address) == nil {
+				if !node.Enabled || net.ParseIP(node.Address) == nil {
 					continue
 				}
 				if state, managed := cloudNodes[node.ID]; managed && state != "ready" {

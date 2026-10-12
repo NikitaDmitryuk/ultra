@@ -6,7 +6,7 @@ UPDATE users SET name=$1 WHERE uuid=$2
 RETURNING uuid, name, kind, is_active, disabled_at,
   socks_username, socks_password, socks_port,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  preferred_exit_id;
+  preferred_exit_id, account_id;
 
 -- name: DisableUser :execrows
 UPDATE users SET is_active=false, disabled_at=NOW() WHERE uuid=$1 AND is_active=true;
@@ -24,13 +24,13 @@ INSERT INTO users(
   uuid, name, telegram_id, telegram_username, created_at, is_active, disabled_at,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
   kind, socks_username, socks_password, socks_port, preferred_exit_id,
-  enrollment_source, enrolled_at, member_pending
+  enrollment_source, enrolled_at, member_pending, account_id
 )
 SELECT
   $2, u.name, u.telegram_id, u.telegram_username, u.created_at, u.is_active, u.disabled_at,
   u.leak_policy, u.leak_max_concurrent_ips, u.leak_max_unique_ips_24h,
   u.kind, u.socks_username, u.socks_password, u.socks_port, u.preferred_exit_id,
-  u.enrollment_source, u.enrolled_at, (u.enrollment_source IS NOT NULL)
+  u.enrollment_source, u.enrolled_at, (u.enrollment_source IS NOT NULL), u.account_id
 FROM original u CROSS JOIN cleared;
 
 -- name: MoveTrafficStatsUserUUID :exec
@@ -52,21 +52,21 @@ UPDATE user_leak_signals SET user_uuid=$2 WHERE user_uuid=$1;
 SELECT uuid, name, kind, is_active, disabled_at,
   socks_username, socks_password, socks_port,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  preferred_exit_id
+  preferred_exit_id, account_id
 FROM users WHERE is_active=true ORDER BY created_at;
 
 -- name: ListAllUsers :many
 SELECT uuid, name, kind, is_active, disabled_at,
   socks_username, socks_password, socks_port,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  preferred_exit_id
+  preferred_exit_id, account_id
 FROM users ORDER BY created_at;
 
 -- name: GetUser :one
 SELECT uuid, name, kind, is_active, disabled_at,
   socks_username, socks_password, socks_port,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  preferred_exit_id
+  preferred_exit_id, account_id
 FROM users WHERE uuid=$1;
 
 -- name: SetUserPreferredExit :one
@@ -74,7 +74,7 @@ UPDATE users SET preferred_exit_id=$2 WHERE uuid=$1 AND is_active=true
 RETURNING uuid, name, kind, is_active, disabled_at,
   socks_username, socks_password, socks_port,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  preferred_exit_id;
+  preferred_exit_id, account_id;
 
 -- name: MoveDailyRouteTrafficUserUUID :exec
 UPDATE daily_route_traffic SET user_uuid=$2 WHERE user_uuid=$1;

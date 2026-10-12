@@ -3,7 +3,12 @@ package stats
 
 import (
 	"context"
+	"errors"
+	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
+	"github.com/google/uuid"
 	"log/slog"
+	"strings"
+	"sync"
 	"time"
 
 	xraystats "github.com/xtls/xray-core/features/stats"
@@ -42,8 +47,13 @@ type Collector struct {
 	interval time.Duration
 	log      *slog.Logger
 
-	stop chan struct{}
-	done chan struct{}
+	state       *runtimestate.Store
+	mu          sync.Mutex
+	pending     *runtimestate.TrafficBatch
+	pendingFull bool
+	replayMu    sync.Mutex
+	stop        chan struct{}
+	done        chan struct{}
 }
 
 // New creates a Collector. interval is how often to poll (minimum 10 s).
@@ -78,20 +88,43 @@ func (c *Collector) Close() {
 
 func (c *Collector) loop() {
 	defer close(c.done)
+	if c.state != nil {
+		workerDone := make(chan struct{})
+		go func() { defer close(workerDone); c.replayLoop() }()
+		defer func() { <-workerDone }()
+	}
 	t := time.NewTicker(c.interval)
 	defer t.Stop()
 	prune := time.NewTicker(24 * time.Hour)
 	defer prune.Stop()
 	// Prune once on startup so stale rows are removed immediately after a long downtime.
-	c.prune()
+	if c.state == nil {
+		c.prune()
+	}
 	for {
 		select {
 		case <-c.stop:
+			if c.state != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = c.Checkpoint(ctx)
+				cancel()
+			}
 			return
 		case now := <-t.C:
-			c.collect(now)
+			if c.state != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := c.Checkpoint(ctx); err != nil {
+					c.log.Warn("stats: checkpoint failed", "err", err)
+				}
+
+				cancel()
+			} else {
+				c.collect(now)
+			}
 		case <-prune.C:
-			c.prune()
+			if c.state == nil {
+				c.prune()
+			}
 		}
 	}
 }
@@ -99,7 +132,13 @@ func (c *Collector) loop() {
 func (c *Collector) prune() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	n, err := c.traffic.PruneOldSamples(ctx, SampleRetention)
+	c.mu.Lock()
+	traffic := c.traffic
+	c.mu.Unlock()
+	if traffic == nil {
+		return
+	}
+	n, err := traffic.PruneOldSamples(ctx, SampleRetention)
 	if err != nil {
 		c.log.Warn("stats: prune old samples failed", "err", err)
 		return
@@ -180,5 +219,120 @@ func (c *Collector) collect(at time.Time) {
 	defer cancel()
 	if err := c.traffic.RecordSamples(ctx, samples); err != nil {
 		c.log.Warn("stats: failed to record traffic samples", "err", err)
+	}
+}
+
+// NewDurable checkpoints independently of PostgreSQL availability every five seconds.
+func NewDurable(xray XrayInstance, traffic TrafficDB, users UserLister, state *runtimestate.Store, log *slog.Logger) *Collector {
+	c := New(xray, traffic, users, time.Minute, log)
+	c.interval = 5 * time.Second
+	c.state = state
+	return c
+}
+func (c *Collector) SetTrafficDB(traffic TrafficDB) { c.mu.Lock(); c.traffic = traffic; c.mu.Unlock() }
+
+// Checkpoint retains a drained batch in memory on a disk error; it never drains twice.
+func (c *Collector) Checkpoint(ctx context.Context) error     { return c.checkpoint(ctx, false) }
+func (c *Collector) CheckpointFull(ctx context.Context) error { return c.checkpoint(ctx, true) }
+func (c *Collector) checkpoint(ctx context.Context, full bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state == nil {
+		return errors.New("durable store unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.pending != nil {
+		appendPending := c.state.AppendBatch
+		if c.pendingFull {
+			appendPending = c.state.AppendBatchFull
+		}
+		if err := appendPending(*c.pending); err != nil {
+			return err
+		}
+		c.pending = nil
+		c.pendingFull = false
+	}
+	meter, ok := c.xray.(interface {
+		DrainAccountTraffic() map[string]map[string][2]int64
+	})
+	if !ok {
+		return errors.New("route traffic meter required")
+	}
+	at := time.Now().UTC()
+	batch := runtimestate.TrafficBatch{Version: 1, NodeID: c.state.NodeID(), BatchID: uuid.NewString(), CollectedAt: at}
+	for account, tags := range meter.DrainAccountTraffic() {
+		for tag, n := range tags {
+			batch.Samples = append(batch.Samples, runtimestate.Sample{AccountID: account, ExitID: strings.TrimPrefix(tag, "to-exit-"), ExitTag: tag, Period: at.Format("2006-01"), UplinkBytes: n[0], DownlinkBytes: n[1]})
+		}
+	}
+	// Empty measurement still flushes conservative durable reservations after a crash.
+	appendBatch := c.state.AppendBatch
+	if full {
+		appendBatch = c.state.AppendBatchFull
+	}
+	if err := appendBatch(batch); err != nil {
+		c.pending = &batch
+		c.pendingFull = full
+		return err
+	}
+	return nil
+}
+func (c *Collector) Replay(ctx context.Context) error {
+	c.replayMu.Lock()
+	defer c.replayMu.Unlock()
+	c.mu.Lock()
+	traffic := c.traffic
+	c.mu.Unlock()
+	if traffic == nil {
+		return errors.New("traffic database unavailable")
+	}
+	durable, ok := traffic.(interface {
+		RecordBatch(context.Context, runtimestate.TrafficBatch) error
+	})
+	if !ok {
+		return errors.New("traffic database lacks batch support")
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		batches, err := c.state.PendingBatches(64)
+		if err != nil {
+			return err
+		}
+		if len(batches) == 0 {
+			return nil
+		}
+		for _, b := range batches {
+			if err = durable.RecordBatch(ctx, b); err != nil {
+				return err
+			}
+			if err = c.state.AckBatch(b.BatchID); err != nil {
+				return err
+			}
+		}
+	}
+}
+func (c *Collector) replayLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	prune := time.NewTicker(24 * time.Hour)
+	defer prune.Stop()
+	for {
+		select {
+		case <-c.stop:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := c.Replay(ctx)
+			cancel()
+			if err != nil {
+				c.log.Warn("stats: replay deferred", "err", err)
+			}
+		case <-prune.C:
+			c.prune()
+		}
 	}
 }

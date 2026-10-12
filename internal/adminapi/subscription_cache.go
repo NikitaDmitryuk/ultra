@@ -1,0 +1,73 @@
+package adminapi
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"time"
+)
+
+type subscriptionCacheEntry struct {
+	Body        []byte            `json:"body"`
+	Headers     map[string]string `json:"headers"`
+	ConfirmedAt time.Time         `json:"confirmed_at"`
+}
+
+// Complete read-only export, never including raw subscription tokens in its response.
+func (s *Server) handleSubscriptionCache(w http.ResponseWriter, r *http.Request) {
+	source, ok := s.Subscriptions.(interface {
+		ListActiveTokens(context.Context) ([]string, error)
+	})
+	if !ok {
+		http.Error(w, "subscription cache unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	tokens, err := source.ListActiveTokens(r.Context())
+	if err != nil {
+		http.Error(w, "subscription cache unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	entries := map[string]subscriptionCacheEntry{}
+	now := time.Now().UTC()
+	for _, token := range tokens {
+		digest := sha256.Sum256([]byte(token))
+		prefix := hex.EncodeToString(digest[:]) + "?"
+		for _, query := range []string{"", "format=uri", "format=happ", "format=uri&transport=xhttp-tls"} {
+			req := httptest.NewRequest("GET", "/v1/subscriptions/"+url.PathEscape(token)+"?"+query, nil).WithContext(r.Context())
+			req.SetPathValue("token", token)
+			req.Header.Set("User-Agent", "Happ")
+			recorder := httptest.NewRecorder()
+			s.handleSubscription(recorder, req)
+			if recorder.Code == http.StatusBadRequest && query == "format=happ" {
+				continue
+			}
+			if recorder.Code == http.StatusServiceUnavailable && query == "format=uri&transport=xhttp-tls" {
+				continue
+			}
+			if recorder.Code != 200 {
+				http.Error(w, "subscription cache incomplete", http.StatusServiceUnavailable)
+				return
+			}
+			headers := map[string]string{}
+			for _, key := range []string{"Content-Type", "profile-title", "profile-update-interval", "Vary"} {
+				if value := recorder.Header().Get(key); value != "" {
+					headers[key] = value
+				}
+			}
+			format, _ := config.ResolveSubscriptionFormat(req.URL.Query().Get("format"), req.URL.Query().Get("transport"), req.UserAgent(), s.spec.HappDefaultJSON)
+			entries[prefix+config.SubscriptionCacheQuery(format, req.URL.Query().Get("transport"))] = subscriptionCacheEntry{Body: recorder.Body.Bytes(), Headers: headers, ConfirmedAt: now}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(struct {
+		Version         int                               `json:"version"`
+		HappDefaultJSON bool                              `json:"happ_default_json,omitempty"`
+		Entries         map[string]subscriptionCacheEntry `json:"entries"`
+	}{1, s.spec.HappDefaultJSON, entries})
+}

@@ -6,6 +6,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 	"github.com/NikitaDmitryuk/ultra/internal/quota"
+	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 	"github.com/google/uuid"
 	"testing"
 	"time"
@@ -61,6 +62,9 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	if _, e = d.Pool.Exec(ctx, `INSERT INTO account_exit_usage(account_id,exit_id,period,downlink_bytes) SELECT account_id,$2,$3,$4 FROM users WHERE uuid=$1`, a, fra, now.Format("2006-01"), 100*quota.GiB); e != nil {
+		t.Fatal(e)
+	}
 	if _, e = repo.Recalculate(ctx, now); e != nil {
 		t.Fatal(e)
 	}
@@ -81,6 +85,9 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 	// Exhaust the user's monthly quarter, including yesterday's traffic.
 	_, e = d.Pool.Exec(ctx, `UPDATE daily_route_traffic SET downlink_bytes=$2 WHERE user_uuid=$1`, a, 200*quota.GiB)
 	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = d.Pool.Exec(ctx, `UPDATE account_exit_usage SET downlink_bytes=$2 WHERE account_id=(SELECT account_id FROM users WHERE uuid=$1)`, a, 200*quota.GiB); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = repo.Recalculate(ctx, now); e != nil {
@@ -221,5 +228,101 @@ func TestBudgetPlanMatchesReadyInstanceAndExit(t *testing.T) {
 			}
 			t.Fatal("budget missing")
 		})
+	}
+}
+
+func TestEmergencyBudgetBoundedBySpendAndObservation(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	r := NewQuotaRepo(d)
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	exit, user := uuid.NewString(), uuid.NewString()
+	if _, e := d.Pool.Exec(ctx, `INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid) VALUES($1,'emergency','127.0.0.1',51001,$2)`, exit, exit); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := d.Pool.Exec(ctx, `INSERT INTO users(uuid,name) VALUES($1,'emergency')`, user); e != nil {
+		t.Fatal(e)
+	}
+	if e := r.EnsureVultr(ctx, exit, "instance", 1_000_000_000_000); e != nil {
+		t.Fatal(e)
+	}
+	if e := r.Observe(ctx, exit, 0, 100_000_000_000, "", now); e != nil {
+		t.Fatal(e)
+	}
+	if e := r.Observe(ctx, exit, 0, 0, "api_unavailable", now.Add(time.Minute)); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := r.Recalculate(ctx, now.Add(time.Minute)); e != nil {
+		t.Fatal(e)
+	}
+	limits, e := r.RuntimeLimits(ctx, now.Add(time.Minute))
+	if e != nil {
+		t.Fatal(e)
+	}
+	var global runtimestate.QuotaLimit
+	for _, v := range limits {
+		if v.AccountID == "" {
+			global = v
+		}
+	}
+	if global.LimitBytes != EmergencyBytes {
+		t.Fatalf("emergency capacity %d", global.LimitBytes)
+	}
+	if _, e = d.Pool.Exec(ctx, `INSERT INTO account_exit_usage(account_id,exit_id,period,charged_bytes) SELECT account_id,$2,$3,$4 FROM users WHERE uuid=$1`, user, exit, "2026-10", EmergencyBytes); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = r.Recalculate(ctx, now.Add(2*time.Minute)); e != nil {
+		t.Fatal(e)
+	}
+	var blocked bool
+	if e = d.Pool.QueryRow(ctx, `SELECT blocked FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, user, exit).Scan(&blocked); e != nil || !blocked {
+		t.Fatalf("exhausted emergency allowed %v %v", blocked, e)
+	}
+	// A repeated provider error cannot create a second allowance.
+	if e = r.Observe(ctx, exit, 0, 0, "api_unavailable", now.Add(3*time.Minute)); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = r.Recalculate(ctx, now.Add(3*time.Minute)); e != nil {
+		t.Fatal(e)
+	}
+	limits, e = r.RuntimeLimits(ctx, now.Add(3*time.Minute))
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, v := range limits {
+		if v.AccountID == "" && v.LimitBytes != v.UsedBytes {
+			t.Fatal("error reset allowance")
+		}
+	}
+	// Healthy observation reconciles the local baseline; a future failure has a new bounded reserve.
+	if e = r.Observe(ctx, exit, EmergencyBytes, 100_000_000_000, "", now.Add(time.Hour)); e != nil {
+		t.Fatal(e)
+	}
+	if e = r.Observe(ctx, exit, 0, 0, "api_unavailable", now.Add(time.Hour+time.Minute)); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = r.Recalculate(ctx, now.Add(time.Hour+time.Minute)); e != nil {
+		t.Fatal(e)
+	}
+	limits, e = r.RuntimeLimits(ctx, now.Add(time.Hour+time.Minute))
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, v := range limits {
+		if v.AccountID == "" && v.LimitBytes-v.UsedBytes != EmergencyBytes {
+			t.Fatal("fresh confirmation did not reconcile")
+		}
+	}
+	if _, e = r.Recalculate(ctx, now.Add(25*time.Hour)); e != nil {
+		t.Fatal(e)
+	}
+	limits, e = r.RuntimeLimits(ctx, now.Add(25*time.Hour))
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, v := range limits {
+		if v.AccountID == "" && v.LimitBytes != v.UsedBytes {
+			t.Fatal("expired provider observation allowed")
+		}
 	}
 }
