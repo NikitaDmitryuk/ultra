@@ -53,10 +53,10 @@ func BuildHappProfile(spec *Spec, user auth.User, name string) (map[string]any, 
 	}
 	outbounds := []any{map[string]any{"tag": "block", "protocol": "blackhole"}}
 	add := func(s *Spec, tag string) error {
-		if !s.DevMode && len(s.Reality.ServerNames) == 0 {
+		if !s.PrimaryXHTTPIsPublished() && !s.DevMode && len(s.Reality.ServerNames) == 0 {
 			return fmt.Errorf("subscription: REALITY server name is required")
 		}
-		export, err := BuildSubscriptionExport(s, user)
+		export, err := BuildSubscriptionExport(s, user, "")
 		if err != nil {
 			return err
 		}
@@ -68,6 +68,9 @@ func BuildHappProfile(spec *Spec, user auth.User, name string) (map[string]any, 
 		if err := add(spec, "bridge-primary"); err != nil {
 			return nil, err
 		}
+	}
+	if spec.PrimaryXHTTPIsPublished() && len(spec.SubscriptionBridges) > 0 {
+		return nil, fmt.Errorf("primary XHTTP cannot use REALITY subscription bridges")
 	}
 	for _, b := range spec.SubscriptionBridges {
 		child := *spec

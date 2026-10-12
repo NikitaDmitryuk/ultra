@@ -39,13 +39,17 @@ func sshConnectTimeoutSec() int {
 
 func sshBaseOpts() []string {
 	sec := sshConnectTimeoutSec()
-	return []string{
+	opts := []string{
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=" + strictHostKeyChecking(),
 		"-o", fmt.Sprintf("ConnectTimeout=%d", sec),
 		"-o", "ServerAliveInterval=5",
 		"-o", "ServerAliveCountMax=2",
 	}
+	if path := strings.TrimSpace(os.Getenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS")); path != "" {
+		opts = append(opts, "-o", "UserKnownHostsFile="+path)
+	}
+	return opts
 }
 
 func sshArgs(user, host, identity string, remoteWords ...string) []string {

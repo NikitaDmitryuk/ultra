@@ -133,3 +133,14 @@ test('subscription ingress cannot be deleted or replaced from server card', asyn
  assert.ok(!html.includes('data-action="delete"'));
  assert.ok(!html.includes('data-replace='));
 });
+
+test('ingress diagnostics distinguishes main and experiment without rendering server strings as HTML',()=>{
+ const adminSource=fs.readFileSync(require('node:path').join(__dirname,'../internal/bot/embed/miniapp/app.js'),'utf8');
+ const functionSource=adminSource.slice(adminSource.indexOf('function renderIngressHealth('));
+ const children=[];const list={replaceChildren(){children.length=0},appendChild(item){children.push(item)}};
+ const context=vm.createContext({document:{getElementById(id){return id==='diag-exits-health-list'?{after(){}}:list},createElement(){return {}}},formatTime(value){return value}});
+ vm.runInContext(functionSource,context);
+ context.states=[{id:'primary',ready:true,phase:'server_path_ready'},{id:'experimental',ready:false,phase:'<script>unsafe</script>'}];
+ vm.runInContext('renderIngressHealth(states)',context);
+ assert.equal(children.length,2);assert.ok(children[0].textContent.includes('Основной вход'));assert.ok(children[1].textContent.includes('Эксперимент: недоступен'));assert.equal(children[1].innerHTML,undefined);
+});

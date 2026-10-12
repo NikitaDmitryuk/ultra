@@ -154,6 +154,7 @@ func (s *Server) routes() error {
 	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
 	s.mux.HandleFunc("GET /v1/diagnostics", s.handleDiagnostics)
 	s.mux.HandleFunc("GET /v1/hardening", s.handleHardening)
+	s.mux.HandleFunc("POST /v1/ingress/notice", s.handleIngressNotice)
 	s.mux.HandleFunc("GET /v1/exits", s.handleListExits)
 	s.mux.HandleFunc("POST /v1/exits", s.handlePostExit)
 	s.mux.HandleFunc("PATCH /v1/exits/{id}", s.handlePatchExit)
@@ -643,16 +644,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Checks            []exits.ProbeResult `json:"checks,omitempty"`
 	}
 	type healthResp struct {
-		CheckedAt         string       `json:"checked_at"`
-		Bridge            nodeHealth   `json:"bridge"`
-		Exit              nodeHealth   `json:"exit"`
-		Exits             []nodeHealth `json:"exits,omitempty"`
-		ActiveExitID      string       `json:"active_exit_id,omitempty"`
-		SelectionDegraded bool         `json:"selection_degraded,omitempty"`
+		CheckedAt         string          `json:"checked_at"`
+		Bridge            nodeHealth      `json:"bridge"`
+		Exit              nodeHealth      `json:"exit"`
+		Exits             []nodeHealth    `json:"exits,omitempty"`
+		ActiveExitID      string          `json:"active_exit_id,omitempty"`
+		SelectionDegraded bool            `json:"selection_degraded,omitempty"`
+		PublicIngresses   []ingressStatus `json:"public_ingresses,omitempty"`
 	}
 	res := healthResp{
-		CheckedAt: time.Now().UTC().Format(time.RFC3339),
-		Bridge:    nodeHealth{Reachable: true},
+		CheckedAt:       time.Now().UTC().Format(time.RFC3339),
+		Bridge:          nodeHealth{Reachable: true},
+		PublicIngresses: s.publicIngressStatus(ctx),
 	}
 
 	var g errgroup.Group
@@ -885,7 +888,8 @@ func (s *Server) handleHardening(w http.ResponseWriter, r *http.Request) {
 			}
 			return nil
 		}(),
-		"checks": checks,
+		"checks":           checks,
+		"public_ingresses": s.publicIngressStatus(r.Context()),
 	})
 }
 

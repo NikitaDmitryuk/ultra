@@ -153,6 +153,14 @@ func BuildBridgeXRayJSON(
 	}
 
 	apiListenHost, apiListenPort, _ := splitHostPort(statsAPIListen(spec))
+	sniffing := map[string]any{
+		"enabled":      true,
+		"destOverride": w.SniffingDestOverride,
+	}
+	if ip := net.ParseIP(spec.PublicHost); ip != nil {
+		// Preserve the bridge endpoint when another VPN connection carries its REALITY SNI.
+		sniffing["ipsExcluded"] = []string{ip.String()}
+	}
 
 	inbounds := []any{
 		map[string]any{
@@ -166,13 +174,13 @@ func BuildBridgeXRayJSON(
 				"fallbacks":  []any{},
 			},
 			"streamSettings": inStream,
-			"sniffing": map[string]any{
-				"enabled":      true,
-				"destOverride": w.SniffingDestOverride,
-			},
+			"sniffing":       sniffing,
 		},
 	}
-	if spec.AntiCensor != nil && spec.AntiCensor.PublicXHTTPPort > 0 && !spec.DevMode {
+	if !spec.LegacyPublicIsEnabled() {
+		inbounds = nil
+	}
+	if spec.LegacyPublicIsEnabled() && spec.AntiCensor != nil && spec.AntiCensor.PublicXHTTPPort > 0 && !spec.DevMode {
 		xhttpStream := bridgeInboundStream(spec)
 		xhttpStream["network"] = "xhttp"
 		xhttpStream["xhttpSettings"] = map[string]any{
@@ -191,16 +199,28 @@ func BuildBridgeXRayJSON(
 				"fallbacks":  []any{},
 			},
 			"streamSettings": xhttpStream,
-			"sniffing": map[string]any{
-				"enabled":      true,
-				"destOverride": w.SniffingDestOverride,
-			},
+			"sniffing":       sniffing,
 		})
 	}
 	if spec.PublicXHTTPTLS != nil && !spec.DevMode {
 		inbounds = append(inbounds, map[string]any{"tag": w.InboundVLESSTag + "-xhttp-tls", "listen": spec.ListenAddress, "port": spec.PublicXHTTPTLS.Port,
 			"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption},
 			"streamSettings": publicTLSStream(spec, true)})
+	}
+	if p := spec.PrimaryXHTTP; p != nil {
+		child := *spec
+		child.PublicXHTTPTLS = &p.PublicXHTTPTLSSpec
+		stream := publicTLSStream(&child, true)
+		delete(stream, "tlsSettings")
+		stream["security"] = "none"
+		stream["sockopt"] = map[string]any{"trustedXForwardedFor": []string{"X-Ultra-Proxy"}}
+		inbounds = append(inbounds, map[string]any{"tag": w.InboundVLESSTag + "-primary-xhttp", "listen": "127.0.0.1", "port": p.BackendPort,
+			"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption}, "streamSettings": stream})
+	}
+	if spec.GatewayVLESSPort > 0 {
+		inbounds = append(inbounds, map[string]any{"tag": w.InboundVLESSTag + "-gateway", "listen": "127.0.0.1", "port": spec.GatewayVLESSPort,
+			"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption},
+			"streamSettings": map[string]any{"network": "tcp", "security": "none", "sockopt": map[string]any{"acceptProxyProtocol": true}}})
 	}
 	if statsEnabled {
 		inbounds = append(inbounds, map[string]any{

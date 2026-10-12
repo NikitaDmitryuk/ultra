@@ -7,3 +7,6 @@ var RelaySystemdUnit string
 
 //go:embed scripts/ultra-bot.service
 var BotSystemdUnit string
+
+//go:embed scripts/xhttp-ingress.py
+var XHTTPIngressScript string

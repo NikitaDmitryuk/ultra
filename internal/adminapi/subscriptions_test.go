@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -78,6 +80,19 @@ func TestSubscriptionHTTP(t *testing.T) {
 			t.Fatal("URI compatibility lost")
 		}
 	}
+	for _, query := range []string{"transport=unknown", "transport=xhttp-tls&format=happ"} {
+		if w := request("GET", "/v1/subscriptions/issued?"+query, true); w.Code != 400 {
+			t.Fatal("invalid transport accepted", w.Code)
+		}
+	}
+	if w := request("GET", "/v1/subscriptions/issued?transport=xhttp-tls", true); w.Code != 503 {
+		t.Fatal("absent listener exported", w.Code)
+	}
+	spec.DevMode = false
+	spec.PublicXHTTPTLS = &config.PublicXHTTPTLSSpec{Port: 5443, ServerName: "vpn.example", Path: "/connect"}
+	if w := request("GET", "/v1/subscriptions/issued?format=uri&transport=xhttp-tls", true); w.Code != 200 || !strings.Contains(w.Body.String(), "security=tls") || !strings.Contains(w.Body.String(), "vless://u1@localhost:5443") {
+		t.Fatal("TLS subscription failed", w.Code)
+	}
 	u := users.users["u1"]
 	u.IsActive = false
 	users.users["u1"] = u
@@ -91,5 +106,68 @@ func TestSubscriptionHTTP(t *testing.T) {
 	}
 	if w := request("GET", "/v1/subscriptions/issued", true); w.Code != 404 {
 		t.Fatal("revoked", w.Code)
+	}
+}
+
+type adminSubscriptions struct {
+	testSubscriptions
+	allowed bool
+	err     error
+}
+
+func (s *adminSubscriptions) IsAdminOwner(context.Context, string) (bool, error) {
+	return s.allowed, s.err
+}
+
+func TestExperimentUsesOwnerPermissionsAndLiveDescriptor(t *testing.T) {
+	users := newFakeUserManager()
+	spec := &config.Spec{Role: config.RoleBridge, DevMode: true, PublicHost: "localhost", VLESSPort: 443}
+	s, err := NewServer("127.0.0.1:0", "secret", users, nil, spec, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permissions := &adminSubscriptions{testSubscriptions: testSubscriptions{token: "issued"}}
+	s.Subscriptions = permissions
+	file := filepath.Join(t.TempDir(), "experimental.json")
+	spec.ExperimentalProfileFile = file
+	descriptor := config.ExperimentalProfile{Host: "experiment.example", StatusPort: 18082, Endpoint: config.PublicXHTTPTLSSpec{Port: 5543, ServerName: "site.example", Path: "/test"}}
+	write := func() {
+		raw, _ := json.Marshal(descriptor)
+		if err := os.WriteFile(file, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write()
+	request := func(query string) string {
+		r := httptest.NewRequest("GET", "/v1/subscriptions/issued"+query, nil)
+		r.Header.Set("Authorization", "Bearer secret")
+		r.Header.Set("X-Admin", "true")
+		w := httptest.NewRecorder()
+		s.authMiddleware(s.mux).ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatal(w.Code)
+		}
+		return w.Body.String()
+	}
+	if strings.Contains(request("?admin=true"), "experiment.example") {
+		t.Fatal("query bypass")
+	}
+	permissions.allowed = true
+	if !strings.Contains(request(""), "experiment.example:5543") {
+		t.Fatal("admin experiment missing")
+	}
+	descriptor.Endpoint.Port = 5544
+	write()
+	if !strings.Contains(request(""), "experiment.example:5544") {
+		t.Fatal("descriptor cached")
+	}
+	permissions.allowed = false
+	if strings.Contains(request(""), "experiment.example") {
+		t.Fatal("removed admin retained profile")
+	}
+	permissions.allowed = true
+	permissions.err = errors.New("unavailable")
+	if strings.Contains(request(""), "experiment.example") {
+		t.Fatal("permissions failed open")
 	}
 }

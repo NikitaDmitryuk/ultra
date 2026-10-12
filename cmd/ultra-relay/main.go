@@ -2,10 +2,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/xtls/xray-core/core"
 	"log/slog"
 	"net/http"
 	"os"
@@ -31,6 +33,8 @@ import (
 )
 
 func main() {
+	transportPath := flag.String("transport-spec", "", "isolated experimental transport spec (no database or workers)")
+	checkOnly := flag.Bool("check", false, "validate spec and certificate without starting services")
 	specPath := flag.String("spec", "", "path to relay JSON spec (required)")
 	adminToken := flag.String(
 		"admin-token",
@@ -56,6 +60,19 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slogLvl}))
 	log.Info("ultra-relay starting", "log_level", *logLevelFlag, "xray_loglevel", xrayLogLevel)
 
+	if *transportPath != "" {
+		if *specPath != "" {
+			log.Error("spec and transport-spec are mutually exclusive")
+			os.Exit(2)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		if err := runTransport(ctx, *transportPath, *checkOnly); err != nil {
+			log.Error("transport failed", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *specPath == "" {
 		log.Error("missing -spec")
 		os.Exit(2)
@@ -70,6 +87,29 @@ func main() {
 	if err != nil {
 		log.Error("mimic preset", "err", err)
 		os.Exit(1)
+	}
+
+	if *checkOnly {
+		if spec.Role == config.RoleBridge && spec.SplitRoutingEnabled() {
+			if err := os.Setenv("XRAY_LOCATION_ASSET", spec.GeoAssetsDir); err != nil {
+				log.Error("set XRAY_LOCATION_ASSET", "err", err)
+				os.Exit(1)
+			}
+		}
+		var data []byte
+		if spec.Role == config.RoleBridge {
+			data, err = config.BuildBridgeXRayJSON(spec, nil, nil, "", strat, xrayLogLevel)
+		} else {
+			data, err = config.BuildExitXRayJSON(spec, strat, xrayLogLevel)
+		}
+		if err == nil {
+			_, err = core.LoadConfig("json", bytes.NewReader(data))
+		}
+		if err != nil {
+			log.Error("Xray configuration validation failed")
+			os.Exit(1)
+		}
+		return
 	}
 
 	runner := new(proxy.Runner)

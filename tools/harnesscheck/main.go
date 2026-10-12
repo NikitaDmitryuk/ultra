@@ -106,6 +106,7 @@ func check(root string) []string {
 			report(file, "страница недоступна из AGENTS.md: добавьте ссылку в навигацию")
 		}
 	}
+	problems = append(problems, checkADR(root, documents)...)
 	sort.Strings(problems)
 	return problems
 }
@@ -190,4 +191,46 @@ func withoutInlineCode(line string) string {
 		start = end
 	}
 	return line
+}
+
+func checkADR(root string, documents map[string]string) []string {
+	var problems []string
+	names := map[string]bool{}
+	validName := regexp.MustCompile(`^docs/adr/([0-9]{4})-[a-z0-9-]+\.md$`)
+	status := regexp.MustCompile(`(?m)^## Статус\s+\n?(proposed|accepted|superseded|deprecated)\b`)
+	date := regexp.MustCompile(`(?m)^## Дата\s+\n?[0-9]{4}-[0-9]{2}-[0-9]{2}\b`)
+	index := documents["docs/adr/README.md"]
+	for file, content := range documents {
+		if !strings.HasPrefix(file, "docs/adr/") || file == "docs/adr/README.md" || file == "docs/adr/template.md" {
+			continue
+		}
+		match := validName.FindStringSubmatch(file)
+		if match == nil {
+			problems = append(problems, file+": неверное имя ADR")
+			continue
+		}
+		if names[match[1]] {
+			problems = append(problems, file+": повторный номер ADR")
+		}
+		names[match[1]] = true
+		for _, section := range []string{"Статус", "Дата", "Контекст", "Решение", "Рассмотренные альтернативы", "Последствия", "Источники"} {
+			if !strings.Contains(content, "## "+section) {
+				problems = append(problems, file+": отсутствует раздел "+section)
+			}
+		}
+		st := status.FindStringSubmatch(content)
+		if st == nil {
+			problems = append(problems, file+": неверный статус ADR")
+		}
+		if !date.MatchString(content) {
+			problems = append(problems, file+": неверная дата ADR")
+		}
+		if st != nil && st[1] == "superseded" && !strings.Contains(content, "## Заменено") {
+			problems = append(problems, file+": отсутствует ссылка на замену")
+		}
+		if !strings.Contains(index, filepath.Base(file)) {
+			problems = append(problems, file+": отсутствует в индексе ADR")
+		}
+	}
+	return problems
 }

@@ -839,6 +839,7 @@ function applyHealthUI(h) {
     diagSummary.textContent = checked ? `Обновлено: ${checked}` : 'Готово';
   }
   renderDiagExitHealth(h.exits || h.Exits || []);
+ renderIngressHealth(h.public_ingresses || []);
 }
 
 function renderDiagExitHealth(exits) {
@@ -1099,4 +1100,18 @@ async function revokeSubscription() {
     document.getElementById('subscription-happ').removeAttribute('href');
   } catch (e) { showToast(e.message); }
   finally { setSubscriptionBusy(false); }
+}
+
+function renderIngressHealth(ingresses) {
+  const anchor = document.getElementById('diag-exits-health-list');
+  if (!anchor) return;
+  let list = document.getElementById('diag-ingresses');
+  if (!list) { list = document.createElement('div'); list.id = 'diag-ingresses'; list.className = 'diag-list'; anchor.after(list); }
+  list.replaceChildren();
+  for (const ingress of ingresses) {
+    const item = document.createElement('div'); item.className = 'diag-item';
+    const name = ingress.id === 'primary' ? 'Основной вход' : 'Эксперимент';
+    item.textContent = `${name}: ${ingress.ready ? 'серверная проверка OK' : 'недоступен'} · ${ingress.phase || '—'}${ingress.certificate_not_after ? ' · сертификат до ' + formatTime(ingress.certificate_not_after) : ''}`;
+    list.appendChild(item);
+  }
 }

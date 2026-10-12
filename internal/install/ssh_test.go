@@ -33,3 +33,17 @@ func TestSSHBaseOptsIncludesConnectTimeout(t *testing.T) {
 		t.Fatalf("ConnectTimeout=7 not in %#v", opts)
 	}
 }
+
+func TestSSHVerifiedKnownHosts(t *testing.T) {
+	t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", "/tmp/verified-known-hosts")
+	t.Setenv("ULTRA_INSTALL_SSH_STRICT_HOST_KEY", "yes")
+	opts := sshBaseOpts()
+	known, strict := false, false
+	for _, v := range opts {
+		known = known || v == "UserKnownHostsFile=/tmp/verified-known-hosts"
+		strict = strict || v == "StrictHostKeyChecking=yes"
+	}
+	if !known || !strict {
+		t.Fatal("verified SSH options missing")
+	}
+}

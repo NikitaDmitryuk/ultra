@@ -37,7 +37,7 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	req.URL.RawQuery = url.Values{"format": r.URL.Query()["format"]}.Encode()
+	req.URL.RawQuery = url.Values{"format": r.URL.Query()["format"], "transport": r.URL.Query()["transport"]}.Encode()
 	req.Header.Set("User-Agent", r.UserAgent())
 	req.Header.Set("Authorization", "Bearer "+b.adminAPIToken)
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)

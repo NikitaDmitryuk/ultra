@@ -324,6 +324,11 @@ func applyBridgeOverlay(dst *config.Spec, src *config.Spec) {
 		return
 	}
 	dst.SubscriptionBridges = append([]config.SubscriptionBridge(nil), src.SubscriptionBridges...)
+	dst.PrimaryXHTTP = src.PrimaryXHTTP
+	dst.LegacyPublicEnabled = src.LegacyPublicEnabled
+	dst.ExperimentalProfileFile = src.ExperimentalProfileFile
+	dst.GatewayVLESSPort = src.GatewayVLESSPort
+	dst.PublicXHTTPTLS = src.PublicXHTTPTLS
 	if g := strings.TrimSpace(src.GeoAssetsDir); g != "" {
 		dst.GeoAssetsDir = g
 	}

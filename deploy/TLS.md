@@ -45,3 +45,7 @@ openssl req -x509 -newkey rsa:2048 \
 ## Несколько exit VPS
 
 Каждая exit-нода — отдельный VPS со своим `spec.json` и **своим** `exit.tunnel_uuid` (регистрация на bridge через Admin API / Mini App). TLS-сертификат (`exit_cert`) выпускается **на каждом** exit-хосте (например `ultra-install -generate-exit-tls` или `-exit-only`). SAN/CN сертификата должны соответствовать `splithttp_host` / `splithttp_tls.server_name`, общим для всех exit в паре с bridge. Bridge хранит dial-адреса и UUID в PostgreSQL (`exit_nodes`), не в `spec.exit`.
+
+## Публичный XHTTP/TLS
+
+Основной HTTPS-вход обслуживает Nginx; продление сертификата выполняет graceful reload без перезапуска relay. Отдельный эксперимент загружает сертификат при старте и имеет собственный deploy-hook. Воспроизводимые команды и сохранение прежнего HTTP-01 бота — в [инструкции входа](../docs/xhttp-ingress.md).

@@ -112,3 +112,20 @@ func TestCheck(t *testing.T) {
 		})
 	}
 }
+
+func TestADRContracts(t *testing.T) {
+	doc := "# 0001 — Decision\n\n## Статус\n\naccepted\n\n## Дата\n\n2026-10-12\n\n## Контекст\n\nReason\n\n## Решение\n\nChoice\n\n## Рассмотренные альтернативы\n\nAlternatives\n\n## Последствия\n\nLimits\n\n## Источники\n\nSources\n"
+	file := "docs/adr/0001-decision.md"
+	documents := map[string]string{file: doc, "docs/adr/README.md": "[Decision](0001-decision.md)"}
+	if got := checkADR("", documents); len(got) != 0 {
+		t.Fatal(got)
+	}
+	documents[file] = strings.Replace(doc, "accepted", "temporary", 1)
+	if got := checkADR("", documents); len(got) == 0 {
+		t.Fatal("invalid status accepted")
+	}
+	documents[file] = strings.Replace(doc, "accepted", "superseded", 1)
+	if got := checkADR("", documents); len(got) == 0 {
+		t.Fatal("missing replacement accepted")
+	}
+}

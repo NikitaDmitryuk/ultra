@@ -136,6 +136,12 @@ func fallbackXHTTPPath(spec *Spec) string {
 
 // BuildClientExport builds a minimal outbound fragment and a connection URI for one user.
 func BuildClientExport(spec *Spec, user auth.User) (*ClientExport, error) {
+	if spec.PrimaryXHTTPIsPublished() {
+		return buildXHTTPTLSExport(spec, user, spec.PrimaryXHTTP.Host, &spec.PrimaryXHTTP.PublicXHTTPTLSSpec), nil
+	}
+	if !spec.LegacyPublicIsEnabled() {
+		return nil, fmt.Errorf("client: no primary ingress configured")
+	}
 	w := resolveXrayWire(spec)
 	enc := w.VLESSEncryption
 	if spec.DevMode {
@@ -358,10 +364,14 @@ func buildTransportProfiles(spec *Spec, user auth.User) ([]ClientProfileExport, 
 		profiles = append(profiles, ClientProfileExport{EntryID: "primary", ID: id, Name: name, Transport: transport, XRayOutboundJSON: exp.XRayOutboundJSON, VLESSURI: exp.VLESSURI, FullConfigBase64: base64.StdEncoding.EncodeToString(full)})
 		return nil
 	}
-	if err := add(ClientProfileFastTCPReality, "Основной · TCP REALITY", "tcp", fast); err != nil {
+	id, name, transport := ClientProfileFastTCPReality, "Основной · TCP REALITY", "tcp"
+	if spec.PrimaryXHTTPIsPublished() {
+		id, name, transport = "primary_xhttp_tls", "Основной · XHTTP TLS", "xhttp"
+	}
+	if err := add(id, name, transport, fast); err != nil {
 		return nil, err
 	}
-	if spec.AntiCensor != nil && spec.AntiCensor.PublicXHTTPPort > 0 && !spec.DevMode {
+	if spec.LegacyPublicIsEnabled() && spec.AntiCensor != nil && spec.AntiCensor.PublicXHTTPPort > 0 && !spec.DevMode {
 		fallback, err := buildFallbackXHTTPExport(spec, user)
 		if err != nil {
 			return nil, err
@@ -387,6 +397,15 @@ func buildTransportProfiles(spec *Spec, user auth.User) ([]ClientProfileExport, 
 		}
 		anti.PublicXHTTPPort = entry.XHTTPRealityPort
 		child.AntiCensor = &anti
+		if spec.PrimaryXHTTPIsPublished() {
+			// Entries without a TLS forwarding port cannot carry the published transport.
+			if entry.XHTTPTLSPort == 0 {
+				continue
+			}
+			primary := *spec.PrimaryXHTTP
+			primary.Host, primary.Port = entry.Host, entry.XHTTPTLSPort
+			child.PrimaryXHTTP = &primary
+		}
 		child.PublicXHTTPTLS = nil
 		if entry.XHTTPTLSPort > 0 && spec.PublicXHTTPTLS != nil {
 			tls := *spec.PublicXHTTPTLS
@@ -457,7 +476,22 @@ func BuildClientProfiles(spec *Spec, user auth.User) ([]ClientProfileExport, err
 
 // BuildSubscriptionExport selects one configured transport without expanding routes
 // or rendering full client configs. Legacy exports and listeners remain unchanged.
-func BuildSubscriptionExport(spec *Spec, user auth.User) (*ClientExport, error) {
+func BuildSubscriptionExport(spec *Spec, user auth.User, transport string) (*ClientExport, error) {
+	if transport == "xhttp-tls" {
+		if spec.PrimaryXHTTPIsPublished() {
+			return buildXHTTPTLSExport(spec, user, spec.PrimaryXHTTP.Host, &spec.PrimaryXHTTP.PublicXHTTPTLSSpec), nil
+		}
+		if spec.DevMode || spec.PublicXHTTPTLS == nil {
+			return nil, fmt.Errorf("subscription: XHTTP TLS listener is not configured")
+		}
+		return buildPublicTLSExport(spec, user), nil
+	}
+	if transport != "" {
+		return nil, fmt.Errorf("subscription: unknown transport")
+	}
+	if spec.PrimaryXHTTPIsPublished() || !spec.LegacyPublicIsEnabled() {
+		return BuildClientExport(spec, user)
+	}
 	if !spec.DevMode && spec.AntiCensor != nil && spec.AntiCensor.PublicXHTTPPort > 0 {
 		if len(spec.Reality.ServerNames) == 0 {
 			return nil, fmt.Errorf("subscription: REALITY server name is required")

@@ -158,6 +158,7 @@ build-bench:
 
 .PHONY: test-ui
 test-ui:
+	python3 internal/install/scripts/xhttp-ingress.py --self-test
 	python3 scripts/test-verify-miniapp.py
 	python3 scripts/test-ingress-setup.py
 	python3 scripts/test-ingress-ssh.py

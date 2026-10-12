@@ -288,3 +288,12 @@ func TestDoctorReportsMissingBotTokenWithoutNetwork(t *testing.T) {
 		t.Fatalf("doctor should pass token-only checks: %#v", report.Issues)
 	}
 }
+
+func TestReusePreservesManagedIngress(t *testing.T) {
+	src := &config.Spec{PrimaryXHTTP: &config.PrimaryXHTTPIngress{Host: "vpn.example", BackendPort: 18080}, LegacyPublicEnabled: config.BoolPtr(false), ExperimentalProfileFile: "/etc/ultra-relay/experimental-profile.json", GatewayVLESSPort: 18081}
+	dst := new(config.Spec)
+	applyBridgeOverlay(dst, src)
+	if dst.PrimaryXHTTP != src.PrimaryXHTTP || dst.LegacyPublicEnabled == nil || *dst.LegacyPublicEnabled || dst.ExperimentalProfileFile != src.ExperimentalProfileFile || dst.GatewayVLESSPort != 18081 {
+		t.Fatal("managed ingress lost during reuse")
+	}
+}

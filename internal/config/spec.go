@@ -140,11 +140,15 @@ type StatsSpec struct {
 // Spec is relay deployment configuration (JSON file: -spec flag).
 type Spec struct {
 	// SchemaVersion defaults to 1 when zero (see Validate).
-	SchemaVersion       int                  `json:"schema_version"`
-	ProbeURLs           []string             `json:"probe_urls,omitempty"`
-	PublicXHTTPTLS      *PublicXHTTPTLSSpec  `json:"public_xhttp_tls,omitempty"`
-	PublicEntries       []PublicEntry        `json:"public_entries,omitempty"`
-	SubscriptionBridges []SubscriptionBridge `json:"subscription_bridges,omitempty"`
+	SchemaVersion           int                  `json:"schema_version"`
+	ProbeURLs               []string             `json:"probe_urls,omitempty"`
+	PublicXHTTPTLS          *PublicXHTTPTLSSpec  `json:"public_xhttp_tls,omitempty"`
+	PrimaryXHTTP            *PrimaryXHTTPIngress `json:"primary_xhttp,omitempty"`
+	LegacyPublicEnabled     *bool                `json:"legacy_public_enabled,omitempty"`
+	ExperimentalProfileFile string               `json:"experimental_profile_file,omitempty"`
+	GatewayVLESSPort        int                  `json:"gateway_vless_port,omitempty"`
+	PublicEntries           []PublicEntry        `json:"public_entries,omitempty"`
+	SubscriptionBridges     []SubscriptionBridge `json:"subscription_bridges,omitempty"`
 
 	Role        Role   `json:"role"`
 	MimicPreset string `json:"mimic_preset"`
@@ -377,7 +381,7 @@ func (s *Spec) Validate() error {
 		if s.PublicHost == "" {
 			return errors.New("config: bridge requires public_host for client export")
 		}
-		if !s.DevMode {
+		if !s.DevMode && s.LegacyPublicIsEnabled() {
 			if s.Reality.PrivateKey == "" || s.Reality.PublicKey == "" {
 				return errors.New("config: bridge requires reality.private_key and reality.public_key unless dev_mode")
 			}
@@ -477,6 +481,9 @@ func effectivePadding(s *Spec) string {
 	return p
 }
 func (s *Spec) validateTransportExtensions() error {
+	if err := s.validatePrimaryIngress(); err != nil {
+		return err
+	}
 	if err := validateSubscriptionBridges(s.SubscriptionBridges); err != nil {
 		return err
 	}
@@ -495,7 +502,7 @@ func (s *Spec) validateTransportExtensions() error {
 		if entry.XHTTPRealityPort > 0 && (s.AntiCensor == nil || s.AntiCensor.PublicXHTTPPort == 0) {
 			return errors.New("entry requires existing XHTTP REALITY listener")
 		}
-		if entry.XHTTPTLSPort > 0 && s.PublicXHTTPTLS == nil {
+		if entry.XHTTPTLSPort > 0 && s.PublicXHTTPTLS == nil && !s.PrimaryXHTTPIsPublished() {
 			return errors.New("entry requires existing XHTTP TLS listener")
 		}
 	}
@@ -523,6 +530,9 @@ func (s *Spec) validateTransportExtensions() error {
 		slog.Warn("legacy padding normalized to Xray default; issued profiles remain compatible")
 	}
 	if t := s.PublicXHTTPTLS; t != nil {
+		if err := t.validateFingerprint(); err != nil {
+			return err
+		}
 		if t.Port <= 0 || t.Port > 65535 || t.Port == s.VLESSPort || (s.AntiCensor != nil && t.Port == s.AntiCensor.PublicXHTTPPort) {
 			return errors.New("public_xhttp_tls requires a distinct port")
 		}

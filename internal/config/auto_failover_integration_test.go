@@ -105,7 +105,7 @@ func testAutoFailoverTransport(t *testing.T, transport TunnelTransport) {
 	apply()
 	clients := make([]*http.Client, 0, 2)
 	for _, u := range auth.ExpandRoutes([]auth.User{owner}) {
-		export, e := BuildSubscriptionExport(spec, u)
+		export, e := BuildSubscriptionExport(spec, u, "")
 		if e != nil {
 			t.Fatal(e)
 		}
