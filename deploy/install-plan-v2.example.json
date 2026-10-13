@@ -8,18 +8,18 @@
   "bridge": {
     "ssh_host": "192.0.2.10",
     "public_host": "192.0.2.10",
-    "reality_dest": "www.microsoft.com:443",
-    "reality_sni": "www.microsoft.com",
+    "reality_dest": "origin.example.net:443",
+    "reality_sni": "origin.example.net",
     "vless_port": 24443
   },
   "exits": [
     {
-      "name": "NL",
+      "name": "primary",
       "ssh_host": "192.0.2.20",
       "priority": 100
     },
     {
-      "name": "US",
+      "name": "independent",
       "ssh_host": "192.0.2.30",
       "priority": 200
     }
@@ -49,23 +49,23 @@
     "bridge_ipv4": "192.0.2.10",
     "bridge_url": "https://admin.example.com/happ",
     "known_hosts_file": "/secure/ultra-known-hosts",
-    "admin_telegram_id": 123456789,
+    "admin_telegram_id": 1,
     "static_nodes": [
       {
-        "name": "NL",
+        "name": "primary",
         "address": "192.0.2.20",
         "provider": "provider-a",
         "budget": {
-          "monthly_bytes": 100000000000,
+          "monthly_bytes": 1048576,
           "is_fallback": true
         }
       },
       {
-        "name": "US",
+        "name": "independent",
         "address": "192.0.2.30",
         "provider": "vultr",
         "budget": {
-          "monthly_bytes": 100000000000,
+          "monthly_bytes": 2097152,
           "is_fallback": false
         }
       }

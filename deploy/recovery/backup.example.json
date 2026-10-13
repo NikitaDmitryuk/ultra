@@ -6,8 +6,8 @@
   "identity_file": "/etc/ultra-recovery/transfer_ed25519",
   "known_hosts": "/etc/ultra-recovery/known_hosts",
   "destinations": [
-    {"host": "ultra-us", "required": true},
-    {"host": "ultra-exit", "required": false}
+    {"host": "ultra-independent", "required": true},
+    {"host": "ultra-primary", "required": false}
   ],
   "state_paths": [
     "/etc/ultra-relay", "/etc/ultra-bot", "/etc/ultra-recovery",

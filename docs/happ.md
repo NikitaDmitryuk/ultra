@@ -150,9 +150,9 @@ Auto и страны используют общий выбор профилей
 ```json
 {
   "subscription_bridges": [
-    {"id":"msk", "host":"bridge-msk.example.com", "port":443,
+    {"id":"region-a", "host":"ingress-a.example.net", "port":443,
      "public_key":"PUBLIC_REALITY_KEY", "server_name":"example.com", "short_id":"0123456789abcdef"},
-    {"id":"spb", "host":"bridge-spb.example.com", "port":8443, "transport":"xhttp", "path":"/vpn",
+    {"id":"region-b", "host":"ingress-b.example.net", "port":8443, "transport":"xhttp", "path":"/transport",
      "public_key":"OTHER_PUBLIC_REALITY_KEY", "server_name":"example.com"}
   ]
 }
@@ -212,7 +212,7 @@ REALITY-ключа сохранённые до обновления профил
 {
   "public_xhttp_tls": {
     "port": 8443,
-    "server_name": "vpn.example.com",
+    "server_name": "access.example.net",
     "certificate_file": "/etc/ultra/public/fullchain.pem",
     "key_file": "/etc/ultra/public/key.pem",
     "path": "/connect",
@@ -253,8 +253,8 @@ JSON Xray. Сборка: `make build-client`; для другого хоста �
 
 ```sh
 ./ultra-client -config client-export.json -profile fast_tcp_reality
-curl --proxy socks5h://127.0.0.1:10808 https://api.ipify.org
-curl --proxy http://127.0.0.1:10809 https://api.ipify.org
+curl --proxy socks5h://127.0.0.1:10808 https://probe.example.net/plain-ip
+curl --proxy http://127.0.0.1:10809 https://probe.example.net/plain-ip
 ```
 
 SOCKS5 и HTTP слушают только loopback. `socks5h` передаёт имя назначения прокси;
@@ -346,8 +346,8 @@ fallback; автоматические исключения российских
 открывает новые. Это может кратко затронуть другие устройства и пользователей.
 
 На дополнительных узлах личный потолок составляет 25% месячного бюджета после
-20% запаса. Для тарифа 1024 ГБ это 204,8 ГБ за календарный месяц UTC. Общий доступный
-остаток узла может ограничить расход раньше. На Амстердаме действует общий бюджет.
+20% запаса. Общий доступный остаток узла может ограничить расход раньше. На
+статическом exit действует общий бюджет.
 При исчерпании узла Auto выбирает другой исправный выход с доступной квотой;
 если допустимого выхода нет, VPN-трафик блокируется. Профиль страны использует
 другой выход только при наличии квоты; удалённая локация остаётся заблокированной. Отсутствие обрыва интернета не означает обход квоты.

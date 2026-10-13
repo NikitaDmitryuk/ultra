@@ -56,7 +56,7 @@ ultra-install upgrade --config install.config
 subscription vhost направляет запросы в TLS listener бота на loopback с проверкой
 сертификата/SNI, VPN vhost обслуживает XHTTP. Раздельные webroot-сертификаты и
 renewal hooks обслуживаются установщиком. Access logs subscription vhost выключены.
-Старые конфигурации с `forward_host` сохраняют NL forwarding; installer их не удаляет.
+Старые конфигурации с `forward_host` сохраняют forwarding через отдельный ingress-узел; installer их не удаляет.
 Изменение уже опубликованного primary endpoint отклоняется с требованием явного
 cutover, а не молча пропускается.
 
@@ -167,7 +167,7 @@ Snapshot файлов bundle позволяет восстановить пре�
 переустановку: использует текущие primary backend/path и существующий service probe,
 создаёт новые vhost aliases, проверяет старую и новую подписки и изолированный VPN
 payload, затем меняет только согласованную publication metadata. Старые Nginx sites,
-NL forwarding, REALITY, UUID и subscription tokens сохраняются. Неизвестные TLS
+Forwarding через отдельный ingress-узел, REALITY, UUID и subscription tokens сохраняются. Неизвестные TLS
 publication descriptors требуют отдельного рассмотрения вместо массовой замены.
 
 HTTPS-проверки subscription ingress, cutover и восстановления явно требуют TLS 1.2

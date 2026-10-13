@@ -1,7 +1,7 @@
 {
   "mode": "peer",
-  "node": "NL",
-  "peer_host": "ultra-us",
+  "node": "primary",
+  "peer_host": "ultra-independent",
   "token_file": "/etc/ultra-recovery/primary-bot-token",
   "chat_id": "REPLACE_ADMIN_CHAT_ID"
 }
