@@ -637,7 +637,7 @@ function serverCapacityHTML(c) {
           `<div class="card"><h3>${esc(n.name)}${n.primary ? " · основной" : ""}</h3><p>${!n.enabled ? "Выключен" : n.ready ? "Серверная проверка HTTPS прошла" : "Серверная проверка HTTPS не прошла или выполняется"}</p>${(() => {
             const b = c.budgets.find((b) => b.exit_id === n.id);
             return b
-              ? `<p>Бюджет хостинга: ${bytes(b.monthly_bytes)}/мес.</p><small>Защитный запас 20%. ${b.source === "vultr" ? (b.error ? "Не удалось обновить данные Vultr" : b.observed_at ? "Данные Vultr: " + esc(new Date(b.observed_at).toLocaleString("ru")) : "Ожидаем данные Vultr") : "Бюджет задан администратором."}</small>`
+              ? `<p>${b.source === "vultr" ? "Сохранённый объём тарифа (справочно)" : "Бюджет хостинга"}: ${bytes(b.monthly_bytes)}/мес.</p>${b.source === "vultr" ? "<p class=\"muted\">Начисленный трафик и остаток общие для всех выходов Vultr; это не отдельный лимит узла.</p>" : ""}<small>Защитный запас 20%. ${b.source === "vultr" ? (b.error ? "Не удалось обновить данные Vultr" : b.observed_at ? "Данные Vultr: " + esc(new Date(b.observed_at).toLocaleString("ru")) : "Ожидаем данные Vultr") : "Бюджет задан администратором."}</small>`
               : "<small>Бюджет трафика не настроен</small>";
           })()}</div>`,
       )
@@ -677,6 +677,21 @@ function personTrafficData(t, period, tag = "") {
   );
   return { routes, selected, buckets, today, month };
 }
+function quotaDate(value) {
+  const date = new Date(value);
+  return value && Number.isFinite(date.getTime())
+    ? esc(date.toLocaleString("ru", { timeZone: "UTC" })) + " UTC"
+    : "уточняется";
+}
+function trafficQuotasHTML(t) {
+  const pool = (t.quota_pools || []).find((p) => p.scope === "vultr");
+  const poolHTML = pool
+    ? `<div class="card compact-limits" data-quota-pool="vultr"><h2>Общий трафик Vultr</h2><small>${esc(pool.period)} · UTC</small><p class="muted">Один личный лимит для всех выходов Vultr. Смена локации не обновляет остаток.</p><div class="route-row"><span>Личный лимит</span><strong>${bytes(pool.personal_limit_bytes)}</strong></div><div class="route-row"><span>Использовано за месяц</span><strong>${bytes(pool.used_bytes)}</strong></div><div class="route-row"><span>Осталось</span><strong>${pool.state === "unknown" ? "Уточняется" : bytes(pool.remaining_bytes)}</strong></div><p class="${pool.state === "exhausted" ? "bad" : "muted"}">${({ available: "Трафик доступен", exhausted: "Доступная квота Vultr исчерпана", unknown: "Нет подтверждённого остатка Vultr", emergency: "Используется аварийный запас: данные Vultr временно недоступны" })[pool.state] || "Доступность уточняется"}</p><small>${pool.observed_at ? "Последние подтверждённые данные Vultr: " + quotaDate(pool.observed_at) : "Ожидаем подтверждённые данные Vultr"}<br>Сброс: ${quotaDate(pool.resets_at)}</small></div>`
+    : "";
+  const limitsHTML = (t.limits || []).map((l) => `<div class="card compact-limits"><h2>${esc(l.name)}</h2><div class="route-row"><span>${l.is_fallback ? "Ручной резерв · общий остаток узла" : "Доступный трафик"}</span><strong>${l.state === "unknown" ? "Уточняется" : bytes(l.remaining_bytes)}</strong></div>${!l.is_fallback && l.period === "month" ? `<p class="muted">Использовано за месяц: ${bytes(l.used_bytes)} · Личный лимит: ${bytes(l.personal_limit_bytes)}<br>Сброс: ${quotaDate(l.resets_at)}. Доступность также ограничена общим остатком узла.</p>` : ""}${l.pending ? '<p class="wait">Применяется переключение</p>' : l.state === "exhausted" ? `<p class="bad">${l.is_fallback ? "Бюджет исчерпан" : "Лимит исчерпан"}</p>` : ""}</div>`).join("");
+  return poolHTML + limitsHTML;
+}
+
 function renderTrafficChart(target, t, period = "month", tag = "") {
   const colors = [
     "#59bbaa",
@@ -724,7 +739,7 @@ function renderTrafficChart(target, t, period = "month", tag = "") {
     })
     .join(
       "",
-    )}</div></div>${(t.limits || []).length ? `<div class="card compact-limits"><h2>Доступный трафик</h2>${t.limits.map((l) => `<div class="route-row"><span>${esc(l.name)}<small>${l.is_fallback ? "Общий остаток узла" : "Доступно сейчас"}</small></span><strong>${l.state === "unknown" ? "Уточняется" : bytes(l.remaining_bytes)}</strong></div>${!l.is_fallback && l.period === "month" ? `<p class="muted">Использовано за месяц: ${bytes(l.used_bytes)} · Личный лимит: ${bytes(l.personal_limit_bytes)}<br>Сброс: ${esc(new Date(l.resets_at).toLocaleDateString("ru"))}, 00:00 UTC. Доступность также ограничена общим остатком узла.</p>` : ""}${l.pending ? '<p class="wait">Применяется переключение</p>' : l.state === "exhausted" ? `<p class="bad">${l.is_fallback ? "Бюджет исчерпан" : "Лимит исчерпан · резерв доступен в Auto"}</p>` : ""}`).join("")}</div>` : ""}`;
+    )}</div></div>${trafficQuotasHTML(t)}`;
   target
     .querySelectorAll("[data-period]")
     .forEach(

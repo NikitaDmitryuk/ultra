@@ -236,22 +236,29 @@ func TestFiveClientsDuringDurableShippingArtifactCopyAndFailover(t *testing.T) {
 	_ = makeExit(nodes[1], payloadB.Listener.Addr().String(), udpB.LocalAddr().String())
 	users := make([]auth.User, 5)
 	now := time.Now().UTC()
-	limits := []runtimestate.QuotaLimit{}
+	pool := runtimestate.ProviderPoolID("vultr")
+	limits := []runtimestate.QuotaLimit{{ExitID: pool, Scope: "provider_pool", Members: []string{nodes[0].ID, nodes[1].ID}, Period: now.Format("2006-01"), LimitBytes: 128 * 1024 * 1024, ExpiresAt: now.Add(runtimeLease)}}
+	for _, node := range nodes {
+		if _, err := database.Pool.Exec(context.Background(), `INSERT INTO quota_exit_membership(exit_id,scope) VALUES($1,'vultr')`, node.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for i := range users {
 		users[i] = auth.User{UUID: uuid.NewString(), AccountID: uuid.NewString(), IsActive: true, Routes: []auth.RouteCredential{{UUID: uuid.NewString(), ExitID: &nodes[0].ID}}}
+		limits = append(limits, runtimestate.QuotaLimit{AccountID: users[i].AccountID, ExitID: pool, Scope: "provider_pool", Period: now.Format("2006-01"), LimitBytes: 32 * 1024 * 1024, ExpiresAt: now.Add(runtimeLease)})
 		for _, n := range nodes {
-			limits = append(limits, runtimestate.QuotaLimit{AccountID: users[i].AccountID, ExitID: n.ID, Period: now.Format("2006-01"), LimitBytes: 32 * 1024 * 1024, ExpiresAt: now.Add(runtimeLease)})
+			limits = append(limits, runtimestate.QuotaLimit{PoolScope: "vultr", AccountID: users[i].AccountID, ExitID: n.ID, Period: now.Format("2006-01"), LimitBytes: 32 * 1024 * 1024, ExpiresAt: now.Add(runtimeLease)})
 		}
 	}
 	for _, n := range nodes {
-		limits = append(limits, runtimestate.QuotaLimit{ExitID: n.ID, Period: now.Format("2006-01"), LimitBytes: 128 * 1024 * 1024, ExpiresAt: now.Add(runtimeLease)})
+		limits = append(limits, runtimestate.QuotaLimit{PoolScope: "vultr", ExitID: n.ID, Period: now.Format("2006-01"), LimitBytes: 128 * 1024 * 1024, ExpiresAt: now.Add(runtimeLease)})
 	}
 	path := filepath.Join(t.TempDir(), "runtime.db")
 	store, err := runtimestate.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := runtimeSnapshotV1{Version: 1, Fingerprint: runtimeFingerprint(spec), Users: snapshotUsers(users), Nodes: nodes, Limits: limits}
+	snapshot := runtimeSnapshotV1{Version: 3, Fingerprint: runtimeFingerprint(spec), Users: snapshotUsers(users), Nodes: nodes, Limits: limits}
 	raw, _ := json.Marshal(snapshot)
 	if err = store.SaveSnapshot(runtimestate.Snapshot{Revision: 1, ConfirmedAt: now, Payload: raw}, limits); err != nil {
 		t.Fatal(err)
@@ -500,15 +507,17 @@ func TestFiveClientsDuringDurableShippingArtifactCopyAndFailover(t *testing.T) {
 	if pending, _, _, err := store.PendingStats(); err != nil || pending != 0 {
 		t.Fatalf("shutdown journal not acknowledged: pending=%d err=%v", pending, err)
 	}
-	var expectedCharge int64
+	var expectedCharge, sharedCharge int64
 	for _, user := range users {
-		for _, node := range nodes {
-			remaining, err := store.Remaining(user.AccountID, node.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			expectedCharge += 32*1024*1024 - remaining
+		personal, global, err := store.PoolUsage(user.AccountID, "vultr")
+		if err != nil {
+			t.Fatal(err)
 		}
+		expectedCharge += personal
+		sharedCharge = global
+	}
+	if sharedCharge != expectedCharge {
+		t.Fatal("shared pool and personal totals diverged", sharedCharge, expectedCharge)
 	}
 	close(problems)
 	for err := range problems {

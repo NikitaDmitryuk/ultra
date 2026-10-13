@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/db/sqlc"
@@ -20,6 +21,10 @@ import (
 func (r *TrafficRepo) RecordBatch(ctx context.Context, b runtimestate.TrafficBatch) error {
 	if b.Version != 1 || b.CollectedAt.IsZero() {
 		return errors.New("unsupported traffic batch")
+	}
+	// The collector's background replay and explicit recovery share this gate.
+	if err := NewQuotaRepo(r.db).PreflightBatches(ctx, []runtimestate.TrafficBatch{b}); err != nil {
+		return err
 	}
 	raw, e := json.Marshal(b)
 	if e != nil {
@@ -51,7 +56,7 @@ func (r *TrafficRepo) RecordBatch(ctx context.Context, b runtimestate.TrafficBat
 	}
 	q := r.db.Queries.WithTx(tx)
 	for _, s := range b.Samples {
-		if s.AccountID == "" || s.UplinkBytes < 0 || s.DownlinkBytes < 0 || s.ChargeTotalBytes < 0 {
+		if strings.HasPrefix(s.ExitID, "@pool:") || s.AccountID == "" || s.UplinkBytes < 0 || s.DownlinkBytes < 0 || s.ChargeTotalBytes < 0 {
 			return errors.New("invalid traffic sample")
 		}
 		period := s.Period

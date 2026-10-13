@@ -154,6 +154,22 @@ type Notification struct {
 	Terminal      bool               `json:"terminal"`
 }
 
+type ProviderQuotaPool struct {
+	Scope              string             `json:"scope"`
+	Period             string             `json:"period"`
+	AccruedBytes       int64              `json:"accrued_bytes"`
+	ProviderUsedBytes  int64              `json:"provider_used_bytes"`
+	RemainingBytes     int64              `json:"remaining_bytes"`
+	ObservedLocalBytes int64              `json:"observed_local_bytes"`
+	ObservedAt         pgtype.Timestamptz `json:"observed_at"`
+	ProviderError      string             `json:"provider_error"`
+}
+
+type QuotaExitMembership struct {
+	ExitID string `json:"exit_id"`
+	Scope  string `json:"scope"`
+}
+
 type RecoveryHeartbeat struct {
 	Singleton  bool               `json:"singleton"`
 	ObservedAt pgtype.Timestamptz `json:"observed_at"`

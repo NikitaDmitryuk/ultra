@@ -81,7 +81,7 @@ pending без автоматического повтора. Drift и дубл�
 
 `make release-dist` собирает relay, installer, bot и client для amd64/arm64, recovery
 bundle и `release-manifest.json`. Manifest содержит SHA-256/размер каждого артефакта,
-версию, capability `service-access-v1` и границы схемы БД. Скопируйте **весь** результат
+версию, capabilities `service-access-v1` и `provider-pool-quota-v1`, границы схемы БД 24–25. Скопируйте **весь** результат
 в `automation.release_dir`; `automation.version` должна точно совпадать с manifest.
 `latest` не допускается. SHA проверяется до изменений на узлах и после доставки;
 доверие к происхождению самого manifest обеспечивает выбранный канал доставки.
@@ -143,9 +143,10 @@ Bootstrap вызывает `ultra-relay -ensure-static-budgets -spec PATH -stati
 relay и bot на bridge: bot запускается только после готовности relay/Xray.
 
 Обратное переключение допускается только на предыдущие бинарники с подтверждёнными
-SHA, `service-access-v1` и совместимыми границами схемы. Автоматически не откатываются
-SQL, credentials и топология. Неизвестный предыдущий manifest или несовместимый
-бинарник блокирует upgrade; наличие старого accounting-aware бинарника недостаточно.
+SHA, `service-access-v1`, `provider-pool-quota-v1` и поддержкой всей целевой схемы.
+Автоматически не откатываются SQL, credentials и топология. Неизвестный предыдущий
+manifest или несовместимый бинарник блокирует обычный rollback; наличие старого
+accounting-aware бинарника недостаточно.
 Комплект сохраняет совместимый emergency relay вместе с его manifest и включает
 их в зашифрованные артефакты. Журнал `/var/lib/ultra-automation/upgrade.json` связывает этапы узлов и bridge с
 точным manifest и топологией. Повтор той же версии после остановки процесса
@@ -154,6 +155,30 @@ SQL, credentials и топология. Неизвестный предыдущ�
 Snapshot файлов bundle позволяет восстановить предыдущие инструменты после
 перезапуска процесса. Неудачный rollback возвращает ошибку,
 а не успешную готовность.
+
+Первый переход с `service-access-v1`/схемы 24 на общую квоту имеет отдельный путь:
+до активации automation проверяет SHA целевого emergency relay и его ответ
+`-capabilities`, сохраняет пару binary/manifest и receipt
+`/var/lib/ultra-automation/pool-emergency.json`. Целевая версия поддерживает схемы
+24–25: миграция 25 добавляет данные, а аварийный режим читает сохранённое runtime
+state. Перед изменением основного unit и заменой бинарников устанавливается
+аварийный cache-only override: текущий процесс продолжает работу, а перезагрузка
+в промежуточной стадии запускает проверенный emergency с сохранённым состоянием.
+Основной unit получает `-require-provider-pool-quota`; старый квотный режим после
+начала перехода не возвращается.
+
+После начала такого перехода ошибка проверки exit, запуска bridge или readiness
+сохраняет целевые controller/emergency и запускает совместимый bridge с
+`-cache-only` через `95-ultra-pool-emergency.conf`. Старый обычный relay не является
+допустимым откатом. Receipt сохраняет SHA и стадию, журнал upgrade — прежний и
+целевой manifest и выполненные этапы. Повтор той же версии продолжает обновление,
+удаляет только этот аварийный override перед обычным запуском и проверяет новую
+готовность. Расход, состояние и сроки квот не откатываются. При ошибке самой
+аварийной активации команда остаётся неуспешной и не возвращает старый квотный код.
+Pool-compatible bootstrap при ошибке после активации использует тот же аварийный
+путь. Для последующих обновлений между совместимыми pool-версиями прежний rollback
+сохраняется. Источники: [automation](../internal/install/scripts/automation.py),
+[регрессии перехода](../internal/install/scripts/test_automation.py).
 
 Проверки реализации: Go-тесты `internal/installplan` и `cmd/ultra-install`,
 `python3 internal/install/scripts/test_automation.py`, существующие проверки ingress

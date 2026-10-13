@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionmeta"
 	"io"
 	"net"
 	"net/http"
@@ -83,9 +84,6 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Server-Timing", fmt.Sprintf("relay;dur=%.1f", float64(time.Since(started).Microseconds())/1000))
-	for _, key := range []string{"Content-Type", "profile-title", "profile-update-interval"} {
-		w.Header().Set(key, resp.Header.Get(key))
-	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if readErr != nil || len(body) > 1<<20 {
 		if b.serveSubscriptionFallback(w, cacheKey, token, r) {
@@ -93,6 +91,11 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
+	}
+	for _, key := range subscriptionmeta.Headers {
+		if value := resp.Header.Get(key); value != "" {
+			w.Header().Set(key, value)
+		}
 	}
 	if acceptance != nil {
 		// Cleanup or expiry during the upstream request revokes the preview too.

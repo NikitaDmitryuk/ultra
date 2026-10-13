@@ -51,7 +51,7 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 		}
 	}
 	check(true)
-	if e = repo.Observe(ctx, fra, 0, 1000*quota.GiB, "", now); e != nil {
+	if e = observeQuotaFixture(t, repo, ctx, fra, 0, 1000*quota.GiB, "", now); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = repo.Recalculate(ctx, now); e != nil {
@@ -101,7 +101,7 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 	if e = d.Pool.QueryRow(ctx, `SELECT applied FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, a, fra).Scan(&applied); e != nil || applied {
 		t.Fatal("acknowledged a newer calculation", e)
 	}
-	if e = repo.Observe(ctx, fra, 0, 1000*quota.GiB, "", now.AddDate(0, 0, 1)); e != nil {
+	if e = observeQuotaFixture(t, repo, ctx, fra, 0, 1000*quota.GiB, "", now.AddDate(0, 0, 1)); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = repo.Recalculate(ctx, now.AddDate(0, 0, 1)); e != nil {
@@ -119,7 +119,7 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 		t.Fatal("rotation reset usage", e)
 	}
 	nextMonth := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	if e = repo.Observe(ctx, fra, 0, 1000*quota.GiB, "", nextMonth); e != nil {
+	if e = observeQuotaFixture(t, repo, ctx, fra, 0, 1000*quota.GiB, "", nextMonth); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = repo.Recalculate(ctx, nextMonth); e != nil {
@@ -127,7 +127,7 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 	}
 	check(false)
 
-	if e = repo.Observe(ctx, fra, 0, 0, "", now); e != nil {
+	if e = observeQuotaFixture(t, repo, ctx, fra, 0, 0, "", now); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = repo.Recalculate(ctx, now); e != nil {
@@ -138,7 +138,7 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 	if e != nil || users[0].FallbackExitID != ams || len(users[0].ExcludedExitIDs) != 1 {
 		t.Fatal("quota cache not attached", e)
 	}
-	if e = repo.Observe(ctx, fra, 0, 1000*quota.GiB, "", now); e != nil {
+	if e = observeQuotaFixture(t, repo, ctx, fra, 0, 1000*quota.GiB, "", now); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = repo.Recalculate(ctx, now.AddDate(0, 0, 1)); e != nil {
@@ -246,10 +246,10 @@ func TestEmergencyBudgetBoundedBySpendAndObservation(t *testing.T) {
 	if e := r.EnsureVultr(ctx, exit, "instance", 1_000_000_000_000); e != nil {
 		t.Fatal(e)
 	}
-	if e := r.Observe(ctx, exit, 0, 100_000_000_000, "", now); e != nil {
+	if e := observeQuotaFixture(t, r, ctx, exit, 0, 100_000_000_000, "", now); e != nil {
 		t.Fatal(e)
 	}
-	if e := r.Observe(ctx, exit, 0, 0, "api_unavailable", now.Add(time.Minute)); e != nil {
+	if e := observeQuotaFixture(t, r, ctx, exit, 0, 0, "api_unavailable", now.Add(time.Minute)); e != nil {
 		t.Fatal(e)
 	}
 	if _, e := r.Recalculate(ctx, now.Add(time.Minute)); e != nil {
@@ -279,7 +279,7 @@ func TestEmergencyBudgetBoundedBySpendAndObservation(t *testing.T) {
 		t.Fatalf("exhausted emergency allowed %v %v", blocked, e)
 	}
 	// A repeated provider error cannot create a second allowance.
-	if e = r.Observe(ctx, exit, 0, 0, "api_unavailable", now.Add(3*time.Minute)); e != nil {
+	if e = observeQuotaFixture(t, r, ctx, exit, 0, 0, "api_unavailable", now.Add(3*time.Minute)); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = r.Recalculate(ctx, now.Add(3*time.Minute)); e != nil {
@@ -290,15 +290,15 @@ func TestEmergencyBudgetBoundedBySpendAndObservation(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, v := range limits {
-		if v.AccountID == "" && v.LimitBytes != v.UsedBytes {
+		if v.AccountID == "" && v.ExitID == exit && v.LimitBytes != v.UsedBytes {
 			t.Fatal("error reset allowance")
 		}
 	}
 	// Healthy observation reconciles the local baseline; a future failure has a new bounded reserve.
-	if e = r.Observe(ctx, exit, EmergencyBytes, 100_000_000_000, "", now.Add(time.Hour)); e != nil {
+	if e = observeQuotaFixture(t, r, ctx, exit, EmergencyBytes, 100_000_000_000, "", now.Add(time.Hour)); e != nil {
 		t.Fatal(e)
 	}
-	if e = r.Observe(ctx, exit, 0, 0, "api_unavailable", now.Add(time.Hour+time.Minute)); e != nil {
+	if e = observeQuotaFixture(t, r, ctx, exit, 0, 0, "api_unavailable", now.Add(time.Hour+time.Minute)); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = r.Recalculate(ctx, now.Add(time.Hour+time.Minute)); e != nil {
@@ -309,7 +309,7 @@ func TestEmergencyBudgetBoundedBySpendAndObservation(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, v := range limits {
-		if v.AccountID == "" && v.LimitBytes-v.UsedBytes != EmergencyBytes {
+		if v.AccountID == "" && v.ExitID == exit && v.LimitBytes-v.UsedBytes != EmergencyBytes {
 			t.Fatal("fresh confirmation did not reconcile")
 		}
 	}
@@ -321,8 +321,22 @@ func TestEmergencyBudgetBoundedBySpendAndObservation(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, v := range limits {
-		if v.AccountID == "" && v.LimitBytes != v.UsedBytes {
+		if v.AccountID == "" && v.ExitID == exit && v.LimitBytes != v.UsedBytes {
 			t.Fatal("expired provider observation allowed")
 		}
 	}
+}
+
+func observeQuotaFixture(t *testing.T, r *QuotaRepo, ctx context.Context, id string, used, remaining int64, code string, now time.Time) error {
+	t.Helper()
+	var monthly int64
+	var instance string
+	if err := r.db.Pool.QueryRow(ctx, `SELECT monthly_bytes,instance_id FROM exit_traffic_budgets WHERE exit_id=$1`, id).Scan(&monthly, &instance); err != nil {
+		return err
+	}
+	watermark, err := r.ProviderWatermark(ctx, now)
+	if err != nil {
+		return err
+	}
+	return r.SaveBandwidth(ctx, []BandwidthObservation{{ID: id, Instance: instance, Monthly: monthly, Used: used, Remaining: remaining, Accrued: monthly, LocalWatermark: watermark, Pool: true, Error: code}}, now)
 }

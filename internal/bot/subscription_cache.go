@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionmeta"
 	"io"
 	"net/http"
 	"net/url"
@@ -310,6 +311,7 @@ func (b *Bot) serveSubscriptionFallback(w http.ResponseWriter, _ string, token s
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Vary", "User-Agent")
 	w.Header().Set("X-Ultra-State", "cached")
+	subscriptionmeta.MarkStale(w.Header(), v.ConfirmedAt)
 	_, _ = w.Write(v.Body)
 	return true
 }

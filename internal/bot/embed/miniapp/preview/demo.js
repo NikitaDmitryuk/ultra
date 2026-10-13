@@ -86,27 +86,26 @@
         downlink_bytes: 24 * 1073741824,
       },
     ],
-    limits: [
-      {
-        period: "month",
-        personal_limit_bytes: 204800000000,
-        name: "Франкфурт",
-        state: "available",
-        used_bytes: 1073741824,
-        remaining_bytes: 204800000000 - 1073741824,
-        limit_bytes: 204800000000,
-        resets_at: new Date(
-          Date.UTC(
-            new Date().getUTCFullYear(),
-            new Date().getUTCMonth() + 1,
-            1,
-          ),
-        ).toISOString(),
-      },
-    ],
+    quota_pools: [{
+      scope: "vultr",
+      period: now.slice(0, 7),
+      personal_limit_bytes: 100 * 1073741824,
+      used_bytes: 21 * 1073741824,
+      remaining_bytes: 79 * 1073741824,
+      observed_at: now,
+      state: "available",
+      resets_at: new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1)).toISOString(),
+    }],
+    limits: [{
+      name: "Резервный выход",
+      is_fallback: true,
+      state: "available",
+      remaining_bytes: 10 * 1073741824,
+    }],
   };
   traffic.today = now.slice(0, 10);
   traffic.routes[0].tag = "to-exit-ams";
+  traffic.routes[0].pool_scope = "vultr";
   traffic.routes[1].tag = "direct";
   traffic.day_routes = Array.from(
     { length: Math.min(8, Number(now.slice(8, 10))) },
@@ -152,7 +151,7 @@
         member: people[0],
       };
     else if (path === "/api/members/traffic")
-      value = { ...traffic, limits: [] };
+      value = { ...traffic, limits: [], quota_pools: [] };
     else if (
       path === "/api/self/traffic" ||
       /^\/api\/members\/\d+\/traffic$/.test(path)

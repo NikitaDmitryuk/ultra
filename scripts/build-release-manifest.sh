@@ -32,9 +32,9 @@ tmp="${manifest}.tmp"
   printf '{\n'
   printf '  "schema_version": 1,\n'
   printf '  "version": "%s",\n' "$(json_escape "$VERSION")"
-  printf '  "capabilities": ["service-access-v1"],\n'
+  printf '  "capabilities": ["service-access-v1", "provider-pool-quota-v1"],\n'
   printf '  "database_schema_min": 24,\n'
-  printf '  "database_schema_max": 24,\n'
+  printf '  "database_schema_max": 25,\n'
   printf '  "assets": [\n'
   first=1
   for file in \

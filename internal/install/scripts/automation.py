@@ -314,9 +314,114 @@ def configure(config):
 
 def compatible_fallback(previous, target):
     required = {'service-access-v1'}
+    if 'provider-pool-quota-v1' in target.get('capabilities', []):
+        required.add('provider-pool-quota-v1')
     return (required <= set(previous.get('capabilities', [])) and required <= set(target.get('capabilities', []))
-            and previous.get('database_schema_max', 0) >= target.get('database_schema_min', 10**9)
+            and target.get('database_schema_min', 10**9) <= target.get('database_schema_max', -1)
+            and previous.get('database_schema_max', 0) >= target.get('database_schema_max', 10**9)
             and previous.get('database_schema_min', 10**9) <= target.get('database_schema_min', 0))
+
+
+
+POOL_CAPABILITY = 'provider-pool-quota-v1'
+
+
+def pool_transition(previous, target):
+    return (POOL_CAPABILITY in target.get('capabilities', [])
+            and POOL_CAPABILITY not in previous.get('capabilities', [])
+            and 'service-access-v1' in previous.get('capabilities', [])
+            and target.get('database_schema_min', 10**9) <= previous.get('database_schema_max', 0)
+            and previous.get('database_schema_max', 10**9) <= target.get('database_schema_max', 0))
+
+
+def pool_override():
+    return UNITS/'ultra-relay.service.d'/'95-ultra-pool-emergency.conf'
+
+
+def clear_pool_override():
+    path = pool_override()
+    if path.exists():
+        path.unlink()
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+        run(['systemctl', 'daemon-reload'])
+
+
+def prepare_pool_emergency(binary, manifest, architecture, target_digest):
+    metadata = json.loads(manifest)
+    expected = asset_hash(metadata, 'ultra-relay-linux-'+architecture)
+    if POOL_CAPABILITY not in metadata.get('capabilities', []) or hashlib.sha256(binary).hexdigest() != expected:
+        raise ValueError('pool emergency checksum or capability mismatch')
+    receipt = STATE/'pool-emergency.json'
+    existing = json.loads(receipt.read_text()) if receipt.exists() else {}
+    if existing and existing.get('target_digest') != target_digest and existing.get('stage') != 'complete':
+        raise ValueError('unfinished pool transition belongs to another release')
+    path = Path('/usr/local/libexec/ultra-relay-emergency')
+    atomic(path, binary, 0o755)
+    # A manifest claim alone is insufficient for the irreversible transition.
+    capabilities = json.loads(run([str(path), '-capabilities'], timeout=15))
+    if not isinstance(capabilities, list) or not {'service-access-v1', POOL_CAPABILITY} <= set(capabilities):
+        raise ValueError('pool emergency capability probe failed')
+    atomic(Path('/usr/local/libexec/ultra-emergency-manifest.json'), manifest, 0o644)
+    if sha(path) != expected:
+        raise ValueError('pool emergency changed during capability probe')
+    stage = existing.get('stage', 'prepared') if existing.get('target_digest') == target_digest else 'prepared'
+    if stage == 'complete': stage = 'prepared'
+    write_json(receipt, {'target_digest':target_digest, 'sha256':expected, 'stage':stage})
+
+
+
+def arm_pool_override():
+    unit = (UNITS/'ultra-relay.service').read_text()
+    commands = [line for line in unit.splitlines() if line.startswith('ExecStart=')]
+    if len(commands) != 1 or not commands[0].startswith('ExecStart=/usr/local/bin/ultra-relay '):
+        raise ValueError('managed relay unit required for pool emergency')
+    command = commands[0]
+    if '-require-provider-pool-quota' not in command.split():
+        command += ' -require-provider-pool-quota'
+    command = command.replace('ExecStart=/usr/local/bin/ultra-relay ',
+                              'ExecStart=/usr/local/libexec/ultra-relay-emergency -cache-only ', 1)
+    atomic(pool_override(), ('[Service]\nExecStart=\n'+command+'\n').encode(), 0o644)
+    run(['systemctl', 'daemon-reload'])
+    receipt_path = STATE/'pool-emergency.json'
+    receipt = json.loads(receipt_path.read_text())
+    receipt['stage'] = 'armed'; write_json(receipt_path, receipt)
+
+
+def pool_cache_only(config, release, architecture, manifest, targets):
+    # Never restore the pre-pool controller or emergency manifest after activation.
+    # Stop writers even if failure occurred while readiness had already enabled them.
+    for unit in ('ultra-recovery-reconcile.timer', 'ultra-recovery-backup.timer',
+                 'ultra-recovery-reconcile.service', 'ultra-recovery-backup.service'):
+        stop_existing_unit(unit)
+    receipt_path = STATE/'pool-emergency.json'
+    receipt = json.loads(receipt_path.read_text())
+    expected = asset_hash(manifest, 'ultra-relay-linux-'+architecture)
+    emergency = Path('/usr/local/libexec/ultra-relay-emergency')
+    if receipt['sha256'] != expected or sha(emergency) != expected:
+        raise ValueError('prepared pool emergency checksum mismatch')
+    for path, (data, mode) in targets.items(): atomic(path, data, mode)
+    journal_path = STATE/'upgrade.json'
+    journal = json.loads(journal_path.read_text()) if journal_path.exists() else None
+    for name in ('ultra-relay', 'ultra-bot'):
+        binary = Path(release)/(name+'-linux-'+architecture)
+        if sha(binary) != asset_hash(manifest, name+'-linux-'+architecture):
+            raise ValueError('pool recovery binary checksum mismatch')
+        if journal:
+            journal['steps'].setdefault('bridge-'+name, {'state':'emergency-prepared',
+                'old_sha':asset_hash(journal['previous'], name+'-linux-'+architecture),
+                'new_sha':asset_hash(manifest, name+'-linux-'+architecture)})
+            write_json(journal_path, journal)
+        atomic(BIN/name, binary.read_bytes(), 0o755)
+    arm_pool_override()
+    ensure_pool_guard(manifest)
+    receipt['stage'] = 'cache-only-prepared'; write_json(receipt_path, receipt)
+    write_json(STATE/'release-manifest.json', manifest)
+    write_json(STATE/'release.json', {'version':manifest['version'], 'ready':False})
+    run(['systemctl', 'daemon-reload'])
+    restart_bridge(config['spec'])
+    receipt['stage'] = 'cache-only'; write_json(receipt_path, receipt)
 
 
 def asset_hash(manifest, name):
@@ -355,13 +460,15 @@ def upgrade_fleet(config, release, architecture, target):
     journal_path=STATE/'upgrade.json'
     target_digest=hashlib.sha256(json.dumps(target,sort_keys=True).encode()).hexdigest()
     journal=json.loads(journal_path.read_text()) if journal_path.exists() else None
+    resuming = journal is not None
     if journal:
         if journal.get('target_digest')!=target_digest or journal.get('version')!=config['version']:
             raise ValueError('unfinished upgrade belongs to another immutable version')
         previous=journal['previous']
     else:
         previous=json.loads((ROOT/'release-manifest.json').read_text())
-    if not compatible_fallback(previous,target): raise ValueError('compatible service-access fallback required')
+    transition = pool_transition(previous, target)
+    if not compatible_fallback(previous,target) and not transition: raise ValueError('compatible service-access fallback required')
     reconcile=json.loads((CONFIG/'reconcile.json').read_text())
     import sys
     sys.path.insert(0,str(ROOT))
@@ -377,8 +484,53 @@ def upgrade_fleet(config, release, architecture, target):
         write_json(journal_path,journal)
     for unit in ('ultra-recovery-reconcile.timer','ultra-recovery-backup.timer','ultra-recovery-reconcile.service','ultra-recovery-backup.service'):
         run(['systemctl','stop',unit],timeout=550)
+    if transition:
+        receipt = json.loads((STATE/'pool-emergency.json').read_text())
+        if receipt['target_digest'] != target_digest or receipt['sha256'] != asset_hash(target, 'ultra-relay-linux-'+architecture):
+            raise ValueError('verified pool emergency required before activation')
+        journal['pool_transition'] = True
+        journal['pool_activation_started'] = True
+        write_json(journal_path, journal)
+        # Arm verified cache-only startup before changing the base unit or fleet.
+        # The current process keeps running; any reboot uses the saved state.
+        arm_pool_override()
+        ensure_pool_guard(target)
     rollback=[]
+    def activate_bridge():
+        for name in ('ultra-relay','ultra-bot'):
+            destination=BIN/name
+            expected=asset_hash(previous,name+'-linux-'+architecture)
+            target_sha=asset_hash(target,name+'-linux-'+architecture)
+            step=journal['steps'].get('bridge-'+name)
+            actual=sha(destination)
+            if actual not in ({expected,target_sha} if step else {expected}): raise ValueError('bridge binary has no verified fallback')
+            backup=BIN/(name+'.automation-previous')
+            if not step:
+                journal['steps']['bridge-'+name]={'state':'prepared','old_sha':expected,'new_sha':target_sha}
+                write_json(journal_path,journal)
+            elif step['old_sha']!=expected or step['new_sha']!=target_sha: raise ValueError('bridge journal hash mismatch')
+            if actual==expected: atomic(backup,destination.read_bytes(),destination.stat().st_mode & 0o777)
+            if not transition:
+                if sha(backup)!=expected: raise ValueError('bridge fallback checksum mismatch')
+                rollback.append(('local',(destination,backup.read_bytes(),backup.stat().st_mode & 0o777)))
+            atomic(destination,(Path(release)/(name+'-linux-'+architecture)).read_bytes(),0o755)
+            journal['steps']['bridge-'+name]['state']='applied';write_json(journal_path,journal)
+        run([str(BIN/'ultra-relay'),'-check','-spec',config['spec']],timeout=30)
+        ensure_pool_guard(target)
+        if transition:
+            receipt_path = STATE/'pool-emergency.json'
+            receipt = json.loads(receipt_path.read_text())
+            receipt['stage'] = 'normal-starting'; write_json(receipt_path, receipt)
+        clear_pool_override()
+        restart_bridge(config['spec'])
     try:
+        if transition and resuming:
+            # Cache-only /v1/health intentionally has no exits. Restore the
+            # target control plane before waiting for its fresh tunnel probes.
+            activate_bridge()
+            # Keep the normal process running, but preserve cache-only startup
+            # if the installer or host dies before fleet verification finishes.
+            arm_pool_override()
         for node in nodes:
             arch=remote(reconcile,node,'dpkg --print-architecture').decode().strip()
             if arch not in ('amd64','arm64'): raise ValueError('unsupported exit architecture')
@@ -404,32 +556,23 @@ def upgrade_fleet(config, release, architecture, target):
                     'mv /usr/local/bin/ultra-relay.next /usr/local/bin/ultra-relay; systemctl restart ultra-relay; systemctl is-active --quiet ultra-relay')
             rollback.append(('exit',dict(node,old_sha=expected)))
             since=time.time()
+            if transition:
+                journal['pool_activation_started'] = True; write_json(journal_path, journal)
             remote(reconcile,node,script)
             journal['steps'][node['id']]['state']='applied';write_json(journal_path,journal)
             wait_exit(config,node,since)
             journal['steps'][node['id']]['state']='verified';write_json(journal_path,journal)
-        for name in ('ultra-relay','ultra-bot'):
-            destination=BIN/name
-            expected=asset_hash(previous,name+'-linux-'+architecture)
-            target_sha=asset_hash(target,name+'-linux-'+architecture)
-            step=journal['steps'].get('bridge-'+name)
-            actual=sha(destination)
-            if actual not in ({expected,target_sha} if step else {expected}): raise ValueError('bridge binary has no verified fallback')
-            backup=BIN/(name+'.automation-previous')
-            if not step:
-                journal['steps']['bridge-'+name]={'state':'prepared','old_sha':expected,'new_sha':target_sha}
-                write_json(journal_path,journal)
-            elif step['old_sha']!=expected or step['new_sha']!=target_sha: raise ValueError('bridge journal hash mismatch')
-            if actual==expected: atomic(backup,destination.read_bytes(),destination.stat().st_mode & 0o777)
-            if sha(backup)!=expected: raise ValueError('bridge fallback checksum mismatch')
-            rollback.append(('local',(destination,backup.read_bytes(),backup.stat().st_mode & 0o777)))
-            atomic(destination,(Path(release)/(name+'-linux-'+architecture)).read_bytes(),0o755)
-            journal['steps']['bridge-'+name]['state']='applied';write_json(journal_path,journal)
-        run([str(BIN/'ultra-relay'),'-check','-spec',config['spec']],timeout=30)
-        restart_bridge(config['spec'])
+        if not (transition and resuming):
+            activate_bridge()
+        else:
+            # The resumed normal controller has now verified every exit.
+            clear_pool_override()
         journal['fleet_verified']=True;write_json(journal_path,journal)
         return rollback
     except Exception:
+        if transition and journal.get('pool_activation_started'):
+            journal['fallback_required'] = True; write_json(journal_path, journal)
+            raise
         rollback=[]
         for node in nodes:
             if node['id'] in journal['steps']:
@@ -444,6 +587,21 @@ def upgrade_fleet(config, release, architecture, target):
         rollback_fleet(reconcile,rollback)
         journal_path.unlink(missing_ok=True)
         raise
+
+
+def ensure_pool_guard(manifest):
+    if 'provider-pool-quota-v1' not in manifest.get('capabilities', []):
+        return
+    unit = UNITS/'ultra-relay.service'
+    text = unit.read_text()
+    lines = [line for line in text.splitlines() if line.startswith('ExecStart=')]
+    if len(lines) != 1 or not lines[0].startswith('ExecStart=/usr/local/bin/ultra-relay '):
+        raise ValueError('managed relay unit required for pool activation')
+    if '-require-provider-pool-quota' not in lines[0].split():
+        guarded = lines[0].replace('ExecStart=/usr/local/bin/ultra-relay ',
+                                  'ExecStart=/usr/local/bin/ultra-relay -require-provider-pool-quota ', 1)
+        atomic(unit, text.replace(lines[0], guarded).encode(), 0o644)
+    run(['systemctl', 'daemon-reload'])
 
 
 def restart_bridge(spec_path):
@@ -523,13 +681,20 @@ def emergency_pair(action, release, architecture):
     if action == 'upgrade' and (STATE/'upgrade.json').exists():
         manifest = json.dumps(json.loads((STATE/'upgrade.json').read_text())['previous'], sort_keys=True).encode()
     metadata = json.loads(manifest)
+    target = json.loads((Path(release)/'release-manifest.json').read_text())
+    transition = action == 'upgrade' and pool_transition(metadata, target)
+    if transition:
+        manifest = (Path(release)/'release-manifest.json').read_bytes()
+        metadata = target
+    elif POOL_CAPABILITY in target.get('capabilities', []) and not compatible_fallback(metadata, target):
+        raise ValueError('provider pool compatible emergency required before activation')
     if 'service-access-v1' not in metadata.get('capabilities', []):
         raise ValueError('service-compatible emergency manifest required')
     expected = asset_hash(metadata, 'ultra-relay-linux-'+architecture)
     # Before bridge replacement the active binary is still the previous release.
     # After replacement only the journal-bound, checksum-verified backup is valid.
-    source = BIN/'ultra-relay'
-    if sha(source) != expected and action == 'upgrade':
+    source = Path(release)/('ultra-relay-linux-'+architecture) if transition else BIN/'ultra-relay'
+    if sha(source) != expected and action == 'upgrade' and not transition:
         source = BIN/'ultra-relay.automation-previous'
     binary = source.read_bytes()
     if hashlib.sha256(binary).hexdigest() != expected:
@@ -547,6 +712,17 @@ def _apply(config, release, action, progress):
     manifest = json.loads((Path(release)/'release-manifest.json').read_text())
     fleet_rollback = []
     configured = False
+    previous = None
+    if action == 'upgrade':
+        journal = STATE/'upgrade.json'
+        if journal.exists():
+            pending = json.loads(journal.read_text())
+            if pending.get('target_digest') != hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest() or pending.get('version') != version:
+                raise ValueError('unfinished upgrade belongs to another immutable version')
+            previous = pending['previous']
+        else:
+            previous = json.loads((ROOT/'release-manifest.json').read_text())
+    transition = (action == 'upgrade' and pool_transition(previous, manifest)) or (action == 'bootstrap' and POOL_CAPABILITY in manifest.get('capabilities', []))
     if action == 'bootstrap':
         for name in ('ultra-relay','ultra-bot'):
             if sha('/usr/local/bin/'+name) != asset_hash(manifest,name+'-linux-'+architecture):
@@ -578,6 +754,9 @@ def _apply(config, release, action, progress):
         run(['apt-get', 'update', '-qq'], timeout=180)
         run(['apt-get', 'install', '-y', '-qq', 'age', 'curl', 'python3'], timeout=240)
         progress[0] = 'fleet'
+        if transition:
+            prepare_pool_emergency(emergency_binary, emergency_manifest, architecture,
+                                   hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest())
         if action == 'upgrade': fleet_rollback = upgrade_fleet(config, release, architecture, manifest)
         progress[0] = 'activate'
         # Stop automation writers during bundle activation.
@@ -586,6 +765,11 @@ def _apply(config, release, action, progress):
             stop_existing_unit(unit)
         for path, (data, mode) in targets.items(): atomic(path, data, mode)
         if action == 'bootstrap':
+            if transition:
+                receipt = json.loads((STATE/'pool-emergency.json').read_text())
+                receipt['stage'] = 'activation-started'; write_json(STATE/'pool-emergency.json', receipt)
+                arm_pool_override()
+            ensure_pool_guard(manifest)
             write_json(STATE / 'release-manifest.json', manifest)
             write_json(STATE / 'release.json', {'version': version, 'ready': False})
             # Configuration may persist a service identity before a later check fails.
@@ -595,7 +779,9 @@ def _apply(config, release, action, progress):
             configure(config)
         elif not (CONFIG / 'reconcile.json').exists(): raise ValueError('upgrade requires an installed automation configuration')
         run(['systemctl', 'daemon-reload'])
-        if action == 'bootstrap': run(['systemctl', 'restart', 'ultra-relay'], timeout=60)
+        if action == 'bootstrap':
+            clear_pool_override()
+            run(['systemctl', 'restart', 'ultra-relay'], timeout=60)
         activated_at = int(time.time())
         run(['systemctl', 'enable', '--now', 'ultra-recovery-backup.timer', 'ultra-recovery-reconcile.timer'])
         progress[0] = 'readiness'
@@ -607,12 +793,21 @@ def _apply(config, release, action, progress):
             if status(not_before=activated_at)['ready']:
                 write_json(STATE / 'release.json', {'version': version, 'ready_at': int(time.time())})
                 write_json(STATE / 'release-manifest.json', manifest)
+                if transition:
+                    receipt = json.loads((STATE/'pool-emergency.json').read_text())
+                    receipt['stage'] = 'complete'; write_json(STATE/'pool-emergency.json', receipt)
                 (STATE/'upgrade.json').unlink(missing_ok=True)
                 if rollback_directory: shutil.rmtree(rollback_directory)
                 return
             time.sleep(5)
         raise ValueError('full automation readiness deadline exceeded')
     except Exception:
+        journal = STATE/'upgrade.json'
+        if transition and ((journal.exists() and json.loads(journal.read_text()).get('pool_activation_started')) or
+                           (action == 'bootstrap' and (STATE/'pool-emergency.json').exists() and
+                            json.loads((STATE/'pool-emergency.json').read_text()).get('stage') != 'prepared')):
+            pool_cache_only(config, release, architecture, manifest, targets)
+            raise
         if action == 'bootstrap' and configured:
             # Bootstrap may already have durable database/configuration side effects.
             # Preserve compatible code and readiness=false; a corrected rerun resumes.

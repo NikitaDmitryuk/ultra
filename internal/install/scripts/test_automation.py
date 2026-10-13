@@ -90,7 +90,7 @@ class AutomationTests(unittest.TestCase):
 
     def test_serial_exit_upgrade_stops_and_rolls_back_on_payload_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp);(root/'release-manifest.json').write_text(json.dumps({'capabilities':['service-access-v1'],'database_schema_min':24,'database_schema_max':24,'assets':[{'name':'ultra-relay-linux-amd64','sha256':'old'}]}))
+            root=Path(tmp);(root/'release-manifest.json').write_text(json.dumps({'capabilities':['service-access-v1','provider-pool-quota-v1'],'database_schema_min':24,'database_schema_max':24,'assets':[{'name':'ultra-relay-linux-amd64','sha256':'old'}]}))
             (root/'reconcile.json').write_text('{}');(root/'ultra-relay-linux-amd64').write_bytes(b'new')
             nodes=[{'id':'a','address':'192.0.2.1'},{'id':'b','address':'192.0.2.2'}]
             controller=types.SimpleNamespace(discover=lambda c:[],desired_nodes=lambda c,r:(nodes,set()))
@@ -244,5 +244,172 @@ a.upgrade_fleet({'spec':'fixture','version':'v2'},root/'release','amd64',json.lo
             root=Path(tmp);(root/'real').write_bytes(b'keep');(root/'link').symlink_to(root/'real')
             with self.assertRaises(ValueError):a.atomic(root/'link',b'new')
             self.assertEqual((root/'real').read_bytes(),b'keep')
+
+    def test_pool_transition_emergency_and_schema_contract(self):
+        old={'capabilities':['service-access-v1'],'database_schema_min':24,'database_schema_max':24}
+        new={'capabilities':['service-access-v1','provider-pool-quota-v1'],'database_schema_min':24,'database_schema_max':25}
+        self.assertTrue(a.pool_transition(old,new))
+        self.assertFalse(a.compatible_fallback(old,new))
+        self.assertTrue(a.compatible_fallback(new,new))
+        self.assertFalse(a.compatible_fallback(dict(new,database_schema_max=24),new))
+        self.assertFalse(a.pool_transition(old,dict(new,database_schema_min=25)))
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);release=root/'release';release.mkdir()
+            previous=dict(old,assets=[{'name':'ultra-relay-linux-amd64','sha256':hashlib.sha256(b'old').hexdigest()}])
+            target=dict(new,assets=[{'name':'ultra-relay-linux-amd64','sha256':hashlib.sha256(b'new').hexdigest()}])
+            (root/'release-manifest.json').write_text(json.dumps(previous))
+            (root/'ultra-relay').write_bytes(b'old')
+            (release/'release-manifest.json').write_text(json.dumps(target))
+            binary=release/'ultra-relay-linux-amd64';binary.write_bytes(b'new')
+            with patch.object(a,'BIN',root),patch.object(a,'ROOT',root),patch.object(a,'STATE',root):
+                body,manifest=a.emergency_pair('upgrade',release,'amd64')
+                self.assertEqual(body,b'new')
+                self.assertEqual(json.loads(manifest),target)
+                binary.write_bytes(b'wrong')
+                with self.assertRaisesRegex(ValueError,'does not match'):
+                    a.emergency_pair('upgrade',release,'amd64')
+
+    def test_pool_upgrade_failure_keeps_target_cache_only_and_retry_resumes(self):
+        for failure in ('exit','bridge','readiness','process-death'):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);release=root/'release';release.mkdir()
+                active=root/'active';active.mkdir();state=root/'state';state.mkdir()
+                config_dir=root/'config';config_dir.mkdir();(config_dir/'reconcile.json').write_text('{}')
+                units=root/'units';units.mkdir()
+                (units/'ultra-relay.service').write_text('[Service]\nExecStart=/usr/local/bin/ultra-relay -spec /etc/ultra-relay/spec.json\n')
+                bins=root/'usr/local/bin';bins.mkdir(parents=True)
+                previous={'version':'v1','capabilities':['service-access-v1'],'database_schema_min':24,'database_schema_max':24,'assets':[]}
+                target={'version':'v2','capabilities':['service-access-v1','provider-pool-quota-v1'],'database_schema_min':24,'database_schema_max':25,'assets':[]}
+                for name in ('ultra-relay','ultra-bot','ultra-client'):
+                    (bins/name).write_bytes(b'old')
+                    (release/(name+'-linux-amd64')).write_bytes(b'new')
+                    previous['assets'].append({'name':name+'-linux-amd64','sha256':hashlib.sha256(b'old').hexdigest()})
+                    target['assets'].append({'name':name+'-linux-amd64','sha256':hashlib.sha256(b'new').hexdigest()})
+                (active/'release-manifest.json').write_text(json.dumps(previous))
+                (active/'recovery.py').write_bytes(b'old controller')
+                (release/'release-manifest.json').write_text(json.dumps(target))
+                old=previous['assets'][0]['sha256'];new=target['assets'][0]['sha256']
+                machines={'exit':old};events=[];fail=[failure]
+                bridge_mode=['normal'];health_modes=[]
+                real_wait_exit=a.wait_exit
+                spec_path=root/'spec.json';spec_path.write_text(json.dumps({'admin_listen':'127.0.0.1:8443'}))
+                node={'id':'exit','address':'192.0.2.1'}
+                controller=types.SimpleNamespace(discover=lambda c:[],desired_nodes=lambda c,r:([node],set()))
+                real_path=Path
+                def path(value):
+                    value=real_path(value)
+                    return root/str(value).lstrip('/') if str(value).startswith('/usr/local/') else value
+                def run(argv,**kwargs):
+                    if argv==['dpkg','--print-architecture']:return b'amd64'
+                    if '-capabilities' in argv:return json.dumps(target['capabilities']).encode()
+                    if argv[:2]==['systemctl','show']:return b'loaded'
+                    return b''
+                def remote(config,node,script,data=None):
+                    events.append(script)
+                    if script=='dpkg --print-architecture':return b'amd64'
+                    if script.startswith('sha256sum'):return (machines['exit']+' binary').encode()
+                    if script.startswith('set -eu; old='):
+                        machines['exit']=new
+                        if fail[0]=='process-death':
+                            self.assertIn('-cache-only',a.pool_override().read_text())
+                            self.assertEqual(json.loads((state/'pool-emergency.json').read_text())['stage'],'armed')
+                            raise SystemExit(17)
+                    if script.startswith('set -eu; if test'):self.fail('pre-pool rollback attempted')
+                    return b''
+                def health(*args):
+                    if fail[0]=='exit':raise ValueError('exit payload failed')
+                    return real_wait_exit(*args)
+                def health_response(request,**kwargs):
+                    self.assertTrue(request.full_url.endswith('/v1/health'))
+                    health_modes.append(bridge_mode[0])
+                    # The real cache-only API contract contains no exits. It
+                    # cannot satisfy wait_exit until a normal controller runs.
+                    result={'control_ready':False,'runtime':{},'reload':{'count':1,'error':''}}
+                    if bridge_mode[0]=='normal':
+                        checked=a.datetime.datetime.fromtimestamp(a.time.time()+1,a.datetime.timezone.utc).isoformat()
+                        result={'exits':[{'id':'exit','internet_ok':True,'eligible':True,'checked_at':checked}]}
+                    return io.BytesIO(json.dumps(result).encode())
+                def restart(spec):
+                    if fail[0]=='bridge' and not a.pool_override().exists():raise ValueError('bridge startup failed')
+                    bridge_mode[0]='cache-only' if a.pool_override().exists() else 'normal'
+                config={'version':'v2','spec':str(spec_path),'readiness_timeout_sec':0 if failure=='readiness' else 10}
+                with patch.object(a,'STATE',state),patch.object(a,'ROOT',active),patch.object(a,'CONFIG',config_dir),patch.object(a,'UNITS',units),patch.object(a,'BIN',bins),patch.object(a,'Path',side_effect=path),patch.object(a,'run',side_effect=run),patch.object(a,'verify_release',return_value={'recovery.py':b'pool controller'}),patch.object(a,'remote',side_effect=remote),patch.object(a,'wait_exit',side_effect=health),patch.object(a,'restart_bridge',side_effect=restart),patch.object(a,'status',return_value={'ready':True}),patch.object(a,'read_env',return_value={'ULTRA_RELAY_ADMIN_TOKEN':'fixture'}),patch.object(a.urllib.request,'urlopen',side_effect=health_response),patch.object(a.time,'sleep',side_effect=AssertionError('exit health polled without a normal controller')),patch.dict(sys.modules,{'reconcile':controller}):
+                    if failure=='process-death':
+                        with self.assertRaises(SystemExit):a.apply(config,release,'upgrade')
+                        self.assertTrue(json.loads((state/'upgrade.json').read_text())['pool_activation_started'])
+                        self.assertIn('-require-provider-pool-quota',(units/'ultra-relay.service').read_text())
+                        self.assertEqual((root/'usr/local/libexec/ultra-relay-emergency').read_bytes(),b'new')
+                        fail[0]=''
+                        bridge_mode[0]='cache-only'  # host reboot uses the armed override
+                        a.apply(config,release,'upgrade')
+                        self.assertNotIn('cache-only',health_modes)
+                        self.assertEqual((bins/'ultra-relay').read_bytes(),b'new')
+                        self.assertFalse((state/'upgrade.json').exists())
+                        continue
+                    with self.assertRaises(ValueError):a.apply(config,release,'upgrade')
+                    self.assertEqual((active/'recovery.py').read_bytes(),b'pool controller')
+                    self.assertEqual((bins/'ultra-relay').read_bytes(),b'new')
+                    self.assertEqual(machines['exit'],new)
+                    self.assertIn('-cache-only',a.pool_override().read_text())
+                    self.assertIn('-require-provider-pool-quota',(units/'ultra-relay.service').read_text())
+                    self.assertEqual(json.loads((state/'pool-emergency.json').read_text())['stage'],'cache-only')
+                    journal=json.loads((state/'upgrade.json').read_text())
+                    self.assertEqual(journal['previous'],previous)
+                    self.assertTrue(journal['pool_activation_started'])
+                    self.assertEqual(json.loads((root/'usr/local/libexec/ultra-emergency-manifest.json').read_text()),target)
+                    self.assertEqual((root/'usr/local/libexec/ultra-relay-emergency').read_bytes(),b'new')
+                    self.assertEqual(bridge_mode[0],'cache-only')
+                    # Expose the cache-only response itself, not an always-ready
+                    # wait_exit mock, before resuming the interrupted upgrade.
+                    request=a.urllib.request.Request('http://127.0.0.1:8443/v1/health')
+                    self.assertNotIn('exits',json.load(health_response(request)))
+                    health_modes.clear()
+                    fail[0]='';config['readiness_timeout_sec']=10
+                    a.apply(config,release,'upgrade')
+                    self.assertEqual(bridge_mode[0],'normal')
+                    self.assertEqual(health_modes,['normal'])
+                    self.assertFalse(a.pool_override().exists())
+                    self.assertFalse((state/'upgrade.json').exists())
+                    self.assertEqual(json.loads((state/'pool-emergency.json').read_text())['stage'],'complete')
+                    self.assertEqual((bins/'ultra-relay').read_bytes(),b'new')
+
+    def test_pool_emergency_rejects_false_capability_before_activation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);real_path=Path
+            def path(value):
+                value=real_path(value)
+                return root/str(value).lstrip('/') if str(value).startswith('/usr/local/') else value
+            manifest={'capabilities':['service-access-v1','provider-pool-quota-v1'],'assets':[{'name':'ultra-relay-linux-amd64','sha256':hashlib.sha256(b'new').hexdigest()}]}
+            with patch.object(a,'Path',side_effect=path),patch.object(a,'STATE',root/'state'),patch.object(a,'run',return_value=b'["service-access-v1"]'):
+                with self.assertRaisesRegex(ValueError,'probe failed'):
+                    a.prepare_pool_emergency(b'new',json.dumps(manifest).encode(),'amd64','digest')
+                self.assertFalse((root/'state/pool-emergency.json').exists())
+
+    def test_pool_bootstrap_configuration_failure_enters_cache_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);release=root/'release';release.mkdir();bins=root/'usr/local/bin';bins.mkdir(parents=True)
+            units=root/'units';units.mkdir();(units/'ultra-relay.service').write_text('[Service]\nExecStart=/usr/local/bin/ultra-relay -spec /etc/ultra-relay/spec.json\n')
+            manifest={'version':'v2','capabilities':['service-access-v1','provider-pool-quota-v1'],'database_schema_min':24,'database_schema_max':25,'assets':[]}
+            for name in ('ultra-relay','ultra-bot','ultra-client'):
+                (bins/name).write_bytes(b'new');asset=name+'-linux-amd64';(release/asset).write_bytes(b'new')
+                manifest['assets'].append({'name':asset,'sha256':a.sha(bins/name)})
+            (release/'release-manifest.json').write_text(json.dumps(manifest))
+            real_path=Path
+            def path(value):
+                value=real_path(value)
+                return root/str(value).lstrip('/') if str(value).startswith('/usr/local/') else value
+            def run(argv,**kwargs):
+                if '-capabilities' in argv:return json.dumps(manifest['capabilities']).encode()
+                if argv[:2]==['systemctl','show']:return b'not-found'
+                return b'amd64'
+            with patch.object(a,'STATE',root/'state'),patch.object(a,'ROOT',root/'active'),patch.object(a,'UNITS',units),patch.object(a,'BIN',bins),patch.object(a,'Path',side_effect=path),patch.object(a,'run',side_effect=run),patch.object(a,'verify_release',return_value={'recovery.py':b'pool controller'}),patch.object(a,'configure',side_effect=ValueError('configuration failed')),patch.object(a,'restart_bridge') as restart:
+                with self.assertRaisesRegex(ValueError,'configuration failed'):
+                    a.apply({'version':'v2','spec':'fixture'},release,'bootstrap')
+                self.assertEqual(restart.call_count,1)
+                self.assertIn('-cache-only',a.pool_override().read_text())
+                self.assertEqual((root/'active/recovery.py').read_bytes(),b'pool controller')
+                self.assertEqual(json.loads((root/'state/pool-emergency.json').read_text())['stage'],'cache-only')
+                self.assertFalse(json.loads((root/'state/release.json').read_text())['ready'])
+
 
 if __name__=='__main__':unittest.main()

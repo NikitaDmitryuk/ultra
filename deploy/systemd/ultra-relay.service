@@ -10,7 +10,7 @@ Group=ultra-relay
 EnvironmentFile=-/etc/ultra-relay/environment
 # Writable state dir on the host (not affected by PrivateTmp).
 StateDirectory=ultra-relay
-ExecStart=/usr/local/bin/ultra-relay -spec /etc/ultra-relay/spec.json
+ExecStart=/usr/local/bin/ultra-relay -require-provider-pool-quota -spec /etc/ultra-relay/spec.json
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=1048576

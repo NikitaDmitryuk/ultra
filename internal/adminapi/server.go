@@ -48,6 +48,7 @@ type Server struct {
 	Members           *MemberService
 	ReloadStatus      func() proxy.ReloadStatus
 	Subscriptions     SubscriptionStore
+	SubscriptionQuota SubscriptionQuotaSource
 	log               *slog.Logger
 	users             auth.UserManager
 	traffic           TrafficQuerier // nil when DB is not configured

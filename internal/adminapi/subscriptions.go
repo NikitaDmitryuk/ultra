@@ -107,6 +107,7 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Vary", "User-Agent")
 	w.Header().Set("profile-title", "ultra")
 	w.Header().Set("profile-update-interval", "1")
+	s.setSubscriptionQuota(r.Context(), w.Header(), u.AccountID)
 	_, _, health, nodes := s.clientExitSelection(u)
 	var experiment *config.ExperimentalProfile
 	if specFile := s.spec.ExperimentalProfileFile; specFile != "" && transport == "" && preview == "" {
