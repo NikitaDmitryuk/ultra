@@ -103,11 +103,17 @@ class AutomationTests(unittest.TestCase):
             def health(config,node,since):
                 events.append((node['id'],'health'))
                 if node['id']=='b':raise ValueError('payload failed')
-            with patch.object(a,'STATE',root),patch.object(a,'ROOT',root),patch.object(a,'CONFIG',root),patch.object(a,'run',return_value=b''),patch.object(a,'status',return_value={'ready':True}),patch.object(a,'remote',side_effect=remote),patch.object(a,'wait_exit',side_effect=health),patch.dict(sys.modules,{'reconcile':controller}):
+            readiness=[{'ready':False},{'ready':True}]
+            with patch.object(a,'STATE',root),patch.object(a,'ROOT',root),patch.object(a,'CONFIG',root),patch.object(a,'run',return_value=b''),patch.object(a,'status',side_effect=readiness),patch.object(a,'remote',side_effect=remote),patch.object(a,'wait_exit',side_effect=health),patch.object(a.time,'sleep',return_value=None),patch.dict(sys.modules,{'reconcile':controller}):
                 with self.assertRaises(ValueError):a.upgrade_fleet({'spec':'unused','version':'v2'},root,'amd64',json.loads((root/'release-manifest.json').read_text()))
             self.assertLess(events.index(('a','health')),events.index(('b','dpkg --print-architecture')))
             rollback=[node for node,script in events if script.startswith('set -eu; if test')]
             self.assertEqual(rollback,['b','a'])
+
+    def test_upgrade_preflight_rejects_controller_that_never_converges(self):
+        with patch.object(a,'status',return_value={'ready':False}),patch.object(a,'run',return_value=b''),patch.object(a.time,'monotonic',side_effect=[10,10,10,11]),patch.object(a.time,'sleep',return_value=None):
+            with self.assertRaisesRegex(ValueError,'fresh independent backup'):
+                a.wait_upgrade_preflight_ready(timeout=1)
 
     def test_upgrade_resumes_after_process_death_without_overwriting_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
