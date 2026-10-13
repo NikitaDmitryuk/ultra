@@ -19,6 +19,7 @@ type RouteCredential struct {
 }
 
 type User struct {
+	ServiceTargets []string `json:"-"`
 	// AccountID is the stable accounting owner; credentials may rotate independently.
 	AccountID            string            `json:"-"`
 	ExitExclusionReasons map[string]string `json:"-"`

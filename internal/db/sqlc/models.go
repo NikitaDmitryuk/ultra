@@ -159,6 +159,13 @@ type RecoveryHeartbeat struct {
 	ObservedAt pgtype.Timestamptz `json:"observed_at"`
 }
 
+type ServiceAccess struct {
+	Name         string      `json:"name"`
+	AccountID    pgtype.UUID `json:"account_id"`
+	Targets      []string    `json:"targets"`
+	MonthlyBytes int64       `json:"monthly_bytes"`
+}
+
 type SubscriptionToken struct {
 	UserUuid       pgtype.UUID `json:"user_uuid"`
 	TokenHash      []byte      `json:"token_hash"`

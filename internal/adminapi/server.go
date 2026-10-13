@@ -336,6 +336,13 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	if includeDisabled {
 		users = s.users.ListAll()
 	}
+	visible := make([]auth.User, 0, len(users))
+	for _, u := range users {
+		if len(u.ServiceTargets) == 0 {
+			visible = append(visible, u)
+		}
+	}
+	users = visible
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(users)

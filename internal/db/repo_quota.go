@@ -109,18 +109,19 @@ func (r *QuotaRepo) Recalculate(ctx context.Context, now time.Time) (bool, error
 		if remaining == 0 && reason == "" {
 			reason = "exit_budget_exhausted"
 		}
-		rows, err := tx.Query(ctx, `SELECT u.uuid::text,COALESCE(MAX(GREATEST(t.uplink_bytes+t.downlink_bytes,t.charged_bytes)),0)::bigint FROM users u LEFT JOIN account_exit_usage t ON t.account_id=u.account_id AND t.exit_id=$1 AND t.period=$2 WHERE u.is_active AND u.kind='vless' GROUP BY u.uuid`, b.ID, month.Format("2006-01"))
+		rows, err := tx.Query(ctx, `SELECT u.uuid::text,COALESCE(MAX(GREATEST(t.uplink_bytes+t.downlink_bytes,t.charged_bytes)),0)::bigint, COALESCE((SELECT monthly_bytes FROM service_access s WHERE s.account_id=u.account_id),0) FROM users u LEFT JOIN account_exit_usage t ON t.account_id=u.account_id AND t.exit_id=$1 AND t.period=$2 WHERE u.is_active AND u.kind='vless' GROUP BY u.uuid`, b.ID, month.Format("2006-01"))
 		if err != nil {
 			return false, err
 		}
 		type usage struct {
-			ID   string
-			Used int64
+			ID           string
+			Used         int64
+			ServiceLimit int64
 		}
 		demand := []usage{}
 		for rows.Next() {
 			var d usage
-			if e = rows.Scan(&d.ID, &d.Used); e != nil {
+			if e = rows.Scan(&d.ID, &d.Used, &d.ServiceLimit); e != nil {
 				rows.Close()
 				return false, e
 			}
@@ -133,10 +134,16 @@ func (r *QuotaRepo) Recalculate(ctx context.Context, now time.Time) (bool, error
 		}
 		for _, d := range demand {
 			limit := d.Used + quota.Available(b.Monthly, d.Used, remaining, b.Fallback)
+			if d.ServiceLimit > 0 && limit > d.ServiceLimit {
+				limit = d.ServiceLimit
+			}
 			blocked := remaining == 0 || d.Used >= limit
 			why := reason
 			if blocked && why == "" {
 				why = "monthly_user_limit_exhausted"
+				if d.ServiceLimit > 0 {
+					why = "monitor_quota_exhausted"
+				}
 			}
 			var old *bool
 			e = tx.QueryRow(ctx, `SELECT (SELECT blocked FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2)`, d.ID, b.ID).Scan(&old)

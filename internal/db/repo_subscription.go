@@ -43,7 +43,7 @@ func (r *SubscriptionRepo) issue(ctx context.Context, id string, rotate bool) (s
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck
 	var active bool
-	err = tx.QueryRow(ctx, `SELECT is_active AND kind='vless' FROM users WHERE uuid=$1 FOR UPDATE`, id).Scan(&active)
+	err = tx.QueryRow(ctx, `SELECT is_active AND kind='vless' AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=users.account_id) FROM users WHERE uuid=$1 FOR UPDATE`, id).Scan(&active)
 	if err != nil {
 		return "", err
 	}
@@ -96,7 +96,7 @@ func (r *SubscriptionRepo) Resolve(ctx context.Context, token string) (string, e
 	digest := sha256.Sum256([]byte(token))
 	var id string
 	err = r.db.Pool.QueryRow(ctx, `SELECT u.uuid::text FROM subscription_tokens t JOIN users u ON u.uuid=t.user_uuid
- WHERE t.token_hash=$1 AND u.is_active AND u.kind='vless' AND NOT u.member_pending`, digest[:]).Scan(&id)
+ WHERE t.token_hash=$1 AND u.is_active AND u.kind='vless' AND NOT u.member_pending AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=u.account_id)`, digest[:]).Scan(&id)
 	return id, err
 }
 
@@ -137,7 +137,7 @@ func (r *SubscriptionRepo) ListActiveTokens(ctx context.Context) ([]string, erro
 	if !r.Ready() {
 		return nil, subscriptionkey.ErrUnavailable
 	}
-	rows, e := r.db.Pool.Query(ctx, `SELECT u.uuid::text,t.encrypted_token,t.key_version FROM subscription_tokens t JOIN users u ON u.uuid=t.user_uuid WHERE u.is_active AND u.kind='vless' AND NOT u.member_pending AND t.encrypted_token IS NOT NULL AND t.key_version IS NOT NULL ORDER BY u.uuid`)
+	rows, e := r.db.Pool.Query(ctx, `SELECT u.uuid::text,t.encrypted_token,t.key_version FROM subscription_tokens t JOIN users u ON u.uuid=t.user_uuid WHERE u.is_active AND u.kind='vless' AND NOT u.member_pending AND t.encrypted_token IS NOT NULL AND t.key_version IS NOT NULL AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=u.account_id) ORDER BY u.uuid`)
 	if e != nil {
 		return nil, e
 	}

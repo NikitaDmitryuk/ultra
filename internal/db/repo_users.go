@@ -371,6 +371,10 @@ func (r *UserRepo) ListAll(ctx context.Context) ([]auth.User, error) {
 	for _, row := range rows {
 		users = append(users, authUserFromListAll(row))
 	}
+	users, err = r.attachServices(ctx, users)
+	if err != nil {
+		return nil, err
+	}
 	return NewRouteRepo(r.db).Attach(ctx, users)
 }
 

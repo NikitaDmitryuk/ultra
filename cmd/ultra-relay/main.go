@@ -25,6 +25,13 @@ import (
 )
 
 func main() {
+	staticBudgetsOnly := flag.Bool("ensure-static-budgets", false, "initialize explicit static exit budgets without resetting usage")
+	staticBudgetsFile := flag.String("static-budgets-file", "", "private static node budget JSON array")
+	monitorAdmin := flag.Int64("monitor-admin-telegram-id", 0, "explicit initial admin id for first installation")
+	monitorOnly := flag.Bool("ensure-monitor-access", false, "ensure dedicated metered monitoring access and write private profile")
+	monitorOutput := flag.String("monitor-profile-output", "", "private monitoring profile path")
+	monitorChat := flag.String("monitor-chat-output", "", "private notification recipient path")
+	monitorTargets := flag.String("monitor-targets", "https://www.cloudflare.com/cdn-cgi/trace", "comma-separated allowed HTTPS probe URLs")
 	transportPath := flag.String("transport-spec", "", "isolated experimental transport spec (no database or workers)")
 	checkOnly := flag.Bool("check", false, "validate spec and certificate without starting services")
 	runtimeState := flag.String("runtime-state", "/var/lib/ultra-relay/runtime.db", "private durable relay state and traffic journal")
@@ -46,6 +53,14 @@ func main() {
 		"slog level and embedded xray loglevel: debug, info, warning|warn, error, none; also ULTRA_RELAY_LOG_LEVEL",
 	)
 	flag.Parse()
+	if *staticBudgetsOnly && (*monitorOnly || *cacheOnly || *drainOnly || *checkOnly || *transportPath != "") {
+		fmt.Fprintln(os.Stderr, "static budget mode is exclusive")
+		os.Exit(2)
+	}
+	if *monitorOnly && (*cacheOnly || *drainOnly || *checkOnly || *transportPath != "") {
+		fmt.Fprintln(os.Stderr, "monitor access mode is exclusive")
+		os.Exit(2)
+	}
 	if *cacheOnly && (*drainOnly || *checkOnly || *transportPath != "") {
 		fmt.Fprintln(os.Stderr, "cache-only cannot be combined with drain-journal, check, or transport-spec")
 		os.Exit(2)
@@ -80,6 +95,28 @@ func main() {
 	if err != nil {
 		log.Error("load spec", "err", err)
 		os.Exit(1)
+	}
+	if *staticBudgetsOnly {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := ensureStaticBudgets(ctx, spec, *staticBudgetsFile); err != nil {
+			log.Error("static budget provisioning failed")
+			os.Exit(1)
+		}
+		return
+	}
+	if *monitorOnly {
+		if *cacheOnly || *drainOnly || *checkOnly {
+			log.Error("monitor access mode is exclusive")
+			os.Exit(2)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := ensureMonitorAccess(ctx, spec, *monitorOutput, *monitorChat, *monitorTargets, *monitorAdmin); err != nil {
+			log.Error("monitor provisioning failed")
+			os.Exit(1)
+		}
+		return
 	}
 	if *cacheOnly && spec.Role != config.RoleBridge {
 		log.Error("cache-only requires a bridge spec")

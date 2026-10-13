@@ -29,6 +29,9 @@ func TestAccountingSchemaMigrationCompatibility(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			d := openTestDB(t)
 			ctx := context.Background()
+			if _, err := d.Pool.Exec(ctx, `DROP TABLE service_access; DELETE FROM schema_migrations WHERE version=24`); err != nil {
+				t.Fatal(err)
+			}
 			if kind != "ours22" {
 				removeAccountingExtension(t, d)
 			} else {
@@ -106,7 +109,7 @@ func TestAccountingSchemaMigrationCompatibility(t *testing.T) {
 				t.Fatalf("repeat migration: %v", err)
 			}
 			var maximum int
-			if err = d.Pool.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&maximum); err != nil || maximum != 23 {
+			if err = d.Pool.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&maximum); err != nil || maximum != 24 {
 				t.Fatalf("migration version %d %v", maximum, err)
 			}
 		})

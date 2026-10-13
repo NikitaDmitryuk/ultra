@@ -36,12 +36,13 @@ const runtimeLease = 24 * time.Hour
 // PersistedUser explicitly includes private routing fields omitted from public API JSON.
 // This DTO and the payload containing it must only be stored in the private state DB.
 type persistedUser struct {
-	User       auth.User              `json:"user"`
-	AccountID  string                 `json:"account_id"`
-	Routes     []auth.RouteCredential `json:"routes"`
-	Exclusions []string               `json:"exclusions"`
-	Reasons    map[string]string      `json:"reasons"`
-	Fallback   string                 `json:"fallback"`
+	ServiceTargets []string               `json:"service_targets,omitempty"`
+	User           auth.User              `json:"user"`
+	AccountID      string                 `json:"account_id"`
+	Routes         []auth.RouteCredential `json:"routes"`
+	Exclusions     []string               `json:"exclusions"`
+	Reasons        map[string]string      `json:"reasons"`
+	Fallback       string                 `json:"fallback"`
 }
 type runtimeSnapshotV1 struct {
 	Version     int                       `json:"version"`
@@ -54,7 +55,7 @@ type runtimeSnapshotV1 struct {
 func snapshotUsers(users []auth.User) []persistedUser {
 	out := make([]persistedUser, 0, len(users))
 	for _, u := range users {
-		out = append(out, persistedUser{User: u, AccountID: u.AccountID, Routes: u.Routes, Exclusions: u.ExcludedExitIDs, Reasons: u.ExitExclusionReasons, Fallback: u.FallbackExitID})
+		out = append(out, persistedUser{ServiceTargets: u.ServiceTargets, User: u, AccountID: u.AccountID, Routes: u.Routes, Exclusions: u.ExcludedExitIDs, Reasons: u.ExitExclusionReasons, Fallback: u.FallbackExitID})
 	}
 	return out
 }
@@ -63,6 +64,7 @@ func (s runtimeSnapshotV1) users() []auth.User {
 	for _, p := range s.Users {
 		u := p.User
 		u.AccountID = p.AccountID
+		u.ServiceTargets = p.ServiceTargets
 		u.Routes = p.Routes
 		u.ExcludedExitIDs = p.Exclusions
 		u.ExitExclusionReasons = p.Reasons
@@ -86,7 +88,7 @@ func decodeRuntimeSnapshot(snapshot runtimestate.Snapshot, fingerprint string, n
 	if err := json.Unmarshal(snapshot.Payload, &p); err != nil {
 		return p, errors.New("runtime snapshot corrupt")
 	}
-	if p.Version != 1 || p.Fingerprint != fingerprint {
+	if (p.Version != 1 && p.Version != 2) || p.Fingerprint != fingerprint {
 		return p, errors.New("runtime snapshot incompatible")
 	}
 	return p, nil
@@ -334,6 +336,12 @@ func (r *bridgeRuntime) refresh(ctx context.Context, database *db.DB, users *aut
 		}
 	}
 	payload := runtimeSnapshotV1{Version: 1, Fingerprint: runtimeFingerprint(r.spec), Users: snapshotUsers(live), Nodes: nodes.List(), Limits: limits}
+	for _, user := range live {
+		if len(user.ServiceTargets) > 0 {
+			payload.Version = 2
+			break
+		}
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err

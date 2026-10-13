@@ -96,7 +96,7 @@ func (r *RouteRepo) Publish(ctx context.Context, region, name, exitID string) er
 			return e
 		}
 	}
-	_, e = tx.Exec(ctx, `INSERT INTO vpn_route_credentials(uuid,user_uuid,location_id) SELECT gen_random_uuid(),uuid,$1 FROM users WHERE kind='vless' ON CONFLICT DO NOTHING`, id)
+	_, e = tx.Exec(ctx, `INSERT INTO vpn_route_credentials(uuid,user_uuid,location_id) SELECT gen_random_uuid(),uuid,$1 FROM users WHERE kind='vless' AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=users.account_id) ON CONFLICT DO NOTHING`, id)
 	if e != nil {
 		return e
 	}
@@ -171,7 +171,7 @@ func (r *RouteRepo) PrepareManual(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
-	_, e = tx.Exec(ctx, `INSERT INTO vpn_route_credentials(uuid,user_uuid,location_id) SELECT gen_random_uuid(),u.uuid,l.id FROM users u CROSS JOIN vpn_locations l WHERE u.kind='vless' AND l.provider_region IS NULL AND l.published ON CONFLICT DO NOTHING`)
+	_, e = tx.Exec(ctx, `INSERT INTO vpn_route_credentials(uuid,user_uuid,location_id) SELECT gen_random_uuid(),u.uuid,l.id FROM users u CROSS JOIN vpn_locations l WHERE u.kind='vless' AND l.provider_region IS NULL AND l.published AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=u.account_id) ON CONFLICT DO NOTHING`)
 	if e != nil {
 		return e
 	}
