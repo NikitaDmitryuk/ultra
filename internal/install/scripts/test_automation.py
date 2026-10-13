@@ -103,9 +103,16 @@ class AutomationTests(unittest.TestCase):
             def health(config,node,since):
                 events.append((node['id'],'health'))
                 if node['id']=='b':raise ValueError('payload failed')
+            capture_attempts=[0]
+            def local_run(argv,**kwargs):
+                if len(argv)>2 and argv[0]=='python3' and argv[2]=='capture':
+                    capture_attempts[0]+=1
+                    if capture_attempts[0]==1:raise ValueError('periodic capture owns lock')
+                return b''
             readiness=[{'ready':False},{'ready':True}]
-            with patch.object(a,'STATE',root),patch.object(a,'ROOT',root),patch.object(a,'CONFIG',root),patch.object(a,'run',return_value=b''),patch.object(a,'status',side_effect=readiness),patch.object(a,'remote',side_effect=remote),patch.object(a,'wait_exit',side_effect=health),patch.object(a.time,'sleep',return_value=None),patch.dict(sys.modules,{'reconcile':controller}):
+            with patch.object(a,'STATE',root),patch.object(a,'ROOT',root),patch.object(a,'CONFIG',root),patch.object(a,'run',side_effect=local_run),patch.object(a,'status',side_effect=readiness),patch.object(a,'remote',side_effect=remote),patch.object(a,'wait_exit',side_effect=health),patch.object(a.time,'sleep',return_value=None),patch.dict(sys.modules,{'reconcile':controller}):
                 with self.assertRaises(ValueError):a.upgrade_fleet({'spec':'unused','version':'v2'},root,'amd64',json.loads((root/'release-manifest.json').read_text()))
+            self.assertEqual(capture_attempts[0],2)
             self.assertLess(events.index(('a','health')),events.index(('b','dpkg --print-architecture')))
             rollback=[node for node,script in events if script.startswith('set -eu; if test')]
             self.assertEqual(rollback,['b','a'])

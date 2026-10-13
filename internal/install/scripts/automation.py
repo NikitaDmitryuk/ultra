@@ -476,6 +476,21 @@ def wait_upgrade_preflight_ready(timeout=240):
         time.sleep(min(3, max(0, deadline - time.monotonic())))
 
 
+def capture_upgrade_backup(timeout=240):
+    """Retry a capture that overlaps the periodic backup service's nonblocking lock."""
+    deadline = time.monotonic() + timeout
+    command = ['python3', str(ROOT/'recovery.py'), 'capture', '--config', str(CONFIG/'backup.json')]
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError('fresh independent backup required before upgrade')
+        try:
+            run(command, timeout=max(1, min(175, remaining)))
+            return
+        except (OSError, ValueError, subprocess.SubprocessError):
+            time.sleep(min(3, max(0, deadline - time.monotonic())))
+
+
 def upgrade_fleet(config, release, architecture, target):
     journal_path=STATE/'upgrade.json'
     target_digest=hashlib.sha256(json.dumps(target,sort_keys=True).encode()).hexdigest()
@@ -497,7 +512,7 @@ def upgrade_fleet(config, release, architecture, target):
     if not nodes: raise ValueError('no owned exits available for upgrade')
     if journal and journal['node_ids']!=[n['id'] for n in nodes]: raise ValueError('topology changed during interrupted upgrade')
     if not journal:
-        run(['python3',str(ROOT/'recovery.py'),'capture','--config',str(CONFIG/'backup.json')],timeout=175)
+        capture_upgrade_backup()
         # The capture can overlap a bounded reconcile cycle whose published
         # state is temporarily pending. Let that cycle converge before the
         # timers are frozen for serial fleet activation.
