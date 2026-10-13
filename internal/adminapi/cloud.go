@@ -124,7 +124,7 @@ func (s *Server) cloudCatalog(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	regions, plans, e := s.Cloud.Catalog(r.Context())
 	s.logCloudRequest("catalog", started, e)
-	cloudResult(w, map[string]any{"regions": regions, "plans": plans, "max_servers": 2, "max_monthly_cost": 5}, e)
+	cloudResult(w, map[string]any{"regions": regions, "plans": plans, "max_servers": cloud.MaxServers, "max_monthly_cost": 5}, e)
 }
 func (s *Server) cloudOperations(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCloud(w) {

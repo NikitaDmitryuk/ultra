@@ -93,7 +93,7 @@ func (r *CloudRepo) Reserve(ctx context.Context, offer cloud.Offer) (cloud.Opera
 	if e = tx.QueryRow(ctx, `SELECT COUNT(*) FROM cloud_operations WHERE occupies_slot`).Scan(&count); e != nil {
 		return cloud.Operation{}, e
 	}
-	if count >= 2 {
+	if count >= cloud.MaxServers {
 		return cloud.Operation{}, cloud.ErrLimit
 	}
 	var valid bool

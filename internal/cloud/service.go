@@ -10,7 +10,9 @@ import (
 	"github.com/google/uuid"
 )
 
-var ErrLimit = errors.New("two cloud slots already reserved")
+const MaxServers = 5
+
+var ErrLimit = errors.New("cloud server slots already reserved")
 var ErrConflict = errors.New("operation cannot be changed in current state")
 
 type Offer struct {
@@ -181,7 +183,7 @@ func (s *Service) Confirm(ctx context.Context, actor int64, id string) (Operatio
 	}
 	if occupied, e := s.capacity(ctx); e != nil {
 		return Operation{}, e
-	} else if occupied >= 2 {
+	} else if occupied >= MaxServers {
 		return Operation{}, ErrLimit
 	}
 	return s.Store.Reserve(ctx, offer)
@@ -304,7 +306,7 @@ func (s *Service) advance(ctx context.Context, op Operation) error {
 	case "prepare":
 		if occupied, e := s.capacity(ctx); e != nil {
 			return s.fail(ctx, op, "capacity_check_failed", e)
-		} else if occupied > 2 {
+		} else if occupied > MaxServers {
 			return s.fail(ctx, op, "capacity_limit", ErrLimit)
 		}
 		if e := s.checkOffer(ctx, op.Offer); e != nil {

@@ -43,7 +43,7 @@ func (m *memoryStore) List(context.Context) ([]Operation, error) {
 func (m *memoryStore) Reserve(_ context.Context, o Offer) (Operation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.ops) >= 2 {
+	if len(m.ops) >= MaxServers {
 		return Operation{}, ErrLimit
 	}
 	v := Operation{ID: o.ID, Offer: o, State: "pending", Phase: "prepare"}
@@ -227,3 +227,21 @@ func (m *memoryStore) RecordEvent(_ context.Context, e Event) error {
 	return nil
 }
 func (m *memoryStore) Events(context.Context, string) ([]Event, error) { return m.events, nil }
+
+func TestFiveServerCapacityBoundary(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := testService()
+	for i := 0; i < 6; i++ {
+		offer, err := s.Quote(ctx, 1, "fra", "vc2-1c-1gb", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = s.Confirm(ctx, 1, offer.ID)
+		if i < 5 && err != nil {
+			t.Fatalf("reservation %d: %v", i+1, err)
+		}
+		if i == 5 && !errors.Is(err, ErrLimit) {
+			t.Fatalf("sixth reservation: %v", err)
+		}
+	}
+}
