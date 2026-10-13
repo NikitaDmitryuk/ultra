@@ -415,7 +415,7 @@ async function service() {
     replicas = await api("/api/cloud/replicas");
   } catch {}
   if (version !== viewVersion) return;
-  app.innerHTML = `<p class="eyebrow">ИНФРАСТРУКТУРА</p><h1>Сервис</h1><div class="section-tabs"><button class="active" id="servers-view">Серверы</button><button id="diagnostics-view">Диагностика</button></div><p class="muted">Управление через Vultr · не более 2 VPS</p><p class="muted">Проверка HTTPS выполняется с bridge через exit. Подключение вашего устройства проверьте в Happ: откройте сайт с включённым VPN.</p><section id="cloud-account" aria-live="polite"></section>${unavailable ? '<div class="card"><h2>Vultr пока не настроен</h2><p>Для автоматизации нужны серверный API-ключ, SSH-ключ и настройки исполнителя.</p></div>' : '<button class="btn" id="create-server">Создать exit</button>'}${ops
+  app.innerHTML = `<p class="eyebrow">ИНФРАСТРУКТУРА</p><h1>Сервис</h1><div class="section-tabs"><button class="active" id="servers-view">Серверы</button><button id="diagnostics-view">Диагностика</button></div><p class="muted">Управление через Vultr · не более 5 VPS</p><p class="muted">Проверка HTTPS выполняется с bridge через exit. Подключение вашего устройства проверьте в Happ: откройте сайт с включённым VPN.</p><section id="cloud-account" aria-live="polite"></section>${unavailable ? '<div class="card"><h2>Vultr пока не настроен</h2><p>Для автоматизации нужны серверный API-ключ, SSH-ключ и настройки исполнителя.</p></div>' : '<button class="btn" id="create-server">Создать exit</button>'}${ops
     .filter((o) => o.state !== "deleted" && o.state !== "cancelled")
     .map(
       (o) =>
