@@ -83,14 +83,14 @@ func Doctor(ctx context.Context, p *InstallPlan, opts DoctorOptions) DoctorRepor
 		}
 		if opts.DialTCP != nil {
 			for _, port := range []int{80, p.Bot.Port} {
-				if err := opts.DialTCP(ctx, p.Bridge.SSHHost, port); err != nil {
+				if err := opts.DialTCP(ctx, p.Bridge.Address, port); err != nil {
 					issues = append(
 						issues,
 						Issue{
 							Severity: SeverityWarning,
 							Code:     CodePortBlocked,
 							Node:     "bot",
-							Message:  fmt.Sprintf("bridge %s:%d is not reachable: %v", p.Bridge.SSHHost, port, err),
+							Message:  fmt.Sprintf("bridge %s:%d is not reachable: %v", p.Bridge.Address, port, err),
 						},
 					)
 				}
@@ -209,5 +209,5 @@ func expectedBotHost(p *InstallPlan) string {
 	if p.Automation != nil && p.Automation.Ingress != nil && p.Automation.Ingress.ForwardHost != "" {
 		return p.Automation.Ingress.ForwardHost
 	}
-	return p.Bridge.SSHHost
+	return p.Bridge.Address
 }

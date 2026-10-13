@@ -49,12 +49,12 @@ func handlePlanSubcommand(args []string) bool {
 
 func runPlanCommand(args []string) {
 	fs := flag.NewFlagSet("ultra-install plan", flag.ExitOnError)
-	configPath := fs.String("config", "install.config", "legacy install.config path")
+	configPath := fs.String("config", "install.config", "canonical install.config path")
 	out := fs.String("out", "", "write install-plan JSON to path")
 	format := fs.String("format", "human", "human or json")
 	_ = fs.Parse(args)
 
-	p, err := installplan.LoadLegacyEnvConfig(*configPath)
+	p, err := installplan.LoadConfig(*configPath)
 	exitOnErr("plan", err)
 	exitOnErr("plan validate", installplan.ValidatePlan(p))
 	writePlanOutput(p, *out, *format)
@@ -277,7 +277,7 @@ func readDeploymentOrExit(planPath, configPath string) *installplan.InstallPlan 
 	if planPath != "" {
 		exitOnErr("deployment input", fmt.Errorf("--config and --plan are mutually exclusive"))
 	}
-	p, err := installplan.LoadLegacyEnvConfig(configPath)
+	p, err := installplan.LoadConfig(configPath)
 	exitOnErr("read canonical deployment", err)
 	exitOnErr("validate canonical deployment", installplan.ValidatePlan(p))
 	return p

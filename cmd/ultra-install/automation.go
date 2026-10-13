@@ -23,7 +23,7 @@ func runAutomationCommand(action string, args []string) {
 	fs := flag.NewFlagSet("ultra-install "+action, flag.ExitOnError)
 	plan := fs.String("plan", "", "validated install plan; private file references only")
 	configPath := fs.String("config", "", "canonical install.config path (exclusive with --plan)")
-	releaseDir := fs.String("release-dir", "", "verified immutable release directory (legacy adopted installations)")
+	releaseDir := fs.String("release-dir", "", "verified immutable release directory (adopted schema v1 installations)")
 	_ = fs.Parse(args)
 	p := readDeploymentOrExit(*plan, *configPath)
 	if p.Automation == nil && action == "upgrade" {
@@ -389,7 +389,7 @@ func upgradePersistedAutomation(p *installplan.InstallPlan, releaseDir string) e
 		return err
 	}
 	if strings.TrimSpace(releaseDir) == "" {
-		return errors.New("legacy adopted installation upgrade requires --release-dir")
+		return errors.New("adopted schema v1 installation upgrade requires --release-dir")
 	}
 	manifest, err := verifyAutomationRelease(releaseDir, "")
 	if err != nil {

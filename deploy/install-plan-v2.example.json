@@ -6,6 +6,7 @@
     "strict_host_key": true
   },
   "bridge": {
+    "address": "192.0.2.10",
     "ssh_host": "192.0.2.10",
     "public_host": "192.0.2.10",
     "reality_dest": "origin.example.net:443",

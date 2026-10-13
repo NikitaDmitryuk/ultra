@@ -152,9 +152,9 @@ func applyDomainCutover(p *installplan.InstallPlan, configFile, subscription, vp
 	if subscription == vpn || !filepath.IsAbs(pins) || !filepath.IsAbs(receipt) || !strings.Contains(email, "@") {
 		return errors.New("cutover requires distinct hostnames, pinned SSH, ownership receipt and ACME email")
 	}
-	bridgeIP := net.ParseIP(p.Bridge.SSHHost)
+	bridgeIP := net.ParseIP(p.Bridge.Address)
 	if bridgeIP == nil || bridgeIP.To4() == nil {
-		return errors.New("cutover bridge SSH host must be explicit IPv4")
+		return errors.New("cutover bridge address must be explicit IPv4")
 	}
 	if err := os.Setenv("ULTRA_INSTALL_SSH_STRICT_HOST_KEY", "yes"); err != nil {
 		return err

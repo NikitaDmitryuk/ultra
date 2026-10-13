@@ -43,6 +43,24 @@ func TestCanonicalV2MappingAndLegacyBoundary(t *testing.T) {
 		t.Fatal("unsafe parsing")
 	}
 }
+
+func TestCanonicalV2BridgeSSHHostDoesNotChangeServiceAddress(t *testing.T) {
+	v := canonicalFixture()
+	v["BRIDGE_SSH_HOST"] = "bridge-admin"
+	p, err := CanonicalValuesToPlan(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Bridge.Address != "192.0.2.1" || p.Bridge.SSHHost != "bridge-admin" {
+		t.Fatalf("bridge address and SSH target were conflated: %#v", p.Bridge)
+	}
+	if p.Bridge.PublicHost != "192.0.2.1" {
+		t.Fatalf("public host = %q, want service address", p.Bridge.PublicHost)
+	}
+	if p.Automation.BridgeIPv4 != "192.0.2.1" {
+		t.Fatalf("automation bridge IPv4 = %q, want service address", p.Automation.BridgeIPv4)
+	}
+}
 func TestDNSRoleValidation(t *testing.T) {
 	for _, value := range []string{"../vpn", "edge.example.com", "-vpn", "vpn_", ""} {
 		p, _ := CanonicalValuesToPlan(canonicalFixture())
