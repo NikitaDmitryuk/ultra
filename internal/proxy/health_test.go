@@ -19,10 +19,45 @@ func TestFullBodyProbe(t *testing.T) {
 		if result.OK != (size == 65536) {
 			t.Fatalf("size %d: %+v", size, result)
 		}
-		if checkBody(context.Background(), http.DefaultClient, server.URL).OK {
+		if size != 65536 && result.Error != "body_size" {
+			t.Fatal("missing body-size diagnosis", result)
+		}
+		if untrusted := checkBody(context.Background(), http.DefaultClient, server.URL); untrusted.OK || untrusted.Error != "tls_handshake_failed" {
 			t.Fatal("accepted untrusted cert")
 		}
 		server.Close()
+	}
+}
+
+func TestProbeClassifiesTLSHandshakeTimeout(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		<-done
+	}()
+	client := &http.Client{Transport: &http.Transport{Proxy: nil, TLSHandshakeTimeout: 50 * time.Millisecond}}
+	result := checkBody(context.Background(), client, "https://"+listener.Addr().String())
+	if result.OK || result.Error != "tls_handshake_timeout" {
+		t.Fatal(result)
+	}
+}
+
+func TestProbeClassifiesHTTPStatus(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
+	defer server.Close()
+	result := checkBody(context.Background(), server.Client(), server.URL)
+	if result.OK || result.Error != "http_status" {
+		t.Fatal(result)
 	}
 }
 func TestProbeStallDeadline(t *testing.T) {

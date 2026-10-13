@@ -74,7 +74,7 @@
         downlink_bytes: 20 * 1073741824,
       },
       {
-        name: "Напрямую с bridge · Yandex Cloud",
+        name: "Напрямую с bridge",
         uplink_bytes: 1073741824,
         downlink_bytes: 4 * 1073741824,
       },

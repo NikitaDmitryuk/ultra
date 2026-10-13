@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"github.com/NikitaDmitryuk/ultra/internal/quota"
+	"strings"
 	"time"
 )
 
 type RouteTraffic struct {
 	Tag      string `json:"tag"`
 	Name     string `json:"name"`
+	Group    string `json:"group,omitempty"`
 	Uplink   int64  `json:"uplink_bytes"`
 	Downlink int64  `json:"downlink_bytes"`
 }
@@ -47,21 +49,28 @@ func (r *MemberRepo) Traffic(ctx context.Context, id int64, now time.Time) (Memb
 	if e != nil {
 		return result, e
 	}
-	rows, e := r.db.Pool.Query(ctx, `SELECT t.exit_tag,COALESCE(NULLIF(e.display_name,''),NULLIF(e.country_name,''),NULLIF(e.city,''),e.name,''),SUM(t.uplink_bytes)::bigint,SUM(t.downlink_bytes)::bigint FROM daily_route_traffic t JOIN users u ON u.uuid=t.user_uuid LEFT JOIN exit_nodes e ON 'to-exit-'||e.id::text=t.exit_tag WHERE `+filter+` AND t.day>=$2 AND t.day<$3 GROUP BY t.exit_tag,e.display_name,e.country_name,e.city,e.name ORDER BY SUM(t.uplink_bytes+t.downlink_bytes) DESC`, id, start, end)
+	rows, e := r.db.Pool.Query(ctx, `SELECT t.exit_tag,COALESCE(NULLIF(e.display_name,''),NULLIF(e.country_name,''),NULLIF(e.city,''),e.name,''),COALESCE(e.country_code,''),COALESCE(e.city,''),SUM(t.uplink_bytes)::bigint,SUM(t.downlink_bytes)::bigint FROM daily_route_traffic t JOIN users u ON u.uuid=t.user_uuid LEFT JOIN exit_nodes e ON 'to-exit-'||e.id::text=t.exit_tag WHERE `+filter+` AND t.day>=$2 AND t.day<$3 GROUP BY t.exit_tag,e.display_name,e.country_name,e.country_code,e.city,e.name ORDER BY SUM(t.uplink_bytes+t.downlink_bytes) DESC`, id, start, end)
 	if e != nil {
 		return result, e
 	}
 	var up, down int64
 	for rows.Next() {
 		var item RouteTraffic
-		if e = rows.Scan(&item.Tag, &item.Name, &item.Uplink, &item.Downlink); e != nil {
+		var country, city string
+		if e = rows.Scan(&item.Tag, &item.Name, &country, &city, &item.Uplink, &item.Downlink); e != nil {
 			rows.Close()
 			return result, e
+		}
+		// Presentation only: history and quota ownership retain the original exit tag.
+		country = strings.ToUpper(strings.TrimSpace(country))
+		city = strings.ToLower(strings.Join(strings.Fields(city), " "))
+		if country != "" && city != "" {
+			item.Group = "location:" + country + ":" + city
 		}
 		if item.Name == "" {
 			switch item.Tag {
 			case "direct":
-				item.Name = "Напрямую с bridge · Yandex Cloud"
+				item.Name = "Напрямую с bridge"
 			case "block":
 				item.Name = "Заблокировано"
 			default:

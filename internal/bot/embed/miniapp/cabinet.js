@@ -647,13 +647,21 @@ function serverCapacityHTML(c) {
 
 function personTrafficData(t, period, tag = "") {
   const points = (period === "day" ? t.hours : t.day_routes) || [];
-  const routes = (t.routes || [])
+  const rawRoutes = (t.routes || [])
     .filter((r) => r.tag && r.tag !== "unknown" && r.tag !== "block")
     .sort((a, b) => a.tag.localeCompare(b.tag));
-  const valid = new Set(routes.map((r) => r.tag));
-  const selected = points.filter(
-    (p) => valid.has(p.tag) && (!tag || p.tag === tag),
-  );
+  const groups = new Map(), tags = new Map();
+  for (const route of rawRoutes) {
+    const key = route.tag === "direct" ? "direct" : route.group || route.tag;
+    if (!groups.has(key)) groups.set(key, { ...route });
+    tags.set(route.tag, groups.get(key).tag);
+  }
+  const routes = [...groups.values()];
+  // Map both old and replacement exit points to one displayed direction. Never
+  // alter source tags, stored counters or the per-exit quota list.
+  const selected = points
+    .filter((p) => tags.has(p.tag) && (!tag || tags.get(p.tag) === tag))
+    .map((p) => ({ ...p, tag: tags.get(p.tag) }));
   const today = t.today || new Date().toISOString().slice(0, 10),
     month = t.month || today.slice(0, 7);
   const count =
@@ -692,8 +700,8 @@ function renderTrafficChart(target, t, period = "month", tag = "") {
     (n, p) => n + (Number(p.downlink_bytes) || 0),
     0,
   );
-  const routeName = (r) => (r.tag === "direct" ? "Yandex Cloud" : r.name);
-  target.innerHTML = `<div class="card usage-panel"><div class="row"><h2>Трафик по выходам</h2><div class="period-switch" role="group" aria-label="Период"><button data-period="day" aria-pressed="${period === "day"}">День</button><button data-period="month" aria-pressed="${period === "month"}">Месяц</button></div></div><small>${esc(period === "day" ? d.today : d.month)} · UTC</small><div class="usage-total">${bytes(total)}</div><div class="usage-directions"><span>↓ ${bytes(down)} получено</span><span>↑ ${bytes(total - down)} отправлено</span></div><label>Выход<select id="traffic-route"><option value="">Все выходы</option>${d.routes.map((r) => `<option value="${esc(r.tag)}" ${tag === r.tag ? "selected" : ""}>${esc(routeName(r))}</option>`).join("")}</select></label><div class="chart-scale"><span>${bytes(peak === 1 && total === 0 ? 0 : peak)}</span><span>0</span></div><div class="usage-chart" aria-label="${period === "day" ? "Потребление по часам" : "Потребление по дням"}">${groups
+  const routeName = (r) => (r.tag === "direct" ? "Напрямую с bridge" : r.name);
+  target.innerHTML = `<div class="card usage-panel"><div class="row"><h2>Трафик по направлениям</h2><div class="period-switch" role="group" aria-label="Период"><button data-period="day" aria-pressed="${period === "day"}">День</button><button data-period="month" aria-pressed="${period === "month"}">Месяц</button></div></div><small>${esc(period === "day" ? d.today : d.month)} · UTC</small><div class="usage-total">${bytes(total)}</div><div class="usage-directions"><span>↓ ${bytes(down)} получено</span><span>↑ ${bytes(total - down)} отправлено</span></div><label>Направление<select id="traffic-route"><option value="">Все направления</option>${d.routes.map((r) => `<option value="${esc(r.tag)}" ${tag === r.tag ? "selected" : ""}>${esc(routeName(r))}</option>`).join("")}</select></label><div class="chart-scale"><span>${bytes(peak === 1 && total === 0 ? 0 : peak)}</span><span>0</span></div><div class="usage-chart" aria-label="${period === "day" ? "Потребление по часам" : "Потребление по дням"}">${groups
     .map(
       (points, i) =>
         `<button class="chart-column" data-bucket="${i}" aria-label="${esc(d.buckets[i])}: ${bytes(sum(points))}" title="${esc(d.buckets[i])}: ${bytes(sum(points))}">${d.routes

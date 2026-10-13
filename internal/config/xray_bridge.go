@@ -45,7 +45,16 @@ func BuildBridgeXRayJSON(
 	if spec.Role != RoleBridge {
 		return nil, fmt.Errorf("config: expected bridge role")
 	}
-	if spec.SplitHTTPTLS.OmitSNI {
+	switch spec.SplitHTTPTLS.SNIMode {
+	case "", "auto", "omit":
+	case "send":
+		if spec.SplitHTTPTLS.OmitSNI {
+			return nil, fmt.Errorf("conflicting tunnel SNI settings")
+		}
+	default:
+		return nil, fmt.Errorf("unknown tunnel SNI mode")
+	}
+	if spec.SplitHTTPTLS.OmitSNI || spec.SplitHTTPTLS.SNIMode == "omit" {
 		if spec.TunnelTLSProvision != TunnelTLSSelfSigned {
 			return nil, fmt.Errorf("omit_sni requires pinned self-signed tunnels")
 		}
@@ -100,11 +109,17 @@ func BuildBridgeXRayJSON(
 		xrayLogLevel = "warning"
 	}
 	inStream := bridgeInboundStream(spec)
-	buildOutStream := func(pinnedPeerCertSHA256 string) map[string]any {
+	buildOutStream := func(address, pinnedPeerCertSHA256 string) map[string]any {
+		// The IP and certificate pin authenticate this peer. An unrelated mimic
+		// SNI adds no authentication and can make an otherwise reachable tunnel stall.
+		child := *spec
+		pin, pinErr := hex.DecodeString(normalizeCertSHA256(pinnedPeerCertSHA256))
+		safeOmission := spec.TunnelTLSProvision == TunnelTLSSelfSigned && net.ParseIP(address) != nil && pinErr == nil && len(pin) == 32
+		child.SplitHTTPTLS.OmitSNI = spec.SplitHTTPTLS.OmitSNI || spec.SplitHTTPTLS.SNIMode == "omit" || (spec.SplitHTTPTLS.SNIMode != "send" && safeOmission)
 		if spec.UsesGRPC() {
-			return grpcOutboundStream(spec, strat, pinnedPeerCertSHA256)
+			return grpcOutboundStream(&child, strat, pinnedPeerCertSHA256)
 		}
-		return splithttpOutboundStream(spec, strat, w, pinnedPeerCertSHA256)
+		return splithttpOutboundStream(&child, strat, w, pinnedPeerCertSHA256)
 	}
 
 	domainStrategy, routeRules := buildBridgeRouting(spec, resolveActiveExitTag(activeExitID, w), userExitTags)

@@ -63,7 +63,10 @@ def checks(config, now):
             results['us_notifications'] = results['us_monitor'] and not heartbeat.get('send_error')
         except (ValueError, KeyError, TypeError):
             results['us_monitor'] = False
-            results['us_notifications'] = False
+        # A missing heartbeat cannot establish whether Telegram delivery failed.
+        # Keep that alarm distinct from the independently observed monitor outage.
+        if not results.get('us_monitor'):
+            results.pop('us_notifications', None)
     else:
         raise ValueError('unsupported monitor mode')
     return results
@@ -145,6 +148,12 @@ def cycle(config, directory):
         raise ValueError('private monitor directory required')
     path = directory / 'state.json'
     state = json.loads(private(path).read_text()) if path.exists() else {}
+    if state.get('mode') != config['mode']:
+        # Nodes can change from primary to peer. Health from the old role must
+        # not survive as a permanently healthy, unmeasured diagnostic.
+        state['checks'] = {}
+        state['streaks'] = {}
+        state['mode'] = config['mode']
     try:
         results = checks(config, now)
         results['probe_execution'] = True

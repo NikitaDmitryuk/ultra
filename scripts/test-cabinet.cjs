@@ -369,6 +369,47 @@ test("person charts select period and route without historical unattributed tota
   assert.ok(!html.includes("999"));
 });
 
+test("traffic directions combine recreated exits without losing points or merging unrelated nodes", async () => {
+  const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
+  await flush();
+  p.context.chart = {
+    month: "2026-09", today: "2026-09-08",
+    routes: [
+      { tag: "direct", name: "Legacy provider" },
+      { tag: "to-exit-old", name: "Test City", group: "location:XX:test city" },
+      { tag: "to-exit-new", name: "Test City", group: "location:XX:test city" },
+      { tag: "to-exit-other", name: "Test City", group: "location:YY:test city" },
+      { tag: "to-exit-missing", name: "Другой или удалённый выход" },
+    ],
+    day_routes: [
+      { bucket: "2026-09-08", tag: "direct", downlink_bytes: 5 },
+      { bucket: "2026-09-08", tag: "to-exit-old", uplink_bytes: 10, downlink_bytes: 20 },
+      { bucket: "2026-09-08", tag: "to-exit-new", uplink_bytes: 30, downlink_bytes: 40 },
+      { bucket: "2026-09-08", tag: "to-exit-other", downlink_bytes: 7 },
+    ],
+    hours: [
+      { bucket: "2026-09-08 12:00", tag: "to-exit-old", downlink_bytes: 2 },
+      { bucket: "2026-09-08 12:00", tag: "to-exit-new", downlink_bytes: 3 },
+    ],
+    limits: [{ name: "Test City", exit_id: "new", state: "available", remaining_bytes: 99 }],
+  };
+  const original = JSON.stringify(p.context.chart);
+  const grouped = vm.runInContext('personTrafficData(chart,"month")', p.context);
+  assert.equal(grouped.routes.length, 4);
+  const tag = grouped.routes.find((r) => r.group === "location:XX:test city").tag;
+  p.context.selectedTag = tag;
+  assert.equal(vm.runInContext('personTrafficData(chart,"month",selectedTag).selected.reduce((n,p)=>n+(p.uplink_bytes||0)+(p.downlink_bytes||0),0)', p.context), 100);
+  assert.equal(vm.runInContext('personTrafficData(chart,"day",selectedTag).selected.reduce((n,p)=>n+(p.downlink_bytes||0),0)', p.context), 5);
+  vm.runInContext('renderTrafficChart(document.querySelector("#person-traffic"),chart,"month",selectedTag)', p.context);
+  const html = p.el("#person-traffic").innerHTML;
+  assert.ok(html.includes("100 Б"));
+  assert.ok(html.includes("99 Б"));
+  vm.runInContext('renderTrafficChart(document.querySelector("#person-traffic"),chart)', p.context);
+  assert.ok(p.el("#person-traffic").innerHTML.includes("Напрямую с bridge"));
+  assert.ok(!p.el("#person-traffic").innerHTML.includes("Legacy provider"));
+  assert.equal(JSON.stringify(p.context.chart), original);
+});
+
 test("invitations identify recipient and group with links", async () => {
   const p = page(false, {
     "/api/me": { is_admin: true },

@@ -277,7 +277,9 @@ type ExitTunnelSpec struct {
 
 type SplitHTTPTLSSpec struct {
 	// OmitSNI is permitted only for IP-addressed tunnels with pinned leaf certificates.
+	// Legacy explicit omission; SNIMode selects auto (default), omit or send.
 	OmitSNI     bool     `json:"omit_sni,omitempty"`
+	SNIMode     string   `json:"sni_mode,omitempty"`
 	ServerName  string   `json:"server_name"`
 	Alpn        []string `json:"alpn"`
 	Fingerprint string   `json:"fingerprint"`
