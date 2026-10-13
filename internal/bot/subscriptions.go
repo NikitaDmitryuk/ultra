@@ -12,6 +12,39 @@ import (
 	"time"
 )
 
+func validBotUsername(username string) bool {
+	if len(username) < 5 || len(username) > 32 {
+		return false
+	}
+	for _, r := range username {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func (b *Bot) subscriptionSupportURL() string {
+	username := b.telegramSelf().UserName
+	if !validBotUsername(username) && b.subscriptionCache != nil {
+		b.subscriptionCache.mu.RLock()
+		username = b.subscriptionCache.botUsername
+		b.subscriptionCache.mu.RUnlock()
+	}
+	if !validBotUsername(username) {
+		return ""
+	}
+	return (&url.URL{Scheme: "https", Host: "t.me", Path: "/" + username, RawQuery: "start=member"}).String()
+}
+
+func (b *Bot) setSubscriptionSupportURL(h http.Header) {
+	if target := b.subscriptionSupportURL(); target != "" {
+		h.Set("support-url", target)
+	} else {
+		h.Del("support-url")
+	}
+}
+
 func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	defer func() {
@@ -97,6 +130,7 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set(key, value)
 		}
 	}
+	b.setSubscriptionSupportURL(w.Header())
 	if acceptance != nil {
 		// Cleanup or expiry during the upstream request revokes the preview too.
 		acceptance, err = loadHappAcceptance(b.happAcceptanceFile, token, time.Now())

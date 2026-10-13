@@ -11,7 +11,7 @@ import (
 // Headers is the metadata allowlist for confirmed subscription responses.
 var Headers = []string{
 	"Content-Type", "profile-title", "profile-update-interval", "Vary",
-	"subscription-userinfo", "announce", "X-Ultra-Quota-Scope",
+	"subscription-userinfo", "support-url", "announce", "X-Ultra-Quota-Scope",
 	"X-Ultra-Quota-Period", "X-Ultra-Quota-State", "X-Ultra-Quota-Observed-At",
 	"X-Ultra-Quota-Resets-At",
 }

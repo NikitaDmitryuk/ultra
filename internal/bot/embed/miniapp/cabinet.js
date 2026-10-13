@@ -208,8 +208,15 @@ async function self() {
 async function locations() {
   const data = await api("/api/self/exits");
   const effective = data.exits.find((e) => e.id === data.effective_exit_id);
+  const exitLabel = (e) =>
+    e
+      ? `${esc(e.display_name)}${quotaKindLabel(e) ? ` <span class="badge">${esc(quotaKindLabel(e))}</span>` : ""}`
+      : "Нет подтверждённого маршрута";
   document.querySelector("#locations").innerHTML =
-    `<p class="eyebrow">МАРШРУТИЗАЦИЯ</p><h2>Автоматический выход</h2><p class="muted">Профиль «Автоматически» выбирает доступный сервер и возвращается к основному после восстановления.</p><p>${esc(applicationLabel(data.application))}</p>${data.route_reason ? `<p class="muted">${esc(routeReasonLabel(data.route_reason))}</p>` : ""}<p>Подтверждённый выход: <strong>${esc(effective?.display_name || "Нет подтверждённого маршрута")}</strong></p><details><summary>Как работают профили</summary><small>Профиль страны предпочитает её сервер. При отказе или исчерпании лимита он переключается на другой исправный выход, только если на нём осталась ваша квота. После восстановления возвращается к предпочтительной стране.</small>${(data.profiles || []).length ? "<h3>Маршруты профилей Happ</h3>" : ""}${(data.profiles || []).map((p) => `<p>${esc(p.name)} → ${esc(data.exits.find((e) => e.id === p.effective_exit_id)?.display_name || "Маршрут недоступен")}</p>`).join("")}<small>Кабинет не видит, какой профиль включён на устройстве.</small></details>`;
+    `<p class="eyebrow">МАРШРУТИЗАЦИЯ</p><h2>Автоматический выход</h2><p class="muted">Профиль «Автоматически» выбирает доступный сервер и возвращается к основному после восстановления.</p><p>${esc(applicationLabel(data.application))}</p>${data.route_reason ? `<p class="muted">${esc(routeReasonLabel(data.route_reason))}</p>` : ""}<p>Подтверждённый выход: <strong>${exitLabel(effective)}</strong></p><details><summary>Как работают профили</summary><small>Профиль страны предпочитает её сервер. При отказе или исчерпании лимита он переключается на другой исправный выход, только если на нём осталась ваша квота. После восстановления возвращается к предпочтительной стране.</small>${(data.profiles || []).length ? "<h3>Маршруты профилей Happ</h3>" : ""}${(data.profiles || []).map((p) => {
+      const route = data.exits.find((e) => e.id === p.effective_exit_id);
+      return `<p>${esc(p.name)} → ${route ? exitLabel(route) : "Маршрут недоступен"}</p>`;
+    }).join("")}<small>Кабинет не видит, какой профиль включён на устройстве.</small></details>`;
   if (data.application && data.application.state !== "applied") {
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(
@@ -683,10 +690,19 @@ function quotaDate(value) {
     ? esc(date.toLocaleString("ru", { timeZone: "UTC" })) + " UTC"
     : "уточняется";
 }
+function quotaKindLabel(item) {
+  return (
+    { shared: "Общая квота", separate: "Отдельная квота", direct: "Напрямую" }[
+      item?.quota_kind || (item?.pool_scope === "vultr" ? "shared" : "")
+    ] || ""
+  );
+}
 function trafficQuotasHTML(t) {
-  const pool = (t.quota_pools || []).find((p) => p.scope === "vultr");
+  const pool = (t.quota_pools || []).find(
+    (p) => p.quota_kind === "shared" || p.scope === "vultr",
+  );
   const poolHTML = pool
-    ? `<div class="card compact-limits" data-quota-pool="vultr"><h2>Общий трафик Vultr</h2><small>${esc(pool.period)} · UTC</small><p class="muted">Один личный лимит для всех выходов Vultr. Смена локации не обновляет остаток.</p><div class="route-row"><span>Личный лимит</span><strong>${bytes(pool.personal_limit_bytes)}</strong></div><div class="route-row"><span>Использовано за месяц</span><strong>${bytes(pool.used_bytes)}</strong></div><div class="route-row"><span>Осталось</span><strong>${pool.state === "unknown" ? "Уточняется" : bytes(pool.remaining_bytes)}</strong></div><p class="${pool.state === "exhausted" ? "bad" : "muted"}">${({ available: "Трафик доступен", exhausted: "Доступная квота Vultr исчерпана", unknown: "Нет подтверждённого остатка Vultr", emergency: "Используется аварийный запас: данные Vultr временно недоступны" })[pool.state] || "Доступность уточняется"}</p><small>${pool.observed_at ? "Последние подтверждённые данные Vultr: " + quotaDate(pool.observed_at) : "Ожидаем подтверждённые данные Vultr"}<br>Сброс: ${quotaDate(pool.resets_at)}</small></div>`
+    ? `<div class="card compact-limits" data-quota-kind="shared"><div class="row"><h2>Общая квота выходов</h2><span class="badge">Общая квота</span></div><small>${esc(pool.period)} · UTC</small><p class="muted">Один личный лимит для отмеченных стран. Смена страны не обновляет остаток.</p><div class="route-row"><span>Личный лимит</span><strong>${bytes(pool.personal_limit_bytes)}</strong></div><div class="route-row"><span>Использовано за месяц</span><strong>${bytes(pool.used_bytes)}</strong></div><div class="route-row"><span>Осталось</span><strong>${pool.state === "unknown" ? "Уточняется" : bytes(pool.remaining_bytes)}</strong></div><p class="${pool.state === "exhausted" ? "bad" : "muted"}">${({ available: "Трафик доступен", exhausted: "Общая квота исчерпана", unknown: "Нет подтверждённого остатка", emergency: "Используется аварийный запас: данные провайдера временно недоступны" })[pool.state] || "Доступность уточняется"}</p><small>${pool.observed_at ? "Последние подтверждённые данные: " + quotaDate(pool.observed_at) : "Ожидаем подтверждённые данные"}<br>Сброс: ${quotaDate(pool.resets_at)}</small></div>`
     : "";
   const limitsHTML = (t.limits || []).map((l) => `<div class="card compact-limits"><h2>${esc(l.name)}</h2><div class="route-row"><span>${l.is_fallback ? "Ручной резерв · общий остаток узла" : "Доступный трафик"}</span><strong>${l.state === "unknown" ? "Уточняется" : bytes(l.remaining_bytes)}</strong></div>${!l.is_fallback && l.period === "month" ? `<p class="muted">Использовано за месяц: ${bytes(l.used_bytes)} · Личный лимит: ${bytes(l.personal_limit_bytes)}<br>Сброс: ${quotaDate(l.resets_at)}. Доступность также ограничена общим остатком узла.</p>` : ""}${l.pending ? '<p class="wait">Применяется переключение</p>' : l.state === "exhausted" ? `<p class="bad">${l.is_fallback ? "Бюджет исчерпан" : "Лимит исчерпан"}</p>` : ""}</div>`).join("");
   return poolHTML + limitsHTML;
@@ -716,7 +732,9 @@ function renderTrafficChart(target, t, period = "month", tag = "") {
     0,
   );
   const routeName = (r) => (r.tag === "direct" ? "Напрямую с bridge" : r.name);
-  target.innerHTML = `<div class="card usage-panel"><div class="row"><h2>Трафик по направлениям</h2><div class="period-switch" role="group" aria-label="Период"><button data-period="day" aria-pressed="${period === "day"}">День</button><button data-period="month" aria-pressed="${period === "month"}">Месяц</button></div></div><small>${esc(period === "day" ? d.today : d.month)} · UTC</small><div class="usage-total">${bytes(total)}</div><div class="usage-directions"><span>↓ ${bytes(down)} получено</span><span>↑ ${bytes(total - down)} отправлено</span></div><label>Направление<select id="traffic-route"><option value="">Все направления</option>${d.routes.map((r) => `<option value="${esc(r.tag)}" ${tag === r.tag ? "selected" : ""}>${esc(routeName(r))}</option>`).join("")}</select></label><div class="chart-scale"><span>${bytes(peak === 1 && total === 0 ? 0 : peak)}</span><span>0</span></div><div class="usage-chart" aria-label="${period === "day" ? "Потребление по часам" : "Потребление по дням"}">${groups
+  const routeOption = (r) =>
+    routeName(r) + (quotaKindLabel(r) ? " · " + quotaKindLabel(r) : "");
+  target.innerHTML = `<div class="card usage-panel"><div class="row"><h2>Трафик по направлениям</h2><div class="period-switch" role="group" aria-label="Период"><button data-period="day" aria-pressed="${period === "day"}">День</button><button data-period="month" aria-pressed="${period === "month"}">Месяц</button></div></div><small>${esc(period === "day" ? d.today : d.month)} · UTC</small><div class="usage-total">${bytes(total)}</div><div class="usage-directions"><span>↓ ${bytes(down)} получено</span><span>↑ ${bytes(total - down)} отправлено</span></div><label>Направление<select id="traffic-route"><option value="">Все направления</option>${d.routes.map((r) => `<option value="${esc(r.tag)}" ${tag === r.tag ? "selected" : ""}>${esc(routeOption(r))}</option>`).join("")}</select></label><div class="chart-scale"><span>${bytes(peak === 1 && total === 0 ? 0 : peak)}</span><span>0</span></div><div class="usage-chart" aria-label="${period === "day" ? "Потребление по часам" : "Потребление по дням"}">${groups
     .map(
       (points, i) =>
         `<button class="chart-column" data-bucket="${i}" aria-label="${esc(d.buckets[i])}: ${bytes(sum(points))}" title="${esc(d.buckets[i])}: ${bytes(sum(points))}">${d.routes
@@ -735,7 +753,7 @@ function renderTrafficChart(target, t, period = "month", tag = "") {
     .map((r) => {
       const j = d.routes.indexOf(r),
         value = sum(d.selected.filter((p) => p.tag === r.tag));
-      return `<div class="route-row"><span><i style="background:${colors[j % colors.length]}"></i>${esc(routeName(r))}</span><strong>${bytes(value)}</strong><small>${total ? Math.round((value / total) * 100) : 0}%</small></div>`;
+      return `<div class="route-row"><span><i style="background:${colors[j % colors.length]}"></i>${esc(routeName(r))}${quotaKindLabel(r) ? ` <span class="badge">${esc(quotaKindLabel(r))}</span>` : ""}</span><strong>${bytes(value)}</strong><small>${total ? Math.round((value / total) * 100) : 0}%</small></div>`;
     })
     .join(
       "",

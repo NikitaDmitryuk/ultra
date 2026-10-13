@@ -186,6 +186,7 @@ type clientExitItem struct {
 	LatencyMS   int64  `json:"latency_ms,omitempty"`
 	Selected    bool   `json:"selected"`
 	Effective   bool   `json:"effective"`
+	QuotaKind   string `json:"quota_kind,omitempty"`
 }
 
 func (s *Server) validateClientUser(w http.ResponseWriter, uuid string) (u auth.User, ok bool) {
@@ -255,12 +256,17 @@ func (s *Server) handleClientListExits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selectedID, effectiveID, health, nodes := s.clientExitSelection(u)
+	quotaKinds := s.exitQuotaKinds(r.Context())
 	items := make([]clientExitItem, 0, len(nodes))
 	for _, n := range nodes {
 		h := health[n.ID]
+		displayName := subscriptionCountryName(n)
+		if displayName == "" {
+			displayName = n.LocationLabel()
+		}
 		items = append(items, clientExitItem{
 			ID:          n.ID,
-			DisplayName: n.LocationLabel(),
+			DisplayName: displayName,
 			CountryCode: n.CountryCode,
 			CountryName: n.CountryName,
 			City:        n.City,
@@ -268,6 +274,7 @@ func (s *Server) handleClientListExits(w http.ResponseWriter, r *http.Request) {
 			LatencyMS:   h.TunnelLatencyMS,
 			Selected:    selectedID != nil && *selectedID == n.ID,
 			Effective:   effectiveID == n.ID,
+			QuotaKind:   quotaKinds[n.ID],
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -323,12 +330,17 @@ func (s *Server) handleClientSetExitSelection(w http.ResponseWriter, r *http.Req
 	}
 	u, _ = s.users.Lookup(u.UUID)
 	selectedID, effectiveID, health, nodes := s.clientExitSelection(u)
+	quotaKinds := s.exitQuotaKinds(r.Context())
 	items := make([]clientExitItem, 0, len(nodes))
 	for _, n := range nodes {
 		h := health[n.ID]
+		displayName := subscriptionCountryName(n)
+		if displayName == "" {
+			displayName = n.LocationLabel()
+		}
 		items = append(items, clientExitItem{
 			ID:          n.ID,
-			DisplayName: n.LocationLabel(),
+			DisplayName: displayName,
 			CountryCode: n.CountryCode,
 			CountryName: n.CountryName,
 			City:        n.City,
@@ -336,6 +348,7 @@ func (s *Server) handleClientSetExitSelection(w http.ResponseWriter, r *http.Req
 			LatencyMS:   h.TunnelLatencyMS,
 			Selected:    selectedID != nil && *selectedID == n.ID,
 			Effective:   effectiveID == n.ID,
+			QuotaKind:   quotaKinds[n.ID],
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -440,7 +453,15 @@ func (s *Server) profileRoutes(u auth.User) []map[string]any {
 		alias.Routes = nil
 		alias.UUID = route.UUID
 		_, effective, _, _ := s.clientExitSelection(alias)
-		out = append(out, map[string]any{"location_id": route.LocationID, "name": route.Name, "preferred_exit_id": route.ExitID, "effective_exit_id": effective})
+		name := route.Name
+		if route.ExitID != nil && s.exits != nil {
+			if node, ok := s.exits.Get(*route.ExitID); ok {
+				if country := subscriptionCountryName(node); country != "" {
+					name = country
+				}
+			}
+		}
+		out = append(out, map[string]any{"location_id": route.LocationID, "name": name, "preferred_exit_id": route.ExitID, "effective_exit_id": effective})
 	}
 	return out
 }

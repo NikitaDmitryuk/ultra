@@ -18,8 +18,8 @@ func TestSubscriptionQuotaProxyAndStaleCache(t *testing.T) {
 	confirmed := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	metadata := map[string]string{
 		"subscription-userinfo": "upload=0; download=400; total=1000",
-		"announce":              "base64:" + base64.StdEncoding.EncodeToString([]byte("Vultr: общий пользовательский лимит; остальные выходы отдельно.")),
-		"X-Ultra-Quota-Scope":   "vultr", "X-Ultra-Quota-State": "ready", "X-Ultra-Quota-Period": "2026-10",
+		"announce":              "base64:" + base64.StdEncoding.EncodeToString([]byte("Общая квота выходов; остальные выходы отдельно.")),
+		"X-Ultra-Quota-Scope":   "shared", "X-Ultra-Quota-State": "ready", "X-Ultra-Quota-Period": "2026-10",
 		"X-Ultra-Quota-Observed-At": "2026-10-12T13:00:00Z", "X-Ultra-Quota-Resets-At": "2026-11-01T00:00:00Z",
 	}
 	broken := false
@@ -72,7 +72,7 @@ func TestSubscriptionQuotaProxyAndStaleCache(t *testing.T) {
 			}
 		}
 		msg, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(w.Header().Get("announce"), "base64:"))
-		if err != nil || !strings.Contains(string(msg), "устарели") || !strings.Contains(string(msg), "Vultr") || !strings.Contains(string(msg), confirmed.Format(time.RFC3339)) {
+		if err != nil || !strings.Contains(string(msg), "устарели") || strings.Contains(string(msg), "Vultr") || !strings.Contains(string(msg), confirmed.Format(time.RFC3339)) {
 			t.Fatal("missing stale announcement", string(msg), err)
 		}
 	}

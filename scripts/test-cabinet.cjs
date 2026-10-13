@@ -509,11 +509,11 @@ test("automatic route displays confirmed exit without a country selector", async
     effective_exit_id: "ams",
     application: { state: "error" },
     route_reason: "monthly_user_limit_exhausted",
-    exits: [
-      { id: "ams", display_name: "Амстердам", reachable: true },
-      { id: "atl", display_name: "Атланта", reachable: true },
-    ],
-    profiles: [{ name: "Атланта", effective_exit_id: "atl" }],
+	exits: [
+	  { id: "ams", display_name: "Нидерланды", quota_kind: "separate", reachable: true },
+	  { id: "atl", display_name: "США", quota_kind: "shared", reachable: true },
+	],
+	profiles: [{ name: "США", effective_exit_id: "atl" }],
   };
   const p = page(true, {
     "/api/self": { registered: true, member: { active: true } },
@@ -522,8 +522,10 @@ test("automatic route displays confirmed exit without a country selector", async
   await flush();
   const html = p.el("#locations").innerHTML;
   assert.match(html, /Ошибка применения/);
-  assert.match(html, /Подтверждённый выход: <strong>Амстердам/);
-  assert.match(html, /Атланта → Атланта/);
+	assert.match(html, /Подтверждённый выход: <strong>Нидерланды/);
+	assert.match(html, /Нидерланды.*Отдельная квота/);
+	assert.match(html, /США → США.*Общая квота/);
+	assert.ok(!html.includes("Vultr"));
   assert.match(html, /только если на нём осталась ваша квота/);
   assert.match(html, /возвращается к предпочтительной стране/);
   assert.ok(!html.includes('id="preferred"'));
@@ -737,20 +739,21 @@ test("all embedded HTML assets still exist after removing the legacy UI", () => 
   }
 });
 
-test("shared Vultr quota stays whole across route and period filters beside manual reserve", async () => {
+test("shared quota stays whole across route and period filters beside separate reserve", async () => {
   const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
   await flush();
   p.context.chart = {
     month: "2026-09", today: "2026-09-08",
-    routes: [{ tag: "exit-a", name: "Выход A", pool_scope: "vultr" }, { tag: "exit-b", name: "Выход B", pool_scope: "vultr" }],
-    quota_pools: [{ scope: "vultr", period: "2026-09", personal_limit_bytes: 900, used_bytes: 200, remaining_bytes: 700, observed_at: "2026-09-08T12:00:00Z", resets_at: "2026-10-01T00:00:00Z", state: "available" }],
+	  routes: [{ tag: "exit-a", name: "Нидерланды", quota_kind: "shared" }, { tag: "exit-b", name: "США", quota_kind: "shared" }, { tag: "direct", name: "Напрямую с bridge", quota_kind: "direct" }],
+	  quota_pools: [{ quota_kind: "shared", period: "2026-09", personal_limit_bytes: 900, used_bytes: 200, remaining_bytes: 700, observed_at: "2026-09-08T12:00:00Z", resets_at: "2026-10-01T00:00:00Z", state: "available" }],
     limits: [{ name: "Резерв <тест>", is_fallback: true, remaining_bytes: 99, state: "available" }],
   };
   for (const expression of ['"month"', '"day", "exit-a"', '"month", "exit-b"']) {
     vm.runInContext(`renderTrafficChart(document.querySelector("#person-traffic"),chart,${expression})`, p.context);
     const html = p.el("#person-traffic").innerHTML;
-    assert.equal((html.match(/data-quota-pool="vultr"/g) || []).length, 1);
-    for (const text of ["900 Б", "200 Б", "700 Б", "99 Б", "Резерв &lt;тест&gt;", "Последние подтверждённые данные Vultr", "UTC", "Ручной резерв"]) assert.ok(html.includes(text), text);
+	assert.equal((html.match(/data-quota-kind="shared"/g) || []).length, 1);
+	for (const text of ["900 Б", "200 Б", "700 Б", "99 Б", "Резерв &lt;тест&gt;", "Последние подтверждённые данные", "Общая квота", "UTC", "Ручной резерв"]) assert.ok(html.includes(text), text);
+	assert.ok(!html.includes("Vultr"));
     assert.ok(!html.includes("Invalid Date"));
   }
 });
@@ -758,7 +761,7 @@ test("shared Vultr quota stays whole across route and period filters beside manu
 test("pool states distinguish unknown confirmation, emergency and exhaustion without promising reserve", async () => {
   const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
   await flush();
-  p.context.quota = { quota_pools: [{ scope: "vultr", state: "unknown", remaining_bytes: 777, observed_at: null }] };
+	p.context.quota = { quota_pools: [{ quota_kind: "shared", state: "unknown", remaining_bytes: 777, observed_at: null }] };
   let html = vm.runInContext("trafficQuotasHTML(quota)", p.context);
   assert.ok(html.includes("Уточняется"));
   assert.ok(html.includes("Ожидаем подтверждённые данные"));
@@ -770,7 +773,7 @@ test("pool states distinguish unknown confirmation, emergency and exhaustion wit
   assert.ok(html.includes("777 Б"));
   p.context.quota.quota_pools[0].state = "exhausted";
   html = vm.runInContext("trafficQuotasHTML(quota)", p.context);
-  assert.ok(html.includes("Доступная квота Vultr исчерпана"));
+	assert.ok(html.includes("Общая квота исчерпана"));
   assert.ok(!html.includes("резерв доступен"));
 });
 
