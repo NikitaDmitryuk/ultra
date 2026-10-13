@@ -48,6 +48,21 @@ def current_fence(config):
     return fence(read_private(config['fence_file']), 'bridge', config['target']['host'], config['old_bridge_address'])
 
 
+def seed_original_artifact(config, state, destination):
+    # Re-verify ciphertext even on resume; the age identity remains on the operator.
+    verified = restore(SimpleNamespace(command='verify', identity=config['identity'], bundle=config['bundle'],
+                                       target=str(Path(config['state_dir']) / 'verify-only')))
+    if verified != state:
+        raise ValueError('staged_manifest_mismatch')
+    artifact = Path(config['bundle']).parent / state['artifact']
+    private(artifact)
+    script = "import sys,json;sys.path.insert(0,sys.argv[1]);from restore_host import seed_artifact_cache;" + \
+             "c=json.load(open('/etc/ultra-recovery/backup.json'));" + \
+             "assert c['repository']=='/var/lib/ultra-recovery' and c['source']=='bridge';" + \
+             "seed_artifact_cache(c['repository'],sys.argv[2],sys.argv[3],sys.stdin.buffer)"
+    remote(config['target'], ['python3', '-c', script, destination, artifact.name, sha(artifact)], artifact.read_bytes())
+
+
 def stage_generation(config, directory):
     stage = directory / 'stage'
     if not stage.exists():
@@ -200,6 +215,9 @@ os.replace(q,p)
         plan['ingress_confirmed'] = True
         if config['ingress_mode'] == 'forward':
             host('ingress')
+        diagnostic.stage = 'artifact_cache'
+        current_fence(config)
+        seed_original_artifact(config, state, destination)
         host('automation'); host('ready')
         receipt['finished_at'] = int(time.time())
         receipt['elapsed_seconds'] = receipt['finished_at'] - receipt['started_at']

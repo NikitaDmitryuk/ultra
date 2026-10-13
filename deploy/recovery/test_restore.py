@@ -23,6 +23,40 @@ class RestoreContracts(unittest.TestCase):
         self.root = Path(self.temp.name)
     def tearDown(self):
         self.temp.cleanup()
+    def test_original_artifact_ciphertext_is_preserved_for_receiver_and_resume(self):
+        import io
+        repo=recovery.repository(self.root/'repo','bridge',initialize=True)
+        name='artifact-'+('a'*64)+'.age'; original=b'original-encrypted-generation'; regenerated=b'different-age-randomness'
+        target=repo/name; target.write_bytes(regenerated)
+        expected=hashlib.sha256(original).hexdigest()
+        # Existing immutable receiver correctly rejects a re-encrypted artifact.
+        args=__import__('types').SimpleNamespace(repository=str(repo),source='bridge',name=name,sha256=expected,snapshot=int(time.time()))
+        with mock.patch.object(recovery.shutil,'disk_usage',return_value=__import__('types').SimpleNamespace(free=10**12)):
+            with self.assertRaisesRegex(ValueError,'immutable backup name collision'):
+                recovery.receive(args,io.BytesIO(original))
+            host.seed_artifact_cache(repo,name,expected,io.BytesIO(original))
+            recovery.receive(args,io.BytesIO(original))
+        self.assertEqual(target.read_bytes(),original)
+        self.assertEqual(next(repo.glob('*.pre-restore-*')).read_bytes(),regenerated)
+        host.seed_artifact_cache(repo,name,expected,io.BytesIO(original))
+        self.assertEqual(target.read_bytes(),original)
+        with self.assertRaisesRegex(ValueError,'staged_manifest_mismatch'):
+            host.seed_artifact_cache(repo,name,expected,io.BytesIO(b'tampered'))
+        self.assertEqual(target.read_bytes(),original)
+
+    def test_artifact_cache_requires_operator_verification_before_remote_write(self):
+        name='artifact-'+('b'*64)+'.age'; cipher=self.root/name;cipher.write_bytes(b'ciphertext');cipher.chmod(0o600)
+        state={'artifact':name};config={'identity':'/operator/private-identity','bundle':str(self.root/'backup.age'),'state_dir':str(self.root),'target':{'host':'fixture'}}
+        with mock.patch.object(restore,'restore',return_value=state) as verify, mock.patch.object(restore,'remote') as remote:
+            restore.seed_original_artifact(config,state,'/var/lib/ultra-restore/owned')
+            self.assertEqual(verify.call_args.args[0].command,'verify')
+            self.assertEqual(remote.call_args.args[2],b'ciphertext')
+            self.assertNotIn(config['identity'],str(remote.call_args))
+        with mock.patch.object(restore,'restore',return_value={'artifact':'different'}), mock.patch.object(restore,'remote') as remote:
+            with self.assertRaisesRegex(ValueError,'staged_manifest_mismatch'):
+                restore.seed_original_artifact(config,state,'/var/lib/ultra-restore/owned')
+            remote.assert_not_called()
+
     def certbot_fixture(self):
         stage=self.root/'stage';root=self.root/'target';state={'files':{}}
         files={'etc/letsencrypt/renewal/vpn.example.conf':

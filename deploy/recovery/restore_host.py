@@ -251,6 +251,40 @@ def restore_units(stage, state, root=Path('/')):
         write(safe_target(root, relative), (stage / name).read_bytes(), row['mode'])
 
 
+def seed_artifact_cache(repo, name, expected, stream):
+    """Reuse the verified generation's original ciphertext on the new primary."""
+    import hashlib
+    import tempfile
+    from recovery import MAX_BYTES, sync_directory
+    if not re.fullmatch(r'artifact-[a-f0-9]{64}\.age', name) or not re.fullmatch(r'[a-f0-9]{64}', expected):
+        raise ValueError('invalid_artifact_reference')
+    repo = repository(repo, 'bridge')
+    with (repo / '.capture-lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        fd, temporary = tempfile.mkstemp(prefix='.restore-artifact-', dir=repo)
+        try:
+            digest = hashlib.sha256(); size = 0
+            with os.fdopen(fd, 'wb') as output:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    size += len(chunk)
+                    if size > MAX_BYTES: raise ValueError('encrypted_backup_exceeds_bounds')
+                    digest.update(chunk); output.write(chunk)
+                output.flush(); os.fsync(output.fileno())
+            if not size or digest.hexdigest() != expected:
+                raise ValueError('staged_manifest_mismatch')
+            target = repo / name
+            if target.is_symlink(): raise ValueError('restore_destination_symlink')
+            if target.exists() and sha(target) != expected:
+                # A previous failed restore may have re-encrypted identical bytes.
+                # Preserve that local cache; immutable receiver objects never change.
+                previous = repo / (name + '.pre-restore-' + sha(target))
+                if previous.is_symlink(): raise ValueError('restore_destination_symlink')
+                if not previous.exists(): os.replace(target, previous)
+            os.replace(temporary, target); sync_directory(repo)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+
+
 class Host:
     def __init__(self, directory, plan):
         self.directory = Path(directory)

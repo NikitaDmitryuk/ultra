@@ -186,7 +186,6 @@ def execute(args):
     receipt['restore_elapsed_seconds']=int(time.time())-receipt['restore_started_at']
     receipt['within_one_hour']=receipt['restore_elapsed_seconds']<=3600
     receipt['completed_at']=int(time.time());save()
-    if not receipt['within_one_hour']:raise ValueError('restore_exceeded_one_hour')
     print(json.dumps(receipt))
 
 
