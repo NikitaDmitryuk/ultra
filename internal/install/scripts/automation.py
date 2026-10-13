@@ -456,6 +456,26 @@ def wait_exit(config, node, since):
     raise ValueError('updated exit did not pass tunnel payload health')
 
 
+def wait_upgrade_preflight_ready(timeout=240):
+    """Wait for an in-flight controller cycle before freezing automation writers."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if status()['ready']:
+                return
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError('fresh independent backup and healthy fleet required before upgrade')
+        try:
+            run(['systemctl', 'start', 'ultra-recovery-reconcile.service'],
+                timeout=max(1, min(remaining, 240)))
+        except (ValueError, subprocess.SubprocessError):
+            pass
+        time.sleep(min(3, max(0, deadline - time.monotonic())))
+
+
 def upgrade_fleet(config, release, architecture, target):
     journal_path=STATE/'upgrade.json'
     target_digest=hashlib.sha256(json.dumps(target,sort_keys=True).encode()).hexdigest()
@@ -478,7 +498,10 @@ def upgrade_fleet(config, release, architecture, target):
     if journal and journal['node_ids']!=[n['id'] for n in nodes]: raise ValueError('topology changed during interrupted upgrade')
     if not journal:
         run(['python3',str(ROOT/'recovery.py'),'capture','--config',str(CONFIG/'backup.json')],timeout=175)
-        if not status()['ready']: raise ValueError('fresh independent backup and healthy fleet required before upgrade')
+        # The capture can overlap a bounded reconcile cycle whose published
+        # state is temporarily pending. Let that cycle converge before the
+        # timers are frozen for serial fleet activation.
+        wait_upgrade_preflight_ready()
         journal={'version':config['version'],'target_digest':target_digest,'previous':previous,
                  'node_ids':[n['id'] for n in nodes],'steps':{},'created_at':int(time.time())}
         write_json(journal_path,journal)
