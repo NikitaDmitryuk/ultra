@@ -52,6 +52,7 @@ type automationPoll struct {
 	Version string
 	Ready   bool
 	Pending bool
+	Receipt bool
 	Error   string
 }
 
@@ -260,6 +261,16 @@ func automationUnitName(action, version string) (string, error) {
 	return unit, nil
 }
 
+func automationReceiptPath(action, version string) (string, error) {
+	if action != "bootstrap" && action != "upgrade" {
+		return "", errors.New("invalid durable automation action")
+	}
+	if _, err := automationBundlePath(version); err != nil {
+		return "", err
+	}
+	return path.Join("/var/lib/ultra-automation/receipts", action+"-"+version+".json"), nil
+}
+
 func persistAutomationBundle(p *installplan.InstallPlan, source, version string) (string, error) {
 	target, err := automationBundlePath(version)
 	if err != nil {
@@ -296,26 +307,34 @@ func runDurableAutomation(p *installplan.InstallPlan, action, bundle, version st
 	if err != nil {
 		return err
 	}
-	launch := durableAutomationLaunchCommand(action, bundle, unit, timeout)
+	receipt, err := automationReceiptPath(action, version)
+	if err != nil {
+		return err
+	}
+	launch := durableAutomationLaunchCommand(action, bundle, unit, receipt, timeout)
 	if err := install.RunSSH(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, launch); err != nil {
 		return errors.New("durable automation job was not started; repeat the same command")
 	}
-	program := `import json,pathlib
+	program := `import json,pathlib,sys
 state=pathlib.Path('/var/lib/ultra-automation'); release={}
 try: release=json.loads((state/'release.json').read_text())
+except Exception: pass
+receipt={}
+try: receipt=json.loads(pathlib.Path(sys.argv[1]).read_text())
 except Exception: pass
 print('ULTRA_VERSION='+str(release.get('version','missing')))
 print('ULTRA_READY='+('true' if bool(release.get('ready_at')) else 'false'))
 print('ULTRA_PENDING='+('true' if (state/'upgrade.json').exists() else 'false'))
+print('ULTRA_RECEIPT='+('true' if receipt.get('action')==sys.argv[2] and receipt.get('version')==sys.argv[3] else 'false'))
 print('ULTRA_ERROR='+('present' if (state/'last-error.json').exists() else 'absent'))`
 	deadline := time.Now().Add(timeout)
 	for {
 		poll := "printf 'ULTRA_UNIT='; systemctl show -p ActiveState --value " + shellQuote(unit+".service") + " 2>/dev/null || printf unknown; " +
-			"python3 -c " + shellQuote(program)
+			"python3 -c " + shellQuote(program) + " " + shellQuote(receipt) + " " + shellQuote(action) + " " + shellQuote(version)
 		output, pollErr := install.RunSSHOutput(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, poll)
 		if pollErr == nil {
 			state := parseAutomationPoll(string(output))
-			if state.Version == version && state.Ready && !state.Pending {
+			if automationPollComplete(state, version) {
 				return nil
 			}
 			if state.Unit == "failed" || state.Unit == "inactive" || state.Unit == "unknown" || state.Unit == "" {
@@ -329,11 +348,16 @@ print('ULTRA_ERROR='+('present' if (state/'last-error.json').exists() else 'abse
 	}
 }
 
-func durableAutomationLaunchCommand(action, bundle, unit string, timeout time.Duration) string {
+func automationPollComplete(state automationPoll, version string) bool {
+	return state.Receipt && state.Version == version && state.Ready && !state.Pending
+}
+
+func durableAutomationLaunchCommand(action, bundle, unit, receipt string, timeout time.Duration) string {
 	command := "/usr/bin/python3 " + shellQuote(path.Join(bundle, "automation.py")) + " --action " + shellQuote(action) +
 		" --config " + shellQuote(path.Join(bundle, "bootstrap.json")) + " --release " + shellQuote(bundle)
 	return "state=$(systemctl show -p ActiveState --value " + shellQuote(unit+".service") + " 2>/dev/null || true); " +
 		"case \"$state\" in active|activating) ;; *) " +
+		"install -d -m 700 " + shellQuote(path.Dir(receipt)) + "; rm -f -- " + shellQuote(receipt) + "; " +
 		"systemctl reset-failed " + shellQuote(unit+".service") + " >/dev/null 2>&1 || true; " +
 		"systemd-run --no-block --collect --unit " + shellQuote(unit) +
 		" --property Type=oneshot --property TimeoutStartSec=" + fmt.Sprint(int(timeout.Seconds())) + " " + command + ";; esac"
@@ -352,6 +376,8 @@ func parseAutomationPoll(output string) automationPoll {
 			result.Ready = true
 		case line == "ULTRA_PENDING=true":
 			result.Pending = true
+		case line == "ULTRA_RECEIPT=true":
+			result.Receipt = true
 		case strings.HasPrefix(line, "ULTRA_ERROR="):
 			result.Error = strings.TrimPrefix(line, "ULTRA_ERROR=")
 		}

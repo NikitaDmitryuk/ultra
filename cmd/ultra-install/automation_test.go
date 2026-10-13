@@ -55,9 +55,16 @@ func TestAutomationReleasePreflightRejectsIncompleteAndModified(t *testing.T) {
 }
 
 func TestAutomationPollAndDurableNames(t *testing.T) {
-	state := parseAutomationPoll("noise\nULTRA_UNIT=activating\nULTRA_VERSION=v2.4.1\nULTRA_READY=true\nULTRA_PENDING=false\nULTRA_ERROR=absent\n")
-	if state.Unit != "activating" || state.Version != "v2.4.1" || !state.Ready || state.Pending || state.Error != "absent" {
+	state := parseAutomationPoll("noise\nULTRA_UNIT=activating\nULTRA_VERSION=v2.4.1\nULTRA_READY=true\nULTRA_PENDING=false\nULTRA_RECEIPT=true\nULTRA_ERROR=absent\n")
+	if state.Unit != "activating" || state.Version != "v2.4.1" || !state.Ready || state.Pending || !state.Receipt || state.Error != "absent" {
 		t.Fatalf("unexpected poll state: %#v", state)
+	}
+	if !automationPollComplete(state, "v2.4.1") {
+		t.Fatal("matching completion receipt was not accepted")
+	}
+	state.Receipt = false
+	if automationPollComplete(state, "v2.4.1") {
+		t.Fatal("stale release readiness was accepted without this attempt's receipt")
 	}
 	unit, err := automationUnitName("upgrade", "v2.4.1-rc.1")
 	if err != nil || unit != "ultra-automation-upgrade-v2-4-1-rc-1" {
@@ -69,8 +76,12 @@ func TestAutomationPollAndDurableNames(t *testing.T) {
 	if _, err = automationBundlePath("v2.4.1;reboot"); err == nil {
 		t.Fatal("unsafe version accepted")
 	}
-	command := durableAutomationLaunchCommand("upgrade", "/var/lib/ultra-automation/releases/v2.4.1", unit, automationTimeout(300))
-	for _, required := range []string{"active|activating", "systemd-run --no-block --collect", "TimeoutStartSec=900", "/var/lib/ultra-automation/releases/v2.4.1/automation.py"} {
+	receipt, err := automationReceiptPath("upgrade", "v2.4.1")
+	if err != nil || receipt != "/var/lib/ultra-automation/receipts/upgrade-v2.4.1.json" {
+		t.Fatalf("unexpected receipt: %q %v", receipt, err)
+	}
+	command := durableAutomationLaunchCommand("upgrade", "/var/lib/ultra-automation/releases/v2.4.1", unit, receipt, automationTimeout(300))
+	for _, required := range []string{"active|activating", "systemd-run --no-block --collect", "TimeoutStartSec=900", "/var/lib/ultra-automation/releases/v2.4.1/automation.py", "rm -f --", receipt} {
 		if !strings.Contains(command, required) {
 			t.Fatalf("durable launch misses %q: %s", required, command)
 		}
