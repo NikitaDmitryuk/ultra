@@ -8,7 +8,19 @@ import tempfile
 import time
 import uuid
 from recovery import collect, encrypt, pack
-from vm_guest import run, sql, write
+from vm_guest import inert_unit_path, run, sql, write
+
+
+def state_files(config, stage):
+    # Preserve automation from its verified inert source. Live /etc entries are
+    # /dev/null masks and must neither be captured nor temporarily unmasked.
+    manifest = json.loads((stage / 'manifest.json').read_text())
+    inert = {name: stage / name for name in manifest['files']
+             if name.startswith('state/') and inert_unit_path(name)}
+    excluded = config['artifact_paths'] + ['/' + name.removeprefix('state/') for name in inert]
+    selected = [name for name in config['state_paths'] if not inert_unit_path(name)]
+    state = collect(selected + ['/etc/ultra-drill/cert.pem', '/etc/ultra-drill/key.pem'], excluded)
+    return {**{'state/' + name: Path('/') / name for name in state}, **inert}
 
 
 def generation():
@@ -23,8 +35,7 @@ def generation():
         identity.chmod(0o600)
         recipient = run(['age-keygen', '-y', str(identity)]).decode().strip()
         config = json.loads(Path('/etc/ultra-recovery/backup.json').read_text())
-        selected = config['state_paths'] + ['/etc/ultra-drill/cert.pem', '/etc/ultra-drill/key.pem']
-        state = collect(selected, config['artifact_paths'])
+        files = state_files(config, Path('/root/ultra-drill-stage'))
         artifacts = collect(config['artifact_paths'])
         artifact_plain = directory / 'artifact.tar.gz'
         manifest = pack(artifact_plain, {'kind': 'artifact', 'source': 'drill'}, {name: Path('/') / name for name in artifacts})
@@ -33,7 +44,6 @@ def generation():
         encrypt(artifact_plain, artifact, recipient)
         dump = directory / 'database.dump'
         dump.write_bytes(run(['runuser', '-u', 'postgres', '--', 'pg_dump', '-Fc', '--no-owner', '--no-acl', 'ultra_drill']))
-        files = {'state/' + name: Path('/') / name for name in state}
         files['database.dump'] = dump
         plain = directory / 'backup.tar.gz'
         now = int(time.time())

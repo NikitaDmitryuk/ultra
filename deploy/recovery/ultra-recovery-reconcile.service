@@ -1,0 +1,13 @@
+[Unit]
+Description=Reconcile backups and independent monitoring for owned ready ultra exits
+After=postgresql.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/ultra-recovery/reconcile.py --config /etc/ultra-recovery/reconcile.json
+TimeoutStartSec=540
+Nice=10
+PrivateTmp=yes
+NoNewPrivileges=true

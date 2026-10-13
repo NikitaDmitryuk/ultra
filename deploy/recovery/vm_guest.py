@@ -10,6 +10,51 @@ import subprocess
 import time
 
 
+INERT_UNITS = (
+    'ultra-recovery-backup.service', 'ultra-recovery-backup.timer',
+    'ultra-recovery-prune.service', 'ultra-recovery-prune.timer',
+    'ultra-recovery-reconcile.service', 'ultra-recovery-reconcile.timer',
+    'ultra-monitor.service', 'ultra-monitor.timer',
+    'ultra-monitor-probe.service', 'ultra-monitor-probe.timer',
+    'certbot.service', 'certbot.timer',
+)
+
+
+def inert_unit_path(path):
+    # Includes restored target.wants links and supplementary unit directories.
+    return any(part in INERT_UNITS or part in {unit + '.d' for unit in INERT_UNITS}
+               for part in Path(path).parts)
+
+
+def mask_external_automation(unit_directory='/etc/systemd/system'):
+    directory = Path(unit_directory)
+    for unit in INERT_UNITS:
+        path = directory / unit
+        if path.is_symlink() and os.readlink(path) == '/dev/null':
+            continue
+        if path.exists() or path.is_symlink():
+            path.unlink()
+    # Persistent masks have priority over restored /etc units; runtime /run masks
+    # would not. The copy step below must never follow these /dev/null symlinks.
+    run(['systemctl', 'mask', '--now', *INERT_UNITS])
+
+
+def install_stage_files(stage, manifest, artifacts, target_root='/'):
+    for source in [stage / 'state', stage / 'artifacts']:
+        for path in source.rglob('*'):
+            if not path.is_file() or path.name == 'manifest.json':
+                continue
+            relative = path.relative_to(source)
+            if inert_unit_path(relative):
+                continue
+            target = Path(target_root) / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target)
+            name = relative.as_posix()
+            row = artifacts['files'][name] if source.name == 'artifacts' else manifest['files']['state/' + name]
+            target.chmod(row['mode'])
+
+
 def run(args, data=None):
     Path('/var/lib/ultra-drill-phase').write_text(Path(args[0]).name + ('/' + args[4] if args[0] == 'runuser' and len(args) > 4 else '') + '\n')
     p = subprocess.run(args, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
@@ -49,16 +94,8 @@ def restore(stage):
             content = (root / name).read_bytes()
             if hashlib.sha256(content).hexdigest() != row['sha256']:
                 raise RuntimeError('staging checksum mismatch')
-    for source in [stage / 'state', stage / 'artifacts']:
-        for path in source.rglob('*'):
-            if not path.is_file() or path.name == 'manifest.json':
-                continue
-            target = Path('/') / path.relative_to(source)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(path, target)
-            name = path.relative_to(source).as_posix()
-            row = artifacts['files'][name] if source.name == 'artifacts' else manifest['files']['state/' + name]
-            target.chmod(row['mode'])
+    mask_external_automation()
+    install_stage_files(stage, manifest, artifacts)
     run(['systemctl', 'stop', 'nginx'])
     # No restored EnvironmentFile is executed; real credentials remain inert.
     write('/etc/ultra-relay/environment', 'ULTRA_RELAY_ADMIN_TOKEN=drill-admin-token\n')
@@ -122,6 +159,7 @@ def restore(stage):
     run(['chmod', '700', '/var/lib/ultra-relay'])
     # Override start commands explicitly and remove all restored supplementary units.
     shutil.rmtree('/etc/systemd/system/ultra-relay.service.d', ignore_errors=True)
+    shutil.rmtree('/etc/systemd/system/ultra-bot.service.d', ignore_errors=True)
     write('/etc/systemd/system/ultra-relay.service.d/drill.conf', '[Service]\nExecStart=\nExecStart=/usr/local/bin/ultra-relay -spec /etc/ultra-relay/spec.json -log-level error\n')
     write('/etc/systemd/system/ultra-bot.service.d/drill.conf', '[Service]\nExecStart=\nExecStart=/usr/local/bin/ultra-bot -spec /etc/ultra-relay/spec.json -dev -port 18444 -log-level error\n')
     Path('/var/www/ultra-acme/.well-known/acme-challenge').mkdir(parents=True, exist_ok=True)

@@ -23,6 +23,11 @@ MAX_FILES = 20000
 NAME = re.compile(r'(?:backup-[0-9]{10}-[a-f0-9]{32}|artifact-[a-f0-9]{64})\.age$')
 SOURCE = re.compile(r'[a-zA-Z0-9_-]{1,64}$')
 EXCLUDED = {'runtime.db', 'runtime.db.lock'}
+EXCLUDED_FILES = {
+    Path('/var/lib/ultra-bot/subscriptions.json'),
+    Path('/var/lib/ultra-relay/recovery-status.json'),
+    Path('/var/lib/ultra-relay/recovery-reconcile-status.json'),
+}
 EXCLUDED_DIRECTORIES = {Path('/var/lib/ultra-relay/releases'), Path('/var/lib/ultra-relay/candidates')}
 
 
@@ -116,6 +121,8 @@ def collect(paths, excluded_paths=()):
             raise ValueError('required state missing')
         candidates = [path] if path.is_file() else sorted(path.rglob('*'))
         for candidate in candidates:
+            if candidate in EXCLUDED_FILES:
+                continue  # Derived cache and health receipts are recomputed after restore.
             if any(p == candidate or p in candidate.parents for p in excluded_paths):
                 continue  # Explicitly versioned assets are copied only in the artifact.
             if any(p == candidate or p in candidate.parents for p in EXCLUDED_DIRECTORIES):
@@ -209,10 +216,12 @@ def ssh(config, destination, command, **kwargs):
         raise ValueError('invalid SSH destination')
     args = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'UpdateHostKeys=no',
             '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2']
-    if config.get('identity_file'):
-        args += ['-i', config['identity_file']]
-    if config.get('known_hosts'):
-        args += ['-o', 'UserKnownHostsFile=' + config['known_hosts']]
+    identity = destination.get('identity_file', config.get('identity_file'))
+    known_hosts = destination.get('known_hosts', config.get('known_hosts'))
+    if identity:
+        args += ['-i', identity]
+    if known_hosts:
+        args += ['-o', 'UserKnownHostsFile=' + known_hosts]
     import shlex
     return run(args + [host, shlex.join(command)], **kwargs)
 
@@ -313,7 +322,10 @@ def create(config):
                 raise ValueError('backup exceeded freshness budget')
             completed = int(time.time())
             atomic_json(repo / 'last-success.json', {'source': source, 'snapshot_at': snapshot,
-                         'completed_at': completed, 'destinations': successful})
+                         'completed_at': completed, 'destinations': successful,
+                         'backup_name': encrypted.name, 'backup_sha256': digest(encrypted),
+                         'artifact_name': artifact.name, 'artifact_sha256': digest(artifact),
+                         'delivered_target_ids': [item.get('id', item.get('name', item['host'])) for item in destinations if item['host'] in successful]})
             diagnostic_status(config, successful, snapshot, completed)
 
 

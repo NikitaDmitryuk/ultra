@@ -69,6 +69,35 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'binary artifacts changed'): recovery.create(config)
         self.assertFalse((self.repo / 'last-success.json').exists())
         self.assertFalse(list(self.repo.glob('artifact-*.age')))
+    def test_capture_receipt_matches_delivered_cipher_and_artifact(self):
+        state=self.root/'spec.json';state.write_text('{}')
+        binary=self.root/'binary';binary.write_bytes(b'fixture-binary')
+        config={'source':'bridge','repository':str(self.repo),'database':'ultra_test','state_paths':[str(state)],
+                'artifact_paths':[str(binary)],'recipient':'fixture-public','diagnostic_status':False,
+                'destinations':[{'id':'owned-node','host':'owned-address','required':True}]}
+        delivered={}
+        def run(args,**kwargs):
+            kwargs['stdout'].write(b'fixture-pg-dump')
+            return argparse.Namespace(returncode=0)
+        def encrypt(source,target,recipient):target.write_bytes(source.read_bytes())
+        def deliver(config,destination,source,encrypted,snapshot):delivered[encrypted.name]=encrypted.read_bytes()
+        with mock.patch.object(recovery,'run',side_effect=run),mock.patch.object(recovery,'encrypt',side_effect=encrypt),mock.patch.object(recovery,'verify_remote_artifact',side_effect=ValueError('missing')),mock.patch.object(recovery,'deliver',side_effect=deliver):
+            recovery.create(config)
+        receipt=json.loads((self.repo/'last-success.json').read_text())
+        self.assertEqual(receipt['source'],'bridge')
+        self.assertEqual(receipt['delivered_target_ids'],['owned-node'])
+        self.assertEqual(receipt['backup_sha256'],hashlib.sha256(delivered[receipt['backup_name']]).hexdigest())
+        self.assertEqual(receipt['artifact_sha256'],hashlib.sha256(delivered[receipt['artifact_name']]).hexdigest())
+
+    def test_destination_specific_pins_override_defaults(self):
+        config={'identity_file':'global-key','known_hosts':'global-pins'}
+        destination={'host':'root@192.0.2.1','identity_file':'node-key','known_hosts':'node-pins'}
+        with mock.patch.object(recovery,'run',return_value=argparse.Namespace(returncode=0))as run:
+            recovery.ssh(config,destination,['true'])
+        argv=run.call_args.args[0]
+        self.assertIn('node-key',argv);self.assertIn('UserKnownHostsFile=node-pins',argv)
+        self.assertNotIn('global-key',argv);self.assertIn('StrictHostKeyChecking=yes',argv)
+
     def test_retention_keeps_hour_day_and_last_stale(self):
         now=1800000000
         names=['backup-'+str(now-age)+'-'+('a'*32)+'.age' for age in (1,60,3601,3700,7200,86401,86402,16*86400)]
@@ -88,6 +117,41 @@ class RecoveryTests(unittest.TestCase):
         state=self.root/'state';state.mkdir();(state/'runtime.db').write_text('changing');(state/'spec.json').write_text('{}')
         files=recovery.collect([str(state)])
         self.assertEqual(len(files),1)
+    def test_only_exact_derived_subscription_cache_is_excluded(self):
+        self.assertEqual(recovery.EXCLUDED_FILES,{
+            Path('/var/lib/ultra-bot/subscriptions.json'),
+            Path('/var/lib/ultra-relay/recovery-status.json'),
+            Path('/var/lib/ultra-relay/recovery-reconcile-status.json'),
+        })
+        bot=self.root/'ultra-bot';bot.mkdir()
+        derived=bot/'subscriptions.json';derived.write_text('first derived generation')
+        settings=bot/'settings.json';settings.write_text('stable settings')
+        other=bot/'other';other.mkdir()
+        canonical=other/'subscriptions.json';canonical.write_text('canonical data')
+        with mock.patch.object(recovery,'EXCLUDED_FILES',{derived}):
+            before=recovery.collect([str(bot)])
+            derived.write_text('a changed and longer derived generation')
+            after=recovery.collect([str(bot)])
+        self.assertEqual(before,after)
+        self.assertNotIn(str(derived.relative_to('/')),before)
+        self.assertIn(str(settings.relative_to('/')),before)
+        self.assertIn(str(canonical.relative_to('/')),before)
+
+    def test_exact_derived_health_receipts_do_not_invalidate_capture(self):
+        relay=self.root/'ultra-relay';relay.mkdir()
+        derived=[relay/'recovery-status.json',relay/'recovery-reconcile-status.json']
+        for path in derived:path.write_text('first derived health')
+        other=relay/'keys';other.mkdir()
+        keys=[other/path.name for path in derived]
+        for path in keys:path.write_text('required canonical key fixture')
+        with mock.patch.object(recovery,'EXCLUDED_FILES',set(derived)):
+            before=recovery.collect([str(relay)])
+            for path in derived:path.write_text('newer and longer health receipt')
+            after=recovery.collect([str(relay)])
+        self.assertEqual(before,after)
+        for path in derived:self.assertNotIn(str(path.relative_to('/')),before)
+        for path in keys:self.assertIn(str(path.relative_to('/')),before)
+
     def test_binary_staging_is_excluded_but_state_is_retained(self):
         state=self.root/'state';state.mkdir();(state/'settings.json').write_text('{}')
         candidate=state/'candidates';candidate.mkdir();(candidate/'large-relay').write_bytes(b'candidate')

@@ -1,0 +1,23 @@
+{
+  "database": "ultra_db",
+  "bridge_provider": "vdsina",
+  "vultr_state_dir": "/var/lib/ultra-relay/vultr",
+  "ssh_identity_file": "/etc/ultra-relay/automation/id_ed25519",
+  "vultr_api_key_file": "/etc/ultra-relay/vultr-api-key",
+  "api_key_owner": "ultra-relay",
+  "ssh_identity_owner": "ultra-relay",
+  "backup_config": "/etc/ultra-recovery/backup.json",
+  "state_dir": "/var/lib/ultra-recovery-reconcile",
+  "status_file": "/var/lib/ultra-relay/recovery-reconcile-status.json",
+  "status_group": "ultra-relay",
+  "bundle_dir": "/opt/ultra-recovery",
+  "client_binary": "/usr/local/bin/ultra-client",
+  "bot_token_file": "/etc/ultra-recovery/primary-bot-token",
+  "chat_id_file": "/etc/ultra-recovery/admin-chat-id",
+  "probe_profile_file": "/etc/ultra-recovery/probe.json",
+  "bridge_url": "https://REPLACE_DOMAIN/happ",
+  "payload_url": "https://www.cloudflare.com/cdn-cgi/trace",
+  "static_nodes": [
+    {"id": "REPLACE_NL_NODE_UUID", "name": "NL", "address": "192.0.2.2", "provider": "vdsina", "known_hosts": "/etc/ultra-recovery/known_hosts"}
+  ]
+}

@@ -1,0 +1,10 @@
+[Unit]
+Description=Discover newly ready ultra exits every minute
+[Timer]
+OnBootSec=30s
+OnActiveSec=30s
+OnUnitInactiveSec=60s
+RandomizedDelaySec=3s
+Persistent=true
+[Install]
+WantedBy=timers.target

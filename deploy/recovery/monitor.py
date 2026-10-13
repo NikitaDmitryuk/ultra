@@ -48,8 +48,12 @@ def checks(config, now):
         host = config['peer_host']
         if not re.fullmatch(r'[A-Za-z0-9_.@:-]+', host) or host.startswith('-'):
             raise ValueError('invalid peer host')
-        result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'UpdateHostKeys=no', '-o', 'ConnectTimeout=5', host,
-                                 'cat /var/lib/ultra-monitor/heartbeat.json'], capture_output=True, timeout=8)
+        command = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'UpdateHostKeys=no', '-o', 'ConnectTimeout=5']
+        if config.get('peer_identity_file'):
+            command += ['-i', config['peer_identity_file'], '-o', 'IdentitiesOnly=yes']
+        if config.get('peer_known_hosts'):
+            command += ['-o', 'UserKnownHostsFile=' + config['peer_known_hosts']]
+        result = subprocess.run(command + [host, 'cat /var/lib/ultra-monitor/heartbeat.json'], capture_output=True, timeout=8)
         try:
             heartbeat = json.loads(result.stdout)
             age = now - heartbeat['updated_at']
@@ -151,7 +155,7 @@ def cycle(config, directory):
         raise ValueError('invalid monitor bot token')
     drain(state, token, config['chat_id'], now)
     atomic_json(path, state)
-    atomic_json(directory / 'heartbeat.json', {'updated_at': now, 'checks': state.get('checks', {}), 'pending': len(state.get('queue', [])), 'send_error': state.get('send_error')})
+    atomic_json(directory / 'heartbeat.json', {'updated_at': now, 'checks': state.get('checks', {}), 'current_checks': results, 'pending': len(state.get('queue', [])), 'send_error': state.get('send_error')})
 
 
 def main():
