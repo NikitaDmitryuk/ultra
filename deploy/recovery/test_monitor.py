@@ -43,6 +43,38 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(state['queue']),monitor.MAX_EVENTS);self.assertIn('queue_overflow_at',state)
 
 class ServiceMonitorTests(unittest.TestCase):
+    def test_missing_heartbeat_is_not_a_telegram_delivery_failure(self):
+        import subprocess
+        config={'mode':'peer','peer_host':'root@192.0.2.1'}
+        with patch.object(monitor.subprocess, 'run', return_value=subprocess.CompletedProcess([], 255, stdout=b'')):
+            results=monitor.checks(config,150)
+        self.assertFalse(results['us_monitor'])
+        self.assertNotIn('us_notifications',results)
+
+    def test_stale_heartbeat_is_not_a_telegram_delivery_failure(self):
+        import subprocess
+        config={'mode':'peer','peer_host':'root@192.0.2.1'}
+        value=json.dumps({'updated_at':1,'send_error':'telegram_unavailable'}).encode()
+        with patch.object(monitor.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout=value)):
+            results=monitor.checks(config,150)
+        self.assertFalse(results['us_monitor'])
+        self.assertNotIn('us_notifications',results)
+
+    def test_mode_change_clears_old_health_and_preserves_send_queue(self):
+        import time
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);root.chmod(0o700)
+            state=root/'state.json'
+            state.write_text(json.dumps({'mode':'primary','checks':{'vpn_payload':True},'streaks':{'vpn_payload':{'ok':True,'count':2}},'queue':[{'text':'old alarm','next_at':time.time()+3600,'attempts':1}]}));state.chmod(0o600)
+            token=root/'token';token.write_text('123:fixture');token.chmod(0o600)
+            with patch.object(monitor,'checks',return_value={'us_monitor':True,'us_notifications':True}):
+                monitor.cycle({'mode':'peer','node':'peer','token_file':str(token),'chat_id':'fixture'},root)
+            saved=json.loads(state.read_text())
+            self.assertNotIn('vpn_payload',saved['checks'])
+            self.assertNotIn('vpn_payload',saved['streaks'])
+            self.assertEqual(saved['queue'][0]['text'],'old alarm')
+            self.assertEqual(saved['mode'],'peer')
+
     def test_probe_has_small_response_bound_and_no_redirect(self):
         import subprocess
         with patch.object(monitor.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as call:
