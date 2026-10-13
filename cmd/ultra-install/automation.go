@@ -366,11 +366,22 @@ func statusPersistedAutomation(p *installplan.InstallPlan) error {
 	if err := os.Setenv("ULTRA_INSTALL_SSH_STRICT_HOST_KEY", "yes"); err != nil {
 		return err
 	}
-	command := "test -f /opt/ultra-recovery/automation.py && python3 /opt/ultra-recovery/automation.py --action status"
+	command := persistedAutomationStatusCommand("/var/lib/ultra-automation")
 	if err := install.RunSSH(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, command); err != nil {
 		return errors.New("installed automation status unavailable")
 	}
 	return nil
+}
+
+func persistedAutomationStatusCommand(stateRoot string) string {
+	program := `import json,os,pathlib,re,sys
+state=pathlib.Path(sys.argv[1])
+version=json.loads((state/'release.json').read_text()).get('version','')
+if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?',version): raise SystemExit(2)
+script=state/'releases'/version/'automation.py'
+if not script.is_file(): raise SystemExit(3)
+os.execv('/usr/bin/python3',['python3',str(script),'--action','status'])`
+	return "python3 -c " + shellQuote(program) + " " + shellQuote(stateRoot)
 }
 
 func upgradePersistedAutomation(p *installplan.InstallPlan, releaseDir string) error {
