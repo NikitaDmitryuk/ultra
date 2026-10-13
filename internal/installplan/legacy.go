@@ -13,7 +13,7 @@ func LoadLegacyEnvConfig(path string) (*InstallPlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	return LegacyValuesToPlan(values), nil
+	return CanonicalValuesToPlan(values)
 }
 
 func LegacyValuesToPlan(v map[string]string) *InstallPlan {
@@ -25,7 +25,7 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 	tunnelPort := intDefault(v, "TUNNEL_PORT", vlessPort)
 
 	p := &InstallPlan{
-		SchemaVersion: CurrentSchemaVersion,
+		SchemaVersion: 1,
 		SSH: SSHConfig{
 			User:              sshUser,
 			Identity:          v["IDENTITY"],
@@ -78,10 +78,11 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 			User:        valueDefault(v, "DB_USER", "ultra"),
 		},
 		Bot: BotConfig{
-			Enabled: boolValue(v, "BOT_ENABLE", false),
-			Domain:  v["BOT_DOMAIN"],
-			Port:    intDefault(v, "BOT_PORT", 8444),
-			EnvFile: valueDefault(v, "BOT_ENV_FILE", ".env"),
+			SubscriptionDomain: v["SUBSCRIPTION_DOMAIN"],
+			Enabled:            boolValue(v, "BOT_ENABLE", false),
+			Domain:             v["BOT_DOMAIN"],
+			Port:               intDefault(v, "BOT_PORT", 8444),
+			EnvFile:            valueDefault(v, "BOT_ENV_FILE", ".env"),
 		},
 		Secrets: SecretsConfig{
 			EnvFile: valueDefault(v, "BOT_ENV_FILE", ".env"),

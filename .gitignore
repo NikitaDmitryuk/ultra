@@ -12,6 +12,8 @@
 /ultra-relay
 /ultra-relay-linux-amd64
 /ultra-relay-linux-arm64
+/ultra-client-linux-amd64
+/ultra-client-linux-arm64
 
 # Test binary, built with `go test -c`
 *.test

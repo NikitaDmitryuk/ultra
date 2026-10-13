@@ -32,6 +32,9 @@ tmp="${manifest}.tmp"
   printf '{\n'
   printf '  "schema_version": 1,\n'
   printf '  "version": "%s",\n' "$(json_escape "$VERSION")"
+  printf '  "capabilities": ["service-access-v1"],\n'
+  printf '  "database_schema_min": 24,\n'
+  printf '  "database_schema_max": 24,\n'
   printf '  "assets": [\n'
   first=1
   for file in \
@@ -41,6 +44,9 @@ tmp="${manifest}.tmp"
     ultra-relay-linux-arm64 \
     ultra-bot-linux-amd64 \
     ultra-bot-linux-arm64 \
+    ultra-client-linux-amd64 \
+    ultra-client-linux-arm64 \
+    ultra-recovery.tar.gz \
     mobile-bootstrap.sh \
     checksums.txt; do
     path="${DIST_DIR}/${file}"

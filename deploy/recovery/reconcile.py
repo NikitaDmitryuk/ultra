@@ -296,7 +296,9 @@ def api(config, method, path, data=None):
     raise ValueError('provider unavailable')
 
 
-def ensure_provider_peer_rule(config, primary, peer):
+def ensure_provider_peer_rule(config, primary, peer, port=22):
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError('invalid peer port')
     if not primary.get('managed'):
         return  # Static receiver firewall remains operator-managed.
     identifier = primary['instance_id']
@@ -311,17 +313,17 @@ def ensure_provider_peer_rule(config, primary, peer):
         raise ValueError('foreign managed firewall')
     rules = api(config, 'GET', '/v2/firewalls/' + firewall + '/rules').get('firewall_rules', [])
     address = str(ipaddress.IPv4Address(peer['address']))
-    required = {'ip_type': 'v4', 'protocol': 'tcp', 'subnet': address, 'subnet_size': 32, 'port': '22'}
+    required = {'ip_type': 'v4', 'protocol': 'tcp', 'subnet': address, 'subnet_size': 32, 'port': str(port)}
     if not any(all(rule.get(key) == value for key, value in required.items()) for rule in rules):
         api(config, 'POST', '/v2/firewalls/' + firewall + '/rules', required)
     return address
 
 
-def allow_peer(config, primary, peer):
-    address = ensure_provider_peer_rule(config, primary, peer)
+def allow_peer(config, primary, peer, port=22):
+    address = ensure_provider_peer_rule(config, primary, peer, port=port)
     if address is None:
         return
-    command = "if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then ufw allow from " + address + " to any port 22 proto tcp >/dev/null; fi"
+    command = "if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then ufw allow from " + address + " to any port " + str(port) + " proto tcp >/dev/null; fi"
     execute(config, primary, ['sh', '-c', command], stdout=subprocess.DEVNULL)
 
 
@@ -396,6 +398,28 @@ def topology_fingerprint(config, nodes):
 
 
 
+def refresh_monitor_profile(config):
+    # Only provisioned installations opt in; legacy manually managed profiles
+    # remain compatible until adopted by the full installer.
+    spec = config.get('monitor_spec_file')
+    if not spec:
+        return
+    cloud_private_file(spec, 'ultra-relay')
+    targets = config.get('monitor_targets', [config['payload_url']])
+    if not isinstance(targets, list) or not targets or any(not isinstance(t, str) or ',' in t for t in targets):
+        raise ValueError('invalid monitor targets')
+    result = subprocess.run(['/usr/local/bin/ultra-relay', '-ensure-monitor-access', '-spec', spec,
+                    '-monitor-profile-output', config['probe_profile_file'],
+                    '-monitor-targets', ','.join(targets)], check=True, timeout=65,
+                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if len(result.stdout) > 1024:
+        raise ValueError('monitor status exceeds bounds')
+    status = json.loads(result.stdout)
+    if status.get('monitor_access') != 'ready' or type(status.get('quota_available')) is not bool:
+        raise ValueError('invalid monitor access status')
+    return status['quota_available']
+
+
 def reconcile(config):
     directory = Path(config['state_dir'])
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -404,6 +428,8 @@ def reconcile(config):
     with open(directory / 'reconcile.lock', 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
+            stage = 'monitor_profile'
+            monitor_quota = refresh_monitor_profile(config)
             stage = 'discover'
             cloud_private_file(config['ssh_identity_file'], config.get('ssh_identity_owner', 'ultra-relay'))
             rows = discover(config)  # No DB failure may be interpreted as an empty topology.
@@ -457,6 +483,8 @@ def reconcile(config):
                        'probe_socks': '127.0.0.1:10818', 'backup_status': '/var/lib/ultra-recovery/last-success.json',
                        'backup_independent': bool(independent), 'token_file': '/etc/ultra-recovery/primary-bot-token',
                        'chat_id': private(config['chat_id_file']).read_text().strip()}
+            if monitor_quota is not None:
+                monitor['service_quota_available'] = monitor_quota
             stage = 'primary_monitor'
             install(config, primary, monitor)
             monitor_ready(config, primary, 'primary', bool(independent))

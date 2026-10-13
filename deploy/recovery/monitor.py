@@ -19,7 +19,7 @@ def curl(url, proxy=None):
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError('HTTPS probe URL required')
-    args = ['curl', '--silent', '--fail', '--max-time', '8', '--connect-timeout', '4', '--max-filesize', '1048576']
+    args = ['curl', '--silent', '--fail', '--max-time', '8', '--connect-timeout', '4', '--max-filesize', '16384']
     if proxy:
         if not re.fullmatch(r'127\.0\.0\.1:[0-9]{1,5}', proxy):
             raise ValueError('loopback probe SOCKS required')
@@ -35,6 +35,8 @@ def checks(config, now):
     if config['mode'] == 'primary':
         results['bridge_https'] = curl(config['bridge_url'])
         results['vpn_payload'] = curl(config['payload_url'], config['probe_socks'])
+        if 'service_quota_available' in config:
+            results['monitor_quota_available'] = config['service_quota_available'] is True
         status = Path(config['backup_status'])
         try:
             saved = json.loads(status.read_text())

@@ -11,6 +11,11 @@ import (
 // EnableRecoveryNode authorizes the bridge worker to maintain an isolated replica.
 // This remains callable by the local installer; no cloud API is required.
 func EnableRecoveryNode(user, primary, target, identity string) error {
+	return EnableRecoveryNodeForInstall(user, primary, target, identity, false)
+}
+
+// EnableRecoveryNodeForInstall permits a required primary restart only during an explicit full install.
+func EnableRecoveryNodeForInstall(user, primary, target, identity string, allowRestart bool) error {
 	if primary == target {
 		return errors.New("replica must differ from primary")
 	}
@@ -38,7 +43,11 @@ grep -qF -- '%s' /root/.ssh/authorized_keys || printf '%%s\n' '%s ultra-recovery
 `, public, public)); err != nil {
 		return errors.New("replica SSH authorization failed")
 	}
-	return RunSSH(user, primary, identity, recoveryPrimaryScript)
+	script := recoveryPrimaryScript
+	if allowRestart {
+		script = "export ULTRA_RECOVERY_ALLOW_RESTART=1\n" + script
+	}
+	return RunSSH(user, primary, identity, script)
 }
 
 // This script operates on a co-located primary and preserves existing application credentials.

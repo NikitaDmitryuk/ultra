@@ -17,8 +17,11 @@ func ValidatePlan(p *InstallPlan) error {
 	if p.SchemaVersion == 0 {
 		p.SchemaVersion = CurrentSchemaVersion
 	}
-	if p.SchemaVersion != CurrentSchemaVersion {
+	if p.SchemaVersion != 1 && p.SchemaVersion != CurrentSchemaVersion {
 		return fmt.Errorf("unsupported install plan schema_version %d", p.SchemaVersion)
+	}
+	if err := validateAutomation(p); err != nil {
+		return err
 	}
 	if strings.TrimSpace(p.SSH.User) == "" {
 		p.SSH.User = "root"

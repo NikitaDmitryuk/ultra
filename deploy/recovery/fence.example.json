@@ -1,0 +1,7 @@
+{
+  "source": "bridge",
+  "confirmed_offline": true,
+  "confirmed_at": 0,
+  "source_address": "192.0.2.10",
+  "target_host": "root@192.0.2.20"
+}

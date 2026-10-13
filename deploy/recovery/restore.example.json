@@ -1,0 +1,26 @@
+{
+  "format": 1,
+  "source": "bridge",
+  "bundle": "/home/operator/recovery/generation/backup-1791856682-00000000000000000000000000000000.age",
+  "identity": "/home/operator/recovery/identity.txt",
+  "fence_file": "/home/operator/recovery/fence.json",
+  "state_dir": "/home/operator/recovery/restore-runs",
+  "target": {
+    "host": "root@192.0.2.20",
+    "port": 22,
+    "identity": "/home/operator/.ssh/replacement_vm",
+    "known_hosts": "/home/operator/recovery/replacement_known_hosts"
+  },
+  "ingress": {
+    "host": "root@198.51.100.10",
+    "port": 22,
+    "identity": "/home/operator/.ssh/nl_ingress",
+    "known_hosts": "/home/operator/recovery/ingress_known_hosts"
+  },
+  "old_bridge_address": "192.0.2.10",
+  "new_bridge_address": "192.0.2.20",
+  "public_host": "192.0.2.20",
+  "subscription_domain": "vpn.example.org",
+  "readiness_timeout": 900,
+  "new_bridge_provider": "replacement-provider"
+}

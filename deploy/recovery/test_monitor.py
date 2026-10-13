@@ -41,3 +41,21 @@ class MonitorTests(unittest.TestCase):
         state={'checks':{'vpn':True},'queue':[{'text':'old','attempts':0,'next_at':0}]*monitor.MAX_EVENTS}
         monitor.transition(state,{'vpn':False},1,'US');monitor.transition(state,{'vpn':False},2,'US')
         self.assertEqual(len(state['queue']),monitor.MAX_EVENTS);self.assertIn('queue_overflow_at',state)
+
+class ServiceMonitorTests(unittest.TestCase):
+    def test_probe_has_small_response_bound_and_no_redirect(self):
+        import subprocess
+        with patch.object(monitor.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as call:
+            self.assertTrue(monitor.curl('https://probe.example/health','127.0.0.1:10818'))
+        args=call.call_args.args[0]
+        self.assertEqual(args[args.index('--max-filesize')+1], '16384')
+        self.assertNotIn('--location', args)
+    def test_quota_is_distinct_from_payload_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status=Path(directory)/'status.json'
+            status.write_text(json.dumps({'snapshot_at':100}))
+            config={'mode':'primary','bridge_url':'https://bridge.invalid','payload_url':'https://payload.invalid','probe_socks':'127.0.0.1:10818','backup_status':str(status),'service_quota_available':False}
+            with patch.object(monitor,'curl',return_value=True):
+                result=monitor.checks(config,110)
+            self.assertTrue(result['vpn_payload'])
+            self.assertFalse(result['monitor_quota_available'])

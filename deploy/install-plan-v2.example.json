@@ -1,0 +1,81 @@
+{
+  "schema_version": 2,
+  "ssh": {
+    "user": "root",
+    "identity": "/secure/operator_ed25519",
+    "strict_host_key": true
+  },
+  "bridge": {
+    "ssh_host": "192.0.2.10",
+    "public_host": "192.0.2.10",
+    "reality_dest": "www.microsoft.com:443",
+    "reality_sni": "www.microsoft.com",
+    "vless_port": 24443
+  },
+  "exits": [
+    {
+      "name": "NL",
+      "ssh_host": "192.0.2.20",
+      "priority": 100
+    },
+    {
+      "name": "US",
+      "ssh_host": "192.0.2.30",
+      "priority": 200
+    }
+  ],
+  "database": {
+    "enabled": true,
+    "name": "ultra_db",
+    "user": "ultra"
+  },
+  "bot": {
+    "enabled": true,
+    "domain": "admin.example.com",
+    "port": 8444
+  },
+  "secrets": {
+    "env_file": "/secure/.env"
+  },
+  "features": {
+    "preset": "steamlike",
+    "generate_exit_tls": true
+  },
+  "automation": {
+    "version": "v1.0.0",
+    "release_dir": "/srv/ultra-release-v1.0.0",
+    "age_recipient": "age1REPLACE_WITH_PUBLIC_RECIPIENT",
+    "bridge_provider": "provider-a",
+    "bridge_ipv4": "192.0.2.10",
+    "bridge_url": "https://admin.example.com/happ",
+    "known_hosts_file": "/secure/ultra-known-hosts",
+    "admin_telegram_id": 123456789,
+    "static_nodes": [
+      {
+        "name": "NL",
+        "address": "192.0.2.20",
+        "provider": "provider-a",
+        "budget": {
+          "monthly_bytes": 100000000000,
+          "is_fallback": true
+        }
+      },
+      {
+        "name": "US",
+        "address": "192.0.2.30",
+        "provider": "vultr",
+        "budget": {
+          "monthly_bytes": 100000000000,
+          "is_fallback": false
+        }
+      }
+    ],
+    "ingress": {
+      "domain": "edge.example.com",
+      "email": "operator@example.com",
+      "path": "/connect",
+      "public_host": "192.0.2.10"
+    },
+    "readiness_timeout_sec": 900
+  }
+}

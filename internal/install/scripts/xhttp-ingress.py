@@ -30,18 +30,50 @@ def atomic(path, data, mode=0o600):
     if path.exists():
         st = path.stat(); os.chown(tmp, st.st_uid, st.st_gid)
     os.replace(tmp, path)
+    sync_directory(path.parent)
+
+def sync_directory(path):
+    fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY)
+    try:os.fsync(fd)
+    finally:os.close(fd)
 
 def digest(data): return hashlib.sha256(data).hexdigest()
 
+def recover_owned(manifest):
+    journal=MANIFEST.with_name(MANIFEST.name+'.pending')
+    if not journal.exists():return
+    if journal.is_symlink():raise RuntimeError('managed journal is a symlink')
+    operation=json.loads(journal.read_text())
+    target=Path(operation['path'])
+    if operation.get('version')!=1 or not target.is_absolute() or target.is_symlink():
+        raise RuntimeError('invalid managed transaction')
+    before,after=operation['before'],operation['after']
+    current=digest(target.read_bytes()) if target.exists() else None
+    persisted=json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {}
+    if current not in (before,after) or persisted.get(str(target)) not in (before,after):
+        raise RuntimeError('managed transaction drift')
+    # File before-image means the write did not happen (or an enclosing rollback
+    # restored it). Target-image means finish its interrupted receipt update.
+    if current is None:persisted.pop(str(target),None)
+    else:persisted[str(target)]=current
+    atomic(MANIFEST,json.dumps(persisted,sort_keys=True).encode())
+    journal.unlink();sync_directory(journal.parent)
+    manifest.clear();manifest.update(persisted)
+
 def owned(path, content, manifest, mode=0o644):
+    recover_owned(manifest)
     key = str(path)
     if path.is_symlink(): raise RuntimeError('managed path is a symlink')
     old = path.read_bytes() if path.exists() else None
     if old is not None and manifest.get(key) != digest(old):
         raise RuntimeError('refusing foreign or modified configuration: ' + key)
     if old == content: return False
+    journal=MANIFEST.with_name(MANIFEST.name+'.pending')
+    atomic(journal,json.dumps({'version':1,'path':str(path),'before':digest(old) if old is not None else None,'after':digest(content)},sort_keys=True).encode())
     atomic(path, content, mode); manifest[key] = digest(content)
-    atomic(MANIFEST,json.dumps(manifest,sort_keys=True).encode()); return True
+    atomic(MANIFEST,json.dumps(manifest,sort_keys=True).encode())
+    journal.unlink();sync_directory(journal.parent)
+    return True
 
 def endpoint(p, port, experimental=False):
     return {'port':port,'server_name':p['domain'],'path':p['path'],'mode':'stream-up',
@@ -136,6 +168,7 @@ def prepare_certificate(p, manifest):
     run(['nginx','-t']);run(['systemctl','reload','nginx'])
     run(['certbot','certonly','--webroot','-w','/var/www/ultra-acme','-d',p['domain'],'--non-interactive','--agree-tos','--email',p['email']])
     challenge.unlink();manifest.pop(str(challenge),None)
+    atomic(MANIFEST,json.dumps(manifest,sort_keys=True).encode())
 
 def configure_renewal(p, manifest):
     # Existing bot HTTP-01 forwarding still reaches bridge:80. Keep that path served.
@@ -348,6 +381,53 @@ def main():
             assert owned(target,b'one',manifest)
             stamp=target.stat().st_mtime_ns
             assert not owned(target,b'one',manifest) and target.stat().st_mtime_ns==stamp
+            from unittest.mock import patch
+            original_atomic=atomic
+            for initial in (None,b'one'):
+                crash_target=Path(directory)/('new.conf' if initial is None else 'existing.conf')
+                state={}
+                if initial is not None:
+                    crash_target.write_bytes(initial);state[str(crash_target)]=digest(initial)
+                atomic(MANIFEST,json.dumps(state).encode())
+                def interrupted(path,*args,**kwargs):
+                    original_atomic(path,*args,**kwargs)
+                    if path==crash_target:raise SystemExit('simulated power loss')
+                with patch.dict(globals(),atomic=interrupted):
+                    try:owned(crash_target,b'two',state)
+                    except SystemExit:pass
+                    else:raise AssertionError('failure injection missed')
+                state=json.loads(MANIFEST.read_text())
+                owned(crash_target,b'two',state)
+                assert state[str(crash_target)]==digest(b'two')
+                assert not MANIFEST.with_name(MANIFEST.name+'.pending').exists()
+            for crash_phase in ('journal','receipt'):
+                crash_target=Path(directory)/(crash_phase+'.conf')
+                state={};atomic(MANIFEST,b'{}')
+                crash_at=MANIFEST if crash_phase=='receipt' else MANIFEST.with_name(MANIFEST.name+'.pending')
+                def interrupted(path,*args,**kwargs):
+                    original_atomic(path,*args,**kwargs)
+                    if path==crash_at:raise SystemExit('simulated power loss')
+                with patch.dict(globals(),atomic=interrupted):
+                    try:owned(crash_target,b'two',state)
+                    except SystemExit:pass
+                state=json.loads(MANIFEST.read_text())
+                owned(crash_target,b'two',state)
+                assert crash_target.read_bytes()==b'two' and state[str(crash_target)]==digest(b'two')
+                assert not MANIFEST.with_name(MANIFEST.name+'.pending').exists()
+            # A pending operation must not adopt unrelated edits.
+            atomic(MANIFEST,json.dumps({str(target):digest(b'one')}).encode())
+            state=json.loads(MANIFEST.read_text())
+            def interrupted(path,*args,**kwargs):
+                original_atomic(path,*args,**kwargs)
+                if path==target:raise SystemExit('simulated power loss')
+            with patch.dict(globals(),atomic=interrupted):
+                try:owned(target,b'two',state)
+                except SystemExit:pass
+            target.write_bytes(b'foreign')
+            try:owned(target,b'two',json.loads(MANIFEST.read_text()))
+            except RuntimeError:pass
+            else:raise AssertionError('pending transaction adopted foreign file')
+            MANIFEST.with_name(MANIFEST.name+'.pending').unlink(missing_ok=True)
             target.write_bytes(b'foreign')
             try:owned(target,b'two',manifest)
             except RuntimeError:pass

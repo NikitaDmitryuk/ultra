@@ -2,20 +2,21 @@ package installplan
 
 import "time"
 
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 type InstallPlan struct {
-	SchemaVersion int             `json:"schema_version"`
-	SSH           SSHConfig       `json:"ssh"`
-	Bridge        BridgeConfig    `json:"bridge"`
-	Exits         []ExitNode      `json:"exits"`
-	Database      DatabaseConfig  `json:"database,omitempty"`
-	Bot           BotConfig       `json:"bot,omitempty"`
-	Secrets       SecretsConfig   `json:"secrets,omitempty"`
-	Features      FeatureConfig   `json:"features,omitempty"`
-	Verification  Verification    `json:"verification,omitempty"`
-	Artifacts     ArtifactConfig  `json:"artifacts,omitempty"`
-	Execution     ExecutionConfig `json:"execution,omitempty"`
+	Automation    *AutomationConfig `json:"automation,omitempty"`
+	SchemaVersion int               `json:"schema_version"`
+	SSH           SSHConfig         `json:"ssh"`
+	Bridge        BridgeConfig      `json:"bridge"`
+	Exits         []ExitNode        `json:"exits"`
+	Database      DatabaseConfig    `json:"database,omitempty"`
+	Bot           BotConfig         `json:"bot,omitempty"`
+	Secrets       SecretsConfig     `json:"secrets,omitempty"`
+	Features      FeatureConfig     `json:"features,omitempty"`
+	Verification  Verification      `json:"verification,omitempty"`
+	Artifacts     ArtifactConfig    `json:"artifacts,omitempty"`
+	Execution     ExecutionConfig   `json:"execution,omitempty"`
 }
 
 type SSHConfig struct {
@@ -59,9 +60,10 @@ type DatabaseConfig struct {
 }
 
 type BotConfig struct {
-	Enabled bool   `json:"enabled,omitempty"`
-	Domain  string `json:"domain,omitempty"`
-	Port    int    `json:"port,omitempty"`
+	SubscriptionDomain string `json:"subscription_domain,omitempty"`
+	Enabled            bool   `json:"enabled,omitempty"`
+	Domain             string `json:"domain,omitempty"`
+	Port               int    `json:"port,omitempty"`
 	// EnvFile is kept for backward compatibility. New callers should use secrets.env_file.
 	EnvFile string `json:"env_file,omitempty"`
 }
@@ -184,4 +186,68 @@ type Issue struct {
 type DoctorReport struct {
 	OK     bool    `json:"ok"`
 	Issues []Issue `json:"issues,omitempty"`
+}
+
+// AutomationConfig contains references and public deployment policy, never secret values.
+// A v2 plan requires automation; v1 plans retain their legacy deployment semantics.
+type AutomationConfig struct {
+	DNS                 *AutomationDNS     `json:"dns,omitempty"`
+	Ingress             *AutomationIngress `json:"ingress,omitempty"`
+	AdminTelegramID     int64              `json:"admin_telegram_id,omitempty"`
+	ReleaseDir          string             `json:"release_dir"`
+	Version             string             `json:"version"`
+	AgeRecipient        string             `json:"age_recipient"`
+	BridgeProvider      string             `json:"bridge_provider"`
+	BridgeIPv4          string             `json:"bridge_ipv4"`
+	BridgeURL           string             `json:"bridge_url"`
+	CloudKeyFile        string             `json:"cloud_key_file,omitempty"`
+	KnownHostsFile      string             `json:"known_hosts_file"`
+	StaticNodes         []AutomationNode   `json:"static_nodes"`
+	StatePaths          []string           `json:"state_paths,omitempty"`
+	ArtifactPaths       []string           `json:"artifact_paths,omitempty"`
+	ReadinessTimeoutSec int                `json:"readiness_timeout_sec,omitempty"`
+}
+type StaticBudget struct {
+	MonthlyBytes int64 `json:"monthly_bytes"`
+	IsFallback   bool  `json:"is_fallback"`
+}
+
+type AutomationNode struct {
+	Budget   *StaticBudget `json:"budget,omitempty"`
+	Name     string        `json:"name"`
+	Address  string        `json:"address"`
+	Provider string        `json:"provider"`
+}
+
+func (p *InstallPlan) FullAutomation() bool { return p.SchemaVersion >= 2 || p.Automation != nil }
+
+type AutomationIngress struct {
+	Domain           string `json:"domain"`
+	Email            string `json:"email"`
+	Path             string `json:"path"`
+	ForwardHost      string `json:"forward_host,omitempty"`
+	PublicHost       string `json:"public_host,omitempty"`
+	BackendPort      int    `json:"backend_port"`
+	GatewayPort      int    `json:"gateway_port"`
+	StatusPort       int    `json:"status_port"`
+	ExperimentalPort int    `json:"experimental_port"`
+	StagingPort      int    `json:"staging_port"`
+}
+
+// AutomationDNS describes owned records. APIKeyFile is a derived runtime reference, never a token.
+type AutomationDNS struct {
+	Provider         string `json:"provider"`
+	Zone             string `json:"zone"`
+	TTL              int    `json:"ttl"`
+	SubscriptionName string `json:"subscription_name"`
+	VPNName          string `json:"vpn_name"`
+	APIKeyFile       string `json:"api_key_file,omitempty"`
+}
+
+// PublicSubscriptionDomain is independent of the bot's backend TLS certificate name.
+func (p *InstallPlan) PublicSubscriptionDomain() string {
+	if p.Bot.SubscriptionDomain != "" {
+		return p.Bot.SubscriptionDomain
+	}
+	return p.Bot.Domain
 }

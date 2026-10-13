@@ -132,6 +132,19 @@ class ReconcileTests(unittest.TestCase):
             reconcile.allow_peer(self.config,self.primary,self.nodes[0])
             self.assertFalse(any(call.args[1]=='POST'for call in api.call_args_list))
 
+    def test_tunnel_peer_port_is_validated_and_narrow(self):
+        with mock.patch.object(reconcile, 'api', side_effect=self.firewall_api) as api, mock.patch.object(reconcile, 'execute') as remote:
+            reconcile.allow_peer(self.config, self.primary, self.nodes[0], port=51001)
+            posted = [call for call in api.call_args_list if call.args[1] == 'POST']
+            self.assertEqual(posted[0].args[3]['port'], '51001')
+            self.assertEqual(posted[0].args[3]['subnet_size'], 32)
+            self.assertIn('to any port 51001 proto tcp', remote.call_args.args[2][-1])
+        for invalid in (0, 65536, True, '22; false'):
+            with mock.patch.object(reconcile, 'api') as api:
+                with self.assertRaises(ValueError):
+                    reconcile.ensure_provider_peer_rule(self.config, self.primary, self.nodes[0], port=invalid)
+                api.assert_not_called()
+
     def test_foreign_instance_or_firewall_never_mutated(self):
         for bad_kind in ['instance','firewall']:
             def foreign(config,method,path,data=None):
@@ -249,6 +262,29 @@ class ReconcileTests(unittest.TestCase):
         with stack:state=reconcile.reconcile(self.config)
         self.assertEqual(state['peer_pending'],[])
         self.assertIn(('install','NL','peer'),events)
+
+    def test_relocated_primary_provider_does_not_reuse_false_independence(self):
+        self.config['bridge_provider'] = 'vultr'
+        state_dir = Path(self.config['state_dir'])
+        state_dir.mkdir(mode=0o700)
+        reconcile.atomic_json(state_dir / 'state.json', {'primary': ID})
+        stack, events = self.run_transition(fresh_peer=True)
+        with stack:
+            result = reconcile.reconcile(self.config)
+        self.assertEqual(result['primary'], 'NL')
+        saved = json.loads(Path(self.config['backup_config']).read_text())
+        self.assertTrue(saved['independent'])
+        self.assertEqual([item['host'] for item in saved['destinations'] if item.get('required')], ['root@192.0.2.2'])
+        self.assertIn(('install', ID, 'peer'), events)
+
+    def test_same_provider_receiver_alone_never_claims_independence(self):
+        self.config['bridge_provider'] = 'vultr'
+        stack, _ = self.run_transition(nl_down=True)
+        with stack:
+            result = reconcile.reconcile(self.config)
+        self.assertEqual(result['primary'], ID)
+        self.assertFalse(json.loads(Path(self.config['backup_config']).read_text())['independent'])
+        self.assertFalse(json.loads(Path(self.config['status_file']).read_text())['independent'])
 
     def test_optional_previous_monitor_read_only_tolerates_absence(self):
         path=self.root/'previous-monitor.json'
@@ -371,3 +407,17 @@ class ReconcileTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+class MonitorRefreshTests(unittest.TestCase):
+    def test_refresh_uses_supported_command_and_redacted_result(self):
+        from unittest.mock import patch
+        import subprocess
+        config={'monitor_spec_file':'/etc/ultra-relay/spec.json','payload_url':'https://probe.example/health','probe_profile_file':'/etc/ultra-recovery/probe.json'}
+        with patch.object(reconcile,'cloud_private_file') as check, patch.object(reconcile.subprocess,'run',return_value=subprocess.CompletedProcess([],0,b'{"monitor_access":"ready","quota_available":false}')) as run:
+            self.assertIs(reconcile.refresh_monitor_profile(config),False)
+        check.assert_called_once_with(config['monitor_spec_file'],'ultra-relay')
+        argv=run.call_args.args[0]
+        self.assertIn('-ensure-monitor-access',argv)
+        self.assertIn('-monitor-profile-output',argv)
+    def test_legacy_profile_is_not_reprovisioned(self):
+        self.assertIsNone(reconcile.refresh_monitor_profile({}))

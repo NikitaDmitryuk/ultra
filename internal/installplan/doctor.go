@@ -66,7 +66,7 @@ func Doctor(ctx context.Context, p *InstallPlan, opts DoctorOptions) DoctorRepor
 			issues = append(issues, Issue{Severity: SeverityError, Code: CodeMissingBotToken, Node: "bot", Message: err.Error()})
 		}
 		if opts.LookupHost != nil {
-			ips, err := opts.LookupHost(ctx, p.Bot.Domain)
+			ips, err := opts.LookupHost(ctx, p.PublicSubscriptionDomain())
 			if err != nil || len(ips) == 0 {
 				issues = append(
 					issues,
@@ -74,11 +74,11 @@ func Doctor(ctx context.Context, p *InstallPlan, opts DoctorOptions) DoctorRepor
 						Severity: SeverityError,
 						Code:     CodeDNSMismatch,
 						Node:     "bot",
-						Message:  fmt.Sprintf("bot domain %s has no A/AAAA records", p.Bot.Domain),
+						Message:  fmt.Sprintf("bot domain %s has no A/AAAA records", p.PublicSubscriptionDomain()),
 					},
 				)
-			} else if !containsIP(ips, p.Bridge.SSHHost) {
-				issues = append(issues, Issue{Severity: SeverityWarning, Code: CodeDNSMismatch, Node: "bot", Message: fmt.Sprintf("bot domain %s resolves to %s, expected bridge %s", p.Bot.Domain, strings.Join(ips, ","), p.Bridge.SSHHost)})
+			} else if !containsIP(ips, expectedBotHost(p)) {
+				issues = append(issues, Issue{Severity: SeverityWarning, Code: CodeDNSMismatch, Node: "bot", Message: fmt.Sprintf("bot domain %s resolves to %s, expected bridge %s", p.PublicSubscriptionDomain(), strings.Join(ips, ","), expectedBotHost(p))})
 			}
 		}
 		if opts.DialTCP != nil {
@@ -203,4 +203,11 @@ func hasErrors(issues []Issue) bool {
 		}
 	}
 	return false
+}
+
+func expectedBotHost(p *InstallPlan) string {
+	if p.Automation != nil && p.Automation.Ingress != nil && p.Automation.Ingress.ForwardHost != "" {
+		return p.Automation.Ingress.ForwardHost
+	}
+	return p.Bridge.SSHHost
 }
