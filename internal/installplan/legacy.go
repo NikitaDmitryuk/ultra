@@ -16,11 +16,17 @@ func LoadLegacyEnvConfig(path string) (*InstallPlan, error) {
 	return CanonicalValuesToPlan(values)
 }
 
+// LoadConfig reads the canonical KEY=VALUE deployment configuration.
+func LoadConfig(path string) (*InstallPlan, error) {
+	return LoadLegacyEnvConfig(path)
+}
+
 func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 	sshUser := valueDefault(v, "SSH_USER", "root")
-	bridgeHost := firstValue(v, "BRIDGE", "FRONT")
+	bridgeAddress := firstValue(v, "BRIDGE", "FRONT")
+	bridgeSSHHost := valueDefault(v, "BRIDGE_SSH_HOST", bridgeAddress)
 	exitHost := firstValue(v, "EXIT", "BACK")
-	publicHost := valueDefault(v, "PUBLIC_HOST", bridgeHost)
+	publicHost := valueDefault(v, "PUBLIC_HOST", bridgeAddress)
 	vlessPort := intDefault(v, "VLESS_PORT", 443)
 	tunnelPort := intDefault(v, "TUNNEL_PORT", vlessPort)
 
@@ -33,7 +39,8 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 			ConnectTimeoutSec: intDefault(v, "ULTRA_SSH_CONNECT_TIMEOUT", 10),
 		},
 		Bridge: BridgeConfig{
-			SSHHost:     bridgeHost,
+			Address:     bridgeAddress,
+			SSHHost:     bridgeSSHHost,
 			PublicHost:  publicHost,
 			VLESSPort:   vlessPort,
 			TunnelPort:  tunnelPort,
@@ -159,7 +166,7 @@ func parseLegacyEnvFile(path string) (map[string]string, error) {
 		values[key] = unquote(strings.TrimSpace(val))
 	}
 	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("read legacy config: %w", err)
+		return nil, fmt.Errorf("read config: %w", err)
 	}
 	return values, nil
 }

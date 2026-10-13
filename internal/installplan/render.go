@@ -190,14 +190,14 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 	if p.Database.Enabled {
 		primaryHost := p.Database.PrimaryHost
 		if strings.TrimSpace(primaryHost) == "" {
-			primaryHost = p.Bridge.SSHHost
+			primaryHost = p.Bridge.Address
 		}
 		replicaHost := p.Database.ReplicaHost
 		if strings.TrimSpace(replicaHost) == "" && len(p.Exits) > 0 {
 			replicaHost = p.Exits[0].SSHHost
 		}
-		bridgeHBA := p.Bridge.SSHHost
-		if primaryHost == p.Bridge.SSHHost {
+		bridgeHBA := p.Bridge.Address
+		if primaryHost == p.Bridge.Address || primaryHost == p.Bridge.SSHHost {
 			bridgeHBA = "127.0.0.1"
 		}
 		pc := &install.PostgresConfig{
@@ -211,7 +211,7 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 		}
 		pgCfg = pc
 		dbHost := primaryHost
-		if dbHost == p.Bridge.SSHHost {
+		if dbHost == p.Bridge.Address || dbHost == p.Bridge.SSHHost {
 			dbHost = "127.0.0.1"
 		}
 		dbDSN = pc.DSN(dbHost)

@@ -4,6 +4,8 @@ SECRETS_ENV_FILE=.env
 SSH_USER=root
 IDENTITY=/secure/operator_ed25519
 BRIDGE=192.0.2.10
+# Optional SSH config alias or hostname; BRIDGE remains the service IPv4 address.
+BRIDGE_SSH_HOST=bridge-admin
 PUBLIC_HOST=192.0.2.10
 EXIT=192.0.2.20
 EXIT2=192.0.2.30

@@ -27,6 +27,7 @@ type SSHConfig struct {
 }
 
 type BridgeConfig struct {
+	Address     string `json:"address,omitempty"`
 	SSHHost     string `json:"ssh_host"`
 	PublicHost  string `json:"public_host,omitempty"`
 	VLESSPort   int    `json:"vless_port,omitempty"`

@@ -54,6 +54,56 @@ func TestLegacyValuesToPlanMapsExitPair(t *testing.T) {
 	}
 }
 
+func TestConfigSeparatesBridgeAddressFromSSHTarget(t *testing.T) {
+	p := LegacyValuesToPlan(map[string]string{
+		"BRIDGE":          "192.0.2.10",
+		"BRIDGE_SSH_HOST": "bridge-admin",
+		"EXIT":            "192.0.2.20",
+		"REALITY_DEST":    "origin.example.net:443",
+		"BOT_ENABLE":      "yes",
+		"BOT_DOMAIN":      "sync.example.com",
+	})
+	if err := ValidatePlan(p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Bridge.Address != "192.0.2.10" || p.Bridge.SSHHost != "bridge-admin" {
+		t.Fatalf("bridge address and SSH target were conflated: %#v", p.Bridge)
+	}
+	if p.Bridge.PublicHost != "192.0.2.10" {
+		t.Fatalf("public host = %q, want service address", p.Bridge.PublicHost)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("TELEGRAM_BOT_TOKEN=fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var sshTargets []string
+	var dialTargets []string
+	report := Doctor(context.Background(), p, DoctorOptions{
+		CheckSSH: func(_, host, _ string) bool {
+			sshTargets = append(sshTargets, host)
+			return true
+		},
+		LookupHost: func(context.Context, string) ([]string, error) {
+			return []string{"192.0.2.10"}, nil
+		},
+		DialTCP: func(_ context.Context, host string, _ int) error {
+			dialTargets = append(dialTargets, host)
+			return nil
+		},
+		EnvRoot: dir,
+	})
+	if !report.OK {
+		t.Fatalf("doctor failed: %#v", report.Issues)
+	}
+	if len(sshTargets) != 2 || sshTargets[0] != "bridge-admin" || sshTargets[1] != "192.0.2.20" {
+		t.Fatalf("doctor SSH targets = %v", sshTargets)
+	}
+	if len(dialTargets) != 2 || dialTargets[0] != "192.0.2.10" || dialTargets[1] != "192.0.2.10" {
+		t.Fatalf("doctor service targets = %v", dialTargets)
+	}
+}
+
 func TestRenderDesiredStateSupportsManyExits(t *testing.T) {
 	p := &InstallPlan{
 		SchemaVersion: 1,

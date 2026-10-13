@@ -29,11 +29,17 @@ func ValidatePlan(p *InstallPlan) error {
 	if p.SSH.ConnectTimeoutSec == 0 {
 		p.SSH.ConnectTimeoutSec = 10
 	}
+	if strings.TrimSpace(p.Bridge.Address) == "" {
+		p.Bridge.Address = p.Bridge.SSHHost
+	}
+	if strings.TrimSpace(p.Bridge.SSHHost) == "" {
+		p.Bridge.SSHHost = p.Bridge.Address
+	}
 	if strings.TrimSpace(p.Bridge.SSHHost) == "" {
 		return errors.New("bridge.ssh_host is required")
 	}
 	if strings.TrimSpace(p.Bridge.PublicHost) == "" {
-		p.Bridge.PublicHost = p.Bridge.SSHHost
+		p.Bridge.PublicHost = p.Bridge.Address
 	}
 	if p.Bridge.VLESSPort == 0 {
 		p.Bridge.VLESSPort = 443
