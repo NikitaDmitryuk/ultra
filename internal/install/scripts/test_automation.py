@@ -202,6 +202,22 @@ a.upgrade_fleet({'spec':'fixture','version':'v2'},root/'release','amd64',json.lo
                 a.apply({},root,'bootstrap')
                 self.assertFalse((root/'last-error.json').exists())
 
+    def test_main_replaces_durable_completion_receipt_only_after_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);config=root/'config.json';config.write_text(json.dumps({'version':'v2.4.4'}))
+            receipt=root/'receipts/upgrade-v2.4.4.json'
+            receipt.parent.mkdir();receipt.write_text(json.dumps({'action':'upgrade','version':'v2.4.4','completed_at':1}))
+            with patch.object(a,'STATE',root),patch.object(sys,'argv',['automation.py','--action','upgrade','--config',str(config),'--release',str(root)]),patch.object(a,'apply'):
+                self.assertEqual(a.main(),0)
+            value=json.loads(receipt.read_text())
+            self.assertEqual((value['action'],value['version']),('upgrade','v2.4.4'))
+            self.assertGreater(value['completed_at'],1)
+            receipt.unlink()
+            with patch.object(a,'STATE',root),patch.object(sys,'argv',['automation.py','--action','upgrade','--config',str(config),'--release',str(root)]),patch.object(a,'apply',side_effect=ValueError('failed')):
+                with self.assertRaisesRegex(ValueError,'failed'):
+                    a.main()
+            self.assertFalse(receipt.exists())
+
     def test_interrupted_upgrade_emergency_matches_previous_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)

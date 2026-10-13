@@ -840,6 +840,9 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         config = json.loads(Path(args.config).read_text())
         apply(config, args.release, args.action)
+        receipt = STATE / 'receipts' / (args.action + '-' + config['version'] + '.json')
+        write_json(receipt, {'action': args.action, 'version': config['version'],
+                            'completed_at': int(time.time())})
     print(json.dumps({'ready': True, 'version': config['version']}))
     return 0
 
