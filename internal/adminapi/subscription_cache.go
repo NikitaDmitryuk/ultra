@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionmeta"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -54,7 +55,7 @@ func (s *Server) handleSubscriptionCache(w http.ResponseWriter, r *http.Request)
 				return
 			}
 			headers := map[string]string{}
-			for _, key := range []string{"Content-Type", "profile-title", "profile-update-interval", "Vary"} {
+			for _, key := range subscriptionmeta.Headers {
 				if value := recorder.Header().Get(key); value != "" {
 					headers[key] = value
 				}

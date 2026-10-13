@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 	"github.com/jackc/pgx/v5"
 	"github.com/xtls/xray-core/common/uuid"
 )
@@ -42,9 +43,15 @@ type VPNInvite struct {
 	UsedAt        *time.Time `json:"used_at"`
 	CancelledAt   *time.Time `json:"cancelled_at"`
 }
-type MemberRepo struct{ db *DB }
+type MemberRepo struct {
+	db    *DB
+	state *runtimestate.Store
+}
 
 func NewMemberRepo(d *DB) *MemberRepo { return &MemberRepo{db: d} }
+func NewRuntimeMemberRepo(d *DB, s *runtimestate.Store) *MemberRepo {
+	return &MemberRepo{db: d, state: s}
+}
 func NewOpaqueToken() (string, error) {
 	b := make([]byte, 32)
 	if _, e := rand.Read(b); e != nil {

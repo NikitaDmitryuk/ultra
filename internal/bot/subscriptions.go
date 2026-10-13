@@ -4,12 +4,46 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionmeta"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"time"
 )
+
+func validBotUsername(username string) bool {
+	if len(username) < 5 || len(username) > 32 {
+		return false
+	}
+	for _, r := range username {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func (b *Bot) subscriptionSupportURL() string {
+	username := b.telegramSelf().UserName
+	if !validBotUsername(username) && b.subscriptionCache != nil {
+		b.subscriptionCache.mu.RLock()
+		username = b.subscriptionCache.botUsername
+		b.subscriptionCache.mu.RUnlock()
+	}
+	if !validBotUsername(username) {
+		return ""
+	}
+	return (&url.URL{Scheme: "https", Host: "t.me", Path: "/" + username, RawQuery: "start=member"}).String()
+}
+
+func (b *Bot) setSubscriptionSupportURL(h http.Header) {
+	if target := b.subscriptionSupportURL(); target != "" {
+		h.Set("support-url", target)
+	} else {
+		h.Del("support-url")
+	}
+}
 
 func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
@@ -83,9 +117,6 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Server-Timing", fmt.Sprintf("relay;dur=%.1f", float64(time.Since(started).Microseconds())/1000))
-	for _, key := range []string{"Content-Type", "profile-title", "profile-update-interval"} {
-		w.Header().Set(key, resp.Header.Get(key))
-	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if readErr != nil || len(body) > 1<<20 {
 		if b.serveSubscriptionFallback(w, cacheKey, token, r) {
@@ -94,6 +125,12 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	for _, key := range subscriptionmeta.Headers {
+		if value := resp.Header.Get(key); value != "" {
+			w.Header().Set(key, value)
+		}
+	}
+	b.setSubscriptionSupportURL(w.Header())
 	if acceptance != nil {
 		// Cleanup or expiry during the upstream request revokes the preview too.
 		acceptance, err = loadHappAcceptance(b.happAcceptanceFile, token, time.Now())

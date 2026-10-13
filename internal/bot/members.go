@@ -15,6 +15,8 @@ import (
 
 	"github.com/NikitaDmitryuk/ultra/internal/db"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"golang.org/x/text/language"
+	"golang.org/x/text/language/display"
 )
 
 type relayCloudError struct{ Code string }
@@ -161,7 +163,14 @@ func (b *Bot) sendMemberButton(chatID int64) {
 	}
 	msg := tgbotapi.NewMessage(chatID, "Ваш личный кабинет Ultra:")
 	msg.ReplyMarkup = webAppMarkup("Мой VPN", strings.TrimRight(b.miniAppURL, "/")+"/member")
-	if _, e := b.api.Send(msg); e != nil {
+	sender := b.msgSender
+	if sender == nil && b.api != nil {
+		sender = b.api
+	}
+	if sender == nil {
+		return
+	}
+	if _, e := sender.Send(msg); e != nil {
 		b.log.Warn("member button delivery failed")
 	}
 }
@@ -487,5 +496,59 @@ func (b *Bot) selfTraffic(w http.ResponseWriter, r *http.Request) {
 		memberHTTPError(w, status)
 		return
 	}
-	jsonOK(w, result)
+	public, e := publicMemberTraffic(result)
+	if e != nil {
+		memberHTTPError(w, http.StatusBadGateway)
+		return
+	}
+	jsonOK(w, public)
+}
+
+func publicMemberTraffic(raw json.RawMessage) (map[string]any, error) {
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	if routes, ok := result["routes"].([]any); ok {
+		for _, value := range routes {
+			route, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			tag, _ := route["tag"].(string)
+			scope, _ := route["pool_scope"].(string)
+			delete(route, "pool_scope")
+			switch {
+			case tag == "direct":
+				route["quota_kind"] = "direct"
+			case scope == "vultr":
+				route["quota_kind"] = "shared"
+			case strings.HasPrefix(tag, "to-exit-"):
+				route["quota_kind"] = "separate"
+			}
+			if group, _ := route["group"].(string); strings.HasPrefix(group, "location:") {
+				parts := strings.SplitN(group, ":", 3)
+				if len(parts) == 3 {
+					if parts[1] == "US" {
+						route["name"] = "США"
+					} else if region, err := language.ParseRegion(parts[1]); err == nil {
+						route["name"] = display.Regions(language.Russian).Name(region)
+					}
+				}
+			}
+		}
+	}
+	if pools, ok := result["quota_pools"].([]any); ok {
+		for _, value := range pools {
+			pool, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			if scope, _ := pool["scope"].(string); scope == "vultr" {
+				delete(pool, "scope")
+				pool["quota_kind"] = "shared"
+			}
+		}
+	}
+	return result, nil
 }

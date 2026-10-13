@@ -158,7 +158,15 @@ func accountingFixture(t *testing.T, capacity int64, udp, direct bool) (*proxy.R
 	}
 	t.Cleanup(func() { _ = state.Close() })
 	now := time.Now().UTC()
-	q := []runtimestate.QuotaLimit{{AccountID: user.AccountID, ExitID: "fixture", Period: now.Format("2006-01"), LimitBytes: capacity, ExpiresAt: now.Add(time.Hour)}, {ExitID: "fixture", Period: now.Format("2006-01"), LimitBytes: capacity, ExpiresAt: now.Add(time.Hour)}}
+	// Physical ceilings deliberately exceed the pool so TCP/UDP/Vision tests
+	// prove that the shared provider limiter, rather than an exit limit, stops bytes.
+	pool := runtimestate.ProviderPoolID("vultr")
+	q := []runtimestate.QuotaLimit{
+		{AccountID: user.AccountID, ExitID: "fixture", PoolScope: "vultr", Period: now.Format("2006-01"), LimitBytes: capacity * 10, ExpiresAt: now.Add(time.Hour)},
+		{ExitID: "fixture", PoolScope: "vultr", Period: now.Format("2006-01"), LimitBytes: capacity * 10, ExpiresAt: now.Add(time.Hour)},
+		{AccountID: user.AccountID, ExitID: pool, Scope: "provider_pool", Period: now.Format("2006-01"), LimitBytes: capacity, ExpiresAt: now.Add(time.Hour)},
+		{ExitID: pool, Scope: "provider_pool", Members: []string{"fixture"}, Period: now.Format("2006-01"), LimitBytes: capacity, ExpiresAt: now.Add(time.Hour)},
+	}
 	if e = state.SaveSnapshot(runtimestate.Snapshot{ConfirmedAt: now, Payload: []byte(`{}`)}, q); e != nil {
 		t.Fatal(e)
 	}

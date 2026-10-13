@@ -64,10 +64,7 @@ func eachSubscriptionProfile(user auth.User, nodes []exits.Node, _ map[string]ex
 	seen := map[string]bool{}
 	for _, n := range nodes {
 		code := strings.ToUpper(strings.TrimSpace(n.CountryCode))
-		name := strings.TrimSpace(n.CountryName)
-		if region, err := language.ParseRegion(code); err == nil && len(code) == 2 {
-			name = display.Regions(language.Russian).Name(region)
-		}
+		name := subscriptionCountryName(n)
 		// Publication is stable across health changes: a country credential prefers
 		// this exit, while runtime selection handles failover and quota enforcement.
 		if code == "" || name == "" || !n.Enabled || seen[code] {
@@ -87,4 +84,16 @@ func eachSubscriptionProfile(user auth.User, nodes []exits.Node, _ map[string]ex
 		}
 	}
 	return nil
+}
+
+func subscriptionCountryName(n exits.Node) string {
+	code := strings.ToUpper(strings.TrimSpace(n.CountryCode))
+	if code == "US" {
+		return "США"
+	}
+	name := strings.TrimSpace(n.CountryName)
+	if region, err := language.ParseRegion(code); err == nil && len(code) == 2 {
+		name = display.Regions(language.Russian).Name(region)
+	}
+	return name
 }

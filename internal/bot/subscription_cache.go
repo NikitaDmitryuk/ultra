@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionmeta"
 	"io"
 	"net/http"
 	"net/url"
@@ -28,6 +29,7 @@ type cachedSubscription struct {
 type subscriptionCacheSnapshot struct {
 	Version         int                           `json:"version"`
 	HappDefaultJSON bool                          `json:"happ_default_json,omitempty"`
+	BotUsername     string                        `json:"bot_username,omitempty"`
 	Entries         map[string]cachedSubscription `json:"entries"`
 }
 type subscriptionCache struct {
@@ -39,6 +41,7 @@ type subscriptionCache struct {
 	entries              map[string]cachedSubscription
 	generation           uint64
 	happDefaultJSON      bool
+	botUsername          string
 }
 
 func subscriptionDigest(token string) string {
@@ -70,6 +73,9 @@ func (b *Bot) ConfigureSubscriptionCache(path string) error {
 			return errors.New("invalid subscription cache")
 		}
 		c.happDefaultJSON = snapshot.HappDefaultJSON
+		if validBotUsername(snapshot.BotUsername) {
+			c.botUsername = snapshot.BotUsername
+		}
 		for k, v := range snapshot.Entries {
 			if validSubscriptionTime(v.ConfirmedAt, time.Now()) {
 				c.entries[k] = v
@@ -105,7 +111,7 @@ func (c *subscriptionCache) replace(entries map[string]cachedSubscription) error
 }
 func (c *subscriptionCache) replaceLocked(entries map[string]cachedSubscription) error {
 	// Publish memory only after the durable file has been committed.
-	data, err := json.Marshal(subscriptionCacheSnapshot{Version: 1, HappDefaultJSON: c.happDefaultJSON, Entries: entries})
+	data, err := json.Marshal(subscriptionCacheSnapshot{Version: 1, HappDefaultJSON: c.happDefaultJSON, BotUsername: c.botUsername, Entries: entries})
 	if err != nil || len(data) > maxSubscriptionCacheSize {
 		return errors.New("subscription cache too large")
 	}
@@ -147,6 +153,24 @@ func (c *subscriptionCache) replaceLocked(entries map[string]cachedSubscription)
 		}
 	}
 	c.entries = entries
+	return nil
+}
+
+func (c *subscriptionCache) setBotUsername(username string) error {
+	if !validBotUsername(username) {
+		return errors.New("invalid bot username")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.botUsername == username {
+		return nil
+	}
+	previous := c.botUsername
+	c.botUsername = username
+	if err := c.replaceLocked(c.entries); err != nil {
+		c.botUsername = previous
+		return err
+	}
 	return nil
 }
 func (c *subscriptionCache) invalidate(digest string) {
@@ -310,6 +334,8 @@ func (b *Bot) serveSubscriptionFallback(w http.ResponseWriter, _ string, token s
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Vary", "User-Agent")
 	w.Header().Set("X-Ultra-State", "cached")
+	b.setSubscriptionSupportURL(w.Header())
+	subscriptionmeta.MarkStale(w.Header(), v.ConfirmedAt)
 	_, _ = w.Write(v.Body)
 	return true
 }

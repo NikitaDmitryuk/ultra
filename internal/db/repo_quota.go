@@ -9,9 +9,13 @@ import (
 	"time"
 )
 
-type QuotaRepo struct{ db *DB }
+type QuotaRepo struct {
+	db    *DB
+	state *runtimestate.Store
+}
 
-func NewQuotaRepo(d *DB) *QuotaRepo { return &QuotaRepo{db: d} }
+func NewQuotaRepo(d *DB) *QuotaRepo                               { return &QuotaRepo{db: d} }
+func NewRuntimeQuotaRepo(d *DB, s *runtimestate.Store) *QuotaRepo { return &QuotaRepo{db: d, state: s} }
 
 type ExitBudget struct {
 	Enabled           bool       `json:"enabled"`
@@ -66,14 +70,6 @@ func (r *QuotaRepo) EnsureVultr(ctx context.Context, id, instance string, monthl
 	_, e := r.db.Pool.Exec(ctx, `INSERT INTO exit_traffic_budgets(exit_id,instance_id,monthly_bytes,source) VALUES($1,$2,$3,'vultr') ON CONFLICT(exit_id) DO UPDATE SET instance_id=EXCLUDED.instance_id,monthly_bytes=EXCLUDED.monthly_bytes`, id, instance, monthly)
 	return e
 }
-func (r *QuotaRepo) Observe(ctx context.Context, id string, used, remaining int64, code string, now time.Time) error {
-	if code != "" {
-		_, e := r.db.Pool.Exec(ctx, `UPDATE exit_traffic_budgets SET provider_error=$2,updated_at=$3 WHERE exit_id=$1`, id, code, now)
-		return e
-	}
-	_, e := r.db.Pool.Exec(ctx, `UPDATE exit_traffic_budgets SET provider_used_bytes=$2,account_remaining_bytes=$3,observed_at=$4,updated_at=$4,provider_error='',emergency_started_at=NULL,emergency_baseline_bytes=NULL,provider_observed_local_bytes=(SELECT COALESCE(SUM(GREATEST(uplink_bytes+downlink_bytes,charged_bytes)),0)::bigint FROM account_exit_usage WHERE exit_id=$1::text AND period=to_char($4::timestamptz AT TIME ZONE 'UTC','YYYY-MM')) WHERE exit_id=$1`, id, used, remaining, now)
-	return e
-}
 
 // Recalculate persists monthly allowances. Only changed exclusions require applying Xray.
 func (r *QuotaRepo) Recalculate(ctx context.Context, now time.Time) (bool, error) {
@@ -93,6 +89,10 @@ func (r *QuotaRepo) Recalculate(ctx context.Context, now time.Time) (bool, error
 	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	changed := false
+	pool, e := loadProviderPool(ctx, tx, now)
+	if e != nil {
+		return false, e
+	}
 	for _, b := range budgets {
 		if !b.Enabled {
 			continue
@@ -102,7 +102,15 @@ func (r *QuotaRepo) Recalculate(ctx context.Context, now time.Time) (bool, error
 		if e != nil {
 			return false, e
 		}
-		remaining, reason, e := effectiveExitRemaining(ctx, tx, b, used, now)
+		var remaining int64
+		var reason string
+		monthly := b.Monthly
+		if b.Source == "vultr" {
+			monthly = pool.Accrued
+			remaining, reason, e = effectivePoolExitRemaining(ctx, tx, b, pool, used, now)
+		} else {
+			remaining, reason, e = effectiveExitRemaining(ctx, tx, b, used, now)
+		}
 		if e != nil {
 			return false, e
 		}
@@ -133,7 +141,17 @@ func (r *QuotaRepo) Recalculate(ctx context.Context, now time.Time) (bool, error
 			return false, e
 		}
 		for _, d := range demand {
-			limit := d.Used + quota.Available(b.Monthly, d.Used, remaining, b.Fallback)
+			if b.Source == "vultr" && d.ServiceLimit == 0 {
+				var account string
+				if e = tx.QueryRow(ctx, `SELECT account_id::text FROM users WHERE uuid=$1`, d.ID).Scan(&account); e != nil {
+					return false, e
+				}
+				d.Used, e = poolUsage(ctx, tx, month.Format("2006-01"), account)
+				if e != nil {
+					return false, e
+				}
+			}
+			limit := d.Used + quota.Available(monthly, d.Used, remaining, (b.Fallback && b.Source != "vultr") || d.ServiceLimit > 0)
 			if d.ServiceLimit > 0 && limit > d.ServiceLimit {
 				limit = d.ServiceLimit
 			}
@@ -203,9 +221,11 @@ func (r *QuotaRepo) Acknowledge(ctx context.Context, snapshot []QuotaSnapshot) e
 
 // BandwidthObservation is one provider refresh, committed with the other nodes.
 type BandwidthObservation struct {
-	ID, Instance             string
-	Monthly, Used, Remaining int64
-	Error                    string
+	ID, Instance                         string
+	Monthly, Used, Remaining             int64
+	Accrued, AccountUsed, LocalWatermark int64
+	Pool                                 bool
+	Error                                string
 }
 
 func (r *QuotaRepo) SaveBandwidth(ctx context.Context, observations []BandwidthObservation, now time.Time) error {
@@ -215,6 +235,17 @@ func (r *QuotaRepo) SaveBandwidth(ctx context.Context, observations []BandwidthO
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 	for _, o := range observations {
+		if o.Pool {
+			period := now.UTC().Format("2006-01")
+			if o.Error != "" {
+				_, err = tx.Exec(ctx, `UPDATE provider_quota_pools SET provider_error=$2 WHERE scope='vultr' AND period=$1`, period, o.Error)
+			} else {
+				_, err = tx.Exec(ctx, `INSERT INTO provider_quota_pools(scope,period,accrued_bytes,provider_used_bytes,remaining_bytes,observed_local_bytes,observed_at) VALUES('vultr',$1,$2,$3,$4,$5,$6) ON CONFLICT(scope,period) DO UPDATE SET accrued_bytes=EXCLUDED.accrued_bytes,provider_used_bytes=EXCLUDED.provider_used_bytes,remaining_bytes=EXCLUDED.remaining_bytes,observed_local_bytes=EXCLUDED.observed_local_bytes,observed_at=EXCLUDED.observed_at,provider_error='' WHERE provider_quota_pools.observed_at<=EXCLUDED.observed_at`, period, o.Accrued, o.AccountUsed, o.Remaining, o.LocalWatermark, now)
+			}
+			if err != nil {
+				return err
+			}
+		}
 		if o.Error != "" {
 			_, err = tx.Exec(ctx, `UPDATE exit_traffic_budgets SET provider_error=$2,updated_at=$3 WHERE exit_id=$1`, o.ID, o.Error, now)
 		} else {
@@ -229,34 +260,11 @@ func (r *QuotaRepo) SaveBandwidth(ctx context.Context, observations []BandwidthO
 
 const EmergencyBytes int64 = 5_000_000_000
 
-func effectiveExitRemaining(ctx context.Context, tx pgx.Tx, b ExitBudget, used int64, now time.Time) (int64, string, error) {
-	remaining := max(0, b.Monthly-b.Monthly/5-used)
-	if b.Source != "vultr" {
-		return remaining, "", nil
+func effectiveExitRemaining(_ context.Context, _ pgx.Tx, b ExitBudget, used int64, _ time.Time) (int64, string, error) {
+	if b.Source != "manual" {
+		return 0, "provider_pool_required", nil
 	}
-	month := time.Date(now.UTC().Year(), now.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
-	if b.Observed == nil || b.Observed.Before(month) || !now.Before(b.Observed.Add(24*time.Hour)) {
-		return 0, "provider_unavailable", nil
-	}
-	// Provider observations lag local accounting; never spend the same residual twice.
-	since := max(0, used-b.ObservedLocal)
-	remaining = min(remaining, max(0, b.Remaining-since), max(0, b.Monthly-b.Monthly/5-b.ProviderUsed-since))
-	if b.Error == "" && now.Sub(*b.Observed) <= 15*time.Minute {
-		return remaining, "", nil
-	}
-	baseline := used
-	if b.EmergencyBaseline != nil {
-		baseline = *b.EmergencyBaseline
-	} else {
-		if _, err := tx.Exec(ctx, `UPDATE exit_traffic_budgets SET emergency_started_at=COALESCE(emergency_started_at,$2),emergency_baseline_bytes=COALESCE(emergency_baseline_bytes,$3) WHERE exit_id=$1`, b.ID, now, used); err != nil {
-			return 0, "", err
-		}
-	}
-	remaining = min(remaining, max(0, EmergencyBytes-max(0, used-baseline)))
-	if remaining == 0 {
-		return 0, "provider_emergency_exhausted", nil
-	}
-	return remaining, "", nil
+	return max(0, quota.SafeBudget(b.Monthly)-used), "", nil
 }
 
 // RuntimeLimits returns cumulative allowances. A single bridge retains the greater
@@ -274,9 +282,12 @@ func (r *QuotaRepo) RuntimeLimits(ctx context.Context, now time.Time) ([]runtime
 	now = now.UTC()
 	period := now.Format("2006-01")
 	expires := minTime(now.Add(runtimestate.SnapshotTTL), time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, time.UTC))
-	out := []runtimestate.QuotaLimit{}
+	out, e := r.poolRuntimeLimits(ctx, tx, budgets, now, expires)
+	if e != nil {
+		return nil, e
+	}
 	for _, b := range budgets {
-		if !b.Enabled {
+		if !b.Enabled || b.Source == "vultr" {
 			continue
 		}
 		var used int64
@@ -288,14 +299,7 @@ func (r *QuotaRepo) RuntimeLimits(ctx context.Context, now time.Time) ([]runtime
 			return nil, e
 		}
 		deadline := expires
-		if b.Source == "vultr" && b.Observed != nil {
-			deadline = minTime(deadline, b.Observed.Add(24*time.Hour))
-		}
 		global := runtimestate.QuotaLimit{ExitID: b.ID, Period: period, LimitBytes: used + left, UsedBytes: used, ExpiresAt: deadline}
-		if b.Source == "vultr" && b.Observed != nil {
-			global.EmergencyAfter = b.Observed.Add(15 * time.Minute)
-			global.EmergencyBytes = EmergencyBytes
-		}
 		out = append(out, global)
 		rows, e := tx.Query(ctx, `SELECT u.account_id::text,q.limit_bytes,q.used_bytes,q.blocked FROM user_exit_quotas q JOIN users u ON u.uuid=q.user_uuid WHERE q.exit_id=$1 AND u.is_active AND NOT u.member_pending`, b.ID)
 		if e != nil {

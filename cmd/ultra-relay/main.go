@@ -25,6 +25,10 @@ import (
 )
 
 func main() {
+	capabilities := flag.Bool("capabilities", false, "print supported durable-state capabilities and exit")
+	// A managed unit requires this named capability. Older binaries reject the
+	// unknown flag rather than silently recalculating independent exit quotas.
+	flag.Bool("require-provider-pool-quota", false, "require provider-pool-quota-v1 compatible binary")
 	staticBudgetsOnly := flag.Bool("ensure-static-budgets", false, "initialize explicit static exit budgets without resetting usage")
 	staticBudgetsFile := flag.String("static-budgets-file", "", "private static node budget JSON array")
 	monitorAdmin := flag.Int64("monitor-admin-telegram-id", 0, "explicit initial admin id for first installation")
@@ -53,6 +57,10 @@ func main() {
 		"slog level and embedded xray loglevel: debug, info, warning|warn, error, none; also ULTRA_RELAY_LOG_LEVEL",
 	)
 	flag.Parse()
+	if *capabilities {
+		fmt.Println(`["service-access-v1","provider-pool-quota-v1"]`)
+		return
+	}
 	if *staticBudgetsOnly && (*monitorOnly || *cacheOnly || *drainOnly || *checkOnly || *transportPath != "") {
 		fmt.Fprintln(os.Stderr, "static budget mode is exclusive")
 		os.Exit(2)

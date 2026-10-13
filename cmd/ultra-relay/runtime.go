@@ -88,7 +88,7 @@ func decodeRuntimeSnapshot(snapshot runtimestate.Snapshot, fingerprint string, n
 	if err := json.Unmarshal(snapshot.Payload, &p); err != nil {
 		return p, errors.New("runtime snapshot corrupt")
 	}
-	if (p.Version != 1 && p.Version != 2) || p.Fingerprint != fingerprint {
+	if (p.Version != 1 && p.Version != 2 && p.Version != 3) || p.Fingerprint != fingerprint {
 		return p, errors.New("runtime snapshot incompatible")
 	}
 	return p, nil
@@ -158,6 +158,7 @@ func (r *bridgeRuntime) status() any {
 	}
 	status := map[string]any{"mode": mode, "revision": r.revision, "applied_revision": r.appliedRevision, "confirmed_at": r.confirmed, "expires_at": r.confirmed.Add(runtimeLease), "error": r.lastError}
 	status["control_disabled"] = r.cacheOnly
+	status["capabilities"] = []string{"provider-pool-quota-v1"}
 	status["backup"] = recoveryStatus("/var/lib/ultra-relay/recovery-status.json", r.now())
 	if r.state != nil {
 		count, bytes, oldest, err := r.state.PendingStats()
@@ -300,10 +301,17 @@ func (r *bridgeRuntime) refresh(ctx context.Context, database *db.DB, users *aut
 	if err := checkpoint(c); err != nil {
 		return err
 	}
+	quotas := db.NewQuotaRepo(database)
+	pendingBatches, err := r.state.PendingBatches(0)
+	if err != nil {
+		return err
+	}
+	if err = quotas.PreflightBatches(c, pendingBatches); err != nil {
+		return err
+	}
 	if err := r.collector.Replay(c); err != nil {
 		return err
 	}
-	quotas := db.NewQuotaRepo(database)
 	routes := db.NewRouteRepo(database)
 	if _, err := quotas.Recalculate(c, r.now()); err != nil {
 		return err
@@ -334,18 +342,15 @@ func (r *bridgeRuntime) refresh(ctx context.Context, database *db.DB, users *aut
 	}
 	now := r.now().UTC()
 	for i := range limits {
+		if limits[i].ChargeOnly {
+			continue
+		}
 		until := now.Add(runtimeLease)
 		if limits[i].ExpiresAt.IsZero() || limits[i].ExpiresAt.After(until) {
 			limits[i].ExpiresAt = until
 		}
 	}
-	payload := runtimeSnapshotV1{Version: 1, Fingerprint: runtimeFingerprint(r.spec), Users: snapshotUsers(live), Nodes: nodes.List(), Limits: limits}
-	for _, user := range live {
-		if len(user.ServiceTargets) > 0 {
-			payload.Version = 2
-			break
-		}
-	}
+	payload := runtimeSnapshotV1{Version: 3, Fingerprint: runtimeFingerprint(r.spec), Users: snapshotUsers(live), Nodes: nodes.List(), Limits: limits}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -733,6 +738,7 @@ func (r *bridgeRuntime) control(ctx context.Context, wg *sync.WaitGroup, handler
 		srv.ReloadStatus = r.runner.Status
 		srv.RouteStatus = r.applications.Status
 		srv.RuntimeStatus = r.status
+		srv.SubscriptionQuota = db.NewRuntimeQuotaRepo(database, r.state)
 		configureCloud(ctx, wg, srv, database, r.spec, nodes, refresh, users.Refresh, r.log)
 		keys, keyErr := subscriptionkey.Load(os.Getenv("ULTRA_SUBSCRIPTION_ENCRYPTION_KEY_FILE"))
 		if keyErr != nil {
@@ -740,7 +746,7 @@ func (r *bridgeRuntime) control(ctx context.Context, wg *sync.WaitGroup, handler
 		}
 		subscriptions := db.NewSubscriptionRepo(database, keys)
 		srv.Subscriptions = subscriptions
-		srv.Members = &adminapi.MemberService{Repo: db.NewMemberRepo(database), Subscriptions: subscriptions, Apply: refresh}
+		srv.Members = &adminapi.MemberService{Repo: db.NewRuntimeMemberRepo(database, r.state), Subscriptions: subscriptions, Apply: refresh}
 		wg.Add(1)
 		go func() { defer wg.Done(); srv.Members.Run(ctx) }()
 		handler.install(srv.Handler())

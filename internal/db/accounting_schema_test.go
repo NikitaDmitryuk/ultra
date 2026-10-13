@@ -109,7 +109,7 @@ func TestAccountingSchemaMigrationCompatibility(t *testing.T) {
 				t.Fatalf("repeat migration: %v", err)
 			}
 			var maximum int
-			if err = d.Pool.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&maximum); err != nil || maximum != 24 {
+			if err = d.Pool.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&maximum); err != nil || maximum != 25 {
 				t.Fatalf("migration version %d %v", maximum, err)
 			}
 		})

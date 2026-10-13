@@ -6,8 +6,6 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 	"github.com/NikitaDmitryuk/ultra/internal/db"
 	"log/slog"
-	"math"
-	"math/big"
 	"time"
 )
 
@@ -62,19 +60,17 @@ func (e bandwidthRefreshError) Unwrap() error { return e.err }
 
 type bandwidthRepo interface {
 	Budgets(context.Context) ([]db.ExitBudget, error)
+	ProviderWatermark(context.Context, time.Time) (int64, error)
 	SaveBandwidth(context.Context, []db.BandwidthObservation, time.Time) error
 }
 type bandwidthAPI interface {
-	Plans(context.Context) ([]cloud.Plan, error)
-	Get(context.Context, string) (cloud.Instance, error)
-	AccountRemaining(context.Context) (int64, error)
-	InstanceBandwidth(context.Context, string, time.Time) (int64, error)
+	AccountBandwidth(context.Context) (cloud.AccountBandwidth, error)
 }
 
 func refreshBandwidth(ctx context.Context, repo bandwidthRepo, api bandwidthAPI, now time.Time) error {
-	budgets, e := repo.Budgets(ctx)
-	if e != nil {
-		return bandwidthRefreshError{stage: "budgets", err: e}
+	budgets, err := repo.Budgets(ctx)
+	if err != nil {
+		return bandwidthRefreshError{stage: "budgets", err: err}
 	}
 	managed := []db.ExitBudget{}
 	for _, b := range budgets {
@@ -85,86 +81,36 @@ func refreshBandwidth(ctx context.Context, repo bandwidthRepo, api bandwidthAPI,
 	if len(managed) == 0 {
 		return nil
 	}
-	var remaining int64
-	var plans []cloud.Plan
+	watermark, err := repo.ProviderWatermark(ctx, now)
+	if err != nil {
+		return bandwidthRefreshError{stage: "membership", err: err}
+	}
+	var pool cloud.AccountBandwidth
 	if api == nil {
-		e = cloud.ErrUnavailable
+		err = cloud.ErrUnavailable
 	} else {
-		remaining, e = api.AccountRemaining(ctx)
+		pool, err = api.AccountBandwidth(ctx)
 	}
-	accountErr := e
-	var plansErr error
-	plansLoaded := false
-	// Resolve every actual plan before partitioning the account ceiling. Never use
-	// instance.allowed_bandwidth as the nominal plan allowance.
-	type observation struct {
-		budget db.ExitBudget
-		used   int64
-		err    error
-		stage  string
+	if err == nil && (pool.Accrued < 0 || pool.Used < 0 || pool.Remaining < 0) {
+		err = cloud.ErrUnavailable
 	}
-	observations := make([]observation, 0, len(managed))
-	var total int64
+	updates := make([]db.BandwidthObservation, 0, len(managed))
 	for _, b := range managed {
-		o := observation{budget: b, err: accountErr, stage: "account_bandwidth"}
-		if o.err == nil {
-			instance, getErr := api.Get(ctx, b.Instance)
-			o.err = getErr
-			o.stage = "instance"
-			if o.err == nil {
-				o.stage = "plan"
-				if b.PlanID != "" && b.PlanID == instance.Plan && b.PlanBandwidth > 0 && b.PlanBandwidth <= math.MaxInt64/1_000_000_000 {
-					o.budget.Monthly = b.PlanBandwidth * 1_000_000_000
-				} else {
-					if !plansLoaded {
-						plans, plansErr = api.Plans(ctx)
-						plansLoaded = true
-					}
-					o.err = plansErr
-					if o.err == nil {
-						o.err = cloud.ErrUnavailable
-						for _, p := range plans {
-							if p.ID == instance.Plan && p.Bandwidth > 0 && int64(p.Bandwidth) <= math.MaxInt64/1_000_000_000 {
-								o.budget.Monthly = int64(p.Bandwidth) * 1_000_000_000
-								o.err = nil
-								break
-							}
-						}
-					}
-				}
-			}
-			if o.err == nil {
-				o.stage = "instance_bandwidth"
-				o.used, o.err = api.InstanceBandwidth(ctx, b.Instance, now)
-			}
-		}
-		if o.err == nil {
-			if o.budget.Monthly > math.MaxInt64-total {
-				return bandwidthRefreshError{stage: "plan", err: cloud.ErrUnavailable}
-			}
-			total += o.budget.Monthly
-		}
-		observations = append(observations, o)
-	}
-	updates := make([]db.BandwidthObservation, 0, len(observations))
-	for _, o := range observations {
 		code := ""
-		var share int64
-		if o.err != nil {
-			code = cloud.ErrorCode(o.err)
-			e = bandwidthRefreshError{stage: o.stage, err: o.err}
-		} else {
-			// Integer arithmetic keeps the sum of rounded-down shares <= remaining.
-			amount := new(big.Int).Mul(big.NewInt(max(0, remaining)), big.NewInt(o.budget.Monthly))
-			share = amount.Div(amount, big.NewInt(max(1, total))).Int64()
-
+		if err != nil {
+			code = cloud.ErrorCode(err)
 		}
-		updates = append(updates, db.BandwidthObservation{ID: o.budget.ID, Instance: o.budget.Instance, Monthly: o.budget.Monthly, Used: o.used, Remaining: share, Error: code})
+		// Every exit refers to this same observation. There are no apportioned shares
+		// and no dependency on a nominal plan or individual instance statistics.
+		updates = append(updates, db.BandwidthObservation{ID: b.ID, Instance: b.Instance, Monthly: b.Monthly, Remaining: pool.Remaining, Accrued: pool.Accrued, AccountUsed: pool.Used, LocalWatermark: watermark, Pool: true, Error: code})
 	}
-	if err := repo.SaveBandwidth(ctx, updates, now); err != nil {
-		return bandwidthRefreshError{stage: "save_bandwidth", err: err}
+	if saveErr := repo.SaveBandwidth(ctx, updates, now); saveErr != nil {
+		return bandwidthRefreshError{stage: "save_bandwidth", err: saveErr}
 	}
-	return e
+	if err != nil {
+		return bandwidthRefreshError{stage: "account_bandwidth", err: err}
+	}
+	return nil
 }
 
 func optionalBandwidthAPI(api *cloud.Vultr) bandwidthAPI {

@@ -62,11 +62,11 @@ def main():
                 counts = sql(restored, f'SELECT count(DISTINCT account_id),sum(uplink_bytes+downlink_bytes),max(charged_bytes) FROM "{schema}".account_exit_usage').split('|')
                 if counts[0] != '5' or int(counts[1]) <= 0 or int(counts[2]) <= 0:
                     raise ValueError('restored accounting incomplete')
-                if sql(restored, f'SELECT max(version) FROM "{schema}".schema_migrations') != '24':
+                if sql(restored, f'SELECT max(version) FROM "{schema}".schema_migrations') != '25':
                     raise ValueError('restored schema version invalid')
                 if process.wait(timeout=90) != 0:
                     raise ValueError('VPN load/failover failed')
-                print('PASS: pg_dump during five TCP/UDP clients; isolated restore schema24, five owners and confirmed traffic; failover and final accounting passed')
+                print('PASS: pg_dump during five TCP/UDP clients; isolated restore schema25, five owners and confirmed traffic; failover and final accounting passed')
             finally:
                 if process.poll() is None:
                     process.terminate()

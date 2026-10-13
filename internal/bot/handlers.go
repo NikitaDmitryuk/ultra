@@ -42,6 +42,10 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 
 func (b *Bot) handleStart(ctx context.Context, msg *tgbotapi.Message) {
 	token := strings.TrimSpace(msg.CommandArguments())
+	if token == "member" {
+		b.sendMemberButton(msg.Chat.ID)
+		return
+	}
 	if strings.HasPrefix(token, "vpn_g_") || strings.HasPrefix(token, "vpn_i_") {
 		b.handleMemberStart(ctx, msg, token)
 		return

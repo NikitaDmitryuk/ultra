@@ -9,11 +9,12 @@ import (
 )
 
 type RouteTraffic struct {
-	Tag      string `json:"tag"`
-	Name     string `json:"name"`
-	Group    string `json:"group,omitempty"`
-	Uplink   int64  `json:"uplink_bytes"`
-	Downlink int64  `json:"downlink_bytes"`
+	Tag       string `json:"tag"`
+	Name      string `json:"name"`
+	Group     string `json:"group,omitempty"`
+	PoolScope string `json:"pool_scope,omitempty"`
+	Uplink    int64  `json:"uplink_bytes"`
+	Downlink  int64  `json:"downlink_bytes"`
 }
 type DayTraffic struct {
 	Day      string `json:"day"`
@@ -27,15 +28,16 @@ type RoutePoint struct {
 	Downlink int64  `json:"downlink_bytes"`
 }
 type MemberTraffic struct {
-	DayRoutes []RoutePoint   `json:"day_routes"`
-	Hours     []RoutePoint   `json:"hours"`
-	Today     string         `json:"today"`
-	Limits    []MemberLimit  `json:"limits"`
-	Month     string         `json:"month"`
-	Uplink    int64          `json:"uplink_bytes"`
-	Downlink  int64          `json:"downlink_bytes"`
-	Routes    []RouteTraffic `json:"routes"`
-	Days      []DayTraffic   `json:"days"`
+	DayRoutes  []RoutePoint   `json:"day_routes"`
+	Hours      []RoutePoint   `json:"hours"`
+	Today      string         `json:"today"`
+	Limits     []MemberLimit  `json:"limits"`
+	QuotaPools []PoolQuota    `json:"quota_pools"`
+	Month      string         `json:"month"`
+	Uplink     int64          `json:"uplink_bytes"`
+	Downlink   int64          `json:"downlink_bytes"`
+	Routes     []RouteTraffic `json:"routes"`
+	Days       []DayTraffic   `json:"days"`
 }
 
 // MemberTraffic returns current-month usage of enrolled accesses only. ID zero is the overview.
@@ -49,7 +51,7 @@ func (r *MemberRepo) Traffic(ctx context.Context, id int64, now time.Time) (Memb
 	if e != nil {
 		return result, e
 	}
-	rows, e := r.db.Pool.Query(ctx, `SELECT t.exit_tag,COALESCE(NULLIF(e.display_name,''),NULLIF(e.country_name,''),NULLIF(e.city,''),e.name,''),COALESCE(e.country_code,''),COALESCE(e.city,''),SUM(t.uplink_bytes)::bigint,SUM(t.downlink_bytes)::bigint FROM daily_route_traffic t JOIN users u ON u.uuid=t.user_uuid LEFT JOIN exit_nodes e ON 'to-exit-'||e.id::text=t.exit_tag WHERE `+filter+` AND t.day>=$2 AND t.day<$3 GROUP BY t.exit_tag,e.display_name,e.country_name,e.country_code,e.city,e.name ORDER BY SUM(t.uplink_bytes+t.downlink_bytes) DESC`, id, start, end)
+	rows, e := r.db.Pool.Query(ctx, `SELECT t.exit_tag,COALESCE(NULLIF(e.display_name,''),NULLIF(e.country_name,''),NULLIF(e.city,''),e.name,''),COALESCE(e.country_code,''),COALESCE(e.city,''),COALESCE(m.scope,''),SUM(t.uplink_bytes)::bigint,SUM(t.downlink_bytes)::bigint FROM daily_route_traffic t JOIN users u ON u.uuid=t.user_uuid LEFT JOIN exit_nodes e ON 'to-exit-'||e.id::text=t.exit_tag LEFT JOIN quota_exit_membership m ON 'to-exit-'||m.exit_id=t.exit_tag WHERE `+filter+` AND t.day>=$2 AND t.day<$3 GROUP BY t.exit_tag,e.display_name,e.country_name,e.country_code,e.city,e.name,m.scope ORDER BY SUM(t.uplink_bytes+t.downlink_bytes) DESC`, id, start, end)
 	if e != nil {
 		return result, e
 	}
@@ -57,7 +59,7 @@ func (r *MemberRepo) Traffic(ctx context.Context, id int64, now time.Time) (Memb
 	for rows.Next() {
 		var item RouteTraffic
 		var country, city string
-		if e = rows.Scan(&item.Tag, &item.Name, &country, &city, &item.Uplink, &item.Downlink); e != nil {
+		if e = rows.Scan(&item.Tag, &item.Name, &country, &city, &item.PoolScope, &item.Uplink, &item.Downlink); e != nil {
 			rows.Close()
 			return result, e
 		}
@@ -115,7 +117,25 @@ func (r *MemberRepo) Traffic(ctx context.Context, id int64, now time.Time) (Memb
 		return result, e
 	}
 	result.Limits, e = r.Limits(ctx, id, now)
-	return result, e
+	if e != nil {
+		return result, e
+	}
+	result.QuotaPools = []PoolQuota{}
+	if id != 0 {
+		var account string
+		e = r.db.Pool.QueryRow(ctx, `SELECT account_id::text FROM users WHERE telegram_id=$1`, id).Scan(&account)
+		if e != nil {
+			return result, e
+		}
+		q, err := NewRuntimeQuotaRepo(r.db, r.state).SubscriptionQuota(ctx, account, now)
+		if err != nil {
+			return result, err
+		}
+		if q.Scope != "" {
+			result.QuotaPools = append(result.QuotaPools, q)
+		}
+	}
+	return result, nil
 }
 
 type MemberLimit struct {
@@ -139,7 +159,7 @@ func (r *MemberRepo) Limits(ctx context.Context, id int64, now time.Time) ([]Mem
 	if id == 0 {
 		return out, nil
 	}
-	rows, e := r.db.Pool.Query(ctx, `SELECT b.exit_id::text,COALESCE(NULLIF(n.display_name,''),NULLIF(n.city,''),n.name),b.monthly_bytes,b.is_fallback,q.used_bytes,q.limit_bytes,q.day,q.blocked,q.applied,COALESCE(q.reason,'') FROM exit_traffic_budgets b JOIN exit_nodes n ON n.id=b.exit_id JOIN users u ON u.telegram_id=$1 LEFT JOIN user_exit_quotas q ON q.user_uuid=u.uuid AND q.exit_id=b.exit_id WHERE n.enabled ORDER BY n.priority,n.id`, id)
+	rows, e := r.db.Pool.Query(ctx, `SELECT b.exit_id::text,COALESCE(NULLIF(n.display_name,''),NULLIF(n.city,''),n.name),b.monthly_bytes,b.is_fallback,q.used_bytes,q.limit_bytes,q.day,q.blocked,q.applied,COALESCE(q.reason,'') FROM exit_traffic_budgets b JOIN exit_nodes n ON n.id=b.exit_id JOIN users u ON u.telegram_id=$1 LEFT JOIN user_exit_quotas q ON q.user_uuid=u.uuid AND q.exit_id=b.exit_id WHERE n.enabled AND b.source<>'vultr' ORDER BY n.priority,n.id`, id)
 	if e != nil {
 		return nil, e
 	}

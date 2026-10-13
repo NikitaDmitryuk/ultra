@@ -33,7 +33,15 @@ type Snapshot struct {
 	ConfirmedAt time.Time       `json:"confirmed_at"`
 	Payload     json.RawMessage `json:"payload"`
 }
+
+// ProviderPoolID is an internal quota key, never a physical traffic destination.
+func ProviderPoolID(scope string) string { return "@pool:" + scope }
+
 type QuotaLimit struct {
+	ChargeOnly     bool      `json:"charge_only,omitempty"`
+	Scope          string    `json:"scope,omitempty"`
+	PoolScope      string    `json:"pool_scope,omitempty"`
+	Members        []string  `json:"members,omitempty"`
 	AccountID      string    `json:"account_id"`
 	ExitID         string    `json:"exit_id"`
 	Period         string    `json:"period"`
@@ -193,6 +201,7 @@ func (s *Store) SetQuotaLimits(limits []QuotaLimit) error {
 	return s.db.Update(func(tx *bolt.Tx) error { return setLimits(tx, limits) })
 }
 func setLimits(tx *bolt.Tx, limits []QuotaLimit) error {
+	limits = append([]QuotaLimit(nil), limits...)
 	b := tx.Bucket(quotaBucket)
 	// Expire removed entries; never mutate a bucket while its cursor is traversing.
 	prior := map[string]quotaState{}
@@ -225,7 +234,61 @@ func setLimits(tx *bolt.Tx, limits []QuotaLimit) error {
 			return err
 		}
 	}
+	// Upgrade cumulative charges before enabling pool reservations. Include removed
+	// members and max each physical pair before summing, never add DB and local totals.
+	for i, l := range limits {
+		if l.Scope != "provider_pool" {
+			continue
+		}
+		members := l.Members
+		if l.AccountID != "" {
+			for _, g := range limits {
+				if g.Scope == "provider_pool" && g.ExitID == l.ExitID && g.AccountID == "" {
+					members = g.Members
+					break
+				}
+			}
+		}
+		var total int64
+		for _, exit := range members {
+			values := map[string]int64{}
+			for _, q := range prior {
+				if q.Scope == "" && q.ExitID == exit && q.Period == l.Period {
+					values[q.AccountID] = max(values[q.AccountID], q.Spent)
+				}
+			}
+			for _, q := range limits {
+				if q.Scope == "" && q.ExitID == exit && q.Period == l.Period {
+					values[q.AccountID] = max(values[q.AccountID], q.UsedBytes)
+				}
+			}
+			physical := values[l.AccountID]
+			if l.AccountID == "" {
+				var owners int64
+				for account, value := range values {
+					if account != "" {
+						if owners > int64(^uint64(0)>>1)-value {
+							return errors.New("pool charge overflow")
+						}
+						owners += value
+					}
+				}
+				physical = max(physical, owners)
+			}
+			if physical > 0 && total > int64(^uint64(0)>>1)-physical {
+				return errors.New("pool charge overflow")
+			}
+			total += physical
+		}
+		limits[i].UsedBytes = max(l.UsedBytes, total)
+	}
 	for _, l := range limits {
+		if l.Scope != "" && (l.Scope != "provider_pool" || !bytes.HasPrefix([]byte(l.ExitID), []byte("@pool:"))) {
+			return errors.New("invalid runtime quota scope")
+		}
+		if l.Scope == "" && bytes.HasPrefix([]byte(l.ExitID), []byte("@pool:")) {
+			return errors.New("physical quota uses reserved pool identifier")
+		}
 		if l.ExitID == "" || l.Period == "" || l.LimitBytes < 0 || l.UsedBytes < 0 {
 			return errors.New("invalid runtime quota")
 		}
@@ -269,7 +332,7 @@ func loadQuota(tx *bolt.Tx, key string, now time.Time) (quotaState, error) {
 	if err := json.Unmarshal(raw, &q); err != nil {
 		return q, err
 	}
-	if q.ExpiresAt.IsZero() || !now.Before(q.ExpiresAt) {
+	if q.ChargeOnly || q.ExpiresAt.IsZero() || !now.Before(q.ExpiresAt) {
 		return q, ErrExpired
 	}
 	return q, nil
@@ -297,8 +360,38 @@ func (s *Store) remaining(tx *bolt.Tx, account, exit string, now time.Time) (int
 		return 0, u, g, e
 	}
 	credit := s.credits[key]
-	return max(0, min(u.LimitBytes-u.Spent, quotaAvailable(g, now))+credit), u, g, nil
+	left := max(0, min(u.LimitBytes-u.Spent, quotaAvailable(g, now)))
+	extra, err := poolQuotas(tx, u, g, now)
+	if err != nil {
+		return 0, u, g, err
+	}
+	for _, q := range extra {
+		left = min(left, quotaAvailable(q, now))
+	}
+	return max(0, left+credit), u, g, nil
 }
+func poolQuotas(tx *bolt.Tx, u, g quotaState, now time.Time) ([]quotaState, error) {
+	if u.PoolScope != g.PoolScope {
+		return nil, ErrQuota
+	}
+	if u.PoolScope == "" {
+		return nil, nil
+	}
+	id := ProviderPoolID(u.PoolScope)
+	personal, err := loadQuota(tx, quotaKey(u.AccountID, id, u.Period), now)
+	if err != nil {
+		return nil, err
+	}
+	global, err := loadQuota(tx, quotaKey("", id, u.Period), now)
+	if err != nil {
+		return nil, err
+	}
+	if personal.Scope != "provider_pool" || global.Scope != "provider_pool" {
+		return nil, ErrQuota
+	}
+	return []quotaState{personal, global}, nil
+}
+
 func (s *Store) Remaining(account, exit string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -362,7 +455,7 @@ func (s *Store) Reserve(account, exit string, want int64) (int64, error) {
 			return ErrJournalFull
 		}
 		if credit < grant {
-			reserve := min(ReservationChunk-credit, max(0, min(u.LimitBytes-u.Spent, quotaAvailable(g, now))))
+			reserve := min(ReservationChunk-credit, max(0, left-credit))
 			if reserve == 0 {
 				grant = min(grant, credit)
 			} else {
@@ -371,9 +464,13 @@ func (s *Store) Reserve(account, exit string, want int64) (int64, error) {
 					v := g.Spent
 					g.EmergencyBaseline = &v
 				}
-				u.Spent += reserve
-				g.Spent += reserve
-				for _, q := range []quotaState{u, g} {
+				extra, err := poolQuotas(tx, u, g, now)
+				if err != nil {
+					return err
+				}
+				states := append([]quotaState{u, g}, extra...)
+				for _, q := range states {
+					q.Spent += reserve
 					raw, _ := json.Marshal(q)
 					if e := tx.Bucket(quotaBucket).Put([]byte(quotaKey(q.AccountID, q.ExitID, q.Period)), raw); e != nil {
 						return e
@@ -440,7 +537,7 @@ func (s *Store) appendBatch(batch TrafficBatch, full bool) error {
 			if err := json.Unmarshal(v, &q); err != nil {
 				return err
 			}
-			if q.AccountID != "" {
+			if q.AccountID != "" && q.Scope == "" {
 				charges[quotaKey(q.AccountID, q.ExitID, q.Period)] = q
 			}
 			return nil
@@ -451,6 +548,9 @@ func (s *Store) appendBatch(batch TrafficBatch, full bool) error {
 		batch.Samples = nil
 		queued := map[string]int64{}
 		for _, sample := range actual {
+			if bytes.HasPrefix([]byte(sample.ExitID), []byte("@pool:")) {
+				return errors.New("pool counters cannot be traffic samples")
+			}
 			if sample.UplinkBytes == 0 && sample.DownlinkBytes == 0 && sample.ChargeTotalBytes == 0 {
 				continue
 			}
@@ -630,6 +730,9 @@ func (s *Store) ValidateAuthorization(account string) error {
 			if err := json.Unmarshal(v, &q); err != nil {
 				return err
 			}
+			if q.Scope != "" {
+				return nil
+			}
 			if q.AccountID != account || q.Period != s.now().UTC().Format("2006-01") {
 				return nil
 			}
@@ -652,4 +755,30 @@ func (s *Store) ValidateAuthorization(account string) error {
 		}
 		return ErrQuota
 	})
+}
+
+// PoolUsage exposes durable charge totals, including unsent reservations, without
+// exposing credentials or converting virtual counters into traffic samples.
+func (s *Store) PoolUsage(account, scope string) (personal, global int64, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err = s.db.View(func(tx *bolt.Tx) error {
+		for i, id := range []string{account, ""} {
+			raw := tx.Bucket(quotaBucket).Get([]byte(quotaKey(id, ProviderPoolID(scope), s.now().UTC().Format("2006-01"))))
+			if raw == nil {
+				return ErrQuota
+			}
+			var q quotaState
+			if err := json.Unmarshal(raw, &q); err != nil {
+				return err
+			}
+			if i == 0 {
+				personal = q.Spent
+			} else {
+				global = q.Spent
+			}
+		}
+		return nil
+	})
+	return
 }

@@ -32,7 +32,10 @@ var accountingColumns = []accountingColumn{
 // ValidateAccountingSchema checks the resolved relations, rather than trusting a
 // migration number that an older deployment may have used for unrelated DDL.
 func (d *DB) ValidateAccountingSchema(ctx context.Context) error {
-	return validateAccountingSchema(ctx, d.Pool)
+	if err := validateAccountingSchema(ctx, d.Pool); err != nil {
+		return err
+	}
+	return validatePoolSchema(ctx, d.Pool)
 }
 func validateAccountingSchema(ctx context.Context, q schemaQuerier) error {
 	for _, c := range accountingColumns {

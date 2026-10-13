@@ -94,6 +94,11 @@ func (b *Bot) RunPolling(ctx context.Context) error {
 		var self tgbotapi.User
 		if err := b.telegramJSON(ctx, "getMe", nil, &self); err == nil {
 			b.self.Store(&self)
+			if b.subscriptionCache != nil && validBotUsername(self.UserName) {
+				if err := b.subscriptionCache.setBotUsername(self.UserName); err != nil {
+					b.log.Warn("bot username cache unavailable")
+				}
+			}
 			return b.runMemberPolling(ctx)
 		}
 		if !waitTelegramRetry(ctx, retryDelay(attempt, 0)) {

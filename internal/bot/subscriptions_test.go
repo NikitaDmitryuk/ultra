@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 func TestPublicSubscriptionProxy(t *testing.T) {
@@ -22,6 +24,7 @@ func TestPublicSubscriptionProxy(t *testing.T) {
 	}))
 	defer upstream.Close()
 	b := &Bot{adminAPIURL: upstream.URL, adminAPIToken: "admin-secret"}
+	b.self.Store(&tgbotapi.User{UserName: "ultra_test_bot"})
 	mux := http.NewServeMux()
 	b.registerMiniAppRoutes(mux)
 	for _, part := range []string{"invalid", token} {
@@ -30,7 +33,7 @@ func TestPublicSubscriptionProxy(t *testing.T) {
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, r)
 		if part == token {
-			if w.Code != 200 || !strings.HasPrefix(w.Body.String(), "vless://") || w.Header().Get("Cache-Control") != "no-store" {
+			if w.Code != 200 || !strings.HasPrefix(w.Body.String(), "vless://") || w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("support-url") != "https://t.me/ultra_test_bot?start=member" {
 				t.Fatal(w.Code)
 			}
 		} else if w.Code != 404 {

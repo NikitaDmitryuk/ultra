@@ -78,6 +78,9 @@ var migration023 string
 //go:embed migrations/024_service_access.sql
 var migration024 string
 
+//go:embed migrations/025_provider_pool.sql
+var migration025 string
+
 func (d *DB) migrate(ctx context.Context) error {
 	tx, err := d.Pool.Begin(ctx)
 	if err != nil {
@@ -125,6 +128,7 @@ func (d *DB) migrate(ctx context.Context) error {
 		{22, migration022},
 		{23, migration023},
 		{24, migration024},
+		{25, migration025},
 	}
 
 	for _, m := range migrations {
@@ -152,6 +156,9 @@ func (d *DB) migrate(ctx context.Context) error {
 		}
 	}
 	if err := validateAccountingSchema(ctx, tx); err != nil {
+		return err
+	}
+	if err := validatePoolSchema(ctx, tx); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

@@ -37,3 +37,23 @@ func TestBandwidthUsesAccruedAccountCredits(t *testing.T) {
 		t.Fatal("transient GET failures were not retried", calls)
 	}
 }
+
+func TestAccountPoolRequiresCompleteConfirmedCreditsAndUsage(t *testing.T) {
+	for _, body := range []string{
+		`{"bandwidth":{}}`,
+		`{"bandwidth":{"current_month_to_date":{"instance_bandwidth_credits":100,"free_bandwidth_credits":2000,"purchased_bandwidth_credits":0}}}`,
+		`{"bandwidth":{"current_month_to_date":{"gb_out":0,"instance_bandwidth_credits":100,"free_bandwidth_credits":null,"purchased_bandwidth_credits":0}}}`,
+		`{"bandwidth":{"current_month_to_date":{"gb_out":-1,"instance_bandwidth_credits":100,"free_bandwidth_credits":2000,"purchased_bandwidth_credits":0}}}`,
+		`{"bandwidth":{"current_month_to_date":{"gb_out":0,"instance_bandwidth_credits":1e30,"free_bandwidth_credits":2000,"purchased_bandwidth_credits":0}}}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
+			defer server.Close()
+			api := NewVultr("fixture")
+			api.BaseURL = server.URL
+			if _, err := api.AccountBandwidth(context.Background()); err == nil {
+				t.Fatal("incomplete observation granted budget")
+			}
+		})
+	}
+}
