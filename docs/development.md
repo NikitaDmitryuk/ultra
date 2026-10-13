@@ -162,6 +162,13 @@ REALITY закреплён через `replace` на совместимом оф
 переход Vision в direct copy и не доказывает совместимость зависимости.
 [Проверки детектора REALITY](../internal/config/reality_detector_test.go) защищают
 обработку неполных TLS-записей и закрытие соединений после ошибки handshake.
+Целевой TLS `ServerHello` закреплённой REALITY поддерживает X25519 и
+X25519MLKEM768. Поэтому camouflage endpoint в тестах устойчивого учёта явно
+выбирает TLS 1.3 и X25519: настройки групп по умолчанию в новой версии Go могут
+дать иной обмен ключами и сорвать аутентификацию до проверки квоты. Регрессия
+проверяет реальный согласованный TLS, а UDP/direct/Vision — передачу через него.
+Источники: [проверки учёта](../internal/config/accounting_integration_test.go),
+[граница upstream](https://github.com/XTLS/REALITY/blob/e1986a4d31ca/tls.go).
 
 Гонка `splithttp.WaitReadCloser` исправлена upstream в
 [PR #6694](https://github.com/XTLS/Xray-core/pull/6694).

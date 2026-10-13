@@ -25,11 +25,34 @@ import (
 	"time"
 )
 
+// The pinned REALITY implementation accepts X25519 or X25519MLKEM768 target
+// ServerHello shares. Keep the camouflage endpoint independent of Go's evolving
+// default groups; these tests exercise accounting, not target compatibility.
+func accountingCamouflageTLS() *tls.Config {
+	return &tls.Config{MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519}}
+}
+
+func TestAccountingCamouflageNegotiatesRealityCompatibleTLS(t *testing.T) {
+	target := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	target.EnableHTTP2 = true
+	target.TLS = accountingCamouflageTLS()
+	target.StartTLS()
+	defer target.Close()
+	response, err := target.Client().Get(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.TLS == nil || response.TLS.Version != tls.VersionTLS13 || response.TLS.CurveID != tls.X25519 {
+		t.Fatal("camouflage endpoint negotiated a TLS handshake unsupported by pinned REALITY")
+	}
+}
+
 func accountingFixture(t *testing.T, capacity int64, udp, direct bool) (*proxy.Runner, *proxy.Runner, *runtimestate.Store, auth.User) {
 	t.Helper()
 	camouflage := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
 	camouflage.EnableHTTP2 = true
-	camouflage.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
+	camouflage.TLS = accountingCamouflageTLS()
 	camouflage.StartTLS()
 	t.Cleanup(camouflage.Close)
 	keys, e := realitykey.Generate()
