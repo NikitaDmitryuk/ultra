@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -68,7 +69,15 @@ func checkBody(ctx context.Context, client *http.Client, target string) exits.Pr
 	result := exits.ProbeResult{Target: target}
 	start := time.Now()
 	var first atomic.Int64
-	trace := &httptrace.ClientTrace{GotFirstResponseByte: func() { first.Store(time.Since(start).Milliseconds()) }}
+	var handshakeStarted, handshakeFailed, handshakeCompleted atomic.Bool
+	trace := &httptrace.ClientTrace{
+		GotFirstResponseByte: func() { first.Store(time.Since(start).Milliseconds()) },
+		TLSHandshakeStart:    func() { handshakeStarted.Store(true) },
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			handshakeFailed.Store(err != nil)
+			handshakeCompleted.Store(err == nil)
+		},
+	}
 	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), http.MethodGet, target, nil)
 	if err == nil {
 		req.Header.Set("Accept-Encoding", "identity")
@@ -77,7 +86,11 @@ func checkBody(ctx context.Context, client *http.Client, target string) exits.Pr
 		if err == nil {
 			result.Bytes, err = io.Copy(io.Discard, io.LimitReader(resp.Body, 65537))
 			_ = resp.Body.Close()
-			if err == nil && (resp.StatusCode != http.StatusOK || result.Bytes != 65536) {
+			if err == nil && resp.StatusCode != http.StatusOK {
+				result.Error = "http_status"
+				err = fmt.Errorf("unexpected response")
+			} else if err == nil && result.Bytes != 65536 {
+				result.Error = "body_size"
 				err = fmt.Errorf("unexpected response")
 			}
 		}
@@ -86,7 +99,18 @@ func checkBody(ctx context.Context, client *http.Client, target string) exits.Pr
 	result.DurationMS = time.Since(start).Milliseconds()
 	result.OK = err == nil
 	if err != nil {
-		result.Error = "response_failed"
+		if result.Error == "" {
+			result.Error = "response_failed"
+			if handshakeFailed.Load() {
+				result.Error = "tls_handshake_failed"
+			}
+			if timeout, ok := err.(interface{ Timeout() bool }); ok && timeout.Timeout() {
+				result.Error = "response_timeout"
+				if handshakeStarted.Load() && !handshakeCompleted.Load() {
+					result.Error = "tls_handshake_timeout"
+				}
+			}
+		}
 		if ctx.Err() != nil {
 			result.Error = "deadline_or_cancel"
 		}

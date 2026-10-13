@@ -25,7 +25,7 @@ func buildBridgeExitOutbounds(
 	exitNodes []exits.Node,
 	activeExitID string,
 	w xrayWireResolved,
-	buildStream func(pinnedPeerCertSHA256 string) map[string]any,
+	buildStream func(address, pinnedPeerCertSHA256 string) map[string]any,
 ) []any {
 	enabled := exits.FilterEnabled(exitNodes)
 	if len(enabled) == 0 {
@@ -36,7 +36,7 @@ func buildBridgeExitOutbounds(
 				spec.Exit.Port,
 				spec.Exit.TunnelUUID,
 				w,
-				buildStream(spec.Exit.PinnedPeerCertSHA256),
+				buildStream(spec.Exit.Address, spec.Exit.PinnedPeerCertSHA256),
 			),
 		}
 	}
@@ -44,7 +44,7 @@ func buildBridgeExitOutbounds(
 	for _, n := range enabled {
 		out = append(
 			out,
-			bridgeExitVLESSOutbound(exits.OutboundTag(n.ID), n.Address, n.Port, n.TunnelUUID, w, buildStream(n.PinnedPeerCertSHA256)),
+			bridgeExitVLESSOutbound(exits.OutboundTag(n.ID), n.Address, n.Port, n.TunnelUUID, w, buildStream(n.Address, n.PinnedPeerCertSHA256)),
 		)
 	}
 	legacyNode, ok := findEnabledExit(enabled, activeExitID)
@@ -60,7 +60,7 @@ func buildBridgeExitOutbounds(
 				legacyNode.Port,
 				legacyNode.TunnelUUID,
 				w,
-				buildStream(legacyNode.PinnedPeerCertSHA256),
+				buildStream(legacyNode.Address, legacyNode.PinnedPeerCertSHA256),
 			),
 		)
 	}

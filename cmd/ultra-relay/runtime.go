@@ -264,8 +264,12 @@ func (r *bridgeRuntime) applyLocked(reason string, force bool) (err error) {
 	if err != nil {
 		return err
 	}
+	before := r.runner.Status()
 	if err = r.runner.ReloadReason(data, reason); err != nil {
 		return err
+	}
+	if after := r.runner.Status(); after.Count != before.Count {
+		r.log.Info("runtime core reloaded", "reason", reason, "count", after.Count)
 	}
 	r.lastApplied = users
 	r.lastNodes = nodes
