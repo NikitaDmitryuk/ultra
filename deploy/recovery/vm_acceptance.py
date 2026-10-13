@@ -32,6 +32,40 @@ def running_process(pid, root=Path('/proc')):
         return False
 
 
+def owned_vm_pids(disk, root=Path('/proc')):
+    """Find only live QEMU processes owning this exact fixture disk."""
+    result=[]
+    for directory in Path(root).glob('[0-9]*'):
+        try:
+            args=(directory/'cmdline').read_bytes().split(b'\0')
+            if Path(os.fsdecode(args[0])).name not in ('qemu-system-x86_64','qemu-system-aarch64'):
+                continue
+            drives=[args[i+1].split(b',') for i,arg in enumerate(args[:-1]) if arg==b'-drive']
+            if any(b'file='+os.fsencode(disk) in drive for drive in drives) and running_process(int(directory.name),root):
+                result.append(int(directory.name))
+        except (FileNotFoundError,ProcessLookupError):
+            continue
+    return sorted(result)
+
+
+def fence_owned_vm(disk):
+    pids=owned_vm_pids(disk)
+    if len(pids)>1:raise ValueError('multiple_synthetic_primary_processes')
+    for pid in pids:
+        # The fd binds the signal to this process even if the numeric PID is reused.
+        try:fd=os.pidfd_open(pid)
+        except ProcessLookupError:continue
+        try:
+            if pid not in owned_vm_pids(disk):
+                raise ValueError('synthetic_vm_process_ownership_changed')
+            signal.pidfd_send_signal(fd,signal.SIGTERM)
+        finally:os.close(fd)
+    deadline=time.monotonic()+30
+    while owned_vm_pids(disk):
+        if time.monotonic()>deadline:raise ValueError('synthetic_primary_not_offline')
+        time.sleep(0.2)
+
+
 def fetch_generation(topology, metadata, generation):
     address=topology['nodes']['us']
     if (not topology.get('synthetic_only') or address!='198.18.0.12'
@@ -127,23 +161,13 @@ def execute(args):
         receipt['bundle']=str(fetch_generation(topology,metadata,directory/'generation'));receipt['snapshot_at']=metadata['snapshot_at'];save()
         run([installer,'recovery-key','verify','--identity',str(directory/'identity.age'),'--extracted-identity',str(directory/'extracted-identity.age'),'--bundle',receipt['bundle'],'--receipt',str(directory/'key-proof.json')],directory/'key.log')
     phase('encrypted_generation',capture)
-    def offline():
-        pid=topology['qemu_pids']['bridge']
-        if not running_process(pid):return
-        # Only this recorded synthetic QEMU process may be fenced. Its command
-        # line must still reference this topology's exact bridge disk.
-        command=Path('/proc',str(pid),'cmdline').read_bytes()
-        if str(directory/'bridge/disk.qcow2').encode() not in command or b'qemu-system' not in command:
-            raise ValueError('synthetic_vm_process_ownership_changed')
-        os.kill(pid,signal.SIGTERM)
-        deadline=time.monotonic()+30
-        while running_process(pid):
-            if time.monotonic()>deadline:raise ValueError('synthetic_primary_not_offline')
-            time.sleep(0.2)
-    phase('old_primary_fenced',offline)
+    # Recheck real process ownership even when an earlier receipt says fenced.
+    # Cached topology PIDs can become stale after fixture VM restarts.
+    fence_owned_vm(directory/'bridge/disk.qcow2')
+    phase('old_primary_fenced',lambda:None)
     fence={'source':'bridge','confirmed_offline':True,'confirmed_at':int(time.time()),'source_address':topology['nodes']['bridge'],'target_host':'root@'+topology['nodes']['replacement']}
     # Every retry rechecks that the old producer remains absent.
-    if running_process(topology['qemu_pids']['bridge']):raise ValueError('old_primary_process_exists')
+    if owned_vm_pids(directory/'bridge/disk.qcow2'):raise ValueError('old_primary_process_exists')
     (directory/'fence.json').write_text(json.dumps(fence))
     config={'format':1,'source':'bridge','bundle':receipt['bundle'],'identity':str(directory/'extracted-identity.age'),'fence_file':str(directory/'fence.json'),'state_dir':str(directory/'restore-runs'),
             'target':{'host':fence['target_host'],'identity':topology['identity'],'known_hosts':topology['known_hosts']},

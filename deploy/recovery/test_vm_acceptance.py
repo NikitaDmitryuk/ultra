@@ -39,3 +39,21 @@ class GenerationReceipt(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'confirmed_independent'):
                     vm_acceptance.fetch_generation(topology,{**receipt,'destinations':['root@198.18.0.11']},destination)
                 ssh.assert_not_called()
+
+class SyntheticFencing(unittest.TestCase):
+    def test_stale_recorded_pid_does_not_hide_running_owned_disk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); disk=root/'topology/bridge/disk.qcow2'; proc=root/'proc'
+            for pid,name in ((3454,'bridge'),(3480,'nl')):
+                directory=proc/str(pid);directory.mkdir(parents=True)
+                (directory/'stat').write_text(str(pid)+' (qemu-system-x86) S 0')
+                (directory/'cmdline').write_bytes(b'qemu-system-x86_64\0-drive\0file='+str(root/'topology'/name/'disk.qcow2').encode()+b',if=virtio,format=qcow2\0')
+            self.assertEqual(vm_acceptance.owned_vm_pids(disk,proc),[3454])
+            # A similar prefix must never match the owned disk.
+            self.assertEqual(vm_acceptance.owned_vm_pids(Path(str(disk)+'.other'),proc),[])
+
+    def test_pidfd_identity_rechecked_before_signal(self):
+        with mock.patch.object(vm_acceptance,'owned_vm_pids',side_effect=[[3454],[]]), mock.patch.object(vm_acceptance.os,'pidfd_open',return_value=99), mock.patch.object(vm_acceptance.os,'close') as close, mock.patch.object(vm_acceptance.signal,'pidfd_send_signal') as send:
+            with self.assertRaisesRegex(ValueError,'ownership_changed'):
+                vm_acceptance.fence_owned_vm(Path('/fixture/bridge/disk.qcow2'))
+            send.assert_not_called();close.assert_called_once_with(99)
