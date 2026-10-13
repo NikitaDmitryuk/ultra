@@ -23,6 +23,20 @@ class RestoreContracts(unittest.TestCase):
         self.root = Path(self.temp.name)
     def tearDown(self):
         self.temp.cleanup()
+    def test_activate_reloads_nginx_after_start_and_on_completed_resume(self):
+        target=host.Host(self.root, {'restore_id':'a'*64, 'fence':{}, 'target_host':'fixture', 'old_bridge_address':'192.0.2.1'})
+        with mock.patch.object(host, 'stage_manifests', return_value=({}, {})), mock.patch.object(host, 'restore_certbot_lineages'), mock.patch.object(host, 'restore_units'), mock.patch.object(target, 'override'), mock.patch.object(target, 'wait_runtime'), mock.patch.object(host, 'AUTOMATION_UNITS', ()), mock.patch.object(host, 'run') as run:
+            target.activate()
+            calls=[x.args[0] for x in run.call_args_list]
+            self.assertLess(calls.index(['nginx','-t']), calls.index(['systemctl','reload','nginx.service']))
+            self.assertLess(calls.index(['systemctl','enable','--now','ultra-bot.service','nginx.service']), calls.index(['systemctl','reload','nginx.service']))
+        target.status['completed']=list(common.PHASES[:common.PHASES.index('activate')+1])
+        with mock.patch.object(host, 'fence'), mock.patch.object(target, 'verify_resume') as verify, mock.patch.object(target, 'activate') as activate, mock.patch.object(host, 'run') as run:
+            target.phase('activate'); target.phase('activate')
+            self.assertEqual(verify.call_count, 2)
+            activate.assert_not_called()
+            self.assertEqual([x.args[0] for x in run.call_args_list], [['nginx','-t'], ['systemctl','reload','nginx.service']]*2)
+
     def test_original_artifact_ciphertext_is_preserved_for_receiver_and_resume(self):
         import io
         repo=recovery.repository(self.root/'repo','bridge',initialize=True)

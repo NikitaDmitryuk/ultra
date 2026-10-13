@@ -590,6 +590,7 @@ class Host:
         run(['systemctl', 'enable', '--now', 'ultra-relay.service'])
         self.wait_runtime()
         run(['systemctl', 'enable', '--now', 'ultra-bot.service', 'nginx.service'])
+        run(['systemctl', 'reload', 'nginx.service'])
 
     def api(self, path):
         env = json.loads((self.directory / 'service-environment.json').read_text())['ultra-relay.service']
@@ -724,6 +725,9 @@ class Host:
             raise ValueError('restore_phase_order')
         if action in self.status['completed'] and action != 'ready':
             self.verify_resume()
+            if action == 'activate':
+                run(['nginx', '-t'])
+                run(['systemctl', 'reload', 'nginx.service'])
             if action == 'ingress' and self.plan.get('ingress_mode') == 'direct':
                 self.direct_ingress()
             return self.status
