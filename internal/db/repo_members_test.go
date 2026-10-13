@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/subscriptionkey"
+	"github.com/google/uuid"
 )
 
 func TestMemberEnrollmentAndReset(t *testing.T) {
@@ -256,6 +258,58 @@ func TestMemberTrafficRoutesAndLegacyTotals(t *testing.T) {
 	result, e = r.Traffic(ctx, 456, now)
 	if e != nil || len(result.DayRoutes) != 2 || len(result.Hours) != 0 {
 		t.Fatal("monthly route chart lost after raw retention", e)
+	}
+}
+
+func TestMemberTrafficDirectionsKeepRecreatedExitHistory(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	r := NewMemberRepo(d)
+	token, err := r.Invite(ctx, 456, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := r.Enroll(ctx, 456, "traffic", "invite", token, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	old, current, other := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	for i, id := range []string{old, current, other} {
+		country := "XX"
+		if id == other {
+			country = "YY"
+		}
+		_, err := d.Pool.Exec(ctx, `INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid,country_code,city,display_name,enabled) VALUES($1,'fixture',$2,443,$3,$4,'Test City','Test City',$5)`, id, fmt.Sprintf("192.0.2.%d", i+1), uuid.NewString(), country, id != old)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{old, current, other} {
+		if err = NewTrafficRepo(d).RecordSamples(ctx, []TrafficSample{{UserUUID: m.UUID, CollectedAt: now, UplinkBytes: 10, DownlinkBytes: 20, ExitTag: "to-exit-" + id}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = NewTrafficRepo(d).RecordSamples(ctx, []TrafficSample{{UserUUID: m.UUID, CollectedAt: now, DownlinkBytes: 5, ExitTag: "direct"}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := r.Traffic(ctx, 456, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byTag := map[string]RouteTraffic{}
+	for _, route := range result.Routes {
+		byTag[route.Tag] = route
+	}
+	if len(result.Routes) != 4 || len(result.DayRoutes) != 4 || result.Uplink != 30 || result.Downlink != 65 {
+		t.Fatalf("lost history: %+v", result)
+	}
+	if byTag["direct"].Name != "Напрямую с bridge" {
+		t.Fatal("incorrect direct label")
+	}
+	a, b, c := byTag["to-exit-"+old], byTag["to-exit-"+current], byTag["to-exit-"+other]
+	if a.Group != "location:XX:test city" || a.Group != b.Group || a.Group == c.Group || a.Downlink != 20 || b.Downlink != 20 {
+		t.Fatalf("incorrect directions: %+v %+v %+v", a, b, c)
 	}
 }
 
