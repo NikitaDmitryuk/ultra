@@ -22,8 +22,15 @@ INERT_UNITS = (
 
 def inert_unit_path(path):
     # Includes restored target.wants links and supplementary unit directories.
+    parts = Path(path).parts
+    if parts and parts[0] == '/':
+        parts = parts[1:]
+    if parts and parts[0] in ('state', 'artifacts'):
+        parts = parts[1:]
+    if parts[:3] != ('etc', 'systemd', 'system'):
+        return False  # Controller templates under /opt are data, not active units.
     return any(part in INERT_UNITS or part in {unit + '.d' for unit in INERT_UNITS}
-               for part in Path(path).parts)
+               for part in parts[3:])
 
 
 def mask_external_automation(unit_directory='/etc/systemd/system'):
@@ -72,6 +79,15 @@ def write(path, value, mode=0o600):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(value)
     path.chmod(mode)
+
+
+def exit_fixture_plan(nodes):
+    # Keep every restored exit ID and tunnel identity. Enabled endpoints have a
+    # unique (address, port) constraint, so each local fixture needs its own port.
+    if not nodes or len(nodes) > 16:
+        raise RuntimeError('unsupported drill exit count')
+    return [{**node, 'port': 16443 + index, 'unit': 'ultra-drill-exit-' + str(index)}
+            for index, node in enumerate(nodes)]
 
 
 def restore(stage):
@@ -139,18 +155,24 @@ def restore(stage):
     run(['update-ca-certificates'])
     cert_der = run(['openssl', 'x509', '-in', str(fixture / 'cert.pem'), '-outform', 'DER'])
     pin = hashlib.sha256(cert_der).hexdigest()
-    node = json.loads(sql("SELECT row_to_json(t) FROM (SELECT tunnel_uuid FROM exit_nodes WHERE enabled ORDER BY priority LIMIT 1) t"))
-    sql("UPDATE exit_nodes SET address='127.0.0.1', port=16443, pinned_peer_cert_sha256='" + pin + "' WHERE enabled;")
+    nodes = exit_fixture_plan(json.loads(sql("SELECT json_agg(t ORDER BY priority,id) FROM (SELECT id,priority,tunnel_uuid FROM exit_nodes WHERE enabled) t")))
+    node = nodes[0]
+    for item in nodes:
+        identifier = str(item['id']).replace("'", "''")
+        sql("UPDATE exit_nodes SET address='127.0.0.1', port=" + str(item['port']) + ", pinned_peer_cert_sha256='" + pin + "' WHERE id='" + identifier + "';")
     spec['exit']['tunnel_uuid'] = node['tunnel_uuid']
     spec['exit']['pinned_peer_cert_sha256'] = pin
     spec['splithttp_tls']['server_name'] = 'localhost'
     spec['splithttp_tls']['omit_sni'] = False
     spec['tunnel_tls_provision'] = 'self_signed'
     exit_spec = {key: spec[key] for key in ['schema_version', 'mimic_preset', 'splithttp_tls', 'splithttp_host', 'splithttp_path', 'tunnel_transport'] if key in spec}
-    exit_spec.update({'role': 'exit', 'listen_address': '127.0.0.1', 'vless_port': 16443, 'exit': {'tunnel_uuid': node['tunnel_uuid']}, 'anti_censor': {'disable_doh': True, 'exit_fallback_host': '8.8.8.8:19443'}})
+    exit_spec.update({'role': 'exit', 'listen_address': '127.0.0.1', 'anti_censor': {'disable_doh': True, 'exit_fallback_host': '8.8.8.8:19443'}})
     exit_spec['exit_cert'] = {'cert_file': str(fixture / 'cert.pem'), 'key_file': str(fixture / 'key.pem')}
-    write(fixture / 'exit.json', json.dumps(exit_spec))
-    write('/etc/systemd/system/ultra-drill-exit.service', '[Service]\nExecStart=/usr/local/bin/ultra-relay -spec /etc/ultra-drill/exit.json -log-level error\n')
+    for item in nodes:
+        exit_spec.update({'vless_port': item['port'], 'exit': {'tunnel_uuid': item['tunnel_uuid']}})
+        config_path = fixture / (item['unit'] + '.json')
+        write(config_path, json.dumps(exit_spec))
+        write('/etc/systemd/system/' + item['unit'] + '.service', '[Service]\nExecStart=/usr/local/bin/ultra-relay -spec ' + str(config_path) + ' -log-level error\n')
     write('/etc/systemd/system/ultra-drill-target.service', '[Service]\nExecStart=/usr/bin/python3 /opt/ultra-drill/vm_fixture.py --cert /etc/ultra-drill/cert.pem --key /etc/ultra-drill/key.pem\n')
     write(spec_path, json.dumps(spec))
     if subprocess.run(['id', 'ultra-relay'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
@@ -170,10 +192,10 @@ def restore(stage):
     run(['nginx', '-t'])
     run(['/usr/local/bin/ultra-relay', '-check', '-spec', str(spec_path), '-log-level', 'error'])
     run(['systemctl', 'daemon-reload'])
-    run(['systemctl', 'start', 'ultra-drill-target', 'ultra-drill-exit', 'ultra-relay', 'ultra-bot', 'nginx'])
+    run(['systemctl', 'start', 'ultra-drill-target', *[item['unit'] for item in nodes], 'ultra-relay', 'ultra-bot', 'nginx'])
     run(['curl', '--fail', '--silent', '--header', 'Host: ' + spec['primary_xhttp']['server_name'], 'http://127.0.0.1/.well-known/acme-challenge/ultra-drill'])
     # Return only non-sensitive proof, further VPN fixtures are a separate phase.
-    result = {'schema': 23, 'restored_tables_equal': checked, 'vm_restore_seconds': round(time.monotonic() - started, 2), 'services_started': True, 'network_output_isolated': True, 'from_stage_creation_seconds': round(time.time() - int(run(['stat', '-c', '%W', str(stage)]).decode().strip()), 2)}
+    result = {'schema': 23, 'restored_tables_equal': checked, 'isolated_exit_fixtures': len(nodes), 'vm_restore_seconds': round(time.monotonic() - started, 2), 'services_started': True, 'network_output_isolated': True, 'from_stage_creation_seconds': round(time.time() - int(run(['stat', '-c', '%W', str(stage)]).decode().strip()), 2)}
     write('/var/lib/ultra-drill-result.json', json.dumps(result))
     print(json.dumps(result))
 

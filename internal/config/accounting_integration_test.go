@@ -12,6 +12,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/realitykey"
 	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 	"github.com/google/uuid"
+	"github.com/xtls/reality"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
 	"io"
@@ -30,6 +31,53 @@ import (
 // default groups; these tests exercise accounting, not target compatibility.
 func accountingCamouflageTLS() *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519}}
+}
+
+// Listener readiness alone is insufficient: REALITY starts its post-handshake
+// detector asynchronously and polls unfinished detection every five seconds.
+// Quota tests must start their five-second transfer deadline after detection.
+func waitAccountingRealityDetector(t *testing.T, destination, serverName string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		ready := true
+		for alpn := range 3 {
+			value, _ := reality.GlobalPostHandshakeRecordsLens.Load(fmt.Sprintf("%s %s %d", destination, serverName, alpn))
+			if _, ok := value.([]int); !ok {
+				ready = false
+			}
+		}
+		if ready {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("REALITY accounting fixture detector not ready")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestAccountingRealityDetectorWaitsForConfirmedReadiness(t *testing.T) {
+	destination := "accounting-readiness-fixture"
+	for alpn := range 3 {
+		key := fmt.Sprintf("%s example.com %d", destination, alpn)
+		reality.GlobalPostHandshakeRecordsLens.Store(key, false)
+		t.Cleanup(func() { reality.GlobalPostHandshakeRecordsLens.Delete(key) })
+	}
+	confirmed := make(chan struct{})
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		close(confirmed)
+		for alpn := range 3 {
+			reality.GlobalPostHandshakeRecordsLens.Store(fmt.Sprintf("%s example.com %d", destination, alpn), []int{})
+		}
+	}()
+	waitAccountingRealityDetector(t, destination, "example.com")
+	select {
+	case <-confirmed:
+	default:
+		t.Fatal("pending detector was considered ready")
+	}
 }
 
 func TestAccountingCamouflageNegotiatesRealityCompatibleTLS(t *testing.T) {
@@ -55,6 +103,15 @@ func accountingFixture(t *testing.T, capacity int64, udp, direct bool) (*proxy.R
 	camouflage.TLS = accountingCamouflageTLS()
 	camouflage.StartTLS()
 	t.Cleanup(camouflage.Close)
+	for alpn := range 3 {
+		key := fmt.Sprintf("%s example.com %d", camouflage.Listener.Addr().String(), alpn)
+		// A previous, closed fixture may have owned this reusable TCP port.
+		reality.GlobalPostHandshakeRecordsLens.Delete(key)
+		t.Cleanup(func() {
+			reality.GlobalPostHandshakeRecordsLens.Delete(key)
+			reality.GlobalMaxCSSMsgCount.Delete(key)
+		})
+	}
 	keys, e := realitykey.Generate()
 	if e != nil {
 		t.Fatal(e)
@@ -113,6 +170,7 @@ func accountingFixture(t *testing.T, capacity int64, udp, direct bool) (*proxy.R
 		t.Fatal(e)
 	}
 	t.Cleanup(func() { _ = server.Close() })
+	waitAccountingRealityDetector(t, camouflage.Listener.Addr().String(), "example.com")
 	for _, port := range []int{spec.VLESSPort, spec.AntiCensor.PublicXHTTPPort, spec.PublicXHTTPTLS.Port} {
 		c, e := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), time.Second)
 		if e != nil {

@@ -9,6 +9,16 @@ import vm_generation
 
 
 class IsolatedRestoreUnitTests(unittest.TestCase):
+    def test_multiple_enabled_exits_keep_identities_on_distinct_fixture_ports(self):
+        nodes = [{'id': 'NL', 'priority': 0, 'tunnel_uuid': 'fixture-nl'},
+                 {'id': 'US', 'priority': 1, 'tunnel_uuid': 'fixture-us'}]
+        plan = vm_guest.exit_fixture_plan(nodes)
+        self.assertEqual([node['id'] for node in plan], ['NL', 'US'])
+        self.assertEqual([node['tunnel_uuid'] for node in plan], ['fixture-nl', 'fixture-us'])
+        self.assertEqual([node['port'] for node in plan], [16443, 16444])
+        self.assertEqual(len({node['unit'] for node in plan}), 2)
+        self.assertNotIn('port', nodes[0])
+
     def test_new_generation_uses_staged_automation_without_unmasking(self):
         with tempfile.TemporaryDirectory() as directory:
             stage = Path(directory)
@@ -75,6 +85,10 @@ class IsolatedRestoreUnitTests(unittest.TestCase):
             binary.parent.mkdir(parents=True)
             binary.write_text('synthetic binary')
             artifacts['files']['usr/local/bin/ultra-client'] = {'mode': 0o755}
+            template = stage / 'artifacts/opt/ultra-recovery/ultra-monitor.service'
+            template.parent.mkdir(parents=True)
+            template.write_text('inert controller template')
+            artifacts['files']['opt/ultra-recovery/ultra-monitor.service'] = {'mode': 0o644}
             vm_guest.install_stage_files(stage, manifest, artifacts, guest)
             self.assertEqual(fake_null.read_text(), 'untouched mask destination')
             self.assertTrue((unit_dir / 'ultra-recovery-reconcile.service').is_symlink())
@@ -83,6 +97,8 @@ class IsolatedRestoreUnitTests(unittest.TestCase):
             self.assertTrue((guest / 'etc/ultra-recovery/fixture-master-credentials').is_file())
             self.assertTrue((unit_dir / 'ultra-relay.service').is_file())
             self.assertEqual((guest / 'usr/local/bin/ultra-client').stat().st_mode & 0o777, 0o755)
+            self.assertEqual((guest / 'opt/ultra-recovery/ultra-monitor.service').read_text(), 'inert controller template')
+            self.assertFalse(vm_guest.inert_unit_path('/opt/ultra-recovery/ultra-monitor.service'))
 
 
 if __name__ == '__main__':

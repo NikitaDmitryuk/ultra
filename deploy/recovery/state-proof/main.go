@@ -84,7 +84,15 @@ func run() error {
 		_ = f.Close()
 		return fmt.Errorf("baseline sync failed")
 	}
-	return f.Close()
+	if err = f.Close(); err != nil {
+		return err
+	}
+	// Report the stopped journal's lease, avoiding a race between the last live
+	// API observation and a concurrent snapshot refresh during shutdown.
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{
+		"confirmed_at": snapshot.ConfirmedAt,
+		"expires_at":   snapshot.ConfirmedAt.Add(runtimestate.SnapshotTTL),
+	})
 }
 func main() {
 	if err := run(); err != nil {
