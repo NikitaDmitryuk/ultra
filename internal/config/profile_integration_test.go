@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -27,6 +28,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 	"github.com/NikitaDmitryuk/ultra/internal/proxy"
 	"github.com/NikitaDmitryuk/ultra/internal/realitykey"
+	"github.com/xtls/reality"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
 	_ "github.com/xtls/xray-core/main/distro/all"
@@ -123,6 +125,16 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 	camouflage.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
 	camouflage.StartTLS()
 	defer camouflage.Close()
+	for alpn := range 3 {
+		key := fmt.Sprintf("%s example.com %d", camouflage.Listener.Addr().String(), alpn)
+		// Avoid metadata from a closed fixture if the OS reuses its TCP port.
+		reality.GlobalPostHandshakeRecordsLens.Delete(key)
+		reality.GlobalMaxCSSMsgCount.Delete(key)
+		t.Cleanup(func() {
+			reality.GlobalPostHandshakeRecordsLens.Delete(key)
+			reality.GlobalMaxCSSMsgCount.Delete(key)
+		})
+	}
 	keys, e := realitykey.Generate()
 	if e != nil {
 		t.Fatal(e)
@@ -164,6 +176,9 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer func() { _ = relay.Close() }()
+	// REALITY's first handshake can otherwise hit the detector's five-second
+	// polling interval before this fixture's three-second HTTP deadline.
+	waitAccountingRealityDetector(t, camouflage.Listener.Addr().String(), "example.com")
 	for _, port := range []int{s.VLESSPort, s.AntiCensor.PublicXHTTPPort, s.PublicXHTTPTLS.Port} {
 		deadline := time.Now().Add(time.Second)
 		for {
