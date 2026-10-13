@@ -144,6 +144,13 @@ test("personal cabinet reuses subscription and opens HTTPS import without admin 
     "https://vpn.example/sub/test",
   ]);
   assert.deepEqual(p.opened, ["https://vpn.example/happ#test"]);
+  assert.ok(p.el("#app").innerHTML.includes("Доступ и устройства"));
+  assert.ok(
+    p.el("#app").innerHTML.includes(
+      "Состояние подписки, маршруты и расход трафика",
+    ),
+  );
+  assert.ok(!p.el("#app").innerHTML.includes("Ваш интернет"));
   assert.equal(p.el("#switch").hidden, false);
   assert.ok(p.calls.every((c) => c.path.startsWith("/api/self")));
   assert.ok(p.calls.every((c) => c.options.cache === "no-store"));
