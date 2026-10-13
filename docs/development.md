@@ -9,6 +9,7 @@
 | Изменение | Проверка |
 | --- | --- |
 | Только инструкции или документация | `make harness-check`; содержательная сверка с источниками |
+| Состав релиза, manifest или публикация GitHub Release | `python3 scripts/test-release-assets.py`: опубликованные файлы должны покрывать весь manifest и checksum inventory из `release-dist` |
 | Проверяющий инструмент harness | `go test ./tools/harnesscheck`; `make harness-check`; `go vet ./tools/harnesscheck` |
 | Go-код | Тесты затронутых пакетов, затем `make test`, `make vet`, `make lint` |
 | Конфигурация Xray, маршрутизация, failover | Тесты `./internal/config ./internal/exits ./internal/proxy`; сборка relay |

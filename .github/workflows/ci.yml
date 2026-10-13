@@ -53,6 +53,9 @@ jobs:
       - name: Check agent context and ADRs
         run: make harness-check
 
+      - name: Verify published release asset contract
+        run: python3 scripts/test-release-assets.py
+
       - name: Verify dependencies
         run: go mod verify
 
