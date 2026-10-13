@@ -27,6 +27,13 @@ def udp():
             s.sendto(data, address)
 
 
+def tls_context(cert, key):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(cert, key)
+    return context
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cert', required=True)
@@ -34,7 +41,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
     threading.Thread(target=udp, daemon=True).start()
     server = ThreadingHTTPServer(('8.8.8.8', 19443), Handler)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(args.cert, args.key)
+    context = tls_context(args.cert, args.key)
     server.socket = context.wrap_socket(server.socket, server_side=True)
     server.serve_forever()
