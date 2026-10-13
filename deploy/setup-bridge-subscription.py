@@ -74,6 +74,7 @@ server {{
 
 def probe(p, timeout=20):
     context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     deadline = time.monotonic() + timeout
     while True:
         try:

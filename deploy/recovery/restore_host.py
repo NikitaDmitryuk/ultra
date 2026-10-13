@@ -640,6 +640,7 @@ class Host:
         # Before publishing either A record, validate both certificates against
         # the replacement IP, bypassing DNS but preserving hostname validation.
         context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         for name in names.values():
             with socket.create_connection((self.plan['new_bridge_address'], 443), timeout=15) as raw:
                 with context.wrap_socket(raw, server_hostname=name):

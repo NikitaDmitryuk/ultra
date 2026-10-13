@@ -134,6 +134,7 @@ def subscription_tls_endpoints(raw):
 
 def https(host, address, port, request_path):
     context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     with socket.create_connection((address, port), timeout=8) as raw:
         with context.wrap_socket(raw, server_hostname=host) as connection:
             connection.sendall(('GET ' + request_path + ' HTTP/1.1\r\nHost: ' + host + '\r\nUser-Agent: Happ/4.7.1/Android/cutover-check\r\nConnection: close\r\n\r\n').encode())

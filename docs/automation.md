@@ -161,6 +161,12 @@ payload, затем меняет только согласованную publica
 NL forwarding, REALITY, UUID и subscription tokens сохраняются. Неизвестные TLS
 publication descriptors требуют отдельного рассмотрения вместо массовой замены.
 
+HTTPS-проверки subscription ingress, cutover и восстановления явно требуют TLS 1.2
+или новее, сохраняя проверку цепочки сертификата и имени сервера. Более старый TLS
+не считается готовым входом даже при разрешающих настройках Python/OpenSSL хоста.
+Контракт проверяется локальным TLS handshake в
+[регрессии HTTPS-проверок](../deploy/recovery/test_https_policy.py).
+
 ```sh
 ultra-install domain-cutover --config install.config \
   --subscription-domain sync.example.com --vpn-domain edge.example.com \
