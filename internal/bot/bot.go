@@ -38,8 +38,10 @@ type Bot struct {
 	miniAppURL          string // public HTTPS URL of the Mini App (e.g. https://bot.example.com:8444)
 
 	// Admin API proxy settings (ultra-relay admin HTTP API on loopback)
-	adminAPIURL   string
-	adminAPIToken string
+	adminAPIURL           string
+	adminAPIToken         string
+	happAcceptanceFile    string
+	happAcceptanceUACount atomic.Uint32
 
 	log *slog.Logger
 }
@@ -71,16 +73,17 @@ func New(
 	api := &tgbotapi.BotAPI{Token: botToken, Client: client, Buffer: 100}
 	api.SetAPIEndpoint(tgbotapi.APIEndpoint)
 	bot := &Bot{
-		api:           api,
-		botToken:      botToken,
-		adminRepo:     adminRepo,
-		teleRepo:      teleRepo,
-		alertsTele:    teleRepo,
-		msgSender:     api,
-		miniAppURL:    miniAppURL,
-		adminAPIURL:   adminAPIURL,
-		adminAPIToken: adminAPIToken,
-		log:           log,
+		happAcceptanceFile: os.Getenv("ULTRA_HAPP_ACCEPTANCE_FILE"),
+		api:                api,
+		botToken:           botToken,
+		adminRepo:          adminRepo,
+		teleRepo:           teleRepo,
+		alertsTele:         teleRepo,
+		msgSender:          api,
+		miniAppURL:         miniAppURL,
+		adminAPIURL:        adminAPIURL,
+		adminAPIToken:      adminAPIToken,
+		log:                log,
 	}
 	return bot, nil
 }

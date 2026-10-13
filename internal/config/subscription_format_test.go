@@ -11,6 +11,11 @@ func TestSubscriptionFormatContract(t *testing.T) {
 	}{
 		{"", "", "Happ/3 Android", false, "uri", false},
 		{"", "", "Happ/3 Android", true, "happ", false},
+		// Observed Android product shape; the device identifier is anonymised.
+		{"", "", "Happ/4.7.1/Android/fixture-device", true, "happ", false},
+		{"uri", "", "Happ/4.7.1/Android/fixture-device", true, "uri", false},
+		{"", "xhttp-tls", "Happ/4.7.1/Android/fixture-device", true, "uri", false},
+		{"", "", "Happ/4.7.1/Android/fixture-device", false, "uri", false},
 		{"", "", "Mozilla Happier/3", true, "uri", false},
 		{"", "", "Other/1", true, "uri", false},
 		{"uri", "", "Happ/3", true, "uri", false},

@@ -33,12 +33,29 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	var acceptance *happAcceptance
+	if r.URL.Query().Get("preview") == "reserve-live" {
+		if r.URL.Query().Get("format") != "happ" || r.URL.Query().Get("transport") != "" {
+			http.Error(w, "explicit Happ format required", http.StatusBadRequest)
+			return
+		}
+		acceptance, err = loadHappAcceptance(b.happAcceptanceFile, token, time.Now())
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, b.adminAPIURL+"/v1/subscriptions/"+url.PathEscape(token), nil)
 	if err != nil {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	req.URL.RawQuery = url.Values{"format": r.URL.Query()["format"], "transport": r.URL.Query()["transport"], "preview": r.URL.Query()["preview"]}.Encode()
+	if acceptance != nil {
+		query := req.URL.Query()
+		query.Set("preview", "reserve")
+		req.URL.RawQuery = query.Encode()
+	}
 	cacheKey, formatErr := b.subscriptionFallbackKey(token, r)
 	if formatErr != nil {
 		http.Error(w, formatErr.Error(), http.StatusBadRequest)
@@ -66,7 +83,7 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Server-Timing", fmt.Sprintf("relay;dur=%.1f", float64(time.Since(started).Microseconds())/1000))
-	for _, key := range []string{"Content-Type", "profile-title", "profile-update-interval", "Vary"} {
+	for _, key := range []string{"Content-Type", "profile-title", "profile-update-interval"} {
 		w.Header().Set(key, resp.Header.Get(key))
 	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
@@ -76,6 +93,24 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
+	}
+	if acceptance != nil {
+		// Cleanup or expiry during the upstream request revokes the preview too.
+		acceptance, err = loadHappAcceptance(b.happAcceptanceFile, token, time.Now())
+		if err != nil {
+			http.Error(w, "acceptance profile unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		body, err = acceptance.rewrite(body)
+		if err != nil {
+			http.Error(w, "acceptance profile unavailable", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	if b.happAcceptanceFile != "" {
+		if _, err := loadHappAcceptance(b.happAcceptanceFile, token, time.Now()); err == nil {
+			b.captureHappAcceptanceUserAgent(r.UserAgent())
+		}
 	}
 	_, _ = w.Write(body)
 }

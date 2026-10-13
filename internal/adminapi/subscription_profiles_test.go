@@ -1,6 +1,8 @@
 package adminapi
 
 import (
+	"bytes"
+	"encoding/json"
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
@@ -8,12 +10,12 @@ import (
 	"testing"
 )
 
-func TestSubscriptionOnlyAutoAndAvailableCountries(t *testing.T) {
+func TestSubscriptionOnlyAutoAndPublishedEnabledCountries(t *testing.T) {
 	spec := &config.Spec{DevMode: true, PublicHost: "example.com", VLESSPort: 443, PublicEntries: []config.PublicEntry{{ID: "other", Host: "other.example.com", TCPPort: 443}}}
 	// The public subscription uses the primary listener even when technical exports have alternatives.
 	a, b, c := "a", "b", "c"
 	user := auth.User{UUID: "owner", Routes: []auth.RouteCredential{{UUID: "nl-a", ExitID: &a, Published: true}, {UUID: "nl-b", ExitID: &b, Published: true}, {UUID: "de", ExitID: &c, Published: true}}}
-	nodes := []exits.Node{{ID: a, Enabled: true, Priority: 100, CountryCode: "NL"}, {ID: b, Enabled: true, Priority: 200, CountryCode: "NL"}, {ID: c, Enabled: true, CountryCode: "DE"}}
+	nodes := []exits.Node{{ID: a, Enabled: true, Priority: 100, CountryCode: "NL"}, {ID: b, Enabled: true, Priority: 200, CountryCode: "NL"}, {ID: c, Enabled: false, CountryCode: "DE"}}
 	health := map[string]exits.Health{a: {Eligible: true}, b: {Eligible: true}, c: {Eligible: false}}
 	uris, err := subscriptionURIs(spec, user, nodes, health, "")
 	if err != nil || len(uris) != 2 {
@@ -148,5 +150,47 @@ func TestSubscriptionXHTTPTLSPreservesCredentials(t *testing.T) {
 	spec.PublicXHTTPTLS = nil
 	if _, err := subscriptionURIs(spec, user, nodes, health, "xhttp-tls"); err == nil {
 		t.Fatal("published absent listener")
+	}
+}
+
+// A country UUID is a preferred route with server-side failover, not a live health badge.
+func TestSubscriptionCountriesRemainStableAcrossHealthChanges(t *testing.T) {
+	spec := &config.Spec{DevMode: true, PublicHost: "bridge.example", VLESSPort: 443}
+	nl, us := "nl", "us"
+	user := auth.User{UUID: "owner", Routes: []auth.RouteCredential{{UUID: "nl-route", ExitID: &nl, Published: true}, {UUID: "us-route", ExitID: &us, Published: true}}}
+	nodes := []exits.Node{{ID: nl, Enabled: true, Priority: 100, CountryCode: "NL"}, {ID: us, Enabled: true, Priority: 200, CountryCode: "US"}}
+	healthy := map[string]exits.Health{nl: {Eligible: true}, us: {Eligible: true}}
+	for _, format := range []string{"uri", "happ"} {
+		t.Run(format, func(t *testing.T) {
+			export := func(health map[string]exits.Health) []byte {
+				t.Helper()
+				var value any
+				var err error
+				if format == "uri" {
+					value, err = subscriptionURIs(spec, user, nodes, health, "")
+				} else {
+					value, err = subscriptionHapp(spec, user, nodes, health)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err := json.Marshal(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return body
+			}
+			before := export(healthy)
+			for _, health := range []map[string]exits.Health{nil, {nl: {Eligible: true}, us: {Eligible: false}}, healthy} {
+				if after := export(health); !bytes.Equal(before, after) {
+					t.Fatal("health changed country list or route credentials")
+				}
+			}
+			user.ExcludedExitIDs = []string{us}
+			if after := export(healthy); !bytes.Equal(before, after) {
+				t.Fatal("temporary quota state changed published country list")
+			}
+			user.ExcludedExitIDs = nil
+		})
 	}
 }

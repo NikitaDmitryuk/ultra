@@ -625,11 +625,14 @@ func TestAdminLookupOutageIsExplicitAndCannotMutateRelay(t *testing.T) {
 func TestSubscriptionCacheSeparatesEffectiveFormats(t *testing.T) {
 	token := "synthetic"
 	b := &Bot{subscriptionCache: &subscriptionCache{happDefaultJSON: true, entries: map[string]cachedSubscription{
-		subscriptionCacheKey(token, "format=happ"): {Body: []byte("json"), ConfirmedAt: time.Now()},
-		subscriptionCacheKey(token, "format=uri"):  {Body: []byte("uri"), ConfirmedAt: time.Now()},
+		subscriptionCacheKey(token, "format=happ"):                    {Body: []byte("json"), ConfirmedAt: time.Now()},
+		subscriptionCacheKey(token, "format=uri"):                     {Body: []byte("uri"), ConfirmedAt: time.Now()},
+		subscriptionCacheKey(token, "format=uri&transport=xhttp-tls"): {Body: []byte("tls-uri"), ConfirmedAt: time.Now()},
 	}}}
 	for _, c := range []struct{ query, ua, want string }{
-		{"", "Happ/3 Android", "json"}, {"", "Other", "uri"}, {"format=uri", "Happ/3", "uri"}, {"format=happ", "Other", "json"},
+		{"", "Happ/4.7.1/Android/fixture-device", "json"}, {"", "Other", "uri"}, {"format=uri", "Happ/4.7.1/Android/fixture-device", "uri"}, {"format=happ", "Other", "json"},
+		{"transport=xhttp-tls", "Happ/4.7.1/Android/fixture-device", "tls-uri"},
+		{"format=uri&transport=xhttp-tls", "Happ/4.7.1/Android/fixture-device", "tls-uri"},
 	} {
 		r := httptest.NewRequest("GET", "/sub/test?"+c.query, nil)
 		r.Header.Set("User-Agent", c.ua)
@@ -638,7 +641,7 @@ func TestSubscriptionCacheSeparatesEffectiveFormats(t *testing.T) {
 			t.Fatal(err)
 		}
 		w := httptest.NewRecorder()
-		if !b.serveSubscriptionFallback(w, key, token, r) || w.Body.String() != c.want {
+		if !b.serveSubscriptionFallback(w, key, token, r) || w.Body.String() != c.want || w.Header().Get("Vary") != "User-Agent" || w.Header().Get("Cache-Control") != "no-store" {
 			t.Fatal(c, w.Body.String())
 		}
 	}
