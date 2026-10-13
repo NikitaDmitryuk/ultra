@@ -180,3 +180,9 @@ BOT_INGRESS_MODE=vultr
 BOT_INGRESS_IP=
 # ID Vultr VPS, который нельзя удалять до переноса HTTPS-входа
 BOT_INGRESS_INSTANCE_ID=
+
+# Дополнительный явный backup inventory для INSTALL_SCHEMA_VERSION=2.
+# JSON-массивы абсолютных путей на bridge; отсутствие или [] не добавляет путей.
+# Старый inventory автоматически не переносится: перечислите только нужные пути.
+# ULTRA_AUTOMATION_STATE_PATHS='["/etc/owned-service/config"]'
+# ULTRA_AUTOMATION_ARTIFACT_PATHS='["/opt/owned-service/restore.py"]'

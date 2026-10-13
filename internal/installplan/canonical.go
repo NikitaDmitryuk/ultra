@@ -28,6 +28,26 @@ func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 	if err := json.Unmarshal([]byte(v["ULTRA_AUTOMATION_STATIC_NODES"]), &a.StaticNodes); err != nil {
 		return nil, errors.New("ULTRA_AUTOMATION_STATIC_NODES must be a JSON array of node policy")
 	}
+	for _, field := range []struct {
+		key   string
+		paths *[]string
+	}{
+		{"ULTRA_AUTOMATION_STATE_PATHS", &a.StatePaths},
+		{"ULTRA_AUTOMATION_ARTIFACT_PATHS", &a.ArtifactPaths},
+	} {
+		if raw := strings.TrimSpace(v[field.key]); raw != "" {
+			var paths []string
+			if err := json.Unmarshal([]byte(raw), &paths); err != nil || paths == nil {
+				return nil, errors.New(field.key + " must be a JSON array of path strings")
+			}
+			for _, path := range paths {
+				if path == "" {
+					return nil, errors.New(field.key + " must contain nonempty path strings")
+				}
+			}
+			*field.paths = paths
+		}
+	}
 	var err error
 	a.AdminTelegramID, err = strconv.ParseInt(v["ULTRA_AUTOMATION_ADMIN_TELEGRAM_ID"], 10, 64)
 	if err != nil {

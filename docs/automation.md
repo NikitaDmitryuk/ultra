@@ -19,6 +19,15 @@ age recipient, Telegram ID, провайдеры/бюджеты статичес
 узлов. Приватный age identity остаётся у оператора; `recovery-key init/verify`
 управляют им отдельно. Монитор получает отдельный ограниченный service access.
 
+`ULTRA_AUTOMATION_STATE_PATHS` и `ULTRA_AUTOMATION_ARTIFACT_PATHS` — необязательные
+JSON-массивы абсолютных путей на bridge, дополняющие штатный backup inventory.
+Первый хранит конфигурацию/состояние, второй — исполняемые файлы и инструменты.
+Например: `ULTRA_AUTOMATION_STATE_PATHS='["/etc/owned-service/config"]'`.
+Отсутствие, пустое значение или `[]` не добавляет путей; `null`, неверные типы
+и относительные пути отклоняются. При принятии legacy-установки явно перенесите
+нужные пути из прежнего inventory в `install.config`: bootstrap не объединяет
+старые списки автоматически. Значения секретов остаются в `.env`.
+
 `.env` содержит `TELEGRAM_BOT_TOKEN`, `ULTRA_VULTR_API_KEY` для compute и отдельный
 `ULTRA_VULTR_DNS_API_KEY` для DNS. `SECRETS_ENV_FILE` переопределяет путь; прежний
 `BOT_ENV_FILE` поддерживается. Известные секретные ключи в `install.config`
