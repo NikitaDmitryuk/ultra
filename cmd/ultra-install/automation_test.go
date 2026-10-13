@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -82,5 +83,30 @@ func TestAutomationTimeoutIncludesOperationMargin(t *testing.T) {
 	}
 	if got := automationTimeout(0).Seconds(); got != 1500 {
 		t.Fatalf("default timeout=%v", got)
+	}
+}
+
+func TestPersistedAutomationStatusUsesReadyReleaseBundle(t *testing.T) {
+	state := t.TempDir()
+	bundle := filepath.Join(state, "releases", "v2.4.1")
+	if err := os.MkdirAll(bundle, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "release.json"), []byte(`{"version":"v2.4.1"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := "import sys\nraise SystemExit(0 if sys.argv[1:] == ['--action', 'status'] else 9)\n"
+	if err := os.WriteFile(filepath.Join(bundle, "automation.py"), []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("bash", "-lc", persistedAutomationStatusCommand(state))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("persisted status failed: %v: %s", err, output)
+	}
+	if err := os.WriteFile(filepath.Join(state, "release.json"), []byte(`{"version":"../../tmp"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("bash", "-lc", persistedAutomationStatusCommand(state)).Run(); err == nil {
+		t.Fatal("unsafe persisted version accepted")
 	}
 }
