@@ -1,0 +1,7 @@
+[Unit]
+Description=Rotate completed ultra recovery generations
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/ultra-recovery/recovery.py prune --repository /var/lib/ultra-recovery --source bridge

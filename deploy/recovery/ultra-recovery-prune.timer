@@ -1,0 +1,7 @@
+[Unit]
+Description=Hourly rotation of ultra recovery generations
+[Timer]
+OnCalendar=hourly
+Persistent=true
+[Install]
+WantedBy=timers.target

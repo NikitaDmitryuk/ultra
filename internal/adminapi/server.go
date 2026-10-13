@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
@@ -40,6 +41,7 @@ type TrafficQuerier interface {
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
 type Server struct {
+	RuntimeStatus     func() any
 	RouteStatus       func(string) auth.RouteApplication
 	ReplicationStatus func(context.Context) (any, error)
 	Cloud             *cloud.Service
@@ -57,6 +59,7 @@ type Server struct {
 	srv               *http.Server
 	lim               *visitorLimiter
 	tokenH            [32]byte
+	previewUACount    atomic.Uint32
 }
 
 // NewServer validates listen address is loopback.
@@ -138,6 +141,7 @@ func (s *Server) routes() error {
 	s.mux.HandleFunc("POST /v1/users/{uuid}/subscription", s.handleRotateSubscription)
 	s.mux.HandleFunc("DELETE /v1/users/{uuid}/subscription", s.handleRevokeSubscription)
 	s.mux.HandleFunc("GET /v1/subscriptions/{token}", s.handleSubscription)
+	s.mux.HandleFunc("GET /v1/subscriptions/cache", s.handleSubscriptionCache)
 	s.mux.HandleFunc("GET /v1/users", s.handleListUsers)
 	s.mux.HandleFunc("GET /v1/users/{uuid}", s.handleGetUser)
 	s.mux.HandleFunc("PATCH /v1/users/{uuid}", s.handlePatchUser)
@@ -332,6 +336,13 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	if includeDisabled {
 		users = s.users.ListAll()
 	}
+	visible := make([]auth.User, 0, len(users))
+	for _, u := range users {
+		if len(u.ServiceTargets) == 0 {
+			visible = append(visible, u)
+		}
+	}
+	users = visible
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(users)
@@ -885,6 +896,12 @@ func (s *Server) handleHardening(w http.ResponseWriter, r *http.Request) {
 		"reload": func() any {
 			if s.ReloadStatus != nil {
 				return s.ReloadStatus()
+			}
+			return nil
+		}(),
+		"runtime": func() any {
+			if s.RuntimeStatus != nil {
+				return s.RuntimeStatus()
 			}
 			return nil
 		}(),

@@ -127,21 +127,23 @@ build-install-linux-arm64:
 build-bot-linux-arm64:
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BOT_BINARY)-linux-arm64 ./cmd/ultra-bot
 
-release-dist: build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64
+release-dist: build-client-release build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64
 	mkdir -p dist
 	cp $(BINARY)-linux-amd64 $(INSTALL_BINARY)-linux-amd64 $(BOT_BINARY)-linux-amd64 \
 	   $(BINARY)-linux-arm64 $(INSTALL_BINARY)-linux-arm64 $(BOT_BINARY)-linux-arm64 \
-	   deploy/mobile-bootstrap.sh dist/
+	   ultra-client-linux-amd64 ultra-client-linux-arm64 deploy/mobile-bootstrap.sh dist/
+	tar -czf dist/ultra-recovery.tar.gz -C deploy/recovery $$(cd deploy/recovery && find . -maxdepth 1 -type f \( -name "*.py" -o -name "*.service" -o -name "*.timer" \) ! -name "test_*" ! -name "vm_*" ! -name "test-*" -printf "%f\n" | sort)
 	(cd dist && sha256sum \
 	   $(BINARY)-linux-amd64 $(INSTALL_BINARY)-linux-amd64 $(BOT_BINARY)-linux-amd64 \
 	   $(BINARY)-linux-arm64 $(INSTALL_BINARY)-linux-arm64 $(BOT_BINARY)-linux-arm64 \
-	   mobile-bootstrap.sh > checksums.txt)
+	   ultra-client-linux-amd64 ultra-client-linux-arm64 ultra-recovery.tar.gz mobile-bootstrap.sh > checksums.txt)
 	scripts/build-release-manifest.sh dist "$$(git describe --tags --always --dirty 2>/dev/null || true)"
 
 clean:
 	rm -f $(BINARY) $(BINARY)-linux-amd64 $(BINARY)-linux-arm64 \
 	      $(INSTALL_BINARY) $(INSTALL_BINARY)-linux-amd64 $(INSTALL_BINARY)-linux-arm64 \
-	      $(BOT_BINARY) $(BOT_BINARY)-linux-amd64 $(BOT_BINARY)-linux-arm64
+	      $(BOT_BINARY) $(BOT_BINARY)-linux-amd64 $(BOT_BINARY)-linux-arm64 \
+	      ultra-client-linux-amd64 ultra-client-linux-arm64
 	rm -rf dist
 
 .PHONY: build-client
@@ -158,12 +160,20 @@ build-bench:
 
 .PHONY: test-ui
 test-ui:
+	python3 internal/install/scripts/test_automation.py
 	python3 internal/install/scripts/xhttp-ingress.py --self-test
 	python3 scripts/test-verify-miniapp.py
 	python3 scripts/test-ingress-setup.py
 	python3 scripts/test-ingress-ssh.py
+	python3 scripts/test-bridge-subscription.py
 	python3 scripts/test-migrate-bridge.py
+	python3 scripts/test-reality-reserve.py
 	node --test scripts/test-happ-import.cjs scripts/test-cabinet.cjs scripts/test-miniapp-preview.cjs
 
 test-race:
 	go test -race -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' ./...
+
+.PHONY: build-client-release
+build-client-release:
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ultra-client-linux-amd64 ./cmd/ultra-client
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ultra-client-linux-arm64 ./cmd/ultra-client

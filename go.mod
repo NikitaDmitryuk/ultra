@@ -8,6 +8,7 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/xtls/reality v0.0.0-20260908062103-8cdf7bf9c7f0
 	github.com/xtls/xray-core v1.260327.1-0.20260930074004-b26a91de4f32
+	go.etcd.io/bbolt v1.4.3
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
 	golang.org/x/sync v0.23.0

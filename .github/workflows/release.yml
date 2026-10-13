@@ -53,6 +53,9 @@ jobs:
             dist/ultra-relay-linux-arm64
             dist/ultra-bot-linux-amd64
             dist/ultra-bot-linux-arm64
+            dist/ultra-client-linux-amd64
+            dist/ultra-client-linux-arm64
+            dist/ultra-recovery.tar.gz
             dist/mobile-bootstrap.sh
             dist/checksums.txt
             dist/checksums.txt.minisig

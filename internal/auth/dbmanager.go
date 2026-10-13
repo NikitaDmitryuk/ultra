@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 // DBUserRepo is the subset of db.UserRepo used by DBManager.
@@ -44,6 +45,12 @@ var _ UserManager = (*DBManager)(nil)
 // NewDBManager creates a DBManager, pre-loads the user list from the DB, and returns.
 // onChange is called after any mutation with the updated user list (same contract as Manager).
 func NewDBManager(repo DBUserRepo, onChange func([]User), log *slog.Logger) (*DBManager, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return NewDBManagerContext(ctx, repo, onChange, log)
+}
+
+func NewDBManagerContext(ctx context.Context, repo DBUserRepo, onChange func([]User), log *slog.Logger) (*DBManager, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -54,7 +61,7 @@ func NewDBManager(repo DBUserRepo, onChange func([]User), log *slog.Logger) (*DB
 		byID:     make(map[string]User),
 		onChange: onChange,
 	}
-	if err := m.refresh(context.Background()); err != nil {
+	if err := m.refresh(ctx); err != nil {
 		return nil, err
 	}
 	return m, nil
@@ -87,108 +94,123 @@ func (m *DBManager) refresh(ctx context.Context) error {
 	return nil
 }
 
-func (m *DBManager) notify() {
+func (m *DBManager) notify() error {
 	if m.ApplyChange != nil {
 		if err := m.ApplyChange(m.List()); err != nil {
 			m.log.Warn("user routing application failed", "code", "route_apply_failed")
+			return ErrRouteApply
 		}
-		return
+		return nil
 	}
 	if m.onChange == nil {
-		return
+		return nil
 	}
 	m.mu.RLock()
 	cp := append([]User(nil), m.cacheActive...)
 	m.mu.RUnlock()
 	m.onChange(cp)
+	return nil
 }
 
 // AddUser inserts a VLESS user and triggers an Xray reload.
 func (m *DBManager) AddUser(kind, name string) (User, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	if kind != "" && kind != "vless" {
 		return User{}, ErrInvalidUserKind
 	}
-	u, err := m.repo.Add(context.Background(), kind, name)
+	u, err := m.repo.Add(ctx, kind, name)
 	if err != nil {
 		return User{}, err
 	}
-	if err := m.refresh(context.Background()); err != nil {
+	if err := m.refresh(ctx); err != nil {
 		m.log.Warn("db refresh after AddUser failed", "err", err)
 	}
-	m.notify()
+	if err := m.notify(); err != nil {
+		return u, err
+	}
 	return u, nil
 }
 
 // RenameUser updates the display name and triggers an Xray reload.
 func (m *DBManager) RenameUser(id, name string) (User, error) {
-	u, err := m.repo.Rename(context.Background(), id, name)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	u, err := m.repo.Rename(ctx, id, name)
 	if err != nil {
 		return User{}, err
 	}
-	if err := m.refresh(context.Background()); err != nil {
+	if err := m.refresh(ctx); err != nil {
 		m.log.Warn("db refresh after RenameUser failed", "err", err)
 	}
-	m.notify()
+	if err := m.notify(); err != nil {
+		return u, err
+	}
 	return u, nil
 }
 
 // RemoveUser soft-deletes a user and triggers an Xray reload.
 func (m *DBManager) RemoveUser(id string) error {
-	_, ok, err := m.repo.Lookup(context.Background(), id)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, ok, err := m.repo.Lookup(ctx, id)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return ErrUserNotFound
 	}
-	if err := m.repo.Remove(context.Background(), id); err != nil {
+	if err := m.repo.Remove(ctx, id); err != nil {
 		return err
 	}
-	if err := m.refresh(context.Background()); err != nil {
+	if err := m.refresh(ctx); err != nil {
 		m.log.Warn("db refresh after RemoveUser failed", "err", err)
 	}
-	m.notify()
-	return nil
+	return m.notify()
 }
 
 // PurgeUser permanently removes a user (and cascades all related history) and
 // triggers an Xray reload so the UUID stops being a valid client immediately.
 func (m *DBManager) PurgeUser(id string) error {
-	_, ok, err := m.repo.Lookup(context.Background(), id)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, ok, err := m.repo.Lookup(ctx, id)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return ErrUserNotFound
 	}
-	if err := m.repo.Purge(context.Background(), id); err != nil {
+	if err := m.repo.Purge(ctx, id); err != nil {
 		return err
 	}
-	if err := m.refresh(context.Background()); err != nil {
+	if err := m.refresh(ctx); err != nil {
 		m.log.Warn("db refresh after PurgeUser failed", "err", err)
 	}
-	m.notify()
-	return nil
+	return m.notify()
 }
 
 // EnableUser restores a disabled user and triggers an Xray reload.
 func (m *DBManager) EnableUser(id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	if u, ok := m.Lookup(id); ok && u.Kind != "" && u.Kind != "vless" {
 		return ErrUnsupportedForKind
 	}
-	if err := m.repo.Enable(context.Background(), id); err != nil {
+	if err := m.repo.Enable(ctx, id); err != nil {
 		return err
 	}
-	if err := m.refresh(context.Background()); err != nil {
+	if err := m.refresh(ctx); err != nil {
 		m.log.Warn("db refresh after EnableUser failed", "err", err)
 	}
-	m.notify()
-	return nil
+	return m.notify()
 }
 
 // SetPreferredExit updates a VLESS user's preferred exit location and triggers an Xray reload.
 func (m *DBManager) SetPreferredExit(id string, exitID *string) (User, error) {
-	u, err := m.repo.SetPreferredExit(context.Background(), id, exitID)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	u, err := m.repo.SetPreferredExit(ctx, id, exitID)
 	if err != nil {
 		return User{}, err
 	}
@@ -197,24 +219,30 @@ func (m *DBManager) SetPreferredExit(id string, exitID *string) (User, error) {
 			return u, ErrRouteApply
 		}
 	} else {
-		if err := m.refresh(context.Background()); err != nil {
+		if err := m.refresh(ctx); err != nil {
 			return u, ErrRouteApply
 		}
-		m.notify()
+		if err := m.notify(); err != nil {
+			return u, err
+		}
 	}
 	return u, nil
 }
 
 // RotateUUID reissues a user's UUID and triggers an Xray reload.
 func (m *DBManager) RotateUUID(id string) (string, error) {
-	newUUID, err := m.repo.RotateUUID(context.Background(), id)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	newUUID, err := m.repo.RotateUUID(ctx, id)
 	if err != nil {
 		return "", err
 	}
-	if err := m.refresh(context.Background()); err != nil {
+	if err := m.refresh(ctx); err != nil {
 		m.log.Warn("db refresh after RotateUUID failed", "err", err)
 	}
-	m.notify()
+	if err := m.notify(); err != nil {
+		return newUUID, err
+	}
 	return newUUID, nil
 }
 

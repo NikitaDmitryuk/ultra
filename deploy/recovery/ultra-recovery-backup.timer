@@ -1,0 +1,9 @@
+[Unit]
+Description=Capture ultra recovery state every two minutes
+[Timer]
+OnCalendar=*-*-* *:0/2:00
+AccuracySec=1s
+RandomizedDelaySec=3s
+Persistent=true
+[Install]
+WantedBy=timers.target

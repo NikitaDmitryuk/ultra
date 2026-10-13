@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 // Repo is the persistence layer for exit nodes (implemented by db.ExitNodeRepo).
@@ -39,11 +40,17 @@ type Manager struct {
 }
 
 func NewManager(repo Repo, onChange func([]Node), log *slog.Logger) (*Manager, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return NewManagerContext(ctx, repo, onChange, log)
+}
+
+func NewManagerContext(ctx context.Context, repo Repo, onChange func([]Node), log *slog.Logger) (*Manager, error) {
 	if log == nil {
 		log = slog.Default()
 	}
 	m := &Manager{repo: repo, log: log, onChange: onChange}
-	if err := m.refresh(context.Background()); err != nil {
+	if err := m.refresh(ctx); err != nil {
 		return nil, err
 	}
 	return m, nil
@@ -123,6 +130,16 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 	if err := m.repo.Delete(ctx, id); err != nil {
 		return err
 	}
+	// The deletion committed. Fence the cached node even if the follow-up SELECT
+	// fails, so callbacks cannot publish a node that no longer exists.
+	m.mu.Lock()
+	for i, node := range m.cache {
+		if node.ID == id {
+			m.cache = append(m.cache[:i], m.cache[i+1:]...)
+			break
+		}
+	}
+	m.mu.Unlock()
 	if err := m.refresh(ctx); err != nil {
 		m.log.Warn("exit refresh after Delete failed", "err", err)
 	}
@@ -137,3 +154,6 @@ func (m *Manager) Reload(ctx context.Context) error {
 	m.notify()
 	return nil
 }
+
+// SetOnChange is configured before publishing the manager to request handlers.
+func (m *Manager) SetOnChange(fn func([]Node)) { m.onChange = fn }

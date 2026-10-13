@@ -29,14 +29,18 @@ func (b *Bot) validateClosedGroup(ctx context.Context, id int64) (string, error)
 	var member struct {
 		Status string `json:"status"`
 	}
-	if b.telegramJSON(ctx, "getChatMember", map[string]any{"chat_id": id, "user_id": b.api.Self.ID}, &member) != nil || member.Status != "administrator" {
+	if b.telegramJSON(ctx, "getChatMember", map[string]any{"chat_id": id, "user_id": b.telegramSelf().ID}, &member) != nil || member.Status != "administrator" {
 		return "", errors.New("bot administrator required")
 	}
 	return chat.Title, nil
 }
 func (b *Bot) handleGroupShared(ctx context.Context, msg *tgbotapi.Message, shared sharedGroup) {
 	allowed, e := b.adminRepo.IsAdmin(ctx, msg.From.ID)
-	if e != nil || !allowed {
+	if e != nil {
+		_ = b.telegramJSON(ctx, "sendMessage", map[string]any{"chat_id": msg.Chat.ID, "text": "Сервис временно недоступен. Попробуйте ещё раз."}, nil)
+		return
+	}
+	if !allowed {
 		return
 	}
 	b.picker.mu.Lock()

@@ -56,7 +56,7 @@ func TestLegacyValuesToPlanMapsExitPair(t *testing.T) {
 
 func TestRenderDesiredStateSupportsManyExits(t *testing.T) {
 	p := &InstallPlan{
-		SchemaVersion: CurrentSchemaVersion,
+		SchemaVersion: 1,
 		SSH:           SSHConfig{User: "root"},
 		Bridge: BridgeConfig{
 			SSHHost:     "203.0.113.10",
@@ -101,7 +101,7 @@ func TestRenderDesiredStateSupportsManyExits(t *testing.T) {
 
 func TestRenderDesiredStateGeneratesDatabaseDSN(t *testing.T) {
 	p := &InstallPlan{
-		SchemaVersion: CurrentSchemaVersion,
+		SchemaVersion: 1,
 		SSH:           SSHConfig{User: "root"},
 		Bridge: BridgeConfig{
 			SSHHost:     "203.0.113.10",
@@ -137,7 +137,7 @@ func TestRenderDesiredStateGeneratesDatabaseDSN(t *testing.T) {
 
 func TestRenderDesiredStateReusePreservesBridgeMaterial(t *testing.T) {
 	p := &InstallPlan{
-		SchemaVersion: CurrentSchemaVersion,
+		SchemaVersion: 1,
 		SSH:           SSHConfig{User: "root"},
 		Bridge: BridgeConfig{
 			SSHHost:    "203.0.113.10",
@@ -256,7 +256,7 @@ func TestRenderDesiredStateReusePreservesBridgeMaterial(t *testing.T) {
 func TestDoctorReportsMissingBotTokenWithoutNetwork(t *testing.T) {
 	dir := t.TempDir()
 	p := &InstallPlan{
-		SchemaVersion: CurrentSchemaVersion,
+		SchemaVersion: 1,
 		SSH:           SSHConfig{User: "root"},
 		Bridge: BridgeConfig{
 			SSHHost:     "203.0.113.10",

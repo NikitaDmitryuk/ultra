@@ -13,7 +13,7 @@ func TestAutoAndLocationEffectiveRoutes(t *testing.T) {
 	users := auth.ExpandRoutes([]auth.User{owner})
 	nodes := []exits.Node{{ID: "a", Enabled: true}, {ID: "b", Enabled: true}}
 	got := applyEffectiveUserExits(users, nodes, "a", map[string]exits.Health{"a": {Eligible: true}, "b": {}})
-	if got[0].EffectiveExitID != "a" || got[1].EffectiveExitID != "b" {
+	if got[0].EffectiveExitID != "a" || got[1].EffectiveExitID != "a" {
 		t.Fatal(got)
 	}
 	if users[0].EffectiveExitID != "" || users[1].EffectiveExitID != "" {

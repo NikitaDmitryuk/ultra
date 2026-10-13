@@ -12,8 +12,8 @@ IDENTITY=/Users/you/.ssh/id_ed25519
 PUBLIC_HOST=203.0.113.10
 
 # Публичный inbound (REALITY): пример цели TLS; замените на свой допустимый host:443.
-REALITY_DEST=www.microsoft.com:443
-REALITY_SNI=www.microsoft.com
+REALITY_DEST=origin.example.net:443
+REALITY_SNI=origin.example.net
 
 # Шаблон HTTP для splithttp (bridge→exit).
 PRESET=steamlike
@@ -73,13 +73,13 @@ VLESS_FLOW=xtls-rprx-vision
 # Установка завершится с ошибкой, только если не задеployed ни одна exit.
 # Если exit-ноды ещё недоступны, VERIFY упадёт на SOCKS/curl — отключите: VERIFY_AFTER_INSTALL=n
 VERIFY_AFTER_INSTALL=y
-VERIFY_IP_URL=https://api.ipify.org
+VERIFY_IP_URL=https://probe.example.net/plain-ip
 VERIFY_SOCKS_PORT=10808
 # VERIFY_USER_UUID=
 # После первого GET по умолчанию вызывается split-routing (только зонд exit). Отключить: VERIFY_SPLIT_ROUTING=n.
 # VERIFY_SPLIT_ROUTING=n
 # VERIFY_PROBE_EXIT_URL=
-# VERIFY_PROBE_EXIT_PLAIN_URL=   # ru_direct без EXIT_URL: по умолчанию api.ipify.org (международный → exit)
+# VERIFY_PROBE_EXIT_PLAIN_URL=   # укажите подконтрольную HTTPS-цель для проверки exit
 VERIFY_FAIL_LOG_LINES=400
 
 # Опционально: geosite-теги в blackhole (нужен тег в вашем geosite.dat), например реклама.
@@ -146,7 +146,7 @@ VERIFY_FAIL_LOG_LINES=400
 # Telegram API (long polling, алерты): ultra-bot использует ULTRA_BOT_TELEGRAM_SOCKS5
 # (127.0.0.1:10809 по умолчанию) — локальный SOCKS inbound в bridge Xray → active exit.
 # TLS-сертификат получается автоматически через certbot (HTTP-01) при make install.
-# Бесплатный поддомен: https://freedns.afraid.org/ — надёжно работает с Let's Encrypt.
+# Домен должен быть под вашим управлением и разрешать автоматическое обновление DNS.
 
 # --- База данных PostgreSQL ---
 # DB_ENABLE=y запускает автоматическую установку и настройку PostgreSQL:
@@ -168,7 +168,7 @@ DB_ENABLE=y
 # Geo на bridge при установке (скачивание с GitHub): по умолчанию выполняется по SSH.
 # SKIP_GEO_DOWNLOAD=y — не качать (положите geoip.dat и geosite.dat сами в geo_assets_dir).
 # Синоним устаревшего имени: SKIP_RUNETFREEDOM_GEO=y
-# GEO_RELEASE_TAG=202603220955 — зафиксировать тег релиза вместо latest.
+# GEO_RELEASE_TAG=REPLACE_RELEASE_TAG — зафиксировать тег релиза вместо latest.
 
 # Жёсткая проверка SSH host key (нужен заранее заполненный known_hosts):
 # export ULTRA_INSTALL_SSH_STRICT_HOST_KEY=yes
@@ -180,3 +180,9 @@ BOT_INGRESS_MODE=vultr
 BOT_INGRESS_IP=
 # ID Vultr VPS, который нельзя удалять до переноса HTTPS-входа
 BOT_INGRESS_INSTANCE_ID=
+
+# Дополнительный явный backup inventory для INSTALL_SCHEMA_VERSION=2.
+# JSON-массивы абсолютных путей на bridge; отсутствие или [] не добавляет путей.
+# Старый inventory автоматически не переносится: перечислите только нужные пути.
+# ULTRA_AUTOMATION_STATE_PATHS='["/etc/owned-service/config"]'
+# ULTRA_AUTOMATION_ARTIFACT_PATHS='["/opt/owned-service/restore.py"]'

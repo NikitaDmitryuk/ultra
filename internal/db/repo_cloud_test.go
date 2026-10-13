@@ -38,8 +38,8 @@ func TestCloudConcurrentReservations(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if count != 2 {
-		t.Fatalf("reserved %d; expected exactly 2", count)
+	if count != cloud.MaxServers {
+		t.Fatalf("reserved %d; expected exactly %d", count, cloud.MaxServers)
 	}
 	ops, err := r.List(ctx)
 	if err != nil {
@@ -62,7 +62,11 @@ func TestCloudConcurrentReservations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, o := range offers {
-		if o.ID != ops[0].ID && o.ID != ops[1].ID {
+		reserved := false
+		for _, existing := range ops {
+			reserved = reserved || o.ID == existing.ID
+		}
+		if !reserved {
 			if _, err = r.Reserve(ctx, o); err != nil {
 				t.Fatal("deleted slot was not released", err)
 			}

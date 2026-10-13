@@ -12,19 +12,19 @@ import (
 )
 
 const cloneUserForUUIDRotation = `-- name: CloneUserForUUIDRotation :exec
-WITH original AS MATERIALIZED (SELECT users.uuid, users.name, users.telegram_id, users.telegram_username, users.created_at, users.is_active, users.disabled_at, users.leak_policy, users.leak_max_concurrent_ips, users.leak_max_unique_ips_24h, users.kind, users.socks_username, users.socks_password, users.socks_port, users.preferred_exit_id, users.enrollment_source, users.enrolled_at, users.member_pending, users.member_revision FROM users WHERE users.uuid=$1 FOR UPDATE),
+WITH original AS MATERIALIZED (SELECT users.uuid, users.name, users.telegram_id, users.telegram_username, users.created_at, users.is_active, users.disabled_at, users.leak_policy, users.leak_max_concurrent_ips, users.leak_max_unique_ips_24h, users.kind, users.socks_username, users.socks_password, users.socks_port, users.preferred_exit_id, users.enrollment_source, users.enrolled_at, users.member_pending, users.member_revision, users.account_id FROM users WHERE users.uuid=$1 FOR UPDATE),
 cleared AS (UPDATE users SET telegram_id=NULL FROM original WHERE users.uuid=original.uuid RETURNING users.uuid)
 INSERT INTO users(
   uuid, name, telegram_id, telegram_username, created_at, is_active, disabled_at,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
   kind, socks_username, socks_password, socks_port, preferred_exit_id,
-  enrollment_source, enrolled_at, member_pending
+  enrollment_source, enrolled_at, member_pending, account_id
 )
 SELECT
   $2, u.name, u.telegram_id, u.telegram_username, u.created_at, u.is_active, u.disabled_at,
   u.leak_policy, u.leak_max_concurrent_ips, u.leak_max_unique_ips_24h,
   u.kind, u.socks_username, u.socks_password, u.socks_port, u.preferred_exit_id,
-  u.enrollment_source, u.enrolled_at, (u.enrollment_source IS NOT NULL)
+  u.enrollment_source, u.enrolled_at, (u.enrollment_source IS NOT NULL), u.account_id
 FROM original u CROSS JOIN cleared
 `
 
@@ -78,7 +78,7 @@ const getUser = `-- name: GetUser :one
 SELECT uuid, name, kind, is_active, disabled_at,
   socks_username, socks_password, socks_port,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  preferred_exit_id
+  preferred_exit_id, account_id
 FROM users WHERE uuid=$1
 `
 
@@ -95,6 +95,7 @@ type GetUserRow struct {
 	LeakMaxConcurrentIps pgtype.Int4        `json:"leak_max_concurrent_ips"`
 	LeakMaxUniqueIps24h  pgtype.Int4        `json:"leak_max_unique_ips_24h"`
 	PreferredExitID      pgtype.UUID        `json:"preferred_exit_id"`
+	AccountID            pgtype.UUID        `json:"account_id"`
 }
 
 func (q *Queries) GetUser(ctx context.Context, uuid pgtype.UUID) (GetUserRow, error) {
@@ -113,6 +114,7 @@ func (q *Queries) GetUser(ctx context.Context, uuid pgtype.UUID) (GetUserRow, er
 		&i.LeakMaxConcurrentIps,
 		&i.LeakMaxUniqueIps24h,
 		&i.PreferredExitID,
+		&i.AccountID,
 	)
 	return i, err
 }
@@ -135,7 +137,7 @@ const listActiveUsers = `-- name: ListActiveUsers :many
 SELECT uuid, name, kind, is_active, disabled_at,
   socks_username, socks_password, socks_port,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  preferred_exit_id
+  preferred_exit_id, account_id
 FROM users WHERE is_active=true ORDER BY created_at
 `
 
@@ -152,6 +154,7 @@ type ListActiveUsersRow struct {
 	LeakMaxConcurrentIps pgtype.Int4        `json:"leak_max_concurrent_ips"`
 	LeakMaxUniqueIps24h  pgtype.Int4        `json:"leak_max_unique_ips_24h"`
 	PreferredExitID      pgtype.UUID        `json:"preferred_exit_id"`
+	AccountID            pgtype.UUID        `json:"account_id"`
 }
 
 func (q *Queries) ListActiveUsers(ctx context.Context) ([]ListActiveUsersRow, error) {
@@ -176,6 +179,7 @@ func (q *Queries) ListActiveUsers(ctx context.Context) ([]ListActiveUsersRow, er
 			&i.LeakMaxConcurrentIps,
 			&i.LeakMaxUniqueIps24h,
 			&i.PreferredExitID,
+			&i.AccountID,
 		); err != nil {
 			return nil, err
 		}
@@ -191,7 +195,7 @@ const listAllUsers = `-- name: ListAllUsers :many
 SELECT uuid, name, kind, is_active, disabled_at,
   socks_username, socks_password, socks_port,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  preferred_exit_id
+  preferred_exit_id, account_id
 FROM users ORDER BY created_at
 `
 
@@ -208,6 +212,7 @@ type ListAllUsersRow struct {
 	LeakMaxConcurrentIps pgtype.Int4        `json:"leak_max_concurrent_ips"`
 	LeakMaxUniqueIps24h  pgtype.Int4        `json:"leak_max_unique_ips_24h"`
 	PreferredExitID      pgtype.UUID        `json:"preferred_exit_id"`
+	AccountID            pgtype.UUID        `json:"account_id"`
 }
 
 func (q *Queries) ListAllUsers(ctx context.Context) ([]ListAllUsersRow, error) {
@@ -232,6 +237,7 @@ func (q *Queries) ListAllUsers(ctx context.Context) ([]ListAllUsersRow, error) {
 			&i.LeakMaxConcurrentIps,
 			&i.LeakMaxUniqueIps24h,
 			&i.PreferredExitID,
+			&i.AccountID,
 		); err != nil {
 			return nil, err
 		}
@@ -346,7 +352,7 @@ UPDATE users SET name=$1 WHERE uuid=$2
 RETURNING uuid, name, kind, is_active, disabled_at,
   socks_username, socks_password, socks_port,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  preferred_exit_id
+  preferred_exit_id, account_id
 `
 
 type RenameUserParams struct {
@@ -367,6 +373,7 @@ type RenameUserRow struct {
 	LeakMaxConcurrentIps pgtype.Int4        `json:"leak_max_concurrent_ips"`
 	LeakMaxUniqueIps24h  pgtype.Int4        `json:"leak_max_unique_ips_24h"`
 	PreferredExitID      pgtype.UUID        `json:"preferred_exit_id"`
+	AccountID            pgtype.UUID        `json:"account_id"`
 }
 
 func (q *Queries) RenameUser(ctx context.Context, arg RenameUserParams) (RenameUserRow, error) {
@@ -385,6 +392,7 @@ func (q *Queries) RenameUser(ctx context.Context, arg RenameUserParams) (RenameU
 		&i.LeakMaxConcurrentIps,
 		&i.LeakMaxUniqueIps24h,
 		&i.PreferredExitID,
+		&i.AccountID,
 	)
 	return i, err
 }
@@ -394,7 +402,7 @@ UPDATE users SET preferred_exit_id=$2 WHERE uuid=$1 AND is_active=true
 RETURNING uuid, name, kind, is_active, disabled_at,
   socks_username, socks_password, socks_port,
   leak_policy, leak_max_concurrent_ips, leak_max_unique_ips_24h,
-  preferred_exit_id
+  preferred_exit_id, account_id
 `
 
 type SetUserPreferredExitParams struct {
@@ -415,6 +423,7 @@ type SetUserPreferredExitRow struct {
 	LeakMaxConcurrentIps pgtype.Int4        `json:"leak_max_concurrent_ips"`
 	LeakMaxUniqueIps24h  pgtype.Int4        `json:"leak_max_unique_ips_24h"`
 	PreferredExitID      pgtype.UUID        `json:"preferred_exit_id"`
+	AccountID            pgtype.UUID        `json:"account_id"`
 }
 
 func (q *Queries) SetUserPreferredExit(ctx context.Context, arg SetUserPreferredExitParams) (SetUserPreferredExitRow, error) {
@@ -433,6 +442,7 @@ func (q *Queries) SetUserPreferredExit(ctx context.Context, arg SetUserPreferred
 		&i.LeakMaxConcurrentIps,
 		&i.LeakMaxUniqueIps24h,
 		&i.PreferredExitID,
+		&i.AccountID,
 	)
 	return i, err
 }

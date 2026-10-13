@@ -2,11 +2,13 @@
 Description=Ultra Relay Telegram Bot
 Documentation=https://github.com/NikitaDmitryuk/ultra
 After=network-online.target ultra-relay.service
-Wants=network-online.target
-Requires=ultra-relay.service
+Wants=network-online.target ultra-relay.service
 
 [Service]
 Type=simple
+StateDirectory=ultra-bot
+UMask=0077
+TimeoutStopSec=20s
 WorkingDirectory=/etc/ultra-relay
 
 # Main relay token and log level are shared with ultra-relay via this file.

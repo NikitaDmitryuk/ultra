@@ -50,7 +50,7 @@ func subscriptionHapp(spec *config.Spec, user auth.User, nodes []exits.Node, hea
 	return profiles, err
 }
 
-func eachSubscriptionProfile(user auth.User, nodes []exits.Node, health map[string]exits.Health, add func(auth.User, string) error) error {
+func eachSubscriptionProfile(user auth.User, nodes []exits.Node, _ map[string]exits.Health, add func(auth.User, string) error) error {
 	if err := add(user, "Автоматически"); err != nil {
 		return err
 	}
@@ -68,7 +68,9 @@ func eachSubscriptionProfile(user auth.User, nodes []exits.Node, health map[stri
 		if region, err := language.ParseRegion(code); err == nil && len(code) == 2 {
 			name = display.Regions(language.Russian).Name(region)
 		}
-		if code == "" || name == "" || !n.Enabled || !health[n.ID].Eligible || seen[code] {
+		// Publication is stable across health changes: a country credential prefers
+		// this exit, while runtime selection handles failover and quota enforcement.
+		if code == "" || name == "" || !n.Enabled || seen[code] {
 			continue
 		}
 		for _, route := range user.Routes {

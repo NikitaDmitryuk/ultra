@@ -99,7 +99,7 @@ func (b *Bot) mustAdmin(w http.ResponseWriter, r *http.Request) (apiContext, boo
 	isAdmin, err := b.adminRepo.IsAdmin(r.Context(), user.ID)
 	if err != nil {
 		b.log.Error("admin check", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return apiContext{}, false
 	}
 	if !isAdmin {
@@ -125,7 +125,7 @@ func (b *Bot) handleMe(w http.ResponseWriter, r *http.Request) {
 	isAdmin, err := b.adminRepo.IsAdmin(r.Context(), user.ID)
 	if err != nil {
 		b.log.Error("admin check in /api/me", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	jsonOK(w, map[string]any{
@@ -405,7 +405,7 @@ func (b *Bot) handleUserTrafficTimeline(w http.ResponseWriter, r *http.Request) 
 	points, err := b.teleRepo.TrafficTimelineByBuckets(r.Context(), uuid, window, bucket)
 	if err != nil {
 		b.log.Error("load traffic timeline", "uuid", uuid, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if windowLabel == "" {
@@ -443,7 +443,7 @@ func (b *Bot) handleUserConnections(w http.ResponseWriter, r *http.Request) {
 	points, err := b.teleRepo.ConnectionsByBuckets(r.Context(), uuid, window, bucket)
 	if err != nil {
 		b.log.Error("load connection buckets", "uuid", uuid, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	jsonOK(w, map[string]any{
@@ -468,12 +468,12 @@ func (b *Bot) handleUserLeak(w http.ResponseWriter, r *http.Request) {
 	}
 	concurrent, err := b.teleRepo.CountConcurrentIPs(r.Context(), uuid, time.Minute)
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	unique24h, err := b.teleRepo.CountUniqueIPs(r.Context(), uuid, 24*time.Hour)
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	limit := 10
@@ -484,7 +484,7 @@ func (b *Bot) handleUserLeak(w http.ResponseWriter, r *http.Request) {
 	}
 	signals, err := b.teleRepo.RecentUserLeakSignals(r.Context(), uuid, limit)
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	jsonOK(w, map[string]any{
@@ -697,12 +697,12 @@ func (b *Bot) handleGenerateInvite(w http.ResponseWriter, r *http.Request) {
 	token, err := generateToken()
 	if err != nil {
 		b.log.Error("generate invite token", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if err := b.adminRepo.CreateInviteToken(r.Context(), token); err != nil {
 		b.log.Error("store invite token", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	jsonOK(w, map[string]string{"token": token})
@@ -726,7 +726,7 @@ func (b *Bot) handleRecentAlerts(w http.ResponseWriter, r *http.Request) {
 	rows, err := b.teleRepo.RecentDistinctNotifications(r.Context(), limit)
 	if err != nil {
 		b.log.Error("recent alerts", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	jsonOK(w, rows)
@@ -759,7 +759,7 @@ func (b *Bot) handleListAdmins(w http.ResponseWriter, r *http.Request) {
 	admins, err := b.adminRepo.ListAdmins(r.Context())
 	if err != nil {
 		b.log.Error("list admins", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	jsonOK(w, admins)
@@ -782,7 +782,7 @@ func (b *Bot) handleRemoveAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	admins, err := b.adminRepo.ListAdmins(r.Context())
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if len(admins) <= 1 {
@@ -790,7 +790,7 @@ func (b *Bot) handleRemoveAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := b.adminRepo.RemoveAdmin(r.Context(), id); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

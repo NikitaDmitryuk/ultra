@@ -30,9 +30,11 @@ func authUserFromFields(
 	leakPolicy string,
 	leakMaxConcurrent, leakMaxUnique pgtype.Int4,
 	preferredExitID pgtype.UUID,
+	accountID pgtype.UUID,
 ) auth.User {
 	u := auth.User{
 		UUID:            fromPGUUID(uuid),
+		AccountID:       fromPGUUID(accountID),
 		Name:            name,
 		Kind:            kind,
 		IsActive:        isActive,
@@ -65,6 +67,7 @@ func authUserFromGet(row sqlc.GetUserRow) auth.User {
 		row.LeakMaxConcurrentIps,
 		row.LeakMaxUniqueIps24h,
 		row.PreferredExitID,
+		row.AccountID,
 	)
 }
 
@@ -82,6 +85,7 @@ func authUserFromListActive(row sqlc.ListActiveUsersRow) auth.User {
 		row.LeakMaxConcurrentIps,
 		row.LeakMaxUniqueIps24h,
 		row.PreferredExitID,
+		row.AccountID,
 	)
 }
 
@@ -99,6 +103,7 @@ func authUserFromListAll(row sqlc.ListAllUsersRow) auth.User {
 		row.LeakMaxConcurrentIps,
 		row.LeakMaxUniqueIps24h,
 		row.PreferredExitID,
+		row.AccountID,
 	)
 }
 
@@ -116,6 +121,7 @@ func authUserFromRename(row sqlc.RenameUserRow) auth.User {
 		row.LeakMaxConcurrentIps,
 		row.LeakMaxUniqueIps24h,
 		row.PreferredExitID,
+		row.AccountID,
 	)
 }
 
@@ -133,6 +139,7 @@ func authUserFromSetPreferredExit(row sqlc.SetUserPreferredExitRow) auth.User {
 		row.LeakMaxConcurrentIps,
 		row.LeakMaxUniqueIps24h,
 		row.PreferredExitID,
+		row.AccountID,
 	)
 }
 
@@ -363,6 +370,10 @@ func (r *UserRepo) ListAll(ctx context.Context) ([]auth.User, error) {
 	users := make([]auth.User, 0, len(rows))
 	for _, row := range rows {
 		users = append(users, authUserFromListAll(row))
+	}
+	users, err = r.attachServices(ctx, users)
+	if err != nil {
+		return nil, err
 	}
 	return NewRouteRepo(r.db).Attach(ctx, users)
 }

@@ -56,7 +56,7 @@ function bindConfigControls(user) {
   );
   button("purge-config", () => {
     modal(
-      `<h2>Удалить конфиг навсегда?</h2><p>История трафика и наблюдений будет удалена без восстановления. Для подтверждения введите «УДАЛИТЬ».</p><label for="purge-word">Подтверждение</label><input id="purge-word" autocomplete="off"><button class="btn danger" id="purge-confirm">Удалить навсегда</button>`,
+      `<h2>Удалить конфиг навсегда?</h2><p>История доступа и наблюдений будет удалена. Общий расход серверов сохранится и не вернёт потраченную квоту. Для подтверждения введите «УДАЛИТЬ».</p><label for="purge-word">Подтверждение</label><input id="purge-word" autocomplete="off"><button class="btn danger" id="purge-confirm">Удалить навсегда</button>`,
     );
     button("purge-confirm", async () => {
       if (document.querySelector("#purge-word").value !== "УДАЛИТЬ")

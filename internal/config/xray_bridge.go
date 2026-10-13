@@ -108,7 +108,9 @@ func BuildBridgeXRayJSON(
 	}
 
 	domainStrategy, routeRules := buildBridgeRouting(spec, resolveActiveExitTag(activeExitID, w), userExitTags)
-	needsBlock := BridgeNeedsBlockOutbound(spec)
+	serviceRules := serviceRouting(users, resolveActiveExitTag(activeExitID, w), w.OutboundBlockTag)
+	routeRules = append(serviceRules, routeRules...)
+	needsBlock := BridgeNeedsBlockOutbound(spec) || len(serviceRules) > 0
 	for _, tag := range userExitTags {
 		if tag == w.OutboundBlockTag {
 			needsBlock = true

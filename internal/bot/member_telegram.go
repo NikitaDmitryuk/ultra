@@ -71,7 +71,11 @@ func (b *Bot) pickerHTTP(w http.ResponseWriter, r *http.Request) {
 }
 func (b *Bot) inviteVPNCommand(ctx context.Context, msg *tgbotapi.Message) {
 	allowed, e := b.adminRepo.IsAdmin(ctx, msg.From.ID)
-	if e != nil || !allowed {
+	if e != nil {
+		_ = b.telegramJSON(ctx, "sendMessage", map[string]any{"chat_id": msg.Chat.ID, "text": "Сервис временно недоступен. Попробуйте ещё раз."}, nil)
+		return
+	}
+	if !allowed {
 		b.reply(msg.Chat.ID, "Только администратор может выдавать приглашения.")
 		return
 	}
@@ -108,7 +112,11 @@ func (b *Bot) handleMemberCallback(ctx context.Context, cb *tgbotapi.CallbackQue
 		return
 	}
 	admin, e := b.adminRepo.IsAdmin(ctx, cb.From.ID)
-	if e != nil || !admin {
+	if e != nil {
+		_ = b.telegramJSON(ctx, "answerCallbackQuery", map[string]any{"callback_query_id": cb.ID, "text": "Сервис временно недоступен. Попробуйте ещё раз.", "show_alert": true}, nil)
+		return
+	}
+	if !admin {
 		return
 	}
 	_ = b.telegramJSON(ctx, "answerCallbackQuery", map[string]any{"callback_query_id": cb.ID}, nil)
@@ -159,7 +167,7 @@ func (b *Bot) handleMemberCallback(ctx context.Context, cb *tgbotapi.CallbackQue
 		b.reply(cb.From.ID, "Не удалось выдать приглашение. Повторите выбор получателя.")
 		return
 	}
-	b.reply(cb.From.ID, fmt.Sprintf("Приглашение для Telegram ID %d, действует 7 дней:\nhttps://t.me/%s?start=vpn_i_%s", p.Target, b.api.Self.UserName, result.Token))
+	b.reply(cb.From.ID, fmt.Sprintf("Приглашение для Telegram ID %d, действует 7 дней:\nhttps://t.me/%s?start=vpn_i_%s", p.Target, b.telegramSelf().UserName, result.Token))
 }
 
 // Decode new Telegram fields not yet supported by the pinned bot library.
@@ -171,6 +179,7 @@ type memberUpdate struct {
 
 func (b *Bot) runMemberPolling(ctx context.Context) error {
 	offset := 0
+	attempt := 0
 	for ctx.Err() == nil {
 		var updates []memberUpdate
 		c, cancel := context.WithTimeout(ctx, 35*time.Second)
@@ -180,10 +189,16 @@ func (b *Bot) runMemberPolling(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(3 * time.Second):
+			case <-time.After(func() time.Duration {
+				after, _ := telegramFailure(e)
+				d := retryDelay(attempt, after)
+				attempt++
+				return d
+			}()):
 				continue
 			}
 		}
+		attempt = 0
 		for _, update := range updates {
 			if update.ID >= offset {
 				offset = update.ID + 1
@@ -253,25 +268,46 @@ func (b *Bot) memberNotifications(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c, cancel := context.WithTimeout(ctx, 8*time.Second)
-			items, e := b.teleRepo.ClaimMemberNotifications(c)
-			if e == nil {
-				for _, n := range items {
-					allowed, err := b.adminRepo.IsAdmin(c, n.AdminID)
-					if err != nil {
-						continue
-					}
-					if !allowed {
-						_ = b.teleRepo.MemberNotificationSent(c, n.MemberID, n.AdminID)
-						continue
-					}
-					e = b.telegramJSON(c, "sendMessage", map[string]any{"chat_id": n.AdminID, "text": fmt.Sprintf("Новый VPN-пользователь: %s\nTelegram ID: %d\nСпособ регистрации: %s", n.Name, n.MemberID, n.Source), "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "Отключить VPN-доступ", "callback_data": fmt.Sprintf("vpn_disable:%d", n.MemberID)}}}}}, nil)
-					if e == nil {
-						_ = b.teleRepo.MemberNotificationSent(c, n.MemberID, n.AdminID)
-					}
-				}
-			}
+			b.flushMemberNotificationsOnce(ctx)
+		}
+	}
+}
+func (b *Bot) flushMemberNotificationsOnce(ctx context.Context) {
+	c, cancel := context.WithTimeout(ctx, 8*time.Second)
+	items, err := b.teleRepo.ClaimMemberNotifications(c)
+	cancel()
+	if err != nil {
+		return
+	}
+	for _, n := range items {
+		c, cancel = context.WithTimeout(ctx, 8*time.Second)
+		allowed, checkErr := b.adminRepo.IsAdmin(c, n.AdminID)
+		cancel()
+		if checkErr == nil && !allowed {
+			c, cancel = context.WithTimeout(ctx, 8*time.Second)
+			err = b.teleRepo.RetryMemberNotification(c, n.MemberID, n.AdminID, n.Attempts, time.Now(), "recipient_not_admin", true)
 			cancel()
+			if err != nil {
+				b.log.Warn("member notification cancellation unavailable")
+			}
+			continue
+		}
+		sendErr := checkErr
+		if checkErr == nil {
+			c, cancel = context.WithTimeout(ctx, 8*time.Second)
+			sendErr = b.telegramJSON(c, "sendMessage", map[string]any{"chat_id": n.AdminID, "text": fmt.Sprintf("Новый VPN-пользователь: %s\nTelegram ID: %d\nСпособ регистрации: %s", n.Name, n.MemberID, n.Source), "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "Отключить VPN-доступ", "callback_data": fmt.Sprintf("vpn_disable:%d", n.MemberID)}}}}}, nil)
+			cancel()
+		}
+		c, cancel = context.WithTimeout(ctx, 8*time.Second)
+		if sendErr == nil {
+			err = b.teleRepo.CompleteMemberClaim(c, n.MemberID, n.AdminID, n.Attempts)
+		} else {
+			after, terminal := telegramFailure(sendErr)
+			err = b.teleRepo.RetryMemberNotification(c, n.MemberID, n.AdminID, n.Attempts, time.Now().Add(retryDelay(n.Attempts, after)), "telegram_delivery_failed", terminal)
+		}
+		cancel()
+		if err != nil {
+			b.log.Warn("member notification acknowledgement unavailable")
 		}
 	}
 }

@@ -14,6 +14,21 @@ jobs:
     name: Lint, test, build
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ultra_ci_only
+          POSTGRES_DB: ultra_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ultra_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      DATABASE_URL: postgres://postgres:ultra_ci_only@127.0.0.1:5432/ultra_ci?sslmode=disable
+
     steps:
       - name: Check out code
         uses: actions/checkout@v7.0.1
@@ -38,6 +53,9 @@ jobs:
       - name: Check agent context and ADRs
         run: make harness-check
 
+      - name: Verify published release asset contract
+        run: python3 scripts/test-release-assets.py
+
       - name: Verify dependencies
         run: go mod verify
 
@@ -52,6 +70,20 @@ jobs:
 
       - name: Test
         run: make test
+
+      - name: Test primary XHTTP with actual Nginx
+        env:
+          ULTRA_TEST_NGINX_IMAGE: nginx:1.24@sha256:f6daac2445b0ce70e64d77442ccf62839f3f1b4c24bf6746a857eff014e798c8
+        run: go test -race -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' ./internal/config -run '^TestActualNginxPrimaryXHTTPServerFirstInteractiveSmallPayload$' -count=1
+
+      - name: Dump and restore during VPN load
+        run: python3 scripts/test-load-pg-recovery.py --container '${{ job.services.postgres.id }}'
+
+      - name: Recovery and monitor tests
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q age openssh-server
+          python3 -m unittest discover -s deploy/recovery -p 'test_*.py'
 
       - name: Build ultra-relay
         run: make build

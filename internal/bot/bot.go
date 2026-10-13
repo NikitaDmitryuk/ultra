@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -22,19 +23,25 @@ import (
 
 // Bot orchestrates long polling and the Mini App HTTP server.
 type Bot struct {
-	memberships membershipCache
-	picker      memberPicker
-	api         *tgbotapi.BotAPI
-	botToken    string
-	adminRepo   botAdminRepo
-	teleRepo    *db.TelegramRepo
-	alertsTele  alertsTeleRepo
-	msgSender   messageSender
-	miniAppURL  string // public HTTPS URL of the Mini App (e.g. https://bot.example.com:8444)
+	self                atomic.Pointer[tgbotapi.User]
+	telegramLastSuccess atomic.Int64
+	subscriptionCache   *subscriptionCache
+	databaseReady       func(context.Context) bool
+	memberships         membershipCache
+	picker              memberPicker
+	api                 *tgbotapi.BotAPI
+	botToken            string
+	adminRepo           botAdminRepo
+	teleRepo            *db.TelegramRepo
+	alertsTele          alertsTeleRepo
+	msgSender           messageSender
+	miniAppURL          string // public HTTPS URL of the Mini App (e.g. https://bot.example.com:8444)
 
 	// Admin API proxy settings (ultra-relay admin HTTP API on loopback)
-	adminAPIURL   string
-	adminAPIToken string
+	adminAPIURL           string
+	adminAPIToken         string
+	happAcceptanceFile    string
+	happAcceptanceUACount atomic.Uint32
 
 	log *slog.Logger
 }
@@ -51,48 +58,67 @@ func New(
 	if botToken == "" {
 		return nil, fmt.Errorf("bot: empty bot token")
 	}
-	var api *tgbotapi.BotAPI
-	var err error
-	if socks := os.Getenv("ULTRA_BOT_TELEGRAM_SOCKS5"); socks != "" {
-		client, clientErr := telegramHTTPClient(socks)
-		if clientErr != nil {
-			return nil, clientErr
-		}
-		log.Info("telegram_api_proxy", "proxy", "socks5://"+socks)
-		api, err = tgbotapi.NewBotAPIWithClient(botToken, tgbotapi.APIEndpoint, client)
-	} else {
-		api, err = tgbotapi.NewBotAPI(botToken)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("bot: connect to Telegram API: %w", err)
-	}
 	if log == nil {
 		log = slog.Default()
 	}
-	log.Info("bot authenticated", "username", api.Self.UserName)
+	client := &http.Client{Timeout: 60 * time.Second}
+	if socks := os.Getenv("ULTRA_BOT_TELEGRAM_SOCKS5"); socks != "" {
+		var err error
+		client, err = telegramHTTPClient(socks)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// Construction is entirely local: Telegram can be unavailable at startup.
+	api := &tgbotapi.BotAPI{Token: botToken, Client: client, Buffer: 100}
+	api.SetAPIEndpoint(tgbotapi.APIEndpoint)
 	bot := &Bot{
-		api:           api,
-		botToken:      botToken,
-		adminRepo:     adminRepo,
-		teleRepo:      teleRepo,
-		alertsTele:    teleRepo,
-		msgSender:     api,
-		miniAppURL:    miniAppURL,
-		adminAPIURL:   adminAPIURL,
-		adminAPIToken: adminAPIToken,
-		log:           log,
+		happAcceptanceFile: os.Getenv("ULTRA_HAPP_ACCEPTANCE_FILE"),
+		api:                api,
+		botToken:           botToken,
+		adminRepo:          adminRepo,
+		teleRepo:           teleRepo,
+		alertsTele:         teleRepo,
+		msgSender:          api,
+		miniAppURL:         miniAppURL,
+		adminAPIURL:        adminAPIURL,
+		adminAPIToken:      adminAPIToken,
+		log:                log,
 	}
 	return bot, nil
 }
 
 // RunPolling starts Telegram long polling and blocks until ctx is cancelled.
-func (b *Bot) RunPolling(ctx context.Context) error { return b.runMemberPolling(ctx) }
+func (b *Bot) RunPolling(ctx context.Context) error {
+	for attempt := 0; ctx.Err() == nil; attempt++ {
+		var self tgbotapi.User
+		if err := b.telegramJSON(ctx, "getMe", nil, &self); err == nil {
+			b.self.Store(&self)
+			return b.runMemberPolling(ctx)
+		}
+		if !waitTelegramRetry(ctx, retryDelay(attempt, 0)) {
+			break
+		}
+	}
+	return ctx.Err()
+}
+
+func (b *Bot) telegramSelf() tgbotapi.User {
+	if self := b.self.Load(); self != nil {
+		return *self
+	}
+	if b.api != nil {
+		return b.api.Self
+	}
+	return tgbotapi.User{}
+}
 
 // Handler returns an http.Handler serving the Mini App API and embedded frontend.
 // Call this to register routes on your HTTP server.
 func (b *Bot) Handler() http.Handler {
 	mux := http.NewServeMux()
 	b.registerMiniAppRoutes(mux)
+	b.registerHealthRoutes(mux)
 	return withTimeout(30*time.Second, mux)
 }
 
@@ -106,7 +132,7 @@ func withTimeout(d time.Duration, next http.Handler) http.Handler {
 
 func telegramHTTPClient(socksAddr string) (*http.Client, error) {
 	if _, _, err := net.SplitHostPort(socksAddr); err != nil {
-		return nil, fmt.Errorf("bot: invalid ULTRA_BOT_TELEGRAM_SOCKS5 %q: %w", socksAddr, err)
+		return nil, fmt.Errorf("bot: invalid Telegram proxy address")
 	}
 	dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
 	if err != nil {

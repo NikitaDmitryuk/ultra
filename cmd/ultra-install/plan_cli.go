@@ -19,7 +19,14 @@ func handlePlanSubcommand(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
+	if HandleRecoveryCommand(args) {
+		return true
+	}
 	switch args[0] {
+	case "bootstrap", "status", "upgrade":
+		runAutomationCommand(args[0], args[1:])
+	case "domain-cutover":
+		runDomainCutoverCommand(args[1:])
 	case "ingress":
 		runIngressCommand(args[1:])
 	case "plan":
@@ -56,12 +63,13 @@ func runPlanCommand(args []string) {
 func runDoctorCommand(args []string) {
 	fs := flag.NewFlagSet("ultra-install doctor", flag.ExitOnError)
 	planPath := fs.String("plan", "", "install-plan JSON path")
+	configPath := fs.String("config", "", "canonical install.config path (exclusive with --plan)")
 	format := fs.String("format", "human", "human or json")
 	network := fs.Bool("network", false, "run DNS/TCP checks")
 	envRoot := fs.String("env-root", ".", "root for relative bot env path")
 	_ = fs.Parse(args)
 
-	p := readPlanOrExit(*planPath)
+	p := readDeploymentOrExit(*planPath, *configPath)
 	opts := installplan.DoctorOptions{EnvRoot: *envRoot}
 	if *network {
 		opts = installplan.NetworkDoctorOptions(3 * time.Second)
@@ -145,10 +153,11 @@ func runRenderCommand(args []string) {
 func runApplyPlanCommand(args []string) {
 	fs := flag.NewFlagSet("ultra-install apply", flag.ExitOnError)
 	planPath := fs.String("plan", "", "install-plan JSON path")
+	configPath := fs.String("config", "", "canonical install.config path (exclusive with --plan)")
 	secretsPath := fs.String("secrets", "", "secrets env file path; overrides plan.secrets.env_file")
 	format := fs.String("format", "human", "human or jsonl")
 	_ = fs.Parse(args)
-	p := readPlanOrExit(*planPath)
+	p := readDeploymentOrExit(*planPath, *configPath)
 	if strings.TrimSpace(*secretsPath) != "" {
 		p.Secrets.EnvFile = *secretsPath
 	}
@@ -259,4 +268,17 @@ func exitOnErr(prefix string, err error) {
 	}
 	fmt.Fprintf(os.Stderr, "%s: %v\n", prefix, err)
 	os.Exit(1)
+}
+
+func readDeploymentOrExit(planPath, configPath string) *installplan.InstallPlan {
+	if configPath == "" {
+		return readPlanOrExit(planPath)
+	}
+	if planPath != "" {
+		exitOnErr("deployment input", fmt.Errorf("--config and --plan are mutually exclusive"))
+	}
+	p, err := installplan.LoadLegacyEnvConfig(configPath)
+	exitOnErr("read canonical deployment", err)
+	exitOnErr("validate canonical deployment", installplan.ValidatePlan(p))
+	return p
 }

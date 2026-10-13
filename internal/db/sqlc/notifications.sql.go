@@ -11,6 +11,78 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const claimNotifications = `-- name: ClaimNotifications :many
+WITH due AS (
+ SELECT id FROM notifications WHERE sent_at IS NULL AND NOT terminal AND next_attempt_at<=NOW() AND (lease_until IS NULL OR lease_until<=NOW()) ORDER BY created_at,id LIMIT $1 FOR UPDATE SKIP LOCKED
+)
+UPDATE notifications n SET attempts=n.attempts+1,lease_until=NOW()+$2::interval FROM due WHERE n.id=due.id RETURNING n.id, n.user_uuid, n.telegram_id, n.type, n.payload, n.sent_at, n.created_at, n.attempts, n.next_attempt_at, n.lease_until, n.last_error, n.terminal
+`
+
+type ClaimNotificationsParams struct {
+	Limit int32           `json:"limit"`
+	Lease pgtype.Interval `json:"lease"`
+}
+
+func (q *Queries) ClaimNotifications(ctx context.Context, arg ClaimNotificationsParams) ([]Notification, error) {
+	rows, err := q.db.Query(ctx, claimNotifications, arg.Limit, arg.Lease)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Notification
+	for rows.Next() {
+		var i Notification
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserUuid,
+			&i.TelegramID,
+			&i.Type,
+			&i.Payload,
+			&i.SentAt,
+			&i.CreatedAt,
+			&i.Attempts,
+			&i.NextAttemptAt,
+			&i.LeaseUntil,
+			&i.LastError,
+			&i.Terminal,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const completeNotification = `-- name: CompleteNotification :exec
+UPDATE notifications SET sent_at=NOW(),lease_until=NULL,last_error='' WHERE id=$1 AND sent_at IS NULL
+`
+
+func (q *Queries) CompleteNotification(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, completeNotification, id)
+	return err
+}
+
+const completeNotificationClaim = `-- name: CompleteNotificationClaim :execrows
+UPDATE notifications SET sent_at=NOW(),lease_until=NULL,last_error=''
+WHERE id=$1 AND attempts=$2 AND sent_at IS NULL AND lease_until>NOW()
+`
+
+type CompleteNotificationClaimParams struct {
+	ID       int64 `json:"id"`
+	Attempts int32 `json:"attempts"`
+}
+
+func (q *Queries) CompleteNotificationClaim(ctx context.Context, arg CompleteNotificationClaimParams) (int64, error) {
+	result, err := q.db.Exec(ctx, completeNotificationClaim, arg.ID, arg.Attempts)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const enqueueNotification = `-- name: EnqueueNotification :exec
 INSERT INTO notifications(user_uuid, telegram_id, type, payload, sent_at)
 VALUES($1, $2, $3, $4, $5)
@@ -72,7 +144,7 @@ func (q *Queries) MarkNotificationSent(ctx context.Context, id int64) error {
 }
 
 const pendingNotifications = `-- name: PendingNotifications :many
-SELECT id, user_uuid, telegram_id, type, payload, sent_at, created_at
+SELECT id, user_uuid, telegram_id, type, payload, sent_at, created_at, attempts, next_attempt_at, lease_until, last_error, terminal
 FROM notifications WHERE sent_at IS NULL ORDER BY created_at LIMIT $1
 `
 
@@ -93,6 +165,11 @@ func (q *Queries) PendingNotifications(ctx context.Context, limit int32) ([]Noti
 			&i.Payload,
 			&i.SentAt,
 			&i.CreatedAt,
+			&i.Attempts,
+			&i.NextAttemptAt,
+			&i.LeaseUntil,
+			&i.LastError,
+			&i.Terminal,
 		); err != nil {
 			return nil, err
 		}
@@ -145,7 +222,7 @@ func (q *Queries) PruneSentNotifications(ctx context.Context) (int64, error) {
 
 const recentDistinctNotifications = `-- name: RecentDistinctNotifications :many
 WITH ranked AS (
-  SELECT id, user_uuid, telegram_id, type, payload, sent_at, created_at,
+  SELECT id, user_uuid, telegram_id, type, payload, sent_at, created_at, attempts, next_attempt_at, lease_until, last_error, terminal,
     ROW_NUMBER() OVER (
       PARTITION BY COALESCE(payload->>'dedupe_key', type || ':' || payload::text)
       ORDER BY created_at DESC, id DESC
@@ -198,7 +275,7 @@ func (q *Queries) RecentDistinctNotifications(ctx context.Context, limit int32) 
 }
 
 const recentNotifications = `-- name: RecentNotifications :many
-SELECT id, user_uuid, telegram_id, type, payload, sent_at, created_at
+SELECT id, user_uuid, telegram_id, type, payload, sent_at, created_at, attempts, next_attempt_at, lease_until, last_error, terminal
 FROM notifications ORDER BY created_at DESC LIMIT $1
 `
 
@@ -219,6 +296,11 @@ func (q *Queries) RecentNotifications(ctx context.Context, limit int32) ([]Notif
 			&i.Payload,
 			&i.SentAt,
 			&i.CreatedAt,
+			&i.Attempts,
+			&i.NextAttemptAt,
+			&i.LeaseUntil,
+			&i.LastError,
+			&i.Terminal,
 		); err != nil {
 			return nil, err
 		}
@@ -228,6 +310,54 @@ func (q *Queries) RecentNotifications(ctx context.Context, limit int32) ([]Notif
 		return nil, err
 	}
 	return items, nil
+}
+
+const retryNotification = `-- name: RetryNotification :exec
+UPDATE notifications SET next_attempt_at=$2,last_error=$3,terminal=$4,lease_until=NULL WHERE id=$1 AND sent_at IS NULL
+`
+
+type RetryNotificationParams struct {
+	ID            int64              `json:"id"`
+	NextAttemptAt pgtype.Timestamptz `json:"next_attempt_at"`
+	LastError     string             `json:"last_error"`
+	Terminal      bool               `json:"terminal"`
+}
+
+func (q *Queries) RetryNotification(ctx context.Context, arg RetryNotificationParams) error {
+	_, err := q.db.Exec(ctx, retryNotification,
+		arg.ID,
+		arg.NextAttemptAt,
+		arg.LastError,
+		arg.Terminal,
+	)
+	return err
+}
+
+const retryNotificationClaim = `-- name: RetryNotificationClaim :execrows
+UPDATE notifications SET next_attempt_at=$3,last_error=$4,terminal=$5,lease_until=NULL
+WHERE id=$1 AND attempts=$2 AND sent_at IS NULL AND lease_until>NOW()
+`
+
+type RetryNotificationClaimParams struct {
+	ID            int64              `json:"id"`
+	Attempts      int32              `json:"attempts"`
+	NextAttemptAt pgtype.Timestamptz `json:"next_attempt_at"`
+	LastError     string             `json:"last_error"`
+	Terminal      bool               `json:"terminal"`
+}
+
+func (q *Queries) RetryNotificationClaim(ctx context.Context, arg RetryNotificationClaimParams) (int64, error) {
+	result, err := q.db.Exec(ctx, retryNotificationClaim,
+		arg.ID,
+		arg.Attempts,
+		arg.NextAttemptAt,
+		arg.LastError,
+		arg.Terminal,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const upsertAlertState = `-- name: UpsertAlertState :exec

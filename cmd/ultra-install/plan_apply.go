@@ -18,11 +18,32 @@ import (
 )
 
 func applyPlanN(p *installplan.InstallPlan, format string) {
+	exitOnErr("automation preflight", preflightAutomation(p))
+	if p.FullAutomation() {
+		exitOnErr("strict SSH", os.Setenv("ULTRA_INSTALL_SSH_STRICT_HOST_KEY", "yes"))
+		exitOnErr("SSH pins", os.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", p.Automation.KnownHostsFile))
+		exists, err := install.RunSSHOutput(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, "if test -f "+shellQuote(path.Join(p.Bridge.RemoteDir, "spec.json"))+"; then printf yes; else printf no; fi")
+		exitOnErr("existing bridge preflight", err)
+		if string(exists) == "yes" {
+			p.Bridge.ReuseSpec = true
+		}
+		output, err := install.RunSSHOutput(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, "dpkg --print-architecture")
+		exitOnErr("bridge architecture", err)
+		arch := strings.TrimSpace(string(output))
+		if arch != "amd64" && arch != "arm64" {
+			exitOnErr("bridge architecture", fmt.Errorf("unsupported architecture"))
+		}
+		p.Artifacts.RelayBinary = filepath.Join(p.Automation.ReleaseDir, "ultra-relay-linux-"+arch)
+		p.Artifacts.BotBinary = filepath.Join(p.Automation.ReleaseDir, "ultra-bot-linux-"+arch)
+	}
 	renderOpts := installplan.RenderOptions{}
 	if p.Bridge.ReuseSpec {
 		emitInstallEvent(format, installplan.EventStep, "", "loading existing bridge state for reuse", "bridge")
 		existing, err := loadPlanRemoteBridgeSpec(p)
 		if err != nil {
+			if p.FullAutomation() {
+				exitOnErr("refusing to replace unreadable existing bridge", err)
+			}
 			emitInstallEvent(
 				format,
 				installplan.EventWarning,
@@ -32,6 +53,7 @@ func applyPlanN(p *installplan.InstallPlan, format string) {
 			)
 			p.Bridge.ReuseSpec = false
 		} else {
+			exitOnErr("published ingress preflight", checkPublishedIngressPlan(p, existing))
 			renderOpts.ExistingBridge = existing
 			renderOpts.ExistingAdminToken = loadPlanRemoteAdminToken(p)
 			renderOpts.PriorBootstrap = loadRemoteBootstrapEntries(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, p.Bridge.RemoteDir)
@@ -123,7 +145,17 @@ func applyPlanN(p *installplan.InstallPlan, format string) {
 			continue
 		}
 		emitInstallEvent(format, installplan.EventStep, "", fmt.Sprintf("deploying exit %s", plan.SSHHost), plan.Label)
-		certPin, err := deployExitNode(common, plan)
+		nodeCommon := common
+		if p.FullAutomation() {
+			arch, err := install.RunSSHOutput(p.SSH.User, plan.SSHHost, p.SSH.Identity, "dpkg --print-architecture")
+			exitOnErr("exit architecture", err)
+			targetArch := strings.TrimSpace(string(arch))
+			if targetArch != "amd64" && targetArch != "arm64" {
+				exitOnErr("exit architecture", fmt.Errorf("unsupported architecture"))
+			}
+			nodeCommon.binaryPath = filepath.Join(p.Automation.ReleaseDir, "ultra-relay-linux-"+targetArch)
+		}
+		certPin, err := deployExitNode(nodeCommon, plan)
 		if err != nil {
 			emitInstallEvent(format, installplan.EventWarning, "", fmt.Sprintf("exit deploy failed: %v", err), plan.Label)
 			outcomes[plan.Label] = exitDeployOutcome{}
@@ -139,8 +171,17 @@ func applyPlanN(p *installplan.InstallPlan, format string) {
 	bootstrapJSON, err := json.MarshalIndent(bootstrapEntries, "", "  ")
 	exitOnErr("bootstrap", err)
 	deployBridgeArtifacts(p, ds, relayBin, systemdLocal, bootstrapJSON, format)
+	if p.FullAutomation() {
+		exitOnErr("ingress prepare", automationIngress(p, false))
+	}
 	if p.Bot.Enabled {
 		deployBotPlan(p, format)
+	}
+	if p.FullAutomation() {
+		exitOnErr("ingress activation", automationIngress(p, true))
+	}
+	if p.FullAutomation() {
+		exitOnErr("automation bootstrap", applyAutomation(p, "bootstrap"))
 	}
 	emitInstallEvent(format, installplan.EventStep, "", "install finished", "")
 }
@@ -233,7 +274,7 @@ func setupPlanDatabase(p *installplan.InstallPlan, ds *installplan.DesiredState,
 			)
 			continue
 		}
-		if err := install.SetupReplicaPostgres(dbSSH, replicaHost, p.SSH.Identity, *ds.PostgresConfig, primaryHost); err != nil {
+		if err := install.EnableRecoveryNodeForInstall(dbSSH, primaryHost, replicaHost, p.SSH.Identity, p.FullAutomation()); err != nil {
 			emitInstallEvent(
 				format,
 				installplan.EventWarning,
@@ -295,6 +336,12 @@ chmod 600 /etc/ultra-relay/environment
 `, p.Bridge.RemoteDir, exits.BootstrapFileName)
 	exitOnErr("bridge finalize", install.RunSSH(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, finalize))
 	ports := []int{ds.BridgeSpecObject.VLESSPort}
+	if p.FullAutomation() {
+		ports = append(ports, 80, 443, p.Bot.Port)
+		if p.Automation.Ingress != nil {
+			ports = append(ports, p.Automation.Ingress.StagingPort)
+		}
+	}
 	if ds.BridgeSpecObject.AntiCensor != nil && ds.BridgeSpecObject.AntiCensor.PublicXHTTPPort > 0 {
 		ports = append(ports, ds.BridgeSpecObject.AntiCensor.PublicXHTTPPort)
 	}
@@ -324,6 +371,15 @@ func deployBotPlan(p *installplan.InstallPlan, format string) {
 		)
 		os.Exit(1)
 	}
+	values, err := installplan.ReadSecretsFile(envFile)
+	exitOnErr("read canonical bot secrets", err)
+	filtered, err := installplan.BotEnvironment(values)
+	exitOnErr("project bot secrets", err)
+	privateDir, err := os.MkdirTemp("", "ultra-bot-env-")
+	exitOnErr("bot env staging", err)
+	defer os.RemoveAll(privateDir) //nolint:errcheck
+	envFile = filepath.Join(privateDir, "bot.env")
+	exitOnErr("write derived bot env", os.WriteFile(envFile, filtered, 0600))
 	projectRoot := p.Artifacts.ProjectRoot
 	unit, cleanupUnit := botSystemdUnitPath(projectRoot)
 	defer cleanupUnit()
@@ -337,19 +393,23 @@ func deployBotPlan(p *installplan.InstallPlan, format string) {
 grep -v '^ULTRA_BOT_' /etc/ultra-relay/environment > /tmp/env.tmp 2>/dev/null || true
 {
   printf 'ULTRA_BOT_DOMAIN=%%s\n' %s
+  printf 'ULTRA_BOT_PUBLIC_URL=%%s\n' %s
   printf 'ULTRA_BOT_PORT=%d\n'
   printf 'ULTRA_BOT_TELEGRAM_SOCKS5=127.0.0.1:10809\n'
 } >> /tmp/env.tmp
 mv /tmp/env.tmp /etc/ultra-relay/environment
 chmod 600 /etc/ultra-relay/environment
-`, shellLiteral(p.Bot.Domain), p.Bot.Port)
+`, shellLiteral(p.Bot.Domain), shellLiteral("https://"+p.PublicSubscriptionDomain()), p.Bot.Port)
 	exitOnErr("bot env update", install.RunSSH(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, envScript))
-	if err := obtainBotCertPlan(p); err != nil {
+	if err := obtainBotCertUnlessAutomated(p); err != nil {
 		emitInstallEvent(format, installplan.EventWarning, installplan.CodeCertbotFailed, fmt.Sprintf("bot cert failed: %v", err), "bot")
 	}
 	exitOnErr("bot unit scp", install.SCP(p.SSH.Identity, unit, p.SSH.User, p.Bridge.SSHHost, "/etc/systemd/system/ultra-bot.service"))
 	start := `mkdir -p /var/lib/ultra-bot && systemctl daemon-reload && systemctl enable ultra-bot && systemctl restart ultra-bot`
 	exitOnErr("bot systemctl", install.RunSSH(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, start))
+	if p.FullAutomation() {
+		return
+	} // The explicit initial administrator is provisioned by the supported relay command.
 	invite, err := randomInviteToken()
 	exitOnErr("bot invite token", err)
 	insert := fmt.Sprintf(`
@@ -431,6 +491,26 @@ func randomInviteToken() (string, error) {
 func fileMustExist(path string) error {
 	if _, err := os.Stat(path); err != nil {
 		return err
+	}
+	return nil
+}
+
+func obtainBotCertUnlessAutomated(p *installplan.InstallPlan) error {
+	if p.FullAutomation() {
+		return nil
+	}
+	return obtainBotCertPlan(p)
+}
+
+// checkPublishedIngressPlan is read-only and must precede rendering/deployment mutations.
+func checkPublishedIngressPlan(p *installplan.InstallPlan, existing *config.Spec) error {
+	if !p.FullAutomation() || p.Automation.Ingress == nil || !existing.PrimaryXHTTPIsPublished() {
+		return nil
+	}
+	requested := p.Automation.Ingress
+	active := existing.PrimaryXHTTP
+	if active.ServerName != requested.Domain || active.Host != requested.PublicHost || active.Path != requested.Path || active.BackendPort != requested.BackendPort || active.Port != 443 {
+		return fmt.Errorf("published_ingress_change_requires_explicit_cutover")
 	}
 	return nil
 }

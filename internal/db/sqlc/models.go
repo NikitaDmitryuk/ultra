@@ -10,6 +10,15 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AccountExitUsage struct {
+	AccountID     pgtype.UUID `json:"account_id"`
+	ExitID        string      `json:"exit_id"`
+	Period        string      `json:"period"`
+	UplinkBytes   int64       `json:"uplink_bytes"`
+	DownlinkBytes int64       `json:"downlink_bytes"`
+	ChargedBytes  int64       `json:"charged_bytes"`
+}
+
 type AlertState struct {
 	DedupeKey            string             `json:"dedupe_key"`
 	Type                 string             `json:"type"`
@@ -97,16 +106,19 @@ type ExitNode struct {
 }
 
 type ExitTrafficBudget struct {
-	ExitID                pgtype.UUID        `json:"exit_id"`
-	InstanceID            string             `json:"instance_id"`
-	MonthlyBytes          int64              `json:"monthly_bytes"`
-	Source                string             `json:"source"`
-	IsFallback            bool               `json:"is_fallback"`
-	ProviderUsedBytes     int64              `json:"provider_used_bytes"`
-	AccountRemainingBytes int64              `json:"account_remaining_bytes"`
-	ObservedAt            pgtype.Timestamptz `json:"observed_at"`
-	ProviderError         string             `json:"provider_error"`
-	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+	ExitID                     pgtype.UUID        `json:"exit_id"`
+	InstanceID                 string             `json:"instance_id"`
+	MonthlyBytes               int64              `json:"monthly_bytes"`
+	Source                     string             `json:"source"`
+	IsFallback                 bool               `json:"is_fallback"`
+	ProviderUsedBytes          int64              `json:"provider_used_bytes"`
+	AccountRemainingBytes      int64              `json:"account_remaining_bytes"`
+	ObservedAt                 pgtype.Timestamptz `json:"observed_at"`
+	ProviderError              string             `json:"provider_error"`
+	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	EmergencyStartedAt         pgtype.Timestamptz `json:"emergency_started_at"`
+	EmergencyBaselineBytes     pgtype.Int8        `json:"emergency_baseline_bytes"`
+	ProviderObservedLocalBytes int64              `json:"provider_observed_local_bytes"`
 }
 
 type MonthlyTraffic struct {
@@ -128,13 +140,30 @@ type NodeReplication struct {
 }
 
 type Notification struct {
-	ID         int64              `json:"id"`
-	UserUuid   pgtype.UUID        `json:"user_uuid"`
-	TelegramID int64              `json:"telegram_id"`
-	Type       string             `json:"type"`
-	Payload    []byte             `json:"payload"`
-	SentAt     pgtype.Timestamptz `json:"sent_at"`
-	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ID            int64              `json:"id"`
+	UserUuid      pgtype.UUID        `json:"user_uuid"`
+	TelegramID    int64              `json:"telegram_id"`
+	Type          string             `json:"type"`
+	Payload       []byte             `json:"payload"`
+	SentAt        pgtype.Timestamptz `json:"sent_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	Attempts      int32              `json:"attempts"`
+	NextAttemptAt pgtype.Timestamptz `json:"next_attempt_at"`
+	LeaseUntil    pgtype.Timestamptz `json:"lease_until"`
+	LastError     string             `json:"last_error"`
+	Terminal      bool               `json:"terminal"`
+}
+
+type RecoveryHeartbeat struct {
+	Singleton  bool               `json:"singleton"`
+	ObservedAt pgtype.Timestamptz `json:"observed_at"`
+}
+
+type ServiceAccess struct {
+	Name         string      `json:"name"`
+	AccountID    pgtype.UUID `json:"account_id"`
+	Targets      []string    `json:"targets"`
+	MonthlyBytes int64       `json:"monthly_bytes"`
 }
 
 type SubscriptionToken struct {
@@ -142,6 +171,17 @@ type SubscriptionToken struct {
 	TokenHash      []byte      `json:"token_hash"`
 	EncryptedToken []byte      `json:"encrypted_token"`
 	KeyVersion     pgtype.Text `json:"key_version"`
+}
+
+type TrafficAccount struct {
+	AccountID pgtype.UUID `json:"account_id"`
+}
+
+type TrafficBatch struct {
+	NodeID      pgtype.UUID        `json:"node_id"`
+	BatchID     pgtype.UUID        `json:"batch_id"`
+	Digest      []byte             `json:"digest"`
+	CommittedAt pgtype.Timestamptz `json:"committed_at"`
 }
 
 type TrafficStat struct {
@@ -173,6 +213,7 @@ type User struct {
 	EnrolledAt           pgtype.Timestamptz `json:"enrolled_at"`
 	MemberPending        bool               `json:"member_pending"`
 	MemberRevision       int64              `json:"member_revision"`
+	AccountID            pgtype.UUID        `json:"account_id"`
 }
 
 type UserExitQuota struct {
@@ -248,6 +289,9 @@ type VpnMemberNotification struct {
 	SentAt      pgtype.Timestamptz `json:"sent_at"`
 	NextAttempt pgtype.Timestamptz `json:"next_attempt"`
 	Attempts    int32              `json:"attempts"`
+	Terminal    bool               `json:"terminal"`
+	LastError   string             `json:"last_error"`
+	LeaseUntil  pgtype.Timestamptz `json:"lease_until"`
 }
 
 type VpnRouteCredential struct {

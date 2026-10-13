@@ -128,8 +128,19 @@ def paths():
             selected.add(pathlib.Path('/etc/letsencrypt') / suffix)
         renewal = pathlib.Path('/etc/letsencrypt/renewal') / (domain + '.conf')
         config = dict(re.findall(r'(?m)^\s*([a-z_]+)\s*=\s*(.*?)\s*$', renewal.read_text()))
-        if config.get('authenticator') != 'standalone' or config.get('installer', 'None') not in ('None', 'none'):
-            raise ValueError('only certbot standalone renewal is supported; custom plugins require preparation')
+        if config.get('authenticator') not in ('standalone', 'webroot') or config.get('installer', 'None') not in ('None', 'none'):
+            raise ValueError('only standalone or Ultra webroot renewal is supported')
+        if config.get('authenticator') == 'webroot':
+            if config.get('webroot_path', '').rstrip(', /') != '/var/www/ultra-acme':
+                raise ValueError('unsupported ACME webroot')
+            selected.add(pathlib.Path('/var/www/ultra-acme'))
+            # Include only Ultra-owned nginx state, never other hosted sites.
+            for name in ('/etc/nginx/conf.d/ultra-vpn.conf', '/etc/nginx/conf.d/ultra-acme.conf', '/etc/nginx/conf.d/ultra-bot-acme.conf'):
+                if pathlib.Path(name).exists():
+                    selected.add(pathlib.Path(name))
+            hook = pathlib.Path('/etc/letsencrypt/renewal-hooks/deploy/ultra-vpn')
+            if hook.exists():
+                selected.add(hook)
         account, server = config.get('account', ''), urllib.parse.urlsplit(config.get('server', ''))
         if not re.fullmatch(r'[a-f0-9]+', account) or server.scheme != 'https' or not server.hostname:
             raise ValueError('unsupported ACME account configuration')
@@ -168,11 +179,13 @@ def fingerprint(path):
     raise ValueError('unsupported special file in state')
 
 
-def export(root=pathlib.Path('/')):
+def export(root=pathlib.Path('/'), live=False):
     manifest = {}
     def record(info):
         if excluded(info.name):
             return None
+        if live and pathlib.PurePosixPath(info.name).name == 'runtime.db':
+            return None  # Final frozen export includes the closed accounting journal.
         manifest[info.name] = fingerprint(root / info.name)
         return info
     with tarfile.open(fileobj=sys.stdout.buffer, mode='w|gz') as archive:
@@ -278,8 +291,8 @@ def database_fingerprint():
 
 def main():
     command = sys.argv[1]
-    if command == 'export':
-        export()
+    if command in ('export', 'export-live'):
+        export(live=command == 'export-live')
     elif command == 'import':
         import_state()
     elif command == 'check':

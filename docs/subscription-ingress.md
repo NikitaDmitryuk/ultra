@@ -5,7 +5,7 @@
 
 ## Постоянный вход через SSH
 
-Для Амстердама используется существующий nginx. В локальном `install.config`
+Для постоянного ingress-узла используется существующий nginx. В локальном `install.config`
 задать `BOT_INGRESS_MODE=ssh`, `BOT_INGRESS_IP`, `BOT_DOMAIN` и после DNS-перехода
 `BOT_PUBLIC_URL=https://DOMAIN`. Используются `SSH_USER` и `IDENTITY` локального
 установщика. Запуск: `bash scripts/setup-subscription-ingress.sh`.

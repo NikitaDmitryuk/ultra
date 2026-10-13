@@ -20,6 +20,7 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Vary", "User-Agent")
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	fromLoopback := net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback()
 	if r.TLS == nil && (!fromLoopback || r.Header.Get("X-Forwarded-Proto") != "https") {
@@ -32,29 +33,86 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	var acceptance *happAcceptance
+	if r.URL.Query().Get("preview") == "reserve-live" {
+		if r.URL.Query().Get("format") != "happ" || r.URL.Query().Get("transport") != "" {
+			http.Error(w, "explicit Happ format required", http.StatusBadRequest)
+			return
+		}
+		acceptance, err = loadHappAcceptance(b.happAcceptanceFile, token, time.Now())
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, b.adminAPIURL+"/v1/subscriptions/"+url.PathEscape(token), nil)
 	if err != nil {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	req.URL.RawQuery = url.Values{"format": r.URL.Query()["format"], "transport": r.URL.Query()["transport"]}.Encode()
+	req.URL.RawQuery = url.Values{"format": r.URL.Query()["format"], "transport": r.URL.Query()["transport"], "preview": r.URL.Query()["preview"]}.Encode()
+	if acceptance != nil {
+		query := req.URL.Query()
+		query.Set("preview", "reserve")
+		req.URL.RawQuery = query.Encode()
+	}
+	cacheKey, formatErr := b.subscriptionFallbackKey(token, r)
+	if formatErr != nil {
+		http.Error(w, formatErr.Error(), http.StatusBadRequest)
+		return
+	}
 	req.Header.Set("User-Agent", r.UserAgent())
 	req.Header.Set("Authorization", "Bearer "+b.adminAPIToken)
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
+		if b.serveSubscriptionFallback(w, cacheKey, token, r) {
+			return
+		}
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode >= 500 && b.serveSubscriptionFallback(w, cacheKey, token, r) {
+			return
+		}
+		if resp.StatusCode == 404 && b.subscriptionCache != nil {
+			b.subscriptionCache.invalidate(subscriptionDigest(token))
+		}
 		http.Error(w, "subscription unavailable", resp.StatusCode)
 		return
 	}
 	w.Header().Set("Server-Timing", fmt.Sprintf("relay;dur=%.1f", float64(time.Since(started).Microseconds())/1000))
-	for _, key := range []string{"Content-Type", "profile-title", "profile-update-interval", "Vary"} {
+	for _, key := range []string{"Content-Type", "profile-title", "profile-update-interval"} {
 		w.Header().Set(key, resp.Header.Get(key))
 	}
-	_, _ = io.Copy(w, io.LimitReader(resp.Body, 1<<20))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if readErr != nil || len(body) > 1<<20 {
+		if b.serveSubscriptionFallback(w, cacheKey, token, r) {
+			return
+		}
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if acceptance != nil {
+		// Cleanup or expiry during the upstream request revokes the preview too.
+		acceptance, err = loadHappAcceptance(b.happAcceptanceFile, token, time.Now())
+		if err != nil {
+			http.Error(w, "acceptance profile unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		body, err = acceptance.rewrite(body)
+		if err != nil {
+			http.Error(w, "acceptance profile unavailable", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	if b.happAcceptanceFile != "" {
+		if _, err := loadHappAcceptance(b.happAcceptanceFile, token, time.Now()); err == nil {
+			b.captureHappAcceptanceUserAgent(r.UserAgent())
+		}
+	}
+	_, _ = w.Write(body)
 }
 func (b *Bot) handleRotateSubscription(w http.ResponseWriter, r *http.Request) {
 	if _, ok := b.mustAdmin(w, r); !ok {

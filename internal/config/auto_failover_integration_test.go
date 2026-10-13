@@ -134,7 +134,7 @@ func testAutoFailoverTransport(t *testing.T, transport TunnelTransport) {
 		if want == 0 {
 			if e == nil {
 				_ = response.Body.Close()
-				t.Fatal("fixed profile used the reserve")
+				t.Fatal("blocked profile bypassed exit or user quota")
 			}
 			return
 		}
@@ -163,7 +163,7 @@ func testAutoFailoverTransport(t *testing.T, transport TunnelTransport) {
 	}
 	apply()
 	check(clients[0], 'b')
-	check(clients[1], 0)
+	check(clients[1], 'b')
 	// Recovery eligibility alone must not move Auto back before the stability window.
 	if err = exitRunners[0].StartJSON(exitConfigs[0]); err != nil {
 		t.Fatal(err)
@@ -173,7 +173,7 @@ func testAutoFailoverTransport(t *testing.T, transport TunnelTransport) {
 	}
 	apply()
 	check(clients[0], 'b')
-	check(clients[1], 'a')
+	check(clients[1], 'b')
 	// The 60-second selection gate is covered with a fake clock in exits/selector_test.go.
 	// Verify applying its eventual failback with the same running clients here.
 	selector.SetActiveID(primary)
@@ -183,5 +183,9 @@ func testAutoFailoverTransport(t *testing.T, transport TunnelTransport) {
 	owner.ExcludedExitIDs = []string{primary}
 	apply()
 	check(clients[0], 'b')
+	check(clients[1], 'b')
+	owner.ExcludedExitIDs = []string{primary, "reserve"}
+	apply()
+	check(clients[0], 0)
 	check(clients[1], 0)
 }

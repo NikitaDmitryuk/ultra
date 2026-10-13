@@ -10,7 +10,7 @@
   или XHTTP/TLS. Смена exit не исправляет блокировку входного IP.
 - Bridge → exit: XHTTP (`splithttp`, по умолчанию `stream-up`/H2) либо gRPC.
   `mimic_preset` задаёт HTTP-форму, но не означает передачу через разрешённую инфраструктуру Steam/CDN.
-- При split routing `direct` означает выход из сети bridge, например Yandex Cloud.
+- При split routing `direct` означает выход из сети bridge.
   `blocklist` отправляет на exit совпадения со списками; `ru_direct` меняет правило
   по умолчанию; `split_routing: false` отправляет весь пользовательский трафик на exit.
 - Gemini, AI Studio, Generative Language API, Google Accounts, googleusercontent и gstatic
@@ -53,7 +53,8 @@ Worker проверяет каждый outbound работающего ядра:
 восстановления нужны три успеха, для возврата к предпочтительному exit — 60 секунд стабильности.
 При отказе всех exit селектор сохраняет последний active ID и показывает degraded,
 но Auto блокирует туннельный трафик при отсутствии разрешённого исправного выхода;
-UUID фиксированной страны сохраняет свой outbound. RTT/CheckedAt не вызывают reload;
+UUID страны предпочитает свой outbound и при отказе может использовать другой
+исправный выход с доступной пользовательской квотой и бюджетом exit. RTT/CheckedAt не вызывают reload;
 реальное переключение может прервать TCP. См. [проверки доступности](../internal/proxy/health.go).
 
 Маршрутизация использует `AsIs`: имена VPN-назначений передаются на exit. DNS инфраструктуры

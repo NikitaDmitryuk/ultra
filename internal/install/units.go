@@ -10,3 +10,6 @@ var BotSystemdUnit string
 
 //go:embed scripts/xhttp-ingress.py
 var XHTTPIngressScript string
+
+//go:embed scripts/automation.py
+var AutomationScript string

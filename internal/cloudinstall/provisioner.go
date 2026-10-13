@@ -141,6 +141,30 @@ func tunnelFirewallScript(bridgeIP string, port int) (string, error) {
 }
 
 func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
+func (p *Provisioner) exitSpec(node exits.Node) config.Spec {
+	spec := config.Spec{
+		SchemaVersion: config.CurrentSpecSchemaVersion, Role: config.RoleExit,
+		MimicPreset: p.Bridge.MimicPreset, ListenAddress: "0.0.0.0", VLESSPort: node.Port,
+		SplithttpHost: p.Bridge.SplithttpHost, SplithttpPath: p.Bridge.SplithttpPath,
+		SplitHTTPTLS: p.Bridge.SplitHTTPTLS, TunnelTransport: p.Bridge.TunnelTransport,
+		TunnelTLSProvision: p.Bridge.TunnelTLSProvision,
+		Exit:               config.ExitTunnelSpec{TunnelUUID: node.TunnelUUID},
+		ExitCertPaths:      config.CertPaths{CertFile: "/etc/ultra-relay/fullchain.pem", KeyFile: "/etc/ultra-relay/privkey.pem"},
+	}
+	if p.Bridge.XrayWire != nil {
+		wire := *p.Bridge.XrayWire
+		wire.SniffingDestOverride = append([]string(nil), wire.SniffingDestOverride...)
+		spec.XrayWire = &wire
+	}
+	if p.Bridge.AntiCensor != nil {
+		anti := *p.Bridge.AntiCensor
+		anti.WARPProxy = false
+		anti.PublicXHTTPPort = 0
+		spec.AntiCensor = &anti
+	}
+	return spec
+}
+
 func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance cloud.Instance) error {
 	c, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -162,21 +186,7 @@ func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance
 	if e != nil {
 		return e
 	}
-	spec := config.Spec{
-		SchemaVersion: config.CurrentSpecSchemaVersion, Role: config.RoleExit,
-		MimicPreset: p.Bridge.MimicPreset, ListenAddress: "0.0.0.0", VLESSPort: node.Port,
-		SplithttpHost: p.Bridge.SplithttpHost, SplithttpPath: p.Bridge.SplithttpPath,
-		SplitHTTPTLS: p.Bridge.SplitHTTPTLS, TunnelTransport: p.Bridge.TunnelTransport,
-		TunnelTLSProvision: p.Bridge.TunnelTLSProvision,
-		Exit:               config.ExitTunnelSpec{TunnelUUID: node.TunnelUUID},
-		ExitCertPaths:      config.CertPaths{CertFile: "/etc/ultra-relay/fullchain.pem", KeyFile: "/etc/ultra-relay/privkey.pem"},
-	}
-	if p.Bridge.AntiCensor != nil {
-		anti := *p.Bridge.AntiCensor
-		anti.WARPProxy = false
-		anti.PublicXHTTPPort = 0
-		spec.AntiCensor = &anti
-	}
+	spec := p.exitSpec(node)
 	if e = spec.Validate(); e != nil {
 		return errors.New("generated exit spec invalid")
 	}
