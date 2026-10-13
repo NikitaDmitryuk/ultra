@@ -4,17 +4,19 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 func TestAutomationReleasePreflightRejectsIncompleteAndModified(t *testing.T) {
 	dir := t.TempDir()
 	p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE": "192.0.2.1", "EXIT": "192.0.2.2", "REALITY_DEST": "example.com:443"})
 	p.Bridge.ReuseSpec = true
-	p.Automation = &installplan.AutomationConfig{ReleaseDir: dir, Version: "v-test", AgeRecipient: "age1test", BridgeProvider: "a", BridgeIPv4: "192.0.2.1", BridgeURL: "https://example.com/happ", KnownHostsFile: "/pins", StaticNodes: []installplan.AutomationNode{{Name: "NL", Address: "192.0.2.2", Provider: "a"}}}
+	p.Automation = &installplan.AutomationConfig{ReleaseDir: dir, Version: "v1.2.3", AgeRecipient: "age1test", BridgeProvider: "a", BridgeIPv4: "192.0.2.1", BridgeURL: "https://example.com/happ", KnownHostsFile: "/pins", StaticNodes: []installplan.AutomationNode{{Name: "NL", Address: "192.0.2.2", Provider: "a"}}}
 	names := []string{"ultra-relay-linux-amd64", "ultra-relay-linux-arm64", "ultra-bot-linux-amd64", "ultra-bot-linux-arm64", "ultra-client-linux-amd64", "ultra-client-linux-arm64", "ultra-recovery.tar.gz"}
 	var assets []map[string]any
 	for _, name := range names {
@@ -25,7 +27,7 @@ func TestAutomationReleasePreflightRejectsIncompleteAndModified(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	manifest := map[string]any{"version": "v-test", "capabilities": []string{"service-access-v1"}, "assets": assets}
+	manifest := map[string]any{"version": "v1.2.3", "capabilities": []string{"service-access-v1"}, "assets": assets}
 	write := func() {
 		raw, _ := json.Marshal(manifest)
 		if err := os.WriteFile(filepath.Join(dir, "release-manifest.json"), raw, 0600); err != nil {
@@ -48,5 +50,37 @@ func TestAutomationReleasePreflightRejectsIncompleteAndModified(t *testing.T) {
 	}
 	if preflightAutomation(p) == nil {
 		t.Fatal("modified binary accepted")
+	}
+}
+
+func TestAutomationPollAndDurableNames(t *testing.T) {
+	state := parseAutomationPoll("noise\nULTRA_UNIT=activating\nULTRA_VERSION=v2.4.1\nULTRA_READY=true\nULTRA_PENDING=false\nULTRA_ERROR=absent\n")
+	if state.Unit != "activating" || state.Version != "v2.4.1" || !state.Ready || state.Pending || state.Error != "absent" {
+		t.Fatalf("unexpected poll state: %#v", state)
+	}
+	unit, err := automationUnitName("upgrade", "v2.4.1-rc.1")
+	if err != nil || unit != "ultra-automation-upgrade-v2-4-1-rc-1" {
+		t.Fatalf("unexpected unit: %q %v", unit, err)
+	}
+	if _, err = automationUnitName("upgrade", "latest"); err == nil {
+		t.Fatal("latest accepted as immutable version")
+	}
+	if _, err = automationBundlePath("v2.4.1;reboot"); err == nil {
+		t.Fatal("unsafe version accepted")
+	}
+	command := durableAutomationLaunchCommand("upgrade", "/var/lib/ultra-automation/releases/v2.4.1", unit, automationTimeout(300))
+	for _, required := range []string{"active|activating", "systemd-run --no-block --collect", "TimeoutStartSec=900", "/var/lib/ultra-automation/releases/v2.4.1/automation.py"} {
+		if !strings.Contains(command, required) {
+			t.Fatalf("durable launch misses %q: %s", required, command)
+		}
+	}
+}
+
+func TestAutomationTimeoutIncludesOperationMargin(t *testing.T) {
+	if got := automationTimeout(300).Seconds(); got != 900 {
+		t.Fatalf("timeout=%v", got)
+	}
+	if got := automationTimeout(0).Seconds(); got != 1500 {
+		t.Fatalf("default timeout=%v", got)
 	}
 }

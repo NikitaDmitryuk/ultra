@@ -28,7 +28,7 @@ func TestPublishedApplyPreflightProcess(t *testing.T) {
 	}
 	dir := t.TempDir()
 	p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE": "192.0.2.1", "EXIT": "192.0.2.2", "REALITY_DEST": "example.com:443"})
-	p.Automation = &installplan.AutomationConfig{Version: "v-test", ReleaseDir: dir, AgeRecipient: "age1fixture", BridgeProvider: "a", BridgeIPv4: "192.0.2.1", BridgeURL: "https://sync.example.com/healthz", KnownHostsFile: "/pins", StaticNodes: []installplan.AutomationNode{{Name: "NL", Address: "192.0.2.2", Provider: "a"}}, Ingress: &installplan.AutomationIngress{Domain: "edge.example.com", Email: "operator@example.com", Path: "/connect", PublicHost: "192.0.2.1", BackendPort: 18080}}
+	p.Automation = &installplan.AutomationConfig{Version: "v1.2.3", ReleaseDir: dir, AgeRecipient: "age1fixture", BridgeProvider: "a", BridgeIPv4: "192.0.2.1", BridgeURL: "https://sync.example.com/healthz", KnownHostsFile: "/pins", StaticNodes: []installplan.AutomationNode{{Name: "NL", Address: "192.0.2.2", Provider: "a"}}, Ingress: &installplan.AutomationIngress{Domain: "edge.example.com", Email: "operator@example.com", Path: "/connect", PublicHost: "192.0.2.1", BackendPort: 18080}}
 	var assets []map[string]any
 	for _, name := range []string{"ultra-relay-linux-amd64", "ultra-relay-linux-arm64", "ultra-bot-linux-amd64", "ultra-bot-linux-arm64", "ultra-client-linux-amd64", "ultra-client-linux-arm64", "ultra-recovery.tar.gz"} {
 		data := []byte(name)
@@ -38,7 +38,7 @@ func TestPublishedApplyPreflightProcess(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	raw, _ := json.Marshal(map[string]any{"version": "v-test", "capabilities": []string{"service-access-v1"}, "assets": assets})
+	raw, _ := json.Marshal(map[string]any{"version": "v1.2.3", "capabilities": []string{"service-access-v1"}, "assets": assets})
 	if err := os.WriteFile(filepath.Join(dir, "release-manifest.json"), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
