@@ -54,9 +54,31 @@ class CutoverTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'rolled_back'):m.execute(plan,tmp,Host)
             self.assertEqual(events,['prepare','aliases','validate-old','publish','validate-new','rollback'])
             self.assertEqual(json.loads((Path(tmp)/'journal.json').read_text())['phase'],'rolled_back')
+            failure=json.loads((Path(tmp)/'last-error.json').read_text())
+            self.assertEqual(failure['stage'],'operation')
+            self.assertNotIn('fixture failure',json.dumps(failure))
             fail[0]=False;events.clear();self.assertEqual(m.execute(plan,tmp,Host)['cutover'],'complete')
             self.assertEqual(events,['aliases','validate-old','publish','validate-new'])
+            self.assertFalse((Path(tmp)/'last-error.json').exists())
             events.clear();m.execute(plan,tmp,Host);self.assertEqual(events,['validate-new'])
+
+    def test_failure_receipt_contains_only_safe_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            class Host:
+                stage='subscription_happ'
+                def __init__(self,*args):pass
+                def prepare(self):pass
+                def aliases(self):pass
+                def validate(self,published):raise ValueError('private fixture detail')
+                def publish(self):pass
+                def finalize(self):pass
+                def rollback(self):pass
+            plan={'bridge_ipv4':'192.0.2.1','subscription_domain':'sync.example.com','ingress':self.target(),'desired':{}}
+            with self.assertRaises(ValueError):m.execute(plan,tmp,Host)
+            failure=json.loads((Path(tmp)/'last-error.json').read_text())
+            self.assertEqual(set(failure),{'version','stage','code','timestamp'})
+            self.assertEqual(failure['stage'],'subscription_happ')
+            self.assertNotIn('private fixture detail',json.dumps(failure))
 
     def test_final_capture_failure_keeps_publication_and_resumes_finalize(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -117,6 +139,12 @@ class CutoverTests(unittest.TestCase):
         self.assertEqual(m.subscription_shape(old),m.subscription_shape(new))
         changed=base64.b64encode(b'vless://different@edge.example.com:443?security=tls')
         self.assertNotEqual(m.subscription_shape(old),m.subscription_shape(changed))
+
+    def test_subscription_shape_accepts_happ_profile_array(self):
+        profile={'outbounds':[{'protocol':'vless','settings':{'vnext':[{'address':'old.example.com','users':[{'id':'fixture-id'}]}]},'streamSettings':{'security':'tls','tlsSettings':{'serverName':'old.example.com'}}}]}
+        raw=json.dumps([profile,copy.deepcopy(profile)]).encode()
+        self.assertEqual(m.subscription_shape(raw)['routes'],2)
+        self.assertEqual(m.subscription_tls_endpoints(raw),{('old.example.com','old.example.com')})
 
     def test_published_check_rejects_stale_endpoint_with_same_credentials(self):
         with tempfile.TemporaryDirectory() as tmp:

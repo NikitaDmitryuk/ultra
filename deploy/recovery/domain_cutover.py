@@ -89,9 +89,18 @@ def single_alias_probe(profile, old, target, bridge_ip):
     return {'outbounds': [selected]}
 
 
+def subscription_documents(raw):
+    document = json.loads(raw)
+    if isinstance(document, dict):
+        return [document]
+    if isinstance(document, list) and all(isinstance(profile, dict) for profile in document):
+        return document
+    raise ValueError('cutover_subscription_invalid_json')
+
+
 def subscription_shape(raw):
     try:
-        document = json.loads(raw)
+        documents = subscription_documents(raw)
     except ValueError:
         try:
             text = base64.b64decode(raw + b'='*((-len(raw))%4), validate=True).decode()
@@ -99,21 +108,32 @@ def subscription_shape(raw):
             text = raw.decode()
         uris = [line for line in text.splitlines() if line.startswith('vless://')]
         if not uris:
-            raise ValueError('cutover_subscription_invalid')
+            raise ValueError('cutover_subscription_missing_vless')
         credentials = sorted(urllib.parse.urlsplit(uri).username for uri in uris)
     else:
-        if not isinstance(document, dict) or not isinstance(document.get('outbounds'), list):
-            raise ValueError('cutover_subscription_invalid')
-        credentials = sorted(user['id'] for row in document['outbounds'] if row.get('protocol') == 'vless'
-                             for destination in row.get('settings', {}).get('vnext', []) for user in destination.get('users', []))
+        if any(not isinstance(document.get('outbounds'), list) for document in documents):
+            raise ValueError('cutover_subscription_invalid_json')
+        credentials = sorted(user['id'] for document in documents for row in document['outbounds']
+                             if row.get('protocol') == 'vless'
+                             for destination in row.get('settings', {}).get('vnext', [])
+                             for user in destination.get('users', []))
         if not credentials:
-            raise ValueError('cutover_subscription_invalid')
+            raise ValueError('cutover_subscription_missing_credentials')
     return {'credential_digest': digest(json.dumps(credentials).encode()), 'routes': len(credentials)}
+
+
+def shape_failure_stage(prefix, error):
+    known = {
+        'cutover_subscription_missing_vless': 'missing_vless',
+        'cutover_subscription_invalid_json': 'invalid_json',
+        'cutover_subscription_missing_credentials': 'missing_credentials',
+    }
+    return prefix + '_' + known.get(str(error), 'invalid')
 
 
 def subscription_tls_endpoints(raw):
     try:
-        doc=json.loads(raw)
+        documents=subscription_documents(raw)
     except ValueError:
         try:text=base64.b64decode(raw+b'='*((-len(raw))%4),validate=True).decode()
         except (ValueError,UnicodeError):text=raw.decode()
@@ -124,11 +144,12 @@ def subscription_tls_endpoints(raw):
             if query.get('security')==['tls']:endpoints.append((parsed.hostname,query.get('sni',[''])[0]))
         return set(endpoints)
     endpoints=set()
-    for outbound in doc.get('outbounds',[]):
-        stream=outbound.get('streamSettings',{})
-        if stream.get('security')!='tls':continue
-        for destination in outbound.get('settings',{}).get('vnext',[]):
-            endpoints.add((destination['address'],stream.get('tlsSettings',{}).get('serverName','')))
+    for doc in documents:
+        for outbound in doc.get('outbounds',[]):
+            stream=outbound.get('streamSettings',{})
+            if stream.get('security')!='tls':continue
+            for destination in outbound.get('settings',{}).get('vnext',[]):
+                endpoints.add((destination['address'],stream.get('tlsSettings',{}).get('serverName','')))
     return endpoints
 
 
@@ -155,12 +176,18 @@ class Host:
         self.spec_path = Path('/etc/ultra-relay/spec.json')
         self.public_dropin = Path('/etc/systemd/system/ultra-bot.service.d/zz-domain-public-origin.conf')
         self.public_env = Path('/etc/ultra-relay/domain-public.env')
+        self.stage = 'initializing'
+
+    def mark(self, stage):
+        self.stage = stage
 
     def prepare(self):
+        self.mark('fresh_backup')
         run(['python3', '/opt/ultra-recovery/recovery.py', 'capture', '--config', '/etc/ultra-recovery/backup.json'], timeout=175)
         backup = json.loads(private('/var/lib/ultra-recovery/last-success.json').read_text())
         if not 0 <= time.time() - backup['snapshot_at'] <= 180 or not backup.get('destinations'):
             raise ValueError('cutover_fresh_backup_required')
+        self.mark('dns_ownership')
         imported = json.loads(private(self.plan['dns_receipt_source']).read_text())
         if imported.get('zone') != self.plan['dns']['zone'] or imported.get('pending') or set(imported.get('records', {})) != {'subscription','vpn'}:
             raise ValueError('cutover_owned_dns_receipt_required')
@@ -171,12 +198,14 @@ class Host:
                 raise ValueError('cutover_dns_ownership_drift')
         else:save(receipt, imported)
         self.subscription.atomic(Path(self.plan['dns']['api_key_file']),private(self.plan['dns_key_source']).read_bytes(),0o600)
+        self.mark('prepare_spec')
         before = self.spec_path.read_bytes()
         old = json.loads(before)
         candidate = candidate_spec(old, self.plan['ingress'])
         environment = read_env('/etc/ultra-relay/environment')
         bot_domain = environment.get('ULTRA_BOT_DOMAIN', '')
         bot_port = int(environment.get('ULTRA_BOT_PORT', '8444'))
+        self.mark('subscription_backend')
         self.subscription.validate({'domain':self.plan['subscription_domain'], 'upstream_domain':bot_domain, 'bot_port':bot_port})
         https(bot_domain, '127.0.0.1', bot_port, '/healthz')
         for name, data in [('before-spec.json', before), ('candidate-spec.json', json.dumps(candidate, sort_keys=True).encode())]:
@@ -199,15 +228,19 @@ class Host:
             raise ValueError('cutover_spec_drift')
 
     def aliases(self):
+        self.mark('alias_spec')
         self.check_spec(['before'])
         dns = self.plan['dns']
         desired = self.plan['desired']
+        self.mark('alias_dns')
         dns_execute(dns, desired, '/etc/ultra-recovery/dns-receipt.json')
         wait_ready(dns, desired)
         save('/etc/ultra-recovery/dns.json', {'config':dns,'desired':desired})
         manifest = json.loads(self.ingress.MANIFEST.read_text()) if self.ingress.MANIFEST.exists() else {}
         parameters = dict(self.plan['ingress'], binary='/usr/local/bin/ultra-relay')
+        self.mark('certificate_vpn')
         self.ingress.prepare_certificate(parameters, manifest)
+        self.mark('certificate_subscription')
         self.ingress.prepare_certificate(dict(parameters, domain=self.plan['subscription_domain']), manifest)
         # Preserve the old endpoint in a separate owned file; the standard site becomes
         # the new primary, so a later ordinary apply does not create duplicate vhosts.
@@ -217,6 +250,7 @@ class Host:
         previous_legacy=legacy.read_bytes() if legacy.exists() else None
         previous_manifest=self.ingress.MANIFEST.read_bytes()
         content=self.ingress.nginx(parameters,443)
+        self.mark('alias_nginx')
         try:
             if previous_site is None:raise ValueError('cutover_primary_site_missing')
             if previous_site!=content:
@@ -240,6 +274,7 @@ class Host:
             b'#!/bin/sh\nset -eu\nnginx -t\nsystemctl reload nginx\n', manifest, 0o755)
 
     def validate(self, published):
+        self.mark('validate_spec')
         self.check_spec(['candidate'] if published else ['before'])
         parsed = urllib.parse.urlsplit(private(self.plan['subscription_url_file']).read_text().strip())
         if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
@@ -248,20 +283,37 @@ class Host:
             raise ValueError('cutover_private_subscription_path_invalid')
         # Fixed explicit formats override any preview or caller-controlled query.
         for fmt in ('happ', 'uri'):
+            self.mark('subscription_' + fmt + '_old_fetch')
             request_path = parsed.path + '?format=' + fmt
-            old_shape = subscription_shape(https(parsed.hostname, parsed.hostname, parsed.port or 443, request_path))
+            old_body=https(parsed.hostname, parsed.hostname, parsed.port or 443, request_path)
+            self.mark('subscription_' + fmt + '_old_shape')
+            try:
+                old_shape = subscription_shape(old_body)
+            except ValueError as error:
+                self.mark(shape_failure_stage('subscription_' + fmt + '_old_shape', error))
+                raise
+            self.mark('subscription_' + fmt + '_new_fetch')
             new_body=https(self.plan['subscription_domain'], self.plan['bridge_ipv4'], 443, request_path)
-            new_shape = subscription_shape(new_body)
+            self.mark('subscription_' + fmt + '_new_shape')
+            try:
+                new_shape = subscription_shape(new_body)
+            except ValueError as error:
+                self.mark(shape_failure_stage('subscription_' + fmt + '_new_shape', error))
+                raise
+            self.mark('subscription_' + fmt + '_publication')
             if published and (self.plan['ingress']['public_host'],self.plan['ingress']['domain']) not in subscription_tls_endpoints(new_body):
                 raise ValueError('cutover_publication_not_visible')
+            self.mark('subscription_' + fmt + '_identity')
             if old_shape != new_shape:
                 raise ValueError('cutover_subscription_identity_changed')
             baseline = self.directory/('subscription-'+fmt+'.json')
+            self.mark('subscription_' + fmt + '_baseline')
             if baseline.exists():
                 if json.loads(baseline.read_text()) != new_shape:
                     raise ValueError('cutover_subscription_identity_changed')
             else:
                 save(baseline, new_shape)
+        self.mark('vpn_payload')
         before = json.loads((self.directory/'before-spec.json').read_text())
         profile = json.loads(private('/etc/ultra-recovery/probe.json').read_text())
         # Reconcile can refresh the profile after publication; accept either known old or new endpoint.
@@ -321,6 +373,7 @@ class Host:
                 self.public_env:('ULTRA_BOT_PUBLIC_URL=https://'+self.plan['subscription_domain']+'\n').encode()}
 
     def publish(self):
+        self.mark('publish_spec')
         self.check_spec(['before','candidate'])
         candidate = self.directory/'candidate-spec.json'
         run(['/usr/local/bin/ultra-relay','-spec',str(candidate),'-check'])
@@ -329,9 +382,11 @@ class Host:
         self.subscription.atomic(self.spec_path,candidate.read_bytes(),0o600)
         for path,data in self.public_files().items():
             self.subscription.atomic(path,data,0o600 if path==self.public_env else 0o644)
+        self.mark('publish_restart')
         self.restart()
 
     def finalize(self):
+        self.mark('finalize_inventory')
         # Retain old inventory and ingress. New aliases must survive disaster recovery too.
         backup_path=Path('/etc/ultra-recovery/backup.json')
         backup=json.loads(private(backup_path).read_text())
@@ -366,6 +421,7 @@ class Host:
                 value['ingress_mode']='direct'
                 value['subscription_domain']=self.plan['subscription_domain']
             save(path,value)
+        self.mark('final_capture')
         run(['python3','/opt/ultra-recovery/recovery.py','capture','--config',str(backup_path)],timeout=175)
 
     def rollback(self):
@@ -391,29 +447,36 @@ def execute(plan, directory, host_factory=Host):
         state = json.loads(private(journal).read_text()) if journal.exists() else {'version':1,'plan':fingerprint,'phase':'new'}
         if state.get('plan') != fingerprint:raise ValueError('cutover_plan_changed')
         host = host_factory(plan,directory)
-        if state['phase']=='new':
-            host.prepare();state['phase']='prepared';save(journal,state)
-        if state['phase'] in ('prepared','rolled_back'):
-            host.aliases();state['phase']='aliases';save(journal,state)
-        if state['phase']=='aliases':
-            host.validate(False);state['phase']='publishing';save(journal,state)
-        was_complete=state['phase']=='complete'
-        was_finalizing=state['phase']=='finalizing'
-        if state['phase']=='publishing':
-            try:
-                host.publish();host.validate(True)
-            except Exception:
-                host.rollback();state['phase']='rolled_back';save(journal,state)
-                raise ValueError('cutover_publication_failed_rolled_back') from None
-            # Publication is verified. Recovery metadata/capture may now be partially
-            # durable; resume this phase instead of reverting only the application.
-            state['phase']='finalizing';save(journal,state)
-        if state['phase']=='finalizing':
-            if was_finalizing:host.validate(True)
-            host.finalize()
-            state['phase']='complete';save(journal,state)
-        if state['phase']!='complete':raise ValueError('cutover_invalid_journal')
-        if was_complete:host.validate(True)
+        error = directory/'last-error.json'
+        try:
+            if state['phase']=='new':
+                host.prepare();state['phase']='prepared';save(journal,state)
+            if state['phase'] in ('prepared','rolled_back'):
+                host.aliases();state['phase']='aliases';save(journal,state)
+            if state['phase']=='aliases':
+                host.validate(False);state['phase']='publishing';save(journal,state)
+            was_complete=state['phase']=='complete'
+            was_finalizing=state['phase']=='finalizing'
+            if state['phase']=='publishing':
+                try:
+                    host.publish();host.validate(True)
+                except Exception:
+                    host.rollback();state['phase']='rolled_back';save(journal,state)
+                    raise ValueError('cutover_publication_failed_rolled_back') from None
+                # Publication is verified. Recovery metadata/capture may now be partially
+                # durable; resume this phase instead of reverting only the application.
+                state['phase']='finalizing';save(journal,state)
+            if state['phase']=='finalizing':
+                if was_finalizing:host.validate(True)
+                host.finalize()
+                state['phase']='complete';save(journal,state)
+            if state['phase']!='complete':raise ValueError('cutover_invalid_journal')
+            if was_complete:host.validate(True)
+        except Exception:
+            stage=getattr(host,'stage','operation')
+            save(error, {'version':1, 'stage':stage, 'code':stage+'_failed', 'timestamp':int(time.time())})
+            raise
+        error.unlink(missing_ok=True)
         return {'cutover':'complete','old_ingress_preserved':True}
 
 

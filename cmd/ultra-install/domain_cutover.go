@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/NikitaDmitryuk/ultra/deploy"
 	recoveryassets "github.com/NikitaDmitryuk/ultra/deploy/recovery"
@@ -224,8 +225,34 @@ func applyDomainCutover(p *installplan.InstallPlan, configFile, subscription, vp
 	if err = upload("cutover.json", raw); err != nil {
 		return err
 	}
-	if err = ssh("python3 " + shellQuote(path.Join(remote, "domain_cutover.py")) + " --config " + shellQuote(path.Join(remote, "cutover.json"))); err != nil {
+	unit := "ultra-domain-cutover-" + strings.TrimPrefix(filepath.Base(local), "ultra-domain-cutover-")
+	if !regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(unit) {
+		return errors.New("invalid cutover operation identifier")
+	}
+	launch := "systemd-run --no-block --collect --unit " + shellQuote(unit) +
+		" --property Type=oneshot --property TimeoutStartSec=1200 /usr/bin/python3 " +
+		shellQuote(path.Join(remote, "domain_cutover.py")) + " --config " + shellQuote(path.Join(remote, "cutover.json"))
+	if err = ssh(launch); err != nil {
 		return errors.New("domain cutover not completed; resume with same target parameters")
+	}
+	deadline := time.Now().Add(20 * time.Minute)
+	for {
+		poll := "printf 'ULTRA_UNIT='; systemctl is-active " + shellQuote(unit+".service") + " 2>/dev/null || true; " +
+			"printf 'ULTRA_PHASE='; python3 -c " + shellQuote("import json,pathlib; p=pathlib.Path('/var/lib/ultra-domain-cutover/current/journal.json'); print(json.loads(p.read_text()).get('phase','invalid') if p.exists() else 'missing')")
+		output, pollErr := install.RunSSHOutput(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, poll)
+		if pollErr == nil {
+			unitState, phase := parseCutoverPoll(string(output))
+			if phase == "complete" {
+				break
+			}
+			if unitState == "failed" || unitState == "inactive" || unitState == "unknown" || unitState == "not-found" {
+				return errors.New("domain cutover not completed; resume with same target parameters")
+			}
+		}
+		if time.Now().After(deadline) {
+			return errors.New("domain cutover readiness deadline exceeded; resume with same target parameters")
+		}
+		time.Sleep(2 * time.Second)
 	}
 	delta := cutoverDelta(subscription, vpn, zone)
 	delta["ACME_EMAIL"] = email
@@ -235,4 +262,16 @@ func applyDomainCutover(p *installplan.InstallPlan, configFile, subscription, vp
 	}
 	fmt.Println("domain cutover complete; old ingress preserved; canonical parameters updated")
 	return nil
+}
+
+func parseCutoverPoll(output string) (unit, phase string) {
+	for _, line := range strings.Split(output, "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "ULTRA_UNIT="); ok {
+			unit = strings.TrimSpace(value)
+		}
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "ULTRA_PHASE="); ok {
+			phase = strings.TrimSpace(value)
+		}
+	}
+	return unit, phase
 }

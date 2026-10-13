@@ -36,6 +36,7 @@ go.work.sum
 
 # Локальные параметры установки (IP, SSH-ключ)
 install.config
+/install.config.before-domain-cutover
 
 # Local dev TLS material (generate with openssl — see README)
 examples/test-cert.pem

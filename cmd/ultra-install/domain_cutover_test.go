@@ -42,3 +42,14 @@ func TestCutoverCanonicalDeltaPreservesLegacyBackendAndIsRepeatable(t *testing.T
 		t.Fatal("missing compatibility policy")
 	}
 }
+
+func TestParseCutoverPollIgnoresLoginNoise(t *testing.T) {
+	unit, phase := parseCutoverPoll("{}\nULTRA_UNIT=activating\nwarning\nULTRA_PHASE=aliases\n")
+	if unit != "activating" || phase != "aliases" {
+		t.Fatalf("unexpected poll result %q %q", unit, phase)
+	}
+	unit, phase = parseCutoverPoll("ULTRA_PHASE=complete\nULTRA_UNIT=unknown\n")
+	if unit != "unknown" || phase != "complete" {
+		t.Fatalf("completion receipt lost %q %q", unit, phase)
+	}
+}
