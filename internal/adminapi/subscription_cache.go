@@ -38,12 +38,32 @@ func (s *Server) handleSubscriptionCache(w http.ResponseWriter, r *http.Request)
 	for _, token := range tokens {
 		digest := sha256.Sum256([]byte(token))
 		prefix := hex.EncodeToString(digest[:]) + "?"
+		resolveReq := httptest.NewRequest("GET", "/", nil).WithContext(r.Context())
+		resolveReq.SetPathValue("token", token)
+		id, user, ok := s.resolveSubscriptionUser(httptest.NewRecorder(), resolveReq)
+		if !ok {
+			http.Error(w, "subscription cache incomplete", http.StatusServiceUnavailable)
+			return
+		}
+		_, _, _, nodes := s.clientExitSelection(user)
+		quotaHeaders := http.Header{}
+		s.setSubscriptionQuota(r.Context(), quotaHeaders, user.AccountID, nodes)
+		seen := map[string]bool{}
 		for _, query := range []string{"", "format=uri", "format=happ", "format=uri&transport=xhttp-tls"} {
 			req := httptest.NewRequest("GET", "/v1/subscriptions/"+url.PathEscape(token)+"?"+query, nil).WithContext(r.Context())
 			req.SetPathValue("token", token)
 			req.Header.Set("User-Agent", "Happ")
+			format, err := config.ResolveSubscriptionFormat(req.URL.Query().Get("format"), req.URL.Query().Get("transport"), req.UserAgent(), s.spec.HappDefaultJSON)
+			if err != nil {
+				continue
+			}
+			key := prefix + config.SubscriptionCacheQuery(format, req.URL.Query().Get("transport"))
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
 			recorder := httptest.NewRecorder()
-			s.handleSubscription(recorder, req)
+			s.renderSubscription(recorder, req, id, user, quotaHeaders)
 			if recorder.Code == http.StatusBadRequest && query == "format=happ" {
 				continue
 			}
@@ -60,8 +80,7 @@ func (s *Server) handleSubscriptionCache(w http.ResponseWriter, r *http.Request)
 					headers[key] = value
 				}
 			}
-			format, _ := config.ResolveSubscriptionFormat(req.URL.Query().Get("format"), req.URL.Query().Get("transport"), req.UserAgent(), s.spec.HappDefaultJSON)
-			entries[prefix+config.SubscriptionCacheQuery(format, req.URL.Query().Get("transport"))] = subscriptionCacheEntry{Body: recorder.Body.Bytes(), Headers: headers, ConfirmedAt: now}
+			entries[key] = subscriptionCacheEntry{Body: recorder.Body.Bytes(), Headers: headers, ConfirmedAt: now}
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

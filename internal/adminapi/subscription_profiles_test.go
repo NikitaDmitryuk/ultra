@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
@@ -21,7 +22,10 @@ func TestSubscriptionOnlyAutoAndPublishedEnabledCountries(t *testing.T) {
 	if err != nil || len(uris) != 2 {
 		t.Fatalf("got %d profiles, err=%v", len(uris), err)
 	}
-	for i, want := range []string{"Автоматически", "Нидерланды"} {
+	for i, want := range []string{
+		automaticProfileName + "?serverDescription=" + base64.StdEncoding.EncodeToString([]byte(automaticProfileDescription)),
+		"🇳🇱 Нидерланды?serverDescription=" + base64.StdEncoding.EncodeToString([]byte(countryProfileDescription)),
+	} {
 		u, err := url.Parse(uris[i])
 		if err != nil || u.Fragment != want {
 			t.Fatalf("profile %d label mismatch", i)
@@ -39,6 +43,16 @@ func TestSubscriptionOnlyAutoAndPublishedEnabledCountries(t *testing.T) {
 	uris, err = subscriptionURIs(spec, user, nodes, health, "")
 	if err != nil || len(uris) != 1 {
 		t.Fatal("unpublished location leaked")
+	}
+}
+
+func TestCountryFlagUsesOnlyCountryRegionCodes(t *testing.T) {
+	for code, want := range map[string]string{
+		"US": "🇺🇸", "nl": "🇳🇱", "GB": "🇬🇧", "UK": "🇬🇧", "EU": "", "1A": "", "": "",
+	} {
+		if got := countryFlag(code); got != want {
+			t.Errorf("countryFlag(%q)=%q, want %q", code, got, want)
+		}
 	}
 }
 
@@ -90,6 +104,17 @@ func TestHappProfilesPreserveRouteCredentials(t *testing.T) {
 		t.Fatalf("profiles=%d err=%v", len(profiles), err)
 	}
 	for i, profile := range profiles {
+		wantName, wantDescription := automaticProfileName, automaticProfileDescription
+		if i == 1 {
+			wantName, wantDescription = "🇳🇱 Нидерланды", countryProfileDescription
+		}
+		if profile["remarks"] != wantName {
+			t.Fatalf("profile %d name=%v, want %q", i, profile["remarks"], wantName)
+		}
+		meta, ok := profile["meta"].(map[string]any)
+		if !ok || meta["serverDescription"] != wantDescription {
+			t.Fatalf("profile %d metadata=%v, want description %q", i, profile["meta"], wantDescription)
+		}
 		for _, raw := range profile["outbounds"].([]any) {
 			out := raw.(map[string]any)
 			if out["protocol"] != "vless" {
