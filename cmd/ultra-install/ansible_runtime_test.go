@@ -19,6 +19,9 @@ func TestOfflineRuntimeArchiveBoundaries(t *testing.T) {
 		{"lock", "requirements.lock", tar.TypeReg, true},
 		{"wheel", "wheels/package.whl", tar.TypeReg, true},
 		{"escape", "../outside", tar.TypeReg, false},
+		{"absolute", "/wheels/package.whl", tar.TypeReg, false},
+		{"double-parent", "wheels/../../package.whl", tar.TypeReg, false},
+		{"hardlink", "wheels/package.whl", tar.TypeLink, false},
 		{"nested", "wheels/../package.whl", tar.TypeReg, false},
 		{"link", "wheels/package.whl", tar.TypeSymlink, false},
 		{"unexpected", "install.sh", tar.TypeReg, false},
@@ -33,7 +36,7 @@ func TestOfflineRuntimeArchiveBoundaries(t *testing.T) {
 			zip := gzip.NewWriter(file)
 			archive := tar.NewWriter(zip)
 			header := &tar.Header{Name: tc.member, Typeflag: tc.kind, Size: 4, Mode: 0600}
-			if tc.kind == tar.TypeSymlink {
+			if tc.kind == tar.TypeSymlink || tc.kind == tar.TypeLink {
 				header.Size = 0
 				header.Linkname = "/etc/passwd"
 			}

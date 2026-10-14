@@ -30,7 +30,7 @@ count.write_text(str(int(count.read_text())+1 if count.exists() else 1))
 		t.Fatal(err)
 	}
 	inventory := map[string]any{"all": map[string]any{"hosts": map[string]any{"test": map[string]any{"ansible_connection": "local"}}}}
-	vars := map[string]any{"literal": "{{ lookup('pipe', 'false') }}"}
+	vars := map[string]any{"ultra_postgres_password": "fixture-password", "literal": "{{ lookup('pipe', 'false') }}"}
 	directory := filepath.Join(root, "attempt")
 	for i := 0; i < 2; i++ {
 		receipt, err := RunLocal(context.Background(), "inspect-bootstrap", inventory, vars, directory, python, executable)
@@ -42,9 +42,19 @@ count.write_text(str(int(count.read_text())+1 if count.exists() else 1))
 	if string(calls) != "1" {
 		t.Fatal("replayed completed operation")
 	}
-	vars["literal"] = "different"
-	if _, err = RunLocal(context.Background(), "inspect-bootstrap", inventory, vars, directory, python, executable); err == nil {
-		t.Fatal("mutated inputs reused")
+	for _, member := range []string{"request.json", "job.json", "receipt.json"} {
+		info, statErr := os.Stat(filepath.Join(directory, member))
+		if statErr != nil || info.Mode().Perm()&0077 != 0 {
+			t.Fatalf("secret-bearing operation member %s is not private: %v", member, statErr)
+		}
+	}
+	for _, key := range []string{"literal", "ultra_postgres_password"} {
+		original := vars[key]
+		vars[key] = "changed-fixture-value"
+		if _, err = RunLocal(context.Background(), "inspect-bootstrap", inventory, vars, directory, python, executable); err == nil {
+			t.Fatalf("changed %s inputs reused", key)
+		}
+		vars[key] = original
 	}
 	if _, err = RunLocal(context.Background(), "arbitrary", inventory, vars, filepath.Join(root, "invalid"), python, executable); err == nil {
 		t.Fatal("unapproved operation")

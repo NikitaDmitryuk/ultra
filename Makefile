@@ -195,6 +195,7 @@ test-ansible:
 	python3 scripts/test-ansible-release-identity.py
 	python3 scripts/test-ansible-release-retention.py
 	python3 scripts/test-ansible-ingress.py
+	python3 scripts/test-ansible-ingress-probe.py
 	python3 scripts/test-ansible-adopt-baseline.py
 	python3 scripts/test-ansible-adoption.py
 	python3 scripts/test-ansible-replica-adoption.py

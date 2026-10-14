@@ -45,6 +45,20 @@ class BootstrapPlanTests(unittest.TestCase):
         self.assertTrue(all(item['mode']=='0600' for item in result['files']))
         self.assertEqual(result['nodes'][0]['id'],'11111111-2222-3333-4444-555555555555')
 
+    def test_secret_plan_transport_is_never_logged_by_ansible(self):
+        import yaml
+        role = Path(__file__).resolve().parents[1] / 'ansible/roles/recovery_primary/tasks/main.yml'
+        tasks = yaml.safe_load(role.read_text())
+        consumers = [task for task in tasks if 'recovery_primary_plan' in json.dumps(task)]
+        self.assertGreaterEqual(len(consumers), 5)
+        for task in consumers:
+            self.assertIs(task.get('no_log'), True, task['name'])
+        result = bootstrap_plan.plan(self.config)
+        self.assertEqual(result['environment']['ULTRA_RELAY_ADMIN_TOKEN'], 'fixture-admin-token')
+        token = next(item for item in result['files'] if item['destination'].endswith('/primary-bot-token'))
+        self.assertEqual(token['content'], 'fixture-bot-token')
+        self.assertEqual(token['mode'], '0600')
+
     def test_controller_ownership_catalog_survives_recovery_generations(self):
         self.config['controller_directory'] = '/opt/ultra-ansible/releases/v1.0.0'
         result = bootstrap_plan.plan(self.config)

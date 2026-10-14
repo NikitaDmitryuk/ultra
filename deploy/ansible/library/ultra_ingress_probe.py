@@ -45,6 +45,7 @@ def bot_ready():
             key, value = line.split('=', 1)
             values[key] = value.strip().strip('"').strip("'")
     context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     with socket.create_connection(('127.0.0.1', int(values['ULTRA_BOT_PORT'])), timeout=3) as connection:
         with context.wrap_socket(connection, server_hostname=values['ULTRA_BOT_DOMAIN']) as secured:
             secured.sendall(('GET /healthz HTTP/1.1\r\nHost: ' + values['ULTRA_BOT_DOMAIN'] + '\r\nConnection: close\r\n\r\n').encode())

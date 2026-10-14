@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import ssl
 from unittest.mock import patch
 
 source = Path(__file__).resolve().parents[1] / 'deploy/ansible/library/ultra_ingress_probe.py'
@@ -25,3 +26,22 @@ with tempfile.TemporaryDirectory() as folder:
             else:
                 raise AssertionError('unsafe endpoint accepted')
 print('native ingress readiness preserves custom loopback listener')
+
+# Exercise both client entry points with real SSL contexts. A rejected connection
+# stops before HTTP parsing while allowing inspection of the handshake policy.
+for probe in ('bot', 'tls'):
+    context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+    with patch.object(module.ssl, 'create_default_context', return_value=context), \
+            patch.object(module.socket, 'create_connection', side_effect=OSError('fixture connection stopped')), \
+            patch.object(module.Path, 'read_text', return_value='ULTRA_BOT_PORT=443\nULTRA_BOT_DOMAIN=example.com\n'):
+        try:
+            module.bot_ready() if probe == 'bot' else module.tls_ready('127.0.0.1', 'example.com', 443)
+        except OSError:
+            pass
+        else:
+            raise AssertionError('fixture should stop connection')
+    assert context.minimum_version >= ssl.TLSVersion.TLSv1_2
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname
+print('all ingress TLS clients require TLS 1.2 and verified host certificates')

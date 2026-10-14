@@ -163,6 +163,9 @@ func extractRuntime(source, directory string) error {
 			return err
 		}
 		name := header.Name
+		if !filepath.IsLocal(name) {
+			return errors.New("runtime member escapes extraction directory")
+		}
 		if header.Typeflag == tar.TypeDir {
 			if name != "wheels" && name != "wheels/" {
 				return errors.New("unexpected runtime directory")
@@ -179,6 +182,9 @@ func extractRuntime(source, directory string) error {
 			return errors.New("offline runtime exceeds bounds")
 		}
 		target := filepath.Join(directory, filepath.FromSlash(name))
+		if !strings.HasPrefix(target, filepath.Clean(directory)+string(os.PathSeparator)) {
+			return errors.New("runtime member escapes extraction directory")
+		}
 		if err = ensurePrivateBootstrapDirectory(filepath.Dir(target)); err != nil {
 			return err
 		}
