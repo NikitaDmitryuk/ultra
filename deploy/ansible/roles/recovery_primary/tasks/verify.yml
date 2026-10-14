@@ -1,0 +1,33 @@
+---
+- name: Read one fresh independent copy and replica readiness observation
+  ansible.builtin.command:
+    argv: [python3, /opt/ultra-recovery/recovery_status.py, --not-before, "{{ ultra_automation_activated_at | string }}"]
+  register: recovery_primary_status
+  changed_when: false
+- name: Record accepted stable release manifest only after proven readiness
+  ansible.builtin.copy:
+    src: "{{ ultra_automation_manifest_source }}"
+    dest: /var/lib/ultra-automation/release-manifest.json
+    mode: "0600"
+- name: Preserve the accepted manifest signature without serialization
+  ansible.builtin.copy:
+    src: "{{ ultra_automation_signature_source }}"
+    dest: /var/lib/ultra-automation/release-manifest.json.minisig
+    mode: "0600"
+  when: ultra_automation_signature_source | default('') | length > 0
+- name: Remove stale accepted signature for an unsigned operator bundle
+  ansible.builtin.file:
+    path: /var/lib/ultra-automation/release-manifest.json.minisig
+    state: absent
+  when: ultra_automation_signature_source | default('') | length == 0
+- name: Record accepted automation release version
+  ansible.builtin.copy:
+    content: "{{ {'version': ultra_automation_version, 'ready': true} | to_json(preprocess_unsafe=False) }}"
+    dest: /var/lib/ultra-automation/release.json
+    mode: "0600"
+- name: Commit verified recovery readiness acknowledgement
+  ansible.builtin.copy:
+    content: "{{ recovery_primary_status.stdout }}"
+    dest: "{{ ultra_result_file }}"
+    mode: "0600"
+  delegate_to: localhost

@@ -1,0 +1,115 @@
+---
+- name: Inspect bootstrap targets without mutation
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Read target architecture
+      ansible.builtin.command:
+        argv: [dpkg, --print-architecture]
+      changed_when: false
+      register: inspect_architecture
+    - name: Inspect existing private state
+      ansible.builtin.stat:
+        path: "{{ ultra_remote_dir }}/{{ item }}"
+      loop: [spec.json, environment, bot.env, exit_nodes.bootstrap.json]
+      register: inspect_paths
+    - name: Read existing private state
+      ansible.builtin.slurp:
+        src: "{{ ultra_remote_dir }}/{{ item.item }}"
+      loop: "{{ inspect_paths.results }}"
+      when: item.stat.exists
+      register: inspect_contents
+      no_log: true
+    - name: Decode installed bridge specification for asset inspection
+      ansible.builtin.set_fact:
+        inspect_bridge_spec: "{{ item.content | b64decode | from_json }}"
+      loop: "{{ inspect_contents.results }}"
+      when: inventory_hostname == 'bridge' and item.source | default('') == ultra_remote_dir + '/spec.json'
+      no_log: true
+    - name: Inspect installed geo assets without following links
+      ansible.builtin.stat:
+        path: "{{ inspect_bridge_spec.geo_assets_dir }}/{{ item }}"
+        follow: false
+        checksum_algorithm: sha256
+      loop: [geoip.dat, geosite.dat]
+      when:
+        - inventory_hostname == 'bridge'
+        - inspect_bridge_spec is defined
+        - inspect_bridge_spec.geo_assets_dir | default('') != ''
+      register: inspect_geo_assets
+    - name: Inspect fixed recovery policy metadata on the bridge
+      ansible.builtin.stat:
+        path: "/etc/ultra-recovery/{{ item }}"
+      loop: [deployment.json, backup.json, reconcile.json, dns.json, admin-chat-id]
+      when: inventory_hostname == 'bridge'
+      register: inspect_policy_paths
+    - name: Read fixed recovery policy metadata
+      ansible.builtin.slurp:
+        src: "{{ item.stat.path }}"
+      loop: "{{ inspect_policy_paths.results | default([]) }}"
+      when: inventory_hostname == 'bridge' and item.stat.isreg | default(false)
+      register: inspect_policy_contents
+      no_log: true
+    - name: Inspect fixed installed release manifest on the bridge
+      ansible.builtin.stat:
+        path: /opt/ultra-recovery/release-manifest.json
+      when: inventory_hostname == 'bridge'
+      register: inspect_release_manifest_path
+    - name: Require a protected installed release baseline
+      ansible.builtin.assert:
+        that:
+          - not inspect_release_manifest_path.stat.islnk
+          - inspect_release_manifest_path.stat.uid == 0
+          - inspect_release_manifest_path.stat.mode in ['0600', '0644']
+          - inspect_release_manifest_path.stat.size > 0
+          - inspect_release_manifest_path.stat.size <= 1048576
+      when: inventory_hostname == 'bridge' and inspect_release_manifest_path.stat.exists | default(false)
+    - name: Read fixed installed release manifest
+      ansible.builtin.slurp:
+        src: /opt/ultra-recovery/release-manifest.json
+      when: inventory_hostname == 'bridge' and inspect_release_manifest_path.stat.isreg | default(false)
+      register: inspect_release_manifest
+      no_log: true
+    - name: Inspect the installed application capability probe
+      ansible.builtin.stat:
+        path: /usr/local/bin/ultra-relay
+      register: inspect_relay_binary
+    - name: Read installed application capabilities without changing services
+      ansible.builtin.command:
+        argv: [/usr/local/bin/ultra-relay, --capabilities]
+      changed_when: false
+      failed_when: false
+      register: inspect_capabilities
+      when: inspect_relay_binary.stat.isreg | default(false)
+    - name: Inspect the existing exit certificate without changing TLS
+      ultra_adopt_topology:
+        certificate: true
+      register: inspect_exit_certificate
+      when: inventory_hostname in groups['exits'] and ultra_preserve_runtime | default(false) | bool
+      no_log: true
+    - name: Save private inspection result
+      ansible.builtin.copy:
+        content: >-
+          {{ {'architecture': inspect_architecture.stdout,
+          'capabilities': ((inspect_capabilities.stdout | from_json) if inspect_capabilities.rc | default(1) == 0 else []),
+          'geo_assets': inspect_geo_assets.results | default([]),
+          'certificate_pin': inspect_exit_certificate.certificate_pin | default(''),
+          'files': inspect_contents.results + (inspect_policy_contents.results | default([]))
+          + ([inspect_release_manifest] if inspect_release_manifest.content is defined else [])} | to_json(preprocess_unsafe=False) }}
+        dest: "{{ ultra_inspect_dir }}/{{ inventory_hostname }}.json"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+- name: Confirm completed bootstrap operation
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Persist the verified operation result
+      ansible.builtin.copy:
+        content: '{"verified": true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      no_log: true

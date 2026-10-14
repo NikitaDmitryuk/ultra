@@ -1,0 +1,28 @@
+---
+- name: Activate bot after owned ingress is ready
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Inspect required HTTPS certificate
+      ansible.builtin.stat:
+        path: "/etc/letsencrypt/live/{{ ultra_bot_domain }}/{{ item }}"
+      loop: [fullchain.pem, privkey.pem]
+      register: bot_https
+    - name: Require prepared TLS ingress
+      ansible.builtin.assert:
+        that:
+          - bot_https.results | selectattr('stat.exists', 'equalto', false) | list | length == 0
+    - name: Configure bot service
+      ansible.builtin.include_role:
+        name: bot
+- name: Confirm completed bot operation
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Persist verified bot operation result
+      ansible.builtin.copy:
+        content: '{"verified": true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      no_log: true

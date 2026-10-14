@@ -15,6 +15,7 @@ AUTOMATION_UNITS = (
     'ultra-recovery-reconcile.service', 'ultra-recovery-reconcile.timer',
     'ultra-monitor.service', 'ultra-monitor.timer', 'ultra-monitor-probe.service',
     'certbot.service', 'certbot.timer',
+    'ultra-ansible-controller.service',
 )
 APP_UNITS = ('ultra-relay.service', 'ultra-bot.service')
 PHASES = ('prepare', 'install', 'database', 'peer_reseed', 'activate', 'ingress', 'automation', 'ready')
@@ -32,13 +33,32 @@ def sha(path):
     return value.hexdigest()
 
 
-def fence(value, source, target_host, old_address, now=None):
+def migration_identity(value):
+    fields={'source_machine_id','target_machine_id','source_ssh_endpoint','target_ssh_endpoint'}
+    if not isinstance(value,dict) or set(value)!=fields:
+        raise ValueError('invalid_migration_identity')
+    for name in ('source_machine_id','target_machine_id'):
+        if not isinstance(value[name],str) or not re.fullmatch(r'[a-f0-9]{32}',value[name]):
+            raise ValueError('invalid_migration_identity')
+    for name in ('source_ssh_endpoint','target_ssh_endpoint'):
+        if not isinstance(value[name],str) or not re.fullmatch(r'[A-Za-z0-9_.:@-]+',value[name]) or value[name].startswith('-'):
+            raise ValueError('invalid_migration_identity')
+    if value['source_machine_id']==value['target_machine_id'] or value['source_ssh_endpoint']==value['target_ssh_endpoint']:
+        raise ValueError('distinct_migration_machines_required')
+    return value
+
+
+def fence(value, source, target_host, old_address, now=None, migration=None):
     now = time.time() if now is None else now
     age = now - value.get('confirmed_at', 0)
     if (value.get('source') != source or value.get('confirmed_offline') is not True
             or value.get('target_host') != target_host or value.get('source_address') != old_address
             or not 0 <= age <= 3600):
         raise ValueError('fresh_target_bound_fencing_required')
+    if migration is not None:
+        migration_identity(migration)
+        if value.get('migration_identity') != migration or migration['target_ssh_endpoint'] != target_host:
+            raise ValueError('migration_identity_fence_mismatch')
     return value
 
 
@@ -76,7 +96,11 @@ def configuration(value):
         address = ipaddress.IPv4Address(value[key])
         if address.is_unspecified or address.is_loopback or address.is_multicast:
             raise ValueError('invalid_bridge_address')
-    if value['old_bridge_address'] == value['new_bridge_address']:
+    if value.get('migration_identity') is not None:
+        migration_identity(value['migration_identity'])
+        if value['migration_identity']['target_ssh_endpoint'] != value['target']['host']:
+            raise ValueError('migration_target_endpoint_mismatch')
+    if value['old_bridge_address'] == value['new_bridge_address'] and value.get('migration_identity') is None:
         raise ValueError('new_bridge_address_must_differ')
     for key in ('public_host', 'subscription_domain'):
         if not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?', value[key]):
@@ -92,6 +116,8 @@ def plan_id(config, bundle_sha):
     identity = {key: config[key] for key in ('source', 'old_bridge_address', 'new_bridge_address',
                                             'public_host', 'subscription_domain', 'new_bridge_provider')}
     identity['ingress_mode'] = config.get('ingress_mode', 'forward')
+    if config.get('migration_identity') is not None:
+        identity['migration_identity'] = migration_identity(config['migration_identity'])
     identity.update(bundle_sha256=bundle_sha,
                     target={key: config['target'].get(key, 22) for key in ('host', 'port')},
                     ingress={key: config['ingress'].get(key, 22) for key in ('host', 'port')} if config.get('ingress_mode', 'forward') == 'forward' else None)
@@ -170,6 +196,11 @@ def read_private(path):
 
 # Only these literal invariant codes may cross the private execution boundary.
 SAFE_ERROR_CODES = frozenset((
+    'authenticated_offline_runtime_missing', 'authenticated_offline_runtime_member_invalid',
+    'authenticated_offline_runtime_changed', 'authenticated_offline_runtime_exceeds_bounds',
+    'offline_recovery_runtime_failed', 'offline_recovery_runtime_invalid', 'offline_recovery_runtime_not_prepared',
+    'absolute_runtime_release_required', 'foreign_replica_seed_marker', 'retired_seed_conflict',
+
     'certbot_lineage_invalid',
     'certbot_lineage_state_incomplete',
     'certbot_lineage_state_changed',

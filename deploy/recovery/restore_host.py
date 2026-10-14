@@ -3,6 +3,7 @@
 import argparse
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -285,6 +286,39 @@ def seed_artifact_cache(repo, name, expected, stream):
             Path(temporary).unlink(missing_ok=True)
 
 
+def plan_peer_reseed(plan, database_name, system_identifier, topology=None):
+    """Derive pinned reseed requests; cloud ownership guards remain application code."""
+    import sys
+    sys.path.insert(0, '/opt/ultra-recovery')
+    import reconcile as module
+    if topology is None:
+        config = module.read_config('/etc/ultra-recovery/reconcile.json')
+        nodes = module.desired_nodes(config, module.discover(config))[0]
+    else:
+        module, config, nodes = topology
+    selected = []
+    for node in nodes:
+        ports = json.loads(sql("SELECT coalesce(json_agg(port),'[]') FROM exit_nodes WHERE enabled AND address=" + literal(node['address']), database_name))
+        if len(ports) != 1 or not isinstance(ports[0], int) or not 1 <= ports[0] <= 65535:
+            raise ValueError('unique_persisted_exit_tunnel_required')
+        peer = {'address': plan['new_bridge_address']}
+        # Cloud ownership/API operations stay application code; host changes
+        # are applied by the operator's Ansible runner after this proof.
+        module.ensure_provider_peer_rule(config, node, peer)
+        module.ensure_provider_peer_rule(config, node, peer, port=ports[0])
+        selected.append({'id': node['id'], 'address': node['address'],
+                         'identity': config['ssh_identity_file'], 'known_hosts': node['known_hosts'],
+                         'plan': {'action': 'reseed', 'restore_id': plan['restore_id'],
+                                  'system_identifier': system_identifier,
+                                  'old_bridge_address': plan['old_bridge_address'],
+                                  'new_bridge_address': plan['new_bridge_address'], 'tunnel_port': ports[0],
+                                  'fence': plan['fence'], 'target_host': plan['target_host']}})
+    if plan.get('migration_identity') is not None:
+        for node in selected:
+            node['plan']['migration_identity'] = plan['migration_identity']
+    return selected
+
+
 class Host:
     def __init__(self, directory, plan):
         self.directory = Path(directory)
@@ -319,13 +353,6 @@ class Host:
         if not self.status.get('prepared') and Path('/etc/ultra-relay/spec.json').exists():
             raise ValueError('target_already_contains_ultra')
         atomic_json(owner, {'restore_id': self.plan['restore_id']})
-        if not self.status.get('dependencies'):
-            run(['env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'update'], timeout=600)
-            run(['env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'install', '-y', '--no-install-recommends',
-                 'postgresql-16', 'postgresql-client-16', 'nginx', 'libnginx-mod-stream', 'certbot',
-                 'dnsutils', 'age', 'openssh-client', 'curl', 'openssl', 'ca-certificates', 'iproute2'], timeout=900)
-            self.status['dependencies'] = True
-            self.persist()
         for tool in ('python3', 'age', 'nginx', 'systemctl', 'ssh', 'curl', 'openssl'):
             if not shutil.which(tool):
                 raise ValueError('prepared_target_tools_missing')
@@ -344,7 +371,6 @@ class Host:
                 raise ValueError('external_tablespaces_unsupported')
             self.status.update(prepared=True, machine_id=machine)
             self.persist()  # Own the dedicated target before installing any state.
-        run(['systemctl', 'mask', '--now', *APP_UNITS, *AUTOMATION_UNITS])
 
     def unpack(self):
         if self.stage.exists():
@@ -413,8 +439,7 @@ class Host:
             try:
                 account = pwd.getpwnam(service_user)
             except KeyError:
-                run(['useradd', '--system', '--no-create-home', '--shell', '/usr/sbin/nologin', service_user])
-                account = pwd.getpwnam(service_user)
+                raise ValueError('restored_service_account_missing') from None
             if unit == 'ultra-relay.service':
                 inventory = {item.removeprefix('state/') for item in state['files']} | set(artifacts['files'])
                 for filename in certificate_files(spec):
@@ -529,7 +554,6 @@ class Host:
         if marker not in hba.read_text():
             with hba.open('a') as stream:
                 stream.write('\nhost replication ' + role + ' 127.0.0.1/32 scram-sha-256 ' + marker + '\nhost postgres ' + role + ' 127.0.0.1/32 scram-sha-256 ' + marker + '\n')
-        run(['systemctl', 'restart', 'postgresql'])
         self.status['system_identifier'] = sql('SELECT system_identifier FROM pg_control_system()')
         sql("UPDATE node_replication SET state='not_configured',detail='restored_primary_requires_reseed',checked_at=now()", name)
 
@@ -541,27 +565,7 @@ class Host:
         return reconcile, config, reconcile.desired_nodes(config, reconcile.discover(config))[0]
 
     def peer_reseed(self):
-        module, config, nodes = self.nodes()
-        source = Path(__file__).with_name('restore_peer.py').read_text()
-        completed = self.status.setdefault('reseeded_nodes', [])
-        for node in nodes:
-            if node['id'] in completed:
-                continue
-            # The new fenced bridge must be admitted before pinned SSH can reach
-            # a provider-managed exit. Existing old-primary rules are preserved.
-            ports = json.loads(sql("SELECT coalesce(json_agg(port),'[]') FROM exit_nodes WHERE enabled AND address=" + literal(node['address']), self.status['database_name']))
-            if len(ports) != 1 or not isinstance(ports[0], int) or not 1 <= ports[0] <= 65535:
-                raise ValueError('unique_persisted_exit_tunnel_required')
-            peer = {'address': self.plan['new_bridge_address']}
-            module.ensure_provider_peer_rule(config, node, peer)
-            module.ensure_provider_peer_rule(config, node, peer, port=ports[0])
-            module.allow_peer(config, node, peer, port=ports[0])
-            payload = {'action': 'reseed', 'restore_id': self.plan['restore_id'],
-                       'system_identifier': self.status['system_identifier'], 'old_bridge_address': self.plan['old_bridge_address'],
-                       'new_bridge_address': self.plan['new_bridge_address'], 'tunnel_port': ports[0]}
-            bootstrap = 'import json,sys; payload=json.load(sys.stdin); exec(' + repr(source) + ')'
-            module.execute(config, node, ['python3', '-c', bootstrap], input=json.dumps(payload).encode(), stdout=subprocess.PIPE, timeout=90)
-            completed.append(node['id']); self.persist()
+        self.status['reseed_nodes'] = plan_peer_reseed(self.plan, self.status['database_name'], self.status['system_identifier'], self.nodes())
 
     def override(self, final=False):
         values = {'ULTRA_VULTR_BRIDGE_IP': self.plan['new_bridge_address']}
@@ -583,14 +587,8 @@ class Host:
             path = Path('/etc/systemd/system') / unit
             if path.exists() and not path.is_symlink():
                 path.unlink()
-        run(['systemctl', 'mask', '--now', *AUTOMATION_UNITS])
-        run(['systemctl', 'daemon-reload'])
         run(['nginx', '-t'])
         run(['/usr/local/bin/ultra-relay', '-check', '-spec', '/etc/ultra-relay/spec.json'])
-        run(['systemctl', 'enable', '--now', 'ultra-relay.service'])
-        self.wait_runtime()
-        run(['systemctl', 'enable', '--now', 'ultra-bot.service', 'nginx.service'])
-        run(['systemctl', 'reload', 'nginx.service'])
 
     def api(self, path):
         env = json.loads((self.directory / 'service-environment.json').read_text())['ultra-relay.service']
@@ -618,7 +616,6 @@ class Host:
     def automation(self):
         state, _ = stage_manifests(self.stage)
         # Only automatic units; never recopy application config over live state.
-        run(['systemctl', 'unmask', *AUTOMATION_UNITS])
         for name, row in state['files'].items():
             relative = name.removeprefix('state/')
             if system_unit(relative) and any(Path(relative).parts[3] in (unit, unit + '.d') for unit in AUTOMATION_UNITS):
@@ -629,30 +626,29 @@ class Host:
                     target.unlink()
                 write(target, (self.stage / name).read_bytes(), row['mode'])
         self.override(final=True)
-        run(['systemctl', 'daemon-reload'])
-        run(['systemctl', 'restart', 'ultra-relay.service'])
-        self.wait_runtime()
-        run(['systemctl', 'enable', '--now', 'ultra-recovery-backup.timer', 'ultra-recovery-reconcile.timer', 'certbot.timer'])
-        run(['systemctl', 'start', 'ultra-recovery-backup.service', 'ultra-recovery-reconcile.service'], timeout=600)
 
     def ready(self):
+        # One passive observation per Ansible attempt. The operator releases the
+        # infrastructure lease between attempts so background proofs can progress.
         self.wait_runtime()
-        until = time.monotonic() + self.plan.get('readiness_timeout', 900)
-        while time.monotonic() < until:
-            try:
-                backup = json.loads(Path('/var/lib/ultra-recovery/last-success.json').read_text())
-                controller = json.loads(Path('/var/lib/ultra-relay/recovery-reconcile-status.json').read_text())
-                replicas = json.loads(sql("SELECT coalesce(json_agg(json_build_object('state',r.state,'age',extract(epoch from now()-r.checked_at))),'[]') FROM exit_nodes n LEFT JOIN node_replication r ON r.node_id=n.id WHERE n.enabled", self.status['database_name']))
-                if (0 <= time.time() - backup.get('snapshot_at', 0) <= 300
-                        and controller.get('state') == 'ready' and controller.get('independent') is True
-                        and 0 <= time.time() - controller.get('updated_at', 0) <= 120
-                        and replicas and all(row['state'] == 'streaming' and row['age'] is not None and 0 <= row['age'] <= 90 for row in replicas)):
-                    self.status['ready_at'] = int(time.time())
-                    self.status['replicas_ready'] = len(replicas)
-                    return
-            except (OSError, ValueError, KeyError, TypeError):
-                pass
-            time.sleep(5)
+        try:
+            backup = json.loads(Path('/var/lib/ultra-recovery/last-success.json').read_text())
+            controller = json.loads(Path('/var/lib/ultra-relay/recovery-reconcile-status.json').read_text())
+            from recovery_status import independent_generation
+            config = json.loads(Path('/etc/ultra-recovery/reconcile.json').read_text())
+            controller_state = json.loads((Path(config['state_dir']) / 'state.json').read_text())
+            replicas = json.loads(sql("SELECT coalesce(json_agg(json_build_object('state',r.state,'age',extract(epoch from now()-r.checked_at))),'[]') FROM exit_nodes n LEFT JOIN node_replication r ON r.node_id=n.id WHERE n.enabled", self.status['database_name']))
+            if (0 <= time.time() - backup.get('snapshot_at', 0) <= 300
+                    and controller.get('state') == 'ready' and controller.get('independent') is True
+                    and independent_generation(config, controller_state, controller, backup)
+                    and 0 <= time.time() - controller_state.get('updated_at', 0) <= 120
+                    and 0 <= time.time() - controller.get('updated_at', 0) <= 120
+                    and replicas and all(row['state'] == 'streaming' and row['age'] is not None and 0 <= row['age'] <= 90 for row in replicas)):
+                self.status['ready_at'] = int(time.time())
+                self.status['replicas_ready'] = len(replicas)
+                return
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
         raise ValueError('backup_monitor_replica_readiness_timeout')
 
     def ingress(self):
@@ -665,33 +661,79 @@ class Host:
     def direct_ingress(self):
         import dns
         policy = json.loads(dns.private('/etc/ultra-recovery/dns.json').read_text())
-        config, previous = policy['config'], policy['desired']
-        if set(previous) != {'subscription', 'vpn'}:
+        config, previous = policy['config'], dict(policy['desired'])
+        if set(previous) not in ({'subscription', 'vpn'}, {'subscription', 'vpn', 'backend'}):
             raise ValueError('restored_dns_policy_required')
+        # Older bootstrap plans may save only the public pair while DNS ownership
+        # already includes the separately migrated backend. Move that owned record
+        # with the bridge rather than silently retaining the fenced source address.
+        receipt = json.loads(dns.private('/etc/ultra-recovery/dns-receipt.json').read_text())
+        backend = receipt.get('records', {}).get('backend')
+        if backend is not None:
+            if (receipt.get('version') != 1 or receipt.get('zone') != config['zone']
+                    or not isinstance(backend, dict)
+                    or set(backend) != {'id', 'type', 'name', 'data', 'ttl'}
+                    or backend['type'] != 'A' or not re.fullmatch(r'[A-Za-z0-9-]+', str(backend['id']))
+                    or not isinstance(backend['name'], str) or not dns.LABEL.fullmatch(backend['name'])
+                    or type(backend['ttl']) is not int or not 120 <= backend['ttl'] <= 86400):
+                raise ValueError('restored_backend_dns_ownership_required')
+            ipaddress.IPv4Address(backend['data'])
+            if 'backend' in previous and previous['backend'].get('name') != backend['name']:
+                raise ValueError('restored_backend_dns_policy_mismatch')
+            previous['backend'] = {'name': backend['name'], 'data': backend['data']}
+        elif 'backend' in previous:
+            raise ValueError('restored_backend_dns_ownership_required')
         names = {role: previous[role]['name'] + '.' + config['zone'] for role in previous}
         if names['subscription'] != self.plan['subscription_domain'] or names['vpn'] != self.plan['public_host']:
             raise ValueError('restored_dns_policy_mismatch')
         desired = {role: dict(previous[role], data=self.plan['new_bridge_address']) for role in previous}
-        # Before publishing either A record, validate both certificates against
+        backend_port = None
+        backend_hostname = None
+        if backend is not None:
+            _, environment = unit_environment('ultra-bot.service')
+            # A completed migration rollback retains ownership of the unused
+            # backend A record. Move it too, but probe the effective bot identity.
+            backend_hostname = environment.get('ULTRA_BOT_DOMAIN', '')
+            if (not isinstance(backend_hostname, str) or not 1 <= len(backend_hostname) <= 253
+                    or '.' not in backend_hostname
+                    or not all(dns.LABEL.fullmatch(label) for label in backend_hostname.split('.'))):
+                raise ValueError('restored_backend_hostname_required')
+            try:
+                backend_port = int(environment['ULTRA_BOT_PORT'])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError('restored_backend_port_required') from None
+            if not 1 <= backend_port <= 65535:
+                raise ValueError('restored_backend_port_required')
+        # Before publishing the A records, validate public certificates against
         # the replacement IP, bypassing DNS but preserving hostname validation.
         context = ssl.create_default_context()
         context.minimum_version = ssl.TLSVersion.TLSv1_2
-        for name in names.values():
+        for role in ('subscription', 'vpn'):
+            name = names[role]
             with socket.create_connection((self.plan['new_bridge_address'], 443), timeout=15) as raw:
                 with context.wrap_socket(raw, server_hostname=name):
+                    pass
+        if backend_port is not None:
+            with socket.create_connection(('127.0.0.1', backend_port), timeout=15) as raw:
+                with context.wrap_socket(raw, server_hostname=backend_hostname):
                     pass
         run(['curl', '--fail', '--silent', '--show-error', '--noproxy', '*', '--max-time', '30',
              '--resolve', names['subscription'] + ':443:' + self.plan['new_bridge_address'],
              'https://' + names['subscription'] + '/healthz'])
-        fence(self.plan['fence'], 'bridge', self.plan['target_host'], self.plan['old_bridge_address'])
+        fence(self.plan['fence'], 'bridge', self.plan['target_host'], self.plan['old_bridge_address'], migration=self.plan.get('migration_identity'))
         dns.execute(config, desired, '/etc/ultra-recovery/dns-receipt.json')
         dns.wait_ready(config, desired, timeout=120)
         # Persist the new intent only after authoritative convergence. Never
         # compensate a partially published cutover by pointing at the dead VM.
         dns.save('/etc/ultra-recovery/dns.json', {'config': config, 'desired': desired})
-        for name in names.values():
+        for role in ('subscription', 'vpn'):
+            name = names[role]
             with socket.create_connection((name, 443), timeout=15) as raw:
                 with context.wrap_socket(raw, server_hostname=name):
+                    pass
+        if backend_port is not None:
+            with socket.create_connection(('127.0.0.1', backend_port), timeout=15) as raw:
+                with context.wrap_socket(raw, server_hostname=backend_hostname):
                     pass
         run(['curl', '--fail', '--silent', '--show-error', '--noproxy', '*', '--max-time', '30',
              'https://' + names['subscription'] + '/healthz'])
@@ -712,13 +754,11 @@ class Host:
                 raise ValueError('restored_database_identity_changed')
             if int(sql('SELECT max(version) FROM schema_migrations', self.status['database_name'])) != self.status['restored_schema']:
                 raise ValueError('restored_database_schema_changed')
-        if 'activate' in self.status['completed']:
-            run(['systemctl', 'is-active', '--quiet', *APP_UNITS, 'nginx.service'])
 
     def phase(self, action):
         if action not in PHASES:
             raise ValueError('invalid_host_phase')
-        fence(self.plan['fence'], 'bridge', self.plan['target_host'], self.plan['old_bridge_address'])
+        fence(self.plan['fence'], 'bridge', self.plan['target_host'], self.plan['old_bridge_address'], migration=self.plan.get('migration_identity'))
         index = PHASES.index(action)
         required = list(PHASES[:index])
         if not set(required) <= set(self.status['completed']):
@@ -727,7 +767,6 @@ class Host:
             self.verify_resume()
             if action == 'activate':
                 run(['nginx', '-t'])
-                run(['systemctl', 'reload', 'nginx.service'])
             if action == 'ingress' and self.plan.get('ingress_mode') == 'direct':
                 self.direct_ingress()
             return self.status
@@ -742,15 +781,26 @@ def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--directory', required=True)
-    parser.add_argument('--phase', required=True, choices=PHASES)
+    parser.add_argument('--phase', required=True, choices=(*PHASES, 'fence-check', 'runtime-check'))
     args = parser.parse_args()
     plan = json.load(__import__('sys').stdin)
     if not re.fullmatch(r'[a-f0-9]{64}', plan['restore_id']) or Path(args.directory) != Path('/var/lib/ultra-restore') / plan['restore_id']:
         raise ValueError('invalid_restore_directory')
+    if plan.get('migration_identity') is not None:
+        from restore_common import migration_identity
+        proof = migration_identity(plan['migration_identity'])
+        if Path('/etc/machine-id').read_text().strip() != proof['target_machine_id']:
+            raise ValueError('migration_target_machine_mismatch')
     with (Path(args.directory).parent / 'target.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        result = Host(args.directory, plan).phase(args.phase)
-    print(json.dumps({key: result[key] for key in ('restore_id', 'completed', 'machine_id', 'snapshot_at', 'tables_verified', 'restored_schema', 'replicas_ready', 'ready_at') if key in result}))
+        if args.phase in ('fence-check', 'runtime-check'):
+            fence(plan['fence'], 'bridge', plan['target_host'], plan['old_bridge_address'], migration=plan.get('migration_identity'))
+            if args.phase == 'runtime-check':
+                Host(args.directory, plan).wait_runtime()
+            result = {}
+        else:
+            result = Host(args.directory, plan).phase(args.phase)
+    print(json.dumps({key: result[key] for key in ('restore_id', 'completed', 'machine_id', 'snapshot_at', 'tables_verified', 'restored_schema', 'replicas_ready', 'ready_at', 'reseed_nodes') if key in result}))
 
 
 if __name__ == '__main__':

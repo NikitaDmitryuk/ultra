@@ -1,0 +1,66 @@
+---
+- name: Configure selected recovery receiver
+  ansible.builtin.include_tasks: receiver.yml
+  when:
+    - ultra_recovery_files is defined
+    - not ultra_recovery_refresh_only | default(false) | bool
+- name: Refresh release-owned recovery tools
+  ansible.builtin.include_tasks: refresh.yml
+  when: ultra_recovery_refresh_only | default(false) | bool
+- name: Inspect optional managed host firewall
+  ansible.builtin.stat:
+    path: /usr/sbin/ufw
+  register: recovery_ufw
+  when: ultra_recovery_peer_rules is defined
+- name: Inspect firewall activation
+  ansible.builtin.command:
+    argv: [ufw, status]
+  register: recovery_ufw_status
+  changed_when: false
+  when:
+    - ultra_recovery_peer_rules is defined
+    - recovery_ufw.stat.exists
+- name: Validate verified peer firewall contract
+  ansible.builtin.assert:
+    that:
+      - item.address is match('^[0-9.]+$')
+      - item.port | int >= 1
+      - item.port | int <= 65535
+  loop: "{{ ultra_recovery_peer_rules | default([]) }}"
+- name: Apply verified peer firewall rules
+  ansible.builtin.command:
+    argv: [ufw, allow, from, "{{ item.address }}", to, any, port, "{{ item.port | string }}", proto, tcp]
+  loop: "{{ ultra_recovery_peer_rules | default([]) }}"
+  register: recovery_firewall
+  changed_when: "'Skipping' not in recovery_firewall.stdout"
+  when:
+    - recovery_ufw_status.stdout is defined
+    - "'Status: active' in recovery_ufw_status.stdout"
+- name: Install restricted heartbeat key
+  when: ultra_recovery_heartbeat_entry is defined
+  block:
+    - name: Inspect root SSH directory and authorized keys
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: [/root/.ssh, /root/.ssh/authorized_keys]
+      register: recovery_heartbeat_paths
+    - name: Reject heartbeat key symlink destinations
+      ansible.builtin.assert:
+        that: not item.stat.islnk | default(false)
+      loop: "{{ recovery_heartbeat_paths.results }}"
+    - name: Create private SSH directory
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+    - name: Add restricted heartbeat identity without replacing operator keys
+      ansible.builtin.lineinfile:
+        path: /root/.ssh/authorized_keys
+        line: "{{ ultra_recovery_heartbeat_entry }}"
+        create: true
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true

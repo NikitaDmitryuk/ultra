@@ -1,0 +1,7 @@
+---
+- name: Restore verified data onto a fenced dedicated target
+  hosts: restore_targets
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - restore

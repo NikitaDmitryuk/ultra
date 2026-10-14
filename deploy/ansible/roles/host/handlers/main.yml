@@ -1,0 +1,9 @@
+---
+- name: Reload system journal
+  ansible.builtin.systemd_service:
+    name: systemd-journald.service
+    state: restarted
+- name: Generate selected locale
+  ansible.builtin.command:
+    argv: [locale-gen, en_US.UTF-8]
+  changed_when: true

@@ -1,0 +1,19 @@
+---
+- name: Resume automation after every completed or failed upgrade attempt
+  hosts: bridge
+  gather_facts: false
+  tasks:
+    - name: Resume owned timers
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - ultra-recovery-backup.timer
+        - ultra-recovery-reconcile.timer
+    - name: Save the current resume receipt
+      ansible.builtin.copy:
+        content: '{"resumed": true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false

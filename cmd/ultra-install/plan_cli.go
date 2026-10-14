@@ -23,12 +23,38 @@ func handlePlanSubcommand(args []string) bool {
 		return true
 	}
 	switch args[0] {
+	case "config-values":
+		runConfigValuesCommand(args[1:])
+	case "bridge-migrate":
+		runBridgeMigrationCommand(args[1:])
+	case "rewrite-deployment-config":
+		runDeploymentConfigRewrite(args[1:])
+	case "release-probe":
+		runReleaseProbeCommand(args[1:])
+	case "ansible-lease":
+		runAnsibleLease(args[1:])
+	case "ansible-run":
+		runAnsibleLocal(args[1:])
+	case "ansible-retry-bootstrap":
+		runAnsibleRetryBootstrap(args[1:])
+	case "ansible-bootstrap-components":
+		runAnsibleBootstrapComponents(args[1:])
+	case "ansible-controller":
+		runAnsibleController(args[1:])
+	case "ansible-exit":
+		runAnsibleExit(args[1:])
 	case "bootstrap", "status", "upgrade":
 		runAutomationCommand(args[0], args[1:])
 	case "domain-cutover":
 		runDomainCutoverCommand(args[1:])
+	case "backend-domain":
+		runBackendDomainCommand(args[1:])
+	case "verify-channel-state":
+		runVerifyChannelState(args[1:])
 	case "ingress":
 		runIngressCommand(args[1:])
+	case "adopt":
+		runAdoptCommand(args[1:])
 	case "plan":
 		runPlanCommand(args[1:])
 	case "doctor":
@@ -152,14 +178,22 @@ func runRenderCommand(args []string) {
 
 func runApplyPlanCommand(args []string) {
 	fs := flag.NewFlagSet("ultra-install apply", flag.ExitOnError)
+	bridgeNative := fs.Bool("bridge-native", false, "run adoption on the attested bridge without moving SSH keys")
+	adoptRuntime := fs.Bool("adopt-runtime", false, "adopt the reviewed installed runtime without changing transport configuration")
 	planPath := fs.String("plan", "", "install-plan JSON path")
 	configPath := fs.String("config", "", "canonical install.config path (exclusive with --plan)")
 	secretsPath := fs.String("secrets", "", "secrets env file path; overrides plan.secrets.env_file")
 	format := fs.String("format", "human", "human or jsonl")
 	_ = fs.Parse(args)
 	p := readDeploymentOrExit(*planPath, *configPath)
+	p.AdoptRuntime = *adoptRuntime
+	p.BridgeNative = *bridgeNative
 	if strings.TrimSpace(*secretsPath) != "" {
 		p.Secrets.EnvFile = *secretsPath
+	}
+	if p.BridgeNative {
+		_, err := attestNativeAdoption(p)
+		exitOnErr("native adoption", err)
 	}
 	exitOnErr("apply validate", installplan.ValidatePlan(p))
 	emitInstallEvent(*format, installplan.EventStep, "", "starting plan apply engine", "")
@@ -168,6 +202,8 @@ func runApplyPlanCommand(args []string) {
 
 func runApplyRemoteCommand(args []string) {
 	fs := flag.NewFlagSet("ultra-install apply-remote", flag.ExitOnError)
+	adoptRuntime := fs.Bool("adopt-runtime", false, "preserve the reviewed installed runtime")
+	bridgeNative := fs.Bool("bridge-native", false, "run adoption on the attested bridge with its existing SSH identity")
 	planPath := fs.String("plan", "", "install-plan JSON path on this server")
 	secretsPath := fs.String("secrets", "", "secrets env file path already available on this server")
 	sshIdentity := fs.String("ssh-identity", "", "SSH private key path already available on this server; overrides plan.ssh.identity")
@@ -175,11 +211,16 @@ func runApplyRemoteCommand(args []string) {
 	format := fs.String("format", "human", "human or jsonl")
 	_ = fs.Parse(args)
 	p := readPlanOrExit(*planPath)
+	p.AdoptRuntime, p.BridgeNative = *adoptRuntime, *bridgeNative
 	if strings.TrimSpace(*secretsPath) != "" {
 		p.Secrets.EnvFile = *secretsPath
 	}
 	if strings.TrimSpace(*sshIdentity) != "" {
 		p.SSH.Identity = *sshIdentity
+	}
+	if p.BridgeNative {
+		_, err := attestNativeAdoption(p)
+		exitOnErr("native adoption", err)
 	}
 	exitOnErr("apply-remote validate", installplan.ValidatePlan(p))
 	emitInstallEvent(*format, installplan.EventStep, "", "starting remote apply", "")

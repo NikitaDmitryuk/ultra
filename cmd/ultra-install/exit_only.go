@@ -1,16 +1,20 @@
 package main
 
 import (
-	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/NikitaDmitryuk/ultra/internal/config"
-	"github.com/NikitaDmitryuk/ultra/internal/install"
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 )
 
@@ -53,22 +57,44 @@ func runExitOnly(o exitOnlyOpts) {
 		os.Exit(2)
 	}
 
-	remoteSpec := path.Join(o.remoteDir, "spec.json")
-	out, err := install.RunSSHOutput(o.sshUser, o.bridgeHost, o.identity,
-		fmt.Sprintf(`cat %q`, remoteSpec))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "exit-only: read bridge spec:", err)
-		os.Exit(1)
+	if o.remoteDir != "/etc/ultra-relay" {
+		exitOnErr("exit-only", fmt.Errorf("canonical remote directory required"))
 	}
-	out = bytes.TrimSpace(out)
+	ctx := context.Background()
+	root := os.Getenv("ULTRA_INSTALL_STATE_DIR")
+	if root == "" {
+		cache, err := os.UserCacheDir()
+		exitOnErr("exit-only state", err)
+		root = filepath.Join(cache, "ultra-install")
+	}
+	root, err := filepath.Abs(root)
+	exitOnErr("exit-only state", err)
+	exitOnErr("exit-only private state", ensurePrivateBootstrapDirectory(root))
+	ctx, release, err := deployansible.WithOperationLock(ctx, root)
+	exitOnErr("exit-only lease", err)
+	defer release()
+	requestJSON, err := json.Marshal(map[string]any{"bridge": o.bridgeHost, "exit": o.exitHost, "uuid": o.tunnelUUID, "port": o.tunnelPort, "identity": o.identity, "binary": o.binaryPath, "log": o.logLevel, "warp": o.warp, "warp_port": o.warpPort, "transport": o.transport, "host": o.splithttpHost, "path": o.splithttpPath, "disable_doh": o.disableDOH})
+	exitOnErr("exit-only identity", err)
+	// The route identity differentiates jobs; pure option fields are private below.
+	digest := sha256.Sum256(append(requestJSON, []byte(o.bridgeHost+"|"+o.exitHost+"|"+o.tunnelUUID)...))
+	attemptRoot := filepath.Join(root, "exit-"+hex.EncodeToString(digest[:]))
+	exitOnErr("exit-only private journal", ensurePrivateBootstrapDirectory(attemptRoot))
+	directory, err := beginBootstrapAttempt(attemptRoot)
+	exitOnErr("exit-only attempt", err)
+	exitOnErr("exit-only private attempt", ensurePrivateBootstrapDirectory(directory))
+	plan := &installplan.InstallPlan{SSH: installplan.SSHConfig{User: o.sshUser, Identity: o.identity}, Bridge: installplan.BridgeConfig{SSHHost: o.bridgeHost, RemoteDir: o.remoteDir}}
+	executable := os.Getenv("ULTRA_ANSIBLE_EXECUTABLE")
+	if executable == "" {
+		executable = "/opt/ultra-ansible/current/venv/bin/ansible-playbook"
+	}
+	_, inspection, err := inspectBootstrap(ctx, plan, directory, "/usr/bin/python3", executable, root)
+	exitOnErr("exit-only bridge inspection", err)
+	out, err := inspection["bridge"].file("spec.json")
+	exitOnErr("exit-only bridge specification", err)
 	var bridge config.Spec
-	if err := json.Unmarshal(out, &bridge); err != nil {
-		fmt.Fprintln(os.Stderr, "exit-only: parse bridge spec:", err)
-		os.Exit(1)
-	}
+	exitOnErr("exit-only bridge specification", json.Unmarshal(out, &bridge))
 	if bridge.Role != config.RoleBridge {
-		fmt.Fprintln(os.Stderr, "exit-only: remote spec is not bridge role")
-		os.Exit(1)
+		exitOnErr("exit-only", fmt.Errorf("remote target is not a bridge"))
 	}
 
 	preset := strings.TrimSpace(bridge.MimicPreset)
@@ -197,98 +223,26 @@ func runExitOnly(o exitOnlyOpts) {
 		return
 	}
 
-	systemdLocal := filepath.Join(o.projectRoot, "deploy/systemd/ultra-relay.service")
-	if _, err := os.Stat(systemdLocal); err != nil {
-		fmt.Fprintln(os.Stderr, "systemd unit not found:", systemdLocal)
-		os.Exit(1)
+	identity, err := filepath.Abs(o.identity)
+	exitOnErr("exit-only SSH identity", err)
+	pins := os.Getenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS")
+	if pins == "" {
+		pins = filepath.Join(os.Getenv("HOME"), ".ssh", "known_hosts")
 	}
-	if _, err := os.Stat(o.binaryPath); err != nil {
-		fmt.Fprintln(os.Stderr, "binary not found:", o.binaryPath)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Configuring system locale/timezone on exit %s …\n", o.exitHost)
-	if err := install.SetupSystem(o.sshUser, o.exitHost, o.identity); err != nil {
-		fmt.Fprintln(os.Stderr, "system setup (exit):", err)
-		os.Exit(1)
-	}
-
-	exitPrep := fmt.Sprintf(
-		`set -euo pipefail; REMOTE_DIR=%q; mkdir -p "$REMOTE_DIR" && chmod 700 "$REMOTE_DIR"; id -u ultra-relay >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin ultra-relay`,
-		o.remoteDir,
-	)
-	if err := install.RunSSH(o.sshUser, o.exitHost, o.identity, exitPrep); err != nil {
-		fmt.Fprintln(os.Stderr, "exit prepare:", err)
-		os.Exit(1)
-	}
-
-	if o.warp {
-		fmt.Printf("exit: installing Cloudflare WARP (proxy mode → 127.0.0.1:%d) …\n", o.warpPort)
-		if err := install.SetupWARP(o.sshUser, o.exitHost, o.identity, o.warpPort); err != nil {
-			fmt.Fprintln(os.Stderr, "warp setup:", err)
-			os.Exit(1)
-		}
-		if err := install.SetupWARPWatchdog(o.sshUser, o.exitHost, o.identity, o.warpPort); err != nil {
-			fmt.Fprintln(os.Stderr, "warp watchdog setup:", err)
-			os.Exit(1)
-		}
-	}
-
-	if o.generateExitTLS {
-		ssl := fmt.Sprintf(
-			`set -euo pipefail; REMOTE_DIR=%q; CN=%q; openssl req -x509 -newkey rsa:2048 -keyout "$REMOTE_DIR/privkey.pem" -out "$REMOTE_DIR/fullchain.pem" -days 3650 -nodes -subj "/CN=$CN" -addext "subjectAltName=DNS:$CN"; chown ultra-relay:ultra-relay "$REMOTE_DIR/privkey.pem" "$REMOTE_DIR/fullchain.pem"; chmod 600 "$REMOTE_DIR/privkey.pem" "$REMOTE_DIR/fullchain.pem"`,
-			o.remoteDir,
-			mimicHost,
-		)
-		if err := install.RunSSH(o.sshUser, o.exitHost, o.identity, ssl); err != nil {
-			fmt.Fprintln(os.Stderr, "exit tls:", err)
-			os.Exit(1)
-		}
-	}
-
-	tmpExit := filepath.Join(os.TempDir(), "ultra-exit-spec.json")
-	tmpEnvExit := filepath.Join(os.TempDir(), "ultra-relay-exit.env")
-	exitEnv := fmt.Sprintf("ULTRA_RELAY_LOG_LEVEL=%s\n", o.logLevel)
-	_ = os.WriteFile(tmpExit, exitJSON, 0o600)
-	_ = os.WriteFile(tmpEnvExit, []byte(exitEnv), 0o600)
-	defer func() {
-		_ = os.Remove(tmpExit)
-		_ = os.Remove(tmpEnvExit)
-	}()
-
-	for _, fn := range []func() error{
-		func() error { return install.SCP(o.identity, o.binaryPath, o.sshUser, o.exitHost, "/tmp/ultra-relay") },
-		func() error {
-			return install.SCP(o.identity, tmpExit, o.sshUser, o.exitHost, path.Join(o.remoteDir, "spec.json"))
-		},
-		func() error {
-			return install.SCP(o.identity, tmpEnvExit, o.sshUser, o.exitHost, path.Join(o.remoteDir, "environment.tmp"))
-		},
-		func() error {
-			return install.SCP(o.identity, systemdLocal, o.sshUser, o.exitHost, "/etc/systemd/system/ultra-relay.service")
-		},
-	} {
-		if err := fn(); err != nil {
-			fmt.Fprintln(os.Stderr, "exit-only deploy:", err)
-			os.Exit(1)
-		}
-	}
-
-	if err := install.SetupFirewallPorts(o.sshUser, o.exitHost, o.identity, []int{exitSpec.VLESSPort}); err != nil {
-		fmt.Fprintln(os.Stderr, "exit-only firewall:", err)
-		os.Exit(1)
-	}
-
-	finish := fmt.Sprintf(
-		`set -euo pipefail; REMOTE_DIR=%q; install -o ultra-relay -g ultra-relay -m 755 /tmp/ultra-relay /usr/local/bin/ultra-relay; install -o ultra-relay -g ultra-relay -m 600 "$REMOTE_DIR/environment.tmp" "$REMOTE_DIR/environment"; systemctl daemon-reload; systemctl enable ultra-relay; systemctl restart ultra-relay`,
-		o.remoteDir,
-	)
-	if err := install.RunSSH(o.sshUser, o.exitHost, o.identity, finish); err != nil {
-		fmt.Fprintln(os.Stderr, "exit-only finish:", err)
-		os.Exit(1)
-	}
-	if err := install.EnableRecoveryNode(o.sshUser, o.bridgeHost, o.exitHost, o.identity); err != nil {
-		fmt.Fprintln(os.Stderr, "Replica worker requires attention:", err)
-	}
+	pins, err = filepath.Abs(pins)
+	exitOnErr("exit-only pins", err)
+	bridgeIP, err := net.ResolveIPAddr("ip4", o.bridgeHost)
+	exitOnErr("exit-only bridge IPv4", err)
+	source, err := filepath.Abs(o.binaryPath)
+	exitOnErr("exit-only binary", err)
+	sum, err := sourceSHA(source)
+	exitOnErr("exit-only binary", err)
+	request := deployansible.ExitRequest{Host: o.exitHost, User: o.sshUser, Identity: identity, KnownHosts: pins, BridgeIPv4: bridgeIP.IP.String(), Spec: *exitSpec}
+	exitOnErr("exit-only inputs", request.Validate())
+	inventory := map[string]any{"all": map[string]any{"children": map[string]any{"exits": map[string]any{"hosts": map[string]any{"exit": map[string]any{"ansible_host": o.exitHost, "ansible_user": o.sshUser, "ansible_ssh_private_key_file": identity, "ansible_ssh_args": "-F /dev/null -C -o ControlMaster=no -o ControlPath=none", "ansible_ssh_common_args": "-o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o IdentitiesOnly=yes -o UserKnownHostsFile=" + shellQuote(pins)}}}}}}
+	variables := map[string]any{"ultra_lock_directory": root, "ultra_spec": exitSpec, "ultra_bridge_ipv4": bridgeIP.IP.String(), "ultra_relay_source": source, "ultra_relay_sha256": sum, "ultra_relay_environment": "ULTRA_RELAY_LOG_LEVEL=" + o.logLevel + "\n", "ultra_warp_enabled": o.warp, "ultra_warp_port": o.warpPort}
+	_, err = deployansible.RunLocal(ctx, "configure-exit-operator", inventory, variables, filepath.Join(directory, "apply"), "/usr/bin/python3", executable)
+	exitOnErr("Ansible exit-only", err)
+	exitOnErr("exit-only completion", completeBootstrapAttempt(attemptRoot, directory))
 	fmt.Println("Exit node installed:", o.exitHost)
 }

@@ -1,0 +1,139 @@
+---
+- name: Manage WARP installation
+  when: not (ultra_preserve_runtime | default(false) | bool)
+  block:
+    - name: Read host distribution codename
+      ansible.builtin.setup:
+        gather_subset: [distribution]
+    - name: Require supported WARP platform
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution in ['Ubuntu', 'Debian']
+          - ultra_warp_port | int > 0
+          - ultra_warp_port | int <= 65535
+    - name: Install WARP repository prerequisites
+      ansible.builtin.apt:
+        name: [gnupg, ca-certificates]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+    - name: Download WARP repository key
+      ansible.builtin.get_url:
+        url: https://pkg.cloudflareclient.com/pubkey.gpg
+        dest: /usr/share/keyrings/cloudflare-warp.asc
+        mode: "0644"
+    - name: Configure WARP repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/cloudflare-warp.asc] https://pkg.cloudflareclient.com/ {{ ansible_facts.distribution_release }} main"
+        filename: cloudflare-client
+        state: present
+    - name: Install WARP
+      ansible.builtin.apt:
+        name: cloudflare-warp
+        state: present
+    - name: Ensure WARP daemon active
+      ansible.builtin.systemd_service:
+        name: warp-svc.service
+        enabled: true
+        state: started
+    - name: Inspect WARP registration
+      ansible.builtin.command:
+        argv: [warp-cli, --accept-tos, registration, show]
+      register: warp_registration
+      failed_when: false
+      changed_when: false
+    - name: Register WARP once
+      ansible.builtin.command:
+        argv: [warp-cli, --accept-tos, registration, new]
+      when: warp_registration.rc != 0
+      changed_when: true
+      no_log: true
+    - name: Inspect WARP settings
+      ansible.builtin.command:
+        argv: [warp-cli, --accept-tos, settings]
+      register: warp_settings
+      changed_when: false
+    - name: Select WARP proxy mode
+      ansible.builtin.command:
+        argv: [warp-cli, --accept-tos, mode, proxy]
+      when: >-
+        warp_settings.stdout is not search('(?m)^[ \t]*(?:\([^()\r\n]*\)[ \t]*)?Mode:[ \t]*(WarpProxy|Proxy)(?: on port [0-9]+)?[ \t]*$')
+      changed_when: true
+    - name: Configure WARP proxy port
+      ansible.builtin.command:
+        argv: [warp-cli, --accept-tos, proxy, port, "{{ ultra_warp_port | string }}"]
+      when: >-
+        not (
+          warp_settings.stdout is search('(?m)^[ \t]*(?:\([^()\r\n]*\)[ \t]*)?Proxy Port:[ \t]*' + (ultra_warp_port | string) + '[ \t]*$')
+          or warp_settings.stdout is search(
+            '(?m)^[ \t]*(?:\([^()\r\n]*\)[ \t]*)?Mode:[ \t]*(WarpProxy|Proxy) on port '
+            + (ultra_warp_port | string) + '[ \t]*$'
+          )
+        )
+      changed_when: true
+    - name: Inspect WARP connection
+      ansible.builtin.command:
+        argv: [warp-cli, --accept-tos, status]
+      register: warp_status
+      changed_when: false
+    - name: Connect WARP when disconnected
+      ansible.builtin.command:
+        argv: [warp-cli, --accept-tos, connect]
+      when: "'Connected' not in warp_status.stdout"
+      changed_when: true
+    - name: Verify local WARP proxy listener
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ ultra_warp_port }}"
+        timeout: 30
+    - name: Install WARP connectivity watchdog
+      ansible.builtin.copy:
+        src: ultra-warp-watchdog
+        dest: /usr/local/bin/ultra-warp-watchdog
+        owner: root
+        group: root
+        mode: "0755"
+    - name: Install WARP watchdog schedule
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        mode: "0644"
+      loop: [ultra-warp-watchdog.service, ultra-warp-watchdog.timer]
+    - name: Enable WARP connectivity watchdog
+      ansible.builtin.systemd_service:
+        name: ultra-warp-watchdog.timer
+        state: started
+        enabled: true
+        daemon_reload: true
+- name: Verify preserved WARP dependency
+  when: ultra_preserve_runtime | default(false) | bool
+  block:
+    - name: Inspect installed WARP state without reconfiguration
+      ansible.builtin.command:
+        argv: [warp-cli, --accept-tos, "{{ item }}"]
+      loop: [settings, status]
+      register: warp_preserved
+      changed_when: false
+      no_log: true
+    - name: Require preserved WARP proxy settings and connection
+      ansible.builtin.assert:
+        that:
+          - ultra_warp_port | int > 0
+          - ultra_warp_port | int <= 65535
+          - >-
+            warp_preserved.results[0].stdout is search(
+              '(?m)^[ \t]*(?:\([^()\r\n]*\)[ \t]*)?Mode:[ \t]*(WarpProxy|Proxy) on port '
+              + (ultra_warp_port | string) + '[ \t]*$'
+            )
+            or (
+              warp_preserved.results[0].stdout is search('(?m)^[ \t]*(?:\([^()\r\n]*\)[ \t]*)?Mode:[ \t]*(WarpProxy|Proxy)[ \t]*$')
+              and warp_preserved.results[0].stdout is search('(?m)^[ \t]*(?:\([^()\r\n]*\)[ \t]*)?Proxy Port:[ \t]*' + (ultra_warp_port | string) + '[ \t]*$')
+            )
+          - >-
+            warp_preserved.results[1].stdout is search('(?m)^.*Status(?: update)?:\s*Connected\s*$')
+      no_log: true
+    - name: Verify preserved WARP proxy listener
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ ultra_warp_port }}"
+        timeout: 30

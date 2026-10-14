@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+[ "${RENEWED_LINEAGE:-}" = "/etc/letsencrypt/live/{{ ultra_ingress.domain }}" ] || exit 0
+nginx -t
+systemctl reload nginx
+if systemctl is-active --quiet ultra-experimental; then
+ install -o ultra-experimental -g ultra-experimental -m 600 "$RENEWED_LINEAGE/fullchain.pem" /etc/ultra-experimental/fullchain.pem
+ install -o ultra-experimental -g ultra-experimental -m 600 "$RENEWED_LINEAGE/privkey.pem" /etc/ultra-experimental/privkey.pem
+ /opt/ultra-experimental/ultra-relay -transport-spec /etc/ultra-experimental/spec.json -check
+ systemctl restart ultra-experimental
+fi

@@ -1,0 +1,94 @@
+---
+- name: Configure primary database
+  hosts: databases
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: host
+    - role: postgres
+      when: ultra_postgres is defined
+- name: Configure initial exits serially
+  hosts: exits
+  gather_facts: false
+  any_errors_fatal: true
+  serial: 1
+  roles:
+    - host
+    - role: warp
+      when: ultra_warp_enabled | default(false) | bool
+    - relay
+- name: Configure bridge after verified exit activation
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Require adopted topology to have certificate receipts for every preserved route
+      ansible.builtin.assert:
+        that:
+          - item.name in ultra_exit_hosts
+        fail_msg: adopted_exit_topology_requires_verified_receipts
+      loop: "{{ ultra_bootstrap_entries }}"
+      when: ultra_preserve_runtime | default(false) | bool
+      no_log: true
+    - name: Verify preserved exit pins against actual certificate receipts
+      ansible.builtin.assert:
+        that:
+          - item.pinned_peer_cert_sha256 | default('') is match('^[a-f0-9]{64}$')
+          - (hostvars[ultra_exit_hosts[item.name]].relay_fingerprint.stdout.split('=')[-1] | replace(':', '') | lower) is match('^[a-f0-9]{64}$')
+          - item.pinned_peer_cert_sha256 == (hostvars[ultra_exit_hosts[item.name]].relay_fingerprint.stdout.split('=')[-1] | replace(':', '') | lower)
+        fail_msg: adopted_exit_certificate_pin_mismatch
+      loop: "{{ ultra_bootstrap_entries }}"
+      when: ultra_preserve_runtime | default(false) | bool
+      no_log: true
+    - name: Require the frozen database topology before bridge activation
+      ultra_adopt_topology:
+        database: "{{ ultra_adoption_database }}"
+        expected: "{{ ultra_adoption_topology_sha256 }}"
+      when: ultra_preserve_runtime | default(false) | bool
+      no_log: true
+    - name: Start pinned bootstrap assembly
+      ansible.builtin.set_fact:
+        bootstrap_pinned: "{{ ultra_bootstrap_entries if ultra_preserve_runtime | default(false) | bool else [] }}"
+      no_log: true
+    - name: Resolve actual exit certificate pins
+      ansible.builtin.set_fact:
+        bootstrap_pinned: >-
+          {{ bootstrap_pinned + [item | combine({'pinned_peer_cert_sha256':
+             hostvars[ultra_exit_hosts[item.name]].relay_fingerprint.stdout.split('=')[-1] | replace(':', '') | lower})] }}
+      loop: "{{ ultra_bootstrap_entries }}"
+      no_log: true
+      when: not (ultra_preserve_runtime | default(false) | bool)
+    - name: Preserve the primary exit certificate pin
+      ansible.builtin.set_fact:
+        ultra_spec: "{{ ultra_spec | combine({'exit': ultra_spec.exit | combine({'pinned_peer_cert_sha256': bootstrap_pinned[0].pinned_peer_cert_sha256})}) }}"
+      no_log: true
+      when: not (ultra_preserve_runtime | default(false) | bool)
+  roles:
+    - host
+    - role: geo
+      when: ultra_geo_enabled | default(false) | bool
+    - relay
+  tasks:
+    - name: Install pinned bootstrap routes
+      ansible.builtin.copy:
+        content: "{{ bootstrap_pinned | to_nice_json(preprocess_unsafe=False) }}"
+        dest: /etc/ultra-relay/exit_nodes.bootstrap.json
+        owner: ultra-relay
+        group: ultra-relay
+        mode: "0600"
+      no_log: true
+      diff: false
+      notify: Restart ultra relay
+    - name: Activate bootstrap routes
+      ansible.builtin.meta: flush_handlers
+
+- name: Confirm completed bootstrap operation
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Persist the verified operation result
+      ansible.builtin.copy:
+        content: '{"verified": true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      no_log: true

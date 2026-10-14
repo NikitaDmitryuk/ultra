@@ -1,32 +1,35 @@
 package cloudinstall
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/db"
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/install"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 	"github.com/NikitaDmitryuk/ultra/internal/proxy"
 )
 
+type ExitConfigurer interface {
+	Ready(context.Context) error
+	ConfigureExit(context.Context, string, string, deployansible.ExitRequest) (deployansible.Result, error)
+}
+
 type Provisioner struct {
+	Configurer                           ExitConfigurer
 	CheckReady                           func(context.Context) error
 	RemoveReplica                        func(context.Context, string) error
 	API                                  *cloud.Vultr
@@ -59,6 +62,12 @@ func (p *Provisioner) remote(op *cloud.Operation, instance cloud.Instance) (inst
 func (p *Provisioner) Prepare(ctx context.Context, op *cloud.Operation) (cloud.CreateRequest, error) {
 	if p.CheckReady == nil || p.Replica == nil {
 		return cloud.CreateRequest{}, errors.New("replication setup required")
+	}
+	if p.Configurer == nil {
+		return cloud.CreateRequest{}, errors.New("ansible controller required")
+	}
+	if e := p.Configurer.Ready(ctx); e != nil {
+		return cloud.CreateRequest{}, e
 	}
 	if e := p.CheckReady(ctx); e != nil {
 		return cloud.CreateRequest{}, e
@@ -131,16 +140,6 @@ func (p *Provisioner) node(ctx context.Context, op *cloud.Operation, instance cl
 	return n, e
 }
 
-// Configure only an already enabled guest firewall; never expose the tunnel globally.
-func tunnelFirewallScript(bridgeIP string, port int) (string, error) {
-	ip := net.ParseIP(bridgeIP)
-	if ip == nil || ip.To4() == nil || port < 1 || port > 65535 {
-		return "", errors.New("invalid tunnel firewall source or port")
-	}
-	return "if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then\n ufw allow from " + quote(ip.String()) + " to any port " + strconv.Itoa(port) + " proto tcp >/dev/null\nfi\n", nil
-}
-
-func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 func (p *Provisioner) exitSpec(node exits.Node) config.Spec {
 	spec := config.Spec{
 		SchemaVersion: config.CurrentSpecSchemaVersion, Role: config.RoleExit,
@@ -190,81 +189,72 @@ func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance
 	if e = spec.Validate(); e != nil {
 		return errors.New("generated exit spec invalid")
 	}
-	data, e := json.Marshal(spec)
-	if e != nil {
-		return e
+	if p.Configurer == nil {
+		return errors.New("ansible controller required")
 	}
-	_, e = remote.Run(c, `set -eu
-id -u ultra-relay >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin ultra-relay
-install -d -o ultra-relay -g ultra-relay -m 700 /etc/ultra-relay
-`)
-	if e != nil {
-		return e
+	request := deployansible.ExitRequest{
+		Host: instance.IP, User: "root", Identity: p.Identity, KnownHosts: remote.KnownHosts, BridgeIPv4: p.BridgeIP, Spec: spec,
 	}
-	binary, e := os.Open(filepath.Join(p.StateDir, op.ID, "ultra-relay"))
-	if e != nil {
-		return e
+	binary := filepath.Join(p.StateDir, op.ID, "ultra-relay")
+	result, err := p.configureExit(c, op, binary, request)
+	if err != nil {
+		return err
 	}
-	defer binary.Close() //nolint:errcheck
-	h := sha256.New()
-	if _, e = io.Copy(h, binary); e != nil {
-		return e
+	if err = p.Routes.SetPin(c, node.ID, result.CertPin); err != nil {
+		return err
 	}
-	checksum := hex.EncodeToString(h.Sum(nil))
-	if _, e = binary.Seek(0, io.SeekStart); e != nil {
-		return e
-	}
-	if e = remote.Upload(c, "/etc/ultra-relay/ultra-relay.next", binary); e != nil {
-		return e
-	}
-	if e = remote.Upload(c, "/etc/ultra-relay/spec.next", bytes.NewReader(data)); e != nil {
-		return e
-	}
-	if e = remote.Upload(c, "/etc/systemd/system/ultra-relay.service", strings.NewReader(install.RelaySystemdUnit)); e != nil {
-		return e
-	}
-	firewallScript, e := tunnelFirewallScript(p.BridgeIP, node.Port)
-	if e != nil {
-		return e
-	}
-	_, e = remote.Run(c, `set -eu
-echo "`+checksum+`  /etc/ultra-relay/ultra-relay.next" | sha256sum -c - >/dev/null
-if [ ! -s /etc/ultra-relay/fullchain.pem ]; then
- openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -keyout /etc/ultra-relay/privkey.pem -out /etc/ultra-relay/fullchain.pem -subj `+quote("/CN="+spec.SplithttpHost)+` -addext `+quote("subjectAltName=DNS:"+spec.SplithttpHost)+` >/dev/null 2>&1
-fi
-chown ultra-relay:ultra-relay /etc/ultra-relay/*.pem
-chmod 600 /etc/ultra-relay/*.pem
-install -o ultra-relay -g ultra-relay -m 600 /etc/ultra-relay/spec.next /etc/ultra-relay/spec.json
-install -o ultra-relay -g ultra-relay -m 755 /etc/ultra-relay/ultra-relay.next /usr/local/bin/ultra-relay
-printf 'ULTRA_RELAY_LOG_LEVEL=info\n' > /etc/ultra-relay/environment
-chown ultra-relay:ultra-relay /etc/ultra-relay/environment
-chmod 600 /etc/ultra-relay/environment
-rm -f /etc/ultra-relay/spec.next /etc/ultra-relay/ultra-relay.next
-`+firewallScript+`systemctl daemon-reload
-systemctl enable ultra-relay >/dev/null 2>&1
-systemctl restart ultra-relay
-systemctl is-active --quiet ultra-relay
-`)
-	if e != nil {
-		return e
-	}
-	pin, e := remote.Run(c, `openssl x509 -noout -fingerprint -sha256 -in /etc/ultra-relay/fullchain.pem | sed 's/.*=//' | tr -d ':' | tr '[:upper:]' '[:lower:]'`)
-	if e != nil {
-		return e
-	}
-	fingerprint := strings.TrimSpace(string(pin))
-	if !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(fingerprint) {
-		return errors.New("invalid certificate fingerprint")
-	}
-	if e = p.Routes.SetPin(c, node.ID, fingerprint); e != nil {
-		return e
-	}
-	// Replica bootstrap runs in its own monitor after publication; checkpoint I/O
-	// must not hold the cloud operation lock or delay cancellation for minutes.
 	op.ReplicationState = "not_configured"
-
 	return nil
 }
+
+func (p *Provisioner) configureExit(ctx context.Context, op *cloud.Operation, binary string, request deployansible.ExitRequest) (deployansible.Result, error) {
+	jobID, err := configurationAttemptJobID(op.ID, op.InstallAttempt, binary, request)
+	if err != nil {
+		return deployansible.Result{}, err
+	}
+	return p.Configurer.ConfigureExit(ctx, jobID, binary, request)
+}
+
+// Purchase identity stays stable; a changed desired configuration needs a new
+// immutable job instead of reusing a receipt for the former bridge or binary.
+func configurationJobID(owner, binary string, request deployansible.ExitRequest) (string, error) {
+	return configurationAttemptJobID(owner, 0, binary, request)
+}
+
+func configurationAttemptJobID(owner string, attempt uint64, binary string, request deployansible.ExitRequest) (string, error) {
+	data, err := json.Marshal(request)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	for _, value := range [][]byte{[]byte("ultra-exit-configuration-v1"), []byte(owner), data} {
+		_, _ = fmt.Fprintf(hash, "%d:", len(value))
+		_, _ = hash.Write(value)
+	}
+	// Zero keeps the identity of jobs submitted before attempt generations
+	// existed. A saved explicit retry stays stable across relay/worker restarts.
+	if attempt != 0 {
+		_, _ = fmt.Fprintf(hash, "retry:%d:", attempt)
+	}
+	for _, path := range []string{binary, request.Identity, request.KnownHosts} {
+		file, err := os.Open(path)
+		if err != nil {
+			return "", errors.New("configuration inputs unavailable")
+		}
+		digest := sha256.New()
+		_, err = io.Copy(digest, file)
+		_ = file.Close()
+		if err != nil {
+			return "", errors.New("configuration inputs unreadable")
+		}
+		_, _ = hash.Write(digest.Sum(nil))
+	}
+	sum := hash.Sum(nil)
+	sum[6] = (sum[6] & 0x0f) | 0x50
+	sum[8] = (sum[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16]), nil
+}
+
 func (p *Provisioner) Verify(ctx context.Context, op *cloud.Operation, instance cloud.Instance) error {
 	node, e := db.NewExitNodeRepo(p.DB).Get(ctx, op.ExitID)
 	if e != nil {

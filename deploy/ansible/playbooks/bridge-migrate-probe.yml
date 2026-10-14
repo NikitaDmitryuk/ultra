@@ -1,0 +1,27 @@
+---
+- name: Verify a real target tunnel before starting the bot
+  hosts: migration_targets
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Require source fencing before target acceptance
+      ansible.builtin.assert:
+        that:
+          - ultra_migration_probe_url is match('^https://')
+          - ultra_migration_expected_ip | length > 0
+    - name: Run the fixed client payload verifier
+      ansible.builtin.script:
+        cmd: >-
+          {{ playbook_dir }}/../roles/bridge_migration/files/probe.py
+          {{ ultra_migration_probe_url | quote }} {{ ultra_migration_expected_ip | quote }}
+          {{ ultra_migration_target_address | quote }}
+        executable: /usr/bin/python3
+      changed_when: false
+      no_log: true
+    - name: Save the current target payload receipt
+      ansible.builtin.copy:
+        content: '{"verified": true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false

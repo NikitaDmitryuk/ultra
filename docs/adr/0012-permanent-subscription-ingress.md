@@ -36,5 +36,5 @@ accepted
 
 ## Источники
 - [Эксплуатация HTTPS-входа](../subscription-ingress.md)
-- [SSH-настройка nginx](../../deploy/setup-subscription-ingress-ssh.py)
-- [Проверки SSH-настройки](../../scripts/test-ingress-ssh.py)
+- [Роль forwarding Nginx](../../deploy/ansible/roles/forward_ingress/tasks/main.yml)
+- [Проверки нативной роли](../../scripts/test-ansible-forward-role.py)

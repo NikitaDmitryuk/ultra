@@ -209,7 +209,7 @@ func TestJournalFullStopsNewReservations(t *testing.T) {
 }
 
 func TestPrepaidBuffersDoNotCommitAgain(t *testing.T) {
-	s, _, _, q := fixture(t, ReservationChunk*2)
+	s, _, now, q := fixture(t, ReservationChunk*2)
 	defer func() { _ = s.Close() }()
 	if _, e := s.Reserve("account", "exit", 1); e != nil {
 		t.Fatal(e)
@@ -226,12 +226,13 @@ func TestPrepaidBuffersDoNotCommitAgain(t *testing.T) {
 	if before != after {
 		t.Fatalf("prepaid buffer wrote disk: %d -> %d", before, after)
 	}
-	q[0].ExpiresAt = time.Now().Add(-48 * time.Hour)
+	// Revoke relative to the store clock, not the wall clock: this fixture is frozen.
+	q[0].ExpiresAt = now.Add(-48 * time.Hour)
 	if e := s.SetQuotaLimits(q); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := s.Reserve("account", "exit", 1); !errors.Is(e, ErrExpired) {
-		t.Fatalf("prepaid credit bypassed revoked lease: %v", e)
+	if n, e := s.Reserve("account", "exit", 1); !errors.Is(e, ErrExpired) || n != 0 {
+		t.Fatalf("prepaid credit bypassed revoked lease: grant=%d error=%v", n, e)
 	}
 }
 

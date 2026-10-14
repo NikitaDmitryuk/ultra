@@ -1,0 +1,6 @@
+---
+- name: Restart primary relay
+  ansible.builtin.systemd_service:
+    name: ultra-relay.service
+    daemon_reload: true
+    state: restarted

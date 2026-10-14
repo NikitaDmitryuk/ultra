@@ -1,0 +1,20 @@
+---
+- name: Read public readiness without exposing runtime identities or keys
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Read safe application readiness
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/../roles/release/files/state.py --status"
+        executable: /usr/bin/python3
+      changed_when: false
+      no_log: true
+      register: release_public_status
+    - name: Save only public readiness fields
+      ansible.builtin.copy:
+        content: "{{ release_public_status.stdout | from_json | to_json(preprocess_unsafe=False) }}\n"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false

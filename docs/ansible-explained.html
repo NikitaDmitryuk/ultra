@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Наглядное объяснение роли Ansible в ultra: единые роли, задания, обновление, откат и границы приёмки MVP.">
+<title>Ansible в ultra — как устроено и зачем</title>
+<style>
+:root{--ink:#172e3b;--muted:#516675;--paper:#f5f3ed;--line:#d8e0df;--blue:#2359ab;--teal:#086b62;--amber:#885300;--pale:#e8f3f0;--warn:#fff4d9}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1100px;margin:auto;padding:48px 32px 60px}a{color:var(--blue);text-underline-offset:3px}a:focus-visible{outline:3px solid var(--blue);outline-offset:5px}header{padding:12px 0 30px;border-bottom:1px solid var(--line)}.eyebrow{font-size:12px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:var(--teal)}h1{font-size:clamp(38px,5.3vw,64px);line-height:1.08;letter-spacing:-2px;margin:18px 0 24px;max-width:900px}h2{font-size:30px;line-height:1.2;letter-spacing:-.7px;margin:0 0 18px}h3{font-size:20px;line-height:1.35;margin:0 0 10px}p{margin:0 0 16px}.lead{font-size:22px;line-height:1.5;max-width:900px}.subtle{color:var(--muted);font-size:15px}.toc{display:flex;flex-wrap:wrap;gap:10px 22px;padding:20px 0;font-size:14px}.toc a{text-decoration:none}.section{padding-top:46px;scroll-margin-top:20px}.num{font-size:13px;letter-spacing:1px;color:var(--teal);font-weight:800;margin-bottom:10px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:24px}.card.tint{background:var(--pale)}.card.warn{background:var(--warn);border-color:#e6ce95}.label{display:inline-block;font-size:12px;letter-spacing:.8px;text-transform:uppercase;font-weight:800;color:var(--muted);margin-bottom:12px}.accent{color:var(--teal)}.callout{border-left:4px solid var(--teal);background:#e8f3f0;padding:18px 22px;margin:22px 0;border-radius:0 10px 10px 0}.callout.warning{border-color:var(--amber);background:var(--warn)}.callout p:last-child,.card p:last-child{margin-bottom:0}ul,ol{padding-left:23px;margin:10px 0 0}li{margin-bottom:9px}code{font: .86em ui-monospace,SFMono-Regular,Consolas,monospace;background:#edf0f1;padding:2px 5px;border-radius:4px;overflow-wrap:anywhere}figure{margin:22px 0;background:white;border:1px solid var(--line);border-radius:16px;padding:18px}.diagram{overflow-x:auto}svg{display:block;width:100%;height:auto;min-width:750px}svg text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;fill:#172e3b}svg .title{font-size:18px;font-weight:750}svg .body{font-size:14px}svg .small{font-size:12px;fill:#516675}svg .light{fill:white}figcaption{font-size:14px;color:var(--muted);padding:14px 4px 2px}table{width:100%;border-collapse:collapse;font-size:15px;background:#fff}th{text-align:left;background:#e7eceb;font-size:13px}td,th{padding:15px 17px;border-bottom:1px solid var(--line);vertical-align:top}td:first-child{font-weight:700;width:24%}.table-wrap{border:1px solid var(--line);border-radius:12px;overflow:auto}.source{font-size:13px;color:var(--muted);margin-top:15px}.steps{counter-reset:step;list-style:none;padding:0}.steps li{position:relative;padding:0 0 18px 48px;border-left:2px solid var(--line);margin-left:16px;margin-bottom:0}.steps li:last-child{border-left-color:transparent;padding-bottom:0}.steps li:before{counter-increment:step;content:counter(step);position:absolute;left:-17px;top:0;width:32px;height:32px;text-align:center;line-height:32px;background:var(--teal);color:#fff;border-radius:50%;font-size:14px;font-weight:750}.steps strong{display:block;margin-bottom:4px}.badge{font-size:12px;padding:4px 9px;border-radius:20px;background:#e9f0f9;color:var(--blue);font-weight:700;white-space:nowrap}.sources{columns:2;column-gap:38px;font-size:14px}.sources li{break-inside:avoid;margin-bottom:13px}footer{border-top:1px solid var(--line);padding-top:22px;margin-top:40px;font-size:13px;color:var(--muted)}
+@media(max-width:700px){main{padding:26px 18px 40px}.grid{grid-template-columns:1fr}h1{letter-spacing:-1px}h2{font-size:26px}.lead{font-size:20px}.card{padding:20px}.sources{columns:1}.section{padding-top:34px}figure{padding:12px}td,th{padding:12px}td:first-child{width:28%}}
+@media print{@page{size:A4;margin:15mm}body{font-size:10.5pt;background:white;line-height:1.5}main{max-width:none;padding:0}h1{font-size:32pt;letter-spacing:-1px}h2{font-size:20pt}h3{font-size:13pt}.lead{font-size:14pt}.toc{display:none}.section{padding-top:24px}.card,figure,.callout{break-inside:avoid}.card{padding:15px}.grid{gap:12px}svg{min-width:0}figure{padding:10px}figcaption,.subtle{font-size:9pt}.source,footer{font-size:8pt}.diagram,.table-wrap{overflow:visible}table{font-size:9pt}td,th{padding:10px}thead{display:table-header-group}tr{break-inside:avoid}h2,h3,.num{break-after:avoid}a{color:inherit}.sources{font-size:9pt}*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+</style>
+</head>
+<body>
+<main>
+<header>
+<div class="eyebrow">Ultra / устройство развёртывания</div>
+<h1>Ansible настраивает серверы.<br>Ultra управляет сервисом.</h1>
+<p class="lead">Переносим повторяющуюся настройку инфраструктуры в общие роли, а каждое изменение проводим через сохранённое задание, проверки и совместимый откат.</p>
+<p class="subtle">Наглядный путеводитель по текущему коду. Bridge — входной сервер, exit — выходной сервер. Схемы упрощают связи, но сохраняют границы ответственности.</p>
+</header>
+<nav class="toc" aria-label="Содержание">
+<a href="#why">01 Зачем переход</a><a href="#flow">02 Путь задания</a><a href="#boundaries">03 Границы</a><a href="#release">04 Обновление</a><a href="#scenarios">05 При сбое</a><a href="#acceptance">06 Приёмка</a><a href="#sources">Источники</a>
+</nav>
+<section class="section" id="why">
+<div class="num">01 / ПРОБЛЕМА И РЕШЕНИЕ</div><h2>Исправлять настройку в одном месте</h2>
+<div class="grid">
+<article class="card"><span class="label">Исходная проблема</span><h3>Несколько исполнителей одной работы</h3><p>CLI-установщик, создание exit в облаке и восстановление имели отдельные реализации настройки файлов и служб. Изменение могло попасть в один путь и не попасть в другой.</p><p class="subtle">Последствие: сложнее доказать, что новый сервер и восстановленный сервер настроены одинаково.</p></article>
+<article class="card tint"><span class="label accent">Выбранное устройство</span><h3>Общие роли + контракты ultra</h3><p>Роль Ansible описывает нужные пакеты, файлы и службы. Разные точки входа используют эти роли, а код ultra определяет допустимую операцию, проверяет её входы и результат.</p><p class="subtle">Практический эффект: исправление системной настройки получает общий источник и общий набор проверок.</p></article>
+</div>
+<div class="table-wrap" style="margin-top:20px"><table><thead><tr><th>Что мешало</th><th>Что меняем</th><th>Что это даёт</th></tr></thead><tbody>
+<tr><td>Расхождение установщиков</td><td>Общие роли серверов, relay, бота, PostgreSQL и ingress.</td><td>Один источник системной настройки.</td></tr>
+<tr><td>Потеря хода работы</td><td>Приватные задания, журнал попыток, отдельный worker.</td><td>Принятое служебное задание переживает отключение клиента и перезапуск relay.</td></tr>
+<tr><td>Повтор с новыми входами</td><td>Зафиксированный снимок конфигурации и SHA файлов.</td><td>Продолжение той же попытки не генерирует заново ключи и не меняет её топологию.</td></tr>
+<tr><td>«Команда прошла» вместо результата</td><td>Проверки передачи данных, готовности и независимых копий.</td><td>Завершённая стадия не выдаётся за успех всей операции.</td></tr>
+</tbody></table></div>
+<p class="source">Основание: <a href="adr/0020-ansible-infrastructure.md">ADR 0020</a>, <a href="automation.md">автоматизация</a>.</p>
+</section>
+<section class="section" id="flow">
+<div class="num">02 / ОТ НАМЕРЕНИЯ К СЕРВЕРУ</div><h2>Конфигурация → inventory → задание → Ansible</h2>
+<p>Оператор продолжает задавать параметры в <code>install.config</code>, секреты — в <code>.env</code>. Общий Go-парсер проверяет входы и строит <strong>inventory</strong>: производное описание серверов и переменных для Ansible. Поддерживать второй список серверов вручную не нужно.</p>
+<figure><div class="diagram"><svg viewBox="0 0 980 480" role="img" aria-labelledby="flow-title flow-desc">
+<title id="flow-title">Путь конфигурации к серверам</title><desc id="flow-desc">install.config и .env поступают в общий Go-парсер. Он создаёт приватный inventory. Вместе с закреплённым комплектом получается неизменяемое задание. Локальный CLI исполняет операторские операции; отдельный worker на bridge исполняет разрешённые служебные задания. Оба используют общие роли Ansible для exit и bridge.</desc>
+<defs><marker id="arrow-flow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#6a818b"/></marker></defs>
+<rect x="10" y="20" width="235" height="92" rx="12" fill="#edf2f5"/><text class="title" x="29" y="53">install.config + .env</text><text class="body" x="29" y="80">Параметры + секретные входы</text>
+<path d="M245 65H294" stroke="#6a818b" stroke-width="2" marker-end="url(#arrow-flow)"/>
+<rect x="300" y="20" width="225" height="92" rx="12" fill="#edf2f5"/><text class="title" x="320" y="53">Go-парсер ultra</text><text class="body" x="320" y="80">Проверка и построение плана</text>
+<path d="M525 65H574" stroke="#6a818b" stroke-width="2" marker-end="url(#arrow-flow)"/>
+<rect x="580" y="20" width="380" height="92" rx="12" fill="#e8f3f0"/><text class="title" x="600" y="53">Приватный inventory</text><text class="body" x="600" y="80">Узлы + переменные; динамические exit из БД</text>
+<path d="M770 112V151" stroke="#6a818b" stroke-width="2" marker-end="url(#arrow-flow)"/>
+<rect x="580" y="158" width="380" height="100" rx="12" fill="#2359ab"/><text class="title light" x="600" y="192">Неизменяемое задание</text><text class="body light" x="600" y="218">Снимок входов + роли + закреплённые файлы</text><text class="body light" x="600" y="240">Идентификатор, SHA и квитанции попыток</text>
+<rect x="10" y="150" width="515" height="118" rx="12" fill="#f6f4ee"/><text class="title" x="29" y="181">Два способа запуска</text><text class="body" x="29" y="207">Оператор: локальный CLI, bootstrap и восстановление.</text><text class="body" x="29" y="233">Автоматика: отдельный systemd worker на bridge.</text><text class="small" x="29" y="253">Relay передаёт только разрешённые типизированные задания.</text>
+<path d="M525 208H573" stroke="#6a818b" stroke-width="2" marker-end="url(#arrow-flow)"/>
+<path d="M770 258V307" stroke="#6a818b" stroke-width="2" marker-end="url(#arrow-flow)"/>
+<rect x="580" y="314" width="380" height="125" rx="12" fill="#086b62"/><text class="title light" x="600" y="350">Общие роли Ansible</text><text class="body light" x="600" y="379">Файлы, пакеты, службы, TLS, копии</text><text class="body light" x="600" y="406">Фиксированная операция и проверенный SSH</text>
+<path d="M580 374H536" stroke="#6a818b" stroke-width="2" marker-end="url(#arrow-flow)"/>
+<rect x="300" y="314" width="225" height="125" rx="12" fill="#e8f3f0"/><text class="title" x="320" y="353">Exit</text><text class="body" x="320" y="382">Выходной relay</text><text class="body" x="320" y="407">и назначенные роли</text>
+<path d="M770 439V463H127V439" fill="none" stroke="#6a818b" stroke-width="2" marker-end="url(#arrow-flow)"/>
+<rect x="10" y="314" width="235" height="125" rx="12" fill="#e8f3f0"/><text class="title" x="29" y="353">Bridge</text><text class="body" x="29" y="382">Relay, бот, PostgreSQL</text><text class="body" x="29" y="407">и назначенные роли</text>
+</svg></div><figcaption>Схема общего принципа. Локальные операторские операции не обязаны проходить через сокет worker. Покупка VM и выбор её параметров остаются облачной операцией ultra.</figcaption></figure>
+<div class="grid"><article class="card"><h3>Playbook и роль</h3><p><strong>Playbook</strong> задаёт последовательность действий. <strong>Роль</strong> — переиспользуемая часть настройки: например, установить relay и его systemd-службу. Повтор неизменной настройки должен обходиться без лишней активации.</p></article><article class="card"><h3>Задание и квитанция</h3><p><strong>Задание</strong> хранит, что именно нужно выполнить. <strong>Квитанция</strong> связывает результат с конкретной попыткой и входами. Старый успешный результат не может скрыть новую неудачу.</p></article></div>
+<p class="source">Источники: <a href="../internal/deployansible/local_prepare.go">подготовка локального задания</a>, <a href="../internal/deployansible/service.go">worker и сокет</a>, <a href="../internal/cloudinstall/provisioner.go">облачный адаптер</a>.</p>
+</section>
+<section class="section" id="boundaries">
+<div class="num">03 / ДВЕ НЕЗАВИСИМЫЕ ЗАДАЧИ</div><h2>Работа сервиса и его развёртывание</h2>
+<figure><div class="diagram"><svg viewBox="0 0 980 330" role="img" aria-labelledby="planes-title planes-desc"><title id="planes-title">Ansible находится вне пути клиентского трафика</title><desc id="planes-desc">Клиентский трафик проходит через bridge и exit. Отдельный контур развёртывания состоит из сохранённого задания, исполнителя и ролей Ansible. Они управляют файлами и службами серверов, но не передают клиентский трафик. Недоступность worker блокирует новые операции инфраструктуры, не является самостоятельной причиной остановки уже работающего relay.</desc>
+<defs><marker id="arrow-planes" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#6a818b"/></marker></defs>
+<rect x="10" y="8" width="950" height="126" rx="14" fill="#e8f3f0"/><text class="small" x="28" y="34">ОБСЛУЖИВАНИЕ ТРАФИКА</text>
+<rect x="30" y="55" width="190" height="58" rx="9" fill="#086b62"/><text class="title light" x="51" y="91">Клиент</text><path d="M220 84H321" stroke="#6a818b" stroke-width="2" marker-end="url(#arrow-planes)"/>
+<rect x="330" y="55" width="230" height="58" rx="9" fill="#086b62"/><text class="title light" x="351" y="91">Bridge / Xray</text><path d="M560 84H661" stroke="#6a818b" stroke-width="2" marker-end="url(#arrow-planes)"/>
+<rect x="670" y="55" width="260" height="58" rx="9" fill="#086b62"/><text class="title light" x="691" y="91">Exit / Xray → сеть</text>
+<path d="M445 228V123M800 228V123" stroke="#6a818b" stroke-width="2" stroke-dasharray="5 5" marker-end="url(#arrow-planes)"/>
+<rect x="320" y="153" width="565" height="37" rx="9" fill="white"/><text class="body" x="341" y="177">Настройка служб; при активации возможен перезапуск</text>
+<rect x="10" y="205" width="950" height="115" rx="14" fill="#edf2f5"/><text class="small" x="28" y="232">РАЗВЁРТЫВАНИЕ И ОБСЛУЖИВАНИЕ ИНФРАСТРУКТУРЫ</text>
+<rect x="30" y="249" width="230" height="52" rx="9" fill="#2359ab"/><text class="title light" x="51" y="282">Сохранённое задание</text><path d="M260 276H321" stroke="#6a818b" stroke-width="2" marker-end="url(#arrow-planes)"/>
+<rect x="330" y="249" width="230" height="52" rx="9" fill="#2359ab"/><text class="title light" x="351" y="282">CLI / systemd worker</text><path d="M560 276H661" stroke="#6a818b" stroke-width="2" marker-end="url(#arrow-planes)"/>
+<rect x="670" y="249" width="260" height="52" rx="9" fill="#2359ab"/><text class="title light" x="691" y="282">Роли Ansible</text>
+</svg></div><figcaption>Показан маршрут через exit; ultra также поддерживает прямой выход с bridge. Ansible не участвует в обработке каждого соединения.</figcaption></figure>
+<div class="grid"><article class="card"><h3>Ответственность Ansible</h3><ul><li>Подготовить ОС и установить проверенные файлы.</li><li>Настроить systemd, PostgreSQL, ingress и TLS.</li><li>Применить роли обновления, реплик и восстановления.</li></ul></article><article class="card"><h3>Ответственность ultra</h3><ul><li>Передавать трафик, выбирать маршруты и exit.</li><li>Учитывать расход, квоты и права пользователей.</li><li>Покупать VM, вести облачный журнал и проверять пригодность данных и отката.</li></ul></article></div>
+<div class="callout"><p><strong>Независимость процессов — конкретная гарантия.</strong> Перезапуск relay не убивает отдельный systemd worker и его очередь. Остановка worker мешает новым операциям настройки, но сама по себе не останавливает уже работающий relay. Обновление relay всё же может прервать соединения: отсутствие простоя эта архитектура не обещает.</p></div>
+<p class="source">Источники: <a href="architecture.md">архитектура</a>, <a href="../deploy/ansible/roles/controller/templates/ultra-ansible-controller.service.j2">unit исполнителя</a>.</p>
+</section>
+<section class="section" id="release">
+<div class="num">04 / ОБНОВЛЕНИЕ ПО ШАГАМ</div><h2>Сначала возможность восстановиться. Затем активация.</h2>
+<p>Установщик проверяет полный релизный комплект, его происхождение, SHA и совместимость. Для подписанного канала дополнительно обязательны доверенная подпись и успешные CI checks точного коммита.</p>
+<ol class="steps">
+<li><strong>Зафиксировать входы и топологию.</strong> Общая блокировка и сохраняемое резервирование не позволяют конкурирующим операциям изменить состав узлов посреди применения.</li>
+<li><strong>Получить независимую контрольную копию.</strong> Проверить готовность восстановления и совместимого аварийного комплекта до замены рабочих бинарников. Ошибка здесь блокирует дальнейшую активацию.</li>
+<li><strong>Обновлять exit по одному.</strong> После каждого exit проверить реальную передачу данных. Следующие узлы не активируются после неуспешной проверки.</li>
+<li><strong>Обновить bridge.</strong> Сначала relay и его готовность, затем бот; обновить необходимые инструменты и независимый контроллер.</li>
+<li><strong>Подтвердить всю операцию.</strong> Проверить актуальную копию, реплики, мониторинг и квитанции. Затем завершить операцию и безопасно освободить ненужные комплекты.</li>
+</ol>
+<div class="grid" style="margin-top:24px"><article class="card tint"><h3>Когда можно сказать «успех»</h3><p>Целевой код активирован, проверки сервиса и инфраструктуры завершены, а квитанции относятся к этой попытке и этому комплекту.</p><p class="subtle">Успех одной Ansible-стадии — только часть доказательства.</p></article><article class="card warn"><h3>Если проверка провалилась</h3><p>Остановить дальнейшую выкладку и выполнить допустимый совместимый откат. Операция сохраняет статус неудачной, даже если сервис удалось вернуть.</p><p class="subtle">Автоматически снова активировать ту же failed-версию нельзя.</p></article></div>
+<p class="subtle"><strong>Пример проверки, которую нельзя заменить повторяемостью:</strong> запущенная служба создания копии должна действительно закончить работу. Код возврата команды проверки статуса сам по себе не доказывает завершение фонового процесса. Идемпотентная роль не исправляет ошибочное ожидание.</p>
+<p class="source">Источники: <a href="automation.md">обновление и откат</a>, <a href="../deploy/ansible/playbooks/upgrade.yml">upgrade playbook</a>, <a href="../deploy/ansible/playbooks/rollback.yml">rollback playbook</a>.</p>
+</section>
+<section class="section" id="scenarios">
+<div class="num">05 / ПОНЯТНЫЕ СЦЕНАРИИ</div><h2>Что происходит при повторе и сбое</h2>
+<div class="table-wrap"><table><thead><tr><th>Ситуация</th><th>Ожидаемое поведение</th><th>Граница гарантии</th></tr></thead><tbody>
+<tr><td>Уже работающая установка</td><td><code>adopt --check</code> сопоставляет текущее состояние с политикой без перезаписи конфигурации.</td><td>Успешная проверка принятия ещё не означает выполненный <code>apply</code> и принятую миграцию.</td></tr>
+<tr><td>Клиент отключился от worker</td><td>Принятое служебное задание остаётся в очереди. После перезапуска worker незавершённые задания продолжаются.</td><td>Это свойство отдельного worker. Прерванный локальный CLI имеет собственный протокол продолжения.</td></tr>
+<tr><td>Bootstrap прервался</td><td>Продолжение использует исходные зафиксированные входы и результаты завершённых этапов.</td><td>Нельзя подменить входы той же попытки или выдать её старую ошибку за успех.</td></tr>
+<tr><td>Настройка купленного exit не удалась</td><td>Явный повтор создаёт новую генерацию задания в существующей облачной операции.</td><td>VM, UUID и проверенные SSH pins сохраняются; повтор не должен покупать вторую VM.</td></tr>
+<tr><td>Понадобился откат</td><td>Возвращается проверенный совместимый исполняемый комплект; готовность проверяется снова.</td><td>SQL, накопленный расход, credentials и сроки автономности назад не перематываются.</td></tr>
+<tr><td>На сервере чужой файл</td><td>Проверка владения останавливает замену или очистку неизвестного содержимого.</td><td>Имя каталога или совпавший хеш одного бинарника не доказывают владение всем деревом.</td></tr>
+</tbody></table></div>
+<div class="callout warning"><p><strong>Откат приложения и восстановление данных — разные операции.</strong> Старый бинарник допустим только при совместимости с текущими данными и квотным режимом. Ansible не превращает обновление в транзакцию базы данных и не определяет эту совместимость самостоятельно.</p></div>
+<p class="source">Контракты и ограничения: <a href="automation.md">автоматизация</a>, <a href="../internal/deployansible/local_retry.go">повтор локального задания</a>, <a href="../deploy/ansible/library/ultra_release_retention.py">защита владения и очистка</a>.</p>
+</section>
+<section class="section" id="acceptance">
+<div class="num">06 / ГРАНИЦЫ MVP</div><h2>Реализовано — ещё не значит принято на рабочих узлах</h2>
+<p>Основа MVP включает общий парсер и приватный inventory, базовые роли, systemd worker, подготовку exit в существующей облачной операции, последовательное обновление, совместимый откат и ограничение хранения проверенных комплектов.</p>
+<div class="grid"><article class="card"><span class="badge">Что подтверждают проверки</span><h3 style="margin-top:15px">У каждого уровня свой предел</h3><ul><li><strong>Unit и contract tests:</strong> проверяют входы, сохранение заданий, повторы, отказ подменённым данным и контракты релизов.</li><li><strong>Lint и syntax checks:</strong> проверяют структуру ролей и playbook.</li><li><strong>Контейнерные SSH-проверки:</strong> могут проверить настоящее применение ролей и повтор без лишней активации.</li></ul><p class="subtle">Service manager в отдельных контейнерных стендах подменён. Эти проверки не доказывают загрузку настоящей VM или готовность production. Здесь описано покрытие тестов; свежий успешный прогон всего набора не заявляется.</p></article><article class="card"><span class="badge">Что ещё нужно подтвердить</span><h3 style="margin-top:15px">Приёмка конкретного кандидата</h3><ul><li>Обязательные локальные проверки окончательного diff и пригодность независимой копии.</li><li>Последовательная установка проверенного кандидата на exit и bridge.</li><li>SHA, службы, передача данных, подписки, очереди, реплики и свежая независимая копия после установки.</li><li>PR с явными ограничениями и успешный CI его точного коммита.</li></ul><p class="subtle">Сохранённый VM-комплект и окончательные исходники должны учитываться отдельно: старый успешный стенд не подтверждает новый кандидат.</p></article></div>
+<div class="callout"><p><strong>Первый PR — после production-приёмки.</strong> Merge, релиз и включение автоматического канала не входят в завершение MVP. После MVP остаются расширенная аварийная матрица, нагрузка, восстановление поколения в изолированной VM, cutover и перенос bridge. Установка controller-role сама по себе не включает автообновления.</p></div>
+<p class="source">Актуальный перечень работ: <a href="../TODO.md">границы MVP и приёмка</a>. Возможности и ограничения тестов: <a href="development.md">руководство разработки</a>. Этот документ не заменяет журнал приёмки.</p>
+</section>
+<section class="section" id="sources">
+<div class="num">ДАЛЬШЕ ПО ТЕМЕ</div><h2>Где сверить детали</h2>
+<ul class="sources"><li><a href="adr/0020-ansible-infrastructure.md">ADR 0020</a> — проблема, решение и границы Ansible.</li><li><a href="automation.md">Автоматизация</a> — канонические входы, задания, обновление и восстановление.</li><li><a href="architecture.md">Архитектура</a> — компоненты, трафик и источники состояния.</li><li><a href="development.md">Разработка</a> — что проверяют тесты и чего они не подтверждают.</li><li><a href="../TODO.md">TODO</a> — критерии MVP и последующие проверки.</li><li><a href="../deploy/ansible/playbooks/upgrade.yml">Upgrade</a> и <a href="../deploy/ansible/playbooks/rollback.yml">rollback</a> — порядок активации и отката.</li></ul>
+</section>
+<footer>Автономный HTML-документ: схемы SVG встроены, внешние шрифты, скрипты и сетевые ресурсы не используются. Для бумажной версии — печать браузера в PDF. Ссылки на исходники работают при открытии документа внутри checkout ultra.</footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,90 @@
+---
+- name: Create a private compatible tools snapshot
+  ansible.builtin.file:
+    path: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/tools-previous"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Inspect exact local tools
+  ansible.builtin.stat:
+    path: "{{ item.source }}"
+    checksum_algorithm: sha256
+    follow: false
+  loop: "{{ ultra_recovery_files }}"
+  delegate_to: localhost
+  become: false
+  register: release_tool_sources
+- name: Require the verified archive member bytes
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - not item.stat.islnk | default(false)
+      - item.stat.checksum == item.item.sha256
+  loop: "{{ release_tool_sources.results }}"
+- name: Inspect installed tools
+  ansible.builtin.stat:
+    path: "{{ item.destination }}"
+    checksum_algorithm: sha256
+    follow: false
+  loop: "{{ ultra_recovery_files }}"
+  register: release_tool_active
+- name: Require managed tools without unexpected drift
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isreg | default(false) and not item.stat.islnk | default(false))
+      - not item.stat.exists or item.stat.checksum in [item.item.sha256, item.item.previous_sha256]
+  loop: "{{ release_tool_active.results }}"
+- name: Inspect retained tools fallbacks
+  ansible.builtin.stat:
+    path: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/tools-previous/{{ item.backup_name }}"
+    checksum_algorithm: sha256
+    follow: false
+  loop: "{{ ultra_recovery_files }}"
+  register: release_tool_fallbacks
+- name: Require intact tools fallbacks
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isreg | default(false) and not item.stat.islnk | default(false) and item.stat.checksum == item.item.previous_sha256)
+      - >-
+        item.item.previous_sha256 == '' or item.item.previous_sha256 == item.item.sha256 or
+        release_tool_active.results[ansible_loop.index0].stat.checksum | default('') != item.item.sha256 or item.stat.exists
+  loop: "{{ release_tool_fallbacks.results }}"
+  loop_control:
+    extended: true
+- name: Snapshot unchanged compatible installed tools once
+  ansible.builtin.copy:
+    src: "{{ item.item.destination }}"
+    dest: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/tools-previous/{{ item.item.backup_name }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "{{ item.item.mode }}"
+    force: false
+  loop: "{{ release_tool_active.results }}"
+  when:
+    - item.stat.exists
+    - item.stat.checksum == item.item.previous_sha256
+- name: Refresh managed runtime tools through their common role
+  ansible.builtin.include_role:
+    name: recovery
+    tasks_from: refresh
+- name: Prepare the immutable recovery tools generation on the bridge
+  ansible.builtin.file:
+    path: "/opt/ultra-recovery/releases/{{ ultra_release_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: inventory_hostname in groups['bridge']
+- name: Retain checked tool members for the next upgrade contract
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "/opt/ultra-recovery/releases/{{ ultra_release_version }}/{{ item.destination | basename }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ ultra_recovery_files }}"
+  when:
+    - inventory_hostname in groups['bridge']
+    - item.destination != '/usr/local/bin/ultra-client'

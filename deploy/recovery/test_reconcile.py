@@ -119,7 +119,7 @@ class ReconcileTests(unittest.TestCase):
         return {'firewall_group':{'id':'firewall-owned','description':'ultra-operation-'+ID}}
 
     def test_peer_rule_is_narrow_and_idempotent(self):
-        with mock.patch.object(reconcile,'api',side_effect=self.firewall_api)as api,mock.patch.object(reconcile,'execute'):
+        with mock.patch.object(reconcile,'api',side_effect=self.firewall_api)as api,mock.patch.object(reconcile,'ansible_apply'):
             reconcile.allow_peer(self.config,self.primary,self.nodes[0])
             posted=[call for call in api.call_args_list if call.args[1]=='POST']
             self.assertEqual(len(posted),1)
@@ -128,17 +128,17 @@ class ReconcileTests(unittest.TestCase):
             result=self.firewall_api(config,method,path,data)
             if path.endswith('/rules'):result={'firewall_rules':[{'ip_type':'v4','protocol':'tcp','subnet':'192.0.2.2','subnet_size':32,'port':'22'}]}
             return result
-        with mock.patch.object(reconcile,'api',side_effect=existing)as api,mock.patch.object(reconcile,'execute'):
+        with mock.patch.object(reconcile,'api',side_effect=existing)as api,mock.patch.object(reconcile,'ansible_apply'):
             reconcile.allow_peer(self.config,self.primary,self.nodes[0])
             self.assertFalse(any(call.args[1]=='POST'for call in api.call_args_list))
 
     def test_tunnel_peer_port_is_validated_and_narrow(self):
-        with mock.patch.object(reconcile, 'api', side_effect=self.firewall_api) as api, mock.patch.object(reconcile, 'execute') as remote:
+        with mock.patch.object(reconcile, 'api', side_effect=self.firewall_api) as api, mock.patch.object(reconcile, 'ansible_apply') as remote:
             reconcile.allow_peer(self.config, self.primary, self.nodes[0], port=51001)
             posted = [call for call in api.call_args_list if call.args[1] == 'POST']
             self.assertEqual(posted[0].args[3]['port'], '51001')
             self.assertEqual(posted[0].args[3]['subnet_size'], 32)
-            self.assertIn('to any port 51001 proto tcp', remote.call_args.args[2][-1])
+            self.assertEqual(remote.call_args.args[2]['ultra_recovery_peer_rules'][0]['port'],51001)
         for invalid in (0, 65536, True, '22; false'):
             with mock.patch.object(reconcile, 'api') as api:
                 with self.assertRaises(ValueError):
@@ -178,10 +178,11 @@ class ReconcileTests(unittest.TestCase):
     def test_monitor_requires_two_confirmed_observations(self):
         checks={'bridge_https':True,'vpn_payload':True,'probe_execution':True,'independent_backup':True}
         second=json.dumps({'updated_at':time.time(),'checks':checks,'current_checks':checks}).encode()
-        returns=[subprocess.CompletedProcess([],0,b''),subprocess.CompletedProcess([],0,second)]*2
-        with mock.patch.object(reconcile,'execute',side_effect=returns)as remote:
+        returns=[subprocess.CompletedProcess([],0,second)]*2
+        with mock.patch.object(reconcile,'execute',side_effect=returns)as remote, mock.patch.object(reconcile,'ansible_apply') as apply:
             reconcile.monitor_ready(self.config,self.primary,'primary',True)
-            self.assertEqual(remote.call_count,4)
+            self.assertEqual(remote.call_count,2)
+            self.assertEqual(apply.call_count,2)
 
     def test_bad_first_observation_cannot_be_hidden_by_healthy_second(self):
         checks={'bridge_https':True,'vpn_payload':True,'probe_execution':True,'independent_backup':True}
@@ -189,41 +190,72 @@ class ReconcileTests(unittest.TestCase):
             with self.subTest(current=bad):
                 first=json.dumps({'updated_at':time.time(),'checks':checks,'current_checks':bad}).encode()
                 second=json.dumps({'updated_at':time.time(),'checks':checks,'current_checks':checks}).encode()
-                returns=[subprocess.CompletedProcess([],0,b''),subprocess.CompletedProcess([],0,first),subprocess.CompletedProcess([],0,b''),subprocess.CompletedProcess([],0,second)]
-                with mock.patch.object(reconcile,'execute',side_effect=returns):
+                returns=[subprocess.CompletedProcess([],0,first),subprocess.CompletedProcess([],0,second)]
+                with mock.patch.object(reconcile,'execute',side_effect=returns), mock.patch.object(reconcile,'ansible_apply'):
                     with self.assertRaises(ValueError):reconcile.monitor_ready(self.config,self.primary,'primary',True)
 
     def test_fresh_monitor_can_establish_debounce_with_two_healthy_samples(self):
         checks={'bridge_https':True,'vpn_payload':True,'probe_execution':True,'independent_backup':True}
         first=json.dumps({'updated_at':time.time(),'checks':{},'current_checks':checks}).encode()
         second=json.dumps({'updated_at':time.time(),'checks':checks,'current_checks':checks}).encode()
-        returns=[subprocess.CompletedProcess([],0,b''),subprocess.CompletedProcess([],0,first),subprocess.CompletedProcess([],0,b''),subprocess.CompletedProcess([],0,second)]
-        with mock.patch.object(reconcile,'execute',side_effect=returns) as remote:
+        returns=[subprocess.CompletedProcess([],0,first),subprocess.CompletedProcess([],0,second)]
+        with mock.patch.object(reconcile,'execute',side_effect=returns) as remote, mock.patch.object(reconcile,'ansible_apply') as apply:
             reconcile.monitor_ready(self.config,self.primary,'primary',True)
-            self.assertEqual(remote.call_count,4)
+            self.assertEqual(remote.call_count,2)
+            self.assertEqual(apply.call_count,2)
 
     def test_stale_debounced_health_cannot_promote(self):
         checks={'bridge_https':True,'vpn_payload':True,'probe_execution':True,'independent_backup':True}
         current={**checks,'vpn_payload':False}
         body=json.dumps({'updated_at':time.time(),'checks':checks,'current_checks':current}).encode()
-        with mock.patch.object(reconcile,'execute',side_effect=[subprocess.CompletedProcess([],0,b''),subprocess.CompletedProcess([],0,body)]*2):
+        with mock.patch.object(reconcile,'execute',side_effect=[subprocess.CompletedProcess([],0,body)]*2), mock.patch.object(reconcile,'ansible_apply'):
             with self.assertRaises(ValueError):reconcile.monitor_ready(self.config,self.primary,'primary',True)
 
-    def test_production_size_client_fits_bounded_payload(self):
+    def test_large_client_projected_without_binary_json_payload(self):
         client=Path(self.config['client_binary'])
         with client.open('wb')as stream:stream.truncate(52_167_976)
         Path(self.config['bot_token_file']).write_text('fixture');Path(self.config['bot_token_file']).chmod(0o600)
         Path(self.config['probe_profile_file']).write_text('{}');Path(self.config['probe_profile_file']).chmod(0o600)
-        calls=[]
-        def remote(config,node,command,**kwargs):
-            calls.append(kwargs.get('input',b''))
-            if len(calls)==1:return subprocess.CompletedProcess([],0,json.dumps(['/usr/local/bin/ultra-client']).encode())
-            return subprocess.CompletedProcess([],0,b'{}')
-        with mock.patch.object(reconcile,'execute',side_effect=remote):
+        with mock.patch.object(reconcile,'ansible_apply') as apply:
             reconcile.install(self.config,self.primary,{'mode':'primary'})
-        self.assertGreater(len(calls[1]),64<<20)
-        self.assertLess(len(calls[1]),128<<20)
-        self.assertEqual(list(json.loads(calls[1])['files']),['/usr/local/bin/ultra-client'])
+        variables=apply.call_args.args[2]
+        item=next(item for item in variables['ultra_recovery_files'] if item['destination']=='/usr/local/bin/ultra-client')
+        self.assertEqual(Path(item['source']),client)
+        self.assertEqual(item['mode'],'0755')
+        self.assertLess(len(json.dumps(variables)),10000)
+        self.assertNotIn('fixture',json.dumps(variables))
+
+    def test_ansible_inputs_private_pinned_and_no_output(self):
+        with mock.patch.object(reconcile.subprocess,'run',return_value=subprocess.CompletedProcess([],0)) as run:
+            reconcile.ansible_apply(self.config,self.primary,{'ultra_monitor_mode':'none'})
+        arguments=run.call_args.args[0]
+        self.assertEqual(arguments[1:4],['ansible-run','--operation','reconcile'])
+        path=Path(arguments[arguments.index('--inventory')+1])
+        self.assertEqual(path.stat().st_mode & 0o777,0o600)
+        host=json.loads(path.read_text())['all']['children']['recovery_nodes']['hosts']['receiver']
+        self.assertIn('StrictHostKeyChecking=yes',host['ansible_ssh_common_args'])
+        self.assertIn('-F /dev/null',host['ansible_ssh_args'])
+        self.assertEqual(run.call_args.kwargs['stdout'],subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs['stderr'],subprocess.DEVNULL)
+        with mock.patch.object(reconcile.subprocess,'run',return_value=subprocess.CompletedProcess([],1)):
+            with self.assertRaisesRegex(ValueError,'ansible_reconcile_failed'):
+                reconcile.ansible_apply(self.config,self.primary,{})
+
+    def test_compaction_preserves_running_and_recent_attempts(self):
+        directory=self.root/'attempts';directory.mkdir()
+        now=time.time()
+        for index in range(12):
+            path=directory/('attempt-'+str(index));path.mkdir(mode=0o700)
+            reconcile.atomic_json(path/'receipt.json',{'state':'succeeded','finished_at':now-90000-index})
+            reconcile.atomic_json(path/'job.json',{'request_sha256':'a'*64})
+            (path/'bundle').mkdir();(path/'request.json').write_text('private-old-input')
+        active=directory/'attempt-running';active.mkdir(mode=0o700)
+        reconcile.atomic_json(active/'receipt.json',{'state':'running','started_at':now-200000})
+        (active/'request.json').write_text('running-input')
+        reconcile.compact_completed_attempts(directory,now)
+        self.assertTrue((active/'request.json').exists())
+        self.assertEqual(sum((path/'bundle').exists() for path in directory.glob('attempt-*')),8)
+        self.assertEqual(sum((path/'receipt.json').exists() for path in directory.glob('attempt-*')),13)
 
     def run_transition(self, nl_down=False, bad_us=False, final_capture_fail=False, fresh_peer=False):
         events=[]
@@ -343,11 +375,11 @@ class ReconcileTests(unittest.TestCase):
         master=state/'heartbeat_ed25519'
         master.write_bytes(new.read_bytes());master.chmod(0o600)
         Path(str(master)+'.pub').write_bytes(Path(str(old)+'.pub').read_bytes())
-        with mock.patch.object(reconcile,'execute')as remote:
+        with mock.patch.object(reconcile,'ansible_apply')as remote:
             material,public=reconcile.ensure_heartbeat_key(self.config,self.primary)
         derived=(' '.join(subprocess.run(['ssh-keygen','-y','-f',str(new)],check=True,capture_output=True).stdout.decode().split()[:2])+'\n').encode()
         self.assertEqual(public,derived)
-        entry=json.loads(remote.call_args.kwargs['input'])
+        entry=remote.call_args.args[2]['ultra_recovery_heartbeat_entry']
         self.assertIn(derived.decode().strip(),entry)
         path,files=reconcile.peer_key_pair(material,public)
         self.assertNotEqual(path,'/etc/ultra-recovery/peer_ed25519')
@@ -401,9 +433,9 @@ class ReconcileTests(unittest.TestCase):
             process.communicate(timeout=5)
 
     def test_repository_marker_contract(self):
-        self.assertIn('.ultra-recovery-repository',reconcile.INSTALL)
-        self.assertIn('unmarked nonempty repository',reconcile.INSTALL)
-        self.assertNotIn('marker.json',reconcile.INSTALL)
+        tasks=(Path(__file__).parents[1]/'ansible/roles/recovery/tasks/receiver.yml').read_text()
+        self.assertIn('recovery.py, init, --repository, /var/lib/ultra-recovery, --source, bridge',tasks)
+        self.assertNotIn('INSTALL',reconcile.__dict__)
 
 
 if __name__=='__main__':unittest.main()

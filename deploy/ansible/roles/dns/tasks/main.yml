@@ -1,0 +1,51 @@
+---
+- name: Ensure private DNS configuration directory
+  ansible.builtin.file:
+    path: /etc/ultra-recovery
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Ensure DNS application directory
+  ansible.builtin.file:
+    path: /opt/ultra-recovery
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+- name: Install application DNS ownership logic
+  ansible.builtin.copy:
+    content: "{{ ultra_dns_source_content }}"
+    dest: /opt/ultra-recovery/dns.py
+    owner: root
+    group: root
+    mode: "0644"
+- name: Install projected DNS credential
+  ansible.builtin.copy:
+    content: "{{ ultra_dns_api_key }}"
+    dest: /etc/ultra-recovery/dns-api-key
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+- name: Install DNS propagation dependencies
+  ansible.builtin.apt:
+    name: dnsutils
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+- name: Reconcile owned DNS records and verify propagation
+  ultra_dns:
+    config: "{{ ultra_dns_config }}"
+    desired: "{{ ultra_dns_desired }}"
+    receipt_seed: "{{ ultra_dns_receipt_seed | default(omit) }}"
+  no_log: true
+- name: Save desired DNS recovery policy
+  ansible.builtin.copy:
+    content: "{{ {'config': ultra_dns_config, 'desired': ultra_dns_desired} | to_nice_json(preprocess_unsafe=False) }}"
+    dest: /etc/ultra-recovery/dns.json
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true

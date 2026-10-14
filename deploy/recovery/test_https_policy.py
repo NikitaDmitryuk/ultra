@@ -14,9 +14,11 @@ import restore_host
 import test_vm_fixture
 
 spec = importlib.util.spec_from_file_location(
-    'bridge_subscription', Path(__file__).parent.parent / 'setup-bridge-subscription.py')
+    'ingress_probe', Path(__file__).parent.parent / 'ansible/library/ultra_ingress_probe.py')
 subscription = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(subscription)
+# This test exercises the pure TLS function, not the Ansible entrypoint.
+with mock.patch.dict('sys.modules', {'ansible.module_utils.basic': mock.Mock()}):
+    spec.loader.exec_module(subscription)
 
 
 class BeforeConnect(Exception):
@@ -39,7 +41,7 @@ class HTTPSPolicyTests(unittest.TestCase):
                          'public_host': 'edge.example.test', 'new_bridge_address': '192.0.2.1'}
             probes = (
                 ('cutover', lambda: domain_cutover.https('localhost', '192.0.2.1', 443, '/healthz')),
-                ('subscription', lambda: subscription.probe({'domain': 'localhost'})),
+                ('subscription', lambda: subscription.tls_ready('127.0.0.1', 'localhost', 443)),
                 ('restore', host.direct_ingress),
             )
             for name, probe in probes:
@@ -51,11 +53,24 @@ class HTTPSPolicyTests(unittest.TestCase):
                     warnings.simplefilter('ignore', DeprecationWarning)
                     context.minimum_version = ssl.TLSVersion.TLSv1
                 context.set_ciphers('ALL:@SECLEVEL=0')
+                actual_contexts = []
+                context_factory = subscription.verified_client_context
+
+                def capture_subscription_context():
+                    actual = context_factory()
+                    actual.load_verify_locations(self.cert)
+                    actual_contexts.append(actual)
+                    return actual
+
                 with mock.patch.object(ssl, 'create_default_context', return_value=context), \
+                     mock.patch.object(subscription, 'verified_client_context', side_effect=capture_subscription_context), \
                      mock.patch('socket.create_connection', side_effect=BeforeConnect), \
                      mock.patch.object(dns, 'private', return_value=policy):
                     with self.assertRaises(BeforeConnect):
                         probe()
+                if name == 'subscription':
+                    self.assertEqual(len(actual_contexts), 1)
+                    context = actual_contexts[0]
                 yield name, context
 
     def handshake(self, context, version, hostname='localhost'):

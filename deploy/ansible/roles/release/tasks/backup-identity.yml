@@ -1,0 +1,71 @@
+---
+- name: Require a selected compatible immutable controller identity
+  ansible.builtin.assert:
+    that:
+      - release_backup_controller_directory in [ultra_previous_controller_directory, ultra_controller_directory]
+      - release_backup_controller_directory is match('^/opt/ultra-ansible/releases/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$')
+- name: Inspect private recovery identity documents
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop: [/etc/ultra-recovery/deployment.json, /etc/ultra-recovery/backup.json]
+  register: release_identity_documents
+- name: Require adopted regular private root-owned recovery policies
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - not item.stat.islnk | default(false)
+      - item.stat.uid == 0
+      - item.stat.mode == '0600'
+  loop: "{{ release_identity_documents.results }}"
+  no_log: true
+- name: Read the private adopted deployment identity
+  ansible.builtin.slurp:
+    src: /etc/ultra-recovery/deployment.json
+  register: release_identity_deployment
+  no_log: true
+- name: Read the private adopted backup policy
+  ansible.builtin.slurp:
+    src: /etc/ultra-recovery/backup.json
+  register: release_identity_backup
+  no_log: true
+- name: Reject foreign controller ownership before selecting its recovery artifact
+  ansible.builtin.assert:
+    that:
+      - >-
+        (release_identity_deployment.content | b64decode | from_json).controller_directory
+        in [ultra_previous_controller_directory, ultra_controller_directory]
+      - (release_identity_backup.content | b64decode | from_json).artifact_paths is sequence
+      - (release_identity_backup.content | b64decode | from_json).artifact_paths is not string
+      - (release_identity_backup.content | b64decode | from_json).artifact_paths is not mapping
+      - >-
+        ultra_previous_controller_directory in (release_identity_backup.content | b64decode | from_json).artifact_paths
+        or ultra_controller_directory in (release_identity_backup.content | b64decode | from_json).artifact_paths
+  no_log: true
+- name: Select the exact runtime recorded by the active controller service
+  ansible.builtin.copy:
+    content: >-
+      {{ release_identity_deployment.content | b64decode | from_json |
+      combine({'controller_directory': release_backup_controller_directory}) | to_nice_json(preprocess_unsafe=False) }}
+    dest: /etc/ultra-recovery/deployment.json
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+- name: Select only the current controller runtime for subsequent recovery generations
+  ansible.builtin.copy:
+    content: >-
+      {{ (release_identity_backup.content | b64decode | from_json) |
+      combine({'state_paths': ((release_identity_backup.content | b64decode | from_json).state_paths | default([]) |
+      reject('equalto', '/etc/systemd/system/ultra-auto-upgrade.service') |
+      reject('equalto', '/etc/systemd/system/ultra-auto-upgrade.timer') | list | unique | sort),
+      'artifact_paths': ((release_identity_backup.content | b64decode | from_json).artifact_paths |
+      reject('equalto', ultra_previous_controller_directory) | reject('equalto', ultra_controller_directory) | list |
+      union([release_backup_controller_directory]) | unique | sort)}) | to_nice_json(preprocess_unsafe=False) }}
+    dest: /etc/ultra-recovery/backup.json
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false

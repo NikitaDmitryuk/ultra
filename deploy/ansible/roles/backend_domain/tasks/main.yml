@@ -1,0 +1,258 @@
+---
+- name: Require a distinct owned backend name and unchanged public names
+  ansible.builtin.assert:
+    that:
+      - ultra_backend_domain != ultra_backend_old_domain
+      - ultra_backend_domain not in [ultra_subscription_domain, ultra_backend_vpn_domain]
+      - ultra_backend_action in ['apply', 'accept', 'rollback', 'accept-rollback']
+      - ultra_backend_email | length > 0
+- name: Verify currently working backend before any provisioning
+  ultra_ingress_probe:
+    kind: bot
+  no_log: true
+  when: ultra_backend_action == 'apply'
+- name: Verify public subscription before any provisioning
+  ansible.builtin.uri:
+    url: "https://{{ ultra_subscription_domain }}{{ item }}"
+    validate_certs: true
+    use_proxy: false
+    status_code: 200
+    follow_redirects: none
+  loop: [/healthz, /happ, /]
+  no_log: true
+  when: ultra_backend_action == 'apply'
+- name: Require enabled certificate renewal scheduling
+  ansible.builtin.command:
+    argv: [systemctl, is-enabled, --quiet, certbot.timer]
+  changed_when: false
+  when: ultra_backend_action == 'apply'
+- name: Prepare owned backend DNS and HTTP-01 certificate
+  when: ultra_backend_action == 'apply'
+  block:
+    - name: Install current owned DNS implementation
+      ansible.builtin.copy:
+        content: "{{ ultra_dns_source_content }}"
+        dest: /opt/ultra-recovery/dns.py
+        owner: root
+        group: root
+        mode: "0644"
+    - name: Add backend to existing DNS ownership policy
+      ultra_backend_dns:
+        domain: "{{ ultra_backend_domain }}"
+        zone: "{{ ultra_backend_zone }}"
+        address: "{{ ultra_bridge_ipv4 }}"
+      no_log: true
+    - name: Keep backend HTTP-01 webroot permanently available
+      ultra_owned_file:
+        path: /etc/nginx/conf.d/ultra-backend-acme.conf
+        receipt: /var/lib/ultra-ingress/managed.json
+        content: |
+          server {
+              listen 80;
+              server_name {{ ultra_backend_domain }};
+              access_log off;
+              location ^~ /.well-known/acme-challenge/ { root /var/www/ultra-acme; }
+              location / { return 404; }
+          }
+    - name: Validate permanent backend HTTP-01 listener
+      ansible.builtin.command:
+        argv: [nginx, -t]
+      changed_when: false
+    - name: Reload challenge routing
+      ansible.builtin.systemd_service:
+        name: nginx.service
+        state: reloaded
+    - name: Obtain backend certificate using existing webroot
+      ansible.builtin.command:
+        argv:
+          - certbot
+          - certonly
+          - --webroot
+          - -w
+          - /var/www/ultra-acme
+          - --cert-name
+          - "{{ ultra_backend_domain }}"
+          - -d
+          - "{{ ultra_backend_domain }}"
+          - --non-interactive
+          - --agree-tos
+          - --email
+          - "{{ ultra_backend_email }}"
+        creates: "/etc/letsencrypt/live/{{ ultra_backend_domain }}/fullchain.pem"
+      no_log: true
+    - name: Prepare durable backend before images
+      ultra_backend_domain:
+        directory: "{{ ultra_backend_transaction }}"
+        action: prepare
+        old: "{{ ultra_backend_old_domain }}"
+        new: "{{ ultra_backend_domain }}"
+        public: "{{ ultra_subscription_domain }}"
+      no_log: true
+- name: Restore backend on explicit rollback
+  when: ultra_backend_action in ['rollback', 'accept-rollback']
+  block:
+    - name: Restore saved backend configuration
+      ultra_backend_domain:
+        directory: "{{ ultra_backend_transaction }}"
+        action: "{{ 'rollback' if ultra_backend_action == 'rollback' else 'verify-rollback' }}"
+        old: "{{ ultra_backend_old_domain }}"
+        new: "{{ ultra_backend_domain }}"
+        public: "{{ ultra_subscription_domain }}"
+      register: backend_domain_restore
+      no_log: true
+    - name: Validate restored Nginx configuration
+      ansible.builtin.command:
+        argv: [nginx, -t]
+      changed_when: false
+    - name: Restart restored bot
+      when: ultra_backend_action == 'rollback' and backend_domain_restore.phase != 'unmodified'
+      ansible.builtin.systemd_service:
+        name: ultra-bot.service
+        state: restarted
+    - name: Reload restored Nginx
+      when: ultra_backend_action == 'rollback' and backend_domain_restore.phase != 'unmodified'
+      ansible.builtin.systemd_service:
+        name: nginx.service
+        state: reloaded
+    - name: Verify restored backend certificate and application
+      ultra_ingress_probe:
+        kind: bot
+      register: backend_domain_rollback_probe
+      until: backend_domain_rollback_probe.ready | default(false)
+      retries: 15
+      delay: 2
+      no_log: true
+    - name: Verify public subscription after rollback
+      ansible.builtin.uri:
+        url: "https://{{ ultra_subscription_domain }}{{ item }}"
+        validate_certs: true
+        use_proxy: false
+        status_code: 200
+        follow_redirects: none
+      loop: [/healthz, /happ, /]
+      no_log: true
+    - name: Verify VPN after rollback
+      ultra_ingress_probe:
+        kind: tls
+        address: "{{ ultra_bridge_ipv4 }}"
+        hostname: "{{ ultra_backend_vpn_domain }}"
+      no_log: true
+- name: Activate or reverify coordinated backend configuration
+  when: ultra_backend_action in ['apply', 'accept']
+  block:
+    - name: Apply journalled bot environment, proxy SNI and renewal hook
+      ultra_backend_domain:
+        directory: "{{ ultra_backend_transaction }}"
+        action: activate
+        old: "{{ ultra_backend_old_domain }}"
+        new: "{{ ultra_backend_domain }}"
+        public: "{{ ultra_subscription_domain }}"
+      when: ultra_backend_action == 'apply'
+      no_log: true
+    - name: Check configured Nginx
+      ansible.builtin.command:
+        argv: [nginx, -t]
+      changed_when: false
+    - name: Restart bot with new certificate name
+      ansible.builtin.systemd_service:
+        name: ultra-bot.service
+        state: restarted
+      when: ultra_backend_action == 'apply'
+    - name: Verify new backend certificate and application
+      ultra_ingress_probe:
+        kind: bot
+      register: backend_domain_probe
+      until: backend_domain_probe.ready | default(false)
+      retries: 15
+      delay: 2
+      no_log: true
+    - name: Reload Nginx with matching backend SNI
+      ansible.builtin.systemd_service:
+        name: nginx.service
+        state: reloaded
+      when: ultra_backend_action == 'apply'
+    - name: Verify unchanged public subscription application
+      ansible.builtin.uri:
+        url: "https://{{ ultra_subscription_domain }}{{ item }}"
+        validate_certs: true
+        use_proxy: false
+        status_code: 200
+        follow_redirects: none
+      loop: [/healthz, /happ, /]
+      no_log: true
+    - name: Verify unchanged public VPN certificate
+      ultra_ingress_probe:
+        kind: tls
+        address: "{{ ultra_bridge_ipv4 }}"
+        hostname: "{{ ultra_backend_vpn_domain }}"
+      no_log: true
+    - name: Verify backend certificate renewal configuration
+      ansible.builtin.command:
+        argv: [certbot, renew, --cert-name, "{{ ultra_backend_domain }}", --dry-run, --run-deploy-hooks, --no-random-sleep-on-renew]
+      changed_when: false
+      no_log: true
+      when: ultra_backend_action == 'apply'
+    - name: Verify backend after renewal hook rehearsal
+      ultra_ingress_probe:
+        kind: bot
+      register: backend_domain_renewed_probe
+      until: backend_domain_renewed_probe.ready | default(false)
+      retries: 15
+      delay: 2
+      no_log: true
+      when: ultra_backend_action == 'apply'
+    - name: Verify public ingress after renewal hook rehearsal
+      ansible.builtin.uri:
+        url: "https://{{ ultra_subscription_domain }}{{ item }}"
+        validate_certs: true
+        use_proxy: false
+        status_code: 200
+        follow_redirects: none
+      loop: [/healthz, /happ, /]
+      no_log: true
+      when: ultra_backend_action == 'apply'
+    - name: Mark backend transaction verified
+      ultra_backend_domain:
+        directory: "{{ ultra_backend_transaction }}"
+        action: verify
+        old: "{{ ultra_backend_old_domain }}"
+        new: "{{ ultra_backend_domain }}"
+        public: "{{ ultra_subscription_domain }}"
+      no_log: true
+  rescue:
+    - name: Restore previous environment, SNI and renewal hook after failure
+      ultra_backend_domain:
+        directory: "{{ ultra_backend_transaction }}"
+        action: rollback
+        old: "{{ ultra_backend_old_domain }}"
+        new: "{{ ultra_backend_domain }}"
+        public: "{{ ultra_subscription_domain }}"
+      when: ultra_backend_action == 'apply'
+      no_log: true
+    - name: Validate previous configuration
+      ansible.builtin.command:
+        argv: [nginx, -t]
+      changed_when: false
+      when: ultra_backend_action == 'apply'
+    - name: Restart previous backend
+      ansible.builtin.systemd_service:
+        name: ultra-bot.service
+        state: restarted
+      when: ultra_backend_action == 'apply'
+    - name: Restore previous active Nginx
+      ansible.builtin.systemd_service:
+        name: nginx.service
+        state: reloaded
+      when: ultra_backend_action == 'apply'
+    - name: Verify rollback backend
+      ultra_ingress_probe:
+        kind: bot
+      register: backend_domain_rescue_probe
+      until: backend_domain_rescue_probe.ready | default(false)
+      retries: 15
+      delay: 2
+      when: ultra_backend_action == 'apply'
+      no_log: true
+    - name: Keep failed migration visible
+      ansible.builtin.fail:
+        msg: backend_migration_failed_canonical_config_unchanged

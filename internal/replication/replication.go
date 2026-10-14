@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"os"
 	"regexp"
 	"runtime"
@@ -51,19 +52,23 @@ func Load(path string) (Config, error) {
 	return c, nil
 }
 
+// Configurer persists replica installation independently of the relay process.
+type Configurer interface {
+	ConfigureReplica(context.Context, deployansible.ReplicaRequest) error
+	StopReplicaTunnel(context.Context, string) error
+}
+
 type Manager struct {
-	ensureMu sync.Mutex
-	Config   Config
-	// DatabaseName is the application database containing recovery_heartbeat.
+	ensureMu     sync.Mutex
+	Config       Config
 	DatabaseName string
+	Configurer   Configurer
 	ctx          context.Context
-	mu           sync.Mutex
-	tunnels      map[string]context.CancelFunc
 	Record       func(context.Context, string, string, int64, int64, string) error
 }
 
 func New(ctx context.Context, c Config) *Manager {
-	return &Manager{Config: c, DatabaseName: "ultra_db", ctx: ctx, tunnels: map[string]context.CancelFunc{}}
+	return &Manager{Config: c, DatabaseName: "ultra_db", ctx: ctx}
 }
 func (m *Manager) primary(ctx context.Context) (*pgx.Conn, error) {
 	cfg, e := pgx.ParseConfig("host=127.0.0.1 sslmode=disable dbname=postgres")
@@ -76,6 +81,9 @@ func (m *Manager) primary(ctx context.Context) (*pgx.Conn, error) {
 	return pgx.ConnectConfig(ctx, cfg)
 }
 func (m *Manager) Ready(ctx context.Context) error {
+	if m.Configurer == nil {
+		return errors.New("independent replica executor required")
+	}
 	conn, e := m.primary(ctx)
 	if e != nil {
 		return errors.New("primary replication access unavailable")
@@ -100,37 +108,11 @@ func (m *Manager) Ready(ctx context.Context) error {
 	}
 	return nil
 }
-func (m *Manager) startTunnel(id string, remote install.Remote) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.tunnels[id]; ok {
-		return
-	}
-	ctx, cancel := context.WithCancel(m.ctx)
-	m.tunnels[id] = cancel
-	go func() {
-		for ctx.Err() == nil {
-			// GatewayPorts=yes can override an explicit loopback bind on the SSH server.
-			check, cancel := context.WithTimeout(ctx, 8*time.Second)
-			_, safe := remote.Run(check, `test "$(sshd -T | awk '$1=="gatewayports" {print $2}')" = no || test "$(sshd -T | awk '$1=="gatewayports" {print $2}')" = clientspecified`)
-			cancel()
-			if safe == nil {
-				_ = remote.ReverseTunnel(ctx, m.Config.Port)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(5 * time.Second):
-			}
-		}
-	}()
-}
 func (m *Manager) Stop(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if cancel, ok := m.tunnels[id]; ok {
-		cancel()
-		delete(m.tunnels, id)
+	if m.Configurer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = m.Configurer.StopReplicaTunnel(ctx, id)
 	}
 }
 func (m *Manager) record(ctx context.Context, id, state string, free, required int64, detail string) {
@@ -186,7 +168,6 @@ func (m *Manager) Ensure(ctx context.Context, id string, remote install.Remote) 
 		return "insufficient_space", nil
 	}
 	m.record(c, id, "syncing", available, required, "")
-	m.startTunnel(id, remote)
 	slot := "ultra_" + strings.ReplaceAll(id, "-", "")
 	var exists bool
 	if e = conn.QueryRow(c, `SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)`, slot).Scan(&exists); e != nil {
@@ -197,70 +178,23 @@ func (m *Manager) Ensure(ctx context.Context, id string, remote install.Remote) 
 			return "error", errors.New("replication slot creation failed")
 		}
 	}
-	// Variables below are validated integers, a generated hex password, and a generated slot identifier.
-	script := fmt.Sprintf(`set -eu
-export DEBIAN_FRONTEND=noninteractive
-MAJOR=%d
-ROOT=/var/lib/ultra-postgres-replica
-CONF=/etc/ultra-postgres-replica
-BIN=/usr/lib/postgresql/$MAJOR/bin
-if [ ! -x "$BIN/pg_basebackup" ]; then apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq postgresql-$MAJOR >/dev/null 2>&1; fi
-install -d -m 700 -o postgres -g postgres "$ROOT" "$CONF"
-if [ -e "$ROOT/data" ] && [ ! -f "$ROOT/managed-by-ultra" ]; then exit 42; fi
-if [ -f "$ROOT/data/PG_VERSION" ] && [ "$(cat "$ROOT/data/PG_VERSION")" != "$MAJOR" ]; then exit 43; fi
-if [ -f "$ROOT/data/PG_VERSION" ] && [ ! -f "$ROOT/data/standby.signal" ]; then exit 44; fi
-printf '127.0.0.1:15432:*:%s:%s\n' > "$CONF/pgpass"
-chown postgres:postgres "$CONF/pgpass"; chmod 600 "$CONF/pgpass"
-if [ ! -f "$ROOT/data/PG_VERSION" ]; then
- STAGING=$(mktemp -d "$ROOT/seed.XXXXXX")
- chown postgres:postgres "$STAGING"
- trap 'rm -rf -- "$STAGING"' EXIT
- ready=0
- for attempt in $(seq 1 30); do if "$BIN/pg_isready" -h 127.0.0.1 -p 15432 >/dev/null 2>&1; then ready=1; break; fi; sleep 1; done
- [ "$ready" = 1 ]
- runuser -u postgres -- env PGPASSFILE="$CONF/pgpass" "$BIN/pg_basebackup" -h 127.0.0.1 -p 15432 -U %s -D "$STAGING" --wal-method=stream --slot=%s --checkpoint=spread >/dev/null 2>&1
- [ ! -e "$ROOT/data" ]
- touch "$STAGING/standby.signal"
- touch "$ROOT/managed-by-ultra"
- mv "$STAGING" "$ROOT/data"
- trap - EXIT
-fi
-: > "$ROOT/data/postgresql.auto.conf"
-touch "$ROOT/data/standby.signal"
-cat > "$CONF/postgresql.conf" <<'PGCONF'
-listen_addresses = '127.0.0.1'
-port = 5433
-shared_buffers = '64MB'
-hot_standby = on
-max_connections = %d
-max_worker_processes = %d
-max_prepared_transactions = %d
-max_locks_per_transaction = %d
-max_wal_senders = %d
-hba_file = '/etc/ultra-postgres-replica/pg_hba.conf'
-primary_conninfo = 'host=127.0.0.1 port=15432 user=%s passfile=/etc/ultra-postgres-replica/pgpass application_name=%s sslmode=disable'
-primary_slot_name = '%s'
-PGCONF
-printf 'local all postgres peer\nhost all all 127.0.0.1/32 reject\n' > "$CONF/pg_hba.conf"
-chown -R postgres:postgres "$CONF"
-cat > /etc/systemd/system/ultra-postgres-replica.service <<UNIT
-[Unit]
-Description=Ultra PostgreSQL recovery replica
-After=network-online.target
-[Service]
-User=postgres
-ExecStart=$BIN/postgres -D $ROOT/data -c config_file=$CONF/postgresql.conf
-Restart=on-failure
-RestartSec=10
-NoNewPrivileges=true
-[Install]
-WantedBy=multi-user.target
-UNIT
-systemctl daemon-reload
-systemctl enable ultra-postgres-replica >/dev/null 2>&1
-systemctl restart ultra-postgres-replica
-`, major, m.Config.User, m.Config.Password, m.Config.User, slot, connections, workers, prepared, locks, senders, m.Config.User, slot, slot)
-	if _, e = remote.Run(c, script); e != nil {
+	if m.Configurer == nil {
+		m.record(c, id, "error", available, required, "executor_unavailable")
+		return "error", errors.New("independent replica executor required")
+	}
+	request := deployansible.ReplicaRequest{
+		ID: id, Host: remote.Host, Identity: remote.Identity, KnownHosts: remote.KnownHosts,
+		User: m.Config.User, Password: m.Config.Password, PrimaryPort: m.Config.Port,
+		Architecture: expected, RequiredBytes: required, Connections: connections,
+		Workers: workers, Prepared: prepared, Locks: locks, Senders: senders,
+	}
+	if major != 16 {
+		return "incompatible", errors.New("PostgreSQL 16 replica required")
+	}
+	if e = request.ValidatePolicy(); e != nil {
+		return "error", e
+	}
+	if e = m.Configurer.ConfigureReplica(c, request); e != nil {
 		m.record(c, id, "error", available, required, "bootstrap_failed")
 		return "error", e
 	}
@@ -291,7 +225,6 @@ func (m *Manager) Check(ctx context.Context, id string, remote install.Remote) e
 		m.record(ctx, id, "error", 0, 0, "heartbeat_database_invalid")
 		return errors.New("heartbeat database not configured")
 	}
-	m.startTunnel(id, remote)
 	output, e := remote.Run(ctx, fmt.Sprintf(`set -eu
 if [ ! -f /var/lib/ultra-postgres-replica/data/PG_VERSION ]; then echo not_configured; exit 0; fi
 free=$(df -Pk /var/lib | awk 'NR==2 {print $4}')

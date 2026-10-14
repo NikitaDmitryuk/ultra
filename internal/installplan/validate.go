@@ -17,6 +17,9 @@ func ValidatePlan(p *InstallPlan) error {
 	if p.SchemaVersion == 0 {
 		p.SchemaVersion = CurrentSchemaVersion
 	}
+	if p.AdoptRuntime && (!p.FullAutomation() || !p.Bridge.ReuseSpec) {
+		return errors.New("runtime adoption requires schema 2 and an existing bridge")
+	}
 	if p.SchemaVersion != 1 && p.SchemaVersion != CurrentSchemaVersion {
 		return fmt.Errorf("unsupported install plan schema_version %d", p.SchemaVersion)
 	}

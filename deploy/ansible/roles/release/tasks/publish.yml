@@ -1,0 +1,108 @@
+---
+- name: Require exact source and previous manifest identities
+  ansible.builtin.assert:
+    that:
+      - ultra_previous_manifest_sha256 is match('^[a-f0-9]{64}$')
+      - ultra_release_manifest_sha256 is match('^[a-f0-9]{64}$')
+- name: Inspect the active manifest
+  ansible.builtin.stat:
+    path: /opt/ultra-recovery/release-manifest.json
+    checksum_algorithm: sha256
+    follow: false
+  register: release_publish_current
+- name: Inspect the immutable manifest fallback
+  ansible.builtin.stat:
+    path: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/manifest.previous"
+    checksum_algorithm: sha256
+    follow: false
+  register: release_publish_fallback
+- name: Require the current target or exact adopted identity and intact fallback
+  ansible.builtin.assert:
+    that:
+      - release_publish_current.stat.isreg | default(false)
+      - not release_publish_current.stat.islnk | default(false)
+      - release_publish_current.stat.checksum in [ultra_previous_manifest_sha256, ultra_release_manifest_sha256]
+      - not release_publish_fallback.stat.exists or release_publish_fallback.stat.checksum == ultra_previous_manifest_sha256
+      - release_publish_current.stat.checksum == ultra_previous_manifest_sha256 or release_publish_fallback.stat.exists
+- name: Preserve the exact previous manifest only once
+  ansible.builtin.copy:
+    src: /opt/ultra-recovery/release-manifest.json
+    dest: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/manifest.previous"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+    force: false
+  when: release_publish_current.stat.checksum == ultra_previous_manifest_sha256
+- name: Inspect an existing adopted signature
+  ansible.builtin.stat:
+    path: /opt/ultra-recovery/release-manifest.json.minisig
+    follow: false
+  register: release_publish_previous_signature
+  when: release_publish_current.stat.checksum == ultra_previous_manifest_sha256
+- name: Preserve an adopted original signature
+  ansible.builtin.copy:
+    src: /opt/ultra-recovery/release-manifest.json.minisig
+    dest: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/manifest.previous.minisig"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+    force: false
+  when:
+    - release_publish_current.stat.checksum == ultra_previous_manifest_sha256
+    - release_publish_previous_signature.stat.isreg | default(false)
+    - not release_publish_previous_signature.stat.islnk | default(false)
+- name: Publish the exact target manifest before creating its recovery generation
+  ansible.builtin.copy:
+    src: "{{ ultra_release_source }}/release-manifest.json"
+    dest: /opt/ultra-recovery/release-manifest.json
+    owner: root
+    group: root
+    mode: "0600"
+- name: Inspect the exact original target signature
+  ansible.builtin.stat:
+    path: "{{ ultra_release_source }}/release-manifest.json.minisig"
+  register: release_publish_signature
+  delegate_to: localhost
+  become: false
+- name: Retain the exact signed target bytes
+  ansible.builtin.copy:
+    src: "{{ ultra_release_source }}/release-manifest.json.minisig"
+    dest: /opt/ultra-recovery/release-manifest.json.minisig
+    owner: root
+    group: root
+    mode: "0600"
+  when: release_publish_signature.stat.isreg | default(false)
+- name: Remove an obsolete signature for an unsigned target
+  ansible.builtin.file:
+    path: /opt/ultra-recovery/release-manifest.json.minisig
+    state: absent
+  when: not release_publish_signature.stat.exists
+- name: Inspect signed artifact files to include in the next backup
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: [/opt/ultra-recovery/release-manifest.json.minisig, /usr/local/libexec/ultra-emergency-manifest.json.minisig]
+  register: release_publish_backup_signatures
+- name: Read the existing private backup policy
+  ansible.builtin.slurp:
+    src: /etc/ultra-recovery/backup.json
+  register: release_publish_backup_policy
+  no_log: true
+- name: Preserve present original signatures in recovery generations
+  ansible.builtin.copy:
+    content: >-
+      {{ release_publish_backup_policy.content | b64decode | from_json |
+      combine({'state_paths': (((release_publish_backup_policy.content | b64decode | from_json).state_paths | default([])) +
+      ['/var/lib/ultra-ansible/channel', '/var/lib/ultra-ansible/retention']) | unique | sort,
+      'artifact_paths': (((release_publish_backup_policy.content | b64decode | from_json).artifact_paths |
+      reject('equalto', '/opt/ultra-recovery/release-manifest.json.minisig') |
+      reject('equalto', '/usr/local/libexec/ultra-emergency-manifest.json.minisig') | list) +
+      (release_publish_backup_signatures.results | selectattr('stat.isreg', 'defined') | selectattr('stat.isreg') |
+      map(attribute='item') | list)) | unique | sort}) | to_nice_json(preprocess_unsafe=False) }}
+    dest: /etc/ultra-recovery/backup.json
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false

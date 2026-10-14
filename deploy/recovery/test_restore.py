@@ -23,19 +23,108 @@ class RestoreContracts(unittest.TestCase):
         self.root = Path(self.temp.name)
     def tearDown(self):
         self.temp.cleanup()
+    def test_seed_retirement_resumes_after_crash_and_rejects_foreign_marker(self):
+        directory=self.root/'replica';retired=self.root/'retired';directory.mkdir();retired.mkdir()
+        seed=directory/'seed';seed.mkdir();(seed/'payload').write_text('owned old seed')
+        for name in ('seed-owned-by-ultra','seed-complete'):
+            path=directory/name;path.write_text('ultra_'+'b'*32+'\n');path.chmod(0o600)
+        rename=Path.rename;count=0
+        def crash(path,target):
+            nonlocal count
+            count+=1
+            if count==2:raise OSError('simulated interrupted marker retirement')
+            return rename(path,target)
+        with mock.patch.object(Path,'rename',crash):
+            with self.assertRaises(OSError):peer.retire_seed_state(directory,retired)
+        peer.retire_seed_state(directory,retired)
+        self.assertEqual((retired/'seed/payload').read_text(),'owned old seed')
+        self.assertFalse((directory/'seed-complete').exists())
+        (directory/'seed-complete').write_text('foreign')
+        with self.assertRaisesRegex(ValueError,'foreign_replica_seed_marker'):
+            peer.retire_seed_state(directory,retired)
+        self.assertEqual((directory/'seed-complete').read_text(),'foreign')
+
+    def test_clean_operator_runtime_uses_authenticated_wheels_and_explicit_executor(self):
+        import restore_ansible as adapter
+        import tarfile
+        stage=self.root/'stage';deployment=stage/'state/etc/ultra-recovery/deployment.json'
+        deployment.parent.mkdir(parents=True);deployment.write_text(json.dumps({'controller_directory':'/opt/ultra-ansible/releases/v1.0.0'}))
+        prefix='opt/ultra-ansible/releases/v1.0.0/runtime/'
+        files={}
+        for name,payload in [('requirements.lock',b'locked requirements'),('wheels/pip-25.3-py3-none-any.whl',b'synthetic wheel')]:
+            path=stage/'artifacts'/prefix/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(payload)
+            files[prefix+name]={'sha256':common.sha(path),'bytes':len(payload)}
+        config={}
+        with mock.patch.object(common,'stage_manifests',return_value=({}, {'files':files})), mock.patch.object(adapter.subprocess,'run',return_value=subprocess.CompletedProcess([],0,b'{"executable":"/private/runtime/venv/bin/ansible-playbook"}')) as execute:
+            executable=adapter.prepare_runtime(config,self.root)
+            command=execute.call_args.args[0]
+            self.assertIn('prepare-recovery-runtime',command)
+            self.assertIn('--runtime-archive',command)
+            archive=self.root/'operator-runtime.tar.gz';first=archive.read_bytes()
+            with tarfile.open(archive) as content:self.assertEqual(content.getnames(),['requirements.lock','wheels/pip-25.3-py3-none-any.whl'])
+            adapter.prepare_runtime(config,self.root);self.assertEqual(archive.read_bytes(),first)
+            self.assertEqual(adapter.runtime_arguments(config),['--executable',executable])
+            (stage/'artifacts'/prefix/'requirements.lock').write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError,'authenticated_offline_runtime_changed'):
+                adapter.prepare_runtime({},self.root)
+        with self.assertRaisesRegex(ValueError,'offline_recovery_runtime_not_prepared'):adapter.runtime_arguments({})
+
+    def test_preserved_address_requires_distinct_machine_and_bound_fence(self):
+        config=json.loads(Path(__file__).with_name('restore.example.json').read_text())
+        config['new_bridge_address']=config['old_bridge_address']
+        with self.assertRaisesRegex(ValueError,'new_bridge_address_must_differ'):
+            common.configuration(config)
+        identity={'source_machine_id':'a'*32,'target_machine_id':'b'*32,
+                  'source_ssh_endpoint':'root@192.0.2.10','target_ssh_endpoint':config['target']['host']}
+        config['migration_identity']=identity
+        checked=common.configuration(config)
+        proof={'source':'bridge','confirmed_offline':True,'confirmed_at':100,
+               'source_address':config['old_bridge_address'],'target_host':config['target']['host'],
+               'migration_identity':identity}
+        common.fence(proof,'bridge',config['target']['host'],config['old_bridge_address'],now=120,migration=identity)
+        with self.assertRaisesRegex(ValueError,'migration_identity_fence_mismatch'):
+            common.fence(dict(proof,migration_identity={}), 'bridge',config['target']['host'],config['old_bridge_address'],now=120,migration=identity)
+        with self.assertRaisesRegex(ValueError,'distinct_migration_machines_required'):
+            common.migration_identity(dict(identity,target_machine_id=identity['source_machine_id']))
+        before=common.plan_id(checked,'c'*64)
+        checked['migration_identity']=dict(identity,target_machine_id='d'*32)
+        self.assertNotEqual(before,common.plan_id(checked,'c'*64))
+
+    def test_peer_projection_is_pure_and_checks_authenticated_credentials(self):
+        import restore_ansible as adapter
+        identity=self.root/'stage/state/etc/ultra-recovery/key'
+        identity.parent.mkdir(parents=True);identity.write_bytes(b'synthetic key')
+        pins=identity.with_name('pins');pins.write_bytes(b'synthetic pins')
+        manifest={'files':{'state/etc/ultra-recovery/key':{'sha256':common.sha(identity)},
+                           'state/etc/ultra-recovery/pins':{'sha256':common.sha(pins)}}}
+        nodes=[{'identity':'/etc/ultra-recovery/key','known_hosts':'/etc/ultra-recovery/pins',
+                'address':'198.18.0.12','plan':{'action':'reseed'}}]
+        with mock.patch.object(common,'stage_manifests',return_value=(manifest,{})), mock.patch.object(adapter.subprocess,'run') as execute:
+            values=adapter.project_peer_inputs({'isolated_peer_addresses':['198.18.0.12']},self.root,nodes)
+            self.assertEqual(values[0]['variables']['ultra_peer_plan']['action'],'reseed')
+            execute.assert_not_called()
+            with self.assertRaisesRegex(ValueError,'isolated_restore_production_peer_forbidden'):
+                adapter.project_peer_inputs({'isolated_peer_addresses':[]},self.root,nodes)
+            identity.write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError,'restored_peer_credential_changed'):
+                adapter.project_peer_inputs({},self.root,nodes)
+
     def test_activate_reloads_nginx_after_start_and_on_completed_resume(self):
         target=host.Host(self.root, {'restore_id':'a'*64, 'fence':{}, 'target_host':'fixture', 'old_bridge_address':'192.0.2.1'})
         with mock.patch.object(host, 'stage_manifests', return_value=({}, {})), mock.patch.object(host, 'restore_certbot_lineages'), mock.patch.object(host, 'restore_units'), mock.patch.object(target, 'override'), mock.patch.object(target, 'wait_runtime'), mock.patch.object(host, 'AUTOMATION_UNITS', ()), mock.patch.object(host, 'run') as run:
             target.activate()
             calls=[x.args[0] for x in run.call_args_list]
-            self.assertLess(calls.index(['nginx','-t']), calls.index(['systemctl','reload','nginx.service']))
-            self.assertLess(calls.index(['systemctl','enable','--now','ultra-bot.service','nginx.service']), calls.index(['systemctl','reload','nginx.service']))
+            self.assertIn(['nginx','-t'],calls)
+            self.assertFalse(any(call[0]=='systemctl' for call in calls))
+            services=(Path(__file__).parents[1]/'ansible/roles/restore/tasks/services.yml').read_text()
+            self.assertLess(services.index('Start restored relay first'),services.index('Start restored bot and HTTPS'))
+            self.assertLess(services.index('Start restored bot and HTTPS'),services.index('Reload restored HTTPS configuration'))
         target.status['completed']=list(common.PHASES[:common.PHASES.index('activate')+1])
         with mock.patch.object(host, 'fence'), mock.patch.object(target, 'verify_resume') as verify, mock.patch.object(target, 'activate') as activate, mock.patch.object(host, 'run') as run:
             target.phase('activate'); target.phase('activate')
             self.assertEqual(verify.call_count, 2)
             activate.assert_not_called()
-            self.assertEqual([x.args[0] for x in run.call_args_list], [['nginx','-t'], ['systemctl','reload','nginx.service']]*2)
+            self.assertEqual([x.args[0] for x in run.call_args_list], [['nginx','-t']]*2)
 
     def test_original_artifact_ciphertext_is_preserved_for_receiver_and_resume(self):
         import io
@@ -254,13 +343,15 @@ class RestoreContracts(unittest.TestCase):
         self.assertEqual(changed['users'],[{'uuid':'stable-user'}]);self.assertEqual(changed['exits'],[{'address':'192.0.2.1'}])
         self.assertEqual(changed['public_entries'][1]['host'],'nl.example')
     def test_managed_firewall_admission_precedes_peer_ssh(self):
-        target=host.Host(self.root,{'restore_id':'a'*64,'old_bridge_address':'192.0.2.1','new_bridge_address':'192.0.2.2'})
+        target=host.Host(self.root,{'restore_id':'a'*64,'old_bridge_address':'192.0.2.1','new_bridge_address':'192.0.2.2','fence':{},'target_host':'root@192.0.2.2'})
         target.status['system_identifier']='123';target.status['database_name']='fixture'
         module=mock.Mock();calls=[]
         module.ensure_provider_peer_rule.side_effect=lambda *args,**kwargs:calls.append('firewall')
         module.execute.side_effect=lambda *args,**kwargs:calls.append('ssh')
-        with mock.patch.object(target,'nodes',return_value=(module,{},[{'id':'node','address':'192.0.2.3'}])),mock.patch.object(host,'sql',return_value='[8443]'):target.peer_reseed()
-        self.assertEqual(calls,['firewall','firewall','ssh'])
+        with mock.patch.object(target,'nodes',return_value=(module,{'ssh_identity_file':'/etc/ultra-recovery/identity'},[{'id':'node','address':'192.0.2.3','known_hosts':'/etc/ultra-recovery/pins'}])),mock.patch.object(host,'sql',return_value='[8443]'):target.peer_reseed()
+        self.assertEqual(calls,['firewall','firewall'])
+        module.execute.assert_not_called()
+        self.assertEqual(target.status['reseed_nodes'][0]['plan']['tunnel_port'],8443)
     def test_certificate_inventory_uses_only_explicit_file_fields(self):
         value={'public_xhttp_tls':{'cert_file':'/etc/letsencrypt/live/vpn/fullchain.pem','key_file':'/etc/letsencrypt/live/vpn/privkey.pem'},'reality':{'private_key':'opaque-secret'},'other':{'key_file':'not-a-path'}}
         self.assertEqual(host.certificate_files(value),['/etc/letsencrypt/live/vpn/fullchain.pem','/etc/letsencrypt/live/vpn/privkey.pem'])
@@ -274,20 +365,25 @@ class RestoreContracts(unittest.TestCase):
         env=self.root/'etc/ultra-relay/env';env.parent.mkdir();env.write_text('A="file override"\n')
         user,values=host.unit_environment('ultra-relay.service',self.root)
         self.assertEqual(user,'ultra-relay');self.assertEqual(values,{'A':'file override','B':'two'})
-    def test_ingress_failure_rolls_back_both_owned_files(self):
+    def test_forward_preparation_preserves_owned_files_until_role_activation(self):
         nginx=self.root/'etc/nginx';nginx.mkdir(parents=True)
-        original=peer.configurations('192.0.2.1','vpn.example.org')
+        original=peer.configurations('192.0.2.1','access.example.org')
         for name,data in original.items():
             path=nginx/name;path.parent.mkdir(exist_ok=True);path.write_bytes(data)
-        calls=[]
-        def runner(args):
-            calls.append(args)
-            if len(calls)==1:raise ValueError('bad nginx')
-            return ''
-        plan={'restore_id':'a'*64,'old_bridge_address':'192.0.2.1','new_bridge_address':'192.0.2.2','subscription_domain':'vpn.example.org'}
-        with self.assertRaisesRegex(ValueError,'previous_restored'):peer.forward(plan,self.root,runner)
+        plan={'restore_id':'a'*64,'old_bridge_address':'192.0.2.1','new_bridge_address':'192.0.2.2','subscription_domain':'access.example.org'}
+        peer.prepare_forward(plan,self.root)
         for name,data in original.items():self.assertEqual((nginx/name).read_bytes(),data)
-        self.assertEqual(calls[-1],['systemctl','reload','nginx'])
+        with self.assertRaisesRegex(ValueError,'activation_not_confirmed'):peer.commit_forward(plan,self.root)
+        desired=peer.configurations('192.0.2.2','access.example.org')
+        for name,data in desired.items():(nginx/name).write_bytes(data)
+        self.assertTrue(peer.commit_forward(plan,self.root)['ingress_ready'])
+        self.assertTrue(peer.commit_forward(plan,self.root)['ingress_ready'])
+        role=(Path(__file__).parents[1]/'ansible/roles/restore_peer/tasks/forward.yml').read_text()
+        self.assertIn('rescue:',role)
+        self.assertIn('Reactivate previous HTTPS forward configuration',role)
+        (nginx/'conf.d/acme-proxy.conf').write_text('foreign')
+        with self.assertRaisesRegex(ValueError,'foreign_ingress'):peer.prepare_forward(plan,self.root)
+
     def test_forward_pid_must_be_old_primary_owned_ssh(self):
         listeners='LISTEN 0 128 127.0.0.1:15432 0.0.0.0:* users:(("sshd",pid=456,fd=5))'
         connections='ESTAB 0 0 198.51.100.1:22 192.0.2.1:40100 users:(("sshd",pid=456,fd=4))'
@@ -296,6 +392,8 @@ class RestoreContracts(unittest.TestCase):
     def test_reseed_preserves_managed_pg16_data_and_is_idempotent(self):
         directory=self.root/'var/lib/ultra-postgres-replica';data=directory/'data';data.mkdir(parents=True)
         (directory/'managed-by-ultra').write_text('managed');(data/'standby.signal').touch();(data/'PG_VERSION').write_text('16');(data/'original').write_text('sentinel')
+        for name in ('seed-owned-by-ultra','seed-complete'):
+            (directory/name).write_text('ultra_'+'b'*32+'\n');(directory/name).chmod(0o600)
         plan={'restore_id':'a'*64,'system_identifier':'456','old_bridge_address':'192.0.2.1'}
         calls=[]
         def runner(args):
@@ -303,7 +401,18 @@ class RestoreContracts(unittest.TestCase):
             return 'Database system identifier: 123\n' if 'pg_controldata' in args[0] else ''
         self.assertTrue(peer.reseed(plan,self.root,runner)['previous_data_preserved'])
         self.assertFalse(data.exists());self.assertEqual((directory/('retired-'+'a'*16)/'data/original').read_text(),'sentinel')
+        self.assertFalse((directory/'seed-complete').exists())
+        self.assertTrue((directory/('retired-'+'a'*16)/'seed-complete').is_file())
         count=len(calls);self.assertTrue(peer.reseed(plan,self.root,runner)['resumed']);self.assertEqual(count,len(calls))
+    def test_isolated_restore_rejects_production_peer_before_launch(self):
+        import restore_ansible
+        config={'isolated_peer_addresses':['198.18.0.21']}
+        endpoint={'host':'root@203.0.113.21','identity':'/private/key','known_hosts':'/private/pins'}
+        with mock.patch.object(restore_ansible.subprocess,'run') as run:
+            with self.assertRaisesRegex(ValueError,'production_peer_forbidden'):
+                restore_ansible.peer(config,self.root,endpoint,{'action':'reseed'})
+            run.assert_not_called()
+
     def test_fresh_ingress_ack_required_before_automation(self):
         plan={'restore_id':'a'*64,'target_host':'target','old_bridge_address':'192.0.2.1', 'fence':{'source':'bridge','confirmed_offline':True,'confirmed_at':time.time(),'target_host':'target','source_address':'192.0.2.1'}}
         target=host.Host(self.root,plan)
@@ -315,10 +424,13 @@ class RestoreContracts(unittest.TestCase):
     def test_readiness_waits_for_first_receipts(self):
         target=host.Host(self.root,{'restore_id':'a'*64,'readiness_timeout':30})
         target.status['database_name']='fixture'
-        backup={'snapshot_at':time.time()};controller={'state':'ready','independent':True,'updated_at':time.time()}
-        with mock.patch.object(target,'wait_runtime'),mock.patch.object(host.time,'sleep') as sleep,mock.patch.object(Path,'read_text',side_effect=[FileNotFoundError(),json.dumps(backup),json.dumps(controller)]),mock.patch.object(host,'sql',return_value='[{"state":"streaming","age":1}]'):
+        backup={'snapshot_at':time.time(),'source':'bridge','backup_name':'synthetic.age','backup_sha256':'a'*64,'artifact_sha256':'b'*64,'delivered_target_ids':['independent']};controller={'state':'ready','independent':True,'updated_at':time.time(),'primary':'independent'}
+        config={'bridge_provider':'source','state_dir':'/fixture'};state={'primary':'independent','updated_at':time.time(),'node_metadata':[{'id':'independent','provider':'other'}]}
+        with mock.patch.object(target,'wait_runtime'),mock.patch.object(host.time,'sleep') as sleep,mock.patch.object(Path,'read_text',side_effect=[FileNotFoundError(),json.dumps(backup),json.dumps(controller),json.dumps(config),json.dumps(state)]),mock.patch.object(host,'sql',return_value='[{"state":"streaming","age":1}]'):
+            with self.assertRaisesRegex(ValueError,'readiness_timeout'):
+                target.ready()
             target.ready()
-        sleep.assert_called_once();self.assertEqual(target.status['replicas_ready'],1)
+        sleep.assert_not_called();self.assertEqual(target.status['replicas_ready'],1)
 
 
 @unittest.skipUnless(shutil.which('age-keygen'), 'age tools required')
@@ -362,3 +474,96 @@ class KeyLifecycle(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'independently_extracted'):recovery_key.verify_copy(root/'missing',identity,alias,root/'receipt')
 
 if __name__=='__main__':unittest.main()
+
+
+class BackendDNSRestoreContracts(unittest.TestCase):
+    def setUp(self):
+        import dns
+        self.dns = dns
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.policy = {'config': {'zone': 'example.com', 'ttl': 300}, 'desired': {
+            'subscription': {'name': 'sync', 'data': '192.0.2.1'},
+            'vpn': {'name': 'edge', 'data': '192.0.2.1'},
+            'backend': {'name': 'core', 'data': '192.0.2.1'}}}
+        self.receipt = {'version': 1, 'zone': 'example.com', 'records': {
+            role: dict(value, type='A', ttl=300, id=role) for role, value in self.policy['desired'].items()}}
+        self.policy_path = self.root / 'dns.json'
+        self.receipt_path = self.root / 'dns-receipt.json'
+        self.policy_path.write_text(json.dumps(self.policy))
+        self.receipt_path.write_text(json.dumps(self.receipt))
+        self.plan = {'restore_id': 'r', 'ingress_mode': 'direct', 'target_host': 'replacement',
+            'old_bridge_address': '192.0.2.1', 'new_bridge_address': '192.0.2.2',
+            'public_host': 'edge.example.com', 'subscription_domain': 'sync.example.com',
+            'fence': {'source': 'bridge', 'source_address': '192.0.2.1', 'target_host': 'replacement',
+                'confirmed_offline': True, 'confirmed_at': int(time.time())}}
+        self.target = host.Host(self.root, self.plan)
+        self.patches = [
+            mock.patch.object(dns, 'private', side_effect=lambda path: self.receipt_path if str(path).endswith('dns-receipt.json') else self.policy_path),
+            mock.patch.object(host, 'unit_environment', return_value=('root', {'ULTRA_BOT_DOMAIN': 'core.example.com', 'ULTRA_BOT_PORT': '8444'})),
+            mock.patch.object(host.socket, 'create_connection'),
+            mock.patch.object(host.ssl, 'create_default_context'),
+            mock.patch.object(host, 'run'), mock.patch.object(dns, 'execute'),
+            mock.patch.object(dns, 'wait_ready'), mock.patch.object(dns, 'save')]
+        self.private, self.environment, self.connection, self.context, self.command, self.execute, self.wait, self.save = [patcher.start() for patcher in self.patches]
+        for patcher in self.patches: self.addCleanup(patcher.stop)
+
+    def test_backend_owned_record_moves_with_public_pair_without_public_backend_listener(self):
+        self.target.direct_ingress()
+        desired = self.execute.call_args.args[1]
+        self.assertEqual(set(desired), {'subscription', 'vpn', 'backend'})
+        self.assertEqual({row['data'] for row in desired.values()}, {'192.0.2.2'})
+        self.assertEqual(desired['backend']['name'], 'core')
+        addresses = [call.args[0] for call in self.connection.call_args_list]
+        self.assertNotIn(('core.example.com', 443), addresses)
+        self.assertEqual(addresses.count(('127.0.0.1', 8444)), 2)
+        self.save.assert_called_once()
+
+    def test_backend_missing_from_legacy_policy_is_recovered_from_owned_receipt(self):
+        del self.policy['desired']['backend']
+        self.policy_path.write_text(json.dumps(self.policy))
+        self.target.direct_ingress()
+        self.assertEqual(self.execute.call_args.args[1]['backend'], {'name': 'core', 'data': '192.0.2.2'})
+
+    def test_backend_cutover_resume_reuses_replacement_intent_after_dns_wait_failure(self):
+        self.wait.side_effect = ValueError('dns_convergence_timeout')
+        with self.assertRaises(ValueError): self.target.direct_ingress()
+        self.save.assert_not_called()
+        self.wait.side_effect = None
+        self.target.direct_ingress()
+        self.assertEqual(self.execute.call_count, 2)
+        for call in self.execute.call_args_list:
+            self.assertEqual(call.args[1]['backend'], {'name': 'core', 'data': '192.0.2.2'})
+        self.save.assert_called_once()
+
+    def test_backend_tls_failure_blocks_all_dns_publication(self):
+        def connection(address, **kwargs):
+            if address == ('127.0.0.1', 8444):
+                raise OSError('synthetic backend TLS failure')
+            return mock.MagicMock()
+        self.connection.side_effect = connection
+        with self.assertRaises(OSError): self.target.direct_ingress()
+        self.execute.assert_not_called()
+        self.save.assert_not_called()
+
+    def test_backend_environment_and_owned_receipt_are_validated_independently(self):
+        self.environment.return_value = ('root', {'ULTRA_BOT_DOMAIN': 'invalid/name', 'ULTRA_BOT_PORT': '8444'})
+        with self.assertRaisesRegex(ValueError, 'backend'): self.target.direct_ingress()
+        self.execute.assert_not_called()
+        self.environment.return_value = ('root', {'ULTRA_BOT_DOMAIN': 'core.example.com', 'ULTRA_BOT_PORT': '8444'})
+        self.receipt['records']['backend']['name'] = 'foreign'
+        self.receipt_path.write_text(json.dumps(self.receipt))
+        with self.assertRaisesRegex(ValueError, 'backend'): self.target.direct_ingress()
+        self.execute.assert_not_called()
+
+    def test_rolled_back_backend_record_moves_while_active_bot_uses_old_certificate(self):
+        self.environment.return_value = ('root', {'ULTRA_BOT_DOMAIN': 'old.example.com', 'ULTRA_BOT_PORT': '8445'})
+        self.target.direct_ingress()
+        self.assertEqual(self.execute.call_args.args[1]['backend'], {'name': 'core', 'data': '192.0.2.2'})
+        addresses = [call.args[0] for call in self.connection.call_args_list]
+        self.assertEqual(addresses.count(('127.0.0.1', 8445)), 2)
+        self.assertNotIn(('core.example.com', 443), addresses)
+        names = [call.kwargs['server_hostname'] for call in self.context.return_value.wrap_socket.call_args_list]
+        self.assertEqual(names.count('old.example.com'), 2)
+        self.assertNotIn('core.example.com', names)

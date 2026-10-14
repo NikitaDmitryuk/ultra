@@ -1,0 +1,73 @@
+---
+- name: Inspect existing TLS dependencies
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /usr/bin/openssl
+    - /etc/ssl/certs/ca-certificates.crt
+  register: host_tls_dependencies
+- name: Ensure exit TLS dependencies
+  ansible.builtin.apt:
+    name: [openssl, ca-certificates]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: host_tls_dependencies.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
+- name: Ensure the relay service account
+  ansible.builtin.user:
+    name: ultra-relay
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+- name: Ensure private relay directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: ultra-relay
+    group: ultra-relay
+    mode: "0700"
+  loop:
+    - /etc/ultra-relay
+    - /var/lib/ultra-relay
+- name: Configure bootstrap host defaults
+  when: ultra_host_bootstrap | default(false) | bool
+  block:
+    - name: Install bootstrap dependencies
+      ansible.builtin.apt:
+        name: [locales, curl, python3, age, openssh-client]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+    - name: Set UTC system timezone
+      ansible.builtin.file:
+        src: /usr/share/zoneinfo/UTC
+        dest: /etc/localtime
+        state: link
+        force: true
+    - name: Set UTC timezone name
+      ansible.builtin.copy:
+        content: "UTC\n"
+        dest: /etc/timezone
+        mode: "0644"
+    - name: Enable UTF-8 locale
+      ansible.builtin.lineinfile:
+        path: /etc/locale.gen
+        regexp: '^#?\s*en_US.UTF-8 UTF-8'
+        line: en_US.UTF-8 UTF-8
+      notify: Generate selected locale
+    - name: Set default UTF-8 locale
+      ansible.builtin.copy:
+        content: "LANG=en_US.UTF-8\nLC_ALL=en_US.UTF-8\nLANGUAGE=en_US:en\n"
+        dest: /etc/default/locale
+        mode: "0644"
+    - name: Ensure journal drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/journald.conf.d
+        state: directory
+        mode: "0755"
+    - name: Bound retained system journal
+      ansible.builtin.copy:
+        content: "[Journal]\nSystemMaxUse=100M\nRuntimeMaxUse=50M\n"
+        dest: /etc/systemd/journald.conf.d/ultra.conf
+        mode: "0644"
+      notify: Reload system journal

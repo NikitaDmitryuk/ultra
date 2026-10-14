@@ -1,0 +1,11 @@
+---
+- name: Configure a pinned exit
+  hosts: exits
+  gather_facts: false
+  any_errors_fatal: true
+  serial: 1
+  roles:
+    - host
+    - role: warp
+      when: ultra_warp_enabled | default(false) | bool
+    - relay

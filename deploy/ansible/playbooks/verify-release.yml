@@ -1,0 +1,24 @@
+---
+- name: Verify post-activation recovery evidence without waiting under the mutation lock
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Read fresh backup replica and controller evidence
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/../roles/release/files/state.py --expected {{ ultra_topology_sha256 }} --not-before {{ ultra_upgrade_observed_at }}"
+        executable: /usr/bin/python3
+      changed_when: false
+      no_log: true
+    - name: Require bridge readiness after rollout
+      ansible.builtin.command:
+        argv: ["{{ ultra_release_probe_executable }}", release-probe]
+      changed_when: false
+      no_log: true
+    - name: Save the final verified rollout result
+      ansible.builtin.copy:
+        content: "{{ {'verified': true, 'version': ultra_release_version} | to_json(preprocess_unsafe=False) }}\n"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false

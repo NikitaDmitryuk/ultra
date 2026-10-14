@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import urllib.request
 
 from recovery import atomic_json, private, restore
+import restore_ansible
 from restore_common import configuration, fence, plan_id, read_private, sha, stage_manifests, safe_error_code, SAFE_ERROR_CODES
 
 
@@ -45,7 +46,7 @@ def remote(endpoint, arguments, data, timeout=1900):
 
 
 def current_fence(config):
-    return fence(read_private(config['fence_file']), 'bridge', config['target']['host'], config['old_bridge_address'])
+    return fence(read_private(config['fence_file']), 'bridge', config['target']['host'], config['old_bridge_address'], migration=config.get('migration_identity'))
 
 
 def seed_original_artifact(config, state, destination):
@@ -143,6 +144,8 @@ def _execute(config, diagnostic):
         started_at = int(time.time())
         diagnostic.stage = 'decrypt'
         state, artifacts, archive = stage_generation(config, directory)
+        diagnostic.stage = 'operator_runtime'
+        restore_ansible.prepare_runtime(config,directory)
         destination = '/var/lib/ultra-restore/' + run_id
         plan = {key: config[key] for key in ('old_bridge_address', 'new_bridge_address', 'public_host', 'subscription_domain', 'new_bridge_provider')}
         plan['ingress_mode'] = config['ingress_mode']
@@ -150,22 +153,9 @@ def _execute(config, diagnostic):
         if binary[:4] != b'\x7fELF' or binary[5] != 1 or int.from_bytes(binary[18:20], 'little') not in (62, 183):
             raise ValueError('supported_linux_release_required')
         architecture = {62: 'x86_64', 183: 'aarch64'}[int.from_bytes(binary[18:20], 'little')]
+        if config.get('migration_identity') is not None:
+            plan['migration_identity'] = config['migration_identity']
         plan.update(architecture=architecture, restore_id=run_id, target_host=config['target']['host'], readiness_timeout=config.get('readiness_timeout', 900), stage_sha256=sha(archive))
-        files = {name: Path(__file__).with_name(name).read_text() for name in ('restore_host.py', 'restore_common.py', 'restore_peer.py', 'recovery.py', 'dns.py')}
-        # Only code is staged before prepare. The private age identity stays local.
-        bootstrap = '''import json,os,pathlib,sys
-v=json.load(sys.stdin); os.umask(0o077); p=pathlib.Path(v['directory'])
-for x in (p,*p.parents):
- if x.is_symlink(): raise ValueError('symlink')
-p.mkdir(parents=True,exist_ok=True,mode=0o700)
-for name,source in v['files'].items():
- q=p/name
- if q.is_symlink(): raise ValueError('symlink')
- q.write_text(source); q.chmod(0o600)
-'''
-        current_fence(config)
-        diagnostic.stage = 'bootstrap'
-        remote(config['target'], ['python3', '-c', bootstrap], json.dumps({'directory': destination, 'files': files}).encode())
         receipt = {'restore_id': run_id, 'snapshot_at': state['snapshot_at'], 'completed': [], 'started_at': started_at}
         receipt_path = directory / 'receipt.json'
         if receipt_path.exists():
@@ -175,36 +165,20 @@ for name,source in v['files'].items():
         def host(phase):
             diagnostic.stage = phase
             plan['fence'] = current_fence(config)
-            result = json.loads(remote(config['target'], ['python3', destination + '/restore_host.py', '--directory', destination, '--phase', phase], json.dumps(plan).encode()))
-            receipt.update(result)
+            result = restore_ansible.phase(config, directory, plan, phase, archive)
+            if phase == 'peer_reseed':
+                restore_ansible.reseed_peers(config, directory, result.get('reseed_nodes', []))
+            receipt.update({key: value for key, value in result.items() if key != 'reseed_nodes'})
             atomic_json(receipt_path, receipt)
             print(json.dumps({'phase': phase, 'complete': True}), flush=True)
         host('prepare')
-        # SSH stdin carries bytes directly; no key material or plaintext appears in argv.
-        uploader = '''import hashlib,os,pathlib,sys
-p=pathlib.Path(sys.argv[1]); wanted=sys.argv[2]
-if p.is_symlink(): raise ValueError('symlink')
-q=p.with_suffix('.pending'); fd=os.open(q,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600); h=hashlib.sha256()
-with os.fdopen(fd,'wb') as f:
- while True:
-  b=sys.stdin.buffer.read(1048576)
-  if not b: break
-  h.update(b); f.write(b)
- f.flush(); os.fsync(f.fileno())
-if h.hexdigest()!=wanted: raise ValueError('checksum')
-os.replace(q,p)
-'''
-        current_fence(config)
-        diagnostic.stage = 'upload'
-        remote(config['target'], ['python3', '-c', uploader, destination + '/stage.tar.gz', plan['stage_sha256']], archive.read_bytes())
         for phase in ('install', 'database', 'peer_reseed', 'activate'):
             host(phase)
         if config['ingress_mode'] == 'forward':
             plan['fence'] = current_fence(config)
             peer_plan = dict(plan, action='forward')
-            source = Path(__file__).with_name('restore_peer.py').read_text()
             diagnostic.stage = 'forward'
-            remote(config['ingress'], ['python3', '-c', 'import json,sys; payload=json.load(sys.stdin); exec(' + repr(source) + ')'], json.dumps(peer_plan).encode())
+            restore_ansible.peer(config, directory, config['ingress'], peer_plan)
         else:
             host('ingress')
         # Validate the unchanged public DNS/TLS path before automatic services start.
@@ -248,9 +222,12 @@ def check(config):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, help='Private JSON restore plan; see restore.example.json')
+    parser.add_argument('--release-dir',help='Optional complete verified release for operator offline dependencies')
     parser.add_argument('--check', action='store_true', help='Verify generation and pinned SSH prerequisites without installation')
     args = parser.parse_args()
-    result = (check if args.check else execute)(read_private(args.config))
+    config=read_private(args.config)
+    if args.release_dir:config['release_dir']=str(Path(args.release_dir).resolve())
+    result = (check if args.check else execute)(config)
     print(json.dumps(result, sort_keys=True))
 
 

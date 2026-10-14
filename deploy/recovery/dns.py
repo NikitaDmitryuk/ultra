@@ -115,7 +115,7 @@ class API:
                 if name == zone: name = ''
                 elif name.endswith('.' + zone): name = name[:-len(zone)-1]
                 # The API also returns relative multi-label names. Only our exact
-                # two role labels are managed; unrelated names remain untouched.
+                # role labels are managed; unrelated names remain untouched.
                 result.append(dict(row, name=name))
             next_url = page.get('meta', {}).get('links', {}).get('next')
             if not next_url:
@@ -167,7 +167,7 @@ def _execute(config, desired, receiptpath):
     ttl = config.get('ttl', 300)
     if config.get('provider') != 'vultr' or len(zone) > 253 or '.' not in zone or not all(LABEL.fullmatch(x) for x in zone.split('.')):
         fail('invalid_policy')
-    if type(ttl) is not int or not 120 <= ttl <= 86400 or set(desired) != {'subscription', 'vpn'}:
+    if type(ttl) is not int or not 120 <= ttl <= 86400 or set(desired) not in ({'subscription', 'vpn'}, {'subscription', 'vpn', 'backend'}):
         fail('invalid_policy')
     targets = {}
     for role, item in desired.items():
@@ -178,7 +178,7 @@ def _execute(config, desired, receiptpath):
         except (ValueError, KeyError):
             fail('invalid_address')
         targets[role] = {'type': 'A', 'name': item['name'], 'data': address, 'ttl': ttl}
-    if len({row['name'] for row in targets.values()}) != 2:
+    if len({row['name'] for row in targets.values()}) != len(targets):
         fail('duplicate_roles')
     path = Path(receiptpath)
     state = {'version': 1, 'zone': zone, 'records': {}}
@@ -189,6 +189,15 @@ def _execute(config, desired, receiptpath):
             fail('invalid_receipt')
         if not isinstance(state, dict) or state.get('version') != 1 or state.get('zone') != zone or not isinstance(state.get('records'), dict):
             fail('receipt_policy_mismatch')
+    # Public-only callers must retain an already-owned backend introduced by the
+    # bounded certificate migration. Absence from an older plan is not deletion.
+    if 'backend' in state['records'] and 'backend' not in targets:
+        owned_backend = state['records']['backend']
+        if not isinstance(owned_backend, dict) or set(owned_backend) != {'id', 'type', 'name', 'data', 'ttl'}:
+            fail('invalid_receipt')
+        targets['backend'] = {key: owned_backend[key] for key in ('type', 'name', 'data', 'ttl')}
+        if len({row['name'] for row in targets.values()}) != len(targets):
+            fail('duplicate_roles')
     if not set(state['records']) <= set(targets):
         fail('invalid_receipt')
     for row in state['records'].values():

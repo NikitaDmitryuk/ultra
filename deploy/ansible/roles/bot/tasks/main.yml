@@ -1,0 +1,87 @@
+---
+- name: Inspect existing bot service definition
+  ansible.builtin.stat:
+    path: /etc/systemd/system/ultra-bot.service
+    checksum_algorithm: sha256
+  register: bot_unit_current
+- name: Reject foreign or modified bot service definition before activation
+  ansible.builtin.assert:
+    that:
+      - not bot_unit_current.stat.exists or (not bot_unit_current.stat.islnk and bot_unit_current.stat.isreg)
+      - >-
+        not bot_unit_current.stat.exists or
+        bot_unit_current.stat.checksum == (lookup('template', 'ultra-bot.service.j2') | hash('sha256')) or
+        bot_unit_current.stat.checksum == (ultra_previous_bot_unit_sha256 | default(''))
+    fail_msg: bot_service_definition_requires_explicit_adoption
+- name: Verify pinned bot source
+  ansible.builtin.stat:
+    path: "{{ ultra_bot_source }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: bot_source
+- name: Require unchanged bot artifact
+  ansible.builtin.assert:
+    that:
+      - bot_source.stat.isreg | default(false)
+      - bot_source.stat.checksum == ultra_bot_sha256
+- name: Install bot binary
+  ansible.builtin.copy:
+    src: "{{ ultra_bot_source }}"
+    dest: /usr/local/bin/ultra-bot
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart ultra bot
+- name: Verify installed bot artifact checksum before service activation
+  ansible.builtin.stat:
+    path: /usr/local/bin/ultra-bot
+    checksum_algorithm: sha256
+  register: bot_installed_artifact
+- name: Require the pinned installed bot artifact
+  ansible.builtin.assert:
+    that:
+      - bot_installed_artifact.stat.checksum == ultra_bot_sha256
+- name: Install projected bot secrets
+  ansible.builtin.copy:
+    content: "{{ ultra_bot_environment }}"
+    dest: /etc/ultra-relay/bot.env
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+  notify: Restart ultra bot
+- name: Ensure private bot storage
+  ansible.builtin.file:
+    path: /var/lib/ultra-bot
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Install bot service
+  ansible.builtin.template:
+    src: ultra-bot.service.j2
+    dest: /etc/systemd/system/ultra-bot.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart ultra bot
+- name: Activate bot configuration
+  ansible.builtin.meta: flush_handlers
+- name: Ensure bot enabled and running
+  ansible.builtin.systemd_service:
+    name: ultra-bot.service
+    state: started
+    enabled: true
+    daemon_reload: true
+- name: Verify independent bot HTTPS liveness
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:{{ ultra_bot_port }}/healthz"
+    validate_certs: false
+    use_proxy: false
+    status_code: 200
+  register: bot_liveness
+  until: bot_liveness.status | default(0) == 200
+  retries: 15
+  delay: 2

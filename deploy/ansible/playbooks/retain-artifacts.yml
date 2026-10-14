@@ -1,0 +1,34 @@
+---
+- name: Bound verified source cache under the infrastructure lease
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Prove only earlier terminal standalone collector payloads
+      ultra_release_retention:
+        action: job-plan
+        auto_policy: "{{ ultra_retention_auto_policy }}"
+      register: collector_retention_plan
+    - name: Remove proven old collector bundles before checking application identity
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ collector_retention_plan.paths }}"
+    - name: Prove current emergency pending and live artifact references
+      ultra_release_retention:
+        action: source-plan
+        auto_policy: "{{ ultra_retention_auto_policy }}"
+        backup_policy: /etc/ultra-recovery/backup.json
+      register: artifact_retention_plan
+    - name: Remove only proven unreferenced immutable payloads
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ artifact_retention_plan.paths }}"
+    - name: Acknowledge safe artifact cleanup without changing release state
+      ansible.builtin.copy:
+        content: "{{ {'verified': true, 'retained_unknown': artifact_retention_plan.retained_unknown | length} | to_json(preprocess_unsafe=False) }}"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false

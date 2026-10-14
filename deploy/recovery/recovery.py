@@ -29,6 +29,12 @@ EXCLUDED_FILES = {
     Path('/var/lib/ultra-relay/recovery-reconcile-status.json'),
 }
 EXCLUDED_DIRECTORIES = {Path('/var/lib/ultra-relay/releases'), Path('/var/lib/ultra-relay/candidates')}
+# Operation-pinned code and candidate rollback code must survive recovery, but
+# their bytes belong in the versioned artifact rather than every database dump.
+VERSIONED_STATE_PATHS = (
+    (Path('/var/lib/ultra-relay/vultr'), ('*/ultra-relay',)),
+    (Path('/var/lib/ultra-bot/candidates'), ('*/ultra-bot', '*/before/ultra-bot')),
+)
 
 
 def run(args, **kwargs):
@@ -140,6 +146,25 @@ def collect(paths, excluded_paths=()):
     if len(result) > MAX_FILES or sum(row['bytes'] for row in result.values()) > MAX_BYTES:
         raise ValueError('state exceeds backup limits')
     return result
+
+
+def capture_artifact_paths(config):
+    """Move only selected, exact pinned binary paths; keep metadata in state."""
+    selected = [Path(path) for path in config['state_paths']]
+    paths = set(config.get('artifact_paths', []))
+    for path in selected:
+        candidates = [path] if path.is_file() else path.rglob('*')
+        for candidate in candidates:
+            if not candidate.is_file() or 'cache' in candidate.parts:
+                continue
+            for root, patterns in VERSIONED_STATE_PATHS:
+                if root not in candidate.parents:
+                    continue
+                relative = candidate.relative_to(root)
+                if any(len(relative.parts) == len(PurePosixPath(pattern).parts)
+                       and relative.match(pattern) for pattern in patterns):
+                    paths.add(str(candidate))
+    return sorted(paths)
 
 
 def pack(destination, metadata, files):
@@ -268,15 +293,16 @@ def create(config):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with tempfile.TemporaryDirectory(prefix='.capture-', dir=repo) as work:
             work = Path(work)
-            before = collect(config['state_paths'], config.get('artifact_paths', []))
-            artifacts = collect(config.get('artifact_paths', []))
+            artifact_paths = capture_artifact_paths(config)
+            before = collect(config['state_paths'], artifact_paths)
+            artifacts = collect(artifact_paths)
             artifact_manifest = json.dumps(artifacts, sort_keys=True).encode()
             artifact_id = hashlib.sha256(artifact_manifest).hexdigest()
             artifact = repo / ('artifact-' + artifact_id + '.age')
             if not artifact.exists():
                 bundle = work / 'artifact.tar.gz'
                 packed = pack(bundle, {'kind': 'artifact', 'source': source}, {name: Path('/') / name for name in artifacts})
-                if packed['files'] != artifacts or collect(config.get('artifact_paths', [])) != artifacts:
+                if packed['files'] != artifacts or collect(artifact_paths) != artifacts:
                     raise ValueError('binary artifacts changed during capture')
                 inspect_bundle(bundle)
                 candidate = work / artifact.name
@@ -287,7 +313,7 @@ def create(config):
             dump = work / 'database.dump'
             with dump.open('wb') as stream:
                 run(['runuser', '-u', 'postgres', '--', 'pg_dump', '-Fc', '--no-owner', '--no-acl', config['database']], stdout=stream)
-            if collect(config['state_paths'], config.get('artifact_paths', [])) != before:
+            if collect(config['state_paths'], artifact_paths) != before:
                 raise ValueError('configuration changed during capture; retry next interval')
             bundle = work / 'backup.tar.gz'
             files = {'state/' + name: Path('/') / name for name in before}
@@ -295,9 +321,9 @@ def create(config):
             pack(bundle, {'kind': 'backup', 'source': source, 'snapshot_at': snapshot,
                           'artifact': artifact.name, 'database': config['database']}, files)
             # Hash again after archive reads to avoid pairing a dump with changed keys.
-            if collect(config['state_paths'], config.get('artifact_paths', [])) != before:
+            if collect(config['state_paths'], artifact_paths) != before:
                 raise ValueError('configuration changed during archive')
-            if collect(config.get('artifact_paths', [])) != artifacts:
+            if capture_artifact_paths(config) != artifact_paths or collect(artifact_paths) != artifacts:
                 raise ValueError('binary artifacts changed during capture')
             encrypted = work / ('backup-' + str(snapshot) + '-' + uuid.uuid4().hex + '.age')
             encrypt(bundle, encrypted, config['recipient'])

@@ -9,12 +9,19 @@ import (
 
 // CanonicalValuesToPlan keeps deployment policy separate from secret file contents.
 func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
-	for _, key := range []string{"TELEGRAM_BOT_TOKEN", "ULTRA_VULTR_API_KEY", "ULTRA_VULTR_DNS_API_KEY", "ULTRA_CUTOVER_SUBSCRIPTION_URL", "ULTRA_RELAY_ADMIN_TOKEN", "ULTRA_DB_DSN"} {
-		if _, exists := v[key]; exists {
-			return nil, errors.New("secret key " + key + " belongs in .env, not install.config")
+	for key := range v {
+		if strings.HasPrefix(key, "ULTRA_AUTO_UPGRADE_") {
+			return nil, errors.New("automatic upgrade settings are no longer supported; use a manual release directory")
+		}
+		if DisallowedDeploymentSecret(key) {
+			return nil, errors.New("secret key " + key + " belongs outside install.config")
 		}
 	}
 	p := LegacyValuesToPlan(v)
+	p.SourceValues = make(map[string]string, len(v))
+	for key, value := range v {
+		p.SourceValues[key] = value
+	}
 	version := valueDefault(v, "INSTALL_SCHEMA_VERSION", "1")
 	if version == "1" {
 		return p, nil
@@ -62,6 +69,25 @@ func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 	if domain := v["VPN_DOMAIN"]; domain != "" {
 		a.Ingress = &AutomationIngress{Domain: domain, Email: v["ACME_EMAIL"], Path: v["PUBLIC_XHTTP_PATH"], ForwardHost: v["BOT_INGRESS_IP"], PublicHost: valueDefault(v, "PUBLIC_HOST", a.BridgeIPv4)}
 	}
+	if a.Ingress != nil {
+		for _, field := range []struct {
+			key  string
+			port *int
+		}{
+			{"ULTRA_INGRESS_BACKEND_PORT", &a.Ingress.BackendPort},
+			{"ULTRA_INGRESS_GATEWAY_PORT", &a.Ingress.GatewayPort},
+			{"ULTRA_INGRESS_STATUS_PORT", &a.Ingress.StatusPort},
+			{"ULTRA_INGRESS_EXPERIMENTAL_PORT", &a.Ingress.ExperimentalPort},
+			{"ULTRA_INGRESS_STAGING_PORT", &a.Ingress.StagingPort},
+		} {
+			if raw := v[field.key]; raw != "" {
+				*field.port, err = strconv.Atoi(raw)
+				if err != nil {
+					return nil, errors.New("invalid " + field.key)
+				}
+			}
+		}
+	}
 	if provider := v["DNS_PROVIDER"]; provider != "" {
 		ttl, err := strconv.Atoi(valueDefault(v, "DNS_TTL", "300"))
 		if err != nil {
@@ -102,4 +128,17 @@ func BotEnvironment(values map[string]string) ([]byte, error) {
 		}
 	}
 	return []byte(out.String()), nil
+}
+
+// DisallowedDeploymentSecret is shared by parsing and remote projection. Public
+// verification key references are policy; private signing material is never deployable.
+func DisallowedDeploymentSecret(key string) bool {
+	key = strings.ToUpper(key)
+	switch key {
+	case "TELEGRAM_BOT_TOKEN", "ULTRA_VULTR_API_KEY", "ULTRA_VULTR_DNS_API_KEY", "ULTRA_CUTOVER_SUBSCRIPTION_URL", "ULTRA_RELAY_ADMIN_TOKEN", "ULTRA_DB_DSN":
+		return true
+	}
+	signing := strings.Contains(key, "MINISIGN") || strings.Contains(key, "SIGNING")
+	private := strings.Contains(key, "SECRET") || strings.Contains(key, "PRIVATE") || strings.Contains(key, "PASSWORD") || strings.Contains(key, "PASSPHRASE")
+	return signing && private
 }

@@ -5,18 +5,24 @@ import "time"
 const CurrentSchemaVersion = 2
 
 type InstallPlan struct {
-	Automation    *AutomationConfig `json:"automation,omitempty"`
-	SchemaVersion int               `json:"schema_version"`
-	SSH           SSHConfig         `json:"ssh"`
-	Bridge        BridgeConfig      `json:"bridge"`
-	Exits         []ExitNode        `json:"exits"`
-	Database      DatabaseConfig    `json:"database,omitempty"`
-	Bot           BotConfig         `json:"bot,omitempty"`
-	Secrets       SecretsConfig     `json:"secrets,omitempty"`
-	Features      FeatureConfig     `json:"features,omitempty"`
-	Verification  Verification      `json:"verification,omitempty"`
-	Artifacts     ArtifactConfig    `json:"artifacts,omitempty"`
-	Execution     ExecutionConfig   `json:"execution,omitempty"`
+	ControllerLocalTarget string `json:"-"`
+	// Native execution location is attested and frozen by the operator process, never config.
+	ControllerLocal *bool             `json:"-"`
+	SourceValues    map[string]string `json:"-"`
+	Automation      *AutomationConfig `json:"automation,omitempty"`
+	BridgeNative    bool              `json:"bridge_native,omitempty"`
+	AdoptRuntime    bool              `json:"adopt_runtime,omitempty"`
+	SchemaVersion   int               `json:"schema_version"`
+	SSH             SSHConfig         `json:"ssh"`
+	Bridge          BridgeConfig      `json:"bridge"`
+	Exits           []ExitNode        `json:"exits"`
+	Database        DatabaseConfig    `json:"database,omitempty"`
+	Bot             BotConfig         `json:"bot,omitempty"`
+	Secrets         SecretsConfig     `json:"secrets,omitempty"`
+	Features        FeatureConfig     `json:"features,omitempty"`
+	Verification    Verification      `json:"verification,omitempty"`
+	Artifacts       ArtifactConfig    `json:"artifacts,omitempty"`
+	Execution       ExecutionConfig   `json:"execution,omitempty"`
 }
 
 type SSHConfig struct {
@@ -74,6 +80,7 @@ type SecretsConfig struct {
 }
 
 type FeatureConfig struct {
+	BotTelegramProxy       bool   `json:"bot_telegram_proxy,omitempty"`
 	Preset                 string `json:"preset,omitempty"`
 	Transport              string `json:"transport,omitempty"`
 	RoutingMode            string `json:"routing_mode,omitempty"`
@@ -192,21 +199,21 @@ type DoctorReport struct {
 // AutomationConfig contains references and public deployment policy, never secret values.
 // A v2 plan requires automation; v1 plans retain their legacy deployment semantics.
 type AutomationConfig struct {
-	DNS                 *AutomationDNS     `json:"dns,omitempty"`
-	Ingress             *AutomationIngress `json:"ingress,omitempty"`
-	AdminTelegramID     int64              `json:"admin_telegram_id,omitempty"`
-	ReleaseDir          string             `json:"release_dir"`
-	Version             string             `json:"version"`
-	AgeRecipient        string             `json:"age_recipient"`
-	BridgeProvider      string             `json:"bridge_provider"`
-	BridgeIPv4          string             `json:"bridge_ipv4"`
-	BridgeURL           string             `json:"bridge_url"`
-	CloudKeyFile        string             `json:"cloud_key_file,omitempty"`
-	KnownHostsFile      string             `json:"known_hosts_file"`
-	StaticNodes         []AutomationNode   `json:"static_nodes"`
-	StatePaths          []string           `json:"state_paths,omitempty"`
-	ArtifactPaths       []string           `json:"artifact_paths,omitempty"`
-	ReadinessTimeoutSec int                `json:"readiness_timeout_sec,omitempty"`
+	DNS                 *AutomationDNS         `json:"dns,omitempty"`
+	Ingress             *AutomationIngress     `json:"ingress,omitempty"`
+	AdminTelegramID     int64                  `json:"admin_telegram_id,omitempty"`
+	ReleaseDir          string                 `json:"release_dir"`
+	Version             string                 `json:"version"`
+	AgeRecipient        string                 `json:"age_recipient"`
+	BridgeProvider      string                 `json:"bridge_provider"`
+	BridgeIPv4          string                 `json:"bridge_ipv4"`
+	BridgeURL           string                 `json:"bridge_url"`
+	CloudKeyFile        string                 `json:"cloud_key_file,omitempty"`
+	KnownHostsFile      string                 `json:"known_hosts_file"`
+	StaticNodes         []AutomationNode       `json:"static_nodes"`
+	StatePaths          []string               `json:"state_paths,omitempty"`
+	ArtifactPaths       []string               `json:"artifact_paths,omitempty"`
+	ReadinessTimeoutSec int                    `json:"readiness_timeout_sec,omitempty"`
 }
 type StaticBudget struct {
 	MonthlyBytes int64 `json:"monthly_bytes"`

@@ -1,0 +1,218 @@
+---
+- name: Validate replica contract
+  ansible.builtin.assert:
+    that:
+      - ultra_replica_slot is match('^ultra_[a-f0-9]{32}$')
+      - ultra_replica_user is match('^[a-z_][a-z0-9_]*$')
+      - ultra_replica_password is match('^[a-f0-9]{48,128}$')
+      - ultra_replica_primary_port | int > 0
+      - ultra_replica_primary_port | int <= 65535
+      - ultra_replica_architecture == ansible_facts.architecture
+      - ansible_facts.mounts | selectattr('mount', 'equalto', '/') | map(attribute='size_available') | first | int >= ultra_replica_required_bytes | int
+      - ultra_replica_connections | int > 0
+      - ultra_replica_workers | int >= 0
+      - ultra_replica_prepared | int >= 0
+      - ultra_replica_locks | int > 0
+      - ultra_replica_senders | int > 0
+  no_log: true
+- name: Inspect effective SSH forwarding binding policy
+  ansible.builtin.command:
+    argv: [/usr/sbin/sshd, -T]
+  register: replica_sshd_policy
+  changed_when: false
+- name: Reject externally exposed reverse tunnels
+  ansible.builtin.assert:
+    that: "'gatewayports no' in replica_sshd_policy.stdout_lines or 'gatewayports clientspecified' in replica_sshd_policy.stdout_lines"
+- name: Install PostgreSQL standby runtime
+  ansible.builtin.apt:
+    name: postgresql-16
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+- name: Inspect existing standby data and ownership
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /var/lib/ultra-postgres-replica
+    - /var/lib/ultra-postgres-replica/data
+    - /var/lib/ultra-postgres-replica/managed-by-ultra
+    - /var/lib/ultra-postgres-replica/data/standby.signal
+  register: replica_existing
+- name: Reject foreign standby data
+  ansible.builtin.assert:
+    that:
+      - not item.stat.islnk | default(false)
+      - not replica_existing.results[1].stat.exists or replica_existing.results[2].stat.exists
+      - not replica_existing.results[1].stat.exists or replica_existing.results[3].stat.exists
+  loop: "{{ replica_existing.results }}"
+- name: Read current managed standby version
+  ansible.builtin.slurp:
+    src: /var/lib/ultra-postgres-replica/data/PG_VERSION
+  register: replica_existing_version
+  when: replica_existing.results[1].stat.exists
+- name: Require PostgreSQL 16 for existing standby
+  ansible.builtin.assert:
+    that: replica_existing_version.content | b64decode | trim == '16'
+  when: replica_existing.results[1].stat.exists
+- name: Create private standby directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0700"
+  loop: [/var/lib/ultra-postgres-replica, /etc/ultra-postgres-replica]
+- name: Install standby password privately
+  ansible.builtin.copy:
+    content: "127.0.0.1:15432:*:{{ ultra_replica_user }}:{{ ultra_replica_password }}\n"
+    dest: /etc/ultra-postgres-replica/pgpass
+    owner: postgres
+    group: postgres
+    mode: "0600"
+  no_log: true
+- name: Wait for primary transport
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 15432
+    timeout: 30
+- name: Inspect standby seed ownership
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /var/lib/ultra-postgres-replica/seed
+    - /var/lib/ultra-postgres-replica/seed-owned-by-ultra
+    - /var/lib/ultra-postgres-replica/seed-complete
+  register: replica_seed
+  when: not replica_existing.results[1].stat.exists
+- name: Reject unowned seed directory
+  ansible.builtin.assert:
+    that:
+      - not replica_seed.results[0].stat.islnk | default(false)
+      - not replica_seed.results[0].stat.exists or replica_seed.results[1].stat.exists
+  when: not replica_existing.results[1].stat.exists
+- name: Discard only interrupted owned seed
+  ansible.builtin.file:
+    path: /var/lib/ultra-postgres-replica/seed
+    state: absent
+  when:
+    - not replica_existing.results[1].stat.exists
+    - replica_seed.results[0].stat.exists
+    - not replica_seed.results[2].stat.exists
+- name: Read a completed seed identity before trusting it
+  ansible.builtin.slurp:
+    src: /var/lib/ultra-postgres-replica/seed-complete
+  register: replica_seed_identity
+  when:
+    - not replica_existing.results[1].stat.exists
+    - replica_seed.results[2].stat.exists
+- name: Reject foreign completion markers
+  ansible.builtin.assert:
+    that:
+      - replica_seed.results[2].stat.isreg | default(false)
+      - not replica_seed.results[2].stat.islnk | default(false)
+      - replica_seed.results[2].stat.uid == 0
+      - replica_seed.results[2].stat.mode == '0600'
+      - replica_seed_identity.content | b64decode | trim == ultra_replica_slot
+  when:
+    - not replica_existing.results[1].stat.exists
+    - replica_seed.results[2].stat.exists
+- name: Remove an orphaned completion marker when no seed remains
+  ansible.builtin.file:
+    path: /var/lib/ultra-postgres-replica/seed-complete
+    state: absent
+  when:
+    - not replica_existing.results[1].stat.exists
+    - not replica_seed.results[0].stat.exists
+    - replica_seed.results[2].stat.exists
+- name: Own the seed before creating any data
+  ansible.builtin.copy:
+    content: "{{ ultra_replica_slot }}\n"
+    dest: /var/lib/ultra-postgres-replica/seed-owned-by-ultra
+    mode: "0600"
+  when: not replica_existing.results[1].stat.exists
+- name: Seed standby from the primary
+  ansible.builtin.command:
+    argv:
+      - /usr/lib/postgresql/16/bin/pg_basebackup
+      - -h
+      - 127.0.0.1
+      - -p
+      - '15432'
+      - -U
+      - "{{ ultra_replica_user }}"
+      - -D
+      - /var/lib/ultra-postgres-replica/seed
+      - --wal-method=stream
+      - "--slot={{ ultra_replica_slot }}"
+      - --checkpoint=spread
+    creates: /var/lib/ultra-postgres-replica/seed-complete
+  become: true
+  become_user: postgres
+  environment:
+    PGPASSFILE: /etc/ultra-postgres-replica/pgpass
+  when: not replica_existing.results[1].stat.exists
+  no_log: true
+- name: Confirm completed basebackup before activation
+  ansible.builtin.copy:
+    content: "{{ ultra_replica_slot }}\n"
+    dest: /var/lib/ultra-postgres-replica/seed-complete
+    mode: "0600"
+  when: not replica_existing.results[1].stat.exists
+- name: Mark seeded data as a standby
+  ansible.builtin.copy:
+    content: ''
+    dest: /var/lib/ultra-postgres-replica/seed/standby.signal
+    owner: postgres
+    group: postgres
+    mode: "0600"
+  when: not replica_existing.results[1].stat.exists
+- name: Record managed standby ownership
+  ansible.builtin.copy:
+    content: 'ultra standby\n'
+    dest: /var/lib/ultra-postgres-replica/managed-by-ultra
+    owner: postgres
+    group: postgres
+    mode: "0600"
+- name: Activate completed standby data atomically
+  ansible.builtin.command:
+    argv: [mv, /var/lib/ultra-postgres-replica/seed, /var/lib/ultra-postgres-replica/data]
+    creates: /var/lib/ultra-postgres-replica/data
+  when: not replica_existing.results[1].stat.exists
+- name: Clear inherited primary auto configuration
+  ansible.builtin.copy:
+    content: ''
+    dest: /var/lib/ultra-postgres-replica/data/postgresql.auto.conf
+    owner: postgres
+    group: postgres
+    mode: "0600"
+  notify: Restart managed PostgreSQL standby
+- name: Install standby configuration
+  ansible.builtin.template:
+    src: postgresql.conf.j2
+    dest: /etc/ultra-postgres-replica/postgresql.conf
+    owner: postgres
+    group: postgres
+    mode: "0600"
+  notify: Restart managed PostgreSQL standby
+- name: Restrict standby local database access
+  ansible.builtin.copy:
+    content: "local all postgres peer\nhost all all 127.0.0.1/32 reject\n"
+    dest: /etc/ultra-postgres-replica/pg_hba.conf
+    owner: postgres
+    group: postgres
+    mode: "0600"
+  notify: Restart managed PostgreSQL standby
+- name: Install standby systemd service
+  ansible.builtin.template:
+    src: ultra-postgres-replica.service.j2
+    dest: /etc/systemd/system/ultra-postgres-replica.service
+    mode: "0644"
+  notify: Restart managed PostgreSQL standby
+- name: Enable managed standby
+  ansible.builtin.systemd_service:
+    name: ultra-postgres-replica.service
+    daemon_reload: true
+    enabled: true
+    state: started
+- name: Flush standby handlers
+  ansible.builtin.meta: flush_handlers

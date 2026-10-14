@@ -1,0 +1,51 @@
+---
+- name: Prepare a reverse replica plan from the original physical primary
+  hosts: migration_sources
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Require the restored original primary identity
+      ansible.builtin.slurp:
+        src: /etc/machine-id
+      register: bridge_migration_reverse_machine
+    - name: Verify the original source before planning reverse reseed
+      ansible.builtin.assert:
+        that: bridge_migration_reverse_machine.content | b64decode | trim == ultra_migration_source_machine_id
+    - name: Prepare private pure data helpers
+      ansible.builtin.file:
+        path: "/var/lib/ultra-migration/{{ ultra_migration_pair }}/reverse"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+    - name: Copy shared data contract helpers
+      ansible.builtin.copy:
+        src: "{{ ultra_migration_runtime_directory }}/{{ item }}"
+        dest: "/var/lib/ultra-migration/{{ ultra_migration_pair }}/reverse/{{ item }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: [restore_host.py, restore_common.py, restore_peer.py, recovery.py, dns.py]
+    - name: Copy read-only inventory and reverse request derivation
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../roles/bridge_migration/files/{{ item }}"
+        dest: "/var/lib/ultra-migration/{{ ultra_migration_pair }}/reverse/{{ item }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: [state.py, rollback_peers.py]
+    - name: Derive current source requests without configuring any peer
+      ansible.builtin.command:
+        argv: [python3, "/var/lib/ultra-migration/{{ ultra_migration_pair }}/reverse/rollback_peers.py"]
+        stdin: "{{ ultra_migration_reverse_plan | to_json(preprocess_unsafe=False) }}"
+      changed_when: false
+      no_log: true
+      register: bridge_migration_reverse_plan
+    - name: Preserve private reverse peer inputs for the current attempt
+      ansible.builtin.copy:
+        content: "{{ bridge_migration_reverse_plan.stdout | from_json | combine({'verified': true}) | to_json(preprocess_unsafe=False) }}"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true

@@ -1,0 +1,31 @@
+---
+- name: Inspect the authoritative adoption topology without mutation
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Read enabled database routes and verified ownership metadata
+      ultra_adopt_topology:
+        database: "{{ ultra_topology_database }}"
+        expected: "{{ ultra_topology_expected | default('') }}"
+      register: adoption_topology
+      no_log: true
+    - name: Persist private topology evidence for the current inspection
+      ansible.builtin.copy:
+        content: "{{ adoption_topology.topology | to_json(preprocess_unsafe=False) }}\n"
+        dest: "{{ ultra_inspect_dir }}/topology.json"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+- name: Confirm completed read-only topology inspection
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Persist verified topology probe completion
+      ansible.builtin.copy:
+        content: '{"verified": true, "read_only": true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      no_log: true

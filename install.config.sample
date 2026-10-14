@@ -1,7 +1,11 @@
 # Скопируйте в install.config в корне репозитория (install.config в .gitignore).
-# make install — без вопросов; make relay-logs / make verify-relay — хосты и ключ из файла.
+# make install применяет изменения на серверах; сначала проверьте plan и doctor.
+# make relay-logs / make verify-relay — хосты и ключ из файла.
 #
-# Подставьте свои BRIDGE/EXIT и путь к ключу; остальное ниже — рабочие значения по умолчанию.
+# Подставьте свои адреса, ключ, TLS target и URL проверки; example.* — placeholders.
+# Это вход схемы 1 для установки или adopt. Полный шаблон схемы 2:
+# deploy/install.config.v2.example; принятие runtime описано в docs/automation.md.
+# Секреты и токены храните только в .env; этот файл не является shell-скриптом.
 
 BRIDGE=203.0.113.10
 EXIT=203.0.113.11
@@ -11,7 +15,8 @@ SSH_USER=root
 IDENTITY=/Users/you/.ssh/id_ed25519
 PUBLIC_HOST=203.0.113.10
 
-# Публичный inbound (REALITY): пример цели TLS; замените на свой допустимый host:443.
+# Legacy REALITY inbound: замените цель на проверенный допустимый host:443.
+# Эти параметры не задают домен основного XHTTP/TLS-входа (см. VPN_DOMAIN ниже).
 REALITY_DEST=origin.example.net:443
 REALITY_SNI=origin.example.net
 
@@ -21,8 +26,6 @@ PRESET=steamlike
 # Маршрутизация на bridge при split_routing: ru_direct — direct для RU/private, остальное на exit;
 # blocklist — только geosite_exit_tags на exit (как раньше).
 ROUTING_MODE=ru_direct
-# Доп. geosite → direct (только если тег есть в geosite.dat; у runetfreedom по умолчанию нет категории ru).
-# GEOSITE_DIRECT_TAGS=ru
 
 VLESS_PORT=443
 TUNNEL_PORT=8443
@@ -30,8 +33,9 @@ LOG_LEVEL=info
 GENERATE_EXIT_TLS=y
 
 # Переиспользовать ключи с bridge при переустановке (Reality, tunnel UUID, splithttp).
-# Отключает ротацию ключей — существующие клиентские конфиги продолжают работать.
-# Закомментируйте только при намеренной смене ключей.
+# Сохраняет идентификаторы; не означает принятие всего runtime без изменений.
+# Для принятия runtime используйте adopt/apply --adopt-runtime (docs/automation.md).
+# Для новой установки без существующего spec явно задайте n (по умолчанию y).
 REUSE_BRIDGE_SPEC=y
 
 # Транспортный протокол внутреннего туннеля bridge→exit.
@@ -40,7 +44,7 @@ REUSE_BRIDGE_SPEC=y
 TRANSPORT=splithttp
 
 # VLESS flow для публичного REALITY inbound и клиентских URI (Xray 26).
-# По умолчанию xtls-rprx-vision — после включения переимпортируйте подписку в HAPP/Mini App.
+# По умолчанию xtls-rprx-vision; не применяется к XHTTP. После изменения обновите подписку.
 VLESS_FLOW=xtls-rprx-vision
 # Отключить flow для legacy-клиентов (предупреждения Xray останутся):
 # DISABLE_VLESS_FLOW=y
@@ -71,7 +75,8 @@ VLESS_FLOW=xtls-rprx-vision
 # --- Проверка цепочки после установки (нужны локально xray, jq или python3) ---
 # Если exit недоступен по SSH, ultra-install помечает его enabled=false в bootstrap/PostgreSQL.
 # Установка завершится с ошибкой, только если не задеployed ни одна exit.
-# Если exit-ноды ещё недоступны, VERIFY упадёт на SOCKS/curl — отключите: VERIFY_AFTER_INSTALL=n
+# Проверка использует локальный SOCKS клиента, а не публичный SOCKS listener relay.
+# Недоступность exit нужно устранить; VERIFY_AFTER_INSTALL=n пропускает проверку цепочки.
 VERIFY_AFTER_INSTALL=y
 VERIFY_IP_URL=https://probe.example.net/plain-ip
 VERIFY_SOCKS_PORT=10808
@@ -92,7 +97,8 @@ VERIFY_FAIL_LOG_LINES=400
 # --- Выходной IP (Cloudflare WARP на exit) ---
 #
 # Cloudflare WARP на exit-ноде: меняет IP выхода с датацентра на Cloudflare.
-# Устанавливается автоматически при make install.
+# Опционально устанавливается при WARP_ENABLE=y; не скрывает вход клиент→bridge.
+# Cloudflare WARP, DNS и CDN — отдельные функции; CDN здесь не включается.
 # WARP_ENABLE=y
 # WARP_PORT=40000   # порт SOCKS5 (по умолчанию 40000)
 #
@@ -103,30 +109,34 @@ VERIFY_FAIL_LOG_LINES=400
 # --- Тонкая настройка протокола (все опции имеют рабочие значения по умолчанию) ---
 #
 # Профиль сетевых настроек для резервных профилей клиента: fast, balanced, stealth.
-# Пусто = balanced-дефолты. Основной старый TCP+REALITY URI от этого не меняется.
+# Пусто = balanced. Название stealth не гарантирует обход блокировок оператора.
+# Основной старый TCP+REALITY URI от этого не меняется.
 # ANTI_CENSOR_PROFILE=balanced
 #
 # Дополнительный публичный порт на bridge для резервного VLESS+REALITY+XHTTP профиля.
-# Старый VLESS_PORT продолжает обслуживать TCP+REALITY. make install внесёт порт в spec,
-# а ultra-relay best-effort откроет локальный firewall. 0/пусто = не открывать дополнительный inbound.
+# При включённых legacy listeners VLESS_PORT обслуживает TCP+REALITY.
+# Это не основной HTTPS-вход: он задаётся через ingress/primary_xhttp.
+# 0/пусто = не добавлять этот резервный listener; firewall контролирует развёртывание.
 # PUBLIC_XHTTP_PORT=8445
 #
-# Фрагментация TLS ClientHello на исходящем соединении bridge→exit.
-# Разбивает первый TLS-пакет на несколько TCP-сегментов. По умолчанию включена.
-# Раскомментируйте, чтобы отключить:
+# Фрагментация TLS ClientHello bridge→exit по умолчанию выключена.
+# FRAGMENT_DISABLE=y явно отключает её; n не включает фрагментацию автоматически.
+# Это не настройка ClientHello клиента Happ на участке клиент→bridge.
 # FRAGMENT_DISABLE=y
 #
-# Случайный паддинг каждого splithttp-чанка (актуально только при TRANSPORT=splithttp).
-# По умолчанию фактически "0-100"; формат "min-max" байт; "0" отключает паддинг:
-# SPLITHTTP_PADDING=0-100
+# XHTTP padding (TRANSPORT=splithttp), положительный диапазон min-max байт.
+# Пустое значение и старые нулевые диапазоны используют стандарт ядра 100-1000.
+# Не сужайте совместимый диапазон работающего listener без проверки клиентов.
+# SPLITHTTP_PADDING=100-1000
 #
 # Максимальный размер тела одного POST-запроса в туннеле, КБ
-# (актуально при TRANSPORT=splithttp; 0 = умолчание Xray ≈1 МБ):
-# SPLITHTTP_MAX_CHUNK_KB=64
+# (только packet-up; на стандартный stream-up не влияет; 0 = умолчание Xray ≈1 МБ):
+# SPLITHTTP_MAX_CHUNK_KB=0
 #
-# Пул TLS-отпечатков (fingerprint) для ротации при каждом перезапуске Xray.
-# По умолчанию: chrome,firefox,safari,ios,android,randomized.
-# REALITY_FINGERPRINTS=chrome,firefox,safari
+# Первый fingerprint используется только при пустом reality.fingerprint; по умолчанию chrome.
+# Перезапуск сервера не ротирует ClientHello клиентов. XHTTP/TLS fingerprint задаётся
+# отдельно в ingress/runtime: этот список не меняет уже принятые Firefox-профили.
+# REALITY_FINGERPRINTS=firefox
 
 # --- Telegram Mini App (ultra-bot) ---
 # Чтобы развернуть Telegram-бота с веб-интерфейсом администратора:
@@ -137,7 +147,6 @@ VERIFY_FAIL_LOG_LINES=400
 #      A-запись → IP bridge (BRIDGE), не на exit — иначе Mini App: ERR_TIMED_OUT в Telegram.
 #      Проверка: make verify-miniapp
 #   4. Установите BOT_ENABLE=y и запустите make install.
-#   В конце установки будет выведен токен для регистрации первого администратора.
 #
 # BOT_ENABLE=y
 # BOT_DOMAIN=admin.example.com   # FQDN; A-запись на bridge
@@ -164,22 +173,41 @@ DB_ENABLE=y
 
 # --- Прочее (по умолчанию можно не трогать) ---
 # Таймаут SSH при make install / ultra-install / relay-logs (секунды; по умолчанию 10):
-# export ULTRA_SSH_CONNECT_TIMEOUT=10
+# ULTRA_SSH_CONNECT_TIMEOUT=10
 # Geo на bridge при установке (скачивание с GitHub): по умолчанию выполняется по SSH.
 # SKIP_GEO_DOWNLOAD=y — не качать (положите geoip.dat и geosite.dat сами в geo_assets_dir).
 # Синоним устаревшего имени: SKIP_RUNETFREEDOM_GEO=y
 # GEO_RELEASE_TAG=REPLACE_RELEASE_TAG — зафиксировать тег релиза вместо latest.
 
 # Жёсткая проверка SSH host key (нужен заранее заполненный known_hosts):
-# export ULTRA_INSTALL_SSH_STRICT_HOST_KEY=yes
+# ULTRA_INSTALL_SSH_STRICT_HOST_KEY=yes
 
-# Отдельный HTTPS-вход (пусто = прежняя схема domain:BOT_PORT → bridge)
+# --- Постоянные домены подписки и XHTTP/TLS ---
+# BOT_DOMAIN — TLS identity backend бота; после cutover может оставаться legacy.
+# SUBSCRIPTION_DOMAIN — публичный origin подписок/Mini App; VPN_DOMAIN — XHTTP.
+# Не заменяйте BOT_DOMAIN автоматически: Nginx проверяет сертификат backend по этому имени.
+# Изменение опубликованных доменов: ultra-install domain-cutover, см. docs/subscription-ingress.md.
+# SUBSCRIPTION_DOMAIN=sync.example.com
+# VPN_DOMAIN=edge.example.com
+# PUBLIC_HOST=edge.example.com
+# ACME_EMAIL=operator@example.com
+# PUBLIC_XHTTP_PATH=/connect
+# SUBSCRIPTION_INGRESS_MODE=direct
+# DNS_PROVIDER=vultr
+# DNS_ZONE=example.com
+# DNS_TTL=300
+# DNS_SUBSCRIPTION_NAME=sync
+# DNS_VPN_NAME=edge
+# Автоматизация DNS схемы 2 поддерживает Vultr; зону и делегирование NS создают заранее.
+# Cloudflare CDN не требуется. Смена DNS-провайдера требует поддержки в автоматизации.
+#
+# Origin для make verify-miniapp; при постоянном домене согласуйте с SUBSCRIPTION_DOMAIN.
+# Пусто = прежняя схема https://BOT_DOMAIN:BOT_PORT; не меняет runtime public URL само по себе.
+# BOT_PUBLIC_URL=https://sync.example.com
 BOT_PUBLIC_URL=
-# ssh: существующий сервер с nginx; vultr: управляемый VPS с HAProxy (по умолчанию).
-BOT_INGRESS_MODE=vultr
+# Пусто для direct; адрес отдельного узла только при SUBSCRIPTION_INGRESS_MODE=forward.
+# При direct автоматизация игнорирует этот адрес, но verify-miniapp использует его как ожидаемый IP.
 BOT_INGRESS_IP=
-# ID Vultr VPS, который нельзя удалять до переноса HTTPS-входа
-BOT_INGRESS_INSTANCE_ID=
 
 # Дополнительный явный backup inventory для INSTALL_SCHEMA_VERSION=2.
 # JSON-массивы абсолютных путей на bridge; отсутствие или [] не добавляет путей.

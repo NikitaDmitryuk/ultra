@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"path"
+	"reflect"
 	"strings"
 
 	"github.com/xtls/xray-core/common/uuid"
@@ -35,6 +36,15 @@ type DesiredState struct {
 }
 
 type RenderOptions struct {
+	// PreserveRuntime is only for adoption of an explicitly reviewed installed
+	// snapshot. Plan feature defaults must not reconfigure that snapshot.
+	PreserveRuntime bool
+	// Original JSON is required for PreserveRuntime: marshaling a Spec loses
+	// unknown fields and explicit empty arrays with omitempty tags. Each raw
+	// document must decode to its corresponding unmodified Existing spec.
+	ExistingBridgeJSON []byte
+	ExistingExitJSON   map[string][]byte
+	ExistingExits      map[string]*config.Spec
 	ExistingBridge     *config.Spec
 	ExistingAdminToken string
 	PriorBootstrap     []exits.BootstrapEntry
@@ -47,6 +57,9 @@ func RenderDesiredState(p *InstallPlan) (*DesiredState, error) {
 func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*DesiredState, error) {
 	if err := ValidatePlan(p); err != nil {
 		return nil, err
+	}
+	if opts.PreserveRuntime {
+		return renderPreservedRuntime(p, opts)
 	}
 	if p.Bridge.ReuseSpec && opts.ExistingBridge == nil {
 		return nil, errorsForReuseRender()
@@ -165,7 +178,9 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 		GeositeExitTags: []string{"ru-blocked-all"},
 	}
 	if p.Bridge.ReuseSpec {
-		applyBridgeOverlay(bridgeSpec, opts.ExistingBridge)
+		if err := applyBridgeOverlay(bridgeSpec, opts.ExistingBridge); err != nil {
+			return nil, err
+		}
 	}
 	bridgeSpec.AntiCensor = buildAntiCensor(p, false)
 	if p.Features.RoutingMode != "" {
@@ -177,7 +192,7 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 	if p.Features.DomainDirect != "" {
 		bridgeSpec.DomainDirect = normalizeDomains(splitComma(p.Features.DomainDirect))
 	}
-	if p.Bot.Enabled {
+	if p.Bot.Enabled || p.Features.BotTelegramProxy {
 		bridgeSpec.BotTelegramProxy = &config.BotTelegramProxySpec{Enabled: true}
 	}
 	if p.Features.DisableVLESSFlow {
@@ -187,7 +202,13 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 	}
 	var pgCfg *install.PostgresConfig
 	var dbDSN string
-	if p.Database.Enabled {
+	if p.Bridge.ReuseSpec && opts.ExistingBridge.Database != nil && opts.ExistingBridge.Database.DSN != "" {
+		// Adoption must retain the database identity and password; changing the
+		// role credentials would break replicas and the rollback binary.
+		previous := *opts.ExistingBridge.Database
+		bridgeSpec.Database = &previous
+		dbDSN = previous.DSN
+	} else if p.Database.Enabled {
 		primaryHost := p.Database.PrimaryHost
 		if strings.TrimSpace(primaryHost) == "" {
 			primaryHost = p.Bridge.Address
@@ -297,6 +318,94 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 	return ds, nil
 }
 
+// renderPreservedRuntime adopts the inspected snapshot, rather than treating
+// installer defaults as requested runtime changes. Validation uses a separate
+// copy because Spec.Validate fills defaults that were absent from the snapshot.
+func renderPreservedRuntime(p *InstallPlan, opts RenderOptions) (*DesiredState, error) {
+	if !p.Bridge.ReuseSpec || opts.ExistingBridge == nil || strings.TrimSpace(opts.ExistingAdminToken) == "" {
+		return nil, fmt.Errorf("adoption requires existing bridge specification and admin identity")
+	}
+	clone := func(src *config.Spec, raw []byte, role config.Role) (*config.Spec, []byte, error) {
+		if src == nil || src.Role != role {
+			return nil, nil, fmt.Errorf("adoption requires existing %s specification", role)
+		}
+		if len(raw) == 0 {
+			return nil, nil, fmt.Errorf("adoption requires original existing %s JSON", role)
+		}
+		var checked, preserved config.Spec
+		if err := json.Unmarshal(raw, &preserved); err != nil {
+			return nil, nil, fmt.Errorf("adoption existing %s JSON: %w", role, err)
+		}
+		if !reflect.DeepEqual(&preserved, src) {
+			return nil, nil, fmt.Errorf("adoption existing %s JSON does not match reviewed specification", role)
+		}
+		if err := json.Unmarshal(raw, &checked); err != nil {
+			return nil, nil, err
+		}
+		if err := checked.Validate(); err != nil {
+			return nil, nil, fmt.Errorf("adoption existing %s specification: %w", role, err)
+		}
+		raw = append([]byte(nil), raw...)
+		return &preserved, raw, nil
+	}
+	bridge, raw, err := clone(opts.ExistingBridge, opts.ExistingBridgeJSON, config.RoleBridge)
+	if err != nil {
+		return nil, err
+	}
+	if len(opts.PriorBootstrap) == 0 {
+		return nil, fmt.Errorf("adoption requires existing bootstrap topology")
+	}
+	routes := make(map[string]exits.BootstrapEntry, len(opts.PriorBootstrap))
+	names := make(map[string]bool, len(opts.PriorBootstrap))
+	for _, entry := range opts.PriorBootstrap {
+		key := net.JoinHostPort(entry.Address, fmt.Sprint(entry.Port))
+		if strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Address) == "" || entry.Port <= 0 || entry.Port > 65535 || strings.TrimSpace(entry.TunnelUUID) == "" || names[entry.Name] {
+			return nil, fmt.Errorf("adoption existing bootstrap topology is invalid")
+		}
+		if _, exists := routes[key]; exists {
+			return nil, fmt.Errorf("adoption existing bootstrap topology has duplicate route")
+		}
+		routes[key] = entry
+		names[entry.Name] = true
+	}
+	active, ok := routes[net.JoinHostPort(bridge.Exit.Address, fmt.Sprint(bridge.Exit.Port))]
+	if !ok || active.TunnelUUID != bridge.Exit.TunnelUUID {
+		return nil, fmt.Errorf("adoption bridge exit does not match existing bootstrap topology")
+	}
+	ds := &DesiredState{
+		BridgeSpec: raw, BridgeSpecObject: bridge, AdminToken: opts.ExistingAdminToken,
+		ExitSpecs: make(map[string][]byte, len(p.Exits)), ExitSpecObjects: make(map[string]*config.Spec, len(p.Exits)),
+		ExitEnvs: make(map[string]string, len(p.Exits)), TunnelUUIDs: make(map[string]string, len(p.Exits)),
+		SplitHTTPPath: bridge.SplithttpPath, SplitHTTPHost: bridge.SplithttpHost,
+	}
+	if bridge.Database != nil {
+		ds.DBDSN = bridge.Database.DSN
+	}
+	for _, entry := range opts.PriorBootstrap {
+		if entry.Enabled != nil {
+			entry.Enabled = exits.BootstrapEnabledPtr(*entry.Enabled)
+		}
+		ds.Bootstrap = append(ds.Bootstrap, entry)
+	}
+	for _, ex := range p.Exits {
+		exit, raw, err := clone(opts.ExistingExits[ex.Name], opts.ExistingExitJSON[ex.Name], config.RoleExit)
+		if err != nil {
+			return nil, err
+		}
+		if exit.ExitCertPaths.CertFile != "/etc/ultra-relay/fullchain.pem" || exit.ExitCertPaths.KeyFile != "/etc/ultra-relay/privkey.pem" {
+			return nil, fmt.Errorf("adoption requires canonical existing exit certificate paths")
+		}
+		entry, ok := routes[net.JoinHostPort(ex.DialAddr, fmt.Sprint(ex.Port))]
+		if !ok || exit.VLESSPort != ex.Port || entry.TunnelUUID != exit.Exit.TunnelUUID || (ex.TunnelUUID != "" && ex.TunnelUUID != entry.TunnelUUID) {
+			return nil, fmt.Errorf("adoption static exit does not match existing bootstrap topology")
+		}
+		ds.ExitSpecs[ex.Name] = raw
+		ds.ExitSpecObjects[ex.Name] = exit
+		ds.TunnelUUIDs[ex.Name] = entry.TunnelUUID
+	}
+	return ds, nil
+}
+
 func MarshalBootstrap(entries []exits.BootstrapEntry) ([]byte, error) {
 	return json.MarshalIndent(entries, "", "  ")
 }
@@ -319,10 +428,24 @@ func resolveTunnelUUID(ex ExitNode, prior []exits.BootstrapEntry) string {
 	return tunnelUUID(ex)
 }
 
-func applyBridgeOverlay(dst *config.Spec, src *config.Spec) {
+func applyBridgeOverlay(dst *config.Spec, src *config.Spec) error {
 	if src == nil {
-		return
+		return nil
 	}
+	raw, err := json.Marshal(src)
+	if err != nil {
+		return err
+	}
+	var previous config.Spec
+	if err = json.Unmarshal(raw, &previous); err != nil {
+		return err
+	}
+	src = &previous
+	dst.PublicEntries = src.PublicEntries
+	dst.HappDefaultJSON = src.HappDefaultJSON
+	dst.SubscriptionPreviewBridges = src.SubscriptionPreviewBridges
+	dst.ProbeURLs = src.ProbeURLs
+	dst.Stats = src.Stats
 	dst.SubscriptionBridges = append([]config.SubscriptionBridge(nil), src.SubscriptionBridges...)
 	dst.PrimaryXHTTP = src.PrimaryXHTTP
 	dst.LegacyPublicEnabled = src.LegacyPublicEnabled
@@ -376,6 +499,7 @@ func applyBridgeOverlay(dst *config.Spec, src *config.Spec) {
 		v := *src.RuDirectTLDRegex
 		dst.RuDirectTLDRegex = &v
 	}
+	return nil
 }
 
 func randomHex(n int) (string, error) {
@@ -433,5 +557,5 @@ func normalizeDomains(items []string) []string {
 }
 
 func errorsForReuseRender() error {
-	return fmt.Errorf("render for bridge.reuse_spec=true requires reading the remote bridge spec; use the legacy apply path for now")
+	return fmt.Errorf("render for bridge.reuse_spec=true requires reading the remote bridge spec; use apply with read-only Ansible target inspection")
 }

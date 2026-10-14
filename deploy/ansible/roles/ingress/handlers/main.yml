@@ -1,0 +1,15 @@
+---
+- name: Restart ingress relay
+  ansible.builtin.systemd_service:
+    name: ultra-relay.service
+    state: restarted
+- name: Restart ingress bot
+  ansible.builtin.systemd_service:
+    name: ultra-bot.service
+    state: restarted
+    daemon_reload: true
+- name: Reload ultra nginx
+  ansible.builtin.systemd_service:
+    name: nginx.service
+    enabled: true
+    state: reloaded

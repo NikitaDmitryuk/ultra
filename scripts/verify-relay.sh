@@ -178,7 +178,7 @@ remote_curl_api() {
 	fi
 	{
 		printf '%s\n' 'set -euo pipefail' "settings=\$(python3 - env <<'ULTRA_VERIFY_HELPER'"
-		cat "$SCRIPT_DIR/bridge-migration-state.py"
+		cat "$SCRIPT_DIR/../deploy/ansible/roles/bridge_migration/files/state.py"
 		# Evaluated only by remote root/sudo shell.
 # shellcheck disable=SC2016
 		printf '\n%s\n' 'ULTRA_VERIFY_HELPER' ')' 'eval "$settings"'

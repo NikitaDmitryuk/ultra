@@ -1,0 +1,125 @@
+---
+- name: Prepare the dedicated target without changing the source
+  hosts: migration_targets
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Read the bound target machine identity
+      ansible.builtin.slurp:
+        src: /etc/machine-id
+      register: bridge_migration_phase_target
+    - name: Require the same dedicated target before every mutation
+      ansible.builtin.assert:
+        that: bridge_migration_phase_target.content | b64decode | trim == ultra_migration_target_machine_id
+    - name: Validate the explicit phase
+      ansible.builtin.assert:
+        that: ultra_migration_phase in ['stage', 'freeze', 'stop-target', 'rollback-source', 'resume-target']
+    - name: Prepare target packages before the migration window
+      ansible.builtin.apt:
+        name:
+          - postgresql-16
+          - postgresql-client-16
+          - nginx
+          - libnginx-mod-stream
+          - certbot
+          - dnsutils
+          - age
+          - openssh-client
+          - curl
+          - openssl
+          - ca-certificates
+          - iproute2
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      when: ultra_migration_phase == 'stage'
+    - name: Prepare service accounts on the isolated target
+      ansible.builtin.user:
+        name: "{{ item }}"
+        system: true
+        create_home: false
+        shell: /usr/sbin/nologin
+      loop: [ultra-relay, ultra-bot]
+      when: ultra_migration_phase == 'stage'
+    - name: Read target services before isolation
+      ansible.builtin.service_facts:
+    - name: Include active independent replica tunnels in target isolation
+      ansible.builtin.set_fact:
+        bridge_migration_target_automation: >-
+          {{ ultra_migration_automation_units +
+          (ansible_facts.services.keys() | select('match', '^ultra-replica-tunnel-ultra_[a-f0-9]{32}\\.service$') | list) }}
+      no_log: true
+    - name: Keep target application and automation stopped
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+      loop: "{{ ultra_migration_app_units + bridge_migration_target_automation }}"
+      when: item in ansible_facts.services
+    - name: Read the authenticated target resume identity
+      ansible.builtin.slurp:
+        src: "/var/lib/ultra-restore/{{ ultra_migration_restore_id }}/host-status.json"
+      register: bridge_migration_resume_identity
+      when: ultra_migration_phase == 'resume-target'
+      no_log: true
+    - name: Require the same completed restored database before starting it
+      ansible.builtin.assert:
+        that:
+          - ultra_migration_restore_id is match('^[a-f0-9]{64}$')
+          - (bridge_migration_resume_identity.content | b64decode | from_json).machine_id == ultra_migration_target_machine_id
+          - "'database' in (bridge_migration_resume_identity.content | b64decode | from_json).completed"
+      when: ultra_migration_phase == 'resume-target'
+      no_log: true
+    - name: Start only the authenticated restored PostgreSQL during activation retry
+      ansible.builtin.systemd_service:
+        name: postgresql
+        state: started
+      when: ultra_migration_phase == 'resume-target'
+    - name: Stop target primary before source rollback
+      ansible.builtin.systemd_service:
+        name: postgresql
+        state: stopped
+      when: ultra_migration_phase in ['stop-target', 'rollback-source']
+    - name: Confirm the target primary cannot accept writes before rollback
+      ansible.builtin.command:
+        argv: [systemctl, is-active, postgresql]
+      changed_when: false
+      register: bridge_migration_target_stopped
+      failed_when: bridge_migration_target_stopped.rc != 3
+      when: ultra_migration_phase in ['stop-target', 'rollback-source']
+    - name: Confirm target database cannot accept connections before rollback
+      ansible.builtin.command:
+        argv: [pg_isready, -h, 127.0.0.1, -p, "5432", -t, "3"]
+      changed_when: false
+      register: bridge_migration_target_primary_port
+      failed_when: bridge_migration_target_primary_port.rc != 2
+      when: ultra_migration_phase in ['stop-target', 'rollback-source']
+- name: Freeze and export a final encrypted generation
+  hosts: migration_sources
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Read the bound source machine identity
+      ansible.builtin.slurp:
+        src: /etc/machine-id
+      register: bridge_migration_phase_source
+    - name: Require the original source before every mutation
+      ansible.builtin.assert:
+        that: bridge_migration_phase_source.content | b64decode | trim == ultra_migration_source_machine_id
+    - name: Freeze the old primary through the common migration role
+      ansible.builtin.include_role:
+        name: bridge_migration
+        tasks_from: freeze
+      when: ultra_migration_phase == 'freeze'
+    - name: Restore the original source after confirmed rollback
+      ansible.builtin.include_role:
+        name: bridge_migration
+        tasks_from: restart-source
+      when: ultra_migration_phase == 'rollback-source'
+    - name: Save the current migration stage receipt
+      ansible.builtin.copy:
+        content: "{{ {'phase': ultra_migration_phase, 'verified': true} | to_json(preprocess_unsafe=False) }}\n"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: ultra_migration_phase != 'freeze'

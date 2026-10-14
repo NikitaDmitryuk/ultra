@@ -1,0 +1,50 @@
+---
+- name: Configure optional independent subscription forwarder
+  hosts: forward_ingress
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Configure forwarding ingress
+      ansible.builtin.include_role:
+        name: forward_ingress
+      when: ultra_ingress_action != 'adopt'
+    - name: Verify preserved forwarding ingress
+      ansible.builtin.include_role:
+        name: forward_ingress
+        tasks_from: adopt
+      when: ultra_ingress_action == 'adopt'
+- name: Configure owned bridge ingress
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Configure bridge ingress and certificates
+      ansible.builtin.include_role:
+        name: ingress
+      when: ultra_ingress_action in ['prepare', 'stage', 'activate', 'rollback', 'cutover']
+    - name: Verify preserved published ingress
+      ansible.builtin.include_role:
+        name: ingress
+        tasks_from: adopt
+      when: ultra_ingress_action == 'adopt'
+    - name: Configure isolated experimental transport
+      ansible.builtin.include_role:
+        name: ingress_experiment
+      when: ultra_ingress_action == 'experiment'
+    - name: Apply runtime ingress control
+      ultra_ingress_control:
+        action: "{{ ultra_ingress_action }}"
+        notice_key: "{{ ultra_ingress.notice_key | default('') }}"
+        notice_text: "{{ ultra_ingress.notice_text | default('') }}"
+      when: ultra_ingress_action in ['status', 'notice']
+      no_log: true
+- name: Confirm verified ingress operation
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Persist verified ingress result
+      ansible.builtin.copy:
+        content: '{"verified":true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      no_log: true

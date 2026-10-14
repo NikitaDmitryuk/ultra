@@ -1,0 +1,30 @@
+---
+- name: Recover the unchanged legacy control worker before any base mutation
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Require exact saved binary configuration and service identity
+      ultra_adoption_guard:
+        id: "{{ ultra_lifecycle_id }}"
+        action: resume-check
+      register: adoption_previous
+    - name: Restart the unchanged previous worker
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: started
+      when: adoption_previous.legacy | bool
+    - name: Verify the unchanged previous application
+      ultra_ingress_probe:
+        kind: relay
+      register: adoption_previous_ready
+      until: adoption_previous_ready.ready | default(false)
+      retries: 15
+      delay: 2
+    - name: Record previous service recovery
+      ansible.builtin.copy:
+        content: '{"verified":true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false

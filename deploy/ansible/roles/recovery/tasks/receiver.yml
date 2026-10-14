@@ -1,0 +1,84 @@
+---
+- name: Validate recovery receiver contract
+  ansible.builtin.assert:
+    that:
+      - ultra_recovery_files is defined
+      - ultra_recovery_files | length <= 32
+- name: Inspect managed recovery directories
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /opt/ultra-recovery
+    - /etc/ultra-recovery
+    - /var/lib/ultra-recovery
+    - /var/lib/ultra-monitor
+  register: recovery_directories
+- name: Reject recovery directory symlinks
+  ansible.builtin.assert:
+    that: not item.stat.islnk | default(false)
+  loop: "{{ recovery_directories.results }}"
+- name: Create private recovery directories
+  ansible.builtin.file:
+    path: "{{ item.item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop: "{{ recovery_directories.results }}"
+- name: Install receiver runtime dependency
+  ansible.builtin.apt:
+    name: age
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+- name: Validate recovery file destinations
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.destination is match(('^(/opt/ultra-recovery/(recovery|monitor|heartbeat)\.py
+        |/usr/local/bin/ultra-client
+        |/etc/ultra-recovery/(monitor\.json|probe\.json|primary-bot-token|peer_known_hosts|peer_ed25519(-[a-f0-9]{64})?(\.pub)?)
+        |/etc/systemd/system/ultra-(recovery-prune\.(service|timer)|monitor\.(service|timer)|monitor-probe\.service))$') | regex_replace('\\s+', ''))
+      - item.mode in ['0600', '0644', '0755']
+  loop: "{{ ultra_recovery_files }}"
+  no_log: true
+- name: Inspect recovery destination files
+  ansible.builtin.stat:
+    path: "{{ item.destination }}"
+  loop: "{{ ultra_recovery_files }}"
+  register: recovery_destinations
+  no_log: true
+- name: Reject recovery file symlinks
+  ansible.builtin.assert:
+    that: not item.stat.islnk | default(false)
+  loop: "{{ recovery_destinations.results }}"
+  no_log: true
+- name: Install recovery receiver files atomically
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ item.destination }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop: "{{ ultra_recovery_files }}"
+  no_log: true
+  register: recovery_files
+  notify: Reload recovery systemd units
+- name: Initialize owned recovery repository
+  ansible.builtin.command:
+    argv: [python3, /opt/ultra-recovery/recovery.py, init, --repository, /var/lib/ultra-recovery, --source, bridge]
+    creates: /var/lib/ultra-recovery/.ultra-recovery-repository
+- name: Validate receiver repository ownership
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - "import sys; sys.path.insert(0, '/opt/ultra-recovery'); from recovery import repository; repository('/var/lib/ultra-recovery', 'bridge')"
+  changed_when: false
+- name: Flush receiver unit handlers
+  ansible.builtin.meta: flush_handlers
+- name: Enable recovery retention timer
+  ansible.builtin.systemd_service:
+    name: ultra-recovery-prune.timer
+    enabled: true
+    state: started

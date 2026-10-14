@@ -1,0 +1,75 @@
+---
+- name: Require explicit network restoration before restarting the old primary
+  ansible.builtin.assert:
+    that:
+      - ultra_migration_network_restored | bool
+      - ultra_migration_confirm == 'ROLLBACK'
+- name: Read the original source service states
+  ansible.builtin.slurp:
+    src: "/var/lib/ultra-migration/{{ ultra_migration_pair }}/services.json"
+  register: bridge_migration_source_service_snapshot
+  no_log: true
+- name: Restore the same original independent replica transport set
+  ansible.builtin.set_fact:
+    bridge_migration_automation_all: >-
+      {{ ultra_migration_automation_units +
+      ((bridge_migration_source_service_snapshot.content | b64decode | from_json).keys() |
+      select('match', '^ultra-replica-tunnel-ultra_[a-f0-9]{32}\\.service$') | list) }}
+  no_log: true
+- name: Unmask only owned source services after target fencing
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    masked: false
+  loop: "{{ ultra_migration_app_units + bridge_migration_automation_all + ['postgresql.service', ultra_migration_pg_unit] }}"
+- name: Inspect preserved source unit definitions
+  ansible.builtin.stat:
+    path: "/var/lib/ultra-migration/{{ ultra_migration_pair }}/{{ item }}.previous"
+  loop: "{{ ultra_migration_app_units + bridge_migration_automation_all }}"
+  register: bridge_migration_unit_snapshots
+- name: Restore preserved source definitions before restarting anything
+  ansible.builtin.copy:
+    src: "{{ item.stat.path }}"
+    dest: "/etc/systemd/system/{{ item.item }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ bridge_migration_unit_snapshots.results }}"
+  when: item.stat.isreg | default(false)
+- name: Reload restored source services
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+- name: Restore the old primary only after target fencing
+  ansible.builtin.systemd_service:
+    name: postgresql
+    state: started
+    enabled: true
+- name: Restore the actual PostgreSQL cluster
+  ansible.builtin.systemd_service:
+    name: "{{ ultra_migration_pg_unit }}"
+    state: started
+- name: Restore the source relay first
+  ansible.builtin.systemd_service:
+    name: ultra-relay.service
+    state: started
+    enabled: true
+- name: Wait for the original source runtime
+  ansible.builtin.command:
+    argv: ["{{ ultra_migration_probe_executable }}", release-probe]
+  changed_when: false
+  no_log: true
+- name: Restore originally active application and automation units
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: "{{ (bridge_migration_source_service_snapshot.content | b64decode | from_json)[item].status == 'enabled' }}"
+    state: started
+  loop: "{{ ['ultra-bot.service'] + bridge_migration_automation_all }}"
+  when:
+    - item in (bridge_migration_source_service_snapshot.content | b64decode | from_json)
+    - (bridge_migration_source_service_snapshot.content | b64decode | from_json)[item].state == 'running'
+    - not ultra_migration_defer_automation | default(false) | bool
+  no_log: true
+- name: Invalidate the old frozen projection before any later migration attempt
+  ansible.builtin.file:
+    path: "/var/tmp/ultra-migration-{{ ultra_migration_pair }}/capture.json"
+    state: absent

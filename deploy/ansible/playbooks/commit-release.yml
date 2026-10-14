@@ -1,0 +1,60 @@
+---
+- name: Publish the current version only after full rollout verification
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Record the exact active manifest
+      ansible.builtin.copy:
+        src: "{{ ultra_release_source }}/release-manifest.json"
+        dest: /opt/ultra-recovery/release-manifest.json
+        owner: root
+        group: root
+        mode: "0600"
+    - name: Inspect an exact original manifest signature
+      ansible.builtin.stat:
+        path: "{{ ultra_release_source }}/release-manifest.json.minisig"
+      register: release_manifest_signature
+      delegate_to: localhost
+      become: false
+    - name: Retain the exact signed bytes for future acceptance
+      ansible.builtin.copy:
+        src: "{{ ultra_release_source }}/release-manifest.json.minisig"
+        dest: /opt/ultra-recovery/release-manifest.json.minisig
+        owner: root
+        group: root
+        mode: "0600"
+      when: release_manifest_signature.stat.isreg | default(false)
+    - name: Remove obsolete signature for an unsigned manual release
+      ansible.builtin.file:
+        path: /opt/ultra-recovery/release-manifest.json.minisig
+        state: absent
+      when: not release_manifest_signature.stat.exists
+    - name: Record the current verified version
+      ansible.builtin.copy:
+        content: "{{ {'version': ultra_release_version, 'ready_at': ultra_upgrade_observed_at} | to_json(preprocess_unsafe=False) }}\n"
+        dest: /var/lib/ultra-automation/release.json
+        owner: root
+        group: root
+        mode: "0600"
+- name: Bound verified executable history after the fleet commit
+  hosts: bridge:exits
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Retain the current complete emergency bundle and referenced runtimes
+      ansible.builtin.include_role:
+        name: release
+        tasks_from: retention
+- name: Acknowledge the committed release after retention completes
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Save the current committed release receipt
+      ansible.builtin.copy:
+        content: "{{ {'version': ultra_release_version, 'verified': true} | to_json(preprocess_unsafe=False) }}\n"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false

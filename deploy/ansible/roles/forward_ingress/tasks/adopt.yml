@@ -1,0 +1,24 @@
+---
+- name: Derive expected forwarding publication without adopting files
+  ultra_forward_state:
+    bridge: "{{ ultra_forward_bridge_ipv4 }}"
+    domain: "{{ ultra_forward_domain }}"
+    port: "{{ ultra_forward_bot_port }}"
+    verify_existing: true
+  register: forward_ingress_preserved
+- name: Validate preserved forwarding Nginx configuration
+  ansible.builtin.command:
+    argv: [nginx, -t]
+  changed_when: false
+- name: Verify preserved forwarding listeners
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ item }}"
+    timeout: 15
+  loop: "{{ forward_ingress_preserved.ports | unique }}"
+- name: Verify preserved forwarding HTTPS handshake with authenticated SNI
+  ultra_ingress_probe:
+    kind: tls
+    hostname: "{{ ultra_forward_domain }}"
+    port: "{{ ultra_forward_bot_port }}"
+  no_log: true

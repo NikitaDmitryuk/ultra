@@ -184,37 +184,46 @@ make release-dist
 учёт. Старые конфигурации поддерживаются для обслуживания прежней установки, но
 не подтверждают полный набор копий и внешнего мониторинга.
 
-Штатное обновление:
+Ручная выкладка выполняется только из чистого tracked-дерева и committed `HEAD`:
 
 ```sh
-make release-dist
-./ultra-install upgrade --config install.config
-./ultra-install status --config install.config
+ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \
+ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 ```
 
-Если работающая установка уже принята контроллером, а локальный `install.config`
-ещё использует схему 1, укажите каталог скачанного release явно:
+`install.config` задаёт bridge и статические узлы; скрипт берёт первый static exit
+как SSH jump host. `ULTRA_OPERATOR_IDENTITY` и `ULTRA_OPERATOR_KNOWN_HOSTS` — пути
+к локальным файлам оператора: выделенному SSH-ключу с правами 0600 и файлу с
+проверенными host-key pins. Соединение использует строгую проверку ключей и не
+читает пользовательский `~/.ssh/config`. Эти файлы остаются локальными.
+`ULTRA_OPERATOR_INVENTORY` не требуется; он остаётся совместимым способом
+продолжить adoption по существующему failed-operation артефакту. Создавать и
+поддерживать отдельный inventory вручную не нужно.
+
+Скрипт собирает и проверяет release для точного `HEAD`, затем передаёт на bridge
+комплект и обновлённый канонический `install.config` в
+`/var/lib/ultra-ansible/operator-inputs/manual-<SHA>-<attempt>/release`. Файл `.env` и другие
+секреты не копируются. Успешная команда выполняет `doctor`, затем `upgrade` и
+`status`; в режиме adoption вместо upgrade запускаются read-only сравнение,
+`apply` и `status`. Теги, публикацию GitHub Release и фоновые обновления команда
+не создаёт.
+
+Для первой выкладки поверх уже работающего runtime включайте adoption только явно:
 
 ```sh
-./ultra-install upgrade --config install.config --release-dir /secure/releases/v2.4.1
-./ultra-install status --config install.config
+ADOPT=1 ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \
+ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 ```
 
-Команда использует сохранённую на bridge приватную конфигурацию контроллера и меняет
-только проверенную версию. Комплект версии сохраняется до запуска, а само обновление
-работает как systemd-задача: разрыв операторского SSH не останавливает процесс.
-Повтор команды с той же версией продолжает сохранённый журнал.
-
-Обновление проверяет manifest и все SHA-256 до изменений. Затем оно последовательно
-обновляет `exit`, проверяя передачу после каждого, и только после этого меняет
-`bridge` и бота. Перед активацией требуется свежая независимая копия. Прерванный
-запуск продолжает тот же журнал и сверяет уже установленные хеши; другой release
-или изменённую топологию незавершённая операция не принимает.
-
-Откат разрешён только на заранее сохранённый бинарник с совместимыми границами
-схемы, ledger и служебного доступа. SQL, credentials и топология автоматически
-назад не переключаются. Подробности, формат параметров и команды:
-[полная установка и обновление](docs/automation.md).
+Это выполняет `doctor`, `adopt --check --adopt-runtime --bridge-native`,
+`apply --adopt-runtime --bridge-native` и `status`. Без `ADOPT=1` принятие
+не запускается. Ошибка подготовки или read-only сравнения до отправки mutator
+восстанавливает предыдущий локальный config и удаляет журнал. После отправки
+изменяющей команды при ошибке config и приватный журнал сохраняются: задание на
+bridge может продолжаться. Сначала проверьте состояние через `ultra-install status`
+на bridge и разрешите незавершённую операцию; не меняйте config вручную и не
+запускайте другой commit до этого. Повтор с тем же `HEAD` продолжает тот же журнал.
+Подробности и ограничения: [инструкция по автоматизации](docs/automation.md).
 
 ## DNS, TLS и собственный домен
 

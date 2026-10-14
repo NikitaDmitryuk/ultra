@@ -29,6 +29,7 @@ type Operation struct {
 	ErrorMessage              string    `json:"error_message,omitempty"`
 	HTTPStatus                int       `json:"http_status,omitempty"`
 	ReplicationState          string    `json:"replication_state,omitempty"`
+	InstallAttempt            uint64    `json:"install_attempt,omitempty"`
 	ID                        string    `json:"id"`
 	Offer                     Offer     `json:"offer"`
 	State                     string    `json:"state"`
@@ -70,6 +71,7 @@ type Provisioner interface {
 	Cleanup(context.Context, *Operation) error
 }
 type Service struct {
+	TopologyReady     func(context.Context) error
 	IngressInstanceID string
 	Log               *slog.Logger
 	API               Provider
@@ -171,6 +173,16 @@ func (s *Service) Confirm(ctx context.Context, actor int64, id string) (Operatio
 		}
 		return op, nil
 	}
+	if s.TopologyReady != nil {
+		unlock, err := s.Store.Lock(ctx)
+		if err != nil {
+			return Operation{}, err
+		}
+		defer unlock()
+		if err = s.TopologyReady(ctx); err != nil {
+			return Operation{}, err
+		}
+	}
 	offer, e := s.Store.Offer(ctx, id)
 	if e != nil {
 		return Operation{}, e
@@ -197,6 +209,11 @@ func (s *Service) Action(ctx context.Context, actor int64, id, action string) er
 		return e
 	}
 	defer unlock()
+	if s.TopologyReady != nil {
+		if err := s.TopologyReady(ctx); err != nil {
+			return err
+		}
+	}
 	op, e := s.Store.Get(ctx, id)
 	if e != nil {
 		return e
@@ -205,6 +222,14 @@ func (s *Service) Action(ctx context.Context, actor int64, id, action string) er
 	case "retry":
 		if op.State != "failed" && op.State != "unknown" {
 			return ErrConflict
+		}
+		// Only an explicit retry creates another installation attempt. Keep the
+		// purchase and existing VM stable, and persist before the worker sees it.
+		if op.Phase == "install" {
+			if op.InstallAttempt == ^uint64(0) {
+				return ErrConflict
+			}
+			op.InstallAttempt++
 		}
 		op.State = "pending"
 		op.Error = ""
@@ -256,6 +281,11 @@ func (s *Service) Step(ctx context.Context) error {
 		return e
 	}
 	defer unlock()
+	if s.TopologyReady != nil {
+		if err := s.TopologyReady(ctx); err != nil {
+			return err
+		}
+	}
 	ops, e := s.Store.List(ctx)
 	if e != nil {
 		return e

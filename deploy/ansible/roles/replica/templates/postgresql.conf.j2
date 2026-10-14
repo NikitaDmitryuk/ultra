@@ -1,0 +1,12 @@
+listen_addresses = '127.0.0.1'
+port = 5433
+shared_buffers = '64MB'
+hot_standby = on
+max_connections = {{ ultra_replica_connections }}
+max_worker_processes = {{ ultra_replica_workers }}
+max_prepared_transactions = {{ ultra_replica_prepared }}
+max_locks_per_transaction = {{ ultra_replica_locks }}
+max_wal_senders = {{ ultra_replica_senders }}
+hba_file = '/etc/ultra-postgres-replica/pg_hba.conf'
+primary_conninfo = 'host=127.0.0.1 port=15432 user={{ ultra_replica_user }} passfile=/etc/ultra-postgres-replica/pgpass application_name={{ ultra_replica_slot }} sslmode=disable'
+primary_slot_name = '{{ ultra_replica_slot }}'

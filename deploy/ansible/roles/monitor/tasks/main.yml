@@ -1,0 +1,31 @@
+---
+- name: Validate independent monitor mode
+  ansible.builtin.assert:
+    that: ultra_monitor_mode | default('none') in ['none', 'primary', 'peer']
+- name: Start full VPN probe only on the primary monitor
+  ansible.builtin.systemd_service:
+    name: ultra-monitor-probe.service
+    enabled: true
+    state: >-
+      {{ 'restarted' if (recovery_files.results | default([]) | selectattr('changed')
+      | map(attribute='item.destination') | list
+      | intersect(['/usr/local/bin/ultra-client', '/etc/ultra-recovery/probe.json']) | length > 0) else 'started' }}
+  when: ultra_monitor_mode | default('none') == 'primary'
+- name: Enable independent monitor timer
+  ansible.builtin.systemd_service:
+    name: ultra-monitor.timer
+    enabled: true
+    state: started
+  when: ultra_monitor_mode | default('none') != 'none'
+- name: Retire only previously owned monitor services
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+  loop: [ultra-monitor.timer, ultra-monitor-probe.service]
+  when: ultra_monitor_retire | default(false) | bool
+- name: Run one independent readiness observation
+  ansible.builtin.systemd_service:
+    name: ultra-monitor.service
+    state: started
+  when: ultra_monitor_run_once | default(false) | bool

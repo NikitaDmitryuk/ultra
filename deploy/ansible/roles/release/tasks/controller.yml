@@ -1,0 +1,42 @@
+---
+- name: Inspect the adopted controller service
+  ansible.builtin.stat:
+    path: /etc/systemd/system/ultra-ansible-controller.service
+    checksum_algorithm: sha256
+    follow: false
+  register: release_controller_service
+- name: Require the adopted or selected controller service
+  ansible.builtin.assert:
+    that:
+      - release_controller_service.stat.isreg | default(false)
+      - not release_controller_service.stat.islnk | default(false)
+      - release_controller_service.stat.checksum in [ultra_previous_controller_unit_sha256, ultra_target_controller_unit_sha256]
+- name: Inspect the retained controller service fallback
+  ansible.builtin.stat:
+    path: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/controller.service.previous"
+    checksum_algorithm: sha256
+  register: release_controller_previous
+- name: Require an intact compatible controller fallback
+  ansible.builtin.assert:
+    that:
+      - not release_controller_previous.stat.exists or release_controller_previous.stat.checksum == ultra_previous_controller_unit_sha256
+      - release_controller_service.stat.checksum == ultra_previous_controller_unit_sha256 or release_controller_previous.stat.exists
+- name: Preserve the adopted controller service once
+  ansible.builtin.copy:
+    src: /etc/systemd/system/ultra-ansible-controller.service
+    dest: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/controller.service.previous"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+    force: false
+  when: release_controller_service.stat.checksum == ultra_previous_controller_unit_sha256
+- name: Install the verified immutable controller runtime through its common role
+  ansible.builtin.include_role:
+    name: controller
+- name: Activate the new independent controller before verification
+  ansible.builtin.meta: flush_handlers
+- name: Align recovery metadata with the activated immutable controller
+  ansible.builtin.import_tasks: backup-identity.yml
+  vars:
+    release_backup_controller_directory: "{{ ultra_controller_directory }}"

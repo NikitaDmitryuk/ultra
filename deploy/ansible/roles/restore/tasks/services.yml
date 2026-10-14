@@ -1,0 +1,157 @@
+---
+- name: Keep application and automation masked during data installation
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    masked: true
+    state: stopped
+  loop: "{{ ultra_restore_app_units + ultra_restore_automation_units }}"
+  when: ultra_restore_phase == 'prepare'
+- name: Inspect independent replica transports on the restore target
+  ansible.builtin.service_facts:
+  when: ultra_restore_phase == 'prepare'
+- name: Stop inherited replica tunnels before primary replacement
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop: "{{ ansible_facts.services | default({}) | list | select('match', '^ultra-replica-tunnel-ultra_[a-f0-9]{32}\\.service$') | list }}"
+  when: ultra_restore_phase == 'prepare'
+- name: Activate restored PostgreSQL settings
+  ansible.builtin.systemd_service:
+    name: postgresql
+    state: restarted
+  when: ultra_restore_phase == 'database'
+- name: Activate restored application services
+  when: ultra_restore_phase == 'activate'
+  block:
+    - name: Keep recovered automation masked until public ingress is verified
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        masked: true
+        state: stopped
+      loop: "{{ ultra_restore_automation_units }}"
+    - name: Reload restored systemd units
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+    - name: Start restored relay first
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        masked: false
+        enabled: true
+        state: started
+    - name: Wait for restored relay readiness
+      ansible.builtin.command:
+        argv: [python3, "{{ ultra_restore_directory }}/restore_host.py", --directory, "{{ ultra_restore_directory }}", --phase, runtime-check]
+        stdin: "{{ ultra_restore_plan | to_json(preprocess_unsafe=False) }}"
+      changed_when: false
+      no_log: true
+    - name: Start restored bot and HTTPS after relay
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        masked: false
+        enabled: true
+        state: started
+      loop: "{{ ['nginx.service'] if ultra_restore_defer_bot | default(false) | bool else ['ultra-bot.service', 'nginx.service'] }}"
+    - name: Reload restored HTTPS configuration
+      ansible.builtin.systemd_service:
+        name: nginx.service
+        state: reloaded
+- name: Activate only the restored executor before acquiring migration ownership
+  when: ultra_restore_phase == 'migration-controller'
+  block:
+    - name: Inspect authenticated restored executor unit
+      ansible.builtin.stat:
+        path: "{{ ultra_restore_directory }}/stage/state/etc/systemd/system/ultra-ansible-controller.service"
+      register: restore_migration_controller_stage_unit
+    - name: Require the authenticated executor unit
+      ansible.builtin.assert:
+        that:
+          - restore_migration_controller_stage_unit.stat.isreg | default(false)
+          - not restore_migration_controller_stage_unit.stat.islnk | default(false)
+    - name: Unmask only the migration executor
+      ansible.builtin.systemd_service:
+        name: ultra-ansible-controller.service
+        masked: false
+    - name: Restore the authenticated executor unit
+      ansible.builtin.copy:
+        src: "{{ ultra_restore_directory }}/stage/state/etc/systemd/system/ultra-ansible-controller.service"
+        dest: /etc/systemd/system/ultra-ansible-controller.service
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+    - name: Find authenticated executor drop-ins
+      ansible.builtin.find:
+        paths: "{{ ultra_restore_directory }}/stage/state/etc/systemd/system/ultra-ansible-controller.service.d"
+        patterns: '*.conf'
+        file_type: file
+      register: restore_migration_controller_dropins
+    - name: Create executor drop-in directory when needed
+      ansible.builtin.file:
+        path: /etc/systemd/system/ultra-ansible-controller.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: restore_migration_controller_dropins.matched > 0
+    - name: Restore authenticated executor drop-ins
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: "/etc/systemd/system/ultra-ansible-controller.service.d/{{ item.path | basename }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ restore_migration_controller_dropins.files }}"
+      no_log: true
+    - name: Start only the migration executor with restored exact runtime
+      ansible.builtin.systemd_service:
+        name: ultra-ansible-controller.service
+        daemon_reload: true
+        enabled: true
+        state: started
+- name: Activate restored automation after verified cutover
+  when: ultra_restore_phase == 'automation'
+  block:
+    - name: Unmask recovered automation units
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        masked: false
+      loop: "{{ ultra_restore_automation_units }}"
+    - name: Reload recovered automation units
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+    - name: Inspect restored independent executor
+      ansible.builtin.stat:
+        path: /etc/systemd/system/ultra-ansible-controller.service
+      register: restore_controller_unit
+    - name: Start restored independent executor
+      ansible.builtin.systemd_service:
+        name: ultra-ansible-controller.service
+        enabled: true
+        state: started
+      when: restore_controller_unit.stat.exists
+    - name: Restart relay with final restored environment
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: restarted
+    - name: Wait for final restored relay readiness
+      ansible.builtin.command:
+        argv: [python3, "{{ ultra_restore_directory }}/restore_host.py", --directory, "{{ ultra_restore_directory }}", --phase, runtime-check]
+        stdin: "{{ ultra_restore_plan | to_json(preprocess_unsafe=False) }}"
+      changed_when: false
+      no_log: true
+    - name: Enable recovered service timers
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop: [ultra-recovery-backup.timer, ultra-recovery-reconcile.timer, certbot.timer]
+- name: Activate the bot only after migration payload verification
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    masked: false
+    enabled: true
+    state: started
+  loop: [ultra-bot.service, nginx.service]
+  when: ultra_restore_phase == 'migration-bot'

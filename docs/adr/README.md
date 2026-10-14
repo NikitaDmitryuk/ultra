@@ -42,3 +42,4 @@ ADR фиксирует долгосрочный выбор границ комп
 | [0017 — Постоянный HTTPS VPN и изолированный эксперимент](0017-xhttp-ingress.md) | accepted |
 | [0018 — Автономный relay и предпочтительная страна](0018-autonomous-relay-and-preferred-country.md) | accepted |
 | [0019 — Общая квота провайдера и личный потолок](0019-provider-pool-quotas.md) | accepted |
+| [0020 — Общий исполнитель инфраструктуры Ansible](0020-ansible-infrastructure.md) | accepted |

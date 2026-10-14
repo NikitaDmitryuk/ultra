@@ -1,22 +1,26 @@
 package main
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"os"
-	"path"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
-	"time"
+	"syscall"
 
-	"github.com/NikitaDmitryuk/ultra/deploy"
 	recoveryassets "github.com/NikitaDmitryuk/ultra/deploy/recovery"
-	"github.com/NikitaDmitryuk/ultra/internal/install"
+	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
@@ -156,14 +160,71 @@ func applyDomainCutover(p *installplan.InstallPlan, configFile, subscription, vp
 	if bridgeIP == nil || bridgeIP.To4() == nil {
 		return errors.New("cutover bridge address must be explicit IPv4")
 	}
-	if err := os.Setenv("ULTRA_INSTALL_SSH_STRICT_HOST_KEY", "yes"); err != nil {
-		return err
-	}
 	if err := os.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins); err != nil {
 		return err
 	}
-	existing, err := loadPlanRemoteBridgeSpec(p)
+	stateRoot, err := bootstrapStateRoot()
 	if err != nil {
+		return err
+	}
+	if err = ensurePrivateBootstrapDirectory(stateRoot); err != nil {
+		return err
+	}
+	fingerprint := sha256.Sum256([]byte(p.Bridge.SSHHost + "|" + subscription + "|" + vpn + "|" + zone + "|" + email))
+	planRoot := filepath.Join(stateRoot, "domain-cutover-"+hex.EncodeToString(fingerprint[:]))
+	if err = ensurePrivateBootstrapDirectory(planRoot); err != nil {
+		return err
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	ctx, operatorRelease, err := withBootstrapOperatorLock(ctx, stateRoot)
+	if err != nil {
+		return err
+	}
+	defer operatorRelease()
+	directory, err := beginBootstrapAttempt(planRoot)
+	if err != nil {
+		return err
+	}
+	lockDirectory, err := freezeBootstrapExecution(p, directory, stateRoot)
+	if err != nil {
+		return err
+	}
+	ctx, release, err := withFrozenLifecycleLock(ctx, p, lockDirectory, directory)
+	if err != nil {
+		return err
+	}
+	defer release()
+	bridgeOnly := *p
+	bridgeOnly.Exits = nil
+	bridgeOnly.Database.Enabled = false
+	if bridgeOnly.Automation != nil {
+		a := *bridgeOnly.Automation
+		a.KnownHostsFile = pins
+		bridgeOnly.Automation = &a
+	}
+	python := "/usr/bin/python3"
+	executable := os.Getenv("ULTRA_ANSIBLE_EXECUTABLE")
+	if executable == "" {
+		executable = "/opt/ultra-ansible/current/venv/bin/ansible-playbook"
+	}
+	gateInventory, err := bootstrapInventory(&bridgeOnly, directory)
+	if err != nil {
+		return err
+	}
+	if err = ansibleLifecycle(ctx, p, gateInventory, directory, python, executable, "applying", true); err != nil {
+		return err
+	}
+	inventory, inspection, err := inspectBootstrap(ctx, &bridgeOnly, directory, python, executable, lockDirectory)
+	if err != nil {
+		return err
+	}
+	specJSON, err := inspection["bridge"].file("spec.json")
+	if err != nil {
+		return err
+	}
+	var existing config.Spec
+	if err = json.Unmarshal(specJSON, &existing); err != nil {
 		return errors.New("cutover existing spec unavailable")
 	}
 	if !existing.PrimaryXHTTPIsPublished() {
@@ -178,87 +239,79 @@ func applyDomainCutover(p *installplan.InstallPlan, configFile, subscription, vp
 	if url == "" || key == "" || strings.ContainsAny(url+key, "\r\n\x00") {
 		return errors.New("canonical cutover probe URL and DNS key required")
 	}
-	local, err := os.MkdirTemp("", "ultra-domain-cutover-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(local) //nolint:errcheck
-	remote := path.Join("/var/lib/ultra-automation/staging", filepath.Base(local))
-	ssh := func(command string) error {
-		return install.RunSSH(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, command)
-	}
-	if err = ssh("install -d -m 700 " + shellQuote(remote)); err != nil {
-		return err
-	}
-	defer func() { _ = ssh("rm -rf -- " + shellQuote(remote)) }()
-	upload := func(name string, data []byte) error {
-		file := filepath.Join(local, name)
-		if err := os.WriteFile(file, data, 0600); err != nil {
-			return err
-		}
-		return install.SCP(p.SSH.Identity, file, p.SSH.User, p.Bridge.SSHHost, path.Join(remote, name))
-	}
-	for _, name := range []string{"domain_cutover.py", "dns.py"} {
-		data, err := recoveryassets.Scripts.ReadFile(name)
-		if err != nil {
-			return err
-		}
-		if err = upload(name, data); err != nil {
-			return err
-		}
-	}
-	for name, data := range map[string][]byte{"bridge_subscription.py": []byte(deploy.BridgeSubscriptionIngress), "xhttp_ingress.py": []byte(install.XHTTPIngressScript), "subscription-url": []byte(url), "dns-key": []byte(key)} {
-		if err = upload(name, data); err != nil {
-			return err
-		}
+	receiptInfo, err := os.Lstat(receipt)
+	if err != nil || !receiptInfo.Mode().IsRegular() || receiptInfo.Mode().Perm()&0077 != 0 {
+		return errors.New("private owned DNS receipt required")
 	}
 	receiptData, err := os.ReadFile(receipt)
 	if err != nil {
 		return errors.New("owned DNS receipt unavailable")
 	}
-	if err = upload("dns-receipt.json", receiptData); err != nil {
+	var owned map[string]any
+	if err = json.Unmarshal(receiptData, &owned); err != nil {
+		return errors.New("owned DNS receipt invalid")
+	}
+	source, err := recoveryassets.Scripts.ReadFile("dns.py")
+	if err != nil {
 		return err
 	}
-	desired := map[string]any{"subscription": map[string]string{"name": strings.TrimSuffix(subscription, "."+zone), "data": bridgeIP.String()}, "vpn": map[string]string{"name": strings.TrimSuffix(vpn, "."+zone), "data": bridgeIP.String()}}
-	params := map[string]any{"bridge_ipv4": bridgeIP.String(), "subscription_domain": subscription, "subscription_url_file": path.Join(remote, "subscription-url"), "dns_key_source": path.Join(remote, "dns-key"), "dns_receipt_source": path.Join(remote, "dns-receipt.json"), "dns": map[string]any{"provider": "vultr", "zone": zone, "ttl": 300, "subscription_name": strings.TrimSuffix(subscription, "."+zone), "vpn_name": strings.TrimSuffix(vpn, "."+zone), "api_key_file": "/etc/ultra-recovery/dns-api-key"}, "desired": desired, "ingress": map[string]any{"domain": vpn, "public_host": vpn, "path": existing.PrimaryXHTTP.Path, "backend_port": existing.PrimaryXHTTP.BackendPort, "email": email}}
-	raw, _ := json.Marshal(params)
-	if err = upload("cutover.json", raw); err != nil {
+	contract, err := recoveryassets.Scripts.ReadFile("cutover_contract.py")
+	if err != nil {
 		return err
 	}
-	unit := "ultra-domain-cutover-" + strings.TrimPrefix(filepath.Base(local), "ultra-domain-cutover-")
-	if !regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(unit) {
-		return errors.New("invalid cutover operation identifier")
+	environment, err := inspection["bridge"].file("environment")
+	if err != nil {
+		return err
 	}
-	launch := "systemd-run --no-block --collect --unit " + shellQuote(unit) +
-		" --property Type=oneshot --property TimeoutStartSec=1200 /usr/bin/python3 " +
-		shellQuote(path.Join(remote, "domain_cutover.py")) + " --config " + shellQuote(path.Join(remote, "cutover.json"))
-	if err = ssh(launch); err != nil {
-		return errors.New("domain cutover not completed; resume with same target parameters")
+	botDomain := p.Bot.Domain
+	botPort := p.Bot.Port
+	if botPort == 0 {
+		botPort = 8444
 	}
-	deadline := time.Now().Add(20 * time.Minute)
-	for {
-		poll := "printf 'ULTRA_UNIT='; systemctl is-active " + shellQuote(unit+".service") + " 2>/dev/null || true; " +
-			"printf 'ULTRA_PHASE='; python3 -c " + shellQuote("import json,pathlib; p=pathlib.Path('/var/lib/ultra-domain-cutover/current/journal.json'); print(json.loads(p.read_text()).get('phase','invalid') if p.exists() else 'missing')")
-		output, pollErr := install.RunSSHOutput(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, poll)
-		if pollErr == nil {
-			unitState, phase := parseCutoverPoll(string(output))
-			if phase == "complete" {
-				break
-			}
-			if unitState == "failed" || unitState == "inactive" || unitState == "unknown" || unitState == "not-found" {
-				return errors.New("domain cutover not completed; resume with same target parameters")
+	for _, line := range strings.Split(string(environment), "\n") {
+		name, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		value = strings.Trim(value, "\"'")
+		if name == "ULTRA_BOT_DOMAIN" {
+			botDomain = value
+		}
+		if name == "ULTRA_BOT_PORT" {
+			botPort, err = strconv.Atoi(value)
+			if err != nil {
+				return errors.New("invalid existing bot port")
 			}
 		}
-		if time.Now().After(deadline) {
-			return errors.New("domain cutover readiness deadline exceeded; resume with same target parameters")
-		}
-		time.Sleep(2 * time.Second)
+	}
+	gateway := existing.GatewayVLESSPort
+	if gateway == 0 {
+		gateway = 18081
+	}
+	params := map[string]any{"domain": vpn, "public_host": vpn, "path": existing.PrimaryXHTTP.Path, "backend_port": existing.PrimaryXHTTP.BackendPort, "gateway_port": gateway, "staging_port": 18443, "email": email}
+	txnHash := sha256.Sum256([]byte(directory))
+	variables := map[string]any{
+		"ultra_lock_directory": lockDirectory, "ultra_ingress_action": "cutover", "ultra_ingress": params, "ultra_ingress_transaction": "/var/lib/ultra-ingress/ansible-" + hex.EncodeToString(txnHash[:]),
+		"ultra_ingress_email": email, "ultra_ingress_domains": uniqueIngressDomains(subscription, vpn, botDomain), "ultra_subscription_enabled": true, "ultra_subscription_domain": subscription, "ultra_bot_domain": botDomain, "ultra_bot_port": botPort, "ultra_bridge_ipv4": bridgeIP.String(),
+		"ultra_cutover_subscription_url": url, "ultra_cutover_contract_source": string(contract), "ultra_dns_source_content": string(source), "ultra_dns_api_key": key, "ultra_dns_receipt_seed": owned,
+		"ultra_dns_config":  map[string]any{"provider": "vultr", "zone": zone, "ttl": 300, "subscription_name": strings.TrimSuffix(subscription, "."+zone), "vpn_name": strings.TrimSuffix(vpn, "."+zone), "api_key_file": "/etc/ultra-recovery/dns-api-key"},
+		"ultra_dns_desired": map[string]any{"subscription": map[string]string{"name": strings.TrimSuffix(subscription, "."+zone), "data": bridgeIP.String()}, "vpn": map[string]string{"name": strings.TrimSuffix(vpn, "."+zone), "data": bridgeIP.String()}},
+	}
+	_, err = deployansible.RunLocal(ctx, "domain-cutover", inventory, variables, filepath.Join(directory, "apply"), python, executable)
+	if err != nil {
+		return err
 	}
 	delta := cutoverDelta(subscription, vpn, zone)
 	delta["ACME_EMAIL"] = email
 	delta["PUBLIC_XHTTP_PATH"] = existing.PrimaryXHTTP.Path
 	if err = writeCutoverConfig(configFile, delta); err != nil {
 		return errors.New("cutover completed but canonical config write failed; repeat the same command")
+	}
+	if err = ansibleLifecycle(ctx, p, inventory, directory, python, executable, "released", false); err != nil {
+		return err
+	}
+	if err = completeBootstrapAttempt(planRoot, directory); err != nil {
+		return err
 	}
 	fmt.Println("domain cutover complete; old ingress preserved; canonical parameters updated")
 	return nil

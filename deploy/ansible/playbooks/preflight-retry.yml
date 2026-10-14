@@ -1,0 +1,19 @@
+---
+- name: Check recovery before an explicitly authorized repeat of the frozen operation
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Require fresh independent recovery and unchanged topology
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/../roles/release/files/state.py --expected {{ ultra_topology_sha256 }} --not-before 0"
+        executable: /usr/bin/python3
+      changed_when: false
+      no_log: true
+    - name: Save the private current retry preflight result
+      ansible.builtin.copy:
+        content: '{"verified": true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false

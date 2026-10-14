@@ -53,14 +53,37 @@ def cluster_identifier(data, runner=run):
     return value[1]
 
 
+def retire_seed_state(directory, retired):
+    """Resume safe retirement of typed private markers and their owned seed."""
+    slots=[];sources=[]
+    for name in ('seed-owned-by-ultra','seed-complete'):
+        for parent in (directory,retired):
+            path=parent/name
+            if path.exists() or path.is_symlink():
+                if path.is_symlink() or not path.is_file() or path.stat().st_uid!=os.geteuid() or path.stat().st_mode & 0o077:
+                    raise ValueError('foreign_replica_seed_marker')
+                slot=path.read_text().strip()
+                if not re.fullmatch(r'ultra_[a-f0-9]{32}',slot):
+                    raise ValueError('foreign_replica_seed_marker')
+                slots.append(slot)
+                if parent==directory:sources.append(path)
+    seed=directory/'seed';oldseed=retired/'seed'
+    if len(set(slots))>1 or seed.is_symlink() or oldseed.is_symlink():
+        raise ValueError('foreign_replica_seed_marker')
+    if seed.exists() and (oldseed.exists() or not any((p/'seed-owned-by-ultra').is_file() for p in (directory,retired))):
+        raise ValueError('foreign_replica_seed_marker')
+    # Moving the seed first leaves its ownership marker available across crashes.
+    if seed.exists():seed.rename(oldseed)
+    for path in sources:
+        target=retired/path.name
+        if target.exists():
+            if target.read_bytes()!=path.read_bytes():raise ValueError('retired_seed_conflict')
+            path.unlink()
+        else:path.rename(target)
+
+
 def reseed(plan, root=Path('/'), runner=run):
     root = Path(root)
-    if plan.get('new_bridge_address') is not None:
-        address = str(ipaddress.IPv4Address(plan['new_bridge_address']))
-        port = plan['tunnel_port']
-        if not isinstance(port, int) or not 1 <= port <= 65535:
-            raise ValueError('invalid_restored_tunnel_port')
-        runner(['sh', '-c', "if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then ufw allow from " + address + " to any port " + str(port) + " proto tcp >/dev/null; fi"])
     directory = root / 'var/lib/ultra-postgres-replica'
     data = directory / 'data'
     retired = directory / ('retired-' + plan['restore_id'][:16])
@@ -91,8 +114,6 @@ def reseed(plan, root=Path('/'), runner=run):
             raise ValueError('replica_forward_process_not_sshd')
         os.kill(pid, signal.SIGTERM)
     # Do not stop any relay, monitor, or the exit's standard PostgreSQL cluster.
-    if data.exists():
-        runner(['systemctl', 'stop', 'ultra-postgres-replica.service'])
     retired.mkdir(parents=True, exist_ok=True, mode=0o700)
     atomic(marker, {'restore_id': plan['restore_id'], 'old_system_identifier': current,
                     'new_system_identifier': plan['system_identifier'], 'reseed_prepared': False})
@@ -101,6 +122,7 @@ def reseed(plan, root=Path('/'), runner=run):
         if config.is_symlink():
             raise ValueError('foreign_replica_configuration')
         shutil.copytree(config, retired / 'configuration', symlinks=True)
+    retire_seed_state(directory,retired)
     if data.exists():
         data.rename(retired / 'data')
     atomic(marker, {'restore_id': plan['restore_id'], 'old_system_identifier': current,
@@ -140,13 +162,16 @@ def configurations(address, domain):
     return {'stream.d/bot-proxy.conf': stream.encode(), 'conf.d/acme-proxy.conf': acme.encode()}
 
 
-def forward(plan, root=Path('/'), runner=run):
+def prepare_forward(plan, root=Path('/')):
     nginx = Path(root) / 'etc/nginx'
     marker = nginx / 'ultra-ingress.sha256.json'
     known = json.loads(marker.read_text()) if marker.exists() else {}
     expected = configurations(plan['old_bridge_address'], plan['subscription_domain'])
     desired = configurations(plan['new_bridge_address'], plan['subscription_domain'])
-    previous, changes = {}, {}
+    backup = Path(root) / 'var/lib/ultra-restore' / plan['restore_id'] / 'ingress-before'
+    pending = backup.parent / 'ingress-desired'
+    backup.mkdir(parents=True, exist_ok=True, mode=0o700)
+    pending.mkdir(exist_ok=True, mode=0o700)
     normalize = lambda data: re.sub(rb'\s+', b'', data)
     for name, content in desired.items():
         path = nginx / name
@@ -156,41 +181,57 @@ def forward(plan, root=Path('/'), runner=run):
         legacy = expected[name].replace(b'    listen 443;\n    listen [::]:443;\n', b'').replace(b'    access_log off;\n', b'').replace(b'location / { return 404; }', b'location / { return 301 https://$host:8444$request_uri; }')
         if normalize(old) not in (normalize(expected[name]), normalize(legacy), normalize(content)) and hashlib.sha256(old).hexdigest() != known.get(name):
             raise ValueError('foreign_ingress_configuration')
-        previous[name] = old
-        if old != content:
-            changes[name] = content
-    if changes:
-        backup = Path(root) / 'var/lib/ultra-restore' / plan['restore_id'] / 'ingress-before'
-        backup.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for name, data in previous.items():
-            path = backup / Path(name).name
-            if not path.exists():
-                path.write_bytes(data); path.chmod(0o600)
-        try:
-            for name, data in changes.items():
-                (nginx / name).write_bytes(data)
-            runner(['nginx', '-t'])
-            runner(['systemctl', 'reload', 'nginx'])
-        except Exception:
-            for name, data in previous.items():
-                (nginx / name).write_bytes(data)
-            runner(['nginx', '-t'])
-            runner(['systemctl', 'reload', 'nginx'])
-            raise ValueError('ingress_failed_previous_restored') from None
-    runner(['nginx', '-t'])
-    runner(['systemctl', 'is-active', '--quiet', 'nginx'])
-    atomic(marker, {name: hashlib.sha256(data).hexdigest() for name, data in desired.items()})
-    return {'ingress_ready': True, 'dns_changed': False, 'config_changed': bool(changes)}
+        saved = backup / Path(name).name
+        if not saved.exists():
+            saved.write_bytes(old); saved.chmod(0o600)
+        staged = pending / Path(name).name
+        staged.write_bytes(content); staged.chmod(0o600)
+    return {'prepared': True}
+
+
+def commit_forward(plan, root=Path('/')):
+    nginx = Path(root) / 'etc/nginx'
+    desired = configurations(plan['new_bridge_address'], plan['subscription_domain'])
+    for name, content in desired.items():
+        path = nginx / name
+        if path.is_symlink() or path.read_bytes() != content:
+            raise ValueError('owned_ingress_activation_not_confirmed')
+    atomic(nginx / 'ultra-ingress.sha256.json', {name: hashlib.sha256(data).hexdigest() for name, data in desired.items()})
+    return {'ingress_ready': True, 'dns_changed': False}
+
+
+def check_reseed(plan, root=Path('/'), runner=run):
+    directory = Path(root) / 'var/lib/ultra-postgres-replica'
+    data = directory / 'data'
+    if directory.is_symlink() or data.is_symlink():
+        raise ValueError('foreign_replica_path')
+    if not data.exists():
+        return {'needs_stop': False}
+    if (not (directory / 'managed-by-ultra').is_file() or not (data / 'standby.signal').is_file()
+            or (data / 'PG_VERSION').read_text().strip() != '16'):
+        raise ValueError('foreign_or_incompatible_replica')
+    return {'needs_stop': cluster_identifier(data, runner) != plan['system_identifier']}
 
 
 def main(value):
     os.umask(0o077)
     if os.geteuid() != 0 or not re.fullmatch(r'[a-f0-9]{64}', value.get('restore_id', '')):
         raise ValueError('invalid_peer_restore_request')
-    if value['action'] == 'reseed':
+    from restore_common import fence
+    fence(value['fence'], 'bridge', value['target_host'], value['old_bridge_address'], migration=value.get('migration_identity'))
+    if value.get('new_bridge_address') is not None:
+        ipaddress.IPv4Address(value['new_bridge_address'])
+        port = value.get('tunnel_port')
+        if value['action'].startswith('reseed') and (not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535):
+            raise ValueError('invalid_restored_tunnel_port')
+    if value['action'] == 'reseed-check':
+        result = check_reseed(value)
+    elif value['action'] == 'reseed':
         result = reseed(value)
-    elif value['action'] == 'forward':
-        result = forward(value)
+    elif value['action'] == 'forward-prepare':
+        result = prepare_forward(value)
+    elif value['action'] == 'forward-commit':
+        result = commit_forward(value)
     else:
         raise ValueError('invalid_peer_restore_action')
     print(json.dumps(result))
@@ -198,6 +239,7 @@ def main(value):
 
 if __name__ == '__main__':
     try:
-        main(payload)  # Supplied through the pinned SSH stdin envelope.
+        import sys
+        main(json.load(sys.stdin))
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         raise SystemExit('restore_peer_failed; private details suppressed')
