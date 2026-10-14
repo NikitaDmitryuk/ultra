@@ -26,4 +26,4 @@ Multi-master и автоматический failover не выбраны. То�
 
 ## Источники
 
-[Восстановление](../replication.md), [worker](../../internal/replication/replication.go), [локальный установщик](../../internal/install/recovery.go).
+[Восстановление](../replication.md), [worker](../../internal/replication/replication.go), [роль реплики](../../deploy/ansible/roles/replica/tasks/main.yml).

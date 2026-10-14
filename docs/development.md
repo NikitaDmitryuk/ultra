@@ -9,7 +9,7 @@
 | Изменение | Проверка |
 | --- | --- |
 | Только инструкции или документация | `make harness-check`; содержательная сверка с источниками |
-| Состав релиза, manifest или публикация GitHub Release | `python3 scripts/test-release-assets.py`: опубликованные файлы должны покрывать весь manifest и checksum inventory из `release-dist` |
+| Состав релиза, manifest или публикация GitHub Release | `python3 scripts/test-release-assets.py`, затем `python3 scripts/test-release-assets.py --dist dist`: реальный комплект должен совпадать с manifest, SHA-256, архитектурами ELF, исходными архивами и закреплёнными offline wheels |
 | Проверяющий инструмент harness | `go test ./tools/harnesscheck`; `make harness-check`; `go vet ./tools/harnesscheck` |
 | Go-код | Тесты затронутых пакетов, затем `make test`, `make vet`, `make lint` |
 | Конфигурация Xray, маршрутизация, failover | Тесты `./internal/config ./internal/exits ./internal/proxy`; сборка relay |
@@ -65,11 +65,12 @@ Mini App встраивается из `internal/bot/embed/miniapp`, Admin UI �
 1.4.4 ([исходник с лицензией MIT](../internal/bot/embed/miniapp/vendor/qrcode.js));
 для графиков и QR внешние CDN не нужны.
 
-Установочные shell-скрипты и systemd units также встраиваются из `internal/install/scripts`.
-Для изменения поведения установщика проверяй именно встроенный источник и сборку
-`ultra-install`, а не только похожий файл в `deploy/`. Источники:
-[units](../internal/install/units.go), [system setup](../internal/install/system.go),
-[PostgreSQL scripts](../internal/install/postgres.go).
+Роли и systemd-шаблоны Ansible встраиваются в `ultra-install` из
+[deploy/ansible](../deploy/ansible/assets.go). Изменение установленного YAML отдельно
+от бинарника не меняет уже зафиксированное задание: оно использует собственный
+неизменяемый комплект. Источники системной подготовки и PostgreSQL —
+[роль host](../deploy/ansible/roles/host/tasks/main.yml) и
+[роль postgres](../deploy/ansible/roles/postgres/tasks/main.yml).
 
 SSH-проверки, `make install`, выдача сертификатов и эксплуатационные скрипты могут
 обращаться к рабочим узлам. Они не входят в безопасную локальную проверку изменений.
@@ -83,7 +84,7 @@ Xray, затем запускай бота: `Type=simple` не означает 
 после этого отдельно проверь полный туннель. Бот открывает ту же БД и обращается
 к Telegram через локальный прокси при запуске. Источники:
 [запуск relay](../cmd/ultra-relay/main.go), [запуск бота](../cmd/ultra-bot/main.go),
-[systemd unit](../deploy/systemd/ultra-relay.service).
+[systemd unit](../deploy/ansible/roles/relay/templates/ultra-relay.service.j2).
 
 ## Проверка контекста
 
@@ -167,6 +168,21 @@ OUTPUT DNAT TCP:443 к прежнему `198.18.0.20:443` (QEMU guestfwd).
 При сравнении прямого и туннельного запросов сохраняйте один сервер, SNI, CA и путь;
 TLS sniffing может заменить IP назначения доменом из SNI.
 
+Полная синтетическая topology-проверка использует отдельные VM и собственные ключи;
+[vm_topology.py](../deploy/recovery/vm_topology.py) ограничивает TCG translation cache
+параметром `tb-size=32`, чтобы четыре гостя не расходовали память на неограниченный
+кеш эмуляции. До запуска [vm_acceptance.py](../deploy/recovery/vm_acceptance.py)
+вызовите `vm_topology_fixture.py dependencies --workspace <private-directory>`.
+Команда запускает только пакеты тестовых payload/DoH-служб и возвращает
+`prepared`/`pending`; pending завершается кодом 2. Повторная проверка не прерывает
+активную package transaction. `payload_targets` не устанавливает пакеты скрыто внутри
+SSH-запроса: отсутствие prerequisites является явной ошибкой до установки приложения
+и до начала измерения восстановления.
+После остановки контейнера `vm_topology.py resume --workspace <private-directory>
+--memory-mb <original-value>` запускает сохранённые диски и seed без смены SSH pins
+или checkpoint приёмки. Затем повторите `verify`: прежняя проверка изоляции
+не переносится на новые процессы. Живой QEMU с любым диском стенда запрещает resume.
+
 gVisor сохраняет версию, требуемую Xray: HEAD `fcb40d1a9af6` не собирается
 обычным Go из-за смешения пакетов `stack` и `bridge` в `pkg/tcpip/stack`.
 Форк `apernet/quic-go` также сохраняет коммит Xray: тег `v0.62.0` объявляет
@@ -235,7 +251,7 @@ fallback пользовательских запросов на системны
 
 `TestExperimentalGatewayTLSAuthAccountingAndRestart` передаёт TCP и UDP/XUDP через отдельный XHTTP/TLS процесс в закрытый VLESS-вход: подтверждает однократный учёт, блокировку отключённого UUID и отсутствие reload основного процесса при перезапуске эксперимента. Проверки локальные и не доказывают устойчивость в сети оператора.
 
-`python3 internal/install/scripts/xhttp-ingress.py --self-test` проверяет рендер Nginx, валидацию публичного плана, идемпотентность и отказ от перезаписи чужого файла без SSH. `make test-ui` проверяет состояния основного/экспериментального входа. Новые поля входа сохраняются при `ReuseSpec`; тест защищает их от потери при повторной установке.
+`scripts/test-bridge-subscription.py` проверяет шаблоны роли Nginx, а `scripts/test-ansible-ingress.py` и `scripts/test-ansible-owned-file.py` — переходы публикации, идемпотентность и отказ от перезаписи чужих файлов без SSH. Проверки модулей запускаются Python из закреплённого окружения Ansible. `make test-ui` проверяет состояния основного/экспериментального входа. Новые поля входа сохраняются при `ReuseSpec`; тест защищает их от потери при повторной установке.
 
 ## Проверка автономного relay
 
@@ -285,3 +301,45 @@ scripts/test-load-pg-recovery.py --container <test PostgreSQL16 container>`.
 должен совпадать с DSN. CI запускает сценарий обязательно. Эта проверка не
 подтверждает копирование всех ключей под нагрузкой, полное восстановление VM
 или поведение Happ на Android.
+
+## Проверки исполнителя Ansible
+
+`scripts/test-ansible-release-retention.py` проверяет локально предел хранения
+исполняемых комплектов, отказ удалять неизвестные или изменённые файлы,
+сохранение ссылок незавершённой операции и подписанного канала, повтор после
+прерывания записи владения, а также очистку только терминальных служебных
+payload без удаления квитанций и операторских входов.
+
+
+`make test-ansible` запускает закреплённый `ansible-lint` и syntax checks.
+`make test-ansible-exit` требует Docker и Ansible: он применяет роль через настоящий
+SSH в одноразовом контейнере, проверяет сохранение UUID/сертификата и отсутствие
+повторной активации неизменной конфигурации. Service manager контейнера подменён;
+этот тест не подтверждает настоящий systemd boot или передачу через туннель.
+Отдельная регрессия сохраняет Jinja-подобный текст буквально и проверяет отсутствие
+lookup на управляющем узле. Генерируются только временные fixture-ключи; production-конфигурация не читается.
+
+`scripts/test-ansible-forward-role.py --ansible-playbook <absolute executable>`
+проверяет роль forwarding через настоящий SSH и Nginx: listeners, повтор без
+reload, восстановление прежних файлов после ошибки проверки или reload и отказ
+перезаписывать чужой файл. Systemd в контейнере заменён тестовым исполнителем;
+эта проверка не подтверждает загрузку настоящей VM.
+
+`go test -race ./internal/deployansible ./internal/cloudinstall ./cmd/ultra-install`
+проверяет приватность входов, отказ изменённому заданию, повтор результата,
+отсутствие ложного успеха, дескрипторный допуск и продолжение очереди после перезапуска worker.
+Тест Unix-сокета требует разрешённых локальных сокетов. DB-интеграция к этому
+набору не относится; её проверяют отдельно на выделенном PostgreSQL.
+
+Входы Ansible передаются как JSON-совместимый контейнер с `!unsafe`, а не набор
+помеченных скаляров: загрузчик закреплённого Ansible 2.20 повторно определяет тип
+отдельного `!unsafe`-скаляра даже в кавычках. Это могло менять строковые права,
+пароли или настройки. `scripts/test-ansible-input-types.py` проверяет сохранение
+типов и запрет вычисления вложенных выражений через настоящий DataLoader/Templar.
+
+Диагностические shell-скрипты получают только разрешённые несекретные параметры
+через `ultra-install config-values`: общий Go-парсер формирует NUL-пары,
+оболочка назначает их через `printf -v`, без `eval` и второго разбора файла.
+Перед их запуском нужен собранный или установленный `ultra-install`;
+`ULTRA_INSTALL_BIN` позволяет указать его абсолютный путь. Секретные ключи
+в `install.config` и NUL внутри значения отклоняются.

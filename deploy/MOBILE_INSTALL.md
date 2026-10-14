@@ -6,14 +6,17 @@ This document describes the repository-side protocol for an Android/Kotlin app t
 
 The phone is the SSH controller. It does not embed the Go installer. Instead it:
 
-1. Builds an install-plan JSON.
+1. Builds a schema-2 install-plan JSON with explicit recovery and DNS/TLS policy.
 2. Builds a secrets env file when sensitive values are needed.
-3. Uploads a temporary deploy SSH private key that can reach the bridge and exit nodes.
+3. Uploads a temporary deploy SSH private key and a verified `known_hosts` file that cover the bridge and exit nodes.
 4. Uploads all three files to the bridge VPS, for example `/tmp/ultra-plan.json`, `/tmp/ultra-secrets.env`, and `/tmp/ultra-ssh-key`.
 5. Runs `deploy/mobile-bootstrap.sh` on the bridge VPS over SSH.
 6. Reads `ultra-install` progress from stdout as JSON Lines.
 
-The bridge VPS downloads the official GitHub Release, verifies SHA-256 checksums, installs release binaries under `/opt/ultra/current`, then runs:
+The bridge downloads a complete immutable release, verifies its signed manifest and
+all asset hashes, and stores bootstrap artifacts under a private version directory.
+The `/opt/ultra/current` pointer selects those bootstrap artifacts; it does not
+activate server services. The versioned CLI then runs Ansible:
 
 ```bash
 /opt/ultra/current/ultra-install apply-remote \
@@ -42,10 +45,14 @@ GitHub releases must contain:
 - `ultra-relay-linux-arm64`
 - `ultra-bot-linux-amd64`
 - `ultra-bot-linux-arm64`
+- `ultra-client-linux-amd64` and `ultra-client-linux-arm64`
+- `ultra-recovery.tar.gz`
+- `ultra-ansible.tar.gz`
+- `ultra-ansible-runtime-linux-amd64.tar.gz` and `ultra-ansible-runtime-linux-arm64.tar.gz`
 - `mobile-bootstrap.sh`
 - `checksums.txt`
-- `checksums.txt.minisig` (recommended for production)
-- `release-manifest.json`
+- `checksums.txt.minisig` (required by default)
+- `release-manifest.json` and `release-manifest.json.minisig`
 
 Build them locally with:
 
@@ -55,7 +62,11 @@ make release-dist
 
 Tag pushes matching `v*` publish these assets through `.github/workflows/release.yml`.
 
-If the repository secret `MINISIGN_SECRET_KEY` is set, the release workflow signs `checksums.txt` as `checksums.txt.minisig`. Store an unencrypted minisign secret key in that secret and embed the corresponding public key in the mobile app.
+The release workflow requires `MINISIGN_SECRET_KEY` and signs both exact manifest
+bytes and checksums. Keep the private signing key in the publishing environment;
+the mobile app and controller receive only the trusted public key.
+An incomplete or modified bundle is rejected. Existing files for the same version
+are never replaced with different bytes.
 
 ## Bootstrap Command
 
@@ -75,11 +86,19 @@ bash /tmp/mobile-bootstrap.sh \
 
 For development or manual testing, `--release latest` follows the latest GitHub Release.
 
+The initial target must provide Bash, Python 3.12–3.14, curl and ordinary coreutils.
+The loader may install minisign for signature verification; all application, OS,
+PostgreSQL and service configuration belongs to the Ansible roles.
 The bootstrap script must run as root. The mobile app should either connect as root or perform a one-time key setup step before running the bootstrap.
 
 `--ssh-identity` overrides `ssh.identity` from the plan for this run only. If it is omitted, `ultra-install apply-remote` falls back to `plan.ssh.identity`.
 
-For development builds without a configured signing key, use `--require-signature no`. Production mobile builds should pin a release tag and require the minisign signature.
+For isolated development builds, `--require-signature no` explicitly disables
+signature verification. Production defaults to `yes`: a trusted public key is
+required before downloading. A `latest` request resolves to the manifest version
+and downloads the remaining assets from that immutable tag.
+Schema-1 plans remain readable for diagnostics and rendering; deployment requires
+the explicit schema-2 policy and a complete release.
 
 If `bot.enabled=true` and no valid secrets env file is provided, `ultra-install` exits with `MISSING_BOT_TOKEN`.
 
