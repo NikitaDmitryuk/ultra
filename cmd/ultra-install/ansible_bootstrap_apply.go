@@ -68,8 +68,10 @@ func applyReservedBootstrap(ctx, originalCtx context.Context, p *installplan.Ins
 			returnErr = errors.Join(returnErr, err)
 		}
 	}()
+	var transportTopology adoptionTopology
 	if p.AdoptRuntime {
-		if _, err := inspectAdoptionTopology(ctx, p, filepath.Join(directory, "post-gate"), python, executable, stateRoot); err != nil {
+		var err error
+		if transportTopology, err = inspectAdoptionTopology(ctx, p, filepath.Join(directory, "post-gate"), python, executable, stateRoot); err != nil {
 			return err
 		}
 		preflight, err := os.MkdirTemp(directory, "adoption-preflight-")
@@ -86,6 +88,9 @@ func applyReservedBootstrap(ctx, originalCtx context.Context, p *installplan.Ins
 	components, engineErr := bootstrapUsesComponents(directory)
 	if engineErr != nil {
 		return engineErr
+	}
+	if p.AdoptRuntime && !components {
+		return errors.New("adoption_replica_transport_component_anchor_required")
 	}
 	if !components {
 		// An existing frozen monolithic job keeps its original implementation.
@@ -104,6 +109,12 @@ func applyReservedBootstrap(ctx, originalCtx context.Context, p *installplan.Ins
 		}
 	} else if err := runBootstrapComponents(ctx, inventory, operationVars, directory, generation, python, executable); err != nil {
 		return err
+	}
+	if p.AdoptRuntime {
+		emitInstallEvent(format, installplan.EventStep, "", "adopting independent replica transports", "")
+		if err := runAdoptionReplicaTunnels(ctx, inventory, transportTopology, inspection["bridge"], directory, stateRoot, generation, python, executable); err != nil {
+			return err
+		}
 	}
 	if p.FullAutomation() && p.AdoptRuntime {
 		if err := ansibleBootstrapIngress(ctx, p, inventory, bootstrapMutationStage(directory, "ingress-adopt", generation), python, executable, "adopt", operationVars, bootstrapMutationOriginalStage(directory, "ingress-adopt", generation)); err != nil {

@@ -16,37 +16,8 @@
   hosts: bridges
   gather_facts: false
   any_errors_fatal: true
-  tasks:
-    - name: Create private replica tunnel credentials directory
-      ansible.builtin.file:
-        path: /etc/ultra-replica-tunnels
-        state: directory
-        owner: root
-        group: root
-        mode: "0700"
-    - name: Install selected replica tunnel credentials
-      ansible.builtin.copy:
-        src: "{{ item.source }}"
-        dest: "/etc/ultra-replica-tunnels/{{ ultra_replica_slot }}.{{ item.name }}"
-        owner: root
-        group: root
-        mode: "0600"
-      loop:
-        - {name: identity, source: "{{ ultra_replica_identity_source }}"}
-        - {name: known_hosts, source: "{{ ultra_replica_known_hosts_source }}"}
-      no_log: true
-    - name: Install independent replica tunnel service
-      ansible.builtin.template:
-        src: ../roles/replica/templates/ultra-replica-tunnel.service.j2
-        dest: "/etc/systemd/system/ultra-replica-tunnel-{{ ultra_replica_slot }}.service"
-        mode: "0644"
-      register: replica_tunnel_unit
-    - name: Activate independent replica tunnel
-      ansible.builtin.systemd_service:
-        name: "ultra-replica-tunnel-{{ ultra_replica_slot }}.service"
-        daemon_reload: "{{ replica_tunnel_unit.changed }}"
-        enabled: true
-        state: "{{ 'restarted' if replica_tunnel_unit.changed else 'started' }}"
+  roles:
+    - replica_tunnel
 - name: Configure owned PostgreSQL standby
   hosts: replicas
   gather_facts: true

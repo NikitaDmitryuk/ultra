@@ -109,7 +109,7 @@ func withFrozenBootstrapStageLeaseWith(ctx context.Context, directory string, de
 		return deployansible.Receipt{}, errors.New("retry_inputs_invalid")
 	}
 	switch job.Operation {
-	case "bootstrap", "bootstrap-postgres", "bootstrap-exit", "bootstrap-bridge", "ingress", "configure-bot", "bootstrap-automation", "reserve-rolledback-bootstrap":
+	case "bootstrap", "bootstrap-postgres", "bootstrap-exit", "bootstrap-bridge", "adopt-replica-tunnels", "ingress", "configure-bot", "bootstrap-automation", "reserve-rolledback-bootstrap":
 	default:
 		return deployansible.Receipt{}, errors.New("retry_bootstrap_operation_required")
 	}

@@ -11,7 +11,7 @@ import signal
 import subprocess
 import time
 
-LOCAL_OPERATIONS = {'retain-artifacts', 'enable-auto-upgrade', 'resume-schedules', 'rollback-adoption', 'reserve-rolledback-bootstrap', 'resume-adoption', 'lifecycle', 'prepare-controller', 'inspect-upgrade', 'preflight-retry', 'status-automation', 'inspect-release-hosts', 'resume-automation', 'configure-bot', 'configure-exit-operator', 'inspect-bootstrap', 'bootstrap', 'bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'bootstrap-automation', 'verify-bootstrap-automation', 'adopt', 'adopt-topology', 'upgrade', 'rollback', 'verify-release', 'commit-release', 'publish-release', 'ingress', 'reconcile', 'restore', 'restore-peer', 'replica', 'domain-cutover', 'bridge-migrate', 'bridge-migrate-inspect', 'bridge-migrate-fence', 'bridge-migrate-probe', 'bridge-migrate-rollback-peers'}
+LOCAL_OPERATIONS = {'retain-artifacts', 'enable-auto-upgrade', 'resume-schedules', 'rollback-adoption', 'reserve-rolledback-bootstrap', 'resume-adoption', 'lifecycle', 'prepare-controller', 'inspect-upgrade', 'preflight-retry', 'status-automation', 'inspect-release-hosts', 'resume-automation', 'configure-bot', 'configure-exit-operator', 'inspect-bootstrap', 'bootstrap', 'bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'bootstrap-automation', 'verify-bootstrap-automation', 'adopt', 'adopt-topology', 'adopt-replica-tunnels', 'upgrade', 'rollback', 'verify-release', 'commit-release', 'publish-release', 'ingress', 'reconcile', 'restore', 'restore-peer', 'replica', 'domain-cutover', 'bridge-migrate', 'bridge-migrate-inspect', 'bridge-migrate-fence', 'bridge-migrate-probe', 'bridge-migrate-rollback-peers'}
 OPERATIONS = {'configure-exit', 'configure-replica', 'stop-replica'} | LOCAL_OPERATIONS
 
 # Operation identities and authorization stay distinct even when implementation
@@ -214,7 +214,7 @@ def execute(directory, executable, bundle):
             result = load_private(result_path)
             if job['operation'] in ('configure-exit', 'bootstrap-exit') and not re.fullmatch(r'[a-f0-9]{64}', result.get('cert_pin', '')):
                 raise ValueError('invalid_certificate_pin')
-            if job['operation'] in ('bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge') and result.get('verified') is not True:
+            if job['operation'] in ('bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'adopt-replica-tunnels') and result.get('verified') is not True:
                 raise ValueError('invalid_bootstrap_component_acknowledgement')
             if job['operation'] == 'bootstrap-exit' and result.get('exit_host') != variables.get('ultra_bootstrap_exit_host'):
                 raise ValueError('invalid_bootstrap_exit_identity')

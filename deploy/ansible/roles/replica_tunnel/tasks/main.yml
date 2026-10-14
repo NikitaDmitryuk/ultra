@@ -1,0 +1,42 @@
+---
+- name: Validate independent replica transport inputs
+  ansible.builtin.assert:
+    that:
+      - ultra_replica_slot is match('^ultra_[a-f0-9]{32}$')
+      - ultra_replica_address is match('^[0-9a-fA-F:.]+$')
+      - ultra_replica_primary_port | int > 0
+      - ultra_replica_primary_port | int <= 65535
+    quiet: true
+- name: Create private replica tunnel credentials directory
+  ansible.builtin.file:
+    path: /etc/ultra-replica-tunnels
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Install selected replica tunnel credentials
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "/etc/ultra-replica-tunnels/{{ ultra_replica_slot }}.{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop:
+    - {name: identity, source: "{{ ultra_replica_identity_source }}"}
+    - {name: known_hosts, source: "{{ ultra_replica_known_hosts_source }}"}
+  register: replica_tunnel_credentials
+  no_log: true
+- name: Install independent replica tunnel service
+  ansible.builtin.template:
+    src: "{{ role_path }}/../replica/templates/ultra-replica-tunnel.service.j2"
+    dest: "/etc/systemd/system/ultra-replica-tunnel-{{ ultra_replica_slot }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  register: replica_tunnel_unit
+- name: Activate independent replica tunnel
+  ansible.builtin.systemd_service:
+    name: "ultra-replica-tunnel-{{ ultra_replica_slot }}.service"
+    daemon_reload: "{{ replica_tunnel_unit.changed }}"
+    enabled: true
+    state: "{{ 'restarted' if replica_tunnel_unit.changed or replica_tunnel_credentials.changed else 'started' }}"
