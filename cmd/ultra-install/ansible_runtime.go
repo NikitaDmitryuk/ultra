@@ -181,7 +181,16 @@ func extractRuntime(source, directory string) error {
 		if count > 64 || total > 128<<20 {
 			return errors.New("offline runtime exceeds bounds")
 		}
-		target := filepath.Join(directory, filepath.FromSlash(name))
+		// Build destinations from a fixed directory and a single basename only.
+		// The archive's full member path never reaches the filesystem writer.
+		target := filepath.Join(directory, "requirements.lock")
+		if strings.HasPrefix(name, "wheels/") {
+			target = filepath.Join(directory, "wheels", filepath.Base(name))
+		}
+		relative, err := filepath.Rel(directory, target)
+		if err != nil || !filepath.IsLocal(relative) {
+			return errors.New("runtime member escapes extraction directory")
+		}
 		if !strings.HasPrefix(target, filepath.Clean(directory)+string(os.PathSeparator)) {
 			return errors.New("runtime member escapes extraction directory")
 		}

@@ -107,6 +107,7 @@ func runLocal(ctx context.Context, operation string, inventory, variables map[st
 	if err != nil {
 		return Receipt{}, err
 	}
+	// codeql[go/weak-sensitive-data-hashing] This deterministic digest binds a frozen operation request for idempotency; it is not used to authenticate a password or stored as a credential verifier.
 	hash := sha256.Sum256(raw)
 	id := hex.EncodeToString(hash[:])
 	export := Export

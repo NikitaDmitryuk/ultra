@@ -38,14 +38,25 @@ def relay_ready():
     return reload_state.get('count', 0) > 0 and not reload_state.get('error')
 
 
+def verified_client_context():
+    # Retain the platform/Python default chain policy (including strict and
+    # partial-chain flags where enabled) while selecting the client protocol
+    # and minimum TLS version explicitly before any network use.
+    verify_flags = ssl.create_default_context().verify_flags
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.verify_flags = verify_flags
+    context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+    return context
+
+
 def bot_ready():
     values = {}
     for line in Path('/etc/ultra-relay/environment').read_text().splitlines():
         if '=' in line:
             key, value = line.split('=', 1)
             values[key] = value.strip().strip('"').strip("'")
-    context = ssl.create_default_context()
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context = verified_client_context()
     with socket.create_connection(('127.0.0.1', int(values['ULTRA_BOT_PORT'])), timeout=3) as connection:
         with context.wrap_socket(connection, server_hostname=values['ULTRA_BOT_DOMAIN']) as secured:
             secured.sendall(('GET /healthz HTTP/1.1\r\nHost: ' + values['ULTRA_BOT_DOMAIN'] + '\r\nConnection: close\r\n\r\n').encode())
@@ -56,8 +67,7 @@ def bot_ready():
 
 
 def tls_ready(address, hostname, port):
-    context = ssl.create_default_context()
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context = verified_client_context()
     with socket.create_connection((address, port), timeout=5) as connection:
         with context.wrap_socket(connection, server_hostname=hostname):
             return True

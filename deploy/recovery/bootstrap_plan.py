@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Build guarded desired recovery state. No host mutations or installation."""
 import hashlib
+import argparse
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import stat
+import sys
+import tempfile
 import uuid
 
 CONFIG = Path('/etc/ultra-recovery')
@@ -181,9 +185,51 @@ def plan(config):
     return {'files': files, 'nodes': nodes, 'environment': read_env('/etc/ultra-relay/environment'), 'verified': True}
 
 
-if __name__ == '__main__':
-    import sys
+def write_plan(output, value):
+    """Publish secret desired state privately; stdout is never a transport."""
+    output = Path(output)
+    parent = output.parent.lstat()
+    if (not output.is_absolute() or not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.geteuid() or stat.S_IMODE(parent.st_mode) & 0o077):
+        raise ValueError('private_plan_directory_required')
     try:
-        print(json.dumps(plan(json.load(sys.stdin))))
+        previous = output.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if (not stat.S_ISREG(previous.st_mode) or previous.st_uid != os.geteuid()
+                or stat.S_IMODE(previous.st_mode) & 0o077):
+            raise ValueError('private_plan_file_required')
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=output.parent,
+                                         prefix='.recovery-plan-', delete=False) as stream:
+            temporary = stream.name
+            json.dump(value, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # Replace the directory entry itself, never follow an existing symlink.
+        os.replace(temporary, output)
+        temporary = None
+        descriptor = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        if temporary is not None:
+            os.unlink(temporary)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output', required=True)
+    arguments = parser.parse_args(argv)
+    try:
+        write_plan(arguments.output, plan(json.load(sys.stdin)))
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         raise SystemExit('recovery_bootstrap_discovery_failed') from None
+
+
+if __name__ == '__main__':
+    main()

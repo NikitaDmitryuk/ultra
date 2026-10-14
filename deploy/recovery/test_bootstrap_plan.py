@@ -1,9 +1,15 @@
 import hashlib
+import contextlib
+import io
+import copy
 import json
 from pathlib import Path
 import tempfile
 import time
 import unittest
+import shutil
+import subprocess
+import sys
 from unittest import mock
 import bootstrap_plan
 import recovery_status
@@ -58,6 +64,94 @@ class BootstrapPlanTests(unittest.TestCase):
         token = next(item for item in result['files'] if item['destination'].endswith('/primary-bot-token'))
         self.assertEqual(token['content'], 'fixture-bot-token')
         self.assertEqual(token['mode'], '0600')
+
+    def test_cli_transports_secrets_only_in_private_file(self):
+        output = self.root / 'recovery-plan.json'
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(bootstrap_plan.sys, 'stdin', io.StringIO(json.dumps(self.config))), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            bootstrap_plan.main(['--output', str(output)])
+        self.assertEqual(stdout.getvalue(), '')
+        self.assertEqual(stderr.getvalue(), '')
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        result = json.loads(output.read_text())
+        self.assertEqual(result['environment']['ULTRA_RELAY_ADMIN_TOKEN'], 'fixture-admin-token')
+        token = next(item for item in result['files'] if item['destination'].endswith('/primary-bot-token'))
+        self.assertEqual(token['content'], 'fixture-bot-token')
+        import yaml
+        role = Path(__file__).resolve().parents[1] / 'ansible/roles/recovery_primary/tasks/main.yml'
+        tasks = yaml.safe_load(role.read_text())
+        self.assertNotIn('recovery_primary_plan.stdout', role.read_text())
+        transport = next(task for task in tasks if 'block' in task and 'recovery_primary_plan' in json.dumps(task))
+        reader = next(task for task in transport['block'] if 'ansible.builtin.slurp' in task)
+        self.assertIs(reader['no_log'], True)
+        cleanup = next(task for task in transport['always'] if task.get('ansible.builtin.file', {}).get('path', '').endswith('/recovery-plan.json'))
+        self.assertEqual(cleanup['ansible.builtin.file']['state'], 'absent')
+        self.assertIs(cleanup['no_log'], True)
+        self.assertIs(transport['no_log'], True)
+        consumers = [index for index, task in enumerate(tasks) if 'recovery_primary_plan.content' in json.dumps(task)]
+        # `always` runs on either planner/slurp outcome, before any consumer.
+        # A later consumer failure therefore cannot strand the transport file.
+        self.assertLess(tasks.index(transport), min(consumers))
+
+    def test_private_plan_rejects_symlink_and_public_directory(self):
+        target = self.root / 'untouched'
+        target.write_text('original')
+        output = self.root / 'recovery-plan.json'
+        output.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, 'private_plan_file_required'):
+            bootstrap_plan.write_plan(output, {'secret': 'fixture'})
+        self.assertEqual(target.read_text(), 'original')
+        self.assertTrue(output.is_symlink())
+        output.unlink()
+        public = self.root / 'public'
+        public.mkdir(mode=0o755)
+        public.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, 'private_plan_directory_required'):
+            bootstrap_plan.write_plan(public / 'plan.json', {'secret': 'fixture'})
+
+    def test_ansible_removes_transport_on_reader_or_consumer_failure(self):
+        executable = shutil.which('ansible-playbook')
+        if executable is None:
+            self.skipTest('ansible-playbook required for failure lifecycle regression')
+        import yaml
+        role = Path(__file__).resolve().parents[1] / 'ansible/roles/recovery_primary/tasks/main.yml'
+        tasks = yaml.safe_load(role.read_text())
+        source = next(task for task in tasks if 'block' in task and 'recovery_primary_plan' in json.dumps(task))
+        for failure in ('reader', 'consumer'):
+            with self.subTest(failure=failure):
+                transport = copy.deepcopy(source)
+                output = self.root / ('plan-' + failure + '.json')
+                # Keep the production block/always structure and real file/slurp
+                # modules, replacing only remote discovery with a local fixture.
+                transport['block'][0]['ansible.builtin.command'] = {
+                    'argv': [sys.executable, '-c',
+                             'from pathlib import Path; import sys; '
+                             'p=Path(sys.argv[1]); p.write_text(sys.argv[2]); p.chmod(0o600)',
+                             str(output), '{"secret":"fixture-private-payload"}']}
+                reader = transport['block'][1]['ansible.builtin.slurp']
+                reader['src'] = str(output) if failure == 'consumer' else str(self.root / 'missing-plan')
+                transport['always'][0]['ansible.builtin.file']['path'] = str(output)
+                playbook = self.root / ('failure-' + failure + '.yml')
+                playbook.write_text(yaml.safe_dump([{'hosts': 'localhost', 'gather_facts': False,
+                    'tasks': [transport, {'ansible.builtin.fail': {'msg': 'fixture consumer failed'}}]}]))
+                result = subprocess.run([executable, '-i', 'localhost,', '-c', 'local', str(playbook)],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+                self.assertEqual(result.returncode, 2, result.stdout.decode(errors='replace'))
+                self.assertFalse(output.exists())
+                self.assertNotIn(b'fixture-private-payload', result.stdout + result.stderr)
+
+    def test_private_plan_publish_is_atomic_and_cleans_failed_staging(self):
+        output = self.root / 'recovery-plan.json'
+        bootstrap_plan.write_plan(output, {'generation': 'original'})
+        with mock.patch.object(bootstrap_plan.os, 'replace', side_effect=OSError('fixture publish failure')):
+            with self.assertRaises(OSError):
+                bootstrap_plan.write_plan(output, {'generation': 'replacement'})
+        self.assertEqual(json.loads(output.read_text()), {'generation': 'original'})
+        self.assertEqual(list(self.root.glob('.recovery-plan-*')), [])
+        bootstrap_plan.write_plan(output, {'generation': 'replacement'})
+        self.assertEqual(json.loads(output.read_text()), {'generation': 'replacement'})
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
 
     def test_controller_ownership_catalog_survives_recovery_generations(self):
         self.config['controller_directory'] = '/opt/ultra-ansible/releases/v1.0.0'

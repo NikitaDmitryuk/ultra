@@ -56,14 +56,27 @@
   until: recovery_primary_copy_active.idle | default(false) | bool
   retries: 110
   delay: 5
-- name: Build desired state after validating existing pins and resources
-  ansible.builtin.command:
-    argv: [python3, /var/lib/ultra-automation/bootstrap/bootstrap_plan.py]
-    stdin: >-
-      {{ ultra_automation_configuration |
-      combine({'known_hosts_file': '/var/lib/ultra-automation/bootstrap/known_hosts'}) | to_json(preprocess_unsafe=False) }}
-  register: recovery_primary_plan
-  changed_when: false
+- name: Build and read private desired recovery state
+  block:
+    - name: Build desired state after validating existing pins and resources
+      ansible.builtin.command:
+        argv: [python3, /var/lib/ultra-automation/bootstrap/bootstrap_plan.py, --output, /var/lib/ultra-automation/bootstrap/recovery-plan.json]
+        stdin: >-
+          {{ ultra_automation_configuration |
+          combine({'known_hosts_file': '/var/lib/ultra-automation/bootstrap/known_hosts'}) | to_json(preprocess_unsafe=False) }}
+      changed_when: false
+      no_log: true
+    - name: Read private desired recovery state without logging its contents
+      ansible.builtin.slurp:
+        src: /var/lib/ultra-automation/bootstrap/recovery-plan.json
+      register: recovery_primary_plan
+      no_log: true
+  always:
+    - name: Remove private desired-state transport before any consumer runs
+      ansible.builtin.file:
+        path: /var/lib/ultra-automation/bootstrap/recovery-plan.json
+        state: absent
+      no_log: true
   no_log: true
 - name: Create managed operation pin directories
   ansible.builtin.file:
@@ -72,7 +85,7 @@
     owner: ultra-relay
     group: ultra-relay
     mode: "0700"
-  loop: "{{ (recovery_primary_plan.stdout | from_json).nodes }}"
+  loop: "{{ (recovery_primary_plan.content | b64decode | from_json).nodes }}"
   no_log: true
 - name: Install guarded private recovery configuration
   ansible.builtin.copy:
@@ -81,7 +94,7 @@
     owner: "{{ item.owner }}"
     group: "{{ item.group }}"
     mode: "{{ item.mode }}"
-  loop: "{{ (recovery_primary_plan.stdout | from_json).files }}"
+  loop: "{{ (recovery_primary_plan.content | b64decode | from_json).files }}"
   no_log: true
 - name: Preserve immutable verified recovery tool snapshot
   ansible.builtin.file:
@@ -205,7 +218,7 @@
       - "{{ ultra_automation_configuration.spec }}"
       - -static-budgets-file
       - /etc/ultra-recovery/static-budgets.json
-  environment: "{{ (recovery_primary_plan.stdout | from_json).environment }}"
+  environment: "{{ (recovery_primary_plan.content | b64decode | from_json).environment }}"
   changed_when: false
   no_log: true
 - name: Ensure dedicated metered monitoring principal
@@ -221,7 +234,7 @@
       - /etc/ultra-recovery/admin-chat-id
       - -monitor-admin-telegram-id
       - "{{ ultra_automation_configuration.admin_telegram_id | default(0) | string }}"
-  environment: "{{ (recovery_primary_plan.stdout | from_json).environment }}"
+  environment: "{{ (recovery_primary_plan.content | b64decode | from_json).environment }}"
   changed_when: false
   no_log: true
 - name: Preserve existing heartbeat identity

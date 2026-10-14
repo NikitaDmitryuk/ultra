@@ -141,10 +141,44 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err != nil {
 		return err
 	}
+	// A separate attempt always resumes timers, including after UNREACHABLE.
+	resume := func(cleanup context.Context) error {
+		resumeDirectory, err := os.MkdirTemp(directory, "resume-")
+		if err == nil {
+			_ = os.Remove(resumeDirectory)
+			_, err = deployansible.RunLocal(cleanup, "resume-automation", inventory, map[string]any{"ultra_lock_directory": lockDirectory}, resumeDirectory, python, executable)
+		}
+		return err
+	}
+	// Before the first activation, an inspection failure has no release mutation
+	// to roll back. Recover schedules and the durable gate while retaining the
+	// lease and every inspection receipt. A surviving activation job instead
+	// belongs to the existing compatible rollback/retry protocol.
+	preActivation := true
+	_, activationStateErr := os.Lstat(filepath.Join(directory, "activate", "job.json"))
+	if activationStateErr != nil && !os.IsNotExist(activationStateErr) {
+		return activationStateErr
+	}
+	// A failed transition may mean a foreign reservation or a lost response
+	// after our own reservation. Neither proves ownership: leave its gate and
+	// schedules untouched until a subsequent applying transition succeeds.
 	if err = ansibleLifecycle(ctx, p, inventory, directory, python, executable, "applying", true); err != nil {
 		return err
 	}
-	inspectionReceipt, err := deployansible.RunLocal(ctx, "inspect-upgrade", inventory, map[string]any{"ultra_lock_directory": lockDirectory}, filepath.Join(directory, "inspect"), python, executable)
+	defer func() {
+		if !preActivation || returnErr == nil || !os.IsNotExist(activationStateErr) {
+			return
+		}
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		if err := resume(cleanup); err != nil {
+			returnErr = errors.Join(returnErr, errors.New("upgrade_automation_resume_failed"))
+		}
+		if err := ansibleLifecycle(cleanup, p, inventory, directory, python, executable, "released", false); err != nil {
+			returnErr = errors.Join(returnErr, err)
+		}
+	}()
+	inspectionReceipt, err := runUpgradeInspection(ctx, "inspect-upgrade", inventory, map[string]any{"ultra_lock_directory": lockDirectory}, filepath.Join(directory, "inspect"), python, executable)
 	if err != nil {
 		return err
 	}
@@ -179,7 +213,7 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err = os.MkdirAll(inspectionDirectory, 0700); err != nil {
 		return err
 	}
-	_, err = deployansible.RunLocal(ctx, "inspect-release-hosts", inventory, map[string]any{"ultra_lock_directory": lockDirectory, "ultra_release_inspection_directory": inspectionDirectory}, filepath.Join(directory, "hosts"), python, executable)
+	_, err = runUpgradeInspection(ctx, "inspect-release-hosts", inventory, map[string]any{"ultra_lock_directory": lockDirectory, "ultra_release_inspection_directory": inspectionDirectory}, filepath.Join(directory, "hosts"), python, executable)
 	if err != nil {
 		return err
 	}
@@ -272,18 +306,11 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		if _, err = deployansible.RunLocal(ctx, "preflight-retry", inventory, variables, preflightDirectory, python, executable); err != nil {
 			return err
 		}
-		if err = resetFailedUpgradeAttempt(directory); err != nil {
-			return err
+		if activationStateErr == nil {
+			if err = resetFailedUpgradeAttempt(directory); err != nil {
+				return err
+			}
 		}
-	}
-	// A separate attempt always resumes timers, including after UNREACHABLE.
-	resume := func(cleanup context.Context) error {
-		resumeDirectory, err := os.MkdirTemp(directory, "resume-")
-		if err == nil {
-			_ = os.Remove(resumeDirectory)
-			_, err = deployansible.RunLocal(cleanup, "resume-automation", inventory, map[string]any{"ultra_lock_directory": lockDirectory}, resumeDirectory, python, executable)
-		}
-		return err
 	}
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
@@ -302,6 +329,7 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err != nil {
 		return err
 	}
+	preActivation = false
 	activation, activationErr := deployansible.RunLocal(ctx, "upgrade", inventory, variables, filepath.Join(directory, "activate"), python, executable)
 	err = activationErr
 	if err == nil {
@@ -394,6 +422,48 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		err = ansibleLifecycle(ctx, p, inventory, directory, python, executable, "released", false)
 	}
 	return err
+}
+
+// Failed read-only inspections get a new immutable job on the next invocation.
+// Successful and interrupted jobs retain their original cache/resume semantics.
+// The caller holds the fleet lease; activation and other mutations never use this.
+func runUpgradeInspection(ctx context.Context, operation string, inventory, variables map[string]any, directory, python, executable string) (deployansible.Receipt, error) {
+	if operation != "inspect-upgrade" && operation != "inspect-release-hosts" {
+		return deployansible.Receipt{}, errors.New("upgrade_inspection_operation_required")
+	}
+	request, err := json.Marshal(map[string]any{"inventory": inventory, "variables": variables})
+	if err != nil {
+		return deployansible.Receipt{}, err
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256(request))
+	for attempt := 1; attempt <= 1000; attempt++ {
+		stage := directory
+		if attempt > 1 {
+			stage = fmt.Sprintf("%s-attempt-%d", directory, attempt)
+		}
+		raw, err := readBootstrapGenerationInput(filepath.Join(stage, "receipt.json"))
+		if os.IsNotExist(err) {
+			return deployansible.RunLocal(ctx, operation, inventory, variables, stage, python, executable)
+		}
+		var receipt deployansible.Receipt
+		if err != nil || json.Unmarshal(raw, &receipt) != nil {
+			return deployansible.Receipt{}, errors.New("upgrade_inspection_receipt_invalid")
+		}
+		if receipt.State != "failed" {
+			return deployansible.RunLocal(ctx, operation, inventory, variables, stage, python, executable)
+		}
+		jobRaw, jobErr := readBootstrapGenerationInput(filepath.Join(stage, "job.json"))
+		requestRaw, requestErr := readBootstrapGenerationInput(filepath.Join(stage, "request.json"))
+		var job struct {
+			Operation string `json:"operation"`
+			Request   string `json:"request_sha256"`
+			Binary    string `json:"binary_sha256"`
+		}
+		if jobErr != nil || requestErr != nil || json.Unmarshal(jobRaw, &job) != nil || string(requestRaw) != string(request) || job.Operation != operation || job.Request != hash || receipt.RequestSHA256 != hash || job.Binary == "" || receipt.BinarySHA256 != job.Binary {
+			return deployansible.Receipt{}, errors.New("upgrade_inspection_inputs_changed")
+		}
+	}
+	return deployansible.Receipt{}, errors.New("upgrade_inspection_attempt_limit")
 }
 
 func writeUpgradeInput(path string, data []byte) error {
