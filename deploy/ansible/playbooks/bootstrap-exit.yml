@@ -1,0 +1,40 @@
+---
+- name: Require one exact frozen bootstrap exit selector
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Reject a missing or noncanonical exit target before mutation
+      ansible.builtin.assert:
+        that:
+          - ultra_bootstrap_exit_host is defined
+          - ultra_bootstrap_exit_host | default('') is match('^exit_(0|[1-9][0-9]*)$')
+          - ultra_bootstrap_exit_host | default('') in groups.get('exits', [])
+      no_log: true
+- name: Configure one frozen initial exit
+  hosts: "{{ ultra_bootstrap_exit_host | default('__ultra_missing_bootstrap_exit__') }}"
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Require an exact frozen exit target
+      ansible.builtin.assert:
+        that:
+          - ultra_bootstrap_exit_host is match('^exit_(0|[1-9][0-9]*)$')
+          - ultra_bootstrap_exit_host in groups['exits']
+          - ansible_play_hosts_all | length == 1
+  roles:
+    - host
+    - role: warp
+      when: ultra_warp_enabled | default(false) | bool
+    - relay
+  tasks:
+    - name: Persist verified exit certificate identity
+      ansible.builtin.copy:
+        content: >-
+          {{ {'verified': true, 'exit_host': inventory_hostname,
+          'cert_pin': relay_fingerprint.stdout.split('=')[-1] | replace(':', '') | lower}
+          | to_json(preprocess_unsafe=False) }}
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true

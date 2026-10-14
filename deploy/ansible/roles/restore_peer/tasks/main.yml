@@ -1,0 +1,47 @@
+---
+- name: Validate fixed peer recovery action
+  ansible.builtin.assert:
+    that:
+      - ultra_peer_plan.action in ['reseed', 'forward']
+      - ultra_peer_plan.restore_id is match('^[a-f0-9]{64}$')
+- name: Inspect private peer recovery directory
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: [/var/lib/ultra-restore, "/var/lib/ultra-restore/{{ ultra_peer_plan.restore_id }}"]
+  register: restore_peer_paths
+- name: Reject peer recovery directory symlinks
+  ansible.builtin.assert:
+    that: not item.stat.islnk | default(false)
+  loop: "{{ restore_peer_paths.results }}"
+- name: Create private peer recovery parent
+  ansible.builtin.file:
+    path: /var/lib/ultra-restore
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Create private peer data proof directory
+  ansible.builtin.file:
+    path: "/var/lib/ultra-restore/{{ ultra_peer_plan.restore_id }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Transfer release-owned peer data validation code
+  ansible.builtin.copy:
+    src: "{{ ultra_peer_script_directory }}/{{ item }}"
+    dest: "/var/lib/ultra-restore/{{ ultra_peer_plan.restore_id }}/{{ item }}"
+    mode: "0600"
+  loop: [restore_peer.py, restore_common.py, recovery.py]
+- name: Apply owned standby retirement
+  ansible.builtin.include_tasks: reseed.yml
+  when: ultra_peer_plan.action == 'reseed'
+- name: Apply owned HTTPS forward switch
+  ansible.builtin.include_tasks: forward.yml
+  when: ultra_peer_plan.action == 'forward'
+- name: Commit peer recovery acknowledgement
+  ansible.builtin.copy:
+    content: '{"verified":true}'
+    dest: "{{ ultra_result_file }}"
+    mode: "0600"
+  delegate_to: localhost

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,6 +42,9 @@ type TrafficQuerier interface {
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
 type Server struct {
+	TopologyReady     func(context.Context) error
+	TopologyFrozen    func(context.Context) (bool, error)
+	topologyMu        sync.Mutex
 	RuntimeStatus     func() any
 	RouteStatus       func(string) auth.RouteApplication
 	ReplicationStatus func(context.Context) (any, error)
@@ -161,6 +165,7 @@ func (s *Server) routes() error {
 	s.mux.HandleFunc("GET /v1/hardening", s.handleHardening)
 	s.mux.HandleFunc("POST /v1/ingress/notice", s.handleIngressNotice)
 	s.mux.HandleFunc("GET /v1/exits", s.handleListExits)
+	s.mux.HandleFunc("POST /v1/deployment/drain", s.handleDeploymentDrain)
 	s.mux.HandleFunc("POST /v1/exits", s.handlePostExit)
 	s.mux.HandleFunc("PATCH /v1/exits/{id}", s.handlePatchExit)
 	s.mux.HandleFunc("DELETE /v1/exits/{id}", s.handleDeleteExit)
@@ -884,7 +889,7 @@ func (s *Server) handleHardening(w http.ResponseWriter, r *http.Request) {
 	}
 	checks["systemd_sandbox"] = diagnosticCheck{
 		OK:      false,
-		Message: "not introspected by API; audit deploy/systemd/ultra-relay.service on host",
+		Message: "not introspected by API; audit deploy/ansible/roles/relay/templates/ultra-relay.service.j2 on host",
 	}
 	checks["open_ports"] = diagnosticCheck{
 		OK:      false,

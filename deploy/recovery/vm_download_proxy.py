@@ -8,6 +8,7 @@ import socketserver
 import urllib.parse
 
 HOSTS = frozenset(('archive.ubuntu.com', 'security.ubuntu.com', 'ports.ubuntu.com',
+                   'www.postgresql.org', 'apt.postgresql.org',
                    'cloud-images.ubuntu.com', 'github.com', 'api.github.com',
                    'release-assets.githubusercontent.com', 'objects.githubusercontent.com',
                    'raw.githubusercontent.com', 'codeload.github.com'))

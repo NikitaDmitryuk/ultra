@@ -1,0 +1,11 @@
+[Unit]
+Description=Check WARP proxy connectivity every five minutes
+After=warp-svc.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=ultra-warp-watchdog.service
+
+[Install]
+WantedBy=timers.target

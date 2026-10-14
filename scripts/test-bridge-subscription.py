@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-source = Path(__file__).resolve().parents[1]/'deploy/setup-bridge-subscription.py'
+source = Path(__file__).resolve().with_name('ansible-template-fixture.py')
 spec = importlib.util.spec_from_file_location('subscription', source)
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 
@@ -21,50 +21,9 @@ class SubscriptionTests(unittest.TestCase):
         self.assertNotIn('grpc_pass', text)
         self.assertNotIn('edge.example.com', text)
 
-    def test_atomic_replacement_preserves_existing_owner_before_rename(self):
-        from unittest.mock import patch
-        with tempfile.TemporaryDirectory() as tmp:
-            path=Path(tmp)/'spec.json';path.write_bytes(b'old')
-            previous=path.stat()
-            with patch.object(m.os,'fchown') as chown:
-                m.atomic(path,b'new',0o600)
-            self.assertEqual(path.read_bytes(),b'new')
-            self.assertEqual(chown.call_args.args[1:],(previous.st_uid,previous.st_gid))
-            self.assertEqual(path.stat().st_mode & 0o777,0o600)
-
-    def test_owned_repeat_reloads_and_records_inventory(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp); calls=[]; checked=[]
-            for _ in range(2):
-                m.install(self.p, root, lambda args,**kw:calls.append(args), lambda p:checked.append(p))
-            self.assertEqual(calls.count(['systemctl','reload','nginx']),2)
-            self.assertEqual(len(checked),2)
-            manifest=json.loads((root/'var/lib/ultra-ingress/managed.json').read_text())
-            self.assertIn('/etc/nginx/conf.d/ultra-subscription.conf',manifest)
-            self.assertIn('/etc/letsencrypt/renewal-hooks/deploy/ultra-subscription',manifest)
-
-    def test_failed_https_rolls_back_and_foreign_config_is_preserved(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp)
-            def broken(p):raise RuntimeError('unavailable')
-            with self.assertRaisesRegex(RuntimeError,'previous_restored'):
-                m.install(self.p,root,lambda *a,**kw:None,broken)
-            site=root/'etc/nginx/conf.d/ultra-subscription.conf'
-            self.assertFalse(site.exists())
-            self.assertFalse((root/'var/lib/ultra-ingress/managed.json').exists())
-            site.write_text('foreign')
-            with self.assertRaisesRegex(ValueError,'foreign'):
-                m.install(self.p,root,lambda *a,**kw:None,lambda p:None)
-            self.assertEqual(site.read_text(),'foreign')
-
-    def test_published_endpoint_changes_require_explicit_cutover(self):
-        requested={'domain':'edge.example.com','public_host':'192.0.2.1','path':'/connect','backend_port':18080}
-        self.assertFalse(m.check_published({},requested))
-        current={'primary_xhttp':{'published':True,'server_name':'edge.example.com','host':'192.0.2.1','path':'/connect','backend_port':18080,'port':443}}
-        self.assertTrue(m.check_published(current,requested))
-        for key,value in [('domain','new.example.com'),('public_host','192.0.2.2'),('path','/other')]:
-            with self.assertRaisesRegex(ValueError,'explicit_cutover'):
-                m.check_published(current,dict(requested,**{key:value}))
+    # Ownership transactions, drift guards and published endpoint regression
+    # cases now run against native modules in test-ansible-owned-file.py and
+    # test-ansible-ingress.py, rather than the deleted SSH installer.
 
 
 class RealNginxTests(unittest.TestCase):
@@ -90,9 +49,7 @@ class RealNginxTests(unittest.TestCase):
             thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
             front=port();http=port()
             p={'domain':'sync.example.com','upstream_domain':'sync.example.com','bot_port':server.server_port}
-            vpnspec=importlib.util.spec_from_file_location('xhttp',source.parents[1]/'internal/install/scripts/xhttp-ingress.py')
-            vpn=importlib.util.module_from_spec(vpnspec);vpnspec.loader.exec_module(vpn)
-            rendered=m.nginx(p).decode()+vpn.nginx({'domain':'edge.example.com','path':'/connect','backend_port':port()},443).decode()
+            rendered=m.nginx(p).decode()+m.nginx({'domain':'edge.example.com','path':'/connect','backend_port':port()},443).decode()
             for name in ('sync.example.com','edge.example.com'):
                 rendered=rendered.replace('/etc/letsencrypt/live/'+name+'/fullchain.pem','/fixtures/cert.pem').replace('/etc/letsencrypt/live/'+name+'/privkey.pem','/fixtures/key.pem')
             rendered=rendered.replace('/etc/ssl/certs/ca-certificates.crt','/fixtures/cert.pem').replace('listen 443 ssl http2;',f'listen 127.0.0.1:{front} ssl http2;').replace('listen 80;',f'listen 127.0.0.1:{http};').replace('/var/www/ultra-site','/fixtures/site').replace('/var/log/nginx/ultra-subscription-error.log','stderr').replace('/var/log/nginx/ultra-vpn-error.log','stderr')

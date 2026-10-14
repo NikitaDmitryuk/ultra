@@ -1,75 +1,205 @@
 package main
 
 import (
-	"encoding/base64"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/NikitaDmitryuk/ultra/deploy"
-	"github.com/NikitaDmitryuk/ultra/internal/install"
+	"fmt"
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
 )
 
-func automationIngress(p *installplan.InstallPlan, activate bool) error {
-	i := p.Automation.Ingress
-	if i == nil {
-		return nil
-	} // Reused published ingress remains authoritative.
-	if !activate && i.ForwardHost != "" {
-		if err := install.SetupFirewallPorts(p.SSH.User, i.ForwardHost, p.SSH.Identity, []int{80, 443, 8444}); err != nil {
-			return errors.New("forward ingress firewall unavailable")
-		}
-		settings, _ := json.Marshal(map[string]any{"bridge": p.Automation.BridgeIPv4, "domain": p.Bot.Domain, "prepare_stream": true})
-		preparation := `import pathlib,subprocess
-subprocess.run(['apt-get','update','-qq'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-subprocess.run(['apt-get','install','-y','-qq','nginx','libnginx-mod-stream'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-`
-		script := preparation + "\nsettings=json.loads(" + pythonString(string(settings)) + ")\n" + deploy.SubscriptionIngressSSH
-		// json must be imported before assigning settings; the embedded module imports it too.
-		script = "import json\n" + script
-		command := automationPythonCommand(script)
-		if err := install.RunSSH(p.SSH.User, i.ForwardHost, p.SSH.Identity, command); err != nil {
-			return errors.New("forward ingress setup failed")
-		}
-	}
-	raw, _ := json.Marshal(i)
-	setup := "import base64,json\np=json.loads(" + pythonString(string(raw)) + ")\np['binary']='/usr/local/bin/ultra-relay'\n"
-	setup += "scope={'__name__':'ultra_ingress'}\nexec(compile(" + pythonBytes([]byte(install.XHTTPIngressScript)) + ",'ingress','exec'),scope)\nscope['validate'](p)\n"
-	setup += "subscription_scope={'__name__':'ultra_subscription'}\nexec(compile(" + pythonBytes([]byte(deploy.BridgeSubscriptionIngress)) + ",'subscription','exec'),subscription_scope)\n"
-	setup += "current=json.loads(scope['SPEC'].read_text())\npublished=subscription_scope['check_published'](current,p)\n"
-	if activate {
-		setup += "if not published:\n scope['apply'](p,'stage')\n scope['apply'](p,'activate')\n"
+func ansibleIngress(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, python, executable, action string, operationVars map[string]any) error {
+	return ansibleIngressOperation(ctx, p, inventory, directory, python, executable, action, operationVars, false, "")
+}
 
-		if i.ForwardHost == "" {
-			if p.PublicSubscriptionDomain() == i.Domain {
-				return errors.New("subscription and VPN ingress require distinct domains")
-			}
-			subscription, _ := json.Marshal(map[string]any{"domain": p.PublicSubscriptionDomain(), "upstream_domain": p.Bot.Domain, "bot_port": p.Bot.Port})
-			setup += "subscription_scope['install'](json.loads(" + pythonString(string(subscription)) + "))\n"
-		}
-	} else {
-		dnsProgram, cleanup, err := prepareDNSApply(p)
+// Only bootstrap operator re-invocation retries a frozen failed ingress stage.
+func ansibleBootstrapIngress(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, python, executable, action string, operationVars map[string]any, originals ...string) error {
+	if action != "prepare" && action != "activate" {
+		return errors.New("invalid bootstrap ingress action")
+	}
+	original := ""
+	if len(originals) > 0 {
+		original = originals[0]
+	}
+	return ansibleIngressOperation(ctx, p, inventory, directory, python, executable, action, operationVars, true, original)
+}
+
+func ansibleIngressOperation(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, python, executable, action string, operationVars map[string]any, retry bool, original string) error {
+	if p.Automation == nil || p.Automation.Ingress == nil {
+		return nil
+	}
+	if action != "prepare" && action != "stage" && action != "activate" && action != "rollback" && action != "experiment" && action != "status" && action != "notice" {
+		return errors.New("invalid ingress action")
+	}
+	var plan map[string]any
+	raw, err := json.Marshal(p.Automation.Ingress)
+	if err != nil {
+		return err
+	}
+	if err = json.Unmarshal(raw, &plan); err != nil {
+		return err
+	}
+	variables := map[string]any{}
+	for key, value := range operationVars {
+		variables[key] = value
+	}
+	variables["ultra_ingress"] = plan
+	variables["ultra_ingress_action"] = action
+	transactionDirectory := directory
+	if original != "" {
+		transactionDirectory = original
+	}
+	transactionHash := sha256.Sum256([]byte(transactionDirectory))
+	variables["ultra_ingress_transaction"] = "/var/lib/ultra-ingress/ansible-" + hex.EncodeToString(transactionHash[:])
+	variables["ultra_ingress_email"] = p.Automation.Ingress.Email
+	variables["ultra_ingress_domains"] = uniqueIngressDomains(p.Automation.Ingress.Domain, p.Bot.Domain, p.PublicSubscriptionDomain())
+	variables["ultra_bot_domain"] = p.Bot.Domain
+	variables["ultra_bot_port"] = p.Bot.Port
+	variables["ultra_subscription_domain"] = p.PublicSubscriptionDomain()
+	variables["ultra_subscription_enabled"] = p.Automation.Ingress.ForwardHost == ""
+	variables["ultra_bridge_ipv4"] = p.Automation.BridgeIPv4
+	if p.Automation.Ingress.ForwardHost != "" {
+		raw, err := json.Marshal(inventory)
 		if err != nil {
 			return err
 		}
-		defer cleanup()
-		setup += dnsProgram
-		setup += "root=scope['ROOT'];root.mkdir(parents=True,exist_ok=True)\nmanifest=json.loads(scope['MANIFEST'].read_text()) if scope['MANIFEST'].exists() else {}\nscope['prepare_certificate'](p,manifest)\n"
-		if p.PublicSubscriptionDomain() != p.Bot.Domain && p.PublicSubscriptionDomain() != i.Domain {
-			setup += "subscription_cert=dict(p,domain=" + pythonString(p.PublicSubscriptionDomain()) + ")\nscope['prepare_certificate'](subscription_cert,manifest)\n"
+		var independent map[string]any
+		if err = json.Unmarshal(raw, &independent); err != nil {
+			return err
 		}
-		if p.Bot.Domain != "" && p.Bot.Domain != i.Domain {
-			setup += "bot=dict(p,domain=" + pythonString(p.Bot.Domain) + ")\nscope['prepare_certificate'](bot,manifest)\n"
+		children := independent["all"].(map[string]any)["children"].(map[string]any)
+		children["forward_ingress"] = map[string]any{"hosts": map[string]any{"subscription_forward": map[string]any{"ansible_host": p.Automation.Ingress.ForwardHost}}}
+		inventory = independent
+		variables["ultra_forward_bridge_ipv4"] = p.Automation.BridgeIPv4
+		variables["ultra_forward_domain"] = p.Bot.Domain
+		variables["ultra_forward_bot_port"] = p.Bot.Port
+	}
+	if action == "prepare" || action == "stage" || action == "activate" || action == "rollback" {
+		if err = prepareAnsibleDNS(p, variables); err != nil {
+			return err
 		}
 	}
-	return install.RunSSH(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity, automationPythonCommand(setup))
+	if original != "" {
+		source, sourceErr := bootstrapMutationSource(filepath.Dir(original), filepath.Base(original))
+		if sourceErr != nil {
+			return sourceErr
+		}
+		_, err = deployansible.RunLocalRetryFailedPinned(ctx, "ingress", inventory, variables, directory, source, python, executable)
+	} else if retry {
+		_, err = deployansible.RunLocalRetryFailed(ctx, "ingress", inventory, variables, directory, python, executable)
+	} else {
+		_, err = deployansible.RunLocal(ctx, "ingress", inventory, variables, directory, python, executable)
+	}
+	return err
 }
-func pythonString(value string) string { raw, _ := json.Marshal(value); return string(raw) }
 
-func automationPythonCommand(source string) string {
-	// Only the base64 alphabet crosses the shell/Python source boundary.
-	return "python3 -c " + shellQuote("import base64;exec(compile("+pythonBytes([]byte(source))+",'ultra-install','exec'))")
+func uniqueIngressDomains(values ...string) []string {
+	result := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
-func pythonBytes(value []byte) string {
-	return `base64.b64decode("` + base64.StdEncoding.EncodeToString(value) + `")`
+func applyConfiguredIngress(file, action string) error {
+	p, err := installplan.LoadConfig(file)
+	if err != nil {
+		return err
+	}
+	if p.Automation == nil || p.Automation.Ingress == nil {
+		return errors.New("canonical owned ingress policy required")
+	}
+	stateRoot, err := bootstrapStateRoot()
+	if err != nil {
+		return err
+	}
+	if err = ensurePrivateBootstrapDirectory(stateRoot); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	hash := sha256.Sum256(append(raw, []byte(action)...))
+	planRoot := filepath.Join(stateRoot, "configured-ingress-"+hex.EncodeToString(hash[:]))
+	if err = ensurePrivateBootstrapDirectory(planRoot); err != nil {
+		return err
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	ctx, operatorRelease, err := withBootstrapOperatorLock(ctx, stateRoot)
+	if err != nil {
+		return err
+	}
+	defer operatorRelease()
+	var directory string
+	if action == "status" {
+		directory, err = os.MkdirTemp(stateRoot, "ingress-status-")
+		if err == nil {
+			defer func() {
+				if err := os.RemoveAll(directory); err != nil {
+					fmt.Fprintln(os.Stderr, "ingress_private_cleanup_failed")
+				}
+			}()
+		}
+	} else {
+		directory, err = beginBootstrapAttempt(planRoot)
+	}
+	if err != nil {
+		return err
+	}
+	lockDirectory, err := freezeBootstrapExecution(p, directory, stateRoot)
+	if err != nil {
+		return err
+	}
+	ctx, release, err := withFrozenLifecycleLock(ctx, p, lockDirectory, directory)
+	if err != nil {
+		return err
+	}
+	defer release()
+	bridgeOnly := *p
+	bridgeOnly.Exits = nil
+	bridgeOnly.Database.Enabled = false
+	python := "/usr/bin/python3"
+	executable := os.Getenv("ULTRA_ANSIBLE_EXECUTABLE")
+	if executable == "" {
+		executable = "/opt/ultra-ansible/current/venv/bin/ansible-playbook"
+	}
+	gateInventory, err := bootstrapInventory(&bridgeOnly, directory)
+	if err != nil {
+		return err
+	}
+	mutating := action != "status"
+	if mutating {
+		if err = ansibleLifecycle(ctx, p, gateInventory, directory, python, executable, "applying", true); err != nil {
+			return err
+		}
+	}
+	inventory, _, err := inspectBootstrap(ctx, &bridgeOnly, directory, python, executable, lockDirectory)
+	if err != nil {
+		return err
+	}
+	if err = ansibleIngress(ctx, p, inventory, filepath.Join(directory, "apply"), python, executable, action, map[string]any{"ultra_lock_directory": lockDirectory}); err != nil {
+		return err
+	}
+	if mutating {
+		if err = ansibleLifecycle(ctx, p, inventory, directory, python, executable, "released", false); err != nil {
+			return err
+		}
+	}
+	if !mutating {
+		return nil
+	}
+	return completeBootstrapAttempt(planRoot, directory)
 }

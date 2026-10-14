@@ -1,0 +1,25 @@
+---
+- name: Inspect the private broker state directory
+  ansible.builtin.stat:
+    path: /var/lib/ultra-ansible
+    follow: false
+  register: controller_identity_directory
+- name: Preserve unknown state directory ownership
+  ansible.builtin.assert:
+    that:
+      - not controller_identity_directory.stat.exists or controller_identity_directory.stat.isdir | default(false)
+      - not controller_identity_directory.stat.exists or controller_identity_directory.stat.uid == 0
+      - not controller_identity_directory.stat.exists or controller_identity_directory.stat.mode == '0700'
+- name: Create private state for a new restored broker
+  ansible.builtin.file:
+    path: /var/lib/ultra-ansible
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: not controller_identity_directory.stat.exists
+- name: Bind the broker to the actual managed bridge machine
+  ultra_deployment_identity:
+    address: "{{ ultra_controller_bridge_address | default(ansible_host) }}"
+  no_log: true
+  diff: false

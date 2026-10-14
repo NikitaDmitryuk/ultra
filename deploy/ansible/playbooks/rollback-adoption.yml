@@ -1,0 +1,75 @@
+---
+- name: Recover the legacy bridge with its verified compatible emergency
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Verify saved identity and current schema compatibility
+      ultra_adoption_guard:
+        id: "{{ ultra_lifecycle_id }}"
+        action: rollback-check
+      register: adoption_rollback
+    - name: Stop the failed bridge before restoring application files
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: stopped
+    - name: Inspect a potentially activated bot unit
+      ansible.builtin.stat:
+        path: /etc/systemd/system/ultra-bot.service
+      register: adoption_failed_bot
+    - name: Stop a potentially activated bot before restoring application files
+      ansible.builtin.systemd_service:
+        name: ultra-bot.service
+        state: stopped
+      when: adoption_failed_bot.stat.exists
+    - name: Restore the original application configuration and service
+      ansible.builtin.copy:
+        src: "{{ item.source }}"
+        remote_src: true
+        dest: "{{ item.destination }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop: "{{ adoption_rollback.restore_files }}"
+      no_log: true
+    - name: Activate the verified compatible emergency binary
+      ansible.builtin.copy:
+        src: "{{ adoption_rollback.binary }}"
+        remote_src: true
+        dest: /usr/local/bin/ultra-relay
+        owner: root
+        group: root
+        mode: "0755"
+    - name: Start the restored bridge
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: started
+        daemon_reload: true
+    - name: Restart the previously active bot
+      ansible.builtin.systemd_service:
+        name: ultra-bot.service
+        state: started
+        daemon_reload: true
+      when: adoption_rollback.bot_active | bool
+    - name: Require restored application readiness
+      ultra_ingress_probe:
+        kind: relay
+      register: adoption_ready
+      until: adoption_ready.ready | default(false)
+      retries: 15
+      delay: 2
+    - name: Require the restored bot HTTPS listener
+      ultra_ingress_probe:
+        kind: bot
+      register: adoption_bot_ready
+      until: adoption_bot_ready.ready | default(false)
+      retries: 15
+      delay: 2
+      when: adoption_rollback.bot_active | bool
+    - name: Record verified emergency restoration
+      ansible.builtin.copy:
+        content: '{"verified":true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false

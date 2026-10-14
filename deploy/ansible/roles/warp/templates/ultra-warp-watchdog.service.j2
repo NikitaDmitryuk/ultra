@@ -1,0 +1,8 @@
+[Unit]
+Description=Ultra WARP proxy connectivity watchdog
+After=warp-svc.service
+
+[Service]
+Type=oneshot
+Environment=WARP_PROXY_PORT={{ ultra_warp_port }}
+ExecStart=/usr/local/bin/ultra-warp-watchdog

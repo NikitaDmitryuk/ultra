@@ -165,7 +165,9 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 		GeositeExitTags: []string{"ru-blocked-all"},
 	}
 	if p.Bridge.ReuseSpec {
-		applyBridgeOverlay(bridgeSpec, opts.ExistingBridge)
+		if err := applyBridgeOverlay(bridgeSpec, opts.ExistingBridge); err != nil {
+			return nil, err
+		}
 	}
 	bridgeSpec.AntiCensor = buildAntiCensor(p, false)
 	if p.Features.RoutingMode != "" {
@@ -177,7 +179,7 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 	if p.Features.DomainDirect != "" {
 		bridgeSpec.DomainDirect = normalizeDomains(splitComma(p.Features.DomainDirect))
 	}
-	if p.Bot.Enabled {
+	if p.Bot.Enabled || p.Features.BotTelegramProxy {
 		bridgeSpec.BotTelegramProxy = &config.BotTelegramProxySpec{Enabled: true}
 	}
 	if p.Features.DisableVLESSFlow {
@@ -187,7 +189,13 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 	}
 	var pgCfg *install.PostgresConfig
 	var dbDSN string
-	if p.Database.Enabled {
+	if p.Bridge.ReuseSpec && opts.ExistingBridge.Database != nil && opts.ExistingBridge.Database.DSN != "" {
+		// Adoption must retain the database identity and password; changing the
+		// role credentials would break replicas and the rollback binary.
+		previous := *opts.ExistingBridge.Database
+		bridgeSpec.Database = &previous
+		dbDSN = previous.DSN
+	} else if p.Database.Enabled {
 		primaryHost := p.Database.PrimaryHost
 		if strings.TrimSpace(primaryHost) == "" {
 			primaryHost = p.Bridge.Address
@@ -319,10 +327,24 @@ func resolveTunnelUUID(ex ExitNode, prior []exits.BootstrapEntry) string {
 	return tunnelUUID(ex)
 }
 
-func applyBridgeOverlay(dst *config.Spec, src *config.Spec) {
+func applyBridgeOverlay(dst *config.Spec, src *config.Spec) error {
 	if src == nil {
-		return
+		return nil
 	}
+	raw, err := json.Marshal(src)
+	if err != nil {
+		return err
+	}
+	var previous config.Spec
+	if err = json.Unmarshal(raw, &previous); err != nil {
+		return err
+	}
+	src = &previous
+	dst.PublicEntries = src.PublicEntries
+	dst.HappDefaultJSON = src.HappDefaultJSON
+	dst.SubscriptionPreviewBridges = src.SubscriptionPreviewBridges
+	dst.ProbeURLs = src.ProbeURLs
+	dst.Stats = src.Stats
 	dst.SubscriptionBridges = append([]config.SubscriptionBridge(nil), src.SubscriptionBridges...)
 	dst.PrimaryXHTTP = src.PrimaryXHTTP
 	dst.LegacyPublicEnabled = src.LegacyPublicEnabled
@@ -376,6 +398,7 @@ func applyBridgeOverlay(dst *config.Spec, src *config.Spec) {
 		v := *src.RuDirectTLDRegex
 		dst.RuDirectTLDRegex = &v
 	}
+	return nil
 }
 
 func randomHex(n int) (string, error) {
@@ -433,5 +456,5 @@ func normalizeDomains(items []string) []string {
 }
 
 func errorsForReuseRender() error {
-	return fmt.Errorf("render for bridge.reuse_spec=true requires reading the remote bridge spec; use the legacy apply path for now")
+	return fmt.Errorf("render for bridge.reuse_spec=true requires reading the remote bridge spec; use apply with read-only Ansible target inspection")
 }

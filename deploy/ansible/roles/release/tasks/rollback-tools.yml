@@ -1,0 +1,26 @@
+---
+- name: Inspect the recorded tools fallbacks
+  ansible.builtin.stat:
+    path: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/tools-previous/{{ item.backup_name }}"
+    checksum_algorithm: sha256
+    follow: false
+  loop: "{{ ultra_recovery_files }}"
+  register: release_rollback_tools
+- name: Require exact recorded tools bytes before rollback
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isreg | default(false) and not item.stat.islnk | default(false) and item.stat.checksum == item.item.previous_sha256)
+  loop: "{{ release_rollback_tools.results }}"
+- name: Restore compatible tools and units without reverting state
+  ansible.builtin.copy:
+    src: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/tools-previous/{{ item.item.backup_name }}"
+    dest: "{{ item.item.destination }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "{{ item.item.mode }}"
+  loop: "{{ release_rollback_tools.results }}"
+  when: item.stat.exists
+- name: Reload restored service definitions
+  ansible.builtin.systemd_service:
+    daemon_reload: true

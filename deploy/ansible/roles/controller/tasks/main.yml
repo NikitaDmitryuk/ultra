@@ -1,0 +1,155 @@
+---
+- name: Require an immutable controller release directory
+  ansible.builtin.assert:
+    that:
+      - ultra_controller_directory is ansible.builtin.match('^/opt/ultra-ansible/releases/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$')
+- name: Ensure the controller Python environment prerequisites
+  ansible.builtin.apt:
+    name: [python3-venv, minisign]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+- name: Bind durable ownership before populating the immutable controller runtime
+  ultra_release_retention:
+    action: begin
+    path: "{{ ultra_controller_directory }}"
+    expected: "{{ {'ultra-install': ultra_install_sha256, 'runtime.sha256': (ultra_controller_runtime_sha256 + '\n') | hash('sha256')} }}"
+- name: Ensure controller directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - /opt/ultra-ansible
+    - "{{ ultra_controller_directory }}"
+    - "{{ ultra_controller_directory }}/runtime"
+    - /var/lib/ultra-ansible
+- name: Inspect the pinned local controller artifact
+  ansible.builtin.stat:
+    path: "{{ ultra_install_source }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: controller_source
+- name: Inspect an existing immutable controller artifact
+  ansible.builtin.stat:
+    path: "{{ ultra_controller_directory }}/ultra-install"
+    checksum_algorithm: sha256
+  register: controller_existing
+- name: Require a valid immutable controller artifact
+  ansible.builtin.assert:
+    that:
+      - controller_source.stat.isreg | default(false)
+      - controller_source.stat.checksum == ultra_install_sha256
+      - not controller_existing.stat.exists or controller_existing.stat.checksum == ultra_install_sha256
+- name: Install the immutable controller executable
+  ansible.builtin.copy:
+    src: "{{ ultra_install_source }}"
+    dest: "{{ ultra_controller_directory }}/ultra-install"
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart Ansible controller
+- name: Require the supported offline runtime Python version
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, --version]
+  changed_when: false
+  register: controller_python
+- name: Validate the offline runtime ABI
+  ansible.builtin.assert:
+    that:
+      - controller_python.stdout is ansible.builtin.match('^Python 3[.](12|13|14)[.]')
+- name: Inspect the pinned local runtime archive
+  ansible.builtin.stat:
+    path: "{{ ultra_controller_runtime_archive }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: controller_runtime
+- name: Require a verified runtime archive
+  ansible.builtin.assert:
+    that:
+      - controller_runtime.stat.isreg | default(false)
+      - controller_runtime.stat.checksum == ultra_controller_runtime_sha256
+- name: Inspect the immutable runtime marker
+  ansible.builtin.stat:
+    path: "{{ ultra_controller_directory }}/runtime.sha256"
+    follow: false
+  register: controller_marker
+- name: Reject an invalid existing runtime marker
+  ansible.builtin.assert:
+    that:
+      - not controller_marker.stat.exists or (controller_marker.stat.isreg | default(false) and not controller_marker.stat.islnk | default(false))
+- name: Read an existing immutable runtime identity
+  ansible.builtin.slurp:
+    src: "{{ ultra_controller_directory }}/runtime.sha256"
+  register: controller_runtime_identity
+  when: controller_marker.stat.exists
+  no_log: true
+- name: Inspect unmarked runtime contents
+  ansible.builtin.find:
+    paths: "{{ ultra_controller_directory }}/runtime"
+    file_type: any
+    hidden: true
+  register: controller_unmarked
+  when: not controller_marker.stat.exists
+- name: Reject replacement of immutable or unmarked runtime contents
+  ansible.builtin.assert:
+    that:
+      - not controller_marker.stat.exists or controller_runtime_identity.content | b64decode | trim == ultra_controller_runtime_sha256
+      - controller_marker.stat.exists or controller_unmarked.matched | default(0) == 0
+  no_log: true
+- name: Record the immutable runtime identity before extraction
+  ansible.builtin.copy:
+    content: "{{ ultra_controller_runtime_sha256 }}\n"
+    dest: "{{ ultra_controller_directory }}/runtime.sha256"
+    owner: root
+    group: root
+    mode: "0600"
+- name: Install offline runtime files
+  ansible.builtin.unarchive:
+    src: "{{ ultra_controller_runtime_archive }}"
+    dest: "{{ ultra_controller_directory }}/runtime"
+- name: Install the locked Ansible runtime from offline wheels
+  ansible.builtin.pip:
+    requirements: "{{ ultra_controller_directory }}/runtime/requirements.lock"
+    virtualenv: "{{ ultra_controller_directory }}/venv"
+    virtualenv_command: /usr/bin/python3 -m venv
+    extra_args: "--no-index --require-hashes --find-links={{ ultra_controller_directory }}/runtime/wheels"
+- name: Verify the installed immutable runtime
+  ansible.builtin.command:
+    argv: ["{{ ultra_controller_directory }}/venv/bin/ansible-playbook", --version]
+  changed_when: false
+- name: Seal the verified immutable controller executable and runtime
+  ultra_release_retention:
+    action: seal
+    path: "{{ ultra_controller_directory }}"
+    controller: true
+    expected: "{{ {'ultra-install': ultra_install_sha256, 'runtime.sha256': (ultra_controller_runtime_sha256 + '\n') | hash('sha256')} }}"
+- name: Select the verified controller runtime
+  ansible.builtin.file:
+    src: "{{ ultra_controller_directory }}"
+    dest: /opt/ultra-ansible/current
+    state: link
+    owner: root
+    group: root
+- name: Install the independent controller service
+  ansible.builtin.template:
+    src: ultra-ansible-controller.service.j2
+    dest: /etc/systemd/system/ultra-ansible-controller.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Ansible controller
+- name: Record the private physical deployment identity
+  ansible.builtin.import_tasks: identity.yml
+- name: Ensure the controller is running
+  ansible.builtin.systemd_service:
+    name: ultra-ansible-controller.service
+    enabled: true
+    state: started
+    daemon_reload: true
+- name: Configure the accepted automatic stable channel
+  ansible.builtin.import_tasks: auto-upgrade.yml

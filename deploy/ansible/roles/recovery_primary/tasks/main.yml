@@ -1,0 +1,260 @@
+---
+- name: Activate the new independent executor before submitting replica work
+  ansible.builtin.meta: flush_handlers
+- name: Record current guarded configuration attempt time
+  ansible.builtin.command:
+    argv: [date, '+%s']
+  register: recovery_primary_started
+  changed_when: false
+- name: Create private bootstrap staging and recovery directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - /etc/ultra-recovery
+    - /var/lib/ultra-automation
+    - /var/lib/ultra-automation/bootstrap
+    - /var/lib/ultra-recovery
+    - /var/lib/ultra-recovery-reconcile
+    - /opt/ultra-recovery
+- name: Ensure conventional executable helper directory remains traversable
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+- name: Stage trusted SSH pins for read-only bootstrap guards
+  ansible.builtin.copy:
+    src: "{{ ultra_automation_pins_source }}"
+    dest: /var/lib/ultra-automation/bootstrap/known_hosts
+    mode: "0600"
+  no_log: true
+- name: Stage guarded desired-state planner
+  ansible.builtin.copy:
+    src: "{{ ultra_automation_planner_source }}"
+    dest: /var/lib/ultra-automation/bootstrap/bootstrap_plan.py
+    mode: "0600"
+- name: Inspect existing receiver generations before pausing timers
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=LoadState, --value, ultra-recovery-backup.timer]
+  register: recovery_primary_existing_timer
+  changed_when: false
+- name: Pause only an installed backup timer
+  ansible.builtin.systemd_service:
+    name: ultra-recovery-backup.timer
+    state: stopped
+  when: recovery_primary_existing_timer.stdout | trim != 'not-found'
+- name: Wait for an already running copy to finish
+  ansible.builtin.command:
+    argv: [systemctl, is-active, ultra-recovery-backup.service]
+  register: recovery_primary_copy_active
+  changed_when: false
+  failed_when: false
+  until: recovery_primary_copy_active.stdout | trim != 'active'
+  retries: 110
+  delay: 5
+- name: Build desired state after validating existing pins and resources
+  ansible.builtin.command:
+    argv: [python3, /var/lib/ultra-automation/bootstrap/bootstrap_plan.py]
+    stdin: >-
+      {{ ultra_automation_configuration |
+      combine({'known_hosts_file': '/var/lib/ultra-automation/bootstrap/known_hosts'}) | to_json(preprocess_unsafe=False) }}
+  register: recovery_primary_plan
+  changed_when: false
+  no_log: true
+- name: Create managed operation pin directories
+  ansible.builtin.file:
+    path: "/var/lib/ultra-relay/vultr/{{ item.id }}"
+    state: directory
+    owner: ultra-relay
+    group: ultra-relay
+    mode: "0700"
+  loop: "{{ (recovery_primary_plan.stdout | from_json).nodes }}"
+  no_log: true
+- name: Install guarded private recovery configuration
+  ansible.builtin.copy:
+    content: "{{ item.content }}"
+    dest: "{{ item.destination }}"
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop: "{{ (recovery_primary_plan.stdout | from_json).files }}"
+  no_log: true
+- name: Preserve immutable verified recovery tool snapshot
+  ansible.builtin.file:
+    path: "/opt/ultra-recovery/releases/{{ ultra_automation_configuration.version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Inspect previously stored immutable snapshot members
+  ansible.builtin.stat:
+    path: "/opt/ultra-recovery/releases/{{ ultra_automation_configuration.version }}/{{ item.destination | basename }}"
+    checksum_algorithm: sha256
+  loop: "{{ ultra_automation_tools }}"
+  register: recovery_primary_snapshot
+- name: Reject immutable recovery member replacement
+  ansible.builtin.assert:
+    that: not item.stat.exists or item.stat.checksum == item.item.sha256
+  loop: "{{ recovery_primary_snapshot.results }}"
+- name: Store immutable verified recovery tool members
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "/opt/ultra-recovery/releases/{{ ultra_automation_configuration.version }}/{{ item.destination | basename }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop: "{{ ultra_automation_tools }}"
+- name: Initialize the exact bootstrap recovery snapshot inventory
+  ansible.builtin.set_fact:
+    recovery_primary_retention_bootstrap_tools: {}
+- name: Include every verified bootstrap snapshot member
+  ansible.builtin.set_fact:
+    recovery_primary_retention_bootstrap_tools: "{{ recovery_primary_retention_bootstrap_tools | combine({item.destination | basename: item.sha256}) }}"
+  loop: "{{ ultra_automation_tools }}"
+- name: Seal the bootstrap recovery snapshot for later bounded retention
+  ultra_release_retention:
+    action: seal
+    path: "/opt/ultra-recovery/releases/{{ ultra_automation_configuration.version }}"
+    expected: "{{ recovery_primary_retention_bootstrap_tools }}"
+- name: Install recovery tool source copies needed for authenticated generations
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "/opt/ultra-recovery/{{ item.destination | basename }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop: "{{ ultra_automation_tools }}"
+- name: Apply shared release-owned recovery tools
+  ansible.builtin.include_role:
+    name: recovery
+    tasks_from: refresh
+  vars:
+    recovery_managed_files: "{{ ultra_automation_tools }}"
+- name: Install pinned primary release identity
+  ansible.builtin.copy:
+    src: "{{ ultra_automation_manifest_source }}"
+    dest: /opt/ultra-recovery/release-manifest.json
+    mode: "0600"
+- name: Preserve exact supplied release signature
+  ansible.builtin.copy:
+    src: "{{ ultra_automation_signature_source }}"
+    dest: "{{ item }}"
+    mode: "0600"
+  loop: [/opt/ultra-recovery/release-manifest.json.minisig, /usr/local/libexec/ultra-emergency-manifest.json.minisig]
+  when: ultra_automation_signature_source | default('') | length > 0
+- name: Remove stale signature when the operator bundle is unsigned
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: [/opt/ultra-recovery/release-manifest.json.minisig, /usr/local/libexec/ultra-emergency-manifest.json.minisig]
+  when: ultra_automation_signature_source | default('') | length == 0
+- name: Install compatible emergency relay
+  ansible.builtin.copy:
+    src: "{{ ultra_automation_emergency_source }}"
+    dest: /usr/local/libexec/ultra-relay-emergency
+    owner: root
+    group: root
+    mode: "0755"
+- name: Install compatible emergency release identity
+  ansible.builtin.copy:
+    src: "{{ ultra_automation_manifest_source }}"
+    dest: /usr/local/libexec/ultra-emergency-manifest.json
+    mode: "0600"
+- name: Install current pinned operator adapter
+  ansible.builtin.copy:
+    src: "{{ ultra_install_source }}"
+    dest: /usr/local/bin/ultra-install
+    mode: "0755"
+- name: Install provider key in relay-private canonical location
+  ansible.builtin.copy:
+    src: "{{ ultra_automation_cloud_source }}"
+    dest: /var/lib/ultra-relay/automation/vultr-api-key
+    owner: ultra-relay
+    group: ultra-relay
+    mode: "0600"
+  when: ultra_automation_cloud_source | default('') | length > 0
+  no_log: true
+- name: Install optional DNS API key privately
+  ansible.builtin.copy:
+    src: "{{ ultra_automation_dns_source }}"
+    dest: /etc/ultra-recovery/dns-api-key
+    mode: "0600"
+  when: ultra_automation_dns_source | default('') | length > 0
+  no_log: true
+- name: Create relay service drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/ultra-relay.service.d
+    state: directory
+    mode: "0755"
+- name: Configure independent lifecycle executor and provider identity
+  ansible.builtin.template:
+    src: automation.conf.j2
+    dest: /etc/systemd/system/ultra-relay.service.d/automation.conf
+    mode: "0644"
+  notify: Restart primary relay
+- name: Initialize static budgets without resetting spend
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/ultra-relay
+      - -ensure-static-budgets
+      - -spec
+      - "{{ ultra_automation_configuration.spec }}"
+      - -static-budgets-file
+      - /etc/ultra-recovery/static-budgets.json
+  environment: "{{ (recovery_primary_plan.stdout | from_json).environment }}"
+  changed_when: false
+  no_log: true
+- name: Ensure dedicated metered monitoring principal
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/ultra-relay
+      - -ensure-monitor-access
+      - -spec
+      - "{{ ultra_automation_configuration.spec }}"
+      - -monitor-profile-output
+      - /etc/ultra-recovery/probe.json
+      - -monitor-chat-output
+      - /etc/ultra-recovery/admin-chat-id
+      - -monitor-admin-telegram-id
+      - "{{ ultra_automation_configuration.admin_telegram_id | default(0) | string }}"
+  environment: "{{ (recovery_primary_plan.stdout | from_json).environment }}"
+  changed_when: false
+  no_log: true
+- name: Preserve existing heartbeat identity
+  ansible.builtin.command:
+    argv: [ssh-keygen, -q, -t, ed25519, -N, '', -f, /var/lib/ultra-recovery-reconcile/heartbeat_ed25519]
+    creates: /var/lib/ultra-recovery-reconcile/heartbeat_ed25519
+- name: Derive heartbeat public key from actual private identity
+  ansible.builtin.command:
+    argv: [ssh-keygen, -y, -f, /var/lib/ultra-recovery-reconcile/heartbeat_ed25519]
+  register: recovery_primary_heartbeat_public
+  changed_when: false
+- name: Preserve matching heartbeat public key
+  ansible.builtin.copy:
+    content: "{{ recovery_primary_heartbeat_public.stdout }}\n"
+    dest: /var/lib/ultra-recovery-reconcile/heartbeat_ed25519.pub
+    mode: "0600"
+- name: Initialize empty primary generation repository
+  ansible.builtin.command:
+    argv: [python3, /opt/ultra-recovery/recovery.py, init, --repository, /var/lib/ultra-recovery, --source, bridge]
+    creates: /var/lib/ultra-recovery/.ultra-recovery-repository
+- name: Activate independent executor drop-in before checking copies
+  ansible.builtin.meta: flush_handlers
+- name: Enable primary copy and reconciliation timers
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    daemon_reload: true
+    enabled: true
+    state: started
+  loop: [ultra-recovery-backup.timer, ultra-recovery-reconcile.timer]
+- name: Commit configured automation acknowledgement without waiting for child operations
+  ansible.builtin.copy:
+    content: "{{ {'configured': true, 'activated_at': recovery_primary_started.stdout | trim | int} | to_json(preprocess_unsafe=False) }}"
+    dest: "{{ ultra_result_file }}"
+    mode: "0600"
+  delegate_to: localhost

@@ -1,0 +1,12 @@
+[Unit]
+Description=Check stable signed Ultra releases
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+Unit=ultra-auto-upgrade.service
+
+[Install]
+WantedBy=timers.target

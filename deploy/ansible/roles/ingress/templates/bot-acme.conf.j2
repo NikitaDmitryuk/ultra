@@ -1,0 +1,6 @@
+server {
+    listen 80;
+    server_name {{ ultra_bot_domain }};
+    location ^~ /.well-known/acme-challenge/ { root /var/www/ultra-acme; access_log off; }
+    location / { return 404; }
+}

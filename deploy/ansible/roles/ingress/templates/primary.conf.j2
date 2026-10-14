@@ -1,0 +1,44 @@
+# Managed by ultra-install ingress; edit the plan instead.
+server {
+    listen 80;
+    server_name {{ ultra_ingress.domain }};
+    location ^~ /.well-known/acme-challenge/ { root /var/www/ultra-acme; access_log off; }
+    location / { return 301 https://{{ ultra_ingress.domain }}$request_uri; }
+}
+server {
+    listen {{ ingress_public_port }} ssl http2;
+    server_name {{ ultra_ingress.domain }};
+    ssl_certificate /etc/letsencrypt/live/{{ ultra_ingress.domain }}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{ ultra_ingress.domain }}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:ultravpn:10m;
+    ssl_session_timeout 1d;
+    access_log off;
+    error_log /var/log/nginx/ultra-vpn-error.log crit;
+    root /var/www/ultra-site;
+    location ^~ {{ ultra_ingress.path }}/ {
+        grpc_pass grpc://127.0.0.1:{{ ultra_ingress.backend_port }};
+        grpc_set_header Host $host;
+        grpc_set_header X-Forwarded-For $remote_addr;
+        grpc_set_header X-Ultra-Proxy 1;
+        grpc_set_header X-Real-IP $remote_addr;
+        grpc_set_header Forwarded "";
+        grpc_read_timeout 3600s;
+        grpc_send_timeout 3600s;
+        grpc_socket_keepalive on;
+        client_body_timeout 3600s;
+        client_max_body_size 0;
+    }
+    location = {{ ultra_ingress.path }} {
+        grpc_pass grpc://127.0.0.1:{{ ultra_ingress.backend_port }};
+        grpc_set_header X-Forwarded-For $remote_addr;
+        grpc_set_header X-Ultra-Proxy 1;
+        grpc_set_header X-Real-IP $remote_addr;
+        grpc_set_header Forwarded "";
+        grpc_read_timeout 3600s;
+        grpc_send_timeout 3600s;
+        client_body_timeout 3600s;
+        client_max_body_size 0;
+    }
+    location / { try_files $uri $uri/ =404; }
+}

@@ -107,6 +107,11 @@ func (s *Server) handleListExits(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePostExit(w http.ResponseWriter, r *http.Request) {
+	s.topologyMu.Lock()
+	defer s.topologyMu.Unlock()
+	if !s.requireTopologyReady(w, r) {
+		return
+	}
 	if s.exits == nil {
 		http.Error(w, "exit management requires database backend", http.StatusNotImplemented)
 		return
@@ -141,6 +146,11 @@ func (s *Server) handlePostExit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePatchExit(w http.ResponseWriter, r *http.Request) {
+	s.topologyMu.Lock()
+	defer s.topologyMu.Unlock()
+	if !s.requireTopologyReady(w, r) {
+		return
+	}
 	if s.exits == nil {
 		http.Error(w, "exit management requires database backend", http.StatusNotImplemented)
 		return
@@ -363,6 +373,11 @@ func (s *Server) handleClientSetExitSelection(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleDeleteExit(w http.ResponseWriter, r *http.Request) {
+	s.topologyMu.Lock()
+	defer s.topologyMu.Unlock()
+	if !s.requireTopologyReady(w, r) {
+		return
+	}
 	if s.exits == nil {
 		http.Error(w, "exit management requires database backend", http.StatusNotImplemented)
 		return

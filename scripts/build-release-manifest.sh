@@ -3,6 +3,8 @@ set -euo pipefail
 
 DIST_DIR="${1:-dist}"
 VERSION="${2:-}"
+SOURCE_COMMIT="$(git rev-parse HEAD)"
+[[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid source commit" >&2; exit 1; }
 
 if [[ ! -d "$DIST_DIR" ]]; then
   echo "release manifest: dist dir not found: $DIST_DIR" >&2
@@ -32,7 +34,8 @@ tmp="${manifest}.tmp"
   printf '{\n'
   printf '  "schema_version": 1,\n'
   printf '  "version": "%s",\n' "$(json_escape "$VERSION")"
-  printf '  "capabilities": ["service-access-v1", "provider-pool-quota-v1"],\n'
+  printf '  "source_commit": "%s",\n' "$SOURCE_COMMIT"
+  printf '  "capabilities": ["service-access-v1", "provider-pool-quota-v1", "lifecycle-gate-v1"],\n'
   printf '  "database_schema_min": 24,\n'
   printf '  "database_schema_max": 25,\n'
   printf '  "assets": [\n'
@@ -47,10 +50,13 @@ tmp="${manifest}.tmp"
     ultra-client-linux-amd64 \
     ultra-client-linux-arm64 \
     ultra-recovery.tar.gz \
+    ultra-ansible.tar.gz \
+    ultra-ansible-runtime-linux-amd64.tar.gz \
+    ultra-ansible-runtime-linux-arm64.tar.gz \
     mobile-bootstrap.sh \
     checksums.txt; do
     path="${DIST_DIR}/${file}"
-    [[ -f "$path" ]] || continue
+    [[ -f "$path" && -s "$path" ]] || { echo "release manifest: missing or empty asset: $file" >&2; rm -f "$tmp"; exit 1; }
     if [[ "$first" -eq 0 ]]; then
       printf ',\n'
     fi
@@ -62,4 +68,3 @@ tmp="${manifest}.tmp"
   printf '}\n'
 } >"$tmp"
 mv "$tmp" "$manifest"
-

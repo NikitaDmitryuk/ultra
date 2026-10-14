@@ -1,0 +1,24 @@
+[Unit]
+Description=Ultra infrastructure Ansible worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+RuntimeDirectory=ultra-ansible
+RuntimeDirectoryMode=0755
+StateDirectory=ultra-ansible
+StateDirectoryMode=0700
+ExecStart={{ ultra_controller_directory }}/ultra-install ansible-controller --executable {{ ultra_controller_directory }}/venv/bin/ansible-playbook
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

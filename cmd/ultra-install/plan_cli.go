@@ -23,12 +23,42 @@ func handlePlanSubcommand(args []string) bool {
 		return true
 	}
 	switch args[0] {
+	case "config-values":
+		runConfigValuesCommand(args[1:])
+	case "bridge-migrate":
+		runBridgeMigrationCommand(args[1:])
+	case "rewrite-deployment-config":
+		runDeploymentConfigRewrite(args[1:])
+	case "enable-auto-upgrade":
+		runAutoUpgradeAcceptCommand(args[1:])
+	case "accept-channel-state":
+		runAcceptChannelState(args[1:])
+	case "verify-channel-state":
+		runVerifyChannelState(args[1:])
+	case "auto-upgrade":
+		runAutoUpgradeCommand(args[1:])
+	case "release-probe":
+		runReleaseProbeCommand(args[1:])
+	case "ansible-lease":
+		runAnsibleLease(args[1:])
+	case "ansible-run":
+		runAnsibleLocal(args[1:])
+	case "ansible-retry-bootstrap":
+		runAnsibleRetryBootstrap(args[1:])
+	case "ansible-bootstrap-components":
+		runAnsibleBootstrapComponents(args[1:])
+	case "ansible-controller":
+		runAnsibleController(args[1:])
+	case "ansible-exit":
+		runAnsibleExit(args[1:])
 	case "bootstrap", "status", "upgrade":
 		runAutomationCommand(args[0], args[1:])
 	case "domain-cutover":
 		runDomainCutoverCommand(args[1:])
 	case "ingress":
 		runIngressCommand(args[1:])
+	case "adopt":
+		runAdoptCommand(args[1:])
 	case "plan":
 		runPlanCommand(args[1:])
 	case "doctor":

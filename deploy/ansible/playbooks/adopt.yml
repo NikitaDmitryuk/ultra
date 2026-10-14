@@ -1,0 +1,23 @@
+---
+- name: Compare existing deployment without host changes
+  hosts: bridge:exits
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Verify existing owned configuration and pinned installed artifact
+      ultra_adopt_probe:
+        specification: "{{ ultra_spec }}"
+        environment: "{{ ultra_relay_environment }}"
+        unit_sha256: "{{ lookup('file', playbook_dir + '/../roles/relay/templates/ultra-relay.service.j2', rstrip=False) | hash('sha256') }}"
+        binary_sha256: "{{ ultra_relay_sha256 }}"
+      no_log: true
+- name: Confirm verified read-only adoption inspection
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Persist inspection result
+      ansible.builtin.copy:
+        content: '{"verified":true,"read_only":true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      no_log: true

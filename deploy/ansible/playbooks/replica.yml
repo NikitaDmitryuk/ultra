@@ -1,0 +1,69 @@
+---
+- name: Check reverse tunnel exposure before starting transport
+  hosts: replicas
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Inspect SSH gateway policy
+      ansible.builtin.command:
+        argv: [/usr/sbin/sshd, -T]
+      register: replica_gateway_policy
+      changed_when: false
+    - name: Reject unsafe reverse tunnel binding
+      ansible.builtin.assert:
+        that: "'gatewayports no' in replica_gateway_policy.stdout_lines or 'gatewayports clientspecified' in replica_gateway_policy.stdout_lines"
+- name: Install independent primary to replica tunnels
+  hosts: bridges
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Create private replica tunnel credentials directory
+      ansible.builtin.file:
+        path: /etc/ultra-replica-tunnels
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+    - name: Install selected replica tunnel credentials
+      ansible.builtin.copy:
+        src: "{{ item.source }}"
+        dest: "/etc/ultra-replica-tunnels/{{ ultra_replica_slot }}.{{ item.name }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop:
+        - {name: identity, source: "{{ ultra_replica_identity_source }}"}
+        - {name: known_hosts, source: "{{ ultra_replica_known_hosts_source }}"}
+      no_log: true
+    - name: Install independent replica tunnel service
+      ansible.builtin.template:
+        src: ../roles/replica/templates/ultra-replica-tunnel.service.j2
+        dest: "/etc/systemd/system/ultra-replica-tunnel-{{ ultra_replica_slot }}.service"
+        mode: "0644"
+      register: replica_tunnel_unit
+    - name: Activate independent replica tunnel
+      ansible.builtin.systemd_service:
+        name: "ultra-replica-tunnel-{{ ultra_replica_slot }}.service"
+        daemon_reload: "{{ replica_tunnel_unit.changed }}"
+        enabled: true
+        state: "{{ 'restarted' if replica_tunnel_unit.changed else 'started' }}"
+- name: Configure owned PostgreSQL standby
+  hosts: replicas
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  roles:
+    - replica
+  post_tasks:
+    - name: Confirm standby is running
+      ansible.builtin.command:
+        argv: [runuser, -u, postgres, --, psql, -p, '5433', -XAtq, -d, postgres, -c, 'SELECT pg_is_in_recovery()']
+      register: replica_recovery_check
+      changed_when: false
+      failed_when: replica_recovery_check.stdout | trim != 't'
+    - name: Commit verified replica acknowledgement
+      ansible.builtin.copy:
+        content: '{"verified":true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost

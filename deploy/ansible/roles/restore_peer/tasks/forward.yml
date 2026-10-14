@@ -1,0 +1,49 @@
+---
+- name: Verify owned HTTPS forwarding and prepare transactional files
+  ansible.builtin.command:
+    argv: [python3, "/var/lib/ultra-restore/{{ ultra_peer_plan.restore_id }}/restore_peer.py"]
+    stdin: "{{ ultra_peer_plan | combine({'action': 'forward-prepare'}) | to_json(preprocess_unsafe=False) }}"
+  changed_when: false
+  no_log: true
+- name: Activate verified HTTPS forward transaction
+  block:
+    - name: Install verified desired forward files
+      ansible.builtin.copy:
+        src: "/var/lib/ultra-restore/{{ ultra_peer_plan.restore_id }}/ingress-desired/{{ item | basename }}"
+        dest: "/etc/nginx/{{ item }}"
+        remote_src: true
+        mode: "0644"
+      loop: [stream.d/bot-proxy.conf, conf.d/acme-proxy.conf]
+    - name: Validate desired HTTPS forward configuration
+      ansible.builtin.command:
+        argv: [nginx, -t]
+      changed_when: false
+    - name: Activate desired HTTPS forward configuration
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded
+  rescue:
+    - name: Restore previous owned forward files
+      ansible.builtin.copy:
+        src: "/var/lib/ultra-restore/{{ ultra_peer_plan.restore_id }}/ingress-before/{{ item | basename }}"
+        dest: "/etc/nginx/{{ item }}"
+        remote_src: true
+        mode: "0644"
+      loop: [stream.d/bot-proxy.conf, conf.d/acme-proxy.conf]
+    - name: Validate previous HTTPS forward configuration
+      ansible.builtin.command:
+        argv: [nginx, -t]
+      changed_when: false
+    - name: Reactivate previous HTTPS forward configuration
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded
+    - name: Report failed forward transaction after compensation
+      ansible.builtin.fail:
+        msg: ingress_failed_previous_restored
+- name: Record verified forward ownership after activation
+  ansible.builtin.command:
+    argv: [python3, "/var/lib/ultra-restore/{{ ultra_peer_plan.restore_id }}/restore_peer.py"]
+    stdin: "{{ ultra_peer_plan | combine({'action': 'forward-commit'}) | to_json(preprocess_unsafe=False) }}"
+  changed_when: false
+  no_log: true

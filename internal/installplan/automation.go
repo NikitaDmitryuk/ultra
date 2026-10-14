@@ -17,6 +17,17 @@ func validateAutomation(p *InstallPlan) error {
 		return errors.New("clean v2 installation requires bot and database")
 	}
 	a := p.Automation
+	if a != nil && a.AutoUpgrade != nil {
+		channel := a.AutoUpgrade
+		if !regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`).MatchString(channel.Repository) || !filepath.IsAbs(channel.PublicKeyFile) || len(channel.RequiredChecks) == 0 {
+			return errors.New("automation auto_upgrade requires repository, public key file and CI checks")
+		}
+		for _, name := range channel.RequiredChecks {
+			if strings.TrimSpace(name) == "" || strings.ContainsAny(name, "\r\n\x00") {
+				return errors.New("invalid required CI check")
+			}
+		}
+	}
 	if a == nil {
 		return errors.New("v2 requires automation configuration; v1 remains supported for legacy installs")
 	}

@@ -58,7 +58,7 @@ func main() {
 	)
 	flag.Parse()
 	if *capabilities {
-		fmt.Println(`["service-access-v1","provider-pool-quota-v1"]`)
+		fmt.Println(`["service-access-v1","provider-pool-quota-v1","lifecycle-gate-v1"]`)
 		return
 	}
 	if *staticBudgetsOnly && (*monitorOnly || *cacheOnly || *drainOnly || *checkOnly || *transportPath != "") {

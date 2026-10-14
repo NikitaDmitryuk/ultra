@@ -1,0 +1,20 @@
+---
+- name: Reserve the bridge lifecycle and drain existing topology changes
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Apply the fixed root lifecycle transition
+      ultra_lifecycle:
+        id: "{{ ultra_lifecycle_id }}"
+        phase: "{{ ultra_lifecycle_phase }}"
+        resume_frozen: "{{ ultra_lifecycle_resume | default(false) }}"
+        drain: "{{ ultra_lifecycle_drain | default(true) }}"
+      become: true
+    - name: Record the verified lifecycle transition
+      ansible.builtin.copy:
+        content: '{"verified":true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false

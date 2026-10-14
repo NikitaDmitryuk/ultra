@@ -1,0 +1,88 @@
+---
+- name: Identify the verified compatible rollback component
+  ansible.builtin.set_fact:
+    release_retention_expected: >-
+      {{ {'ultra-relay.previous': (ultra_previous_manifest.assets |
+      selectattr('name', 'equalto', 'ultra-relay-linux-' + ultra_architecture) | first).sha256} }}
+- name: Include preserved compatible tools in the complete rollback inventory
+  ansible.builtin.set_fact:
+    release_retention_expected: "{{ release_retention_expected | combine({'tools-previous/' + item.backup_name: item.previous_sha256}) }}"
+  loop: "{{ ultra_recovery_files }}"
+  when: item.previous_sha256 != ''
+- name: Resolve the bridge emergency component identities
+  ansible.builtin.set_fact:
+    release_retention_bridge_expected:
+      ultra-bot.previous: >-
+        {{ (ultra_previous_manifest.assets |
+        selectattr('name', 'equalto', 'ultra-bot-linux-' + ultra_architecture) | first).sha256 }}
+      ultra-install: "{{ ultra_install_sha256 }}"
+      manifest.previous: "{{ ultra_previous_manifest_sha256 }}"
+      controller.service.previous: "{{ ultra_previous_controller_unit_sha256 }}"
+  when: inventory_hostname in groups['bridge']
+- name: Include the bridge manifest controller and bot rollback identities
+  ansible.builtin.set_fact:
+    release_retention_expected: "{{ release_retention_expected | combine(release_retention_bridge_expected) }}"
+  when: inventory_hostname in groups['bridge']
+- name: Seal the complete verified emergency rollback tree
+  ultra_release_retention:
+    action: seal
+    path: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}"
+    expected: "{{ release_retention_expected }}"
+    optional: "{{ ['manifest.previous.minisig'] if inventory_hostname in groups['bridge'] else [] }}"
+- name: Build the exact immutable target tools inventory
+  ansible.builtin.set_fact:
+    release_retention_tools_expected: {}
+  when: inventory_hostname in groups['bridge']
+- name: Include each manifest-verified target tool
+  ansible.builtin.set_fact:
+    release_retention_tools_expected: "{{ release_retention_tools_expected | combine({item.destination | basename: item.sha256}) }}"
+  loop: "{{ ultra_recovery_files }}"
+  when:
+    - inventory_hostname in groups['bridge']
+    - item.destination != '/usr/local/bin/ultra-client'
+- name: Seal manifest-verified target tool artifacts
+  ultra_release_retention:
+    action: seal
+    path: "/opt/ultra-recovery/releases/{{ ultra_release_version }}"
+    expected: "{{ release_retention_tools_expected }}"
+  when: inventory_hostname in groups['bridge']
+- name: Verify the running controller selects the retained target runtime
+  ansible.builtin.stat:
+    path: /opt/ultra-ansible/current
+    follow: false
+  register: release_retention_current
+  when: inventory_hostname in groups['bridge']
+- name: Verify the active immutable controller unit
+  ansible.builtin.stat:
+    path: /etc/systemd/system/ultra-ansible-controller.service
+    follow: false
+    checksum_algorithm: sha256
+  register: release_retention_unit
+  when: inventory_hostname in groups['bridge']
+- name: Refuse ambiguous active controller references
+  ansible.builtin.assert:
+    that:
+      - release_retention_current.stat.islnk | default(false)
+      - release_retention_current.stat.lnk_source == ultra_controller_directory
+      - release_retention_unit.stat.isreg | default(false)
+      - not release_retention_unit.stat.islnk | default(false)
+      - release_retention_unit.stat.checksum == ultra_target_controller_unit_sha256
+  when: inventory_hostname in groups['bridge']
+- name: Plan obsolete executable trees with all live and recovery references
+  ultra_release_retention:
+    action: plan
+    keep: >-
+      {{ ['/var/lib/ultra-ansible/releases/' + ultra_release_version] +
+      ([ultra_controller_directory, ultra_previous_controller_directory,
+      '/opt/ultra-recovery/releases/' + ultra_release_version,
+      '/opt/ultra-recovery/releases/' + ultra_previous_manifest.version]
+      if inventory_hostname in groups['bridge'] else []) }}
+    versions: "{{ [ultra_release_version, ultra_previous_manifest.version] }}"
+    auto_policy: "{{ '/etc/ultra-ansible/auto-upgrade.json' if inventory_hostname in groups['bridge'] else omit }}"
+    backup_policy: "{{ '/etc/ultra-recovery/backup.json' if inventory_hostname in groups['bridge'] else omit }}"
+  register: release_retention_plan
+- name: Remove only unreferenced intact owned executable trees
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ release_retention_plan.paths }}"

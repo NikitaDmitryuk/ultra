@@ -1,0 +1,8 @@
+# Managed by ultra Ansible.
+server {
+    listen 80;
+    server_name {{ ingress_acme_domains | join(' ') }};
+    access_log off;
+    location ^~ /.well-known/acme-challenge/ { root /var/www/ultra-acme; }
+    location / { return 404; }
+}

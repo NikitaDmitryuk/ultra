@@ -1,0 +1,8 @@
+---
+- name: Apply fenced changes to owned restore peers
+  hosts: restore_peers
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  roles:
+    - restore_peer

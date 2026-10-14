@@ -1,0 +1,98 @@
+---
+- name: Validate existing forward configuration before package changes
+  ultra_forward_state:
+    bridge: "{{ ultra_forward_bridge_ipv4 }}"
+    domain: "{{ ultra_forward_domain }}"
+    port: "{{ ultra_forward_bot_port }}"
+- name: Install forwarding ingress dependencies
+  ansible.builtin.apt:
+    name: [nginx, libnginx-mod-stream]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+- name: Ensure forward configuration directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: [/etc/nginx/stream.d, /etc/nginx/conf.d]
+- name: Adopt only proven original forward configurations
+  ultra_forward_state:
+    bridge: "{{ ultra_forward_bridge_ipv4 }}"
+    domain: "{{ ultra_forward_domain }}"
+    port: "{{ ultra_forward_bot_port }}"
+    adopt: true
+  register: forward_ingress_desired
+- name: Inspect forwarding guest firewall
+  ansible.builtin.stat:
+    path: /usr/sbin/ufw
+  register: forward_ingress_ufw
+- name: Inspect forwarding guest firewall state
+  ansible.builtin.command:
+    argv: [/usr/sbin/ufw, status]
+  changed_when: false
+  register: forward_ingress_firewall_state
+  when: forward_ingress_ufw.stat.exists
+- name: Allow managed forwarding listeners on enabled guest firewall
+  ansible.builtin.command:
+    argv: [/usr/sbin/ufw, allow, "{{ item | string }}/tcp"]
+  loop: "{{ [80, 443, ultra_forward_bot_port] | unique }}"
+  register: forward_ingress_firewall_rule
+  changed_when: "'Skipping' not in forward_ingress_firewall_rule.stdout"
+  when:
+    - forward_ingress_ufw.stat.exists
+    - "'Status: active' in forward_ingress_firewall_state.stdout | default('')"
+- name: Save forwarding configuration before images
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  loop: "{{ forward_ingress_desired.files }}"
+  register: forward_ingress_previous
+  failed_when: false
+  no_log: true
+- name: Apply owned forwarding configuration transaction
+  block:
+    - name: Install owned forwarding configuration
+      ultra_owned_file:
+        path: "{{ item.path }}"
+        receipt: /var/lib/ultra-ingress/forward-managed.json
+        content: "{{ item.content }}"
+        mode: "{{ item.mode }}"
+      loop: "{{ forward_ingress_desired.files }}"
+      notify: Reload forward ingress
+    - name: Validate forwarding Nginx configuration
+      ansible.builtin.command:
+        argv: [nginx, -t]
+      changed_when: false
+    - name: Ensure forwarding Nginx is enabled and running
+      ansible.builtin.systemd_service:
+        name: nginx.service
+        state: started
+        enabled: true
+    - name: Activate validated forwarding configuration
+      ansible.builtin.meta: flush_handlers
+    - name: Verify forwarding listeners
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ item }}"
+        timeout: 15
+      loop: "{{ [80, 443, ultra_forward_bot_port] | unique }}"
+  rescue:
+    - name: Restore forwarding configuration before images
+      ultra_owned_file:
+        path: "{{ item.item.path }}"
+        receipt: /var/lib/ultra-ingress/forward-managed.json
+        state: "{{ 'present' if item.content is defined else 'absent' }}"
+        content: "{{ item.content | default('') | b64decode }}"
+      loop: "{{ forward_ingress_previous.results }}"
+      no_log: true
+    - name: Validate restored forwarding configuration
+      ansible.builtin.command:
+        argv: [nginx, -t]
+      changed_when: false
+    - name: Restore working forwarding Nginx
+      ansible.builtin.systemd_service:
+        name: nginx.service
+        state: reloaded
+    - name: Preserve failed forwarding operation result
+      ansible.builtin.fail:
+        msg: forward_ingress_failed_previous_configuration_restored

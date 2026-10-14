@@ -241,6 +241,11 @@ func TestRenderDesiredStateReusePreservesBridgeMaterial(t *testing.T) {
 		GeoAssetsDir:    "/etc/ultra-relay/geo",
 		GeositeExitTags: []string{"ru-blocked-all"},
 	}
+	existing.HappDefaultJSON = true
+	existing.ProbeURLs = []string{"https://health.example.com/test", "https://health.example.net/test"}
+	existing.Stats = &config.StatsSpec{CollectIntervalSeconds: 5, APIListen: "127.0.0.1:10085"}
+	p.Database.Enabled = true
+	existing.Database = &config.DatabaseSpec{DSN: "postgres://ultra:retained-secret@127.0.0.1:5432/ultra_db?sslmode=disable"}
 	ds, err := RenderDesiredStateWithOptions(p, RenderOptions{
 		ExistingBridge:     existing,
 		ExistingAdminToken: "admin-token",
@@ -254,6 +259,20 @@ func TestRenderDesiredStateReusePreservesBridgeMaterial(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("RenderDesiredStateWithOptions: %v", err)
+	}
+	if !ds.BridgeSpecObject.HappDefaultJSON || !reflect.DeepEqual(ds.BridgeSpecObject.ProbeURLs, existing.ProbeURLs) || !reflect.DeepEqual(ds.BridgeSpecObject.Stats, existing.Stats) {
+		t.Fatal("reuse lost client publication or traffic collection configuration")
+	}
+	if ds.DBDSN != existing.Database.DSN || ds.BridgeSpecObject.Database.DSN != existing.Database.DSN || ds.PostgresConfig != nil {
+		t.Fatal("reuse rotated database credentials or reprovisioned the primary")
+	}
+	p.Database.Enabled = false
+	withoutProvisioning, err := RenderDesiredStateWithOptions(p, RenderOptions{ExistingBridge: existing, ExistingAdminToken: "admin-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutProvisioning.DBDSN != existing.Database.DSN {
+		t.Fatal("disabling primary provisioning removed existing database access")
 	}
 	if ds.BridgeSpecObject.Reality.PrivateKey != "private" {
 		t.Fatalf("reality private key not reused: %#v", ds.BridgeSpecObject.Reality)
@@ -342,8 +361,10 @@ func TestDoctorReportsMissingBotTokenWithoutNetwork(t *testing.T) {
 func TestReusePreservesManagedIngress(t *testing.T) {
 	src := &config.Spec{PrimaryXHTTP: &config.PrimaryXHTTPIngress{Host: "vpn.example", BackendPort: 18080}, LegacyPublicEnabled: config.BoolPtr(false), ExperimentalProfileFile: "/etc/ultra-relay/experimental-profile.json", GatewayVLESSPort: 18081}
 	dst := new(config.Spec)
-	applyBridgeOverlay(dst, src)
-	if dst.PrimaryXHTTP != src.PrimaryXHTTP || dst.LegacyPublicEnabled == nil || *dst.LegacyPublicEnabled || dst.ExperimentalProfileFile != src.ExperimentalProfileFile || dst.GatewayVLESSPort != 18081 {
+	if err := applyBridgeOverlay(dst, src); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(dst.PrimaryXHTTP, src.PrimaryXHTTP) || dst.LegacyPublicEnabled == nil || *dst.LegacyPublicEnabled || dst.ExperimentalProfileFile != src.ExperimentalProfileFile || dst.GatewayVLESSPort != 18081 {
 		t.Fatal("managed ingress lost during reuse")
 	}
 }

@@ -15,7 +15,7 @@ SSH_IDENTITY=""
 FORMAT="jsonl"
 INSTALL_ROOT="/opt/ultra"
 MINISIGN_PUBKEY=""
-REQUIRE_SIGNATURE="auto"
+REQUIRE_SIGNATURE="yes"
 WORK=""
 
 usage() {
@@ -31,7 +31,7 @@ Options:
   --format human|jsonl    ultra-install event output format (default: jsonl)
   --install-root PATH     release install root (default: /opt/ultra)
   --minisign-pubkey KEY   minisign public key for checksums.txt.minisig
-  --require-signature MODE  auto, yes, or no (default: auto)
+  --require-signature MODE  auto, yes, or no (default: yes)
 EOF
 }
 
@@ -88,6 +88,10 @@ case "$REQUIRE_SIGNATURE" in
   auto|yes|no) ;;
   *) echo "mobile-bootstrap: --require-signature must be auto, yes, or no" >&2; exit 2 ;;
 esac
+if [[ "$REQUIRE_SIGNATURE" == "yes" && -z "$MINISIGN_PUBKEY" ]]; then
+  echo 'mobile-bootstrap: trusted minisign public key required' >&2
+  exit 2
+fi
 
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -99,6 +103,7 @@ need() {
 need curl
 need sha256sum
 need install
+need python3
 
 case "$(uname -m)" in
   x86_64|amd64) ARCH="amd64" ;;
@@ -118,12 +123,8 @@ download() {
   curl -fL --retry 3 --connect-timeout 10 -o "${WORK}/${name}" "${BASE_URL}/${name}"
 }
 
-INSTALL_ASSET="ultra-install-linux-${ARCH}"
-RELAY_ASSET="ultra-relay-linux-${ARCH}"
-BOT_ASSET="ultra-bot-linux-${ARCH}"
-
 download checksums.txt
-download release-manifest.json || true
+download release-manifest.json
 if [[ "$REQUIRE_SIGNATURE" != "no" ]] && [[ -n "$MINISIGN_PUBKEY" || "$REQUIRE_SIGNATURE" == "yes" ]]; then
   if download checksums.txt.minisig; then
     if ! command -v minisign >/dev/null 2>&1; then
@@ -142,31 +143,76 @@ if [[ "$REQUIRE_SIGNATURE" != "no" ]] && [[ -n "$MINISIGN_PUBKEY" || "$REQUIRE_S
       exit 1
     fi
     minisign -Vm "${WORK}/checksums.txt" -x "${WORK}/checksums.txt.minisig" -P "$MINISIGN_PUBKEY"
+    download release-manifest.json.minisig
+    minisign -Vm "${WORK}/release-manifest.json" -x "${WORK}/release-manifest.json.minisig" -P "$MINISIGN_PUBKEY"
   elif [[ "$REQUIRE_SIGNATURE" == "yes" ]]; then
     echo "mobile-bootstrap: checksums.txt.minisig is required but was not found" >&2
     exit 1
   fi
 fi
-download "$INSTALL_ASSET"
-download "$RELAY_ASSET"
-download "$BOT_ASSET"
-
-(
-  cd "$WORK"
-  grep -E " (${INSTALL_ASSET}|${RELAY_ASSET}|${BOT_ASSET})$" checksums.txt | sha256sum -c -
-)
-
+# The loader fetches a complete immutable bundle; all server setup is Ansible.
+python3 - "$WORK/release-manifest.json" "$WORK/assets" "$WORK/version" <<'PY_MANIFEST'
+import json,re,sys
+from pathlib import Path
+manifest=json.loads(Path(sys.argv[1]).read_text())
+version=manifest.get('version','')
+if not re.fullmatch(r'v[0-9]+[.][0-9]+[.][0-9]+(?:[-+][A-Za-z0-9.-]+)?',version):
+ raise SystemExit('invalid immutable release version')
+required={f'ultra-{app}-linux-{arch}' for app in ('install','relay','bot','client') for arch in ('amd64','arm64')}
+required.update({'ultra-recovery.tar.gz','ultra-ansible.tar.gz','ultra-ansible-runtime-linux-amd64.tar.gz','ultra-ansible-runtime-linux-arm64.tar.gz'})
+names=[]
+for asset in manifest.get('assets',[]):
+ name=asset.get('name','')
+ if name not in required|{'checksums.txt','mobile-bootstrap.sh'} or name in names or not re.fullmatch('[a-f0-9]{64}',asset.get('sha256','')) or type(asset.get('size')) is not int or not 0<asset['size']<512*1024*1024:
+  raise SystemExit('invalid release asset')
+ names.append(name)
+if not required<=set(names):raise SystemExit('incomplete Ansible release')
+Path(sys.argv[2]).write_text('\n'.join(names)+'\n')
+Path(sys.argv[3]).write_text(version)
+PY_MANIFEST
+RELEASE_DIR_NAME="$(cat "$WORK/version")"
+BASE_URL="https://github.com/${REPO}/releases/download/${RELEASE_DIR_NAME}"
+while IFS= read -r asset; do
+ [[ "$asset" == checksums.txt ]] || download "$asset"
+done <"$WORK/assets"
+python3 - "$WORK" <<'PY_VERIFY'
+import hashlib,json,sys
+from pathlib import Path
+root=Path(sys.argv[1])
+for asset in json.loads((root/'release-manifest.json').read_text())['assets']:
+ file=root/asset['name']
+ if not file.is_file() or file.stat().st_size!=asset['size'] or hashlib.sha256(file.read_bytes()).hexdigest()!=asset['sha256']:
+  raise SystemExit('release integrity mismatch')
+PY_VERIFY
 RELEASE_DIR="${INSTALL_ROOT}/releases/${RELEASE_DIR_NAME}-${ARCH}"
-install -d -m 755 "$RELEASE_DIR"
-install -m 755 "${WORK}/${INSTALL_ASSET}" "${RELEASE_DIR}/ultra-install"
-install -m 755 "${WORK}/${RELAY_ASSET}" "${RELEASE_DIR}/ultra-relay"
-install -m 755 "${WORK}/${BOT_ASSET}" "${RELEASE_DIR}/ultra-bot"
+install -d -m 700 "$RELEASE_DIR"
+for metadata in release-manifest.json checksums.txt.minisig release-manifest.json.minisig; do
+ if [[ -f "$WORK/$metadata" && -e "$RELEASE_DIR/$metadata" ]] && ! cmp -s "$WORK/$metadata" "$RELEASE_DIR/$metadata"; then
+  echo 'mobile-bootstrap: immutable release metadata conflict' >&2; exit 1
+ fi
+done
+while IFS= read -r asset; do
+ if [[ -e "$RELEASE_DIR/$asset" ]] && ! cmp -s "$WORK/$asset" "$RELEASE_DIR/$asset"; then
+  echo 'mobile-bootstrap: immutable release conflict' >&2; exit 1
+ fi
+ mode=600
+ [[ "$asset" == ultra-*-linux-* && "$asset" != *.tar.gz ]] && mode=755
+ install -m "$mode" "$WORK/$asset" "$RELEASE_DIR/$asset"
+done <"$WORK/assets"
+install -m 600 "$WORK/release-manifest.json" "$RELEASE_DIR/release-manifest.json"
+for signature in checksums.txt.minisig release-manifest.json.minisig; do
+ [[ ! -f "$WORK/$signature" ]] || install -m 600 "$WORK/$signature" "$RELEASE_DIR/$signature"
+done
+for app in install relay bot; do
+ ln -sfn "ultra-${app}-linux-${ARCH}" "$RELEASE_DIR/ultra-${app}"
+done
+# This pointer refers only to bootstrap artifacts, not an activated service.
 ln -sfn "$RELEASE_DIR" "${INSTALL_ROOT}/current"
 
 APPLY_ARGS=(
   apply-remote
   -plan "$PLAN"
-  -release-dir "${INSTALL_ROOT}/current"
+  -release-dir "$RELEASE_DIR"
   -format "$FORMAT"
 )
 if [[ -n "$SECRETS" ]]; then
@@ -176,4 +222,4 @@ if [[ -n "$SSH_IDENTITY" ]]; then
   APPLY_ARGS+=(-ssh-identity "$SSH_IDENTITY")
 fi
 
-"${INSTALL_ROOT}/current/ultra-install" "${APPLY_ARGS[@]}"
+"${RELEASE_DIR}/ultra-install" "${APPLY_ARGS[@]}"

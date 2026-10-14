@@ -1,0 +1,104 @@
+---
+- name: Ensure isolated experimental account
+  ansible.builtin.user:
+    name: ultra-experimental
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+- name: Ensure isolated experimental directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: ultra-experimental
+    mode: "0750"
+  loop: [/etc/ultra-experimental, /opt/ultra-experimental]
+- name: Install verified experimental binary
+  ansible.builtin.copy:
+    remote_src: true
+    src: /usr/local/bin/ultra-relay
+    dest: /opt/ultra-experimental/ultra-relay
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart isolated experimental transport
+- name: Install private experimental certificate
+  ansible.builtin.copy:
+    remote_src: true
+    src: "/etc/letsencrypt/live/{{ ultra_ingress.domain }}/{{ item }}"
+    dest: "/etc/ultra-experimental/{{ item }}"
+    owner: ultra-experimental
+    group: ultra-experimental
+    mode: "0600"
+  loop: [fullchain.pem, privkey.pem]
+  no_log: true
+  notify: Restart isolated experimental transport
+- name: Assemble public experimental profile
+  ansible.builtin.set_fact:
+    ingress_experiment_public:
+      host: "{{ ultra_ingress.public_host | default(ultra_ingress.domain, true) }}"
+      endpoint:
+        port: "{{ ultra_ingress.experimental_port | int }}"
+        server_name: "{{ ultra_ingress.domain }}"
+        path: "{{ ultra_ingress.path }}"
+        mode: stream-up
+        fingerprint: "{{ ultra_ingress.experimental_fingerprint | default('firefox', true) }}"
+        xmux: {maxConnections: '2', hMaxRequestTimes: '600-900', hMaxReusableSecs: '1800-3000'}
+      status_port: "{{ ultra_ingress.status_port | int }}"
+- name: Assemble private experimental transport
+  ansible.builtin.set_fact:
+    ingress_experiment_transport:
+      profile:
+        host: "{{ ingress_experiment_public.host }}"
+        endpoint: >-
+          {{ ingress_experiment_public.endpoint | dict2items | rejectattr('key', 'equalto', 'fingerprint') | items2dict |
+             combine({'certificate_file': '/etc/ultra-experimental/fullchain.pem', 'key_file': '/etc/ultra-experimental/privkey.pem'}) }}
+        status_port: "{{ ingress_experiment_public.status_port }}"
+      backend_port: "{{ ultra_ingress.gateway_port | int }}"
+- name: Install owned experimental specification
+  ultra_owned_file:
+    path: /etc/ultra-experimental/spec.json
+    receipt: /var/lib/ultra-ingress/managed.json
+    content: "{{ ingress_experiment_transport | to_json(preprocess_unsafe=False) }}"
+    mode: "0640"
+  no_log: true
+  notify: Restart isolated experimental transport
+- name: Set experimental specification group
+  ansible.builtin.file:
+    path: /etc/ultra-experimental/spec.json
+    owner: root
+    group: ultra-experimental
+    mode: "0640"
+- name: Install owned experimental service definition
+  ultra_owned_file:
+    path: /etc/systemd/system/ultra-experimental.service
+    receipt: /var/lib/ultra-ingress/managed.json
+    content: "{{ lookup('template', 'ultra-experimental.service.j2') }}"
+  notify: Restart isolated experimental transport
+- name: Validate transport as its restricted service account
+  ansible.builtin.command:
+    argv: [runuser, -u, ultra-experimental, --, /opt/ultra-experimental/ultra-relay, -transport-spec, /etc/ultra-experimental/spec.json, -check]
+  changed_when: false
+  no_log: true
+- name: Activate verified experimental transport
+  ansible.builtin.meta: flush_handlers
+- name: Ensure experimental transport active
+  ansible.builtin.systemd_service:
+    name: ultra-experimental.service
+    daemon_reload: true
+    enabled: true
+    state: started
+- name: Verify experimental readiness
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ ultra_ingress.status_port }}/ready"
+    use_proxy: false
+    return_content: true
+  register: ingress_experiment_ready
+  until: ingress_experiment_ready.json.ready | default(false)
+  retries: 15
+  delay: 2
+- name: Publish only verified experimental profile
+  ultra_owned_file:
+    path: /etc/ultra-relay/experimental-profile.json
+    receipt: /var/lib/ultra-ingress/managed.json
+    content: "{{ ingress_experiment_public | to_json(preprocess_unsafe=False) }}"

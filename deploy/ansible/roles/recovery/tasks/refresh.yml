@@ -1,0 +1,45 @@
+---
+- name: Validate release-owned recovery tool destinations
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.destination is match(('^(/opt/ultra-recovery/[A-Za-z0-9][A-Za-z0-9_.-]*\.py|/usr/local/bin/ultra-client
+        |/etc/systemd/system/ultra-(recovery-(backup|prune|reconcile)\.(service|timer)|monitor\.(service|timer)|monitor-probe\.service))$')
+        | regex_replace('\\s+', ''))
+      - item.mode in ['0644', '0755']
+  loop: "{{ ultra_recovery_files | default(recovery_managed_files) }}"
+- name: Inspect release-owned recovery tool destinations
+  ansible.builtin.stat:
+    path: "{{ item.destination }}"
+  loop: "{{ ultra_recovery_files | default(recovery_managed_files) }}"
+  register: recovery_refresh_destinations
+- name: Reject tool symlink destinations
+  ansible.builtin.assert:
+    that: not item.stat.islnk | default(false)
+  loop: "{{ recovery_refresh_destinations.results }}"
+- name: Update release-owned recovery tools atomically
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ item.destination }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop: "{{ ultra_recovery_files | default(recovery_managed_files) }}"
+  register: recovery_files
+- name: Reload changed recovery units only
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: recovery_files.results | selectattr('changed') | map(attribute='item.destination') | select('match', '^/etc/systemd/') | list | length > 0
+- name: Inspect active monitor probe
+  ansible.builtin.command:
+    argv: [systemctl, is-active, ultra-monitor-probe.service]
+  register: recovery_refresh_probe
+  changed_when: false
+  failed_when: false
+- name: Restart active probe only after its client changes
+  ansible.builtin.systemd_service:
+    name: ultra-monitor-probe.service
+    state: restarted
+  when:
+    - recovery_refresh_probe.rc == 0
+    - recovery_files.results | selectattr('changed') | map(attribute='item.destination') | select('equalto', '/usr/local/bin/ultra-client') | list | length > 0

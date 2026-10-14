@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Root recovery reconciliation for already-owned, ready exits. No provisioning or migrations."""
 import argparse
-import base64
 import fcntl
 import hashlib
 import ipaddress
@@ -9,6 +8,8 @@ import json
 import os
 import pwd
 import stat
+import shlex
+import shutil
 import grp
 from pathlib import Path
 import re
@@ -114,100 +115,130 @@ def previous_monitor(config, node):
     return value
 
 
-# Payload is sent over pinned SSH stdin, never through arguments/logs.
-INSTALL = r'''
-import base64,hashlib,json,os,pathlib,re,subprocess,tempfile
-os.umask(0o077)
-raw=__import__('sys').stdin.buffer.read(134217729)
-if len(raw)>134217728:raise ValueError('installation exceeds bounds')
-payload=json.loads(raw)
-allowed={'/opt/ultra-recovery/recovery.py','/opt/ultra-recovery/monitor.py','/opt/ultra-recovery/heartbeat.py',
- '/usr/local/bin/ultra-client','/etc/ultra-recovery/monitor.json','/etc/ultra-recovery/probe.json',
- '/etc/ultra-recovery/primary-bot-token','/etc/ultra-recovery/peer_ed25519','/etc/ultra-recovery/peer_known_hosts',
- '/etc/systemd/system/ultra-recovery-prune.service','/etc/systemd/system/ultra-recovery-prune.timer',
- '/etc/systemd/system/ultra-monitor.service','/etc/systemd/system/ultra-monitor.timer','/etc/systemd/system/ultra-monitor-probe.service'}
-for folder in ['/opt/ultra-recovery','/etc/ultra-recovery','/var/lib/ultra-recovery','/var/lib/ultra-monitor']:
- p=pathlib.Path(folder)
- if p.is_symlink():raise ValueError('managed directory symlink')
- p.mkdir(mode=0o700,exist_ok=True)
-marker=pathlib.Path('/var/lib/ultra-recovery/.ultra-recovery-repository')
-if marker.exists():
- if marker.is_symlink() or marker.stat().st_uid!=0 or marker.stat().st_mode&0o077 or json.loads(marker.read_text())!={'source':'bridge','version':1}:raise ValueError('foreign repository')
-else:
- if any(marker.parent.iterdir()):raise ValueError('unmarked nonempty repository')
- marker.write_text(json.dumps({'source':'bridge','version':1}));marker.chmod(0o600)
-changed=[]
-for name,item in payload['files'].items():
- if name not in allowed and not re.fullmatch(r'/etc/ultra-recovery/peer_ed25519-[a-f0-9]{64}(?:\.pub)?',name):raise ValueError('unmanaged path')
- data=base64.b64decode(item['data'],validate=True)
- if hashlib.sha256(data).hexdigest()!=item['sha256']:raise ValueError('digest differs')
- p=pathlib.Path(name)
- if p.is_symlink():raise ValueError('managed file symlink')
- mode=item['mode']
- if p.exists() and p.read_bytes()==data and p.stat().st_mode&0o777==mode and p.stat().st_uid==0:continue
- fd,tmp=tempfile.mkstemp(dir=p.parent,prefix='.pending-')
- try:
-  with os.fdopen(fd,'wb')as f:f.write(data);f.flush();os.fsync(f.fileno());os.fchmod(f.fileno(),mode)
-  os.replace(tmp,p)
-  directory=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(directory);os.close(directory)
- finally:
-  if os.path.exists(tmp):os.unlink(tmp)
- changed.append(name)
-if not pathlib.Path('/usr/bin/age').exists():
- subprocess.run(['apt-get','update','-qq'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=60)
- subprocess.run(['apt-get','install','-y','-qq','age'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=90)
-if any(name.startswith('/etc/systemd/')for name in changed):subprocess.run(['systemctl','daemon-reload'],check=True)
-subprocess.run(['systemctl','enable','--now','ultra-recovery-prune.timer'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-if payload.get('monitor'):
- if payload['monitor']=='primary':
-  subprocess.run(['systemctl','enable','--now','ultra-monitor-probe.service'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-  if '/etc/ultra-recovery/probe.json'in changed or '/usr/local/bin/ultra-client'in changed:subprocess.run(['systemctl','restart','ultra-monitor-probe.service'],check=True)
- subprocess.run(['systemctl','enable','--now','ultra-monitor.timer'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-print(json.dumps({'changed':len(changed)}))
-'''
+# Reconciliation chooses topology; Ansible exclusively applies host configuration.
+def compact_completed_attempts(directory, now=None):
+    """Bound reconciliation caches; never remove a queued/running attempt."""
+    now = time.time() if now is None else now
+    complete = []
+    for path in directory.glob('attempt-*'):
+        if path.is_symlink() or not path.is_dir():
+            continue
+        try:
+            receipt = json.loads(private(path / 'receipt.json').read_text())
+            if receipt.get('state') not in ('succeeded', 'failed'):
+                continue
+            complete.append((receipt.get('finished_at', path.stat().st_mtime), path))
+        except (OSError, ValueError, TypeError):
+            continue
+    complete.sort(reverse=True)
+    for finished, path in complete[8:]:
+        if not isinstance(finished, (int, float)) or now - finished < 86400:
+            continue
+        if now - finished > 30 * 86400:
+            shutil.rmtree(path)
+            continue
+        # Preserve only safe receipt/manifest hashes. These attempt IDs are local
+        # reconcile retries, never fixed cloud/purchase journal identities.
+        for child in path.iterdir():
+            if child.name in ('receipt.json', 'job.json', 'diagnostic.json'):
+                continue
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
 
 
-def file_payload(path, data, mode):
-    return path, {'data': base64.b64encode(data).decode(), 'sha256': hashlib.sha256(data).hexdigest(), 'mode': mode}
+def compact_projected_sources(config, now=None):
+    now = time.time() if now is None else now
+    root = Path(config['state_dir'])
+    sources = root / 'ansible-files'
+    if not sources.is_dir() or sources.is_symlink():
+        return
+    referenced = set()
+
+    def inspect(value):
+        if isinstance(value, str) and str(sources) + '/' in value:
+            referenced.add(value)
+        elif isinstance(value, dict):
+            for item in value.values():
+                inspect(item)
+        elif isinstance(value, list):
+            for item in value:
+                inspect(item)
+    requests = list((root / 'ansible').glob('*/attempt-*/request.json'))
+    requests += list((root / 'ansible').glob('*/variables.json'))
+    for path in requests:
+        try:
+            inspect(json.loads(private(path).read_text()))
+        except (OSError, ValueError, TypeError):
+            return  # An unreadable request may still own its sources; fail safe.
+    for source in sources.iterdir():
+        if (re.fullmatch(r'[a-f0-9]{64}', source.name) and source.is_file() and not source.is_symlink()
+                and str(source) not in referenced and now - source.stat().st_mtime > 86400):
+            private(source).unlink()
+
+
+def ansible_apply(config, node, variables):
+    variables = dict(variables, ultra_lock_directory=config.get('controller_state_dir', '/var/lib/ultra-ansible'))
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', node['id']):
+        raise ValueError('invalid ansible node identity')
+    directory = Path(config['state_dir']) / 'ansible' / node['id']
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    inventory = {'all': {'children': {'recovery_nodes': {'hosts': {'receiver': {
+        'ansible_host': node['address'], 'ansible_user': 'root',
+        'ansible_ssh_private_key_file': config['ssh_identity_file'],
+        'ansible_ssh_args': '-F /dev/null -o ControlMaster=no -o ControlPath=none',
+        'ansible_ssh_common_args': '-o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o IdentitiesOnly=yes -o UserKnownHostsFile=' + shlex.quote(node['known_hosts']),
+    }}}}}}
+    atomic_json(directory / 'inventory.json', inventory)
+    atomic_json(directory / 'variables.json', variables)
+    executable = config.get('installer_binary', '/usr/local/bin/ultra-install')
+    result = subprocess.run([executable, 'ansible-run', '--operation', 'reconcile',
+                             '--inventory', str(directory / 'inventory.json'),
+                             '--variables', str(directory / 'variables.json'),
+                             '--state-dir', str(directory / ('attempt-' + str(uuid.uuid4())))],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
+    compact_completed_attempts(directory)
+    compact_projected_sources(config)
+    if result.returncode:
+        raise ValueError('ansible_reconcile_failed')
 
 
 def install(config, node, monitor=None, extra=None):
     base = Path(config['bundle_dir'])
-    files = {}
+    directory = Path(config['state_dir']) / 'ansible-files'
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    files = []
+
+    def project(destination, source=None, data=None, mode=0o600):
+        if data is None:
+            source = Path(source)
+        else:
+            source = directory / hashlib.sha256(data).hexdigest()
+            if source.exists() and hashlib.sha256(private(source).read_bytes()).hexdigest() != source.name:
+                raise ValueError('projected_source_changed')
+            if not source.exists():
+                with source.open('xb') as stream:
+                    os.chmod(source, 0o600)
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        files.append({'destination': destination, 'source': str(source.resolve()), 'mode': format(mode, '04o')})
+
     for name in ['recovery.py', 'monitor.py', 'heartbeat.py']:
-        files.update([file_payload('/opt/ultra-recovery/' + name, (base / name).read_bytes(), 0o755)])
+        project('/opt/ultra-recovery/' + name, source=base / name, mode=0o755)
     for name in ['ultra-recovery-prune.service', 'ultra-recovery-prune.timer', 'ultra-monitor.service', 'ultra-monitor.timer', 'ultra-monitor-probe.service']:
-        files.update([file_payload('/etc/systemd/system/' + name, (base / name).read_bytes(), 0o644)])
+        project('/etc/systemd/system/' + name, source=base / name, mode=0o644)
     if monitor:
-        files.update([file_payload('/usr/local/bin/ultra-client', Path(config['client_binary']).read_bytes(), 0o755)])
-        files.update([file_payload('/etc/ultra-recovery/monitor.json', json.dumps(monitor, sort_keys=True).encode(), 0o600)])
-        files.update([file_payload('/etc/ultra-recovery/primary-bot-token', private(config['bot_token_file']).read_bytes(), 0o600)])
+        project('/usr/local/bin/ultra-client', source=config['client_binary'], mode=0o755)
+        project('/etc/ultra-recovery/monitor.json', data=json.dumps(monitor, sort_keys=True).encode())
+        project('/etc/ultra-recovery/primary-bot-token', source=private(config['bot_token_file']))
         if monitor['mode'] == 'primary':
-            files.update([file_payload('/etc/ultra-recovery/probe.json', private(config['probe_profile_file']).read_bytes(), 0o600)])
+            project('/etc/ultra-recovery/probe.json', source=private(config['probe_profile_file']))
     for path, data, mode in extra or []:
-        files.update([file_payload(path, data, mode)])
-    inventory = {name: {'sha256': item['sha256'], 'mode': item['mode']} for name, item in files.items()}
-    check = """import hashlib,json,pathlib,sys
-inventory=json.loads(sys.stdin.read());changed=[]
-for name,item in inventory.items():
- p=pathlib.Path(name)
- if p.is_symlink():raise ValueError('managed symlink')
- if not p.is_file()or p.stat().st_mode&0o777!=item['mode'] or p.stat().st_uid!=0:changed.append(name);continue
- h=hashlib.sha256()
- with p.open('rb')as stream:
-  for chunk in iter(lambda:stream.read(1048576),b''):h.update(chunk)
- if h.hexdigest()!=item['sha256']:changed.append(name)
-print(json.dumps(changed))
-"""
-    inspected = execute(config, node, ['python3', '-c', check], input=json.dumps(inventory).encode(), stdout=subprocess.PIPE, timeout=15)
-    changed = json.loads(inspected.stdout)
-    if not isinstance(changed, list) or any(name not in files for name in changed):
-        raise ValueError('remote installation inventory invalid')
-    files = {name: item for name, item in files.items() if name in changed}
-    payload = json.dumps({'files': files, 'monitor': monitor['mode'] if monitor else None}).encode()
-    if len(payload) > 128 << 20:
-        raise ValueError('installation exceeds bounds')
-    execute(config, node, ['python3', '-c', INSTALL], input=payload, stdout=subprocess.PIPE, timeout=170)
+        project(path, data=data, mode=mode)
+    ansible_apply(config, node, {'ultra_recovery_files': files,
+                               'ultra_monitor_mode': monitor['mode'] if monitor else 'none'})
 
 
 def validate_delivery(config, node, receipt):
@@ -323,8 +354,7 @@ def allow_peer(config, primary, peer, port=22):
     address = ensure_provider_peer_rule(config, primary, peer, port=port)
     if address is None:
         return
-    command = "if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then ufw allow from " + address + " to any port " + str(port) + " proto tcp >/dev/null; fi"
-    execute(config, primary, ['sh', '-c', command], stdout=subprocess.DEVNULL)
+    ansible_apply(config, primary, {'ultra_recovery_peer_rules': [{'address': address, 'port': port}]})
 
 
 def ensure_heartbeat_key(config, primary):
@@ -338,18 +368,7 @@ def ensure_heartbeat_key(config, primary):
     if len(public) < 2 or public[0] != 'ssh-ed25519' or not re.fullmatch(r'[A-Za-z0-9+/=]+', public[1]):
         raise ValueError('heartbeat key unavailable')
     entry = 'restrict,command="/usr/bin/python3 /opt/ultra-recovery/heartbeat.py" ' + ' '.join(public[:2]) + ' ultra-recovery-heartbeat'
-    code = """import json,os,pathlib,sys,tempfile
-entry=json.loads(sys.stdin.read())
-p=pathlib.Path('/root/.ssh');p.mkdir(mode=0o700,exist_ok=True)
-a=p/'authorized_keys'
-if a.is_symlink():raise ValueError('symlink')
-text=a.read_text()if a.exists()else''
-if entry not in text.splitlines():
- fd,name=tempfile.mkstemp(dir=p,prefix='.heartbeat-')
- with os.fdopen(fd,'w')as f:f.write(text+(''if not text or text.endswith('\\n')else'\\n')+entry+'\\n');f.flush();os.fsync(f.fileno());os.fchmod(f.fileno(),0o600)
- os.replace(name,a)
-"""
-    execute(config, primary, ['python3', '-c', code], input=json.dumps(entry).encode(), stdout=subprocess.DEVNULL)
+    ansible_apply(config, primary, {'ultra_recovery_heartbeat_entry': entry})
     return material, (' '.join(public[:2]) + '\n').encode()
 
 
@@ -363,7 +382,7 @@ def monitor_ready(config, node, mode, independent=False):
     expected = {'us_monitor', 'us_notifications', 'probe_execution'} if mode == 'peer' else {
         'bridge_https', 'vpn_payload', 'probe_execution', 'independent_backup' if independent else 'backup_generation'}
     for _ in range(2):
-        execute(config, node, ['systemctl', 'start', 'ultra-monitor.service'], stdout=subprocess.DEVNULL, timeout=55)
+        ansible_apply(config, node, {'ultra_monitor_run_once': True})
         result = execute(config, node, ['cat', '/var/lib/ultra-monitor/heartbeat.json'], stdout=subprocess.PIPE, timeout=10)
         if len(result.stdout) > 4096:
             raise ValueError('monitor state exceeds bounds')
@@ -539,7 +558,7 @@ def reconcile(config):
             for old in previous.get('node_metadata', []):
                 if old['id'] in retired and old['id'] != primary['id']:
                     try:
-                        execute(config, old, ['systemctl', 'disable', '--now', 'ultra-monitor.timer', 'ultra-monitor-probe.service'], stdout=subprocess.DEVNULL, timeout=10)
+                        ansible_apply(config, old, {'ultra_monitor_retire': True})
                     except (ValueError, subprocess.SubprocessError):
                         pass  # Deleted/unreachable VM; archives and prune timer remain.
             return state

@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  checks: read
+  actions: read
 
 jobs:
   build-release:
@@ -23,29 +25,49 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Set up Python for offline Ansible runtime packaging
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install wheel download tooling
+        run: python3 -m pip install 'pip==25.3'
+
       - name: Build release dist
         run: make release-dist
+
+      - name: Validate complete release bundle
+        run: python3 scripts/test-release-assets.py --dist dist
 
       - name: Verify checksums
         run: cd dist && sha256sum -c checksums.txt
 
-      - name: Sign checksums with minisign
+      - name: Require successful CI for the exact source commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check-release-ci.py --repository "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA"
+
+      - name: Sign immutable release metadata with minisign
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           if [ -z "$MINISIGN_SECRET_KEY" ]; then
-            echo "MINISIGN_SECRET_KEY is not set; publishing unsigned checksums"
-            exit 0
+            echo "MINISIGN_SECRET_KEY is required; refusing an unsigned release" >&2
+            exit 1
           fi
           sudo apt-get update -q
           sudo apt-get install -y -q minisign
+          umask 077
+          trap 'rm -f minisign.key' EXIT
           printf '%s' "$MINISIGN_SECRET_KEY" > minisign.key
           chmod 600 minisign.key
           minisign -S -s minisign.key -m dist/checksums.txt -x dist/checksums.txt.minisig -W
+          minisign -S -s minisign.key -m dist/release-manifest.json -x dist/release-manifest.json.minisig -W
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3.0.3
         with:
+          fail_on_unmatched_files: true
           files: |
             dist/ultra-install-linux-amd64
             dist/ultra-install-linux-arm64
@@ -56,7 +78,11 @@ jobs:
             dist/ultra-client-linux-amd64
             dist/ultra-client-linux-arm64
             dist/ultra-recovery.tar.gz
+            dist/ultra-ansible.tar.gz
+            dist/ultra-ansible-runtime-linux-amd64.tar.gz
+            dist/ultra-ansible-runtime-linux-arm64.tar.gz
             dist/mobile-bootstrap.sh
             dist/checksums.txt
             dist/checksums.txt.minisig
             dist/release-manifest.json
+            dist/release-manifest.json.minisig

@@ -1,0 +1,16 @@
+---
+- name: Reconcile recovery receivers and external monitors
+  hosts: recovery_nodes
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  roles:
+    - recovery
+    - monitor
+  post_tasks:
+    - name: Commit recovery configuration acknowledgement
+      ansible.builtin.copy:
+        content: '{"verified":true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost

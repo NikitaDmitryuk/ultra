@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net"
 	"os/exec"
-	"strconv"
 )
 
 // Remote is a bounded, non-logging transport used by provisioning workers.
@@ -33,30 +31,4 @@ func (r Remote) Run(ctx context.Context, script string) ([]byte, error) {
 		return nil, errors.New("remote operation failed")
 	}
 	return out, nil
-}
-func (r Remote) Upload(ctx context.Context, remotePath string, data io.Reader) error {
-	args, e := r.args()
-	if e != nil {
-		return e
-	}
-	args = append(args, "root@"+r.Host, "umask 077; cat > "+shellSingleQuote(remotePath))
-	cmd := exec.CommandContext(ctx, "ssh", args...)
-	cmd.Stdin = data
-	if e = cmd.Run(); e != nil {
-		return errors.New("remote upload failed")
-	}
-	return nil
-}
-
-// ReverseTunnel exposes only the primary's loopback PostgreSQL port on the replica's loopback.
-func (r Remote) ReverseTunnel(ctx context.Context, primaryPort int) error {
-	args, e := r.args()
-	if e != nil {
-		return e
-	}
-	args = append(args, "-o", "ExitOnForwardFailure=yes", "-N", "-R", net.JoinHostPort("127.0.0.1", "15432")+":127.0.0.1:"+strconv.Itoa(primaryPort), "root@"+r.Host)
-	if e = exec.CommandContext(ctx, "ssh", args...).Run(); e != nil {
-		return errors.New("replication SSH tunnel stopped")
-	}
-	return nil
 }

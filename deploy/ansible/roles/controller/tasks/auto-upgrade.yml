@@ -1,0 +1,70 @@
+---
+- name: Prepare the private automatic release policy directory
+  ansible.builtin.file:
+    path: /etc/ultra-ansible
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Prepare the durable identity-only channel metadata directory
+  ansible.builtin.file:
+    path: /var/lib/ultra-ansible/channel
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Validate the fixed private canonical input destinations
+  ansible.builtin.assert:
+    that: item.destination in ['/etc/ultra-ansible/install.config', '/etc/ultra-ansible/.env', '/etc/ultra-ansible/release-signing.pub']
+  loop: "{{ ultra_auto_upgrade_files | default([]) }}"
+  no_log: true
+- name: Project canonical deployment parameters and runtime-only credentials
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ item.destination }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ ultra_auto_upgrade_files | default([]) }}"
+  no_log: true
+  diff: false
+- name: Require a complete signed stable channel policy before enabling it
+  ansible.builtin.assert:
+    that:
+      - ultra_auto_upgrade_policy is defined
+      - ultra_auto_upgrade_policy.public_key_file is defined
+      - ultra_auto_upgrade_policy.required_checks | default([]) | length > 0
+      - ultra_auto_upgrade_policy.config_file is defined
+  when: ultra_auto_upgrade_enabled | default(false)
+- name: Install the private automatic release policy
+  ansible.builtin.copy:
+    content: >-
+      {{ ultra_auto_upgrade_policy | default({}) |
+      combine({'enabled': ultra_auto_upgrade_enabled | default(false)}) |
+      to_nice_json(preprocess_unsafe=False) }}
+    dest: /etc/ultra-ansible/auto-upgrade.json
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+- name: Install the independent automatic release checker service
+  ansible.builtin.template:
+    src: ultra-auto-upgrade.service.j2
+    dest: /etc/systemd/system/ultra-auto-upgrade.service
+    owner: root
+    group: root
+    mode: "0644"
+- name: Install the stable release polling timer
+  ansible.builtin.template:
+    src: ultra-auto-upgrade.timer.j2
+    dest: /etc/systemd/system/ultra-auto-upgrade.timer
+    owner: root
+    group: root
+    mode: "0644"
+- name: Enable stable release polling only after adoption and production acceptance
+  ansible.builtin.systemd_service:
+    name: ultra-auto-upgrade.timer
+    enabled: "{{ ultra_auto_upgrade_enabled | default(false) }}"
+    state: "{{ 'started' if ultra_auto_upgrade_enabled | default(false) else 'stopped' }}"
+    daemon_reload: true

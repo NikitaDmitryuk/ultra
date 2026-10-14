@@ -59,6 +59,29 @@ subprocess.run(['update-ca-certificates'],check=True,stdout=subprocess.DEVNULL)
     print(json.dumps({'fixture_ca_installed':True,'synthetic_only':True}))
 
 
+def dependencies(directory):
+    """Prepare guest-only test packages before measuring any restoration."""
+    saved=json.loads((Path(directory)/'topology.json').read_text())
+    if not saved.get('synthetic_only') or not saved.get('isolation_verified_at'):
+        raise ValueError('verified_synthetic_topology_required')
+    code = """import shutil,subprocess
+if shutil.which('iptables') and subprocess.run(['python3','-c','import h2'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:
+ print('prepared')
+else:
+ state=subprocess.run(['systemctl','is-active','ultra-fixture-dependencies.service'],stdout=subprocess.PIPE).stdout.strip()
+ if state not in (b'active',b'activating'):
+  subprocess.run(['systemctl','reset-failed','ultra-fixture-dependencies.service'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+  subprocess.run(['systemd-run','--no-block','--unit=ultra-fixture-dependencies','--property=Type=oneshot','--setenv=DEBIAN_FRONTEND=noninteractive','/bin/sh','-c','apt-get update && apt-get install -y iptables python3-h2'],check=True,stdout=subprocess.DEVNULL)
+ print('pending')
+"""
+    pending=[]
+    for name,address in saved['nodes'].items():
+        if ssh(saved,address,['python3','-c',code]).strip()!=b'prepared':
+            pending.append(name)
+    print(json.dumps({'prepared':not pending,'pending':pending,'synthetic_only':True}))
+    return not pending
+
+
 def payload_targets(directory):
     directory=Path(directory)
     saved=json.loads((directory/'topology.json').read_text())
@@ -75,8 +98,7 @@ def payload_targets(directory):
 v=json.load(sys.stdin);p=pathlib.Path('/etc/ultra-fixture');p.mkdir(mode=0o700,exist_ok=True)
 import shutil
 if not shutil.which('iptables') or subprocess.run(['python3','-c','import h2'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
- subprocess.run(['apt-get','update'],check=True,stdout=subprocess.DEVNULL)
- subprocess.run(['apt-get','install','-y','iptables','python3-h2'],check=True,stdout=subprocess.DEVNULL)
+ raise ValueError('fixture_dependencies_not_prepared')
 for name,value in v.items():
  q=p/name;q.write_text(value);q.chmod(0o600)
 pathlib.Path('/etc/ultra-fixture-marker').write_text('synthetic-only')
@@ -147,5 +169,9 @@ def serve(directory):
 
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('action',choices=('prepare','serve'));parser.add_argument('--workspace',required=True)
-    args=parser.parse_args();(prepare if args.action=='prepare' else serve)(args.workspace)
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('action',choices=('prepare','serve','dependencies'));parser.add_argument('--workspace',required=True)
+    args=parser.parse_args()
+    action={'prepare':prepare,'serve':serve,'dependencies':dependencies}[args.action]
+    result=action(args.workspace)
+    if args.action=='dependencies' and result is False:
+        raise SystemExit(2)

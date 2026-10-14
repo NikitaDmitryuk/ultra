@@ -1,9 +1,14 @@
 package cloudinstall
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
+	"github.com/NikitaDmitryuk/ultra/internal/install"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 	"testing"
 )
@@ -35,5 +40,26 @@ func TestProvisionedExitPreservesWireTransport(t *testing.T) {
 	spec.XrayWire.SniffingDestOverride[0] = "http"
 	if bridge.XrayWire.SniffingDestOverride[0] != "tls" {
 		t.Fatal("exit aliases bridge wire settings")
+	}
+}
+
+type failedAnsibleConfigurer struct{}
+
+func (failedAnsibleConfigurer) Ready(context.Context) error {
+	return errors.New("controller_unavailable")
+}
+func (failedAnsibleConfigurer) ConfigureExit(context.Context, string, string, deployansible.ExitRequest) (deployansible.Result, error) {
+	panic("configuration must not run")
+}
+
+func TestAnsibleControllerPreflightPreventsPurchasePreparation(t *testing.T) {
+	p := &Provisioner{
+		Configurer: failedAnsibleConfigurer{},
+		CheckReady: func(context.Context) error { return nil },
+		Replica:    func(context.Context, string, install.Remote) (string, error) { return "", nil },
+	}
+	// No API is installed: reaching cloud preparation would panic and fail this regression.
+	if _, err := p.Prepare(context.Background(), &cloud.Operation{}); err == nil || err.Error() != "controller_unavailable" {
+		t.Fatalf("unexpected preflight result: %v", err)
 	}
 }

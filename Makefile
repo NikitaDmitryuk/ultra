@@ -43,8 +43,7 @@ lint:
 	@echo "Running golangci-lint ($(GOLANGCI_LINT_VERSION))..."
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 
-install:
-	@# ultra-install fetches geo bundles on the bridge unless skipped; see install.config.sample (SKIP_GEO_DOWNLOAD)
+install: build-install
 	@bash "$(CURDIR)/scripts/install.sh"
 
 # Получить (или обновить) TLS-сертификат для ultra-bot локально через acme.sh и загрузить на bridge.
@@ -127,7 +126,7 @@ build-install-linux-arm64:
 build-bot-linux-arm64:
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BOT_BINARY)-linux-arm64 ./cmd/ultra-bot
 
-release-dist: build-client-release build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64
+release-dist: ansible-dist build-client-release build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64
 	mkdir -p dist
 	cp $(BINARY)-linux-amd64 $(INSTALL_BINARY)-linux-amd64 $(BOT_BINARY)-linux-amd64 \
 	   $(BINARY)-linux-arm64 $(INSTALL_BINARY)-linux-arm64 $(BOT_BINARY)-linux-arm64 \
@@ -136,7 +135,8 @@ release-dist: build-client-release build-linux-amd64 build-install-linux-amd64 b
 	(cd dist && sha256sum \
 	   $(BINARY)-linux-amd64 $(INSTALL_BINARY)-linux-amd64 $(BOT_BINARY)-linux-amd64 \
 	   $(BINARY)-linux-arm64 $(INSTALL_BINARY)-linux-arm64 $(BOT_BINARY)-linux-arm64 \
-	   ultra-client-linux-amd64 ultra-client-linux-arm64 ultra-recovery.tar.gz mobile-bootstrap.sh > checksums.txt)
+	   ultra-client-linux-amd64 ultra-client-linux-arm64 ultra-recovery.tar.gz mobile-bootstrap.sh \
+	   ultra-ansible.tar.gz ultra-ansible-runtime-linux-amd64.tar.gz ultra-ansible-runtime-linux-arm64.tar.gz > checksums.txt)
 	scripts/build-release-manifest.sh dist "$$(git describe --tags --always --dirty 2>/dev/null || true)"
 
 clean:
@@ -160,10 +160,10 @@ build-bench:
 
 .PHONY: test-ui
 test-ui:
-	python3 internal/install/scripts/test_automation.py
-	python3 internal/install/scripts/xhttp-ingress.py --self-test
+	python3 scripts/test-mobile-bootstrap.py
+	python3 scripts/test-ansible-release-contracts.py
+	python3 scripts/test-ansible-migration-probe.py
 	python3 scripts/test-verify-miniapp.py
-	python3 scripts/test-ingress-setup.py
 	python3 scripts/test-ingress-ssh.py
 	python3 scripts/test-bridge-subscription.py
 	python3 scripts/test-migrate-bridge.py
@@ -177,3 +177,27 @@ test-race:
 build-client-release:
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ultra-client-linux-amd64 ./cmd/ultra-client
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ultra-client-linux-arm64 ./cmd/ultra-client
+
+.PHONY: ansible-dist test-ansible test-ansible-exit
+
+ansible-dist:
+	mkdir -p dist
+	tar --exclude=__pycache__ --exclude=\*.pyc -czf dist/ultra-ansible.tar.gz -C deploy/ansible ansible.cfg requirements.txt controller.py playbooks roles library callback_plugins
+	python3 scripts/build-ansible-runtime.py --architecture amd64 --output dist/ultra-ansible-runtime-linux-amd64.tar.gz
+	python3 scripts/build-ansible-runtime.py --architecture arm64 --output dist/ultra-ansible-runtime-linux-arm64.tar.gz
+
+test-ansible:
+	python3 scripts/test-ansible-controller-process.py
+	python3 scripts/test-release-ci.py
+	python3 scripts/test-ansible-owned-file.py
+	python3 scripts/test-ansible-input-types.py
+	python3 scripts/test-ansible-operation-mapping.py
+	python3 scripts/test-ansible-release-identity.py
+	python3 scripts/test-ansible-release-retention.py
+	python3 scripts/test-ansible-ingress.py
+	python3 scripts/test-ansible-forward.py
+	ANSIBLE_CONFIG="$(CURDIR)/deploy/ansible/ansible.cfg" ansible-lint --offline deploy/ansible/playbooks deploy/ansible/roles
+
+# Disposable container: real SSH/Ansible with a simulated service manager.
+test-ansible-exit: build-install
+	python3 scripts/test-ansible-exit.py --installer "$(CURDIR)/ultra-install" --ansible-playbook "$$(command -v ansible-playbook)"

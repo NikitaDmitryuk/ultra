@@ -208,17 +208,11 @@ func nginxInteractiveFrontend(t *testing.T, primary *PrimaryXHTTPIngress, cert, 
 			t.Fatal(e)
 		}
 	}
-	source, e := filepath.Abs("../install/scripts/xhttp-ingress.py")
+	data, e := os.ReadFile("../../deploy/ansible/roles/ingress/templates/primary.conf.j2")
 	if e != nil {
 		t.Fatal(e)
 	}
-	script := `import importlib.util,sys
-spec=importlib.util.spec_from_file_location('ingress',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
-sys.stdout.buffer.write(m.nginx({'domain':'example.com','path':'/interactive','backend_port':int(sys.argv[2])},int(sys.argv[3])))`
-	data, e := exec.Command("python3", "-c", script, source, fmt.Sprint(primary.BackendPort), fmt.Sprint(primary.Port)).Output()
-	if e != nil {
-		t.Fatal(e)
-	}
+	data = []byte(strings.NewReplacer("{{ ultra_ingress.domain }}", "example.com", "{{ ultra_ingress.path }}", "/interactive", "{{ ultra_ingress.backend_port }}", fmt.Sprint(primary.BackendPort), "{{ ingress_public_port }}", fmt.Sprint(primary.Port)).Replace(string(data)))
 	conf := string(data)
 	conf = strings.ReplaceAll(conf, "listen 80;", fmt.Sprintf("listen 127.0.0.1:%d;", freePort(t)))
 	conf = strings.ReplaceAll(conf, fmt.Sprintf("listen %d ssl http2;", primary.Port), fmt.Sprintf("listen 127.0.0.1:%d ssl http2;", primary.Port))

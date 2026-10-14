@@ -1,0 +1,25 @@
+---
+- name: Resume only previously active schedules after verified application recovery
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Confirm the preserved application is ready
+      ultra_ingress_probe:
+        kind: relay
+      register: adoption_schedule_ready
+      until: adoption_schedule_ready.ready | default(false)
+      retries: 15
+      delay: 2
+    - name: Resume the saved active recovery schedules
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: started
+      loop: "{{ ultra_adoption_schedules | default([]) }}"
+    - name: Confirm schedule recovery
+      ansible.builtin.copy:
+        content: '{"verified":true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false

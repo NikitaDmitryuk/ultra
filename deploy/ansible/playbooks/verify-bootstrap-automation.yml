@@ -1,0 +1,10 @@
+---
+- name: Verify one passive bootstrap automation observation
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Read and accept proven primary recovery readiness
+      ansible.builtin.include_role:
+        name: recovery_primary
+        tasks_from: verify

@@ -172,7 +172,7 @@ def execute(args):
     config={'format':1,'source':'bridge','bundle':receipt['bundle'],'identity':str(directory/'extracted-identity.age'),'fence_file':str(directory/'fence.json'),'state_dir':str(directory/'restore-runs'),
             'target':{'host':fence['target_host'],'identity':topology['identity'],'known_hosts':topology['known_hosts']},
             'ingress':{'host':'root@'+topology['nodes']['nl'],'identity':topology['identity'],'known_hosts':topology['known_hosts']},
-            'new_bridge_provider':'fixture-a','old_bridge_address':topology['nodes']['bridge'],'new_bridge_address':topology['nodes']['replacement'],'public_host':topology['nodes']['replacement'],'subscription_domain':'vpn.fixture.test','readiness_timeout':900}
+            'new_bridge_provider':'fixture-a','old_bridge_address':topology['nodes']['bridge'],'new_bridge_address':topology['nodes']['replacement'],'public_host':topology['nodes']['replacement'],'subscription_domain':'vpn.fixture.test','readiness_timeout':900,'isolated_peer_addresses':list(topology['nodes'].values())}
     (directory/'restore.json').write_text(json.dumps(config))
     if 'restore_started_at' not in receipt:receipt['restore_started_at']=int(time.time());save()
     phase('restore',lambda:run([installer,'restore','--config',str(directory/'restore.json')],directory/'restore.log'))

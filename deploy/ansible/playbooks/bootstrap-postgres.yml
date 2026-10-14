@@ -1,0 +1,19 @@
+---
+- name: Configure primary database
+  hosts: databases
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: host
+    - role: postgres
+      when: ultra_postgres is defined
+- name: Confirm completed database component
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Persist verified database result
+      ansible.builtin.copy:
+        content: '{"verified": true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      no_log: true

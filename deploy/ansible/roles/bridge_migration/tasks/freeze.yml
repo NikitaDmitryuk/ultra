@@ -1,0 +1,165 @@
+---
+- name: Validate a target-bound explicit freeze
+  ansible.builtin.assert:
+    that:
+      - ultra_migration_confirm == 'FREEZE'
+      - ultra_migration_pair is match('^[a-f0-9]{64}$')
+      - ultra_migration_pg_unit is match('^postgresql@16-[A-Za-z0-9_-]+\\.service$')
+- name: Read source service state before shutdown
+  ansible.builtin.service_facts:
+- name: Include independent replica transports in source fencing
+  ansible.builtin.set_fact:
+    bridge_migration_automation_all: >-
+      {{ ultra_migration_automation_units +
+      (ansible_facts.services.keys() | select('match', '^ultra-replica-tunnel-ultra_[a-f0-9]{32}\\.service$') | list) }}
+  no_log: true
+- name: Prepare private source migration receipts
+  ansible.builtin.file:
+    path: "/var/lib/ultra-migration/{{ ultra_migration_pair }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Preserve original source service states once
+  ansible.builtin.copy:
+    content: "{{ ansible_facts.services | to_json(preprocess_unsafe=False) }}\n"
+    dest: "/var/lib/ultra-migration/{{ ultra_migration_pair }}/services.json"
+    owner: root
+    group: root
+    mode: "0600"
+    force: false
+  no_log: true
+- name: Stop new automation before freezing writes
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop: "{{ bridge_migration_automation_all }}"
+  when: item in ansible_facts.services
+- name: Stop source writers before the final generation
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop: [ultra-bot.service, ultra-relay.service]
+  when: item in ansible_facts.services
+- name: Prepare operator-readable private ciphertext projection
+  ansible.builtin.file:
+    path: "/var/tmp/ultra-migration-{{ ultra_migration_pair }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    mode: "0700"
+- name: Install the fixed ciphertext validation helper
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../roles/bridge_migration/files/capture.py"
+    dest: "/var/lib/ultra-migration/{{ ultra_migration_pair }}/capture.py"
+    owner: root
+    group: root
+    mode: "0600"
+- name: Inspect a completed final generation for interrupted resume
+  ansible.builtin.stat:
+    path: "/var/tmp/ultra-migration-{{ ultra_migration_pair }}/capture.json"
+  register: bridge_migration_capture_marker
+- name: Read the source clock before the final capture
+  ansible.builtin.command:
+    argv: [date, +%s]
+  register: bridge_migration_capture_clock
+  changed_when: false
+  when: not bridge_migration_capture_marker.stat.exists
+- name: Save the closed-writer capture watermark
+  ansible.builtin.copy:
+    content: "{{ bridge_migration_capture_clock.stdout }}"
+    dest: "/var/tmp/ultra-migration-{{ ultra_migration_pair }}/freeze-start"
+    owner: root
+    mode: "0600"
+  when: not bridge_migration_capture_marker.stat.exists
+- name: Capture the closed journal and final consistent database dump
+  ansible.builtin.command:
+    argv: [python3, /opt/ultra-recovery/recovery.py, capture, --config, /etc/ultra-recovery/backup.json]
+  changed_when: false
+  no_log: true
+  when: not bridge_migration_capture_marker.stat.exists
+- name: Validate and project the final generation
+  ansible.builtin.command:
+    argv: [python3, "/var/lib/ultra-migration/{{ ultra_migration_pair }}/capture.py", "/var/tmp/ultra-migration-{{ ultra_migration_pair }}"]
+  changed_when: false
+  no_log: true
+  when: not bridge_migration_capture_marker.stat.exists
+- name: Give the operator access only to copied ciphertext
+  ansible.builtin.file:
+    path: "/var/tmp/ultra-migration-{{ ultra_migration_pair }}/{{ item }}"
+    owner: "{{ ansible_user }}"
+    mode: "0600"
+  loop: [backup.age, artifact.age, capture.json]
+- name: Preserve owned source unit definitions before persistent fencing
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/{{ item }}"
+  loop: "{{ ultra_migration_app_units + bridge_migration_automation_all }}"
+  register: bridge_migration_unit_definitions
+- name: Snapshot source unit definitions once
+  ansible.builtin.copy:
+    src: "{{ item.stat.path }}"
+    dest: "/var/lib/ultra-migration/{{ ultra_migration_pair }}/{{ item.item }}.previous"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+    force: false
+  loop: "{{ bridge_migration_unit_definitions.results }}"
+  when:
+    - item.stat.isreg | default(false)
+    - not item.stat.islnk | default(false)
+- name: Remove only snapshotted owned unit files for persistent masks
+  ansible.builtin.file:
+    path: "{{ item.stat.path }}"
+    state: absent
+  loop: "{{ bridge_migration_unit_definitions.results }}"
+  when:
+    - item.stat.isreg | default(false)
+    - not item.stat.islnk | default(false)
+- name: Persistently fence source application and automation
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    masked: true
+    daemon_reload: true
+  loop: "{{ ultra_migration_app_units + bridge_migration_automation_all }}"
+  when: item in ansible_facts.services
+- name: Persistently fence the actual PostgreSQL cluster
+  ansible.builtin.systemd_service:
+    name: "{{ ultra_migration_pg_unit }}"
+    state: stopped
+    enabled: false
+    masked: true
+- name: Fence the old PostgreSQL primary before restoring the new primary
+  ansible.builtin.systemd_service:
+    name: postgresql
+    state: stopped
+    enabled: false
+    masked: true
+- name: Confirm that the old primary is stopped
+  ansible.builtin.command:
+    argv: [systemctl, is-active, postgresql]
+  register: bridge_migration_primary_stopped
+  changed_when: false
+  failed_when: bridge_migration_primary_stopped.rc != 3
+- name: Confirm the old database port does not respond
+  ansible.builtin.command:
+    argv: [pg_isready, -h, 127.0.0.1, -p, "5432", -t, "3"]
+  changed_when: false
+  register: bridge_migration_old_primary_port
+  failed_when: bridge_migration_old_primary_port.rc != 2
+- name: Download only authenticated ciphertext through pinned Ansible transport
+  ansible.builtin.fetch:
+    src: "/var/tmp/ultra-migration-{{ ultra_migration_pair }}/{{ item }}"
+    dest: "{{ ultra_migration_local_directory }}/{{ item }}"
+    flat: true
+  loop: [backup.age, artifact.age, capture.json]
+  become: false
+- name: Save the current fenced-source receipt
+  ansible.builtin.copy:
+    content: '{"fenced": true}'
+    dest: "{{ ultra_result_file }}"
+    mode: "0600"
+  delegate_to: localhost
+  become: false

@@ -1,0 +1,69 @@
+---
+- name: Inspect bootstrap targets without mutation
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Read target architecture
+      ansible.builtin.command:
+        argv: [dpkg, --print-architecture]
+      changed_when: false
+      register: inspect_architecture
+    - name: Inspect existing private state
+      ansible.builtin.stat:
+        path: "{{ ultra_remote_dir }}/{{ item }}"
+      loop: [spec.json, environment, exit_nodes.bootstrap.json]
+      register: inspect_paths
+    - name: Read existing private state
+      ansible.builtin.slurp:
+        src: "{{ ultra_remote_dir }}/{{ item.item }}"
+      loop: "{{ inspect_paths.results }}"
+      when: item.stat.exists
+      register: inspect_contents
+      no_log: true
+    - name: Inspect fixed recovery policy metadata on the bridge
+      ansible.builtin.stat:
+        path: "/etc/ultra-recovery/{{ item }}"
+      loop: [deployment.json, backup.json, reconcile.json, dns.json, admin-chat-id]
+      when: inventory_hostname == 'bridge'
+      register: inspect_policy_paths
+    - name: Read fixed recovery policy metadata
+      ansible.builtin.slurp:
+        src: "{{ item.stat.path }}"
+      loop: "{{ inspect_policy_paths.results | default([]) }}"
+      when: inventory_hostname == 'bridge' and item.stat.isreg | default(false)
+      register: inspect_policy_contents
+      no_log: true
+    - name: Inspect the installed application capability probe
+      ansible.builtin.stat:
+        path: /usr/local/bin/ultra-relay
+      register: inspect_relay_binary
+    - name: Read installed application capabilities without changing services
+      ansible.builtin.command:
+        argv: [/usr/local/bin/ultra-relay, --capabilities]
+      changed_when: false
+      failed_when: false
+      register: inspect_capabilities
+      when: inspect_relay_binary.stat.isreg | default(false)
+    - name: Save private inspection result
+      ansible.builtin.copy:
+        content: >-
+          {{ {'architecture': inspect_architecture.stdout,
+          'capabilities': ((inspect_capabilities.stdout | from_json) if inspect_capabilities.rc | default(1) == 0 else []),
+          'files': inspect_contents.results + (inspect_policy_contents.results | default([]))} | to_json(preprocess_unsafe=False) }}
+        dest: "{{ ultra_inspect_dir }}/{{ inventory_hostname }}.json"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+- name: Confirm completed bootstrap operation
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Persist the verified operation result
+      ansible.builtin.copy:
+        content: '{"verified": true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      no_log: true

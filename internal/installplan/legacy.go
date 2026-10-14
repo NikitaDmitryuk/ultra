@@ -173,7 +173,16 @@ func parseLegacyEnvFile(path string) (map[string]string, error) {
 
 func stripInlineComment(s string) string {
 	var quote rune
+	escaped := false
 	for i, r := range s {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if quote == '"' && r == '\\' {
+			escaped = true
+			continue
+		}
 		switch r {
 		case '\'', '"':
 			switch quote {
@@ -192,6 +201,11 @@ func stripInlineComment(s string) string {
 }
 
 func unquote(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		if decoded, err := strconv.Unquote(s); err == nil {
+			return decoded
+		}
+	}
 	if len(s) >= 2 {
 		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
 			return s[1 : len(s)-1]

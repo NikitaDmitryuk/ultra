@@ -1,0 +1,212 @@
+---
+- name: Validate the relay deployment contract
+  ansible.builtin.assert:
+    that:
+      - ultra_spec.role in ['exit', 'bridge']
+      - ultra_spec.role != 'exit' or ultra_bridge_ipv4 is ansible.builtin.match('^[0-9.]+$')
+      - ultra_spec.vless_port | int > 0
+      - ultra_spec.vless_port | int <= 65535
+      - ultra_relay_sha256 is ansible.builtin.match('^[a-f0-9]{64}$')
+  no_log: true
+- name: Inspect existing relay service definition
+  ansible.builtin.stat:
+    path: /etc/systemd/system/ultra-relay.service
+    checksum_algorithm: sha256
+  register: relay_unit_current
+- name: Reject foreign or modified relay service definition before activation
+  ansible.builtin.assert:
+    that:
+      - not relay_unit_current.stat.exists or (not relay_unit_current.stat.islnk and relay_unit_current.stat.isreg)
+      - >-
+        not relay_unit_current.stat.exists or
+        relay_unit_current.stat.checksum == (lookup('template', 'ultra-relay.service.j2') | hash('sha256')) or
+        relay_unit_current.stat.checksum == (ultra_previous_relay_unit_sha256 | default(''))
+    fail_msg: relay_service_definition_requires_explicit_adoption
+- name: Validate canonical exit certificate paths
+  ansible.builtin.assert:
+    that:
+      - ultra_spec.exit_cert.cert_file == '/etc/ultra-relay/fullchain.pem'
+      - ultra_spec.exit_cert.key_file == '/etc/ultra-relay/privkey.pem'
+  when: ultra_spec.role == 'exit'
+- name: Inspect existing exit TLS files before mutation
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: [/etc/ultra-relay/fullchain.pem, /etc/ultra-relay/privkey.pem]
+  register: relay_existing_tls
+  when: ultra_spec.role == 'exit'
+- name: Reject symlink certificates and require provided TLS when generation is disabled
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isreg and not item.stat.islnk)
+      - item.stat.exists or (ultra_generate_exit_tls | default(true) | bool)
+  loop: "{{ relay_existing_tls.results | default([]) }}"
+  when: ultra_spec.role == 'exit'
+- name: Require a complete exit TLS pair or a fully fresh managed pair
+  ansible.builtin.assert:
+    that:
+      - (relay_existing_tls.results | selectattr('stat.exists', 'equalto', true) | list | length) in [0, 2]
+    fail_msg: exit_tls_pair_incomplete
+  when: ultra_spec.role == 'exit'
+- name: Inspect the local pinned binary
+  ansible.builtin.stat:
+    path: "{{ ultra_relay_source }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: relay_source
+- name: Require an unchanged pinned binary
+  ansible.builtin.assert:
+    that:
+      - relay_source.stat.isreg | default(false)
+      - relay_source.stat.checksum == ultra_relay_sha256
+- name: Install the relay binary
+  ansible.builtin.copy:
+    src: "{{ ultra_relay_source }}"
+    dest: /usr/local/bin/ultra-relay
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart ultra relay
+- name: Verify installed relay artifact checksum before service activation
+  ansible.builtin.stat:
+    path: /usr/local/bin/ultra-relay
+    checksum_algorithm: sha256
+  register: relay_installed_artifact
+- name: Require the pinned installed relay artifact
+  ansible.builtin.assert:
+    that:
+      - relay_installed_artifact.stat.checksum == ultra_relay_sha256
+- name: Install the relay specification
+  ansible.builtin.copy:
+    content: "{{ ultra_spec | to_nice_json(preprocess_unsafe=False) }}
+"
+    dest: /etc/ultra-relay/spec.json
+    owner: ultra-relay
+    group: ultra-relay
+    mode: "0600"
+  no_log: true
+  diff: false
+  notify: Restart ultra relay
+- name: Install the relay environment
+  ansible.builtin.copy:
+    content: "{{ ultra_relay_environment | default('ULTRA_RELAY_LOG_LEVEL=info\n') }}"
+    dest: /etc/ultra-relay/environment
+    owner: ultra-relay
+    group: ultra-relay
+    mode: "0600"
+  no_log: true
+  diff: false
+  notify: Restart ultra relay
+- name: Manage exit TLS
+  when: ultra_spec.role == 'exit'
+  block:
+    - name: Inspect the existing exit certificate
+      ansible.builtin.stat:
+        path: /etc/ultra-relay/fullchain.pem
+      register: relay_certificate
+    - name: Generate the initial exit certificate once
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -days
+          - "3650"
+          - -keyout
+          - /etc/ultra-relay/privkey.pem
+          - -out
+          - /etc/ultra-relay/fullchain.pem
+          - -subj
+          - "/CN={{ ultra_spec.splithttp_host }}"
+          - -addext
+          - "subjectAltName=DNS:{{ ultra_spec.splithttp_host }}"
+        creates: /etc/ultra-relay/fullchain.pem
+      when:
+        - not relay_certificate.stat.exists
+        - ultra_generate_exit_tls | default(true) | bool
+      no_log: true
+      notify: Restart ultra relay
+    - name: Protect the exit certificate and key
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: ultra-relay
+        group: ultra-relay
+        mode: "0600"
+      loop:
+        - /etc/ultra-relay/fullchain.pem
+        - /etc/ultra-relay/privkey.pem
+- name: Install the relay service definition
+  ansible.builtin.template:
+    src: ultra-relay.service.j2
+    dest: /etc/systemd/system/ultra-relay.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart ultra relay
+- name: Inspect the guest firewall executable
+  ansible.builtin.stat:
+    path: /usr/sbin/ufw
+  register: relay_ufw
+- name: Inspect the guest firewall state
+  ansible.builtin.command:
+    argv: [/usr/sbin/ufw, status]
+  changed_when: false
+  register: relay_ufw_status
+  when: relay_ufw.stat.exists
+- name: Allow only the bridge to reach the tunnel on an enabled guest firewall
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/ufw
+      - allow
+      - from
+      - "{{ ultra_bridge_ipv4 }}"
+      - to
+      - any
+      - port
+      - "{{ ultra_spec.vless_port | string }}"
+      - proto
+      - tcp
+  register: relay_firewall_rule
+  changed_when: "'Skipping' not in relay_firewall_rule.stdout"
+  when:
+    - ultra_spec.role == 'exit'
+    - relay_ufw.stat.exists
+    - "'Status: active' in relay_ufw_status.stdout | default('')"
+- name: Allow managed public bridge ports on an enabled guest firewall
+  ansible.builtin.command:
+    argv: [/usr/sbin/ufw, allow, "{{ item | string }}/tcp"]
+  loop: "{{ ultra_bridge_ports | default([ultra_spec.vless_port]) | unique }}"
+  register: relay_bridge_firewall
+  changed_when: "'Skipping' not in relay_bridge_firewall.stdout"
+  when:
+    - ultra_spec.role == 'bridge'
+    - relay_ufw.stat.exists
+    - "'Status: active' in relay_ufw_status.stdout | default('')"
+- name: Apply relay changes before verification
+  ansible.builtin.meta: flush_handlers
+- name: Ensure the relay is enabled and running
+  ansible.builtin.systemd_service:
+    name: ultra-relay.service
+    enabled: true
+    state: started
+    daemon_reload: true
+- name: Report exit identity
+  when: ultra_spec.role == 'exit'
+  block:
+    - name: Read the public certificate fingerprint
+      ansible.builtin.command:
+        argv: [openssl, x509, -noout, -fingerprint, -sha256, -in, /etc/ultra-relay/fullchain.pem]
+      changed_when: false
+      register: relay_fingerprint
+    - name: Save the private operation result
+      ansible.builtin.copy:
+        content: "{{ {'cert_pin': relay_fingerprint.stdout.split('=')[-1] | replace(':', '') | lower} | to_json(preprocess_unsafe=False) }}
+    "
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true

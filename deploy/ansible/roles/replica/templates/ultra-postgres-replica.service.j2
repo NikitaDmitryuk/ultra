@@ -1,0 +1,11 @@
+[Unit]
+Description=Ultra PostgreSQL recovery replica
+After=network-online.target
+[Service]
+User=postgres
+ExecStart=/usr/lib/postgresql/16/bin/postgres -D /var/lib/ultra-postgres-replica/data -c config_file=/etc/ultra-postgres-replica/postgresql.conf
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target
