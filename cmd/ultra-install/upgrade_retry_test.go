@@ -195,7 +195,7 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 		t.Skip("python unavailable")
 	}
 	for _, retryFailed := range []bool{false, true} {
-		for _, operation := range []string{"inspect-upgrade", "inspect-release-hosts", "lifecycle-applying", "lifecycle-foreign", "legacy-success", "legacy-rollback-failure"} {
+		for _, operation := range []string{"inspect-upgrade", "inspect-release-hosts", "legacy-inspect-release-hosts", "lifecycle-applying", "lifecycle-foreign", "legacy-success", "legacy-rollback-failure"} {
 			t.Run(fmt.Sprintf("%s/retry-failed=%t", operation, retryFailed), func(t *testing.T) {
 				root := t.TempDir()
 				if err := os.Chmod(root, 0700); err != nil {
@@ -278,7 +278,7 @@ if operation=='lifecycle':
     (root/'gate').write_text(variables['ultra_lifecycle_phase'])
 with (root/'calls').open('a') as log: log.write(key+'\n')
 fail=root/'fail-once'
-if fail.exists() and fail.read_text()==key:
+if fail.exists() and (fail.read_text()==key or fail.read_text()=='legacy-'+key):
     fail.unlink()
     sys.exit(1)
 result={'verified':True}
@@ -290,6 +290,8 @@ if operation=='inspect-upgrade':
         previous['version']='v2.4.6'
         previous['capabilities']=['service-access-v1','provider-pool-quota-v1']
     result={'database_schema':24,'architecture':'amd64','observed_at':1,'topology_sha256':'a'*64,'identity':'fixture','nodes':[{'id':'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','address':'192.0.2.2','pins':'fixture'}],'previous_manifest':previous}
+if operation=='resume-automation' and not (root/'activate').exists() and variables.get('ultra_legacy_bridge_maintenance'):
+    sys.exit(1)
 if operation=='upgrade': result['activated_at']=2
 if fail.exists() and fail.read_text()=='legacy-rollback-failure' and operation in ('upgrade','rollback'):
     sys.exit(1)
@@ -351,7 +353,7 @@ output.chmod(0o600)
 				if _, err := os.Stat(filepath.Join(directory, "activate")); !os.IsNotExist(err) {
 					t.Fatal("inspection failure reached activation")
 				}
-				failedStage := map[string]string{"inspect-upgrade": "inspect", "inspect-release-hosts": "hosts"}[operation]
+				failedStage := map[string]string{"inspect-upgrade": "inspect", "inspect-release-hosts": "hosts", "legacy-inspect-release-hosts": "hosts"}[operation]
 				var original []byte
 				if failedStage != "" {
 					original, err = os.ReadFile(filepath.Join(directory, failedStage, "receipt.json"))
@@ -367,7 +369,7 @@ output.chmod(0o600)
 						t.Fatal("failed request unavailable", err)
 					}
 					request.Variables["changed"] = true
-					if _, err := runUpgradeInspection(context.Background(), operation, request.Inventory, request.Variables, filepath.Join(directory, failedStage), python, executable); err == nil || err.Error() != "upgrade_inspection_inputs_changed" {
+					if _, err := runUpgradeInspection(context.Background(), strings.TrimPrefix(operation, "legacy-"), request.Inventory, request.Variables, filepath.Join(directory, failedStage), python, executable); err == nil || err.Error() != "upgrade_inspection_inputs_changed" {
 						t.Fatal("changed inspection inputs accepted", err)
 					}
 					if _, err := os.Stat(filepath.Join(directory, failedStage+"-attempt-2")); !os.IsNotExist(err) {
@@ -394,7 +396,7 @@ output.chmod(0o600)
 					if err != nil || json.Unmarshal(raw, &receipt) != nil || receipt.State != "succeeded" {
 						t.Fatalf("new inspection receipt missing: %v", err)
 					}
-					if strings.Count(string(calls), operation+"\n") != 2 {
+					if strings.Count(string(calls), strings.TrimPrefix(operation, "legacy-")+"\n") != 2 {
 						t.Fatalf("failed inspection not retried exactly once: %s", calls)
 					}
 				}

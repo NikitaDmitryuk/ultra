@@ -99,10 +99,23 @@ class Contracts(unittest.TestCase):
 
     def test_legacy_rollback_starts_unchanged_bridge_before_bot_restore(self):
         plays = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/rollback.yml').read_text())
+        self.assertTrue(plays[0].get('any_errors_fatal'))
         names = [task['name'] for task in plays[1]['tasks']]
         self.assertLess(names.index('Restore the bridge relay'), names.index('Start the unchanged restored legacy bridge before probing it'))
         self.assertLess(names.index('Start the unchanged restored legacy bridge before probing it'), names.index('Require a usable restored control plane'))
         self.assertLess(names.index('Require a usable restored control plane'), names.index('Restore the original legacy bot state after the restored bridge probe'))
+
+    def test_mixed_baseline_roles_use_frozen_per_host_and_relay_only_emergency(self):
+        root = ROOT / 'deploy/ansible/roles/release/tasks'
+        for name in ('main.yml', 'rollback.yml', 'retention.yml'):
+            tasks = yaml.safe_load((root / name).read_text())
+            self.assertEqual(tasks[0]['ansible.builtin.set_fact']['release_previous_manifest'],
+                             '{{ ultra_host_previous_manifest | default(ultra_previous_manifest) }}')
+            self.assertIn('ultra_previous_relay_manifest', (root / name).read_text())
+        rollback = yaml.safe_load((root / 'rollback.yml').read_text())
+        verified = next(task for task in rollback if task['name'] == 'Verify exact restored bytes even when the fallback was already installed')
+        self.assertNotIn('when', verified)
+        self.assertFalse(verified['ansible.builtin.stat']['follow'])
 
     def test_maintenance_service_predicate_rejects_ambiguous_states(self):
         def runner(output, rc=0):
@@ -167,7 +180,7 @@ class Contracts(unittest.TestCase):
         module.fail_json = lambda **result: (_ for _ in ()).throw(Done(dict(result, failed=True)))
         values = {
             'lifecycle.json': {'id': operation, 'phase': 'applying'},
-            'maintenance.json': {'id': operation, 'legacy_sha256': 'a'*64, 'configuration': {}, 'created_at': 100,
+            'maintenance.json': {'id': operation, 'legacy_sha256': 'a'*64, 'configuration': {}, 'created_at': 100, 'capture_after': 100, 'previous_delivery': {}, 'recovery_provenance': {},
                                  'services': {unit: 'active' for unit in maintenance.SERVICES}},
             'reconcile.json': {'bridge_provider': 'bridge-cloud'},
             'backup.json': {'independent': True, 'destinations': [{'id': 'primary', 'required': True, 'host': 'root@192.0.2.1'}]},
@@ -180,13 +193,15 @@ class Contracts(unittest.TestCase):
                 maintenance.main()
             return result.exception.args[0]
         stopped = {'LoadState': 'loaded', 'ActiveState': 'inactive', 'MainPID': '0', 'ControlPID': '0'}
-        with patch.object(maintenance, 'AnsibleModule', return_value=module), patch.object(maintenance.os, 'geteuid', return_value=0), patch.object(maintenance, 'private', side_effect=lambda path, **kwargs: values[path.name]), patch.object(maintenance, 'hashes', return_value={}), patch.object(maintenance.time, 'time', return_value=110), patch.object(maintenance, 'service', return_value=stopped):
+        with patch.object(maintenance, 'AnsibleModule', return_value=module), patch.object(maintenance.os, 'geteuid', return_value=0), patch.object(maintenance, 'private', side_effect=lambda path, **kwargs: values[path.name]), patch.object(maintenance, 'hashes', return_value={}), patch.object(maintenance, 'recovery_provenance', return_value={}), patch.object(maintenance.time, 'time', return_value=110), patch.object(maintenance, 'service', return_value=stopped):
+            self.assertTrue(invoke()['verified'])
+            values['state.json']['updated_at'] = -100
+            values['recovery-reconcile-status.json']['updated_at'] = -100
             self.assertTrue(invoke()['verified'])
             for name, key, replacement in [('last-success.json', 'delivered_target_ids', ['wrong']),
-                                           ('last-success.json', 'snapshot_at', 99),
+                                           ('last-success.json', 'snapshot_at', 100),
                                            ('last-success.json', 'source', 'exit'),
                                            ('recovery-reconcile-status.json', 'primary', 'wrong'),
-                                           ('recovery-reconcile-status.json', 'updated_at', -100),
                                            ('backup.json', 'independent', False)]:
                 original = values[name][key]
                 values[name][key] = replacement
@@ -195,6 +210,103 @@ class Contracts(unittest.TestCase):
             values['state.json']['node_metadata'][0]['provider'] = 'BRIDGE-CLOUD'
             self.assertTrue(invoke()['failed'])
 
+    def test_held_retry_captures_without_starting_or_reconciling(self):
+        plays = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/preflight-retry.yml').read_text())
+        tasks = plays[0]['tasks']
+        phases = [t['ultra_upgrade_maintenance']['phase'] for t in tasks if 'ultra_upgrade_maintenance' in t]
+        self.assertEqual(phases, ['retry-checkpoint', 'capture-tool-check', 'recovery-ready'])
+        commands = [t['ansible.builtin.command']['argv'] for t in tasks if 'ansible.builtin.command' in t]
+        self.assertEqual(commands, [['python3', '/opt/ultra-recovery/recovery.py', 'capture', '--config', '/etc/ultra-recovery/backup.json']])
+        self.assertFalse(any('ansible.builtin.systemd_service' in t for t in tasks))
+        freshness = next(t for t in tasks if t['name'] == 'Require fresh independent recovery and unchanged topology')
+        self.assertIn('not (legacy_retry_barrier.held', freshness['when'])
+
+    def test_retry_checkpoint_requires_idle_producers_and_advances_capture_evidence(self):
+        class Done(Exception):
+            pass
+        operation = '11111111-2222-3333-4444-555555555555'
+        checkpoint = {'id': operation, 'legacy_sha256': 'a'*64, 'configuration': {}, 'created_at': 10,
+                      'recovery_provenance': {}, 'services': {unit: 'active' for unit in maintenance.SERVICES}}
+        values = {'lifecycle.json': {'id': operation, 'phase': 'applying'}, 'maintenance.json': checkpoint,
+                  'last-success.json': {'snapshot_at': 11}}
+        module = types.SimpleNamespace(params={'id': operation, 'legacy_sha256': 'a'*64, 'phase': 'retry-checkpoint'}, check_mode=False)
+        module.exit_json = lambda **result: (_ for _ in ()).throw(Done(result))
+        module.fail_json = lambda **result: (_ for _ in ()).throw(Done(dict(result, failed=True)))
+        stopped = {'LoadState': 'loaded', 'ActiveState': 'inactive', 'MainPID': '0', 'ControlPID': '0'}
+        def invoke():
+            with self.assertRaises(Done) as result:
+                maintenance.main()
+            return result.exception.args[0]
+        with patch.object(maintenance, 'AnsibleModule', return_value=module), patch.object(maintenance.os, 'geteuid', return_value=0), patch.object(maintenance, 'private', side_effect=lambda path, **kwargs: values[path.name]), patch.object(maintenance, 'hashes', return_value={}), patch.object(maintenance, 'recovery_provenance', return_value={}), patch.object(maintenance.time, 'time', return_value=20), patch.object(maintenance, 'service', return_value=stopped), patch.object(maintenance, 'atomic') as save, patch.object(maintenance.time, 'sleep'), patch.object(maintenance.Path, 'exists', return_value=True):
+            self.assertTrue(invoke()['held'])
+            self.assertEqual(save.call_args.args[1]['capture_after'], 20)
+            self.assertEqual(save.call_args.args[1]['previous_delivery'], {'snapshot_at': 11})
+            with patch.object(maintenance, 'service', side_effect=lambda mod, unit: dict(stopped, MainPID='7') if unit == 'ultra-relay.service' else stopped):
+                self.assertTrue(invoke()['failed'])
+            with patch.object(maintenance, 'recovery_provenance', return_value={'changed': 'pin'}):
+                self.assertTrue(invoke()['failed'])
+
+
+
+    def test_managed_relay_owned_recovery_pins_are_scoped_and_checked(self):
+        relay_uid = os.geteuid()
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = Path(directory) / 'var/lib/ultra-relay'
+            pins = prefix / 'vultr' / '11111111-2222-3333-4444-555555555555' / 'known_hosts'
+            pins.parent.mkdir(parents=True)
+            pins.write_text('fixture host key\n')
+            pins.chmod(0o600)
+            with patch.object(maintenance.pwd, 'getpwnam', return_value=types.SimpleNamespace(pw_uid=relay_uid)):
+                digest = maintenance.recovery_file(str(pins), {relay_uid}, managed_pin=True, relay_prefix=prefix, root_uid=relay_uid, trusted_root=Path(directory))
+                self.assertEqual(digest, hashlib.sha256(pins.read_bytes()).hexdigest())
+                with self.assertRaises(ValueError):
+                    maintenance.recovery_file(str(pins), {relay_uid + 1}, managed_pin=True, relay_prefix=prefix, root_uid=relay_uid, trusted_root=Path(directory))
+                alias = Path(directory) / 'alias'
+                alias.symlink_to(prefix, target_is_directory=True)
+                with self.assertRaises(ValueError):
+                    maintenance.recovery_file(str(alias / pins.relative_to(prefix)), {relay_uid}, managed_pin=True, relay_prefix=alias, root_uid=relay_uid, trusted_root=Path(directory))
+
+    def test_recovery_identity_and_managed_pin_contracts_match_bootstrap_policy(self):
+        relay_uid = os.geteuid()
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / 'identity'
+            identity.write_text('private key fixture\n')
+            identity.chmod(0o600)
+            self.assertEqual(maintenance.recovery_file(str(identity), {relay_uid}, private_file=True),
+                             hashlib.sha256(identity.read_bytes()).hexdigest())
+            with self.assertRaises(ValueError):
+                maintenance.recovery_file(str(identity), {relay_uid + 1}, private_file=True)
+            identity.chmod(0o640)
+            with self.assertRaises(ValueError):
+                maintenance.recovery_file(str(identity), {relay_uid}, private_file=True)
+
+        config = {'vultr_state_dir': '/var/lib/ultra-relay/vultr'}
+        node = {'id': '11111111-2222-3333-4444-555555555555', 'address': '192.0.2.1',
+                'host': 'root@192.0.2.1',
+                'known_hosts': '/var/lib/ultra-relay/vultr/11111111-2222-3333-4444-555555555555/known_hosts'}
+        self.assertEqual(maintenance.validate_managed_pin(node, config), node['known_hosts'])
+        for bad in ({**node, 'known_hosts': '/tmp/known_hosts'}, {**node, 'id': 'not-a-uuid'}):
+            with self.assertRaises(ValueError):
+                maintenance.validate_managed_pin(bad, config)
+
+        topology = {'primary': node['id'], 'node_metadata': [node]}
+        identity_path = '/etc/ultra-recovery/ssh_identity'
+        backup = {'destinations': [{'id': node['id'], 'required': True, 'host': node['host'],
+                                    'known_hosts': node['known_hosts'], 'identity_file': identity_path}]}
+        maintenance.validate_primary_destination(identity_path, topology, backup)
+        backup['destinations'][0]['identity_file'] = '/tmp/other'
+        with self.assertRaises(ValueError):
+            maintenance.validate_primary_destination(identity_path, topology, backup)
+
+    def test_recovery_capture_tool_must_match_a_pinned_prior_or_target_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tool = Path(directory) / 'recovery.py'
+            tool.write_text('trusted recovery fixture\n')
+            tool.chmod(0o700)
+            digest = hashlib.sha256(tool.read_bytes()).hexdigest()
+            self.assertEqual(maintenance.checked_recovery_tool([digest], tool, owner_uid=os.geteuid()), digest)
+            with self.assertRaises(ValueError):
+                maintenance.checked_recovery_tool(['0' * 64], tool, owner_uid=os.geteuid())
 
 
 if __name__ == '__main__':

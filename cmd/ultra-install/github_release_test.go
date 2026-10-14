@@ -445,3 +445,34 @@ func TestGitHubReleaseRejectsUnsafeStagingBase(t *testing.T) {
 		})
 	}
 }
+
+func TestPublishLeasedReleaseRejectsManifestCollisionUnderCacheGate(t *testing.T) {
+	cache := githubPrivateStage(t)
+	candidate := filepath.Join(cache, ".release-pending-test")
+	published := filepath.Join(cache, "release-v1.2.3")
+	t.Cleanup(func() {
+		_ = os.Chmod(candidate, 0700)
+		_ = os.Chmod(published, 0700)
+	})
+	for path, manifest := range map[string]string{candidate: `{"version":"v1.2.3","source_commit":"candidate"}`, published: `{"version":"v1.2.3","source_commit":"winner"}`} {
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "release-manifest.json"), []byte(manifest), 0400); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0500); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if lease, renamed, err := publishLeasedRelease(candidate, published, "v1.2.3"); err == nil {
+		_ = lease.Close()
+		t.Fatalf("different winner manifest accepted (renamed=%v)", renamed)
+	}
+	if _, err := os.Stat(candidate); err != nil {
+		t.Fatalf("candidate was consumed on collision: %v", err)
+	}
+	if _, err := os.Stat(published); err != nil {
+		t.Fatalf("winner bundle changed on collision: %v", err)
+	}
+}

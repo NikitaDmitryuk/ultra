@@ -51,6 +51,19 @@ def private_file(path):
     return path.read_bytes()
 
 
+def private_input(path, modes=(0o600,)):
+    path = Path(path)
+    require(path.is_absolute() and str(path) == os.path.normpath(str(path)), 'upgrade_baseline_path_invalid')
+    for parent in (path, *path.parents):
+        info = parent.lstat()
+        require(not stat.S_ISLNK(info.st_mode), 'upgrade_baseline_symlink_forbidden')
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
+            stat.S_IMODE(info.st_mode) in modes and info.st_size <= 4 * 1024 * 1024,
+            'upgrade_baseline_input_not_private')
+    return path.read_bytes()
+
+
 def canonical_file(path):
     """Read the non-secret canonical deployment config in either supported mode."""
     info = path.lstat()
@@ -109,14 +122,19 @@ def canonical_config_lock(path):
     return resolved.with_name('.' + resolved.name + '.manual-deploy.lock')
 
 
-def config_candidate(raw, version, release):
+def config_candidate(raw, version, release, baseline=None):
     replacements = {'ULTRA_AUTOMATION_VERSION': version, 'ULTRA_AUTOMATION_RELEASE_DIR': str(release)}
+    if baseline is not None:
+        replacements['ULTRA_UPGRADE_BASELINE_FILE'] = str(baseline)
     seen = set()
     lines = []
     for line in raw.decode().splitlines(keepends=True):
-        match = re.match(r'^\s*(ULTRA_AUTOMATION_(?:VERSION|RELEASE_DIR))\s*=', line)
+        match = re.match(r'^\s*(ULTRA_AUTOMATION_(?:VERSION|RELEASE_DIR)|ULTRA_UPGRADE_BASELINE_FILE)\s*=', line)
         if match:
             key = match[1]
+            if key not in replacements:
+                lines.append(line)
+                continue
             require(key not in seen, 'duplicate_canonical_release_key')
             seen.add(key)
             line = key + '=' + json.dumps(replacements[key], ensure_ascii=True) + '\n'
@@ -125,17 +143,127 @@ def config_candidate(raw, version, release):
     if text and not text.endswith('\n'):
         text += '\n'
     for key in replacements:
+        if key == 'ULTRA_UPGRADE_BASELINE_FILE' and baseline is None:
+            continue
         if key in seen:
             continue
         text += key + '=' + json.dumps(replacements[key], ensure_ascii=True) + '\n'
     return text.encode()
 
 
+def remove_config_key(raw, key):
+    require(key in ('ULTRA_UPGRADE_BASELINE_FILE',), 'canonical_config_key_invalid')
+    lines = []
+    found = False
+    for line in raw.decode().splitlines(keepends=True):
+        match = re.match(r'^\s*' + re.escape(key) + r'\s*=', line)
+        if match:
+            require(not found, 'duplicate_canonical_release_key')
+            found = True
+            continue
+        lines.append(line)
+    return ''.join(lines).encode()
+
+
 def remote_attempt(config, version):
     # Normalize derived release fields to avoid hashing a path that contains
-    # this very hash. Corrections to any other canonical input get a new kit;
-    # retries using the already-updated config retain the same attempt identity.
-    return sha(config_candidate(config, version, '/manual-release'))
+    # this very hash. Corrections to any other canonical input get a new kit.
+    value = config_values(config).get('ULTRA_UPGRADE_BASELINE_FILE')
+    normalized_baseline = '/operator-baseline' if value else None
+    return sha(config_candidate(config, version, '/manual-release', normalized_baseline))
+
+
+def stage_upgrade_baseline(config, version, remote_root):
+    """Prepare the optional, one-time baseline proof for remote staging.
+
+    The old signed release is already retained on the bridge under the path
+    pinned by the prior operation journal. Only the private journal is copied;
+    the verifier on the bridge rechecks that entire retained release bundle.
+    """
+    values = config_values(config)
+    source = values.get('ULTRA_UPGRADE_BASELINE_FILE', '')
+    if not source:
+        return config_candidate(config, version, remote_root / 'release'), {}
+    descriptor_path = Path(source)
+    raw = private_input(descriptor_path)
+    try:
+        descriptor = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        raise DeployError('upgrade_baseline_descriptor_invalid') from None
+    require(isinstance(descriptor, dict) and descriptor.get('schema') == 1, 'upgrade_baseline_descriptor_invalid')
+    journal_path = Path(descriptor.get('journal', ''))
+    journal_raw = private_input(journal_path)
+    try:
+        journal = json.loads(journal_raw)
+        manifest_path = Path(descriptor['manifest'])
+    except (ValueError, KeyError, TypeError):
+        raise DeployError('upgrade_baseline_descriptor_invalid') from None
+    manifest_raw = private_input(manifest_path, (0o400, 0o600))
+    require(sha(journal_raw) == descriptor.get('journal_sha256') and
+            sha(manifest_raw) == descriptor.get('manifest_sha256'), 'upgrade_baseline_local_pin_changed')
+    require(journal.get('schema') == 1 and journal.get('mutator_dispatched') is True and
+            re.fullmatch('[a-f0-9]{40}', journal.get('commit', '')) and
+            re.fullmatch('[a-f0-9]{16,64}', journal.get('remote_attempt', '')) and
+            journal.get('manifest_sha256') == descriptor.get('manifest_sha256'),
+            'upgrade_baseline_journal_invalid')
+    try:
+        manifest = json.loads(manifest_raw)
+    except (ValueError, UnicodeDecodeError):
+        raise DeployError('upgrade_baseline_manifest_invalid') from None
+    require(manifest.get('source_commit') == journal['commit'] and manifest.get('version') == journal.get('version') and
+            isinstance(manifest.get('assets'), list) and len(manifest['assets']) == 14,
+            'upgrade_baseline_manifest_unbound')
+    old_release = Path('/var/lib/ultra-ansible/operator-inputs') / (
+        'manual-' + journal['commit'] + '-' + journal['remote_attempt']) / 'release'
+    staged_journal = remote_root / 'baseline' / 'operator-journal.json'
+    staged_descriptor = remote_root / 'baseline' / 'descriptor.json'
+    descriptor['journal'] = str(staged_journal)
+    descriptor['manifest'] = str(old_release / 'release-manifest.json')
+    staged_raw = (json.dumps(descriptor, sort_keys=True, separators=(',', ':')) + '\n').encode()
+    remote_config = config_candidate(config, version, remote_root / 'release', staged_descriptor)
+    return remote_config, {'baseline/descriptor.json': staged_raw,
+                           'baseline/operator-journal.json': journal_raw}
+
+
+def completed_baseline_replay(root, config, version, commit):
+    """Recover the exact staged bytes for a completed same-commit retry.
+
+    The one-time baseline setting is removed from the canonical config after
+    success, but the remote immutable root still pins the staged config that
+    contained it. Rebuild that config from the private pre-deploy backup and
+    reuse it only when removing the one-time setting reproduces today's
+    candidate byte-for-byte.
+    """
+    values = config_values(config)
+    if values.get('ULTRA_UPGRADE_BASELINE_FILE'):
+        return None
+    match = re.fullmatch(r'v0\.0\.(0|[1-9][0-9]*)', version)
+    if not match or values.get('ULTRA_AUTOMATION_VERSION') != version:
+        return None
+    try:
+        target_commit = f'{int(match[1]):040x}'
+    except ValueError:
+        return None
+    release = values.get('ULTRA_AUTOMATION_RELEASE_DIR', '')
+    release_match = re.fullmatch(r'/var/lib/ultra-ansible/operator-inputs/manual-([a-f0-9]{40})-([a-f0-9]{64})/release', release)
+    if not release_match or release_match[1] != target_commit or release_match[1] != commit:
+        return None
+    attempt = release_match[2]
+    remote_root = Path(release).parent
+    expected = config_candidate(config, version, remote_root / 'release')
+    backup_pattern = 'install.config.before-' + version + '-*'
+    for backup in sorted(root.glob(backup_pattern)):
+        if not re.fullmatch(r'install\.config\.before-' + re.escape(version) + r'-[0-9]+', backup.name):
+            continue
+        original = private_file(backup)
+        if not config_values(original).get('ULTRA_UPGRADE_BASELINE_FILE'):
+            continue
+        if remote_attempt(original, version) != attempt:
+            continue
+        staged, files = stage_upgrade_baseline(original, version, remote_root)
+        if remove_config_key(staged, 'ULTRA_UPGRADE_BASELINE_FILE') == expected:
+            return attempt, staged, files
+    return None
 
 
 def validate_config_policy(raw):
@@ -366,7 +494,25 @@ def verify(directory):
         names.add(name);data=read(directory/'release'/name)
         need(len(data)==row['size'] and digest(data)==row['sha256'])
     need({x.name for x in (directory/'release').iterdir()}==names|{'release-manifest.json'})
-    need({x.name for x in directory.iterdir()}=={'release','install.config'})
+    top={x.name for x in directory.iterdir()}
+    need(top in ({'release','install.config'},{'release','install.config','baseline'}))
+    if 'baseline' in top:
+        baseline=directory/'baseline';info=baseline.lstat()
+        need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700)
+        need({x.name for x in baseline.iterdir()}=={'descriptor.json','operator-journal.json'})
+        for name in ['descriptor.json','operator-journal.json']:
+            info=(baseline/name).lstat()
+            need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600)
+        descriptor_raw=read(baseline/'descriptor.json');journal_raw=read(baseline/'operator-journal.json')
+        descriptor=json.loads(descriptor_raw);journal=json.loads(journal_raw)
+        need(descriptor.get('schema')==1 and digest(journal_raw)==descriptor.get('journal_sha256'))
+        need(descriptor.get('journal')==str(root/'baseline/operator-journal.json'))
+        old_release=Path('/var/lib/ultra-ansible/operator-inputs')/('manual-'+journal.get('commit','')+'-'+journal.get('remote_attempt',''))/'release'
+        need(descriptor.get('manifest')==str(old_release/'release-manifest.json'))
+        need(journal.get('manifest_sha256')==descriptor.get('manifest_sha256') and
+             journal.get('mutator_dispatched') is True and
+             re.fullmatch('[a-f0-9]{40}',journal.get('commit','')) and
+             re.fullmatch('[a-f0-9]{16,64}',journal.get('remote_attempt','')))
     need(digest(read(directory/'install.config'))==config_sha)
     return m
 if mode=='stage':
@@ -386,6 +532,11 @@ if mode=='stage':
                     for row in m['assets']:
                         n=row['name'];need(re.fullmatch('[A-Za-z0-9_.-]+',n) and n not in ['.','..','release-manifest.json'] and n not in rows)
                         rows[n]=row
+                elif name in ('baseline/descriptor.json','baseline/operator-journal.json'):
+                    need(name not in seen and member.size<=4194304)
+                    if not (pending/'baseline').exists():
+                        (pending/'baseline').mkdir(mode=0o700)
+                    raw=None
                 else:
                     need(rows is not None)
                     if name=='install.config': need(member.size<=1048576)
@@ -403,7 +554,11 @@ if mode=='stage':
                         shutil.copyfileobj(source,output,1048576)
                     output.flush();os.fsync(output.fileno())
                 seen.add(name)
-        need(rows is not None and seen=={'release/release-manifest.json','install.config'}|{'release/'+n for n in rows})
+        expected={'release/release-manifest.json','install.config'}|{'release/'+n for n in rows}
+        if any(name.startswith('baseline/') for name in seen):
+            need({'baseline/descriptor.json','baseline/operator-journal.json'} <= seen)
+            expected |= {'baseline/descriptor.json','baseline/operator-journal.json'}
+        need(rows is not None and seen==expected)
         verify(pending)
         for directory in [pending/'release',pending]:
             fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
@@ -443,7 +598,7 @@ def remote_command(transport, commit, version, manifest_sha, config_sha, attempt
                                   version, manifest_sha, config_sha, attempt, *arguments])]
 
 
-def stage_remote(repo, root, bundle, config, transport, commit, version, manifest_sha):
+def stage_remote(repo, root, bundle, config, transport, commit, version, manifest_sha, extra_files=None):
     # A bounded on-disk stream avoids keeping release binaries in memory.
     with tempfile.TemporaryFile(dir=root) as stream:
         with tarfile.open(fileobj=stream, mode='w|') as archive:
@@ -455,6 +610,11 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
             entry = tarfile.TarInfo('install.config')
             entry.size = len(config)
             archive.addfile(entry, io.BytesIO(config))
+            for name, data in sorted((extra_files or {}).items()):
+                require(name in ('baseline/descriptor.json', 'baseline/operator-journal.json'), 'baseline_archive_path_invalid')
+                entry = tarfile.TarInfo(name)
+                entry.size = len(data)
+                archive.addfile(entry, io.BytesIO(data))
         stream.seek(0)
         attempt = remote_attempt(config, version)
         result = subprocess.run(remote_command(transport, commit, version, manifest_sha, sha(config), attempt, 'stage'),
@@ -463,7 +623,7 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
     receipt = json.loads(result.stdout)
     require(receipt.get('architecture') in ['amd64', 'arm64'] and receipt.get('manifest_sha256') == manifest_sha
             and receipt.get('config_sha256') == sha(config) and receipt.get('attempt') == attempt, 'bridge_staging_receipt_invalid')
-    return receipt['architecture']
+    return receipt
 
 
 def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_failed=False):
@@ -479,14 +639,36 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         # secrets file. Suppress its output because the plan contains inputs.
         run([str(bundle / ('ultra-install-linux-' + architecture)), 'plan', '--config', str(config), '--format', 'json'],
             repo, 'canonical_policy')
-    attempt = remote_attempt(current, version) if transport else None
+    replay = completed_baseline_replay(root, current, version, commit) if transport else None
+    attempt = (replay[0] if replay else remote_attempt(current, version)) if transport else None
     remote_release = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + commit + '-' + (attempt or '')) / 'release'
     manifest_sha = sha((bundle / 'release-manifest.json').read_bytes()) if transport else None
     journal = root / 'operation.json'
     backup = root / ('install.config.before-' + version + '-' + str(time.time_ns()))
     new = config_candidate(current, version, remote_release if transport else bundle)
+    staged_config = new
+    baseline_files = {}
+    if transport and replay:
+        staged_config, baseline_files = replay[1], replay[2]
+    elif transport:
+        staged_config, baseline_files = stage_upgrade_baseline(current, version, remote_release.parent)
     if journal.exists():
         record = json.loads(private_file(journal))
+        if record.get('stage') == 'completed':
+            require(record.get('schema') == 1 and record.get('commit') == commit and
+                    record.get('version') == version and record.get('adopt') == adopt and
+                    record.get('transport_binding') == transport_binding and
+                    record.get('manifest_sha256') == manifest_sha and
+                    record.get('mutator_dispatched') is True, 'conflicting_unfinished_manual_operation')
+            final_sha = record.get('final_config_sha256', '')
+            require(re.fullmatch('[a-f0-9]{64}', final_sha) and
+                    sha(current) in (record.get('config_sha256'), final_sha), 'canonical_config_changed_during_operation')
+            completed = remove_config_key(current, 'ULTRA_UPGRADE_BASELINE_FILE') if sha(current) != final_sha else current
+            require(sha(completed) == final_sha, 'manual_completion_config_changed')
+            if completed != current:
+                atomic_write(config, completed, preserve_mode=True)
+            journal.unlink()
+            return
         backup_name = record.get('backup', '')
         require(re.fullmatch(r'install\.config\.before-' + re.escape(version) + r'-[0-9]+', backup_name), 'manual_backup_identity_invalid')
         backup = root / backup_name
@@ -524,11 +706,15 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         if transport:
             record['stage'] = 'bridge_staging'
             atomic_write(journal, json.dumps(record).encode())
-            staged_config = canonical_file(config)
-            require(sha(staged_config) == record['config_sha256'], 'canonical_config_changed_before_staging')
-            staged_architecture = stage_remote(repo, root, bundle, staged_config, transport, commit, version, manifest_sha)
+            require(sha(canonical_file(config)) == record['config_sha256'], 'canonical_config_changed_before_staging')
+            staged_receipt = stage_remote(repo, root, bundle, staged_config, transport, commit, version, manifest_sha, baseline_files)
+            staged_architecture = staged_receipt.get('architecture')
+            staged_config_sha = sha(staged_config)
+            require(staged_receipt.get('config_sha256') == staged_config_sha and staged_receipt.get('manifest_sha256') == manifest_sha and
+                    staged_receipt.get('attempt') == attempt, 'bridge_staging_receipt_invalid')
             require(record.get('remote_architecture', staged_architecture) == staged_architecture, 'bridge_architecture_changed')
             record['remote_architecture'] = staged_architecture
+            record['staged_config_sha256'] = staged_config_sha
         for stage, command in commands:
             record['stage'] = stage
             if stage in ('adoption_apply', 'upgrade'):
@@ -536,7 +722,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             atomic_write(journal, json.dumps(record).encode())
             print('manual-deploy: ' + stage, flush=True)
             if transport:
-                command = remote_command(transport, commit, version, manifest_sha, record['config_sha256'], attempt,
+                command = remote_command(transport, commit, version, manifest_sha, record.get('staged_config_sha256', record['config_sha256']), attempt,
                                          'run', record['remote_architecture'], stage, '1' if retry_failed else '0')
             run(command, repo, stage)
     except BaseException:
@@ -550,6 +736,12 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         else:
             print('manual-deploy: canonical inputs retained; reconcile the unfinished operation with ultra-install status before recovery; do not deploy another commit', file=sys.stderr)
         raise
+    if 'ULTRA_UPGRADE_BASELINE_FILE' in config_values(canonical_file(config)):
+        completed = remove_config_key(canonical_file(config), 'ULTRA_UPGRADE_BASELINE_FILE')
+        record['stage'] = 'completed'
+        record['final_config_sha256'] = sha(completed)
+        atomic_write(journal, json.dumps(record).encode())
+        atomic_write(config, completed, preserve_mode=True)
     journal.unlink()
 
 

@@ -316,6 +316,9 @@ func validAutomationVersion(version string) bool {
 // Familiar operator commands enter the new release through its exact installer,
 // so a retained old CLI never applies its old embedded infrastructure roles.
 func handoffManualUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir string, args []string, minisignPath string) (bool, error) {
+	if err := validateMinisignExecutable(minisignPath); err != nil {
+		return false, errors.New("minisign executable required for installer handoff")
+	}
 	if releaseDir == "" && p.Automation != nil {
 		releaseDir = p.Automation.ReleaseDir
 	}

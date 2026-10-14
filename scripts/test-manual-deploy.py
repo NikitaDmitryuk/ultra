@@ -30,7 +30,7 @@ class ManualDeploy(unittest.TestCase):
         self.original = b'# keep\nINSTALL_SCHEMA_VERSION=2\nOTHER="literal $() ${HOME}"\nULTRA_AUTOMATION_VERSION=v1.2.3\nULTRA_AUTOMATION_RELEASE_DIR=/old\n'
         self.config.write_bytes(self.original)
         self.config.chmod(0o600)
-        self.commit = 'abcdef123456789012345678901234567890abcdef'
+        self.commit = 'a' * 40
         self.version = 'v0.0.' + str(int(self.commit, 16))
         self.bundle = self.root / self.version
         self.bundle.mkdir()
@@ -67,6 +67,96 @@ class ManualDeploy(unittest.TestCase):
         self.assertIn('--manifest-sha256', self.calls[1][1])
         self.assertIn('--config-sha256', self.calls[1][1])
         self.assertFalse((self.root / 'operation.json').exists())
+
+    def test_success_removes_one_time_baseline_setting_and_preserves_readable_mode(self):
+        self.config.chmod(0o644)
+        self.config.write_bytes(self.original + b'ULTRA_UPGRADE_BASELINE_FILE=/private/baseline.json\n')
+        original = self.config.read_bytes()
+        self.rollout()
+        self.assertNotIn(b'ULTRA_UPGRADE_BASELINE_FILE=', self.config.read_bytes())
+        self.assertEqual(D.config_values(self.config.read_bytes())['ULTRA_AUTOMATION_VERSION'], self.version)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(next(self.root.glob('install.config.before-*')).read_bytes(), original)
+
+    def test_failed_upgrade_retains_one_time_baseline_setting(self):
+        self.config.write_bytes(self.original + b'ULTRA_UPGRADE_BASELINE_FILE=/private/baseline.json\n')
+        def runner(command, cwd, stage, capture=False, env=None):
+            if stage == 'upgrade':
+                raise D.DeployError('fixture_failure')
+        with self.assertRaises(D.DeployError):
+            self.rollout(runner=runner)
+        self.assertIn(b'ULTRA_UPGRADE_BASELINE_FILE=/private/baseline.json', self.config.read_bytes())
+
+    def test_completed_cleanup_is_idempotent_after_config_write_crash(self):
+        desired = D.config_candidate(self.original, self.version, self.bundle)
+        pending = desired + b'ULTRA_UPGRADE_BASELINE_FILE=/private/baseline.json\n'
+        completed = D.remove_config_key(pending, 'ULTRA_UPGRADE_BASELINE_FILE')
+        record = {'schema': 1, 'commit': self.commit, 'version': self.version, 'adopt': False,
+                  'backup': 'install.config.before-' + self.version + '-1', 'previous_sha256': D.sha(self.original),
+                  'config_sha256': D.sha(pending), 'stage': 'completed', 'mutator_dispatched': True,
+                  'transport_binding': None, 'manifest_sha256': None, 'final_config_sha256': D.sha(completed),
+                  'remote_attempt': None}
+        self.config.write_bytes(completed)
+        D.atomic_write(self.root / 'operation.json', json.dumps(record).encode())
+        self.rollout()
+        self.assertFalse((self.root / 'operation.json').exists())
+        self.assertEqual(self.config.read_bytes(), completed)
+
+    def test_stage_upgrade_baseline_pins_inputs_and_rewrites_only_staged_paths(self):
+        journal = {'schema': 1, 'commit': self.commit, 'version': 'v2.4.2', 'remote_attempt': 'a' * 64,
+                   'manifest_sha256': None, 'mutator_dispatched': True}
+        manifest = {'source_commit': self.commit, 'version': 'v2.4.2',
+                    'assets': [{'name': 'asset-' + str(i)} for i in range(14)]}
+        manifest_raw = json.dumps(manifest, sort_keys=True).encode()
+        journal['manifest_sha256'] = D.sha(manifest_raw)
+        journal_raw = json.dumps(journal, sort_keys=True).encode()
+        old_release = self.repo / 'old-release'
+        old_release.mkdir()
+        manifest_path = old_release / 'release-manifest.json'
+        journal_path = self.repo / 'old-operation.json'
+        descriptor_path = self.repo / 'baseline.json'
+        manifest_path.write_bytes(manifest_raw); manifest_path.chmod(0o600)
+        journal_path.write_bytes(journal_raw); journal_path.chmod(0o600)
+        descriptor = {'schema': 1, 'journal': str(journal_path), 'journal_sha256': D.sha(journal_raw),
+                      'manifest': str(manifest_path), 'manifest_sha256': D.sha(manifest_raw),
+                      'bridge': {}, 'exits': {}}
+        descriptor_path.write_text(json.dumps(descriptor)); descriptor_path.chmod(0o600)
+        config = self.original + ('ULTRA_UPGRADE_BASELINE_FILE=' + str(descriptor_path) + '\n').encode()
+        remote_root = Path('/var/lib/ultra-ansible/operator-inputs/manual-new-attempt')
+        staged, files = D.stage_upgrade_baseline(config, self.version, remote_root)
+        values = D.config_values(staged)
+        self.assertEqual(values['ULTRA_UPGRADE_BASELINE_FILE'], str(remote_root / 'baseline/descriptor.json'))
+        self.assertEqual(set(files), {'baseline/descriptor.json', 'baseline/operator-journal.json'})
+        rewritten = json.loads(files['baseline/descriptor.json'])
+        self.assertEqual(rewritten['journal'], str(remote_root / 'baseline/operator-journal.json'))
+        self.assertEqual(rewritten['manifest'], '/var/lib/ultra-ansible/operator-inputs/manual-' + self.commit + '-' + 'a' * 64 + '/release/release-manifest.json')
+        self.assertEqual(D.remote_attempt(staged, self.version), D.remote_attempt(config, self.version))
+        journal_path.write_bytes(journal_raw + b' ')
+        with self.assertRaisesRegex(D.DeployError, 'baseline_local_pin_changed'):
+            D.stage_upgrade_baseline(config, self.version, remote_root)
+
+    def test_staging_archive_contains_only_the_two_baseline_inputs(self):
+        manifest = {'source_commit': self.commit, 'version': self.version,
+                    'assets': [{'name': 'fixture', 'sha256': D.sha(b'fixture'), 'size': 7}]}
+        raw_manifest = json.dumps(manifest).encode()
+        (self.bundle / 'release-manifest.json').write_bytes(raw_manifest)
+        (self.bundle / 'fixture').write_bytes(b'fixture')
+        config = self.original
+        extras = {'baseline/descriptor.json': b'{"schema":1}',
+                  'baseline/operator-journal.json': b'{"schema":1}'}
+        def process(command, **kwargs):
+            with tarfile.open(fileobj=kwargs['stdin'], mode='r|') as archive:
+                members = [(member.name, archive.extractfile(member).read()) for member in archive]
+            self.assertEqual([name for name, _ in members], ['release/release-manifest.json', 'release/fixture',
+                'install.config', 'baseline/descriptor.json', 'baseline/operator-journal.json'])
+            return subprocess.CompletedProcess(command, 0, json.dumps({'architecture': 'arm64',
+                'manifest_sha256': D.sha(raw_manifest), 'config_sha256': D.sha(config),
+                'attempt': D.remote_attempt(config, self.version)}).encode())
+        with patch.object(D.subprocess, 'run', process):
+            receipt = D.stage_remote(self.repo, self.root, self.bundle, config,
+                ['ssh', '-F', '/dev/null', 'root@192.0.2.10'], self.commit, self.version,
+                D.sha(raw_manifest), extras)
+        self.assertEqual(receipt['architecture'], 'arm64')
 
     def test_retry_failed_is_explicitly_forwarded_to_operator_upgrade(self):
         self.rollout(retry_failed=True)
@@ -173,6 +263,26 @@ class ManualDeploy(unittest.TestCase):
             self.assertEqual(D.remote_attempt(derived, self.version), attempt)
             self.assertNotEqual(D.remote_attempt(derived + b'CORRECTION=1\n', self.version), attempt)
 
+    def test_completed_baseline_keeps_attempt_only_for_unchanged_config(self):
+        baseline = self.repo / 'baseline.json'
+        configured = self.original.replace(b'OTHER="literal $() ${HOME}"\n',
+            ('ULTRA_UPGRADE_BASELINE_FILE=' + str(baseline) + '\n').encode() + b'OTHER="literal $() ${HOME}"\n')
+        attempt = D.remote_attempt(configured, self.version)
+        release = '/var/lib/ultra-ansible/operator-inputs/manual-' + self.commit + '-' + attempt + '/release'
+        installed = D.config_candidate(configured, self.version, release)
+        completed = D.remove_config_key(installed, 'ULTRA_UPGRADE_BASELINE_FILE')
+        backup = self.root / ('install.config.before-' + self.version + '-1')
+        D.atomic_write(backup, configured)
+        def staged_config(raw, version, remote_root):
+            return D.config_candidate(raw, version, remote_root / 'release', remote_root / 'baseline/descriptor.json'), {'baseline/descriptor.json': b'{}'}
+        with patch.object(D, 'stage_upgrade_baseline', side_effect=staged_config):
+            replay = D.completed_baseline_replay(self.root, completed, self.version, self.commit)
+        self.assertEqual(replay[0], attempt)
+        self.assertEqual(D.remove_config_key(replay[1], 'ULTRA_UPGRADE_BASELINE_FILE'), completed)
+        changed = completed + b'CORRECTED_POLICY=1\n'
+        with patch.object(D, 'stage_upgrade_baseline', side_effect=staged_config):
+            self.assertIsNone(D.completed_baseline_replay(self.root, changed, self.version, self.commit))
+
     def test_nested_lock_fails_closed(self):
         with D.lock(self.root / 'lock'):
             with self.assertRaisesRegex(D.DeployError, 'already_running'):
@@ -257,7 +367,12 @@ class NativeDeploy(unittest.TestCase):
         self.pin_probe = patch.object(D.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0))
         self.pin_probe.start()
         self.addCleanup(self.pin_probe.stop)
-        self.stage = patch.object(D, 'stage_remote', return_value='arm64')
+        def staged_receipt(*args):
+            config, version, manifest_sha = args[3], args[6], args[7]
+            return {'architecture': 'arm64', 'manifest_sha256': manifest_sha, 'config_sha256': D.sha(config),
+                    'attempt': D.remote_attempt(config, version)}
+        self.staged_receipt = staged_receipt
+        self.stage = patch.object(D, 'stage_remote', side_effect=staged_receipt)
         self.stage_mock = self.stage.start()
         self.addCleanup(self.stage.stop)
 
@@ -281,7 +396,7 @@ class NativeDeploy(unittest.TestCase):
             self.assertIn('-W %h:%p root@192.0.2.20', proxy)
             remote = D.shlex.split(command[-1])
             self.assertEqual(remote[:3], ['python3', '-I', '-c'])
-            self.assertEqual(remote[4:11], ['run', self.commit, self.version, D.sha(self.manifest), D.sha(self.config.read_bytes()), D.remote_attempt(self.original, self.version), 'arm64'])
+            self.assertEqual(remote[4:11], ['run', self.commit, self.version, D.sha(self.manifest), D.sha(self.stage_mock.call_args.args[3]), D.remote_attempt(self.original, self.version), 'arm64'])
             self.assertEqual(remote[11], stage)
             self.assertEqual(remote[12], '0')
         self.assertIn("'--bridge-native'", D.REMOTE_PROGRAM)
@@ -301,9 +416,32 @@ class NativeDeploy(unittest.TestCase):
         self.assertFalse((self.root / 'operation.json').exists())
         self.assertEqual(self.config.read_bytes(), self.original)
         self.assertEqual([s for s, _ in self.calls], ['canonical_policy'])
-        self.stage_mock.side_effect = None
+        self.stage_mock.side_effect = self.staged_receipt
         self.rollout(adopt=True)
         self.assertEqual(next(self.root.glob('install.config.before-*')).read_bytes(), self.original)
+
+    def test_native_same_commit_replay_keeps_remote_attempt_after_baseline_cleanup(self):
+        self.config.write_bytes(self.original + b'ULTRA_UPGRADE_BASELINE_FILE=/private/baseline.json\n')
+        baseline_setting = self.config.read_bytes()
+        original_prepare = D.stage_upgrade_baseline
+        def prepared(config, version, remote_root):
+            if not D.config_values(config).get('ULTRA_UPGRADE_BASELINE_FILE'):
+                return original_prepare(config, version, remote_root)
+            staged = D.config_candidate(config, version, remote_root / 'release', remote_root / 'baseline/descriptor.json')
+            return staged, {'baseline/descriptor.json': b'{}', 'baseline/operator-journal.json': b'{}'}
+        with patch.object(D, 'stage_upgrade_baseline', side_effect=prepared):
+            first_attempt = D.remote_attempt(baseline_setting, self.version)
+            self.rollout()
+            self.assertNotIn(b'ULTRA_UPGRADE_BASELINE_FILE=', self.config.read_bytes())
+            first_config = self.stage_mock.call_args.args[3]
+            self.rollout()
+        first, second = self.stage_mock.call_args_list
+        self.assertEqual(first.args[3], first_config)
+        self.assertEqual(second.args[3], first_config)
+        with patch.object(D, 'stage_upgrade_baseline', side_effect=prepared):
+            self.assertEqual(D.completed_baseline_replay(self.root, self.config.read_bytes(), self.version, self.commit)[0], first_attempt)
+        self.assertEqual(first.args[1], second.args[1])
+        self.assertEqual(D.remote_attempt(first.args[3], self.version), D.remote_attempt(second.args[3], self.version))
 
     def test_native_changed_transport_or_manifest_rejects_resume(self):
         def failure(command, cwd, stage, **kwargs):
@@ -427,7 +565,7 @@ class NativeDeploy(unittest.TestCase):
         with patch.object(Path, 'read_bytes', read), patch.object(D.subprocess, 'run', process):
             architecture = D.stage_remote(self.repo, self.root, self.bundle, self.original,
                 ['ssh', '-F', '/dev/null', 'root@192.0.2.10'], self.commit, self.version, D.sha(raw_manifest))
-        self.assertEqual(architecture, 'arm64')
+        self.assertEqual(architecture['architecture'], 'arm64')
 
     def test_native_canonical_route_survives_deleted_adopt_directory(self):
         shutil.rmtree(self.operator.parent)
@@ -531,6 +669,118 @@ class RemoteProgram(unittest.TestCase):
         self.assertIn('--retry-failed', json.loads(self.result.read_bytes()))
         again = self.execute('stage', self.archive())
         self.assertEqual(again.returncode, 0, again.stderr)
+
+    def test_actual_stage_accepts_exact_baseline_config_on_same_commit_replay(self):
+        local_state = self.directory / 'local-state'
+        local_state.mkdir(mode=0o700)
+        old_commit, old_attempt = 'b' * 40, 'c' * 64
+        old_assets = [{'name': 'asset-' + str(i)} for i in range(14)]
+        old_manifest = json.dumps({'source_commit': old_commit, 'version': 'v2.4.2',
+                                   'assets': old_assets}, sort_keys=True).encode()
+        old_manifest_path = local_state / 'release-manifest.json'
+        old_manifest_path.write_bytes(old_manifest); old_manifest_path.chmod(0o400)
+        journal = {'schema': 1, 'commit': old_commit, 'version': 'v2.4.2', 'remote_attempt': old_attempt,
+                   'manifest_sha256': D.sha(old_manifest), 'mutator_dispatched': True}
+        journal_raw = json.dumps(journal, sort_keys=True).encode()
+        journal_path = local_state / 'operation.json'
+        journal_path.write_bytes(journal_raw); journal_path.chmod(0o600)
+        descriptor_path = local_state / 'upgrade-baseline.json'
+        descriptor = {'schema': 1, 'journal': str(journal_path), 'journal_sha256': D.sha(journal_raw),
+                      'manifest': str(old_manifest_path), 'manifest_sha256': D.sha(old_manifest)}
+        descriptor_path.write_text(json.dumps(descriptor, sort_keys=True)); descriptor_path.chmod(0o600)
+        original = (b'SECRETS_ENV_FILE=/etc/ultra-relay/.env\n'
+                    + ('ULTRA_UPGRADE_BASELINE_FILE=' + str(descriptor_path) + '\n').encode()
+                    + b'POLICY=unchanged\n')
+        attempt = D.remote_attempt(original, self.version)
+        self.root = self.parent / ('manual-' + self.commit + '-' + attempt)
+        production_root = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + self.commit + '-' + attempt)
+        prepare_baseline = D.stage_upgrade_baseline
+        def fixture_prepare(raw_config, version, remote_root):
+            self.assertEqual(remote_root, production_root)
+            staged, files = prepare_baseline(raw_config, version, production_root)
+            staged = staged.replace(str(production_root / 'baseline/descriptor.json').encode(),
+                                    str(self.root / 'baseline/descriptor.json').encode())
+            staged_descriptor = json.loads(files['baseline/descriptor.json'])
+            staged_descriptor['manifest'] = staged_descriptor['manifest'].replace(
+                '/var/lib/ultra-ansible/operator-inputs', str(self.parent))
+            staged_descriptor['journal'] = staged_descriptor['journal'].replace(
+                str(production_root), str(self.root))
+            files['baseline/descriptor.json'] = (json.dumps(staged_descriptor, sort_keys=True, separators=(',', ':')) + '\n').encode()
+            return staged, files
+        with patch.object(D, 'stage_upgrade_baseline', side_effect=fixture_prepare):
+            staged_config, baseline = D.stage_upgrade_baseline(original, self.version, production_root)
+        backup = local_state / ('install.config.before-' + self.version + '-1')
+        D.atomic_write(backup, original)
+
+        def stage(raw_config, extra_files):
+            entries = [('release/release-manifest.json', self.manifest)]
+            entries += [('release/' + name, data) for name, data in self.assets.items()]
+            entries += [('install.config', raw_config)]
+            entries += list(extra_files.items())
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode='w|') as archive:
+                for name, raw in entries:
+                    member = tarfile.TarInfo(name); member.size = len(raw)
+                    archive.addfile(member, io.BytesIO(raw))
+            return subprocess.run([D.sys.executable, '-I', '-c', self.program, 'stage', self.commit,
+                self.version, D.sha(self.manifest), D.sha(raw_config), attempt],
+                input=stream.getvalue(), capture_output=True)
+
+        first = stage(staged_config, baseline)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        completed = D.remove_config_key(staged_config, 'ULTRA_UPGRADE_BASELINE_FILE')
+        self.assertEqual(D.remote_attempt(original, self.version), attempt)
+        self.assertEqual(D.config_values(completed)['ULTRA_AUTOMATION_VERSION'], self.version)
+        self.assertIn(attempt, D.config_values(completed)['ULTRA_AUTOMATION_RELEASE_DIR'])
+        # Run the production replay reconstruction and baseline staging helpers
+        # from the exact private backup used by rollout.
+        with patch.object(D, 'stage_upgrade_baseline', side_effect=fixture_prepare):
+            replay = D.completed_baseline_replay(local_state, completed, self.version, self.commit)
+        self.assertIsNotNone(replay)
+        replay_attempt, replay_config, replay_files = replay
+        self.assertEqual(replay_attempt, attempt)
+        self.assertEqual(replay_config, staged_config)
+        self.assertEqual(replay_files, baseline)
+        second = stage(replay_config, replay_files)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual((self.root / 'install.config').read_bytes(), replay_config)
+        self.assertNotIn(b'ULTRA_UPGRADE_BASELINE_FILE=', completed)
+
+    def test_actual_stage_baseline_requires_exact_private_inventory_and_rechecks_it(self):
+        old_commit, old_attempt, old_manifest_sha = 'b' * 40, 'c' * 64, 'd' * 64
+        journal = {'schema': 1, 'commit': old_commit, 'remote_attempt': old_attempt,
+                   'manifest_sha256': old_manifest_sha, 'mutator_dispatched': True}
+        journal_raw = json.dumps(journal, sort_keys=True).encode()
+        self.config += b'ULTRA_UPGRADE_BASELINE_FILE=' + (str(self.parent / 'baseline/descriptor.json')).encode() + b'\n'
+        self.root = self.parent / ('manual-' + self.commit + '-' + D.remote_attempt(self.config, self.version))
+        old_release = self.parent / ('manual-' + old_commit + '-' + old_attempt) / 'release'
+        descriptor = {'schema': 1, 'journal': str(self.root / 'baseline/operator-journal.json'),
+                      'journal_sha256': D.sha(journal_raw),
+                      'manifest': str(old_release / 'release-manifest.json'),
+                      'manifest_sha256': old_manifest_sha}
+        descriptor_raw = json.dumps(descriptor, sort_keys=True).encode()
+        entries = [('release/release-manifest.json', self.manifest)]
+        entries += [('release/' + name, data) for name, data in self.assets.items()]
+        entries += [('install.config', self.config), ('baseline/descriptor.json', descriptor_raw),
+                    ('baseline/operator-journal.json', journal_raw)]
+        def archive_with(rows):
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode='w|') as archive:
+                for name, raw in rows:
+                    entry = tarfile.TarInfo(name); entry.size = len(raw)
+                    archive.addfile(entry, io.BytesIO(raw))
+            return stream.getvalue()
+        staged = self.execute('stage', archive_with(entries))
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        baseline = self.root / 'baseline'
+        self.assertEqual({p.name for p in baseline.iterdir()}, {'descriptor.json', 'operator-journal.json'})
+        self.assertEqual(baseline.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((baseline / 'descriptor.json').stat().st_mode & 0o777, 0o600)
+        self.assertEqual((baseline / 'operator-journal.json').stat().st_mode & 0o777, 0o600)
+        (baseline / 'operator-journal.json').write_bytes(journal_raw + b' ')
+        rejected = self.execute('run', None, self.architecture, 'upgrade')
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertFalse(self.result.exists())
 
     def test_bad_asset_incomplete_stage_and_unexpected_files_never_publish(self):
         for mutate in [lambda rows: rows[:-1], lambda rows: rows + [('../escape', b'bad')],

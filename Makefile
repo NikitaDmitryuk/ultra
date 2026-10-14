@@ -162,6 +162,7 @@ build-bench:
 test-ui:
 	python3 scripts/test-mobile-bootstrap.py
 	python3 scripts/test-ansible-release-contracts.py
+	python3 scripts/test-ansible-upgrade-baseline.py
 	python3 scripts/test-ansible-migration-probe.py
 	python3 scripts/test-verify-miniapp.py
 	python3 scripts/test-ingress-ssh.py
@@ -193,6 +194,7 @@ test-ansible:
 	python3 scripts/test-ansible-input-types.py
 	python3 scripts/test-ansible-operation-mapping.py
 	python3 scripts/test-ansible-release-identity.py
+	python3 scripts/test-ansible-upgrade-baseline.py
 	python3 scripts/test-ansible-release-retention.py
 	python3 scripts/test-ansible-ingress.py
 	python3 scripts/test-ansible-ingress-probe.py

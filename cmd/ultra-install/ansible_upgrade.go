@@ -148,16 +148,21 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err != nil {
 		return err
 	}
+	baselineInput, err := prepareUpgradeBaseline(p.SourceValues["ULTRA_UPGRADE_BASELINE_FILE"], directory)
+	if err != nil {
+		return err
+	}
 	legacyBridgeMaintenance := false
 	legacyBridgeSHA := ""
 	resumeCompleted := false
+	preActivation := true
 	// A separate attempt always resumes timers, including after UNREACHABLE.
 	resume := func(cleanup context.Context) error {
 		resumeDirectory, err := os.MkdirTemp(directory, "resume-")
 		if err == nil {
 			_ = os.Remove(resumeDirectory)
 			variables := map[string]any{"ultra_lock_directory": lockDirectory}
-			if legacyBridgeMaintenance {
+			if legacyBridgeMaintenance && !preActivation {
 				variables["ultra_legacy_bridge_maintenance"] = true
 				variables["ultra_legacy_bridge_sha256"] = legacyBridgeSHA
 				variables["ultra_lifecycle_id"] = lifecycleID(directory)
@@ -173,7 +178,6 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	// to roll back. Recover schedules and the durable gate while retaining the
 	// lease and every inspection receipt. A surviving activation job instead
 	// belongs to the existing compatible rollback/retry protocol.
-	preActivation := true
 	_, activationStateErr := os.Lstat(filepath.Join(directory, "activate", "job.json"))
 	if activationStateErr != nil && !os.IsNotExist(activationStateErr) {
 		return activationStateErr
@@ -216,16 +220,6 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err = compatibleAnsibleRelease(&inspection.Previous, manifest); err != nil {
 		return err
 	}
-	legacyBridgeMaintenance = !hasAutomationCapability(&inspection.Previous, "lifecycle-gate-v1")
-	if legacyBridgeMaintenance {
-		asset, assetErr := upgradeAsset(&inspection.Previous, "ultra-relay-linux-"+inspection.Architecture)
-		if assetErr != nil {
-			return errors.New("upgrade_legacy_bridge_identity_unavailable")
-		}
-		legacyBridgeSHA = asset.SHA
-	} else if err = ansibleLifecycle(ctx, p, inventory, directory, python, executable, "applying", true); err != nil {
-		return err
-	}
 	if inspection.DatabaseSchema < manifest.DatabaseSchemaMin || inspection.DatabaseSchema > manifest.DatabaseSchemaMax {
 		return errors.New("upgrade_database_schema_incompatible")
 	}
@@ -246,12 +240,51 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err = os.MkdirAll(inspectionDirectory, 0700); err != nil {
 		return err
 	}
-	_, err = runUpgradeInspection(ctx, "inspect-release-hosts", inventory, map[string]any{"ultra_lock_directory": lockDirectory, "ultra_release_inspection_directory": inspectionDirectory}, filepath.Join(directory, "hosts"), python, executable)
+	hostVariables := map[string]any{"ultra_lock_directory": lockDirectory, "ultra_release_inspection_directory": inspectionDirectory}
+	if baselineInput != nil {
+		baselineNodes := map[string]any{}
+		for _, node := range inspection.Nodes {
+			baselineNodes[node.ID] = map[string]any{"address": node.Address, "pins": node.Pins}
+		}
+		hostVariables["ultra_upgrade_baseline_input"] = baselineInput
+		hostVariables["ultra_upgrade_baseline_nodes"] = baselineNodes
+		hostVariables["ultra_upgrade_baseline_bridge_address"] = p.Bridge.SSHHost
+	}
+	hostReceipt, err := runUpgradeInspection(ctx, "inspect-release-hosts", inventory, hostVariables, filepath.Join(directory, "hosts"), python, executable)
 	if err != nil {
+		return err
+	}
+	baseline := upgradeBaselineResult{}
+	relayPrevious := &inspection.Previous
+	if baselineInput != nil {
+		raw, marshalErr := json.Marshal(hostReceipt.Result.Values["baseline"])
+		if marshalErr != nil || json.Unmarshal(raw, &baseline) != nil {
+			return errors.New("upgrade_baseline_result_invalid")
+		}
+		if err = freezeUpgradeBaseline(baselineInput, baseline, inspection, manifest, directory); err != nil {
+			return err
+		}
+		relayPrevious = &baseline.BridgeRelay
+		for _, node := range inspection.Nodes {
+			alias := "exit_" + strings.ReplaceAll(node.ID, "-", "")
+			nodes[alias].(map[string]any)["ultra_host_previous_manifest"] = baseline.Exits[node.ID]
+		}
+	}
+	legacyBridgeMaintenance = !hasAutomationCapability(relayPrevious, "lifecycle-gate-v1")
+	if legacyBridgeMaintenance {
+		asset, assetErr := upgradeAsset(relayPrevious, "ultra-relay-linux-"+inspection.Architecture)
+		if assetErr != nil {
+			return errors.New("upgrade_legacy_bridge_identity_unavailable")
+		}
+		legacyBridgeSHA = asset.SHA
+	} else if err = ansibleLifecycle(ctx, p, inventory, directory, python, executable, "applying", true); err != nil {
 		return err
 	}
 	bridge := children["bridge"].(map[string]any)["hosts"].(map[string]any)["bridge"].(map[string]any)
 	bridge["ultra_architecture"] = inspection.Architecture
+	if baselineInput != nil {
+		bridge["ultra_previous_relay_manifest"] = baseline.BridgeRelay
+	}
 	for alias, value := range nodes {
 		raw, err := os.ReadFile(filepath.Join(inspectionDirectory, alias+".json"))
 		if err != nil {
@@ -271,6 +304,16 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		return err
 	}
 	bridge["ultra_recovery_files"] = tools
+	baselineToolHashes := map[string]string{}
+	if baselineInput != nil {
+		priorTools, toolErr := extractUpgradeTools(filepath.Join(filepath.Dir(baselineInput.Descriptor.Manifest), "ultra-recovery.tar.gz"), filepath.Join(directory, "baseline-tools"), nil)
+		if toolErr != nil {
+			return toolErr
+		}
+		for _, tool := range priorTools {
+			baselineToolHashes[filepath.Base(tool["destination"].(string))] = tool["sha256"].(string)
+		}
+	}
 	for alias, value := range nodes {
 		node := value.(map[string]any)
 		arch := node["ultra_architecture"].(string)
@@ -278,10 +321,24 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		for _, tool := range tools {
 			base := filepath.Base(tool["destination"].(string))
 			if base == "recovery.py" || base == "monitor.py" || base == "heartbeat.py" || strings.HasPrefix(base, "ultra-monitor") || strings.HasPrefix(base, "ultra-recovery-prune") {
-				selected = append(selected, tool)
+				if baselineInput != nil {
+					copy := map[string]any{}
+					for key, value := range tool {
+						copy[key] = value
+					}
+					copy["previous_sha256"] = baselineToolHashes[base]
+					selected = append(selected, copy)
+				} else {
+					selected = append(selected, tool)
+				}
 			}
 		}
-		client, err := upgradeClientTool(manifest, &inspection.Previous, releaseDir, arch)
+		previous := &inspection.Previous
+		if baselineInput != nil {
+			selected := baseline.Exits[node["ultra_exit_id"].(string)]
+			previous = &selected
+		}
+		client, err := upgradeClientTool(manifest, previous, releaseDir, arch)
 		if err != nil {
 			return err
 		}

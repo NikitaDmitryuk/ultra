@@ -133,6 +133,42 @@ ControlPID и повторная проверка замороженной topol
 их payload проверяется через новый bridge для каждого frozen exit до запуска bot.
 Совместимый rollback запускает и проверяет прежний bridge даже при неизменных байтах,
 затем возвращает сохранённые состояния bot и таймеров до освобождения reservation.
+Для принятой разнородной установки можно явно задать приватный
+`ULTRA_UPGRADE_BASELINE_FILE`: exit остаются на сохранённом операторском комплекте,
+а bridge работает на emergency relay после подтверждённого adoption rollback.
+Это одноразовый адаптер прежнего состояния. Обычное обновление использует прежний
+общий manifest; проверка подписи целевого релиза остаётся обязательной.
+
+Descriptor содержит `schema: 1`, абсолютные пути `journal` и `manifest`, их
+`journal_sha256` и `manifest_sha256`, объект `bridge` и карту `exits` по UUID
+замороженной topology. Каждый exit указывает `stage`, `request_sha256` и старый
+bootstrap selector `alias` (`exit_0`, `exit_1`, …). Bridge указывает `stage` и
+`request_sha256` успешного `rollback-adoption`, а также `checkpoint` и
+`checkpoint_sha256`. Локальные descriptor, journal и manifest должны принадлежать
+оператору, иметь приватные права и не проходить через symlink. Рядом с manifest
+требуется весь прежний release-комплект. Journal связывает source commit, version,
+SHA manifest и remote attempt и должен подтверждать отправку mutator.
+
+На bridge адаптер отдельно проверяет root-владение доказательств, успешные
+request/job/receipt одного attempt, selector и адрес exit, роль `exit`, прежние
+SSH host keys и relay SHA из frozen inventory. Полный сохранённый операторский
+комплект проверяется по manifest в исходном `operator-inputs/manual-…/release`.
+Для bridge UUID rollback-request задаёт единственный checkpoint adoption;
+проверяются его закреплённый SHA и сохранённый emergency relay. Прочитанный SHA
+работающего бинарника не заменяет эти доказательства. Несовпадение останавливает
+обновление до maintenance и активации.
+
+Проверенные входы и нормализованные fallback manifest сохраняются приватно в
+каталоге операции (`baseline.*.json`); при повторе они не могут измениться или
+исчезнуть. Activation, rollback и retention используют прежний manifest каждого
+exit и отдельный emergency manifest только для relay на bridge; bot, client и
+recovery manifest bridge сохраняют свой прежний контракт. При переносе команды
+на другой controller заранее перенеси приватные локальные доказательства и
+перепиши только их локальные пути, сохраняя SHA и исходный remote attempt.
+Источники: [адаптер входов](../cmd/ultra-install/upgrade_baseline.go),
+[проверка root-доказательств](../deploy/ansible/library/ultra_upgrade_baseline.py),
+[синтетические проверки](../scripts/test-ansible-upgrade-baseline.py).
+
 Источники: [upgrade](../deploy/ansible/playbooks/upgrade.yml),
 [maintenance barrier](../deploy/ansible/library/ultra_upgrade_maintenance.py),
 [rollback](../deploy/ansible/playbooks/rollback.yml).

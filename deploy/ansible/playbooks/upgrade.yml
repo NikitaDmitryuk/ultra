@@ -3,6 +3,8 @@
   hosts: bridge
   gather_facts: false
   any_errors_fatal: true
+  vars:
+    ultra_recovery_capture_tool: "{{ ultra_recovery_files | selectattr('destination', 'equalto', '/opt/ultra-recovery/recovery.py') | list | first }}"
   tasks:
     - name: Select the pinned readiness tool
       ansible.builtin.set_fact:
@@ -73,6 +75,19 @@
         executable: /usr/bin/python3
       changed_when: false
       no_log: true
+    - name: Freeze recovery provenance and a new capture watermark with producers stopped
+      ultra_upgrade_maintenance:
+        id: "{{ ultra_lifecycle_id }}"
+        legacy_sha256: "{{ ultra_legacy_bridge_sha256 }}"
+        phase: capture-checkpoint
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
+    - name: Verify the pinned recovery capture script immediately before execution
+      ultra_upgrade_maintenance:
+        id: "{{ ultra_lifecycle_id }}"
+        legacy_sha256: "{{ ultra_legacy_bridge_sha256 }}"
+        phase: capture-tool-check
+        recovery_tool_hashes: "{{ [ultra_recovery_capture_tool.previous_sha256, ultra_recovery_capture_tool.sha256] | reject('equalto', '') | list }}"
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
     - name: Create the independent control generation before activation
       ansible.builtin.command:
         argv: [python3, /opt/ultra-recovery/recovery.py, capture, --config, /etc/ultra-recovery/backup.json]

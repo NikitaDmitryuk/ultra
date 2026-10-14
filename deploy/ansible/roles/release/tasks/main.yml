@@ -1,4 +1,15 @@
 ---
+- name: Select the frozen host rollback manifest
+  ansible.builtin.set_fact:
+    release_previous_manifest: "{{ ultra_host_previous_manifest | default(ultra_previous_manifest) }}"
+- name: Require the emergency relay fallback to read the target schema
+  ansible.builtin.assert:
+    that:
+      - "'service-access-v1' in ultra_previous_relay_manifest.capabilities"
+      - "'provider-pool-quota-v1' in ultra_previous_relay_manifest.capabilities"
+      - ultra_previous_relay_manifest.database_schema_min | int <= ultra_release_manifest.database_schema_min | int
+      - ultra_previous_relay_manifest.database_schema_max | int >= ultra_release_manifest.database_schema_max | int
+  when: release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined
 - name: Validate the release activation contract
   ansible.builtin.assert:
     that:
@@ -6,12 +17,12 @@
       - ultra_release_manifest.version == ultra_release_version
       - ultra_architecture in ['amd64', 'arm64']
       - release_component in ['ultra-relay', 'ultra-bot']
-      - "'service-access-v1' in ultra_previous_manifest.capabilities"
+      - "'service-access-v1' in release_previous_manifest.capabilities"
       - "'service-access-v1' in ultra_release_manifest.capabilities"
-      - "'provider-pool-quota-v1' in ultra_previous_manifest.capabilities"
+      - "'provider-pool-quota-v1' in release_previous_manifest.capabilities"
       - "'provider-pool-quota-v1' in ultra_release_manifest.capabilities"
-      - ultra_previous_manifest.database_schema_min | int <= ultra_release_manifest.database_schema_min | int
-      - ultra_previous_manifest.database_schema_max | int >= ultra_release_manifest.database_schema_max | int
+      - release_previous_manifest.database_schema_min | int <= ultra_release_manifest.database_schema_min | int
+      - release_previous_manifest.database_schema_max | int >= ultra_release_manifest.database_schema_max | int
       - ultra_release_manifest.database_schema_min | int <= ultra_release_manifest.database_schema_max | int
 - name: Resolve the exact component from both manifests
   ansible.builtin.set_fact:
@@ -20,11 +31,11 @@
   ansible.builtin.assert:
     that:
       - ultra_release_manifest.assets | selectattr('name', 'equalto', release_asset_name) | list | length == 1
-      - ultra_previous_manifest.assets | selectattr('name', 'equalto', release_asset_name) | list | length == 1
+      - (ultra_previous_relay_manifest.assets if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined else release_previous_manifest.assets) | selectattr('name', 'equalto', release_asset_name) | list | length == 1
 - name: Pin the target and fallback hashes
   ansible.builtin.set_fact:
     release_target: "{{ ultra_release_manifest.assets | selectattr('name', 'equalto', release_asset_name) | first }}"
-    release_previous: "{{ ultra_previous_manifest.assets | selectattr('name', 'equalto', release_asset_name) | first }}"
+    release_previous: "{{ (ultra_previous_relay_manifest.assets if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined else release_previous_manifest.assets) | selectattr('name', 'equalto', release_asset_name) | first }}"
 - name: Validate exact asset metadata
   ansible.builtin.assert:
     that:

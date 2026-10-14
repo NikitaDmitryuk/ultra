@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -56,6 +57,25 @@ func TestManualUpgradeEnvironmentPreservesResolvedMinisign(t *testing.T) {
 	}
 	if got := manualUpgradeEnvironment("", "relative/minisign"); len(got) != 1 {
 		t.Fatalf("invalid home or verifier leaked into environment: %#v", got)
+	}
+}
+
+func TestMinisignVerifierMustBeAvailableForHandoff(t *testing.T) {
+	if handed, err := handoffManualUpgrade(context.Background(), &installplan.InstallPlan{}, "", nil, ""); err == nil || handed {
+		t.Fatalf("handoff proceeded without the verifier: handed=%v err=%v", handed, err)
+	}
+	if err := validateMinisignExecutable("relative/minisign"); err == nil {
+		t.Fatal("relative verifier path accepted")
+	}
+	if err := validateMinisignExecutable(filepath.Join(t.TempDir(), "missing-minisign")); err == nil {
+		t.Fatal("missing verifier accepted")
+	}
+	verifier := filepath.Join(t.TempDir(), "minisign")
+	if err := os.WriteFile(verifier, []byte("not executable"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateMinisignExecutable(verifier); err == nil {
+		t.Fatal("non-executable verifier accepted")
 	}
 }
 

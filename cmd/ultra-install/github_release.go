@@ -139,6 +139,15 @@ func publishLeasedRelease(candidate, published, tag string) (VerifiedGitHubRelea
 		renamed = true
 	} else if statErr != nil {
 		return result, false, statErr
+	} else {
+		// Decide collisions while the cache gate is held. Comparing manifests in
+		// the caller after releasing the gate permits the published winner to be
+		// replaced between the check and lease acquisition.
+		candidateManifest, candidateErr := os.ReadFile(filepath.Join(candidate, "release-manifest.json"))
+		publishedManifest, publishedErr := os.ReadFile(filepath.Join(published, "release-manifest.json"))
+		if candidateErr != nil || publishedErr != nil || !bytes.Equal(candidateManifest, publishedManifest) {
+			return result, false, errors.New("signed release cache already contains a different bundle for this tag")
+		}
 	}
 	absolute, err := filepath.Abs(published)
 	if err != nil {
@@ -493,8 +502,7 @@ func resolveMinisignExecutable() (string, error) {
 		if !filepath.IsAbs(override) {
 			return "", errors.New("minisign override must be absolute")
 		}
-		info, err := os.Stat(override)
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+		if err := validateMinisignExecutable(override); err != nil {
 			return "", errors.New("minisign override is unavailable")
 		}
 		return filepath.Clean(override), nil
@@ -503,7 +511,25 @@ func resolveMinisignExecutable() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Abs(path)
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if err := validateMinisignExecutable(absolute); err != nil {
+		return "", err
+	}
+	return absolute, nil
+}
+
+func validateMinisignExecutable(path string) error {
+	if !filepath.IsAbs(path) {
+		return errors.New("minisign path must be absolute")
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+		return errors.New("minisign executable unavailable")
+	}
+	return nil
 }
 
 func preparePrivateReleaseStage(path string) error {

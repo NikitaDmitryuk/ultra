@@ -2,6 +2,7 @@
 - name: Restore compatible exits from the frozen topology
   hosts: exits
   gather_facts: false
+  any_errors_fatal: true
   serial: 1
   tasks:
     - name: Restore compatible exit tools
