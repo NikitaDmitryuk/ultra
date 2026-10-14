@@ -10,6 +10,12 @@ import re
 import tempfile
 import shutil
 import time
+import pwd
+import shlex
+import subprocess
+import stat
+import ipaddress
+import uuid
 
 FILES = ['/usr/local/bin/ultra-relay', '/etc/ultra-relay/spec.json', '/etc/ultra-relay/environment', '/etc/systemd/system/ultra-relay.service']
 
@@ -30,6 +36,85 @@ def read(path):
     if source.is_symlink() or not source.is_file() or source.stat().st_size > 1048576:
         raise ValueError('adoption_state_unavailable')
     return json.loads(source.read_text())
+
+
+def owned_file(path, private=False, owner='root'):
+    source = Path(path)
+    allowed = {0}
+    if owner == 'ultra-relay':
+        allowed.add(pwd.getpwnam(owner).pw_uid)
+    elif owner != 'root':
+        raise ValueError('adoption_file_owner_invalid')
+    if (not source.is_absolute() or source.is_symlink() or not source.is_file()
+            or source.stat().st_uid not in allowed or source.stat().st_mode & (0o077 if private else 0o022)):
+        raise ValueError('unowned_adoption_file')
+
+
+def checked_pins(config, primary):
+    pins = Path(primary['known_hosts'])
+    managed = primary.get('managed') is True
+    prefix = Path('/var/lib/ultra-relay')
+    if managed and (config.get('vultr_state_dir') != '/var/lib/ultra-relay/vultr'
+                    or str(uuid.UUID(primary['id'])) != primary['id']
+                    or primary['known_hosts'] != '/var/lib/ultra-relay/vultr/' + primary['id'] + '/known_hosts'):
+        raise ValueError('adoption_ssh_pins_invalid')
+    relay_uid = pwd.getpwnam('ultra-relay').pw_uid if managed else None
+    if not pins.is_absolute() or '..' in pins.parts:
+        raise ValueError('adoption_ssh_pins_invalid')
+    for path in [pins, *pins.parents]:
+        metadata = path.lstat()
+        relay_owned = managed and (path == prefix or prefix in path.parents) and metadata.st_uid == relay_uid
+        if stat.S_ISLNK(metadata.st_mode) or metadata.st_mode & 0o022 or (metadata.st_uid != 0 and not relay_owned):
+            raise ValueError('adoption_ssh_pins_invalid')
+    if not pins.is_file() or not 0 < pins.stat().st_size <= 65536:
+        raise ValueError('adoption_ssh_pins_invalid')
+    address = str(ipaddress.ip_address(primary['address']))
+    if primary['host'] != 'root@' + address:
+        raise ValueError('adoption_ssh_destination_invalid')
+    result = subprocess.run(['ssh-keygen', '-F', address, '-f', str(pins)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+    if result.returncode:
+        raise ValueError('adoption_ssh_pins_missing')
+
+
+def verify_delivery(config, topology, backup_config, backup):
+    # Match reconcile.validate_delivery: the bridge retains the artifact, while
+    # the encrypted database generation lives on its confirmed receiver.
+    primary = next(node for node in topology['node_metadata'] if node['id'] == topology['primary'])
+    destinations = [item for item in backup_config['destinations']
+                    if item.get('id') == primary['id'] and item.get('host') == primary['host'] and item.get('required') is True]
+    if len(destinations) != 1 or primary['host'] not in backup['destinations']:
+        raise ValueError('adoption_primary_delivery_required')
+    destination = destinations[0]
+    names = [backup['backup_name'], backup['artifact_name']]
+    hashes = [backup['backup_sha256'], backup['artifact_sha256']]
+    if (not re.fullmatch(r'backup-[0-9]{10}-[a-f0-9]{32}\.age', names[0])
+            or not re.fullmatch(r'artifact-[a-f0-9]{64}\.age', names[1])
+            or any(not re.fullmatch(r'[a-f0-9]{64}', value) for value in hashes)
+            or int(names[0].split('-')[1]) != int(backup['snapshot_at'])
+            or not 0 <= time.time() - backup['snapshot_at'] <= 300):
+        raise ValueError('adoption_generation_invalid')
+    host = primary['host']
+    if not re.fullmatch(r'[A-Za-z0-9_.@:-]+', host) or host.startswith('-'):
+        raise ValueError('adoption_ssh_destination_invalid')
+    identity, pins = config['ssh_identity_file'], primary['known_hosts']
+    if destination.get('identity_file') != identity or destination.get('known_hosts') != pins:
+        raise ValueError('adoption_ssh_identity_invalid')
+    owned_file(identity, private=True, owner=config.get('ssh_identity_owner', 'ultra-relay'))
+    checked_pins(config, primary)
+    artifact = '/var/lib/ultra-recovery/' + names[1]
+    owned_file(artifact, private=True)
+    if digest(artifact) != hashes[1]:
+        raise ValueError('adoption_generation_invalid')
+    command = ['sha256sum', *['/var/lib/ultra-recovery/' + name for name in names]]
+    result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'UpdateHostKeys=no',
+                             '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2',
+                             '-o', 'IdentitiesOnly=yes', '-i', identity, '-o', 'UserKnownHostsFile=' + pins,
+                             host, shlex.join(command)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15)
+    expected = [[value.encode('ascii'), ('/var/lib/ultra-recovery/' + name).encode('ascii')]
+                for value, name in zip(hashes, names)]
+    if result.returncode or [line.split() for line in result.stdout.splitlines()] != expected:
+        raise ValueError('adoption_generation_invalid')
 
 
 def checked_asset(manifest, architecture, binary, component="ultra-relay"):
@@ -128,6 +213,9 @@ def main():
             module.exit_json(changed=False, legacy=legacy, fresh=False, stopped=stopped)
         backup = read('/var/lib/ultra-recovery/last-success.json')
         reconcile = read('/var/lib/ultra-relay/recovery-reconcile-status.json')
+        for path in ['/etc/ultra-recovery/backup.json', '/etc/ultra-recovery/reconcile.json',
+                     '/var/lib/ultra-recovery-reconcile/state.json']:
+            owned_file(path, private=True)
         backup_config = read('/etc/ultra-recovery/backup.json')
         reconcile_config = read('/etc/ultra-recovery/reconcile.json')
         if reconcile_config.get('state_dir') != '/var/lib/ultra-recovery-reconcile':
@@ -149,13 +237,9 @@ def main():
             raise ValueError('adoption_independent_delivery_required')
         if backup_config['repository'] != '/var/lib/ultra-recovery':
             raise ValueError('adoption_repository_invalid')
-        for name_key, hash_key in [('backup_name', 'backup_sha256'), ('artifact_name', 'artifact_sha256')]:
-            name = backup[name_key]
-            if Path(name).name != name or not name.endswith('.age') or digest('/var/lib/ultra-recovery/' + name) != backup[hash_key]:
-                raise ValueError('adoption_generation_invalid')
-
         if reconcile.get('independent') is not True or reconcile.get('state') != 'ready' or not 0 <= time.time() - reconcile['updated_at'] <= 180 or not 0 <= time.time() - backup['snapshot_at'] <= 300 or not backup.get('destinations'):
             raise ValueError('adoption_independent_backup_required')
+        verify_delivery(reconcile_config, topology, backup_config, backup)
         code, architecture, _ = module.run_command(['dpkg', '--print-architecture'])
         if code or architecture.strip() not in ('amd64', 'arm64'):
             raise ValueError('adoption_architecture_invalid')
@@ -231,7 +315,7 @@ def main():
             finally:
                 os.close(directory)
         module.exit_json(changed=False, legacy=True, fresh=False, stopped=stopped, verified=True)
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, StopIteration, subprocess.SubprocessError):
         module.fail_json(msg='adoption_guard_failed')
 
 
