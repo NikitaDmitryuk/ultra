@@ -42,6 +42,11 @@ def owned_baseline_file(name, bounded=False):
     return path
 
 
+def local_installed_manifest():
+    """A previously activated exit may have a different release than bridge."""
+    return json.loads(owned_baseline_file('/opt/ultra-recovery/release-manifest.json', bounded=True).read_text())
+
+
 def emergency_baseline(module, specification, architecture, binary):
     """Use the same fixed emergency identity/schema contract as adoption_guard.
 
@@ -109,20 +114,19 @@ def main():
         if actual_sha not in permitted:
             if not module.params['preserve_runtime']:
                 raise ValueError('installed_artifact_drift')
-            selected = module.params['installed_manifest']
-            if not selected:
-                manifest = Path('/opt/ultra-recovery/release-manifest.json')
-                metadata = manifest.lstat()
-                if manifest.is_symlink() or not manifest.is_file() or metadata.st_uid != 0 or metadata.st_mode & 0o022 or metadata.st_size > 1048576:
-                    raise ValueError('installed_artifact_drift')
-                selected = json.loads(manifest.read_text())
             code, architecture, _ = module.run_command(['dpkg', '--print-architecture'])
             if code:
                 raise ValueError('installed_artifact_drift')
             try:
+                selected = module.params['installed_manifest']
+                if not selected:
+                    selected = local_installed_manifest()
                 installed_baseline(selected, architecture.strip(), binary.read_bytes())
             except ValueError:
-                emergency_baseline(module, actual, architecture.strip(), binary.read_bytes())
+                try:
+                    installed_baseline(local_installed_manifest(), architecture.strip(), binary.read_bytes())
+                except (OSError, ValueError, KeyError, TypeError):
+                    emergency_baseline(module, actual, architecture.strip(), binary.read_bytes())
         module.exit_json(changed=False, verified=True)
     except (OSError, ValueError, KeyError, TypeError) as error:
         known = {'managed_paths_required', 'specification_drift', 'specification_unreadable', 'environment_drift', 'service_definition_drift', 'installed_artifact_drift'}

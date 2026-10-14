@@ -119,6 +119,36 @@ with tempfile.TemporaryDirectory() as temporary:
         module = FakeModule()
         assert invoke(module).get('verified') is True, 'existing installed/candidate identity'
         assert not any(args[:3] == ['runuser', '-u', 'postgres'] for args in module.commands)
+    # A prior partial rolling update can leave one exit on a newer verified
+    # release than bridge. Its protected local manifest must attest that binary.
+    exit_manifest = deepcopy(manifest)
+    exit_manifest['version'] = 'v2.4.8'
+    exit_manifest['assets'][0].update(size=len(candidate), sha256=hashlib.sha256(candidate).hexdigest())
+    local_manifest_path = '/opt/ultra-recovery/release-manifest.json'
+    write(local_manifest_path, exit_manifest)
+    write('/usr/local/bin/ultra-relay', candidate)
+    module = FakeModule()
+    module.params['binary_sha256'] = hashlib.sha256(b'new candidate').hexdigest()
+    module.params['specification'] = {'role': 'exit'}
+    write('/etc/ultra-relay/spec.json', {'role': 'exit'})
+    assert invoke(module).get('verified') is True, 'exit release newer than bridge'
+    write('/usr/local/bin/ultra-relay', b'unknown binary')
+    assert invoke(module).get('failed') is True, 'unknown exit binary refused'
+    write('/usr/local/bin/ultra-relay', candidate)
+    owners[str(mapped(local_manifest_path))] = 1000
+    assert invoke(module).get('failed') is True, 'unowned exit manifest refused'
+    owners.clear()
+    mapped(local_manifest_path).chmod(0o622)
+    assert invoke(module).get('failed') is True, 'writable exit manifest refused'
+    mapped(local_manifest_path).chmod(0o600)
+    write(local_manifest_path, b'{invalid json')
+    assert invoke(module).get('failed') is True, 'malformed exit manifest refused'
+    mapped(local_manifest_path).unlink()
+    target = write('/exit-manifest-target', exit_manifest)
+    mapped(local_manifest_path).symlink_to(target)
+    assert invoke(module).get('failed') is True, 'symlinked exit manifest refused'
+    mapped(local_manifest_path).unlink()
+    write('/etc/ultra-relay/spec.json', {'role': 'bridge'})
     unreadable = FakeModule()
     unreadable.spec_readable = False
     assert invoke(unreadable).get('msg') == 'adoption_specification_unreadable'
