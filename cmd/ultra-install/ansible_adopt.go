@@ -19,11 +19,19 @@ func runAdoptCommand(arguments []string) {
 	file := flags.String("config", "install.config", "canonical deployment parameters")
 	releaseDirectory := flags.String("release-dir", "", "complete verified release for read-only comparison")
 	prepareConfig := flags.String("prepare-config", "", "write a private schema 2 candidate from managed recovery policy; no host changes")
+	bridgeSSHHost := flags.String("bridge-ssh-host", "", "explicit bridge SSH address for legacy preparation; pins and identity stay unchanged")
 	_ = flags.Bool("check", true, "read-only comparison; no configuration ownership is assumed")
 	_ = flags.Parse(arguments)
 	p, err := installplan.LoadConfig(*file)
 	exitOnErr("adopt config", err)
 	legacyPreparation := *prepareConfig != ""
+	if *bridgeSSHHost != "" {
+		if !legacyPreparation {
+			exitOnErr("adopt SSH endpoint", errors.New("adoption_ssh_override_requires_preparation"))
+		}
+		p, err = adoptionSSHOverride(p, *bridgeSSHHost)
+		exitOnErr("adopt SSH endpoint", err)
+	}
 	if legacyPreparation && (p.Automation != nil || *releaseDirectory == "") {
 		exitOnErr("adopt preparation", errors.New("legacy config and explicit verified release required"))
 	}

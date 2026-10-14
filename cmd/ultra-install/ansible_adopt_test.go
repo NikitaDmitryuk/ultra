@@ -17,6 +17,23 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+func TestAdoptSSHOverrideRequiresPreparation(t *testing.T) {
+	if os.Getenv("ULTRA_TEST_ADOPT_OVERRIDE_CHILD") == "1" {
+		runAdoptCommand([]string{"--config", os.Getenv("ULTRA_TEST_ADOPT_CONFIG"), "--bridge-ssh-host", "192.0.2.1"})
+		return
+	}
+	config := filepath.Join(t.TempDir(), "install.config")
+	if err := os.WriteFile(config, []byte("BRIDGE=192.0.2.1\nEXIT=192.0.2.2\nIDENTITY=/fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestAdoptSSHOverrideRequiresPreparation$")
+	command.Env = []string{"ULTRA_TEST_ADOPT_OVERRIDE_CHILD=1", "ULTRA_TEST_ADOPT_CONFIG=" + config}
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "adoption_ssh_override_requires_preparation") {
+		t.Fatalf("override reached inspection: %v: %s", err, output)
+	}
+}
+
 // The subprocess exercises the CLI's os.Exit error path with a clean operator
 // cache. Its generated credentials cannot authorize access to any real host.
 func TestAdoptPreparesOfflineRuntimeOnCleanCache(t *testing.T) {

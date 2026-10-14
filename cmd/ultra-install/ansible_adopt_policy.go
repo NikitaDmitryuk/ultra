@@ -12,6 +12,23 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
+// This opt-in imports an explicit endpoint, never an ambient SSH alias or its
+// ProxyCommand. The inspection still requires the original identity and pins.
+func adoptionSSHOverride(p *installplan.InstallPlan, host string) (*installplan.InstallPlan, error) {
+	if p.Automation != nil || len(p.SourceValues) == 0 || net.ParseIP(host) == nil {
+		return nil, errors.New("adoption_explicit_ssh_address_required")
+	}
+	values := make(map[string]string, len(p.SourceValues)+1)
+	for key, value := range p.SourceValues {
+		values[key] = value
+	}
+	values["BRIDGE_SSH_HOST"] = host
+	if values["DB_HOST"] == p.Bridge.SSHHost {
+		values["DB_HOST"] = host
+	}
+	return installplan.CanonicalValuesToPlan(values)
+}
+
 // Recovery metadata supplies existing policy, never credentials or a second
 // operator inventory. The caller obtained these fixed files using pinned SSH.
 func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspection, version, release, pins string) (*installplan.InstallPlan, []byte, error) {

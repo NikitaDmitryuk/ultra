@@ -40,6 +40,42 @@ func adoptionInspectionAdd(i *bootstrapInspection, name string, raw []byte) {
 		Source  string `json:"source"`
 	}{base64.StdEncoding.EncodeToString(raw), "/etc/ultra-recovery/" + name})
 }
+
+func TestAdoptionExplicitSSHOverridePreservesTrustAndSource(t *testing.T) {
+	p, _ := adoptionPolicyFixture(t)
+	p.SourceValues["BRIDGE_SSH_HOST"] = "bridge-admin"
+	p.SourceValues["DB_HOST"] = "bridge-admin"
+	p, err := installplan.CanonicalValuesToPlan(p.SourceValues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := p.SourceValues["BRIDGE_SSH_HOST"]
+	candidate, err := adoptionSSHOverride(p, "192.0.2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.SourceValues["BRIDGE_SSH_HOST"] != original || candidate.Bridge.SSHHost != "192.0.2.1" || candidate.Database.PrimaryHost != "192.0.2.1" {
+		t.Fatal("source changed or primary endpoint lost")
+	}
+	for key, value := range p.SourceValues {
+		if key != "BRIDGE_SSH_HOST" && key != "DB_HOST" && candidate.SourceValues[key] != value {
+			t.Fatalf("changed preserved parameter %s", key)
+		}
+	}
+	if candidate.SSH != p.SSH || candidate.SecretsEnvFile() != p.SecretsEnvFile() {
+		t.Fatal("SSH trust or secret reference changed")
+	}
+	p.SourceValues["DB_HOST"] = "192.0.2.3"
+	separate, err := adoptionSSHOverride(p, "192.0.2.1")
+	if err != nil || separate.Database.PrimaryHost != "192.0.2.3" {
+		t.Fatal("independent primary endpoint changed", err)
+	}
+	for _, host := range []string{"bridge-admin", "192.0.2.1; command", ""} {
+		if _, err := adoptionSSHOverride(p, host); err == nil {
+			t.Fatal("implicit or invalid endpoint accepted")
+		}
+	}
+}
 func TestPrepareAdoptionPolicyPreservesCanonicalInputs(t *testing.T) {
 	p, i := adoptionPolicyFixture(t)
 	original := map[string]string{}
