@@ -31,9 +31,14 @@ func adoptionSSHOverride(p *installplan.InstallPlan, host string) (*installplan.
 
 // Recovery metadata supplies existing policy, never credentials or a second
 // operator inventory. The caller obtained these fixed files using pinned SSH.
+type adoptionPolicyError struct{ stage string }
+
+func (*adoptionPolicyError) Error() string { return "adoption_policy_missing_or_conflicting" }
+
 func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspection, version, release, pins string) (*installplan.InstallPlan, []byte, error) {
+	stage := "input"
 	fail := func() (*installplan.InstallPlan, []byte, error) {
-		return nil, nil, errors.New("adoption_policy_missing_or_conflicting")
+		return nil, nil, &adoptionPolicyError{stage: stage}
 	}
 	if p.Automation != nil || len(p.SourceValues) == 0 || !filepath.IsAbs(release) || !filepath.IsAbs(pins) {
 		return fail()
@@ -47,6 +52,8 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 		Ingress             *installplan.AutomationIngress `json:"ingress"`
 		StaticNodes         []installplan.AutomationNode   `json:"static_nodes"`
 		ControllerDirectory string                         `json:"controller_directory"`
+		SubscriptionDomain  string                         `json:"subscription_domain"`
+		IngressMode         string                         `json:"ingress_mode"`
 	}
 	var backup struct {
 		Source        string   `json:"source"`
@@ -65,17 +72,21 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 		raw, err := inspection.file(name)
 		return err == nil && len(raw) > 0 && validAdoptionMetadata(name, raw) && json.Unmarshal(raw, target) == nil
 	}
+	stage = "metadata"
 	if !decode("deployment.json", &deployment) || !decode("backup.json", &backup) || !decode("reconcile.json", &reconcile) {
 		return fail()
 	}
+	stage = "agreement"
 	if deployment.Version == "" || deployment.BridgeProvider == "" || deployment.BridgeURL == "" || deployment.Database == "" || len(deployment.StaticNodes) == 0 || backup.Source != "bridge" || backup.Recipient == "" || deployment.BridgeProvider != reconcile.BridgeProvider || deployment.BridgeURL != reconcile.BridgeURL || deployment.Database != backup.Database || deployment.Database != reconcile.Database || deployment.Database != p.Database.Name || !reflect.DeepEqual(deployment.StaticNodes, reconcile.StaticNodes) {
 		return fail()
 	}
+	stage = "bridge"
 	address := net.ParseIP(deployment.BridgeIPv4)
 	if address == nil || !address.Equal(net.ParseIP(p.Bridge.Address)) {
 		return fail()
 	}
 	// Every canonical static endpoint must have exactly one policy entry and vice versa.
+	stage = "nodes"
 	addresses := map[string]bool{}
 	for _, node := range deployment.StaticNodes {
 		ip := net.ParseIP(node.Address)
@@ -104,14 +115,28 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 		values[key] = value
 		return true
 	}
+	stage = "subscription"
+	if deployment.IngressMode != "" {
+		if (deployment.IngressMode != "direct" && deployment.IngressMode != "forward") || !set("SUBSCRIPTION_INGRESS_MODE", deployment.IngressMode) {
+			return fail()
+		}
+		if deployment.IngressMode == "forward" && (deployment.Ingress == nil || strings.TrimSpace(deployment.Ingress.ForwardHost) == "") {
+			return fail()
+		}
+	}
+	if deployment.SubscriptionDomain != "" && !set("SUBSCRIPTION_DOMAIN", deployment.SubscriptionDomain) {
+		return fail()
+	}
 	nodes, _ := json.Marshal(deployment.StaticNodes)
 	for key, value := range map[string]string{
 		"ULTRA_AUTOMATION_AGE_RECIPIENT": backup.Recipient, "ULTRA_AUTOMATION_BRIDGE_PROVIDER": deployment.BridgeProvider, "ULTRA_AUTOMATION_BRIDGE_IPV4": deployment.BridgeIPv4, "ULTRA_AUTOMATION_BRIDGE_URL": deployment.BridgeURL, "ULTRA_AUTOMATION_STATIC_NODES": string(nodes), "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": pins,
 	} {
+		stage = "managed_policy." + key
 		if !set(key, value) {
 			return fail()
 		}
 	}
+	stage = "admin"
 	raw, err := inspection.file("admin-chat-id")
 	if err != nil {
 		return fail()
@@ -125,16 +150,25 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 	}
 	if ingress := deployment.Ingress; ingress != nil {
 		for key, value := range map[string]string{"VPN_DOMAIN": ingress.Domain, "ACME_EMAIL": ingress.Email, "PUBLIC_XHTTP_PATH": ingress.Path, "PUBLIC_HOST": ingress.PublicHost, "BOT_INGRESS_IP": ingress.ForwardHost} {
+			stage = "ingress." + key
+			// Direct subscription mode already clears the effective ForwardHost in
+			// the canonical parser. Keep an unused legacy backend address without
+			// interpreting it as a request to restore the forwarding ingress.
+			if key == "BOT_INGRESS_IP" && deployment.IngressMode == "direct" && value == "" {
+				continue
+			}
 			if !set(key, value) {
 				return fail()
 			}
 		}
 		for key, value := range map[string]int{"ULTRA_INGRESS_BACKEND_PORT": ingress.BackendPort, "ULTRA_INGRESS_GATEWAY_PORT": ingress.GatewayPort, "ULTRA_INGRESS_STATUS_PORT": ingress.StatusPort, "ULTRA_INGRESS_EXPERIMENTAL_PORT": ingress.ExperimentalPort, "ULTRA_INGRESS_STAGING_PORT": ingress.StagingPort} {
+			stage = "ingress." + key
 			if value != 0 && !set(key, strconv.Itoa(value)) {
 				return fail()
 			}
 		}
 	}
+	stage = "dns"
 	dnsRaw, err := inspection.file("dns.json")
 	if err != nil {
 		return fail()
@@ -147,6 +181,7 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 			return fail()
 		}
 		for key, value := range map[string]string{"DNS_PROVIDER": dns.Config.Provider, "DNS_ZONE": dns.Config.Zone, "DNS_TTL": strconv.Itoa(dns.Config.TTL), "DNS_SUBSCRIPTION_NAME": dns.Config.SubscriptionName, "DNS_VPN_NAME": dns.Config.VPNName} {
+			stage = "dns." + key
 			if !set(key, value) {
 				return fail()
 			}
@@ -156,12 +191,14 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 	}
 	// Only the controller tree explicitly identified by deployment metadata is
 	// replaced by bootstrap. Unrelated or historical trees remain in coverage.
+	stage = "controller"
 	controller := deployment.ControllerDirectory
 	if controller != "" && (!validAutomationVersion(deployment.Version) ||
 		(controller != "/opt/ultra-ansible/releases/"+deployment.Version && controller != managedControllerDirectory(deployment.Version))) {
 		return fail()
 	}
 	for key, paths := range map[string][]string{"ULTRA_AUTOMATION_STATE_PATHS": backup.StatePaths, "ULTRA_AUTOMATION_ARTIFACT_PATHS": backup.ArtifactPaths} {
+		stage = "backup_paths." + key
 		extras, err := adoptionBackupExtras(paths, controller)
 		if err != nil {
 			return fail()
@@ -190,10 +227,12 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 	values["REUSE_BRIDGE_SPEC"] = "true"
 	values["ULTRA_AUTOMATION_VERSION"] = version
 	values["ULTRA_AUTOMATION_RELEASE_DIR"] = release
+	stage = "validation"
 	candidate, err := installplan.CanonicalValuesToPlan(values)
 	if err != nil || installplan.ValidatePlan(candidate) != nil {
 		return fail()
 	}
+	stage = "render"
 	rendered, err := renderCanonicalInputs(values)
 	if err != nil {
 		return fail()
@@ -251,7 +290,7 @@ func adoptionBackupExtras(paths []string, regeneratedController ...string) ([]st
 // Auxiliary fields are references emitted by the existing recovery planner.
 func validAdoptionMetadata(name string, raw []byte) bool {
 	fields := map[string]string{
-		"deployment.json": "version bridge_ipv4 bridge_provider bridge_url database ingress static_nodes ssh_identity_file known_hosts_file controller_directory",
+		"deployment.json": "version bridge_ipv4 bridge_provider bridge_url database ingress static_nodes ssh_identity_file known_hosts_file controller_directory subscription_domain ingress_mode",
 		"backup.json":     "source repository database recipient identity_file known_hosts destinations independent state_paths artifact_paths diagnostic_status",
 		"reconcile.json":  "database bridge_provider vultr_state_dir ssh_identity_file vultr_api_key_file api_key_owner ssh_identity_owner backup_config state_dir status_file status_group bundle_dir client_binary installer_binary bot_token_file chat_id_file probe_profile_file bridge_url payload_url static_nodes monitor_spec_file",
 		"dns.json":        "config desired",

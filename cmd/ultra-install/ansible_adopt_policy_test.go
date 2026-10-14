@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -172,6 +173,89 @@ func TestAdoptionMetadataRejectsUnknownPolicy(t *testing.T) {
 	}
 	if validAdoptionMetadata("dns.json", []byte(`{"config":{"provider":"vultr","unknown":true}}`)) {
 		t.Fatal("unknown DNS policy accepted")
+	}
+}
+
+func TestAdoptionPreservesPublishedSubscriptionPolicy(t *testing.T) {
+	for _, fixture := range []struct {
+		mode, domain, forward string
+		valid                 bool
+	}{
+		{"direct", "sync.example.com", "", true},
+		{"forward", "sync.example.com", "192.0.2.2", true},
+		{"forward", "sync.example.com", "", false},
+		{"forward", "sync.example.com", " ", false},
+		{"unknown", "sync.example.com", "", false},
+		{"direct", "changed.example.com", "", false},
+	} {
+		t.Run(fixture.mode+fixture.domain, func(t *testing.T) {
+			p, inspection := adoptionPolicyFixture(t)
+			for index, file := range inspection.Files {
+				if filepath.Base(file.Source) != "deployment.json" {
+					continue
+				}
+				raw, _ := base64.StdEncoding.DecodeString(file.Content)
+				var doc map[string]any
+				if err := json.Unmarshal(raw, &doc); err != nil {
+					t.Fatal(err)
+				}
+				doc["ingress_mode"], doc["subscription_domain"] = fixture.mode, fixture.domain
+				doc["ingress"].(map[string]any)["forward_host"] = fixture.forward
+				raw, _ = json.Marshal(doc)
+				inspection.Files[index].Content = base64.StdEncoding.EncodeToString(raw)
+			}
+			candidate, _, err := prepareAdoptionConfig(p, inspection, "v2.0.0", "/release", "/pins")
+			if !fixture.valid {
+				if err == nil {
+					t.Fatal("conflicting or unknown subscription policy accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if candidate.SourceValues["SUBSCRIPTION_INGRESS_MODE"] != fixture.mode || candidate.SourceValues["SUBSCRIPTION_DOMAIN"] != fixture.domain {
+				t.Fatal("published subscription policy lost")
+			}
+			if candidate.Automation.Ingress.ForwardHost != fixture.forward {
+				t.Fatal("forwarding endpoint lost")
+			}
+		})
+	}
+}
+
+func TestAdoptionDirectModePreservesUnusedLegacyBackend(t *testing.T) {
+	p, inspection := adoptionPolicyFixture(t)
+	p.SourceValues["BOT_INGRESS_IP"] = "192.0.2.2"
+	for index, file := range inspection.Files {
+		if filepath.Base(file.Source) != "deployment.json" {
+			continue
+		}
+		raw, _ := base64.StdEncoding.DecodeString(file.Content)
+		var doc map[string]any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatal(err)
+		}
+		doc["ingress_mode"] = "direct"
+		raw, _ = json.Marshal(doc)
+		inspection.Files[index].Content = base64.StdEncoding.EncodeToString(raw)
+	}
+	candidate, _, err := prepareAdoptionConfig(p, inspection, "v2.0.0", "/release", "/pins")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.SourceValues["BOT_INGRESS_IP"] != "192.0.2.2" || p.SourceValues["BOT_INGRESS_IP"] != "192.0.2.2" || candidate.Automation.Ingress.ForwardHost != "" {
+		t.Fatal("legacy backend lost or direct mode restored forwarding")
+	}
+}
+
+func TestAdoptionPolicyDiagnosticContainsOnlyStage(t *testing.T) {
+	p, inspection := adoptionPolicyFixture(t)
+	p.SourceValues["ACME_EMAIL"] = "private-fixture@example.net"
+	_, _, err := prepareAdoptionConfig(p, inspection, "v2.0.0", "/release", "/pins")
+	var failure *adoptionPolicyError
+	if !errors.As(err, &failure) || failure.stage != "ingress.ACME_EMAIL" || err.Error() != "adoption_policy_missing_or_conflicting" {
+		t.Fatalf("unsafe or missing diagnostic: %v", err)
 	}
 }
 

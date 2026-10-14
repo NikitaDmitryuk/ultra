@@ -93,6 +93,10 @@ func runAdoptCommand(arguments []string) {
 		pinPath, err = filepath.Abs(pinPath)
 		exitOnErr("adopt pins", err)
 		_, candidate, prepareErr := prepareAdoptionConfig(p, inspection["bridge"], runtimePlan.Automation.Version, runtimePlan.Automation.ReleaseDir, pinPath)
+		var policyError *adoptionPolicyError
+		if errors.As(prepareErr, &policyError) {
+			prepareErr = fmt.Errorf("%s (%s)", policyError.Error(), policyError.stage)
+		}
 		exitOnErr("adopt policy preparation", prepareErr)
 		exitOnErr("adopt private candidate", writeAdoptionCandidate(*prepareConfig, candidate))
 		fmt.Println("adopt: validated private schema 2 candidate prepared; no host state changed")
