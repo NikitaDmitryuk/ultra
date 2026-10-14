@@ -57,6 +57,24 @@ public age recipient, Telegram ID, домены и несекретную пол
 бот не получает ключи управления провайдером. Поддерживаемый
 `automation.cloud_key_file` не заменяет канонический compute key из `.env`.
 
+`ULTRA_RELEASE_MINISIGN_PUBLIC_KEY` — доверенный открытый ключ, которым локальный
+оператор проверяет подписи `release-manifest.json` и `checksums.txt` перед
+обновлением. Это публичная политика, не секрет: значение остаётся в каноническом
+`install.config`, не попадает в JSON-план, Ansible inventory и recovery config.
+Значение — base64-строка из `minisign.pub` (строка после комментария), а не
+приватный `minisign.key`; приватная часть остаётся только в секретах release
+workflow. Перед доверием проверьте, что открытый ключ соответствует ключу,
+которым подписывает workflow. Для проверки на машине оператора нужен `minisign`
+в `PATH`.
+
+После успешного upgrade локальный кеш `~/.cache/ultra/releases` очищается от
+устаревших комплектов только при подтверждённой подписи, неизменном составе и
+отсутствии активного bundle lease или ссылки из незавершённой операции. Текущий
+и предыдущий релизы сохраняются для отката; неизвестные и изменённые каталоги
+очистка оставляет на месте. Ссылка на релиз незавершённой операции хранится рядом
+с кешем и защищает комплект независимо от того, где расположен заданный `--job-dir`;
+после успешного завершения ссылка удаляется.
+
 `ULTRA_AUTOMATION_STATE_PATHS` и `ULTRA_AUTOMATION_ARTIFACT_PATHS` дополняют
 backup inventory. Это JSON-массивы абсолютных путей: отсутствие, пустая строка
 и `[]` не добавляют путей; `null` и неверные типы отклоняются.
@@ -91,13 +109,19 @@ ultra-install plan --config install.config
 ultra-install adopt --config install.config --release-dir /secure/releases/vX.Y.Z --check
 ultra-install apply --config install.config
 ultra-install status --config install.config
-ultra-install upgrade --config install.config --release-dir /secure/releases/vX.Y.Z
+ultra-install upgrade
+ultra-install upgrade --release vX.Y.Z
+ultra-install upgrade --config install.config --release latest
 ```
 
 `--config` и `--plan` взаимоисключающие. Относительные пути разрешаются от
 рабочего каталога оператора. CLI проверяет входы, создаёт приватное неизменяемое
 задание и запускает фиксированную операцию Ansible. Обычное обновление
-не повторяет полную подготовку ОС.
+не повторяет полную подготовку ОС. `upgrade` без selector выбирает stable
+`latest`; `--release vX.Y.Z` закрепляет конкретный релиз. Для upgrade без
+`--config` используется локальный `install.config`. Явный config выбирает цели
+и deployment policy, но сохраняет текущие runtime-настройки. Локальный
+`--release-dir` поддержан для уже скачанного подписанного комплекта.
 
 Служба `ultra-ansible-controller` работает на bridge независимо от relay и бота.
 Она принимает ограниченный набор заданий через Unix-сокет. Root-peer управляет
@@ -173,6 +197,10 @@ ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \
 ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 ```
 
+При запуске из отдельного worktree путь к каноническому файлу можно передать через
+`INSTALL_CONFIG=/absolute/path/to/install.config make deploy`. Для конфигурации
+допустимы режимы 0600 и 0644; обновление сохраняет исходный режим.
+
 Ключ должен быть выделенным файлом с правами 0600, а host keys — проверенными
 заранее. SSH использует `-F /dev/null`, `StrictHostKeyChecking=yes` и только эти
 локальные path refs; пользовательский `~/.ssh/config` не читается. `.env`, SSH
@@ -187,8 +215,16 @@ inventory не нужен и вручную его создавать не сл�
 и точный canonical `install.config` в
 `/var/lib/ultra-ansible/operator-inputs/manual-<SHA>-<attempt>/release`. В конфигурации
 обновляются только `ULTRA_AUTOMATION_VERSION` и `ULTRA_AUTOMATION_RELEASE_DIR`;
-`.env` и иные секреты не передаются. На bridge выполняются `doctor`, затем обычный
-`upgrade` и `status`. Для принятия уже работающего runtime используйте явный запуск:
+`.env` и иные секреты не передаются. На bridge выполняются `doctor`, затем
+`operator-upgrade` и `status`. Эта отдельная команда сверяет source commit, SHA-256
+manifest и config, все хеши assets и совпадение собственного исполняемого installer
+с записью manifest; эти значения приходят по pinned SSH transport. Обычная команда
+`upgrade` сохраняет обязательную проверку подписи GitHub Releases. Операторский
+sidecar-lock рядом с canonical config сериализует выкладки из разных worktree,
+передающих один и тот же `INSTALL_CONFIG`. После неудачного upgrade повтор той же
+задачи с recovery preflight запускается явно через `RETRY_FAILED=1 make deploy`;
+значение по умолчанию выключено. Для принятия уже работающего runtime используйте
+явный запуск:
 
 ```sh
 ADOPT=1 ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \

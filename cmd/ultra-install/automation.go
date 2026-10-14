@@ -8,12 +8,14 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"math/big"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
@@ -23,22 +25,73 @@ func runAutomationCommand(action string, args []string) {
 	fs := flag.NewFlagSet("ultra-install "+action, flag.ExitOnError)
 	plan := fs.String("plan", "", "validated install plan; private file references only")
 	configPath := fs.String("config", "", "canonical install.config path (exclusive with --plan)")
-	releaseDir := fs.String("release-dir", "", "verified immutable release directory (adopted schema v1 installations)")
+	releaseDir := fs.String("release-dir", "", "local signed release directory (overrides GitHub selection)")
+	releaseSelector := fs.String("release", "latest", "GitHub release tag, or latest for the stable release")
 	retryFailed := fs.Bool("retry-failed", false, "explicitly retry the same failed frozen Ansible job after recovery preflight")
 	jobDirectory := fs.String("job-dir", "", "persistent private Ansible upgrade directory")
 	python := fs.String("python", "/usr/bin/python3", "controller Python")
 	ansible := fs.String("ansible-playbook", "", "pinned Ansible executable; otherwise resolve exact release runtime")
 	_ = fs.Parse(args)
+	if fs.NArg() > 0 {
+		exitOnErr("upgrade arguments", errors.New("positional arguments are not supported"))
+		return
+	}
+	if action == "upgrade" && *plan == "" && *configPath == "" {
+		*configPath = "install.config"
+	}
 	p := readDeploymentOrExit(*plan, *configPath)
 	if action == "upgrade" {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
-		handed, err := handoffManualUpgrade(ctx, p, *releaseDir, args)
+		publicKey := strings.TrimSpace(p.SourceValues["ULTRA_RELEASE_MINISIGN_PUBLIC_KEY"])
+		if publicKey == "" {
+			message := "trusted Minisign public key missing from canonical install.config (ULTRA_RELEASE_MINISIGN_PUBLIC_KEY)"
+			if *plan != "" {
+				message = "signed upgrade requires canonical --config; deployment plans do not carry the trusted Minisign key"
+			}
+			exitOnErr("GitHub release verification", errors.New(message))
+			return
+		}
+		minisignPath, err := resolveMinisignExecutable()
+		if err != nil {
+			exitOnErr("GitHub release verification", errors.New("minisign executable required"))
+			return
+		}
+		selectedReleaseDir := *releaseDir
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			exitOnErr("GitHub release cache", err)
+			return
+		}
+		stagingBase := filepath.Join(cache, "ultra", "releases")
+		if selectedReleaseDir == "" {
+			verified, err := FetchVerifiedGitHubRelease(ctx, GitHubReleaseOptions{
+				Selector:     *releaseSelector,
+				PublicKey:    publicKey,
+				StagingBase:  stagingBase,
+				MinisignPath: minisignPath,
+			})
+			exitOnErr("GitHub release download", err)
+			selectedReleaseDir = verified.Directory
+			defer verified.Close()
+		} else if *releaseSelector != "latest" {
+			exitOnErr("upgrade arguments", errors.New("--release and --release-dir cannot be used together"))
+			return
+		} else {
+			verified, err := snapshotSignedAutomationRelease(selectedReleaseDir, publicKey, stagingBase, minisignPath)
+			exitOnErr("local release snapshot", err)
+			selectedReleaseDir = verified.Directory
+			defer verified.Close()
+		}
+		_, err = verifySignedAutomationRelease(selectedReleaseDir, publicKey, minisignPath)
+		exitOnErr("GitHub release verification", err)
+		handoffArgs := rewriteUpgradeReleaseArgs(args, selectedReleaseDir)
+		handed, err := handoffManualUpgrade(ctx, p, selectedReleaseDir, handoffArgs, minisignPath)
 		if handed || err != nil {
 			exitOnErr("Ansible target upgrade", err)
 			return
 		}
-		exitOnErr("Ansible upgrade", ansibleUpgrade(ctx, p, *releaseDir, *jobDirectory, *python, *ansible, *retryFailed))
+		exitOnErr("Ansible upgrade", ansibleUpgrade(ctx, p, selectedReleaseDir, *jobDirectory, *python, *ansible, *retryFailed))
 		return
 	}
 	if action == "status" {
@@ -48,6 +101,134 @@ func runAutomationCommand(action string, args []string) {
 		return
 	}
 	applyPlanN(p, "human")
+}
+
+// runOperatorUpgradeCommand applies the exact local release candidate prepared
+// by scripts/manual-deploy.py. Its expected identities are bound by the
+// operator's pinned SSH transport; normal "upgrade" remains signature-only.
+func runOperatorUpgradeCommand(args []string) {
+	fs := flag.NewFlagSet("ultra-install operator-upgrade", flag.ExitOnError)
+	configPath := fs.String("config", "", "canonical install.config path")
+	releaseDir := fs.String("release-dir", "", "operator-staged release candidate")
+	sourceCommit := fs.String("source-commit", "", "expected 40-character source commit")
+	version := fs.String("version", "", "expected candidate version")
+	manifestSHA := fs.String("manifest-sha256", "", "expected release manifest SHA-256")
+	configSHA := fs.String("config-sha256", "", "expected canonical config SHA-256")
+	retryFailed := fs.Bool("retry-failed", false, "explicitly retry the same failed frozen Ansible job after recovery preflight")
+	jobDirectory := fs.String("job-dir", "", "persistent private Ansible upgrade directory")
+	python := fs.String("python", "/usr/bin/python3", "controller Python")
+	ansible := fs.String("ansible-playbook", "", "pinned Ansible executable; otherwise resolve exact release runtime")
+	_ = fs.Parse(args)
+	if fs.NArg() > 0 || *configPath == "" || *releaseDir == "" || *version == "" ||
+		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(*sourceCommit) ||
+		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(*manifestSHA) ||
+		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(*configSHA) {
+		exitOnErr("operator upgrade arguments", errors.New("complete operator candidate identity required"))
+		return
+	}
+	configRaw, err := os.ReadFile(*configPath)
+	if err != nil || digestSHA256(configRaw) != *configSHA {
+		exitOnErr("operator upgrade config verification", errors.New("canonical config digest mismatch"))
+		return
+	}
+	p := readDeploymentOrExit("", *configPath)
+	if p.Automation == nil || p.Automation.Version != *version {
+		exitOnErr("operator upgrade config verification", errors.New("candidate version does not match canonical config"))
+		return
+	}
+	configuredRelease, err := filepath.Abs(p.Automation.ReleaseDir)
+	if err != nil {
+		exitOnErr("operator upgrade config verification", err)
+		return
+	}
+	selectedRelease, err := filepath.Abs(*releaseDir)
+	if err != nil || configuredRelease != selectedRelease {
+		exitOnErr("operator upgrade config verification", errors.New("candidate directory does not match canonical config"))
+		return
+	}
+	current := "/proc/self/exe"
+	if _, err := verifyOperatorUpgradeRelease(selectedRelease, *sourceCommit, *version, *manifestSHA, current); err != nil {
+		exitOnErr("operator upgrade release verification", err)
+		return
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	exitOnErr("Ansible operator upgrade", ansibleUpgrade(ctx, p, selectedRelease, *jobDirectory, *python, *ansible, *retryFailed))
+}
+
+func verifyOperatorUpgradeRelease(releaseDir, sourceCommit, version, manifestSHA, executable string) (*automationRelease, error) {
+	if !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(sourceCommit) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(manifestSHA) {
+		return nil, errors.New("invalid operator candidate identity")
+	}
+	commitNumber, ok := new(big.Int).SetString(sourceCommit, 16)
+	if !ok || version != "v0.0."+commitNumber.String() {
+		return nil, errors.New("operator candidate version does not match source commit")
+	}
+	info, err := os.Lstat(releaseDir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("candidate directory must be a real directory")
+	}
+	manifestInfo, err := os.Lstat(filepath.Join(releaseDir, "release-manifest.json"))
+	if err != nil || !manifestInfo.Mode().IsRegular() {
+		return nil, errors.New("candidate manifest must be a regular file")
+	}
+	manifestRaw, err := os.ReadFile(filepath.Join(releaseDir, "release-manifest.json"))
+	if err != nil || digestSHA256(manifestRaw) != manifestSHA {
+		return nil, errors.New("candidate manifest digest mismatch")
+	}
+	manifest, err := verifyAutomationRelease(releaseDir, version)
+	if err != nil || manifest.SourceCommit != sourceCommit || len(manifest.Assets) != 14 {
+		return nil, errors.New("candidate manifest identity or assets invalid")
+	}
+	allowed := map[string]bool{"release-manifest.json": true, "candidate.json": true}
+	for _, asset := range manifest.Assets {
+		allowed[asset.Name] = true
+	}
+	entries, err := os.ReadDir(releaseDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if !allowed[entry.Name()] || entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() {
+			return nil, errors.New("candidate directory contains an unexpected or non-regular file")
+		}
+	}
+	asset, err := upgradeAsset(manifest, "ultra-install-linux-"+runtime.GOARCH)
+	if err != nil {
+		return nil, err
+	}
+	executableSHA, err := sourceSHA(executable)
+	if err != nil || executableSHA != asset.SHA {
+		return nil, errors.New("running installer is not the verified release asset")
+	}
+	return manifest, nil
+}
+
+func digestSHA256(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// rewriteUpgradeReleaseArgs pins a child installer handoff to the already
+// verified immutable directory. It must not resolve "latest" a second time.
+func rewriteUpgradeReleaseArgs(args []string, releaseDir string) []string {
+	filtered := make([]string, 0, len(args)+2)
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			// The release pin must remain a parsed flag in the handed-off CLI.
+			continue
+		}
+		if arg == "--release" || arg == "-release" || arg == "--release-dir" || arg == "-release-dir" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--release=") || strings.HasPrefix(arg, "-release=") || strings.HasPrefix(arg, "--release-dir=") || strings.HasPrefix(arg, "-release-dir=") {
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	return append(filtered, "--release-dir", releaseDir)
 }
 
 type automationRelease struct {
@@ -134,7 +315,7 @@ func validAutomationVersion(version string) bool {
 
 // Familiar operator commands enter the new release through its exact installer,
 // so a retained old CLI never applies its old embedded infrastructure roles.
-func handoffManualUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir string, args []string) (bool, error) {
+func handoffManualUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir string, args []string, minisignPath string) (bool, error) {
 	if releaseDir == "" && p.Automation != nil {
 		releaseDir = p.Automation.ReleaseDir
 	}
@@ -160,20 +341,93 @@ func handoffManualUpgrade(ctx context.Context, p *installplan.InstallPlan, relea
 	if currentSHA == asset.SHA {
 		return false, nil
 	}
-	target, err := filepath.Abs(filepath.Join(releaseDir, asset.Name))
+	target, cleanup, err := stageManualUpgradeInstaller(releaseDir, asset.Name, asset.SHA, asset.Size)
 	if err != nil {
 		return false, err
 	}
-	if err = os.Chmod(target, 0700); err != nil {
-		return false, err
-	}
+	defer cleanup()
 	command := exec.CommandContext(ctx, target, append([]string{"upgrade"}, args...)...)
-	command.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
-	if home, err := os.UserHomeDir(); err == nil {
-		command.Env = append(command.Env, "HOME="+home)
-	}
+	home, _ := os.UserHomeDir()
+	command.Env = manualUpgradeEnvironment(home, minisignPath)
 	if command.Run() != nil {
 		return true, errors.New("target_installer_upgrade_failed")
 	}
 	return true, nil
+}
+
+// Stage an executable copy beside the immutable signed release bundle. The
+// cache remains byte-for-byte and mode-for-mode verifiable for later retention.
+func stageManualUpgradeInstaller(releaseDir, name, expectedSHA string, expectedSize int64) (string, func(), error) {
+	sourcePath := filepath.Join(releaseDir, name)
+	info, err := os.Lstat(sourcePath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != expectedSize || expectedSize <= 0 {
+		return "", nil, errors.New("target_installer_asset_invalid")
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return "", nil, errors.New("target_installer_asset_unavailable")
+	}
+	opened, statErr := source.Stat()
+	if statErr != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		_ = source.Close()
+		return "", nil, errors.New("target_installer_asset_changed")
+	}
+
+	directory, err := os.MkdirTemp(filepath.Dir(releaseDir), ".ultra-installer-handoff-")
+	if err != nil {
+		_ = source.Close()
+		return "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(directory) }
+	fail := func(cause error) (string, func(), error) {
+		_ = source.Close()
+		cleanup()
+		return "", nil, cause
+	}
+	if err := os.Chmod(directory, 0700); err != nil {
+		return fail(err)
+	}
+	target := filepath.Join(directory, "ultra-install")
+	output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return fail(err)
+	}
+	hash := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(output, hash), io.LimitReader(source, expectedSize+1))
+	closeSourceErr := source.Close()
+	if copyErr != nil || closeSourceErr != nil || written != expectedSize || hex.EncodeToString(hash.Sum(nil)) != expectedSHA {
+		_ = output.Close()
+		return fail(errors.New("target_installer_copy_verification_failed"))
+	}
+	if err := output.Sync(); err != nil {
+		_ = output.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if err := output.Chmod(0700); err != nil {
+		_ = output.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if err := output.Sync(); err != nil {
+		_ = output.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if err := output.Close(); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return target, cleanup, nil
+}
+
+func manualUpgradeEnvironment(home, minisignPath string) []string {
+	env := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+	if home != "" {
+		env = append(env, "HOME="+home)
+	}
+	if filepath.IsAbs(minisignPath) {
+		env = append(env, upgradeMinisignPathEnv+"="+minisignPath)
+	}
+	return env
 }

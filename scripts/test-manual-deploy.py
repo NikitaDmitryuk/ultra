@@ -34,19 +34,25 @@ class ManualDeploy(unittest.TestCase):
         self.version = 'v0.0.' + str(int(self.commit, 16))
         self.bundle = self.root / self.version
         self.bundle.mkdir()
+        (self.bundle / 'release-manifest.json').write_bytes(b'fixture-manifest')
         self.calls = []
 
     def run_fixture(self, command, cwd, stage, capture=False, env=None):
         self.calls.append((stage, command))
 
-    def rollout(self, adopt=False, runner=None):
+    def rollout(self, adopt=False, runner=None, config_path=None, retry_failed=False):
         with patch.object(D, 'run', runner or self.run_fixture), patch.object(D.platform, 'system', return_value='Linux'), patch.object(D.platform, 'machine', return_value='x86_64'), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            D.rollout(self.repo, self.root, self.bundle, self.commit, self.version, adopt)
+            D.rollout(self.repo, self.root, self.bundle, self.commit, self.version, adopt, config_path, retry_failed)
 
     def test_numeric_version_exact_commit_round_trip_and_path_limit(self):
         self.assertRegex(self.version, r'^v[0-9]+\.[0-9]+\.[0-9]+$')
         self.assertEqual(int(self.version[5:]), int(self.commit, 16))
         self.assertLess(len(self.version), 95)
+
+    def test_canonical_config_lock_is_shared_across_worktree_path_aliases(self):
+        alias = self.repo / 'other-worktree'
+        alias.symlink_to(self.repo, target_is_directory=True)
+        self.assertEqual(D.canonical_config_lock(self.config), D.canonical_config_lock(alias / 'install.config'))
 
     def test_only_two_canonical_values_change_without_shell_evaluation(self):
         self.rollout()
@@ -56,8 +62,23 @@ class ManualDeploy(unittest.TestCase):
         self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
         self.assertEqual(next(self.root.glob('install.config.before-*')).read_bytes(), self.original)
         self.assertEqual([stage for stage, _ in self.calls], ['doctor', 'upgrade', 'status'])
-        self.assertIn('--release-dir', self.calls[1][1])
+        self.assertIn('operator-upgrade', self.calls[1][1])
+        self.assertIn('--source-commit', self.calls[1][1])
+        self.assertIn('--manifest-sha256', self.calls[1][1])
+        self.assertIn('--config-sha256', self.calls[1][1])
         self.assertFalse((self.root / 'operation.json').exists())
+
+    def test_retry_failed_is_explicitly_forwarded_to_operator_upgrade(self):
+        self.rollout(retry_failed=True)
+        command = self.calls[1][1]
+        self.assertIn('operator-upgrade', command)
+        self.assertIn('--retry-failed', command)
+
+    def test_readable_canonical_config_keeps_its_mode(self):
+        self.config.chmod(0o644)
+        self.rollout(config_path=self.config)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o644)
+        self.assertIn(self.version.encode(), self.config.read_bytes())
 
     def test_explicit_adoption_compares_then_applies_without_redundant_upgrade(self):
         self.rollout(adopt=True)
@@ -133,12 +154,12 @@ class ManualDeploy(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), desired)
 
     def test_private_config_and_symlink_requirements(self):
-        self.config.chmod(0o644)
-        with self.assertRaisesRegex(D.DeployError, '0600'):
+        self.config.chmod(0o640)
+        with self.assertRaisesRegex(D.DeployError, 'readable_file'):
             self.rollout()
         self.config.unlink()
         self.config.symlink_to(self.root / 'missing')
-        with self.assertRaisesRegex(D.DeployError, '0600'):
+        with self.assertRaisesRegex(D.DeployError, 'readable_file'):
             self.rollout()
 
     def test_duplicate_release_keys_fail_closed(self):
@@ -187,6 +208,7 @@ class ManualDeploy(unittest.TestCase):
                 (cwd / 'dist').mkdir()
                 (cwd / 'dist/release-manifest.json').write_text('{}')
                 (cwd / 'dist/ultra-install-linux-amd64').write_bytes(b'fixture')
+        (self.bundle / 'release-manifest.json').unlink()
         self.bundle.rmdir()
         with patch.object(D, 'prepare_runtime_environment', return_value={}), patch.object(D, 'run', runner), patch.object(D, 'verify_bundle', side_effect=lambda *args: validations.append(args)):
             bundle = D.build_candidate(self.repo, self.root, self.commit, self.version)
@@ -260,9 +282,17 @@ class NativeDeploy(unittest.TestCase):
             remote = D.shlex.split(command[-1])
             self.assertEqual(remote[:3], ['python3', '-I', '-c'])
             self.assertEqual(remote[4:11], ['run', self.commit, self.version, D.sha(self.manifest), D.sha(self.config.read_bytes()), D.remote_attempt(self.original, self.version), 'arm64'])
-            self.assertEqual(remote[-1], stage)
+            self.assertEqual(remote[11], stage)
+            self.assertEqual(remote[12], '0')
         self.assertIn("'--bridge-native'", D.REMOTE_PROGRAM)
-        self.assertIn("'upgrade':['upgrade'", D.REMOTE_PROGRAM)
+        self.assertIn("'upgrade':['operator-upgrade'", D.REMOTE_PROGRAM)
+
+    def test_native_retry_failed_is_bound_to_upgrade_handoff(self):
+        self.rollout(retry_failed=True)
+        command = next(command for stage, command in self.calls if stage == 'upgrade')
+        remote = D.shlex.split(command[-1])
+        self.assertEqual(remote[11], 'upgrade')
+        self.assertEqual(remote[12], '1')
 
     def test_native_interrupted_staging_is_retryable_without_dispatch(self):
         self.stage_mock.side_effect = D.DeployError('bridge_staging_failed')
@@ -486,12 +516,19 @@ class RemoteProgram(unittest.TestCase):
         self.assertEqual((self.root / 'install.config').read_bytes(), self.config)
         self.assertEqual(json.loads(staged.stdout)['architecture'], self.architecture)
         for action, expected in [('doctor', ['doctor']), ('adoption_check', ['adopt', '--adopt-runtime', '--bridge-native', '--check']),
-                                 ('adoption_apply', ['apply', '--adopt-runtime', '--bridge-native']), ('upgrade', ['upgrade']), ('status', ['status'])]:
+                                 ('adoption_apply', ['apply', '--adopt-runtime', '--bridge-native']),
+                                 ('upgrade', ['operator-upgrade', '--release-dir', str(self.root / 'release'),
+                                              '--source-commit', self.commit, '--version', self.version,
+                                              '--manifest-sha256', D.sha(self.manifest), '--config-sha256', D.sha(self.config)]),
+                                 ('status', ['status'])]:
             run = self.execute('run', None, self.architecture, action)
             self.assertEqual(run.returncode, 0, run.stderr)
             argv = json.loads(self.result.read_bytes())
             self.assertEqual(argv[:len(expected)], expected)
             self.assertEqual(argv[-2:], ['--config', str(self.root / 'install.config')])
+        retried = self.execute('run', None, self.architecture, 'upgrade', '1')
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        self.assertIn('--retry-failed', json.loads(self.result.read_bytes()))
         again = self.execute('stage', self.archive())
         self.assertEqual(again.returncode, 0, again.stderr)
 

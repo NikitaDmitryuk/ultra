@@ -99,6 +99,13 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err = freezeOperatorPlan(directory, p, releaseDir); err != nil {
 		return err
 	}
+	cacheRoot, err := os.UserCacheDir()
+	if err != nil {
+		return err
+	}
+	if err = pinOperatorRelease(filepath.Join(cacheRoot, "ultra", "releases"), directory, releaseDir); err != nil {
+		return errors.New("upgrade_release_retention_pin_failed")
+	}
 	originalCtx := ctx
 	operatorCtx, releaseOperator, err := withBootstrapOperatorLock(ctx, filepath.Dir(directory))
 	if err != nil {
@@ -322,6 +329,38 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 			returnErr = sealCompletedOperatorOperation(directory, "upgrade", manifest, manifestSHA)
 			if returnErr == nil {
 				returnErr = collectCompletedOperatorArtifacts(filepath.Dir(directory), manifest, &inspection.Previous)
+			}
+			if returnErr == nil {
+				if cacheRoot, cacheErr := os.UserCacheDir(); cacheErr == nil {
+					if unpinErr := unpinOperatorReleaseReferences(filepath.Join(cacheRoot, "ultra", "releases"), directory); unpinErr != nil {
+						_, _ = fmt.Fprintf(os.Stderr, "warning: release cache pin cleanup skipped: %v\n", unpinErr)
+					}
+				} else {
+					_, _ = fmt.Fprintf(os.Stderr, "warning: release cache pin cleanup skipped: %v\n", cacheErr)
+				}
+			}
+			if returnErr == nil {
+				key := strings.TrimSpace(p.SourceValues["ULTRA_RELEASE_MINISIGN_PUBLIC_KEY"])
+				if key != "" {
+					cache, cacheErr := os.UserCacheDir()
+					if cacheErr == nil {
+						minisignPath, signerErr := resolveMinisignExecutable()
+						cacheErr = signerErr
+						if cacheErr == nil {
+							keep := []string{manifest.Version}
+							if stableReleaseTag.MatchString(inspection.Previous.Version) {
+								keep = append(keep, inspection.Previous.Version)
+							}
+							cacheErr = pruneVerifiedOperatorReleaseCache(
+								filepath.Join(cache, "ultra", "releases"), filepath.Dir(directory),
+								key, minisignPath, keep...,
+							)
+						}
+					}
+					if cacheErr != nil {
+						_, _ = fmt.Fprintf(os.Stderr, "warning: release cache retention skipped: %v\n", cacheErr)
+					}
+				}
 			}
 		}
 	}()

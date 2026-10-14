@@ -178,6 +178,16 @@ func TestCanonicalRejectsPrivateSigningMaterialButAllowsPublicPolicy(t *testing.
 	if DisallowedDeploymentSecret("ULTRA_AUTO_UPGRADE_MINISIGN_PUBLIC_KEY_FILE") {
 		t.Fatal("public verifier rejected")
 	}
+	values := canonicalFixture()
+	values["ULTRA_RELEASE_MINISIGN_PUBLIC_KEY"] = "RWQtrusted-public-key"
+	plan, err := CanonicalValuesToPlan(values)
+	if err != nil || plan.SourceValues["ULTRA_RELEASE_MINISIGN_PUBLIC_KEY"] != "RWQtrusted-public-key" {
+		t.Fatal("trusted public key was not kept in local source values")
+	}
+	encoded, err := json.Marshal(plan)
+	if err != nil || strings.Contains(string(encoded), "RWQtrusted-public-key") {
+		t.Fatal("trusted public key leaked into serialized install plan")
+	}
 }
 
 func TestCanonicalIngressPorts(t *testing.T) {

@@ -45,6 +45,8 @@ func handlePlanSubcommand(args []string) bool {
 		runAnsibleExit(args[1:])
 	case "bootstrap", "status", "upgrade":
 		runAutomationCommand(args[0], args[1:])
+	case "operator-upgrade":
+		runOperatorUpgradeCommand(args[1:])
 	case "domain-cutover":
 		runDomainCutoverCommand(args[1:])
 	case "backend-domain":

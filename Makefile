@@ -210,7 +210,7 @@ test-ansible-exit: build-install
 # Explicit operator action: builds committed HEAD in isolation, then rolls out.
 .PHONY: deploy deploy-build test-manual-deploy
 deploy:
-	python3 scripts/manual-deploy.py
+	python3 scripts/manual-deploy.py $(if $(INSTALL_CONFIG),--config "$(INSTALL_CONFIG)",) $(if $(filter 1,$(RETRY_FAILED)),--retry-failed,)
 
 deploy-build:
 	python3 scripts/manual-deploy.py --build-only

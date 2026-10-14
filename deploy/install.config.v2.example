@@ -1,6 +1,8 @@
 # Canonical deployment policy; secrets belong only in .env.
 INSTALL_SCHEMA_VERSION=2
 SECRETS_ENV_FILE=.env
+# Trusted public key for verifying signed GitHub release bundles.
+ULTRA_RELEASE_MINISIGN_PUBLIC_KEY=REPLACE_WITH_TRUSTED_MINISIGN_PUBLIC_KEY
 SSH_USER=root
 IDENTITY=/secure/operator_ed25519
 BRIDGE=192.0.2.10

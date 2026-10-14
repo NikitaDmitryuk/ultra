@@ -51,11 +51,29 @@ def private_file(path):
     return path.read_bytes()
 
 
-def atomic_write(path, raw):
+def canonical_file(path):
+    """Read the non-secret canonical deployment config in either supported mode."""
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
+            stat.S_IMODE(info.st_mode) in (0o600, 0o644), 'canonical_config_requires_owned_regular_readable_file')
+    return path.read_bytes()
+
+
+def atomic_write(path, raw, preserve_mode=False):
+    mode = 0o600
+    if preserve_mode:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
+                    stat.S_IMODE(info.st_mode) in (0o600, 0o644), 'canonical_config_mode_invalid')
+            mode = stat.S_IMODE(info.st_mode)
     descriptor, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
     try:
         with os.fdopen(descriptor, 'wb') as stream:
-            os.fchmod(stream.fileno(), 0o600)
+            os.fchmod(stream.fileno(), mode)
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
@@ -84,6 +102,11 @@ def lock(path):
         yield
     finally:
         os.close(descriptor)
+
+
+def canonical_config_lock(path):
+    resolved = Path(path).resolve(strict=True)
+    return resolved.with_name('.' + resolved.name + '.manual-deploy.lock')
 
 
 def config_candidate(raw, version, release):
@@ -396,12 +419,16 @@ elif mode=='run':
     verify(root)
     architecture=sys.argv[7];need(architecture in ['amd64','arm64'])
     need(architecture=={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine()))
-    action=sys.argv[8];need(action in ['doctor','adoption_check','adoption_apply','upgrade','status'])
+    action=sys.argv[8];need(action in ['doctor','adoption_check','adoption_apply','upgrade','operator-upgrade','status'])
+    retry_failed=len(sys.argv)>9 and sys.argv[9]=='1';need(len(sys.argv)<=9 or sys.argv[9] in ['0','1'])
     binary=root/'release'/('ultra-install-linux-'+architecture)
     binary.chmod(0o700)
     args={'doctor':['doctor'],'adoption_check':['adopt','--adopt-runtime','--bridge-native','--check','--release-dir',str(root/'release')],
           'adoption_apply':['apply','--adopt-runtime','--bridge-native'],
-          'upgrade':['upgrade','--release-dir',str(root/'release')],'status':['status']}[action]
+          'upgrade':['operator-upgrade','--release-dir',str(root/'release'),
+              '--source-commit',commit,'--version',version,'--manifest-sha256',manifest_sha,
+              '--config-sha256',config_sha] + (['--retry-failed'] if retry_failed else []),
+          'status':['status']}[action]
     os.chdir(root)
     # Keep the remote lock across exec and strip unchecked installer overrides.
     os.set_inheritable(lock,True)
@@ -439,11 +466,11 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
     return receipt['architecture']
 
 
-def rollout(repo, root, bundle, commit, version, adopt):
+def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_failed=False):
     architecture = {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(platform.machine())
     require(platform.system() == 'Linux' and architecture, 'operator_requires_linux_amd64_or_arm64')
-    config = repo / 'install.config'
-    current = private_file(config)
+    config = Path(config_path) if config_path else repo / 'install.config'
+    current = canonical_file(config)
     validate_config_policy(current)
     operator_inventory = os.environ.get('ULTRA_OPERATOR_INVENTORY')
     transport, transport_binding = operator_transport(operator_inventory, current) if operator_requested() else (None, None)
@@ -469,7 +496,7 @@ def rollout(repo, root, bundle, commit, version, adopt):
                 'manual_operation_transport_or_manifest_changed')
         require(record.get('remote_attempt') == attempt, 'manual_operation_attempt_changed')
         if record.get('stage') == 'prepared' and sha(current) == record.get('previous_sha256'):
-            atomic_write(config, new)
+            atomic_write(config, new, preserve_mode=True)
         else:
             require(sha(current) == record.get('config_sha256'), 'canonical_config_changed_during_operation')
     else:
@@ -478,21 +505,26 @@ def rollout(repo, root, bundle, commit, version, adopt):
                   'backup': backup.name, 'previous_sha256': sha(current), 'config_sha256': sha(new), 'stage': 'prepared', 'mutator_dispatched': False,
                   'transport_binding': transport_binding, 'manifest_sha256': manifest_sha, 'remote_attempt': attempt}
         atomic_write(journal, json.dumps(record).encode())
-        require(private_file(config) == current, 'canonical_config_changed_before_update')
-        atomic_write(config, new)
+        require(canonical_file(config) == current, 'canonical_config_changed_before_update')
+        atomic_write(config, new, preserve_mode=True)
     installer = str(bundle / ('ultra-install-linux-' + architecture))
     commands = [('doctor', [installer, 'doctor', '--config', str(config)])]
     if adopt:
         commands += [('adoption_check', [installer, 'adopt', '--config', str(config), '--release-dir', str(bundle), '--adopt-runtime', '--check']),
                      ('adoption_apply', [installer, 'apply', '--config', str(config), '--adopt-runtime'])]
     else:
-        commands += [('upgrade', [installer, 'upgrade', '--config', str(config), '--release-dir', str(bundle)])]
+        commands += [('upgrade', [installer, 'operator-upgrade', '--config', str(config), '--release-dir', str(bundle),
+                                  '--source-commit', commit, '--version', version,
+                                  '--manifest-sha256', manifest_sha or sha((bundle / 'release-manifest.json').read_bytes()),
+                                  '--config-sha256', sha(new)])]
+        if retry_failed:
+            commands[-1][1].append('--retry-failed')
     commands += [('status', [installer, 'status', '--config', str(config)])]
     try:
         if transport:
             record['stage'] = 'bridge_staging'
             atomic_write(journal, json.dumps(record).encode())
-            staged_config = private_file(config)
+            staged_config = canonical_file(config)
             require(sha(staged_config) == record['config_sha256'], 'canonical_config_changed_before_staging')
             staged_architecture = stage_remote(repo, root, bundle, staged_config, transport, commit, version, manifest_sha)
             require(record.get('remote_architecture', staged_architecture) == staged_architecture, 'bridge_architecture_changed')
@@ -505,15 +537,15 @@ def rollout(repo, root, bundle, commit, version, adopt):
             print('manual-deploy: ' + stage, flush=True)
             if transport:
                 command = remote_command(transport, commit, version, manifest_sha, record['config_sha256'], attempt,
-                                         'run', record['remote_architecture'], stage)
+                                         'run', record['remote_architecture'], stage, '1' if retry_failed else '0')
             run(command, repo, stage)
     except BaseException:
         # Read-only adoption comparison cannot have dispatched a mutating job.
         # After apply/upgrade dispatch, keep exact canonical inputs for recovery.
-        if not record.get('mutator_dispatched', False) and record['stage'] in ('bridge_staging', 'doctor', 'adoption_check') and sha(private_file(config)) == record['config_sha256']:
+        if not record.get('mutator_dispatched', False) and record['stage'] in ('bridge_staging', 'doctor', 'adoption_check') and sha(canonical_file(config)) == record['config_sha256']:
             previous = private_file(backup)
             require(sha(previous) == record['previous_sha256'], 'canonical_backup_changed')
-            atomic_write(config, previous)
+            atomic_write(config, previous, preserve_mode=True)
             journal.unlink()
         else:
             print('manual-deploy: canonical inputs retained; reconcile the unfinished operation with ultra-install status before recovery; do not deploy another commit', file=sys.stderr)
@@ -525,8 +557,11 @@ def main():
     require(__debug__, 'python_optimization_disables_release_validation')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build-only', action='store_true', help='verify/build candidate without changing canonical config or remote hosts')
+    parser.add_argument('--config', help='canonical install.config path; defaults to install.config in this checkout')
+    parser.add_argument('--retry-failed', action='store_true', help='explicitly retry the same failed upgrade after recovery preflight')
     arguments = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
+    config = Path(os.path.abspath(arguments.config)) if arguments.config else repo / 'install.config'
     for executable in ['git', 'make', 'go', 'tar', 'sha256sum', 'bash']:
         require(shutil.which(executable), 'missing_prerequisite_' + executable)
     dirty = run(['git', 'status', '--porcelain', '--untracked-files=no'], repo, 'tracked_tree_check', capture=True)
@@ -534,12 +569,7 @@ def main():
     commit = run(['git', 'rev-parse', '--verify', 'HEAD'], repo, 'source_commit', capture=True)
     require(re.fullmatch('[0-9a-f]{40}', commit), 'source_commit_invalid')
     require(os.environ.get('ADOPT', '0') in ('0', '1'), 'ADOPT_must_be_0_or_1')
-    if not arguments.build_only:
-        validate_config_policy(private_file(repo / 'install.config'))
-        if operator_requested():
-            for executable in ['ssh', 'ssh-keygen']:
-                require(shutil.which(executable), 'missing_prerequisite_' + executable)
-            operator_transport(os.environ.get('ULTRA_OPERATOR_INVENTORY'), private_file(repo / 'install.config'))
+    require(not arguments.retry_failed or os.environ.get('ADOPT') != '1', 'retry_failed_requires_upgrade')
     version = 'v0.0.' + str(int(commit, 16))
     root = repo / 'dist' / 'manual'
     require(not (repo / 'dist').is_symlink(), 'dist_must_not_be_symlink')
@@ -552,7 +582,14 @@ def main():
         if not arguments.build_only:
             require(not run(['git', 'status', '--porcelain', '--untracked-files=no'], repo, 'tracked_tree_recheck', capture=True), 'tracked_tree_changed_during_build')
             require(run(['git', 'rev-parse', '--verify', 'HEAD'], repo, 'source_commit_recheck', capture=True) == commit, 'HEAD_changed_during_build')
-            rollout(repo, root, bundle, commit, version, os.environ.get('ADOPT') == '1')
+            with lock(canonical_config_lock(config)):
+                current = canonical_file(config)
+                validate_config_policy(current)
+                if operator_requested():
+                    for executable in ['ssh', 'ssh-keygen']:
+                        require(shutil.which(executable), 'missing_prerequisite_' + executable)
+                    operator_transport(os.environ.get('ULTRA_OPERATOR_INVENTORY'), current)
+                rollout(repo, root, bundle, commit, version, os.environ.get('ADOPT') == '1', config, arguments.retry_failed)
     print('manual-deploy: complete', flush=True)
 
 
