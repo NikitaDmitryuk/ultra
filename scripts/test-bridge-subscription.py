@@ -59,7 +59,7 @@ class RealNginxTests(unittest.TestCase):
             name='ultra-subscription-test-'+uuid.uuid4().hex
             try:
                 subprocess.run(['docker','run','--detach','--rm','--name',name,'--network','host','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--tmpfs','/tmp:rw,noexec,nosuid,size=16m','--mount','type=bind,src='+tmp+',dst=/fixtures,readonly','--entrypoint','nginx',image,'-c','/fixtures/nginx.conf','-g','daemon off;'],check=True,capture_output=True)
-                ctx=ssl.create_default_context(cafile=str(cert));ctx.minimum_version=ssl.TLSVersion.TLSv1_2
+                ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT);ctx.minimum_version=ssl.TLSVersion.TLSv1_2;ctx.load_verify_locations(cafile=str(cert))
                 def request(host,path='/'):
                     with socket.create_connection(('127.0.0.1',front),timeout=2) as raw:
                         with ctx.wrap_socket(raw,server_hostname=host) as sock:
