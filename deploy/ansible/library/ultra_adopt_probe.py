@@ -90,6 +90,10 @@ def main():
         actual = json.loads(specification.read_text())
         if actual != module.params['specification']:
             raise ValueError('specification_drift')
+        if module.params['preserve_runtime']:
+            code, _, _ = module.run_command(['runuser', '-u', 'ultra-relay', '--', 'test', '-r', '/etc/ultra-relay/spec.json'])
+            if code:
+                raise ValueError('specification_unreadable')
         if environment(Path('/etc/ultra-relay/environment').read_text()) != environment(module.params['environment']):
             raise ValueError('environment_drift')
         if hashlib.sha256(unit.read_bytes()).hexdigest() not in (module.params['unit_sha256'], module.params['previous_unit_sha256'] if module.params['preserve_runtime'] else ''):
@@ -121,7 +125,7 @@ def main():
                 emergency_baseline(module, actual, architecture.strip(), binary.read_bytes())
         module.exit_json(changed=False, verified=True)
     except (OSError, ValueError, KeyError, TypeError) as error:
-        known = {'managed_paths_required', 'specification_drift', 'environment_drift', 'service_definition_drift', 'installed_artifact_drift'}
+        known = {'managed_paths_required', 'specification_drift', 'specification_unreadable', 'environment_drift', 'service_definition_drift', 'installed_artifact_drift'}
         code = str(error) if str(error) in known else 'inspection_failed'
         module.fail_json(msg='adoption_' + code, exception='')
 

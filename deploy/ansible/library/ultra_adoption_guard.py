@@ -201,6 +201,10 @@ def main():
                 for entry in saved['restore_files']:
                     if digest(entry['destination']) != saved['files'][entry['destination']]:
                         raise ValueError('adoption_restored_file_changed')
+                    metadata = Path(entry['destination']).stat()
+                    if (metadata.st_uid != int(entry['owner']) or metadata.st_gid != int(entry['group'])
+                            or stat.S_IMODE(metadata.st_mode) != int(entry['mode'], 8)):
+                        raise ValueError('adoption_restored_file_metadata_changed')
             module.exit_json(changed=False, verified=True, restore_files=saved['restore_files'],
                              binary=str(checkpoint.parent / 'rollback-relay'), bot_active=saved.get('bot_active', False),
                              verified_binary_sha256=(digest(FILES[0]) if module.params['action'] == 'retry-check' else ''))
@@ -209,6 +213,13 @@ def main():
             if any(digest(path) != value for path, value in saved['files'].items()):
                 raise ValueError('adoption_checkpoint_changed')
             module.exit_json(changed=False, legacy=saved['legacy'], verified=True)
+        # A running worker may have loaded its spec before an earlier operation
+        # changed the file owner. The next restart would then fail even though
+        # the bytes still match. Check the service identity before fencing it.
+        if legacy:
+            code, _, _ = module.run_command(['runuser', '-u', 'ultra-relay', '--', 'test', '-r', FILES[1]])
+            if code:
+                raise ValueError('adoption_spec_unreadable')
         if not legacy or module.params['action'] == 'inspect':
             module.exit_json(changed=False, legacy=legacy, fresh=False, stopped=stopped)
         backup = read('/var/lib/ultra-recovery/last-success.json')

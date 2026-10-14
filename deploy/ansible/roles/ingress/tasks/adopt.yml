@@ -22,6 +22,31 @@
           - path: /etc/letsencrypt/renewal-hooks/deploy/ultra-vpn
             content: "{{ lookup('template', 'legacy-renewal-hook.j2') }}"
   no_log: true
+- name: Add the frozen bot-domain hook with its preserved cutover dependencies
+  vars:
+    ingress_adopt_alias_hook: |
+      #!/bin/sh
+      set -eu
+      nginx -t
+      systemctl reload nginx
+  ansible.builtin.set_fact:
+    ingress_adopt_files: >-
+      {{ [ingress_adopt_files[0], {'alternatives': ingress_adopt_files[1].alternatives + [{
+         'path': '/etc/letsencrypt/renewal-hooks/deploy/ultra-vpn',
+         'content': lookup('template', 'legacy-renewal-hook.j2',
+            template_vars={'ultra_ingress': ultra_ingress | combine({'domain': ultra_bot_domain})}),
+         'requires': [
+            {'path': '/etc/nginx/conf.d/ultra-vpn-legacy.conf',
+             'content': lookup('template', 'primary.conf.j2',
+                template_vars={'ultra_ingress': ultra_ingress | combine({'domain': ultra_bot_domain}),
+                               'ingress_public_port': 443})},
+            {'path': '/etc/letsencrypt/renewal-hooks/deploy/ultra-domain-alias',
+             'content': ingress_adopt_alias_hook}],
+         'lineage': '/etc/letsencrypt/live/' + ultra_bot_domain}]}] }}
+  no_log: true
+  when:
+    - ultra_bot_domain | length > 0
+    - ultra_bot_domain != ultra_ingress.domain
 - name: Require preserved subscription routing
   ansible.builtin.set_fact:
     ingress_adopt_files: >-

@@ -39,6 +39,10 @@ class FakeModule:
             return 3, 'inactive', ''
         if args[:2] == ['systemctl', 'show']:
             return 0, '0', ''
+        if args[:4] == ['runuser', '-u', 'ultra-relay', '--']:
+            target = mapped(args[-1])
+            info = target.stat()
+            return (0 if info.st_uid == 1001 and info.st_mode & stat.S_IRUSR else 1), '', ''
         if args[0] == 'runuser':
             return 0, '24:24', ''
         raise AssertionError(args)
@@ -69,6 +73,7 @@ with tempfile.TemporaryDirectory() as temporary:
         target.chmod(0o600)
     for path in module.FILES:
         write(path, b'old-managed-bytes')
+    owners[str(mapped(module.FILES[1]))] = 1001
     write('/usr/local/libexec/ultra-relay-emergency', b'compatible-emergency')
     snapshot = int(time.time())
     backup_name = 'backup-' + str(snapshot) + '-' + 'a'*32 + '.age'
@@ -124,6 +129,14 @@ with tempfile.TemporaryDirectory() as temporary:
             assert 'StrictHostKeyChecking=yes' in argv and 'BatchMode=yes' in argv and 'IdentitiesOnly=yes' in argv
             assert 'UserKnownHostsFile=' + pins in argv and identity in argv
             assert ssh.call_args.kwargs['timeout'] == 15 and ssh.call_args.kwargs['stderr'] == subprocess.DEVNULL
+        # Matching bytes are insufficient if a restart would make the saved
+        # relay unable to open its own 0600 specification.
+        owners[str(mapped(module.FILES[1]))] = 0
+        with patch.object(module.subprocess, 'run', return_value=remote_result) as ssh:
+            assert invoke('inspect').get('failed') is True
+            assert invoke('checkpoint').get('failed') is True
+            ssh.assert_not_called()
+        owners[str(mapped(module.FILES[1]))] = 1001
         parent = str(mapped('/var/lib/ultra-relay/vultr'))
         directory_modes[parent] = stat.S_IFDIR | 0o777
         with patch.object(module.subprocess, 'run', return_value=remote_result) as ssh:
@@ -201,6 +214,9 @@ with tempfile.TemporaryDirectory() as temporary:
         write(module.FILES[0], mapped('/usr/local/libexec/ultra-relay-emergency').read_bytes())
         with patch.object(module, 'check_private_checkpoint', return_value=None):
             assert invoke('retry-check').get('verified') is True
+            owners[str(mapped(module.FILES[1]))] = 0
+            assert invoke('retry-check').get('failed') is True
+            owners[str(mapped(module.FILES[1]))] = 1001
             write(module.FILES[1], b'changed-restored-config')
             assert invoke('retry-check').get('failed') is True
             saved = json.loads(checkpoint_bytes)
@@ -349,4 +365,19 @@ for name, register in [('playbooks/prepare-controller.yml', 'adoption_cycle'),
     assert 'ansible.builtin.command' not in wait and 'failed_when' not in wait, name
     if not name.startswith('roles/'):
         assert wait['loop'] == ['ultra-recovery-backup.service', 'ultra-recovery-reconcile.service'], name
-print('legacy adoption identity, freshness, emergency, pre-base recovery and oneshot drain guards passed')
+rollback_play = yaml.safe_load((source.parents[1] / 'playbooks/rollback-adoption.yml').read_text())[0]['tasks']
+rollback_names = [task['name'] for task in rollback_play]
+restore_index = rollback_names.index('Restore the original application configuration and service')
+inspect_index = rollback_names.index('Inspect restored relay specification readability')
+access_index = rollback_names.index('Repair an unreadable restored relay specification')
+start_index = rollback_names.index('Start the restored bridge')
+assert restore_index < inspect_index < access_index < start_index
+assert rollback_play[inspect_index]['ansible.builtin.command']['argv'] == [
+    'runuser', '-u', 'ultra-relay', '--', 'test', '-r', '/etc/ultra-relay/spec.json'
+]
+assert rollback_play[inspect_index]['failed_when'] == 'restored_relay_spec_access.rc not in [0, 1]'
+assert rollback_play[access_index]['when'] == 'restored_relay_spec_access.rc == 1'
+assert rollback_play[access_index]['ansible.builtin.file'] == {
+    'path': '/etc/ultra-relay/spec.json', 'owner': 'ultra-relay', 'group': 'ultra-relay', 'mode': '0600'
+}
+print('legacy adoption identity, readability, emergency, rollback and oneshot drain guards passed')

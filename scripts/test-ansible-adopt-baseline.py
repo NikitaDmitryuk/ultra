@@ -57,9 +57,12 @@ class FakeModule:
                        'binary_sha256': hashlib.sha256(candidate).hexdigest()}
         self.schema = '24:24'
         self.schema_code = 0
+        self.spec_readable = True
         self.commands = []
     def run_command(self, args):
         self.commands.append(args)
+        if args == ['runuser', '-u', 'ultra-relay', '--', 'test', '-r', '/etc/ultra-relay/spec.json']:
+            return (0 if self.spec_readable else 1), '', ''
         if args == ['dpkg', '--print-architecture']:
             return 0, 'amd64\n', ''
         assert args[:11] == ['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', 'fixture', '-c'], args
@@ -115,7 +118,10 @@ with tempfile.TemporaryDirectory() as temporary:
         write('/usr/local/bin/ultra-relay', ordinary)
         module = FakeModule()
         assert invoke(module).get('verified') is True, 'existing installed/candidate identity'
-        assert not any(args[0] == 'runuser' for args in module.commands)
+        assert not any(args[:3] == ['runuser', '-u', 'postgres'] for args in module.commands)
+    unreadable = FakeModule()
+    unreadable.spec_readable = False
+    assert invoke(unreadable).get('msg') == 'adoption_specification_unreadable'
     write('/usr/local/bin/ultra-relay', emergency)
     result = invoke(FakeModule())
     assert result.get('verified') is True, ('new operation after compatible rollback', result)
@@ -176,7 +182,7 @@ with tempfile.TemporaryDirectory() as temporary:
         module.params['specification'] = {} if role is None else {'role': role}
         write('/etc/ultra-relay/spec.json', module.params['specification'])
         assert invoke(module).get('failed') is True, ('role', role)
-        assert not any(args[0] == 'runuser' for args in module.commands)
+        assert not any(args[:3] == ['runuser', '-u', 'postgres'] for args in module.commands)
     write('/etc/ultra-relay/spec.json', {'role': 'bridge'})
     module = FakeModule()
     module.params['preserve_runtime'] = False

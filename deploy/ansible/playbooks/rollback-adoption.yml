@@ -32,6 +32,19 @@
         mode: "{{ item.mode }}"
       loop: "{{ adoption_rollback.restore_files }}"
       no_log: true
+    - name: Inspect restored relay specification readability
+      ansible.builtin.command:
+        argv: [runuser, -u, ultra-relay, --, test, -r, /etc/ultra-relay/spec.json]
+      register: restored_relay_spec_access
+      changed_when: false
+      failed_when: restored_relay_spec_access.rc not in [0, 1]
+    - name: Repair an unreadable restored relay specification
+      ansible.builtin.file:
+        path: /etc/ultra-relay/spec.json
+        owner: ultra-relay
+        group: ultra-relay
+        mode: "0600"
+      when: restored_relay_spec_access.rc == 1
     - name: Activate the verified compatible emergency binary
       ansible.builtin.copy:
         src: "{{ adoption_rollback.binary }}"
