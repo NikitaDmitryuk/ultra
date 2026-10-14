@@ -196,6 +196,39 @@ func TestRuntimeCollectionHonorsUseLeaseAndOwnership(t *testing.T) {
 	}
 }
 
+func TestOperatorRuntimePython314Alias(t *testing.T) {
+	for _, fixture := range []struct {
+		name, target string
+		valid        bool
+	}{
+		{"𝜋thon", "python3", true},
+		{"𝜋thon", "/tmp/python3", false},
+		{"𝜋thon", "../../../../python3", false},
+		{"𝜋thon-extra", "python3", false},
+	} {
+		t.Run(fixture.name+fixture.target, func(t *testing.T) {
+			directory := t.TempDir()
+			if err := os.Chmod(directory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			bin := filepath.Join(directory, "venv", "bin")
+			if err := os.MkdirAll(bin, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(fixture.target, filepath.Join(bin, fixture.name)); err != nil {
+				t.Fatal(err)
+			}
+			_, err := operatorRuntimeInventory(directory)
+			if fixture.valid && err != nil {
+				t.Fatal(err)
+			}
+			if !fixture.valid && (err == nil || err.Error() != "operator_runtime_symlink_invalid") {
+				t.Fatalf("unsafe runtime alias: %v", err)
+			}
+		})
+	}
+}
+
 func TestCompletedUpgradeReplayRejectsReplacementSourceWithoutExecuting(t *testing.T) {
 	root := t.TempDir()
 	_ = os.Chmod(root, 0700)

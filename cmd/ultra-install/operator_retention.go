@@ -431,6 +431,8 @@ func operatorRuntimeInventory(directory string) (map[string]any, error) {
 				return err
 			}
 			valid := relative == "venv/lib64" && target == "lib"
+			// CPython 3.14's UTF-8 venv adds this exact alias to python3.
+			valid = valid || (relative == "venv/bin/𝜋thon" && target == "python3")
 			if strings.HasPrefix(relative, "venv/bin/python") {
 				valid = target == "python3" || target == "python" || target == "/usr/bin/python3" || regexp.MustCompile(`^/usr/bin/python3\.(12|13|14)$`).MatchString(target)
 			}
