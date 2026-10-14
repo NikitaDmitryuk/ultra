@@ -57,6 +57,7 @@
   retries: 110
   delay: 5
 - name: Build and read private desired recovery state
+  no_log: true
   block:
     - name: Build desired state after validating existing pins and resources
       ansible.builtin.command:
@@ -77,7 +78,6 @@
         path: /var/lib/ultra-automation/bootstrap/recovery-plan.json
         state: absent
       no_log: true
-  no_log: true
 - name: Create managed operation pin directories
   ansible.builtin.file:
     path: "/var/lib/ultra-relay/vultr/{{ item.id }}"
