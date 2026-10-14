@@ -210,6 +210,51 @@ with tempfile.TemporaryDirectory() as temporary:
         assert mapped(checkpoint_path).read_bytes() == checkpoint_bytes
         write(module.FILES[0], original_binary)
 
+        # A completed compatible rollback can be followed by a NEW operation.
+        # It has no old checkpoint, and the installed manifest still names the
+        # pre-rollback worker. Only the fixed verified emergency may substitute.
+        old_id = FakeModule.params['id']
+        old_contract_sha = FakeModule.params['contract_sha256']
+        old_spec = mapped(module.FILES[1]).read_bytes()
+        FakeModule.params['id'] = '22222222-3333-4444-5555-666666666666'
+        new_contract = '/var/lib/ultra-ansible/adoption/' + FakeModule.params['id'] + '/recovery_status.py'
+        write(new_contract, mapped(contract).read_bytes())
+        FakeModule.params['contract_sha256'] = module.digest(new_contract)
+        write(module.FILES[1], {'role': 'bridge'})
+        emergency_path = '/usr/local/libexec/ultra-relay-emergency'
+        emergency_binary = mapped(emergency_path).read_bytes()
+        write(module.FILES[0], emergency_binary)
+        with patch.object(module.subprocess, 'run', return_value=remote_result):
+            result = invoke('checkpoint')
+            assert result.get('verified') is True, ('new checkpoint after compatible rollback', result)
+            write(module.FILES[0], b'arbitrary-runtime')
+            assert invoke('checkpoint').get('failed') is True, 'arbitrary runtime accepted'
+            write(module.FILES[0], emergency_binary)
+            write(emergency_path, b'changed-emergency')
+            assert invoke('checkpoint').get('failed') is True, 'bad fixed emergency accepted'
+            write(emergency_path, emergency_binary)
+            emergency_manifest_path = '/usr/local/libexec/ultra-emergency-manifest.json'
+            emergency_manifest = module.read(emergency_manifest_path)
+            for altered in [dict(emergency_manifest, capabilities=[]),
+                            dict(emergency_manifest, database_schema_max=23)]:
+                write(emergency_manifest_path, altered)
+                assert invoke('checkpoint').get('failed') is True, 'bad emergency manifest/schema accepted'
+            write(emergency_manifest_path, emergency_manifest)
+            for path in [emergency_path, emergency_manifest_path, module.FILES[0]]:
+                owners[str(mapped(path))] = 1002
+                assert invoke('checkpoint').get('failed') is True, ('unowned emergency identity', path)
+                owners.pop(str(mapped(path)))
+                mapped(path).chmod(0o622)
+                assert invoke('checkpoint').get('failed') is True, ('writable emergency identity', path)
+                mapped(path).chmod(0o600)
+            for role in ['exit', None]:
+                write(module.FILES[1], {} if role is None else {'role': role})
+                assert invoke('checkpoint').get('failed') is True, ('emergency accepted for role', role)
+        write(module.FILES[0], original_binary)
+        write(module.FILES[1], old_spec)
+        FakeModule.params['id'] = old_id
+        FakeModule.params['contract_sha256'] = old_contract_sha
+
         assert invoke('prepare-gate').get('verified') is True
         journal = json.loads(mapped('/var/lib/ultra-ansible/lifecycle.json').read_text())
         assert journal == {'id': FakeModule.params['id'], 'phase': 'applying'}

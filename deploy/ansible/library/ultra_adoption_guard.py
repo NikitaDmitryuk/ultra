@@ -244,9 +244,21 @@ def main():
         if code or architecture.strip() not in ('amd64', 'arm64'):
             raise ValueError('adoption_architecture_invalid')
         previous = read('/opt/ultra-recovery/release-manifest.json')
+        owned_file('/usr/local/libexec/ultra-emergency-manifest.json')
+        owned_file('/usr/local/libexec/ultra-relay-emergency')
         emergency = read('/usr/local/libexec/ultra-emergency-manifest.json')
-        checked_asset(previous, architecture.strip(), FILES[0])
         checked_asset(emergency, architecture.strip(), '/usr/local/libexec/ultra-relay-emergency')
+        try:
+            checked_asset(previous, architecture.strip(), FILES[0])
+        except ValueError:
+            # A completed compatible rollback leaves the fixed emergency
+            # running. A fresh legacy bridge checkpoint must re-verify it;
+            # the old operation's saved hash is not an identity for this one.
+            current_spec = read(FILES[1])
+            if not isinstance(current_spec, dict) or current_spec.get('role') != 'bridge':
+                raise ValueError('adoption_binary_identity_invalid')
+            owned_file(FILES[0])
+            checked_asset(emergency, architecture.strip(), FILES[0])
         config = read('/etc/ultra-recovery/reconcile.json')
         database = config['database']
         if not re.fullmatch(r'[A-Za-z0-9_-]+', database):
