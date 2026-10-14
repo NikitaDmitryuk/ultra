@@ -693,8 +693,12 @@ def main():
         if retained:
             module.warn('release_retention_retained_unknown: ' + str(len(retained)) + ' executable trees retained')
         module.exit_json(changed=False, paths=paths, retained_unknown=retained)
-    except (ValueError, KeyError, OSError, TypeError):
-        module.fail_json(msg='release_retention_blocked_unknown_or_changed_identity')
+    except (ValueError, KeyError, OSError, TypeError) as error:
+        # Expose only our fixed invariant code, never paths or exception details.
+        code = str(error)
+        if not isinstance(error, ValueError) or not re.fullmatch(r'retention_[a-z_]+', code):
+            code = 'retention_inspection_failed'
+        module.fail_json(msg='release_retention_blocked_unknown_or_changed_identity', exception='', reason_code=code)
 
 
 if __name__ == '__main__':

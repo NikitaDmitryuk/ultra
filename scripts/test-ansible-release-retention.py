@@ -3,9 +3,16 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
+import sys
+import tarfile
 import tempfile
+from types import ModuleType
+from unittest.mock import patch
+
+import yaml
 
 source = Path(__file__).resolve().parents[1] / 'deploy/ansible/library/ultra_release_retention.py'
 spec = importlib.util.spec_from_file_location('retention', source)
@@ -25,6 +32,106 @@ def refuses(call):
     except (ValueError, OSError):
         return
     raise AssertionError('unsafe retention accepted')
+
+
+def runtime_ownership_regression():
+    root = source.parents[3]
+    tasks = yaml.safe_load((root / 'deploy/ansible/roles/controller/tasks/main.yml').read_text())
+    extraction = next(task['ansible.builtin.unarchive'] for task in tasks
+                      if task.get('name') == 'Install offline runtime files')
+    assert extraction.get('owner') == 'root' and extraction.get('group') == 'root'
+    builder_spec = importlib.util.spec_from_file_location('runtime_builder', root / 'scripts/build-ansible-runtime.py')
+    builder = importlib.util.module_from_spec(builder_spec)
+    builder_spec.loader.exec_module(builder)
+    original_header = tarfile.TarFile.gettarinfo
+
+    def builder_header(archive, *args, **kwargs):
+        member = original_header(archive, *args, **kwargs)
+        member.uid = member.gid = 1000
+        member.uname = member.gname = 'builder'
+        return member
+
+    def download_fixture(command, **kwargs):
+        wheels = Path(command[command.index('--dest') + 1])
+        (wheels / 'fixture-1-py3-none-any.whl').write_bytes(b'offline wheel fixture')
+
+    with tempfile.TemporaryDirectory() as temporary:
+        base = Path(temporary)
+        output = base / 'runtime.tar.gz'
+        with patch.object(builder, 'PINS', ['fixture==1']), \
+                patch.object(builder.sys, 'argv', ['builder', '--architecture', 'amd64', '--output', str(output)]), \
+                patch.object(builder.subprocess, 'run', side_effect=download_fixture), \
+                patch.object(tarfile.TarFile, 'gettarinfo', builder_header):
+            builder.main()
+        controller = base / 'controllers' / 'fixture'
+        runtime = controller / 'runtime'
+        runtime.mkdir(parents=True, mode=0o700)
+        controller.chmod(0o700)
+        with tarfile.open(output) as archive:
+            members = archive.getmembers()
+            assert {member.name for member in members} == {'requirements.lock', 'wheels/fixture-1-py3-none-any.whl'}
+            assert all((member.uid, member.gid, member.uname, member.gname) == (0, 0, 'root', 'root')
+                       for member in members), 'runtime inherited builder ownership'
+            archive.extractall(runtime, filter='data')
+        wheel = runtime / 'wheels/fixture-1-py3-none-any.whl'
+        assert wheel.read_bytes() == b'offline wheel fixture'
+        assert (runtime / 'requirements.lock').read_text() == 'fixture==1 --hash=sha256:' + r.digest(wheel) + '\n'
+        receipts = base / 'receipts'
+        identity = {'runtime/requirements.lock': r.digest(runtime / 'requirements.lock')}
+        original_lstat = Path.lstat
+
+        def root_stat(path, *args, **kwargs):
+            # Model root extraction locally without requiring chown privileges.
+            values = list(original_lstat(path, *args, **kwargs))
+            values[4] = values[5] = 0
+            return os.stat_result(values)
+
+        with patch.object(r.os, 'geteuid', return_value=0), patch.object(Path, 'lstat', root_stat):
+            r.store(r.receipt_path(controller, receipts), {'path': str(controller), 'identity': identity, 'pending': True})
+            assert r.seal(controller, identity, [str(controller.parent)], receipts, controller=True)
+
+            def foreign_stat(path, *args, **kwargs):
+                values = list(root_stat(path, *args, **kwargs))
+                if path == wheel:
+                    values[4] = 1000
+                return os.stat_result(values)
+
+            with patch.object(Path, 'lstat', foreign_stat):
+                try:
+                    r.seal(controller, identity, [str(controller.parent)], receipts, controller=True)
+                except ValueError as error:
+                    assert str(error) == 'retention_foreign_tree'
+                else:
+                    raise AssertionError('root seal accepted foreign runtime ownership')
+
+
+runtime_ownership_regression()
+
+
+def failure_reason_regression():
+    class FakeModule:
+        params = {'action': 'seal', 'path': '/fixture', 'expected': {'fixture': '0' * 64},
+                  'controller': True, 'optional': []}
+        check_mode = False
+
+        def fail_json(self, **result):
+            self.result = result
+
+    for error, expected in ((ValueError('retention_foreign_tree'), 'retention_foreign_tree'),
+                            (OSError('sensitive fixture path'), 'retention_inspection_failed'),
+                            (ValueError('retention_foreign_tree: sensitive fixture path'), 'retention_inspection_failed')):
+        module = FakeModule()
+        basic = ModuleType('ansible.module_utils.basic')
+        basic.AnsibleModule = lambda **kwargs: module
+        with patch.dict(sys.modules, {'ansible': ModuleType('ansible'),
+                                    'ansible.module_utils': ModuleType('ansible.module_utils'),
+                                    'ansible.module_utils.basic': basic}), \
+                patch.object(r, 'seal', side_effect=error):
+            r.main()
+        assert module.result == {'msg': 'release_retention_blocked_unknown_or_changed_identity', 'exception': '', 'reason_code': expected}
+
+
+failure_reason_regression()
 
 
 with tempfile.TemporaryDirectory() as temporary:

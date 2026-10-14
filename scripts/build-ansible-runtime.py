@@ -11,6 +11,20 @@ import tempfile
 PINS = (Path(__file__).resolve().parents[1] / 'deploy/ansible/requirements.txt').read_text().splitlines()
 
 
+def root_owned(member):
+    """Runtime extraction must not inherit the release builder's identity."""
+    member.uid = member.gid = 0
+    member.uname = member.gname = 'root'
+    return member
+
+
+def build_archive(root, output):
+    with tarfile.open(output, 'w:gz') as archive:
+        for path in sorted(root.rglob('*')):
+            if path.is_file():
+                archive.add(path, arcname=str(path.relative_to(root)), recursive=False, filter=root_owned)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--architecture', choices=['amd64', 'arm64'], required=True)
@@ -38,10 +52,7 @@ def main():
             hashes = [' --hash=sha256:' + hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(matches)]
             lines.append(pin + ''.join(hashes))
         (root / 'requirements.lock').write_text('\n'.join(lines) + '\n')
-        with tarfile.open(output, 'w:gz') as archive:
-            for path in sorted(root.rglob('*')):
-                if path.is_file():
-                    archive.add(path, arcname=str(path.relative_to(root)), recursive=False)
+        build_archive(root, output)
 
 
 if __name__ == '__main__':

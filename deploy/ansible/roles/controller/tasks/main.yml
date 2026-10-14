@@ -112,6 +112,8 @@
   ansible.builtin.unarchive:
     src: "{{ ultra_controller_runtime_archive }}"
     dest: "{{ ultra_controller_directory }}/runtime"
+    owner: root
+    group: root
 - name: Install the locked Ansible runtime from offline wheels
   ansible.builtin.pip:
     requirements: "{{ ultra_controller_directory }}/runtime/requirements.lock"
