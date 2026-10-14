@@ -6,6 +6,8 @@ import tempfile
 import time
 from unittest.mock import patch
 
+import yaml
+
 source = Path(__file__).resolve().parents[1] / 'deploy/ansible/library/ultra_adoption_guard.py'
 spec = importlib.util.spec_from_file_location('adoption', source)
 module = importlib.util.module_from_spec(spec)
@@ -128,4 +130,68 @@ with tempfile.TemporaryDirectory() as temporary:
         backup['snapshot_at'] -= 301
         write('/var/lib/ultra-recovery/last-success.json', backup)
         assert invoke('checkpoint').get('failed') is True
-print('legacy adoption identity, freshness, emergency and pre-base recovery guards passed')
+
+# Type=oneshot workers report activating while is-active returns 3. Check the
+# actual module through its Ansible entrypoint; all commands remain fake.
+idle_source = source.with_name('ultra_recovery_idle.py')
+idle_spec = importlib.util.spec_from_file_location('recovery_idle', idle_source)
+idle_module = importlib.util.module_from_spec(idle_spec)
+idle_spec.loader.exec_module(idle_module)
+
+
+class IdleModule(FakeModule):
+    params = {'service': 'ultra-recovery-backup.service'}
+    def __init__(self, output, rc):
+        self.output, self.rc = output, rc
+    def run_command(self, args):
+        assert args == ['systemctl', 'show', '--property=LoadState', '--property=ActiveState',
+                        '--property=MainPID', '--property=ControlPID', self.params['service']]
+        return self.rc, self.output, ''
+
+
+def idle_result(state='inactive', main='0', control='0', load='loaded', rc=0, output=None):
+    if output is None:
+        # Order is deliberately different from the requested properties.
+        output = f'ControlPID={control}\nActiveState={state}\nMainPID={main}\nLoadState={load}\n'
+    with patch.object(idle_module, 'AnsibleModule', return_value=IdleModule(output, rc)):
+        try:
+            idle_module.main()
+        except Done as result:
+            return result.result
+    raise AssertionError('missing idle result')
+
+
+for state, main, control in [('activating', '1234', '0'), ('activating', '0', '1234'),
+                             ('active', '1234', '0'), ('deactivating', '0', '0'),
+                             ('inactive', '1234', '0'), ('failed', '0', '1234')]:
+    assert idle_result(state, main, control) == {'changed': False, 'idle': False}
+for state in ('inactive', 'failed'):
+    assert idle_result(state) == {'changed': False, 'idle': True}
+assert idle_result(load='not-found') == {'changed': False, 'idle': True}
+for kwargs in [{'state': 'unknown'}, {'load': 'error'}, {'load': 'masked'},
+               {'main': 'unknown'}, {'control': '-1'}, {'rc': 1},
+               {'output': 'ActiveState=inactive\nMainPID=0\n'},
+               {'output': 'LoadState=loaded\nActiveState=inactive\nMainPID=0\nControlPID=0\nMainPID=0\n'},
+               {'load': 'not-found', 'main': '1234'}, {'load': 'not-found', 'state': 'failed'}]:
+    assert idle_result(**kwargs).get('failed') is True, kwargs
+
+# Every wait after pausing timers must use the same predicate and retain its
+# bounded retry policy. No wait is allowed to stop a recovery service.
+ansible_root = source.parents[1]
+for name, register in [('playbooks/prepare-controller.yml', 'adoption_cycle'),
+                       ('playbooks/upgrade.yml', 'release_cycle'),
+                       ('playbooks/reserve-rolledback-bootstrap.yml', 'adoption_retry_cycle'),
+                       ('roles/recovery_primary/tasks/main.yml', 'recovery_primary_copy_active')]:
+    tasks = yaml.safe_load((ansible_root / name).read_text())
+    if name.startswith('playbooks/'):
+        tasks = tasks[0]['tasks']
+    expanded = [child for task in tasks for child in task.get('block', [task])]
+    wait = next(task for task in expanded if task.get('register') == register)
+    service = 'ultra-recovery-backup.service' if name.startswith('roles/') else '{{ item }}'
+    assert wait['ultra_recovery_idle'] == {'service': service}, name
+    assert wait['until'] == register+'.idle | default(false) | bool', name
+    assert (wait['retries'], wait['delay']) == (110, 5), name
+    assert 'ansible.builtin.command' not in wait and 'failed_when' not in wait, name
+    if not name.startswith('roles/'):
+        assert wait['loop'] == ['ultra-recovery-backup.service', 'ultra-recovery-reconcile.service'], name
+print('legacy adoption identity, freshness, emergency, pre-base recovery and oneshot drain guards passed')

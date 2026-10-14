@@ -49,12 +49,11 @@
     state: stopped
   when: recovery_primary_existing_timer.stdout | trim != 'not-found'
 - name: Wait for an already running copy to finish
-  ansible.builtin.command:
-    argv: [systemctl, is-active, ultra-recovery-backup.service]
+  ultra_recovery_idle:
+    service: ultra-recovery-backup.service
   register: recovery_primary_copy_active
   changed_when: false
-  failed_when: false
-  until: recovery_primary_copy_active.stdout | trim != 'active'
+  until: recovery_primary_copy_active.idle | default(false) | bool
   retries: 110
   delay: 5
 - name: Build desired state after validating existing pins and resources

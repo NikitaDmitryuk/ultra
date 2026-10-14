@@ -238,6 +238,12 @@ func prepareReservedBootstrap(ctx context.Context, p *installplan.InstallPlan, i
 	} else if !os.IsNotExist(err) {
 		return nil, nil, err
 	}
+	supportsGate := false
+	for _, capability := range inspection["bridge"].Capabilities {
+		if capability == "lifecycle-gate-v1" {
+			supportsGate = true
+		}
+	}
 	defer func() {
 		if returnErr == nil {
 			return
@@ -256,6 +262,11 @@ func prepareReservedBootstrap(ctx context.Context, p *installplan.InstallPlan, i
 					returnErr = errors.Join(returnErr, scheduleErr)
 					return
 				}
+			}
+			// Legacy capture may fail before installing the broker and gate.
+			// An existing gate must release even if drain failed before schedules
+			// were inspected and their receipt was written.
+			if supportsGate {
 				if gateErr := ansibleLifecycle(cleanup, p, inventory, directory, python, executable, "released", false); gateErr != nil {
 					returnErr = errors.Join(returnErr, gateErr)
 				}
@@ -289,12 +300,6 @@ func prepareReservedBootstrap(ctx context.Context, p *installplan.InstallPlan, i
 		}
 	}
 	event("checking independent recovery and preparing the pinned controller")
-	supportsGate := false
-	for _, capability := range inspection["bridge"].Capabilities {
-		if capability == "lifecycle-gate-v1" {
-			supportsGate = true
-		}
-	}
 	if supportsGate {
 		if err := ansibleLifecycle(ctx, p, inventory, directory, python, executable, "applying", true); err != nil {
 			return nil, nil, err

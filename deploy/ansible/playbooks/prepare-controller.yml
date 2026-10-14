@@ -39,12 +39,11 @@
           loop: "{{ adoption_timer.results }}"
           when: item.rc == 0
         - name: Wait for an already running generation and reconcile to finish
-          ansible.builtin.command:
-            argv: [systemctl, is-active, "{{ item }}"]
+          ultra_recovery_idle:
+            service: "{{ item }}"
           changed_when: false
           register: adoption_cycle
-          failed_when: adoption_cycle.rc not in [0, 3, 4]
-          until: adoption_cycle.rc in [3, 4]
+          until: adoption_cycle.idle | default(false) | bool
           retries: 110
           delay: 5
           loop: [ultra-recovery-backup.service, ultra-recovery-reconcile.service]

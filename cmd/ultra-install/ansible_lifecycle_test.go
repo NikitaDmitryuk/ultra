@@ -5,13 +5,114 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
+
+func TestReservedBootstrapEarlyFailureRestoresSchedulesAndReleasesOnlyExistingGate(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		supportsGate bool
+		failDrain    bool
+		noSchedules  bool
+		failRestore  bool
+		maintenance  bool
+		operations   string
+	}{
+		{name: "legacy-before-maintenance", operations: "resume-schedules:\n"},
+		{name: "capable-before-maintenance", supportsGate: true, operations: "lifecycle:applying\nresume-schedules:\nlifecycle:released\n"},
+		{name: "capable-drain-failure", supportsGate: true, failDrain: true, operations: "lifecycle:applying\nresume-schedules:\nlifecycle:released\n"},
+		{name: "fresh-capable-drain-failure", supportsGate: true, failDrain: true, noSchedules: true, operations: "lifecycle:applying\nlifecycle:released\n"},
+		{name: "capable-schedule-restore-failure", supportsGate: true, failRestore: true, operations: "lifecycle:applying\nresume-schedules:\n"},
+		{name: "legacy-after-maintenance", maintenance: true, operations: "resume-adoption:\nresume-schedules:\nlifecycle:released\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			python, err := exec.LookPath("python3")
+			if err != nil {
+				t.Skip("python unavailable")
+			}
+			root := t.TempDir()
+			if err = os.Chmod(root, 0700); err != nil {
+				t.Fatal(err)
+			}
+			directory := filepath.Join(root, "attempt")
+			if err = os.Mkdir(directory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			// A failed capture can leave its schedule receipt without reaching
+			// maintenance; a retry must restore those schedules before returning.
+			if !tc.noSchedules {
+				if err = os.WriteFile(filepath.Join(directory, "adoption-schedules.json"), []byte(`["ultra-recovery-backup.timer"]`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.maintenance {
+				if err = os.WriteFile(filepath.Join(directory, "adoption-maintenance.json"), []byte(`{"legacy":true}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stub := filepath.Join(root, "ansible-playbook")
+			source := "#!" + python + `
+import json,pathlib,sys
+job=pathlib.Path(sys.argv[-1][1:]).parent
+variables=json.loads((job/'variables.json').read_text())
+operation=json.loads((job/'job.json').read_text())['operation']
+phase=variables.get('ultra_lifecycle_phase','')
+with (job.parent.parent/'operations').open('a') as stream:stream.write(operation+':'+phase+'\n')
+if operation=='resume-schedules':
+ assert variables['ultra_adoption_schedules']==['ultra-recovery-backup.timer']
+ FAIL_RESTORE
+if operation=='lifecycle' and phase=='applying':
+ assert variables['ultra_lifecycle_drain'] is True
+ FAIL_DRAIN
+result=pathlib.Path(variables['ultra_result_file']);result.write_text(json.dumps({'verified':True}));result.chmod(0o600)
+`
+			failure := "pass"
+			if tc.failDrain {
+				failure = "sys.exit(1)"
+			}
+			source = strings.Replace(source, "FAIL_DRAIN", failure, 1)
+			restoreFailure := "pass"
+			if tc.failRestore {
+				restoreFailure = "sys.exit(1)"
+			}
+			source = strings.Replace(source, "FAIL_RESTORE", restoreFailure, 1)
+			if err = os.WriteFile(stub, []byte(source), 0700); err != nil {
+				t.Fatal(err)
+			}
+			ctx, release, err := deployansible.WithOperationLock(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			p := &installplan.InstallPlan{Bridge: installplan.BridgeConfig{SSHHost: "192.0.2.1"}}
+			inspection := map[string]bootstrapInspection{"bridge": {Architecture: "amd64"}}
+			if tc.supportsGate {
+				inspection["bridge"] = bootstrapInspection{Architecture: "amd64", Capabilities: []string{"lifecycle-gate-v1"}}
+			}
+			// No automation release forces a pre-base failure, without executing
+			// any controller preparation or touching a real relay.
+			_, _, err = prepareReservedBootstrap(ctx, p, map[string]any{"all": map[string]any{}}, inspection, directory, root, python, stub)
+			if err == nil {
+				t.Fatal("pre-base failure reported success")
+			}
+			if !tc.failDrain && !tc.failRestore && err.Error() != "independent controller release required for fleet lifecycle" {
+				t.Fatal("cleanup changed original preparation failure", err)
+			}
+			operations, readErr := os.ReadFile(filepath.Join(root, "operations"))
+			if readErr != nil || string(operations) != tc.operations {
+				t.Fatalf("wrong cleanup order: %q, read error: %v", operations, readErr)
+			}
+		})
+	}
+}
 
 func TestForwardedLoopbackSSHNeverSelectsBridgeLocalRuntime(t *testing.T) {
 	for _, address := range []string{"127.0.0.1", "198.18.0.10", ""} {
