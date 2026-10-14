@@ -148,12 +148,24 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err != nil {
 		return err
 	}
+	legacyBridgeMaintenance := false
+	legacyBridgeSHA := ""
+	resumeCompleted := false
 	// A separate attempt always resumes timers, including after UNREACHABLE.
 	resume := func(cleanup context.Context) error {
 		resumeDirectory, err := os.MkdirTemp(directory, "resume-")
 		if err == nil {
 			_ = os.Remove(resumeDirectory)
-			_, err = deployansible.RunLocal(cleanup, "resume-automation", inventory, map[string]any{"ultra_lock_directory": lockDirectory}, resumeDirectory, python, executable)
+			variables := map[string]any{"ultra_lock_directory": lockDirectory}
+			if legacyBridgeMaintenance {
+				variables["ultra_legacy_bridge_maintenance"] = true
+				variables["ultra_legacy_bridge_sha256"] = legacyBridgeSHA
+				variables["ultra_lifecycle_id"] = lifecycleID(directory)
+			}
+			_, err = deployansible.RunLocal(cleanup, "resume-automation", inventory, variables, resumeDirectory, python, executable)
+			if err == nil {
+				resumeCompleted = true
+			}
 		}
 		return err
 	}
@@ -166,11 +178,14 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if activationStateErr != nil && !os.IsNotExist(activationStateErr) {
 		return activationStateErr
 	}
-	// A failed transition may mean a foreign reservation or a lost response
-	// after our own reservation. Neither proves ownership: leave its gate and
-	// schedules untouched until a subsequent applying transition succeeds.
-	if err = ansibleLifecycle(ctx, p, inventory, directory, python, executable, "applying", true); err != nil {
-		return err
+	// Reserve first, then install same-ID recovery before inspection or drain can
+	// fail. A failed or ambiguous reservation response never authorizes cleanup.
+	reservation, reserveErr := ansibleLifecycleReserve(ctx, p, inventory, directory, python, executable, "applying")
+	if reserveErr != nil {
+		return reserveErr
+	}
+	if values := reservation.Result.Values; values["verified"] != true || values["reservation_id"] != lifecycleID(directory) || values["reservation_phase"] != "applying" {
+		return errors.New("upgrade_lifecycle_reservation_unverified")
 	}
 	defer func() {
 		if !preActivation || returnErr == nil || !os.IsNotExist(activationStateErr) {
@@ -180,6 +195,7 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		defer cancel()
 		if err := resume(cleanup); err != nil {
 			returnErr = errors.Join(returnErr, errors.New("upgrade_automation_resume_failed"))
+			return
 		}
 		if err := ansibleLifecycle(cleanup, p, inventory, directory, python, executable, "released", false); err != nil {
 			returnErr = errors.Join(returnErr, err)
@@ -198,6 +214,16 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		return errors.New("upgrade_inspection_invalid")
 	}
 	if err = compatibleAnsibleRelease(&inspection.Previous, manifest); err != nil {
+		return err
+	}
+	legacyBridgeMaintenance = !hasAutomationCapability(&inspection.Previous, "lifecycle-gate-v1")
+	if legacyBridgeMaintenance {
+		asset, assetErr := upgradeAsset(&inspection.Previous, "ultra-relay-linux-"+inspection.Architecture)
+		if assetErr != nil {
+			return errors.New("upgrade_legacy_bridge_identity_unavailable")
+		}
+		legacyBridgeSHA = asset.SHA
+	} else if err = ansibleLifecycle(ctx, p, inventory, directory, python, executable, "applying", true); err != nil {
 		return err
 	}
 	if inspection.DatabaseSchema < manifest.DatabaseSchemaMin || inspection.DatabaseSchema > manifest.DatabaseSchemaMax {
@@ -296,7 +322,7 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err != nil {
 		return err
 	}
-	variables := map[string]any{"ultra_lock_directory": lockDirectory, "ultra_upgrade_observed_at": inspection.ObservedAt, "ultra_release_manifest": manifest, "ultra_release_manifest_sha256": manifestSHA, "ultra_previous_manifest_sha256": inspection.PreviousManifestSHA, "ultra_previous_manifest": inspection.Previous, "ultra_release_source": releaseDir, "ultra_release_version": manifest.Version, "ultra_topology_sha256": inspection.TopologySHA, "ultra_bridge_inventory_host": "bridge", "ultra_release_probe_executable": "/var/lib/ultra-ansible/releases/" + manifest.Version + "/ultra-install"}
+	variables := map[string]any{"ultra_lock_directory": lockDirectory, "ultra_upgrade_observed_at": inspection.ObservedAt, "ultra_release_manifest": manifest, "ultra_release_manifest_sha256": manifestSHA, "ultra_previous_manifest_sha256": inspection.PreviousManifestSHA, "ultra_previous_manifest": inspection.Previous, "ultra_release_source": releaseDir, "ultra_release_version": manifest.Version, "ultra_topology_sha256": inspection.TopologySHA, "ultra_bridge_inventory_host": "bridge", "ultra_release_probe_executable": "/var/lib/ultra-ansible/releases/" + manifest.Version + "/ultra-install", "ultra_legacy_bridge_maintenance": legacyBridgeMaintenance, "ultra_legacy_bridge_sha256": legacyBridgeSHA, "ultra_lifecycle_id": lifecycleID(directory)}
 	frozenInventory, err := json.Marshal(inventory)
 	if err != nil {
 		return err
@@ -322,8 +348,17 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
-		if err := resume(cleanup); err != nil {
-			returnErr = errors.Join(returnErr, errors.New("upgrade_automation_resume_failed"))
+		if !resumeCompleted {
+			if legacyBridgeMaintenance && !preActivation {
+				// After legacy services have been stopped, only a verified activation
+				// or completed rollback may restore them. Keep the maintenance barrier
+				// intact when both paths fail.
+				if returnErr == nil {
+					returnErr = errors.New("upgrade_legacy_maintenance_unrestored")
+				}
+			} else if err := resume(cleanup); err != nil {
+				returnErr = errors.Join(returnErr, errors.New("upgrade_automation_resume_failed"))
+			}
 		}
 		if returnErr == nil {
 			returnErr = sealCompletedOperatorOperation(directory, "upgrade", manifest, manifestSHA)
@@ -438,6 +473,9 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		_, rollbackErr := deployansible.RunLocal(cleanup, "rollback", inventory, variables, upgradeDependentStageDirectory(directory, "rollback", generation), python, executable)
 		if rollbackErr != nil {
 			return errors.Join(err, errors.New("upgrade_compatible_rollback_incomplete"))
+		}
+		if legacyBridgeMaintenance {
+			resumeCompleted = true // rollback restores the exact checkpointed bot/timer states
 		}
 		if gateErr := ansibleLifecycle(cleanup, p, inventory, directory, python, executable, "released", false); gateErr != nil {
 			return errors.Join(err, gateErr)

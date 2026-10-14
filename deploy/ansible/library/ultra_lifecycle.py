@@ -2,6 +2,7 @@
 """Fixed root-only bridge lifecycle reservation; no user-controlled commands."""
 from ansible.module_utils.basic import AnsibleModule
 import os
+import stat
 import re
 import json
 import ipaddress
@@ -14,6 +15,7 @@ def main():
     module = AnsibleModule(argument_spec={
         'id': {'type': 'str', 'required': True},
         'drain': {'type': 'bool', 'default': True},
+        'reserve_only': {'type': 'bool', 'default': False},
         'resume_frozen': {'type': 'bool', 'default': False},
         'phase': {'type': 'str', 'required': True, 'choices': ['applying', 'checking', 'released']},
     }, supports_check_mode=True)
@@ -34,6 +36,19 @@ def main():
     code, _, _ = module.run_command(command)
     if code:
         module.fail_json(msg='lifecycle_transition_failed')
+    try:
+        journal = Path('/var/lib/ultra-ansible/lifecycle.json')
+        metadata = journal.lstat()
+        if journal.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096 or metadata.st_uid != 0 or metadata.st_mode & 0o077:
+            raise ValueError('invalid_reservation')
+        if json.loads(journal.read_text()) != {'id': module.params['id'], 'phase': module.params['phase']}:
+            raise ValueError('invalid_reservation')
+    except (OSError, ValueError):
+        module.fail_json(msg='lifecycle_reservation_unverified')
+    if module.params['reserve_only']:
+        if module.params['phase'] != 'applying' or module.params['drain'] or module.params['resume_frozen']:
+            module.fail_json(msg='lifecycle_invalid_reservation_only')
+        module.exit_json(changed=False, verified=True, reservation_id=module.params['id'], reservation_phase='applying')
     if module.params['phase'] == 'applying' and not module.params['drain'] and not module.params['resume_frozen']:
         # Suppressing drain is allowed only with a positively absent/stopped
         # worker. An old checkpoint alone cannot prove it after a partial apply.
@@ -70,7 +85,7 @@ def main():
             # before inspection; do not reopen topology on an ambiguous failure.
             module.fail_json(msg='lifecycle_drain_failed')
     # Transition is idempotent; fixed command doesn't expose private state.
-    module.exit_json(changed=False, verified=True)
+    module.exit_json(changed=False, verified=True, reservation_id=module.params['id'], reservation_phase=module.params['phase'])
 
 
 if __name__ == '__main__':

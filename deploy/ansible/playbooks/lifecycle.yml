@@ -10,10 +10,12 @@
         phase: "{{ ultra_lifecycle_phase }}"
         resume_frozen: "{{ ultra_lifecycle_resume | default(false) }}"
         drain: "{{ ultra_lifecycle_drain | default(true) }}"
+        reserve_only: "{{ ultra_lifecycle_reserve_only | default(false) }}"
+      register: lifecycle_transition
       become: true
     - name: Record the verified lifecycle transition
       ansible.builtin.copy:
-        content: '{"verified":true}'
+        content: "{{ ({'verified': lifecycle_transition.verified, 'reservation_id': lifecycle_transition.reservation_id, 'reservation_phase': lifecycle_transition.reservation_phase} if ultra_lifecycle_reserve_only | default(false) | bool else {'verified': lifecycle_transition.verified}) | to_json(preprocess_unsafe=False) }}"
         dest: "{{ ultra_result_file }}"
         mode: "0600"
       delegate_to: localhost

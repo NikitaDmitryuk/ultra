@@ -123,6 +123,20 @@ ultra-install upgrade --config install.config --release latest
 и deployment policy, но сохраняет текущие runtime-настройки. Локальный
 `--release-dir` поддержан для уже скачанного подписанного комплекта.
 
+Upgrade сначала отдельно подтверждает reservation своего UUID; отказ drain не
+включает legacy fallback. Legacy режим выбирается по проверенному manifest прежнего
+relay без `lifecycle-gate-v1`, затем сверяет SHA работающего процесса с этим
+manifest. Приватный maintenance checkpoint сохраняет состояния bot и recovery
+таймеров, а также хеши конфигурации. Перед изменением exit требуются idle recovery,
+свежая доставка независимому primary, остановленный bridge с нулевыми MainPID и
+ControlPID и повторная проверка замороженной topology. Exit обновляются последовательно;
+их payload проверяется через новый bridge для каждого frozen exit до запуска bot.
+Совместимый rollback запускает и проверяет прежний bridge даже при неизменных байтах,
+затем возвращает сохранённые состояния bot и таймеров до освобождения reservation.
+Источники: [upgrade](../deploy/ansible/playbooks/upgrade.yml),
+[maintenance barrier](../deploy/ansible/library/ultra_upgrade_maintenance.py),
+[rollback](../deploy/ansible/playbooks/rollback.yml).
+
 Служба `ultra-ansible-controller` работает на bridge независимо от relay и бота.
 Она принимает ограниченный набор заданий через Unix-сокет. Root-peer управляет
 резервированием lifecycle; relay может подавать только типизированные задания

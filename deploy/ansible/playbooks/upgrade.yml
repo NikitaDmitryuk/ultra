@@ -37,6 +37,18 @@
         owner: root
         group: root
         mode: "0755"
+    - name: Preserve same-operation legacy maintenance state before stopping services
+      ultra_upgrade_maintenance:
+        id: "{{ ultra_lifecycle_id }}"
+        legacy_sha256: "{{ ultra_legacy_bridge_sha256 }}"
+        phase: checkpoint
+      register: legacy_maintenance_checkpoint
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
+    - name: Stop legacy topology producers before freezing recovery
+      ansible.builtin.systemd_service:
+        name: ultra-bot.service
+        state: stopped
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
     - name: Stop new recovery cycles without interrupting running copies
       ansible.builtin.systemd_service:
         name: "{{ item }}"
@@ -66,6 +78,30 @@
         argv: [python3, /opt/ultra-recovery/recovery.py, capture, --config, /etc/ultra-recovery/backup.json]
       changed_when: false
       no_log: true
+    - name: Require fresh delivery to the independently confirmed primary after capture
+      ultra_upgrade_maintenance:
+        id: "{{ ultra_lifecycle_id }}"
+        legacy_sha256: "{{ ultra_legacy_bridge_sha256 }}"
+        phase: recovery-ready
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
+    - name: Stop the identified legacy bridge before changing exits
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: stopped
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
+    - name: Prove all legacy producers are stopped and original configuration is unchanged
+      ultra_upgrade_maintenance:
+        id: "{{ ultra_lifecycle_id }}"
+        legacy_sha256: "{{ ultra_legacy_bridge_sha256 }}"
+        phase: stopped
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
+    - name: Reinspect frozen topology after the legacy process has stopped
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/../roles/release/files/state.py --expected {{ ultra_topology_sha256 }}"
+        executable: /usr/bin/python3
+      changed_when: false
+      no_log: true
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
 - name: Update exits sequentially before bridge
   hosts: exits
   gather_facts: false
@@ -96,11 +132,31 @@
         name: release
       vars:
         release_component: ultra-relay
+    - name: Open the new bridge payload verification window
+      ansible.builtin.command:
+        argv: [date, '+%s%N']
+      changed_when: false
+      register: legacy_payload_since
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
+    - name: Verify every frozen exit through the newly started bridge
+      ansible.builtin.command:
+        argv:
+          - "{{ ultra_release_probe_executable }}"
+          - release-probe
+          - --exit-id
+          - "{{ hostvars[item].ultra_exit_id }}"
+          - --since-nanos
+          - "{{ legacy_payload_since.stdout }}"
+      loop: "{{ groups['exits'] }}"
+      changed_when: false
+      no_log: true
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
     - name: Activate the bot after relay readiness
       ansible.builtin.include_role:
         name: release
       vars:
         release_component: ultra-bot
+        release_preserve_stopped: "{{ ultra_legacy_bridge_maintenance | default(false) | bool and not (legacy_maintenance_checkpoint.bot_active | default(true) | bool) }}"
     - name: Refresh verified bridge recovery tools
       ansible.builtin.include_role:
         name: release

@@ -36,6 +36,11 @@
         tasks_from: rollback
       vars:
         release_component: ultra-relay
+    - name: Start the unchanged restored legacy bridge before probing it
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: started
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
     - name: Require a usable restored control plane
       ansible.builtin.command:
         argv: ["{{ ultra_release_probe_executable | default('/usr/local/bin/ultra-install') }}", release-probe]
@@ -51,10 +56,17 @@
       ansible.builtin.include_role:
         name: release
         tasks_from: rollback-manifest
+    - name: Restore the original legacy bot state after the restored bridge probe
+      ultra_upgrade_maintenance:
+        id: "{{ ultra_lifecycle_id }}"
+        legacy_sha256: "{{ ultra_legacy_bridge_sha256 }}"
+        phase: restore-services
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
     - name: Start the bot only after restored relay readiness
       ansible.builtin.systemd_service:
         name: ultra-bot.service
         state: started
+      when: not (ultra_legacy_bridge_maintenance | default(false) | bool)
     - name: Save the verified operation result
       ansible.builtin.copy:
         content: "{{ {'operation': 'rollback', 'version': ultra_release_version | default(''), 'verified': true} | to_json(preprocess_unsafe=False) }}\n"

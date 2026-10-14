@@ -195,7 +195,7 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 		t.Skip("python unavailable")
 	}
 	for _, retryFailed := range []bool{false, true} {
-		for _, operation := range []string{"inspect-upgrade", "inspect-release-hosts", "lifecycle-applying", "lifecycle-foreign"} {
+		for _, operation := range []string{"inspect-upgrade", "inspect-release-hosts", "lifecycle-applying", "lifecycle-foreign", "legacy-success", "legacy-rollback-failure"} {
 			t.Run(fmt.Sprintf("%s/retry-failed=%t", operation, retryFailed), func(t *testing.T) {
 				root := t.TempDir()
 				if err := os.Chmod(root, 0700); err != nil {
@@ -282,9 +282,17 @@ if fail.exists() and fail.read_text()==key:
     fail.unlink()
     sys.exit(1)
 result={'verified':True}
+if operation=='lifecycle' and variables.get('ultra_lifecycle_reserve_only'):
+    result.update({'reservation_id':variables['ultra_lifecycle_id'],'reservation_phase':variables['ultra_lifecycle_phase']})
 if operation=='inspect-upgrade':
-    result={'database_schema':24,'architecture':'amd64','observed_at':1,'topology_sha256':'a'*64,'identity':'fixture','nodes':[{'id':'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','address':'192.0.2.2','pins':'fixture'}],'previous_manifest':json.loads((root.parent/'release'/'release-manifest.json').read_text())}
+    previous=json.loads((root.parent/'release'/'release-manifest.json').read_text())
+    if fail.exists() and fail.read_text().startswith('legacy-'):
+        previous['version']='v2.4.6'
+        previous['capabilities']=['service-access-v1','provider-pool-quota-v1']
+    result={'database_schema':24,'architecture':'amd64','observed_at':1,'topology_sha256':'a'*64,'identity':'fixture','nodes':[{'id':'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','address':'192.0.2.2','pins':'fixture'}],'previous_manifest':previous}
 if operation=='upgrade': result['activated_at']=2
+if fail.exists() and fail.read_text()=='legacy-rollback-failure' and operation in ('upgrade','rollback'):
+    sys.exit(1)
 if operation=='inspect-release-hosts':
     output=pathlib.Path(variables['ultra_release_inspection_directory'])/'exit_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'
     output.write_text(json.dumps({'architecture':'amd64','observed_at':1}))
@@ -297,6 +305,26 @@ output.chmod(0o600)
 					t.Fatal(err)
 				}
 				firstErr := ansibleUpgrade(context.Background(), p, release, directory, python, executable, false)
+				if operation == "legacy-success" {
+					if firstErr != nil {
+						t.Fatalf("legacy upgrade failed: %v", firstErr)
+					}
+					calls, err := os.ReadFile(filepath.Join(directory, "calls"))
+					if err != nil || strings.Count(string(calls), "resume-automation\n") != 1 {
+						t.Fatalf("legacy success restored service states more than once: %q %v", calls, err)
+					}
+					return
+				}
+				if operation == "legacy-rollback-failure" {
+					if firstErr == nil || !strings.Contains(firstErr.Error(), "upgrade_compatible_rollback_incomplete") {
+						t.Fatalf("expected incomplete legacy rollback, got %v", firstErr)
+					}
+					calls, err := os.ReadFile(filepath.Join(directory, "calls"))
+					if err != nil || strings.Contains(string(calls), "resume-automation\n") {
+						t.Fatalf("incomplete legacy rollback restored producers: %q %v", calls, err)
+					}
+					return
+				}
 				if firstErr == nil || !strings.Contains(firstErr.Error(), "ansible operation failed") {
 					t.Fatalf("expected inspection failure, got %v", firstErr)
 				}

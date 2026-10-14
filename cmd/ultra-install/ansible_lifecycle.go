@@ -98,6 +98,14 @@ func validLocalLifecycleIdentity(p *installplan.InstallPlan, info os.FileInfo, r
 // ansibleLifecycle binds every stage to a durable bridge reservation. This
 // directory is the whole immutable attempt, not a per-stage work directory.
 func ansibleLifecycle(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, python, executable, phase string, drain bool) error {
+	_, err := ansibleLifecycleTransition(ctx, p, inventory, directory, python, executable, phase, drain, false)
+	return err
+}
+
+// ansibleLifecycleReserve returns only after the broker confirms this exact
+// operation ID and phase. Callers may then safely install same-ID recovery
+// before attempting any operation that can fail after reservation.
+func ansibleLifecycleReserve(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, python, executable, phase string) (deployansible.Receipt, error) {
 	id := lifecycleID(directory)
 	if localLifecycleBridge(p) {
 		socket := os.Getenv("ULTRA_ANSIBLE_SOCKET")
@@ -105,28 +113,56 @@ func ansibleLifecycle(ctx context.Context, p *installplan.InstallPlan, inventory
 			socket = "/run/ultra-ansible/controller.sock"
 		}
 		if err := (deployansible.Client{Socket: socket}).LifecycleWithOperationLock(ctx, id, phase); err != nil {
-			return err
+			return deployansible.Receipt{}, err
 		}
-		if phase == "applying" && drain {
-			return drainLocalLifecycle(ctx)
+		return deployansible.Receipt{Result: deployansible.Result{Values: map[string]any{"verified": true, "reservation_id": id, "reservation_phase": phase}}}, nil
+	}
+	receipt, err := ansibleLifecycleTransition(ctx, p, inventory, directory, python, executable, phase, false, true)
+	if err != nil {
+		return deployansible.Receipt{}, err
+	}
+	values := receipt.Result.Values
+	if values["verified"] != true || values["reservation_id"] != id || values["reservation_phase"] != phase {
+		return deployansible.Receipt{}, errors.New("lifecycle_reservation_unverified")
+	}
+	return receipt, nil
+}
+
+func ansibleLifecycleTransition(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, python, executable, phase string, drain, reserveOnly bool) (deployansible.Receipt, error) {
+	id := lifecycleID(directory)
+	if localLifecycleBridge(p) {
+		if err := (deployansible.Client{Socket: lifecycleSocket()}).LifecycleWithOperationLock(ctx, id, phase); err != nil {
+			return deployansible.Receipt{}, err
 		}
-		if phase == "applying" && !drain {
-			return assertLocalRelayStopped(ctx)
+		if phase == "applying" && !reserveOnly {
+			if drain {
+				if err := drainLocalLifecycle(ctx); err != nil {
+					return deployansible.Receipt{}, err
+				}
+			} else if err := assertLocalRelayStopped(ctx); err != nil {
+				return deployansible.Receipt{}, err
+			}
 		}
-		return nil
+		return deployansible.Receipt{Result: deployansible.Result{Values: map[string]any{"verified": true, "reservation_id": id, "reservation_phase": phase}}}, nil
 	}
 	// A native remote root module performs the exact same fixed transition and
 	// drain. For local bridge it is idempotent after the OFD handoff above.
-	variables := map[string]any{"ultra_lifecycle_id": id, "ultra_lifecycle_phase": phase, "ultra_lifecycle_drain": drain}
+	variables := map[string]any{"ultra_lifecycle_id": id, "ultra_lifecycle_phase": phase, "ultra_lifecycle_drain": drain, "ultra_lifecycle_reserve_only": reserveOnly}
 	stage, err := os.MkdirTemp(directory, "lifecycle-"+phase+"-")
 	if err != nil {
-		return err
+		return deployansible.Receipt{}, err
 	}
 	if err = os.Remove(stage); err != nil {
-		return err
+		return deployansible.Receipt{}, err
 	}
-	_, err = deployansible.RunLocal(ctx, "lifecycle", inventory, variables, stage, python, executable)
-	return err
+	return deployansible.RunLocal(ctx, "lifecycle", inventory, variables, stage, python, executable)
+}
+
+func lifecycleSocket() string {
+	if socket := os.Getenv("ULTRA_ANSIBLE_SOCKET"); socket != "" {
+		return socket
+	}
+	return "/run/ultra-ansible/controller.sock"
 }
 
 func prepareBootstrapController(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, architecture, python, executable string) (map[string]any, error) {

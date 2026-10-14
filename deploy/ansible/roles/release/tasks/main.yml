@@ -113,6 +113,7 @@
       ansible.builtin.systemd_service:
         name: "{{ release_component }}.service"
         state: "{{ 'restarted' if release_delivered.changed else 'started' }}"
+      when: not (release_preserve_stopped | default(false) | bool)
     - name: Read the start of the verification window
       ansible.builtin.command:
         argv: [date, '+%s%N']
@@ -131,7 +132,7 @@
       delegate_to: "{{ ultra_bridge_inventory_host }}"
       changed_when: false
       no_log: true
-      when: inventory_hostname in groups['exits'] and release_component == 'ultra-relay'
+      when: inventory_hostname in groups['exits'] and release_component == 'ultra-relay' and not (ultra_legacy_bridge_maintenance | default(false) | bool)
     - name: Verify bridge reload before starting the bot
       ansible.builtin.command:
         argv: ["{{ ultra_release_probe_executable | default('/usr/local/bin/ultra-install') }}", release-probe]
@@ -159,6 +160,7 @@
       ansible.builtin.systemd_service:
         name: "{{ release_component }}.service"
         state: restarted
+      when: not (release_preserve_stopped | default(false) | bool)
     - name: Retain the failed outcome after compatible rollback
       ansible.builtin.fail:
         msg: release_activation_failed
