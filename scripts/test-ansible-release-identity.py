@@ -25,8 +25,10 @@ def render(value, variables):
 
 class Identity(unittest.TestCase):
     def test_upgrade_generation_contains_the_selected_controller(self):
+        retired_units = ['/etc/systemd/system/ultra-auto-upgrade.service',
+                         '/etc/systemd/system/ultra-auto-upgrade.timer']
         backup = {'artifact_paths': [OLD, '/usr/local/bin/ultra-relay', '/unrelated/retain'],
-                  'state_paths': ['/etc/ultra-ansible']}
+                  'state_paths': ['/etc/ultra-ansible', *retired_units]}
         identity = ROLE / 'backup-identity.yml'
         if identity.exists():
             tasks = yaml.safe_load(identity.read_text())
@@ -49,6 +51,8 @@ class Identity(unittest.TestCase):
         self.assertIn(NEW, result['artifact_paths'], 'new controller unit points outside the backed-up runtime')
         self.assertNotIn(OLD, result['artifact_paths'])
         self.assertIn('/unrelated/retain', result['artifact_paths'])
+        self.assertFalse(set(retired_units) & set(result['state_paths']),
+                         'retired upgrade units cannot remain required backup paths')
 
     def test_publication_preserves_ownership_catalog_without_rewriting_artifact_refs(self):
         tasks = yaml.safe_load((ROLE / 'publish.yml').read_text())

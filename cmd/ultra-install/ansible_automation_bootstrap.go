@@ -119,9 +119,6 @@ func ansibleBootstrapAutomationGeneration(ctx context.Context, p *installplan.In
 		return err
 	}
 	configuration["release_signature"] = variables["ultra_automation_signature_source"] != ""
-	if err = prepareAutoUpgradeInputs(p, stage, variables); err != nil {
-		return err
-	}
 	_, err = runBootstrapMutationStage(ctx, "bootstrap-automation", inventory, variables, directory, "automation", generation, python, executable)
 	return err
 }

@@ -149,8 +149,7 @@ def plan(config):
         artifact_paths.append(spec['geo_assets_dir'])
     if config.get('controller_directory'):
         artifact_paths.append(config['controller_directory'])
-        state_paths.extend(['/var/lib/ultra-ansible/channel', '/var/lib/ultra-ansible/retention', '/etc/ultra-ansible', '/etc/systemd/system/ultra-ansible-controller.service', '/etc/systemd/system/ultra-auto-upgrade.service',
-                            '/etc/systemd/system/ultra-auto-upgrade.timer'])
+        state_paths.extend(['/var/lib/ultra-ansible/channel', '/var/lib/ultra-ansible/retention', '/etc/ultra-ansible', '/etc/systemd/system/ultra-ansible-controller.service'])
     for name in config['recovery_tool_members']:
         if name.endswith(('.service', '.timer')):
             state_paths.append(str(UNITS / name))

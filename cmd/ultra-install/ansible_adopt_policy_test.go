@@ -272,7 +272,8 @@ func TestAdoptionBackupExtrasPreservesCustomManagedDirectoryMembers(t *testing.T
 		"/opt/ultra-recovery/releases",
 		"/opt/ultra-recovery/releases/v0.9.0",
 	}
-	paths := append([]string{"/opt/ultra-recovery/reconcile.py", "/etc/systemd/system/ultra-recovery-backup.timer"}, custom...)
+	paths := append([]string{"/opt/ultra-recovery/reconcile.py", "/etc/systemd/system/ultra-recovery-backup.timer",
+		"/etc/systemd/system/ultra-auto-upgrade.service", "/etc/systemd/system/ultra-auto-upgrade.timer"}, custom...)
 	got, err := adoptionBackupExtras(paths)
 	if err != nil || !reflect.DeepEqual(got, custom) {
 		t.Fatalf("custom backup coverage lost: got %v, err %v", got, err)

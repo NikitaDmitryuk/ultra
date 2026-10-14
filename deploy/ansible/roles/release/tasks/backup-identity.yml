@@ -56,10 +56,13 @@
 - name: Select only the current controller runtime for subsequent recovery generations
   ansible.builtin.copy:
     content: >-
-      {{ release_identity_backup.content | b64decode | from_json |
-      combine({'artifact_paths': (((release_identity_backup.content | b64decode | from_json).artifact_paths |
-      reject('equalto', ultra_previous_controller_directory) | reject('equalto', ultra_controller_directory) | list) +
-      [release_backup_controller_directory]) | unique | sort}) | to_nice_json(preprocess_unsafe=False) }}
+      {{ (release_identity_backup.content | b64decode | from_json) |
+      combine({'state_paths': ((release_identity_backup.content | b64decode | from_json).state_paths | default([]) |
+      reject('equalto', '/etc/systemd/system/ultra-auto-upgrade.service') |
+      reject('equalto', '/etc/systemd/system/ultra-auto-upgrade.timer') | list | unique | sort),
+      'artifact_paths': ((release_identity_backup.content | b64decode | from_json).artifact_paths |
+      reject('equalto', ultra_previous_controller_directory) | reject('equalto', ultra_controller_directory) | list |
+      union([release_backup_controller_directory]) | unique | sort)}) | to_nice_json(preprocess_unsafe=False) }}
     dest: /etc/ultra-recovery/backup.json
     owner: root
     group: root

@@ -3,6 +3,7 @@
 import argparse
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -660,20 +661,61 @@ class Host:
     def direct_ingress(self):
         import dns
         policy = json.loads(dns.private('/etc/ultra-recovery/dns.json').read_text())
-        config, previous = policy['config'], policy['desired']
-        if set(previous) != {'subscription', 'vpn'}:
+        config, previous = policy['config'], dict(policy['desired'])
+        if set(previous) not in ({'subscription', 'vpn'}, {'subscription', 'vpn', 'backend'}):
             raise ValueError('restored_dns_policy_required')
+        # Older bootstrap plans may save only the public pair while DNS ownership
+        # already includes the separately migrated backend. Move that owned record
+        # with the bridge rather than silently retaining the fenced source address.
+        receipt = json.loads(dns.private('/etc/ultra-recovery/dns-receipt.json').read_text())
+        backend = receipt.get('records', {}).get('backend')
+        if backend is not None:
+            if (receipt.get('version') != 1 or receipt.get('zone') != config['zone']
+                    or not isinstance(backend, dict)
+                    or set(backend) != {'id', 'type', 'name', 'data', 'ttl'}
+                    or backend['type'] != 'A' or not re.fullmatch(r'[A-Za-z0-9-]+', str(backend['id']))
+                    or not isinstance(backend['name'], str) or not dns.LABEL.fullmatch(backend['name'])
+                    or type(backend['ttl']) is not int or not 120 <= backend['ttl'] <= 86400):
+                raise ValueError('restored_backend_dns_ownership_required')
+            ipaddress.IPv4Address(backend['data'])
+            if 'backend' in previous and previous['backend'].get('name') != backend['name']:
+                raise ValueError('restored_backend_dns_policy_mismatch')
+            previous['backend'] = {'name': backend['name'], 'data': backend['data']}
+        elif 'backend' in previous:
+            raise ValueError('restored_backend_dns_ownership_required')
         names = {role: previous[role]['name'] + '.' + config['zone'] for role in previous}
         if names['subscription'] != self.plan['subscription_domain'] or names['vpn'] != self.plan['public_host']:
             raise ValueError('restored_dns_policy_mismatch')
         desired = {role: dict(previous[role], data=self.plan['new_bridge_address']) for role in previous}
-        # Before publishing either A record, validate both certificates against
+        backend_port = None
+        backend_hostname = None
+        if backend is not None:
+            _, environment = unit_environment('ultra-bot.service')
+            # A completed migration rollback retains ownership of the unused
+            # backend A record. Move it too, but probe the effective bot identity.
+            backend_hostname = environment.get('ULTRA_BOT_DOMAIN', '')
+            if (not isinstance(backend_hostname, str) or not 1 <= len(backend_hostname) <= 253
+                    or '.' not in backend_hostname
+                    or not all(dns.LABEL.fullmatch(label) for label in backend_hostname.split('.'))):
+                raise ValueError('restored_backend_hostname_required')
+            try:
+                backend_port = int(environment['ULTRA_BOT_PORT'])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError('restored_backend_port_required') from None
+            if not 1 <= backend_port <= 65535:
+                raise ValueError('restored_backend_port_required')
+        # Before publishing the A records, validate public certificates against
         # the replacement IP, bypassing DNS but preserving hostname validation.
         context = ssl.create_default_context()
         context.minimum_version = ssl.TLSVersion.TLSv1_2
-        for name in names.values():
+        for role in ('subscription', 'vpn'):
+            name = names[role]
             with socket.create_connection((self.plan['new_bridge_address'], 443), timeout=15) as raw:
                 with context.wrap_socket(raw, server_hostname=name):
+                    pass
+        if backend_port is not None:
+            with socket.create_connection(('127.0.0.1', backend_port), timeout=15) as raw:
+                with context.wrap_socket(raw, server_hostname=backend_hostname):
                     pass
         run(['curl', '--fail', '--silent', '--show-error', '--noproxy', '*', '--max-time', '30',
              '--resolve', names['subscription'] + ':443:' + self.plan['new_bridge_address'],
@@ -684,9 +726,14 @@ class Host:
         # Persist the new intent only after authoritative convergence. Never
         # compensate a partially published cutover by pointing at the dead VM.
         dns.save('/etc/ultra-recovery/dns.json', {'config': config, 'desired': desired})
-        for name in names.values():
+        for role in ('subscription', 'vpn'):
+            name = names[role]
             with socket.create_connection((name, 443), timeout=15) as raw:
                 with context.wrap_socket(raw, server_hostname=name):
+                    pass
+        if backend_port is not None:
+            with socket.create_connection(('127.0.0.1', backend_port), timeout=15) as raw:
+                with context.wrap_socket(raw, server_hostname=backend_hostname):
                     pass
         run(['curl', '--fail', '--silent', '--show-error', '--noproxy', '*', '--max-time', '30',
              'https://' + names['subscription'] + '/healthz'])

@@ -15,7 +15,7 @@ AUTOMATION_UNITS = (
     'ultra-recovery-reconcile.service', 'ultra-recovery-reconcile.timer',
     'ultra-monitor.service', 'ultra-monitor.timer', 'ultra-monitor-probe.service',
     'certbot.service', 'certbot.timer',
-    'ultra-ansible-controller.service', 'ultra-auto-upgrade.service', 'ultra-auto-upgrade.timer',
+    'ultra-ansible-controller.service',
 )
 APP_UNITS = ('ultra-relay.service', 'ultra-bot.service')
 PHASES = ('prepare', 'install', 'database', 'peer_reseed', 'activate', 'ingress', 'automation', 'ready')

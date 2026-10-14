@@ -106,6 +106,33 @@ class DNSTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'unconfirmed'): self.execute()
         self.assertEqual(self.api.writes, ['POST'])
 
+    def test_backend_extension_preserves_public_records_and_recovers_lost_create(self):
+        self.execute()
+        before = copy.deepcopy(self.api.rows)
+        self.desired['backend'] = {'name': 'core', 'data': '192.0.2.1'}
+        self.api.lose = True
+        with self.assertRaises(ValueError): self.execute()
+        self.assertTrue(self.execute()['ready'])
+        self.assertEqual(self.api.rows[:2], before)
+        self.assertEqual(self.api.writes, ['POST', 'POST', 'POST'])
+        self.execute()
+        self.assertEqual(len(self.api.writes), 3)
+
+    def test_legacy_public_policy_retains_and_verifies_owned_backend(self):
+        self.desired['backend'] = {'name': 'core', 'data': '192.0.2.1'}
+        self.execute()
+        del self.desired['backend']
+        self.assertTrue(self.execute()['ready'])
+        self.assertEqual(len(self.api.writes), 3)
+        self.api.rows[-1]['data'] = '192.0.2.99'
+        with self.assertRaisesRegex(ValueError, 'record_drift'): self.execute()
+        self.assertEqual(len(self.api.writes), 3)
+
+    def test_backend_cannot_share_public_role_name(self):
+        self.desired['backend'] = dict(self.desired['subscription'])
+        with self.assertRaisesRegex(ValueError, 'duplicate_roles'): self.execute()
+        self.assertFalse(self.api.writes)
+
     def test_public_policy_rejects_apex_or_invalid_role(self):
         self.desired['vpn']['name'] = '@'
         with self.assertRaises(ValueError): self.execute()

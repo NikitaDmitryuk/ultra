@@ -183,8 +183,8 @@ build-client-release:
 ansible-dist:
 	mkdir -p dist
 	tar --exclude=__pycache__ --exclude=\*.pyc -czf dist/ultra-ansible.tar.gz -C deploy/ansible ansible.cfg requirements.txt controller.py playbooks roles library callback_plugins
-	python3 scripts/build-ansible-runtime.py --architecture amd64 --output dist/ultra-ansible-runtime-linux-amd64.tar.gz
-	python3 scripts/build-ansible-runtime.py --architecture arm64 --output dist/ultra-ansible-runtime-linux-arm64.tar.gz
+	python3 scripts/manual-deploy-runtime.py --architecture amd64 --output dist/ultra-ansible-runtime-linux-amd64.tar.gz
+	python3 scripts/manual-deploy-runtime.py --architecture arm64 --output dist/ultra-ansible-runtime-linux-arm64.tar.gz
 
 test-ansible:
 	python3 scripts/test-ansible-controller-process.py
@@ -205,3 +205,14 @@ test-ansible:
 # Disposable container: real SSH/Ansible with a simulated service manager.
 test-ansible-exit: build-install
 	python3 scripts/test-ansible-exit.py --installer "$(CURDIR)/ultra-install" --ansible-playbook "$$(command -v ansible-playbook)"
+
+# Explicit operator action: builds committed HEAD in isolation, then rolls out.
+.PHONY: deploy deploy-build test-manual-deploy
+deploy:
+	python3 scripts/manual-deploy.py
+
+deploy-build:
+	python3 scripts/manual-deploy.py --build-only
+
+test-manual-deploy:
+	python3 scripts/test-manual-deploy.py

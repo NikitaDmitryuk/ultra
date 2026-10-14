@@ -474,3 +474,96 @@ class KeyLifecycle(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'independently_extracted'):recovery_key.verify_copy(root/'missing',identity,alias,root/'receipt')
 
 if __name__=='__main__':unittest.main()
+
+
+class BackendDNSRestoreContracts(unittest.TestCase):
+    def setUp(self):
+        import dns
+        self.dns = dns
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.policy = {'config': {'zone': 'example.com', 'ttl': 300}, 'desired': {
+            'subscription': {'name': 'sync', 'data': '192.0.2.1'},
+            'vpn': {'name': 'edge', 'data': '192.0.2.1'},
+            'backend': {'name': 'core', 'data': '192.0.2.1'}}}
+        self.receipt = {'version': 1, 'zone': 'example.com', 'records': {
+            role: dict(value, type='A', ttl=300, id=role) for role, value in self.policy['desired'].items()}}
+        self.policy_path = self.root / 'dns.json'
+        self.receipt_path = self.root / 'dns-receipt.json'
+        self.policy_path.write_text(json.dumps(self.policy))
+        self.receipt_path.write_text(json.dumps(self.receipt))
+        self.plan = {'restore_id': 'r', 'ingress_mode': 'direct', 'target_host': 'replacement',
+            'old_bridge_address': '192.0.2.1', 'new_bridge_address': '192.0.2.2',
+            'public_host': 'edge.example.com', 'subscription_domain': 'sync.example.com',
+            'fence': {'source': 'bridge', 'source_address': '192.0.2.1', 'target_host': 'replacement',
+                'confirmed_offline': True, 'confirmed_at': int(time.time())}}
+        self.target = host.Host(self.root, self.plan)
+        self.patches = [
+            mock.patch.object(dns, 'private', side_effect=lambda path: self.receipt_path if str(path).endswith('dns-receipt.json') else self.policy_path),
+            mock.patch.object(host, 'unit_environment', return_value=('root', {'ULTRA_BOT_DOMAIN': 'core.example.com', 'ULTRA_BOT_PORT': '8444'})),
+            mock.patch.object(host.socket, 'create_connection'),
+            mock.patch.object(host.ssl, 'create_default_context'),
+            mock.patch.object(host, 'run'), mock.patch.object(dns, 'execute'),
+            mock.patch.object(dns, 'wait_ready'), mock.patch.object(dns, 'save')]
+        self.private, self.environment, self.connection, self.context, self.command, self.execute, self.wait, self.save = [patcher.start() for patcher in self.patches]
+        for patcher in self.patches: self.addCleanup(patcher.stop)
+
+    def test_backend_owned_record_moves_with_public_pair_without_public_backend_listener(self):
+        self.target.direct_ingress()
+        desired = self.execute.call_args.args[1]
+        self.assertEqual(set(desired), {'subscription', 'vpn', 'backend'})
+        self.assertEqual({row['data'] for row in desired.values()}, {'192.0.2.2'})
+        self.assertEqual(desired['backend']['name'], 'core')
+        addresses = [call.args[0] for call in self.connection.call_args_list]
+        self.assertNotIn(('core.example.com', 443), addresses)
+        self.assertEqual(addresses.count(('127.0.0.1', 8444)), 2)
+        self.save.assert_called_once()
+
+    def test_backend_missing_from_legacy_policy_is_recovered_from_owned_receipt(self):
+        del self.policy['desired']['backend']
+        self.policy_path.write_text(json.dumps(self.policy))
+        self.target.direct_ingress()
+        self.assertEqual(self.execute.call_args.args[1]['backend'], {'name': 'core', 'data': '192.0.2.2'})
+
+    def test_backend_cutover_resume_reuses_replacement_intent_after_dns_wait_failure(self):
+        self.wait.side_effect = ValueError('dns_convergence_timeout')
+        with self.assertRaises(ValueError): self.target.direct_ingress()
+        self.save.assert_not_called()
+        self.wait.side_effect = None
+        self.target.direct_ingress()
+        self.assertEqual(self.execute.call_count, 2)
+        for call in self.execute.call_args_list:
+            self.assertEqual(call.args[1]['backend'], {'name': 'core', 'data': '192.0.2.2'})
+        self.save.assert_called_once()
+
+    def test_backend_tls_failure_blocks_all_dns_publication(self):
+        def connection(address, **kwargs):
+            if address == ('127.0.0.1', 8444):
+                raise OSError('synthetic backend TLS failure')
+            return mock.MagicMock()
+        self.connection.side_effect = connection
+        with self.assertRaises(OSError): self.target.direct_ingress()
+        self.execute.assert_not_called()
+        self.save.assert_not_called()
+
+    def test_backend_environment_and_owned_receipt_are_validated_independently(self):
+        self.environment.return_value = ('root', {'ULTRA_BOT_DOMAIN': 'invalid/name', 'ULTRA_BOT_PORT': '8444'})
+        with self.assertRaisesRegex(ValueError, 'backend'): self.target.direct_ingress()
+        self.execute.assert_not_called()
+        self.environment.return_value = ('root', {'ULTRA_BOT_DOMAIN': 'core.example.com', 'ULTRA_BOT_PORT': '8444'})
+        self.receipt['records']['backend']['name'] = 'foreign'
+        self.receipt_path.write_text(json.dumps(self.receipt))
+        with self.assertRaisesRegex(ValueError, 'backend'): self.target.direct_ingress()
+        self.execute.assert_not_called()
+
+    def test_rolled_back_backend_record_moves_while_active_bot_uses_old_certificate(self):
+        self.environment.return_value = ('root', {'ULTRA_BOT_DOMAIN': 'old.example.com', 'ULTRA_BOT_PORT': '8445'})
+        self.target.direct_ingress()
+        self.assertEqual(self.execute.call_args.args[1]['backend'], {'name': 'core', 'data': '192.0.2.2'})
+        addresses = [call.args[0] for call in self.connection.call_args_list]
+        self.assertEqual(addresses.count(('127.0.0.1', 8445)), 2)
+        self.assertNotIn(('core.example.com', 443), addresses)
+        names = [call.kwargs['server_hostname'] for call in self.context.return_value.wrap_socket.call_args_list]
+        self.assertEqual(names.count('old.example.com'), 2)
+        self.assertNotIn('core.example.com', names)

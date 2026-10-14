@@ -64,3 +64,64 @@ Domain cutover и перенос bridge выполняются через общ
 
 При сохранённом forwarding-узле он и bridge обязательны для подписок.
 Успех TCP health-check сам по себе не подтверждает TLS, HTTP или работу приложения.
+
+## Смена имени TLS backend бота
+
+`BOT_DOMAIN` — имя сертификата внутреннего listener бота, а
+`SUBSCRIPTION_DOMAIN` и `VPN_DOMAIN` — публичные имена. Когда backend использует
+прежний публичный hostname, его можно перенести на отдельное имя, например
+`core.example.com`, не меняя подписки, Mini App, UUID или VPN endpoint:
+
+```bash
+ultra-install backend-domain --config install.config \
+  --domain core.example.com --zone example.com \
+  --known-hosts /absolute/path/known_hosts --action apply
+```
+
+Операция требует уже работающие управляемые Nginx и DNS: на bridge должны
+существовать `dns.json` и `dns-receipt.json` в `/etc/ultra-recovery`, а изменяемые
+прокси должны принадлежать `/var/lib/ultra-ingress/managed.json`.
+API-ключ используется из существующей приватной DNS-конфигурации bridge.
+ACME email берётся из `ACME_EMAIL` либо `--acme-email`. Bootstrap, обновление
+бинарников и изменение firewall эта операция не выполняет.
+
+[Отдельная роль](../deploy/ansible/roles/backend_domain/tasks/main.yml) добавляет
+управляемую A-запись `backend`, проверяет DNS и выдаёт сертификат HTTP-01 через
+постоянный webroot. Затем [журнал перехода](../deploy/ansible/library/ultra_backend_domain.py)
+сохраняет приватные before images и согласованно меняет `ULTRA_BOT_DOMAIN`,
+`proxy_ssl_name` во всех принадлежащих ultra vhost и отдельный renewal hook.
+`ULTRA_BOT_PUBLIC_URL` сохраняет origin публичной подписки.
+Проверяются Nginx, backend TLS с `/healthz`, публичные `/healthz`, `/happ` и Mini App, VPN TLS
+и Certbot dry-run. Это не проверка импорта подписки на пользовательском устройстве.
+
+После успешной проверки оператор отдельно принимает результат:
+
+```bash
+ultra-install backend-domain --config install.config \
+  --domain core.example.com --zone example.com \
+  --known-hosts /absolute/path/known_hosts --action accept
+```
+
+`accept` заново проверяет работающий вход и журнал, затем атомарно обновляет только
+`BOT_DOMAIN` в каноническом `install.config` с правами 0600. Резервная копия
+создаётся общим механизмом `writeCutoverConfig`; автоматического изменения
+параметров после `apply` нет. До принятия не запускайте другие операции,
+которые заново формируют окружение из прежнего `BOT_DOMAIN`.
+
+При ошибке активации роль восстанавливает прежние environment, SNI и hook и
+проверяет прежний backend; итог операции остаётся ошибкой. Прежний публичный
+vhost и сертификаты сохраняются. Дополнительные DNS-запись, сертификат и
+HTTP-01 listener остаются управляемыми для повторной попытки и продления.
+Повтор `apply` использует тот же журнал; неизвестное изменение файла блокирует
+автоматическую перезапись, включая откат.
+
+Явный `--action rollback` восстанавливает сохранённый backend. Если `accept` уже
+изменил канонический файл, добавьте `--previous-domain old.example.com`, чтобы
+выбрать прежний журнал. После проверенного отката оператор отдельно вызывает
+ту же команду с `--action accept-rollback --previous-domain old.example.com`:
+она требует подтверждённый журнал отката, проверяет сохранённые файлы и работающий
+вход, затем атомарно возвращает канонический `BOT_DOMAIN` с правами 0600. DNS-ownership
+нового имени не удаляется и не передаётся чужой записи. Последующая DNS-сверка
+по прежней публичной паре сохраняет и проверяет уже управляемую backend-запись.
+Инвентарь следующего recovery capture включает новую lineage и её ACME account;
+сама операция не запускает внеочередной capture.

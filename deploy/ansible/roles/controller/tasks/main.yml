@@ -26,6 +26,10 @@
     - "{{ ultra_controller_directory }}"
     - "{{ ultra_controller_directory }}/runtime"
     - /var/lib/ultra-ansible
+    # These are recovery identity state, independent of the retired update timer.
+    - /var/lib/ultra-ansible/channel
+    - /var/lib/ultra-ansible/retention
+    - /etc/ultra-ansible
 - name: Inspect the pinned local controller artifact
   ansible.builtin.stat:
     path: "{{ ultra_install_source }}"
@@ -153,5 +157,5 @@
     enabled: true
     state: started
     daemon_reload: true
-- name: Configure the accepted automatic stable channel
-  ansible.builtin.import_tasks: auto-upgrade.yml
+- name: Retire the previously installed automatic release timer
+  ansible.builtin.import_tasks: retire-auto-upgrade.yml

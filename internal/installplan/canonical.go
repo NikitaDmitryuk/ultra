@@ -10,6 +10,9 @@ import (
 // CanonicalValuesToPlan keeps deployment policy separate from secret file contents.
 func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 	for key := range v {
+		if strings.HasPrefix(key, "ULTRA_AUTO_UPGRADE_") {
+			return nil, errors.New("automatic upgrade settings are no longer supported; use a manual release directory")
+		}
 		if DisallowedDeploymentSecret(key) {
 			return nil, errors.New("secret key " + key + " belongs outside install.config")
 		}
@@ -98,12 +101,6 @@ func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 		}
 		if mode == "direct" && a.Ingress != nil {
 			a.Ingress.ForwardHost = ""
-		}
-	}
-	if v["ULTRA_AUTO_UPGRADE_REPOSITORY"] != "" || v["ULTRA_AUTO_UPGRADE_MINISIGN_PUBLIC_KEY_FILE"] != "" || v["ULTRA_AUTO_UPGRADE_REQUIRED_CHECKS"] != "" {
-		a.AutoUpgrade = &AutomationAutoUpgrade{Repository: v["ULTRA_AUTO_UPGRADE_REPOSITORY"], PublicKeyFile: v["ULTRA_AUTO_UPGRADE_MINISIGN_PUBLIC_KEY_FILE"]}
-		if json.Unmarshal([]byte(v["ULTRA_AUTO_UPGRADE_REQUIRED_CHECKS"]), &a.AutoUpgrade.RequiredChecks) != nil {
-			return nil, errors.New("ULTRA_AUTO_UPGRADE_REQUIRED_CHECKS must be a JSON array")
 		}
 	}
 	p.Automation = a

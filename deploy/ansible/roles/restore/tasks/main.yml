@@ -80,6 +80,28 @@
   register: restore_data_phase
   changed_when: false
   no_log: true
+- name: Inspect restored recovery metadata directories
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop: [/etc/ultra-ansible, /var/lib/ultra-ansible, /var/lib/ultra-ansible/channel, /var/lib/ultra-ansible/retention]
+  register: restore_metadata_directories
+  when: ultra_restore_phase == 'install'
+- name: Reject non-directory restored recovery metadata
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isdir | default(false) and not item.stat.islnk | default(false))
+  loop: "{{ restore_metadata_directories.results }}"
+  when: ultra_restore_phase == 'install'
+- name: Restore empty recovery metadata directories omitted by file-only archives
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop: [/etc/ultra-ansible, /var/lib/ultra-ansible, /var/lib/ultra-ansible/channel, /var/lib/ultra-ansible/retention]
+  when: ultra_restore_phase == 'install'
 - name: Inspect restored canonical deployment configuration
   ansible.builtin.stat:
     path: /etc/ultra-ansible/install.config

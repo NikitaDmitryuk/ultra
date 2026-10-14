@@ -199,7 +199,6 @@ type DoctorReport struct {
 // AutomationConfig contains references and public deployment policy, never secret values.
 // A v2 plan requires automation; v1 plans retain their legacy deployment semantics.
 type AutomationConfig struct {
-	AutoUpgrade         *AutomationAutoUpgrade `json:"auto_upgrade,omitempty"`
 	DNS                 *AutomationDNS         `json:"dns,omitempty"`
 	Ingress             *AutomationIngress     `json:"ingress,omitempty"`
 	AdminTelegramID     int64                  `json:"admin_telegram_id,omitempty"`
@@ -216,12 +215,6 @@ type AutomationConfig struct {
 	ArtifactPaths       []string               `json:"artifact_paths,omitempty"`
 	ReadinessTimeoutSec int                    `json:"readiness_timeout_sec,omitempty"`
 }
-type AutomationAutoUpgrade struct {
-	Repository     string   `json:"repository"`
-	PublicKeyFile  string   `json:"public_key_file"`
-	RequiredChecks []string `json:"required_checks"`
-}
-
 type StaticBudget struct {
 	MonthlyBytes int64 `json:"monthly_bytes"`
 	IsFallback   bool  `json:"is_fallback"`

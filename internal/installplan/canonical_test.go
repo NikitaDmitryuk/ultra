@@ -44,6 +44,14 @@ func TestCanonicalV2MappingAndLegacyBoundary(t *testing.T) {
 	}
 }
 
+func TestCanonicalRejectsRemovedAutomaticUpgradePolicy(t *testing.T) {
+	v := canonicalFixture()
+	v["ULTRA_AUTO_UPGRADE_REPOSITORY"] = "example/project"
+	if _, err := CanonicalValuesToPlan(v); err == nil {
+		t.Fatal("removed automatic upgrade policy was silently ignored")
+	}
+}
+
 func TestCanonicalV2BridgeSSHHostDoesNotChangeServiceAddress(t *testing.T) {
 	v := canonicalFixture()
 	v["BRIDGE_SSH_HOST"] = "bridge-admin"

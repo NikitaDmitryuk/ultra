@@ -38,12 +38,23 @@ func rewriteDeploymentConfig(input, output, old, bridge, ssh, public, subscripti
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 1<<20 {
 		return errors.New("deployment_rewrite_private_source_required")
 	}
-	p, err := installplan.LoadConfig(input)
+	// Older encrypted generations may contain the retired automatic-channel
+	// policy in their canonical input. Strip only that known obsolete namespace
+	// during restore; ordinary installs still reject it.
+	values, err := installplan.ReadSecretsFile(input)
 	if err != nil {
 		return err
 	}
-	values := p.SourceValues
-	if len(values) == 0 {
+	for key := range values {
+		if strings.HasPrefix(key, "ULTRA_AUTO_UPGRADE_") {
+			delete(values, key)
+		}
+	}
+	p, err := installplan.CanonicalValuesToPlan(values)
+	if err != nil {
+		return err
+	}
+	if len(p.SourceValues) == 0 {
 		return errors.New("deployment_rewrite_canonical_source_required")
 	}
 	values["BRIDGE"] = bridge

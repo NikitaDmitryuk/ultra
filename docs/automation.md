@@ -2,7 +2,7 @@
 
 Переход поставляется поэтапно. Границы первого PR и отложенная сквозная
 приёмка перечислены в [Ansible TODO](../TODO.md). Реализация команды не означает
-подтверждённую production-приёмку; стабильный автоматический канал пока выключен.
+подтверждённую production-приёмку.
 
 [Наглядное объяснение Ansible](ansible-explained.html) показывает путь задания,
 границы ответственности, обновление и откат.
@@ -129,7 +129,8 @@ worker продолжает незавершённые задания. Неус�
 Операторский `ansible-retry-bootstrap --state-dir <original-stage>` продолжает
 исходный bootstrap-комплект под блокировкой из frozen request. Ошибка архивируется
 и синхронизируется до смены номера попытки; успешные этапы остаются кешированными.
-Этот интерфейс не снимает блокировку failed-версии автоматического канала.
+Этот интерфейс также очищает оставшуюся с прежних установок блокировку
+failed-версии автоматического канала.
 Таймаут исполнителя прекращает локальную группу Ansible/SSH до записи terminal
 receipt. Отмена оператора прекращает ту же группу, но оставляет задание
 незавершённым для безопасного продолжения.
@@ -159,6 +160,57 @@ base-этапа; исходная failed receipt не подменяется у�
 [локальный адаптер](../internal/deployansible/local.go).
 
 ## Первоначальная установка и принятие
+
+### Ручная выкладка через bridge
+
+`make deploy` запускает `scripts/manual-deploy.py` для точного committed `HEAD`;
+tracked-дерево должно быть чистым. Канонический `install.config` задаёт bridge и
+статические узлы; скрипт подключается к bridge через первый static exit как SSH
+jump host. Для этого оператор передаёт локальные пути к ключу и файлу pins:
+
+```sh
+ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \
+ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
+```
+
+Ключ должен быть выделенным файлом с правами 0600, а host keys — проверенными
+заранее. SSH использует `-F /dev/null`, `StrictHostKeyChecking=yes` и только эти
+локальные path refs; пользовательский `~/.ssh/config` не читается. `.env`, SSH
+private key и known_hosts не копируются на сервер.
+
+`ULTRA_OPERATOR_INVENTORY` остаётся необязательным compatibility route для
+продолжения существующего failed adoption artifact из `adopt-*/compare/`. В этом
+случае скрипт проверяет provenance артефакта. Для обычной ручной выкладки отдельный
+inventory не нужен и вручную его создавать не следует.
+
+После локальной сборки и проверки release скрипт передаёт на bridge полный комплект
+и точный canonical `install.config` в
+`/var/lib/ultra-ansible/operator-inputs/manual-<SHA>-<attempt>/release`. В конфигурации
+обновляются только `ULTRA_AUTOMATION_VERSION` и `ULTRA_AUTOMATION_RELEASE_DIR`;
+`.env` и иные секреты не передаются. На bridge выполняются `doctor`, затем обычный
+`upgrade` и `status`. Для принятия уже работающего runtime используйте явный запуск:
+
+```sh
+ADOPT=1 ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \
+ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
+```
+
+Он выполняет `doctor`, `adopt --check --adopt-runtime --bridge-native`,
+`apply --adopt-runtime --bridge-native` и `status`; без `ADOPT=1` adoption не
+запускается. Отдельного фонового или автоматического обновления этот механизм не
+устанавливает.
+
+До запуска изменяющего задания ошибки staging, `doctor` и read-only adoption
+сравнения восстанавливают прежний локальный config и очищают журнал. После отправки
+`upgrade` или `apply` при ошибке новый config и приватный журнал сохраняются, так
+как удалённое задание может продолжаться. Сверьте состояние через `ultra-install
+status` на bridge и продолжайте восстановление по его журналу; не восстанавливайте
+config вручную и не начинайте другой commit, пока операция не разрешена. Повтор
+того же commit продолжает текущую попытку. Канонический `install.config` должен
+оставаться обычным файлом владельца с правами 0600.
+
+`make deploy-build` только собирает и проверяет кандидата без изменения config и
+узлов. Общая инструкция по выкладке находится в [README](../README.md).
 
 Для принятия действующего runtime используется явный `--adopt-runtime` в
 `adopt --check` и `apply`. Обычный bootstrap сохраняет отдельное назначение:
@@ -315,32 +367,6 @@ Read-only ingress status и adopt используют временные кат
 Проверки контрактов: [Go upgrade](../cmd/ultra-install/ansible_upgrade_test.go),
 [проверка роли через SSH](../scripts/test-ansible-release.py),
 [квитанции и свежесть](../scripts/test-ansible-release-contracts.py).
-
-## Стабильный автоматический канал
-
-Необязательные параметры `install.config`:
-
-- `ULTRA_AUTO_UPGRADE_REPOSITORY` — repository `owner/name`;
-- `ULTRA_AUTO_UPGRADE_MINISIGN_PUBLIC_KEY_FILE` — абсолютный путь доверенного публичного ключа;
-- `ULTRA_AUTO_UPGRADE_REQUIRED_CHECKS` — JSON-массив имён обязательных CI checks.
-
-Установщик создаёт приватные производные `install.config`, `.env` и policy
-на bridge. Signing private key туда не передаётся. Публикующий workflow требует
-minisign key и успешный обязательный CI для точного commit; подписываются
-исходные байты manifest и checksums. Подписанный JSON не пересериализуется
-перед проверкой подписи.
-
-Таймер проверяет стабильные релизы каждые пять минут. Draft, prerelease,
-понижение версии, отсутствие успешного CI, неверная подпись и неполные assets
-блокируют активацию. После проверки запускается установщик целевого релиза,
-а не старые встроенные роли. Офлайн runtime повторно используется только при
-совпадении хеша зависимостей целевого комплекта. Незавершённая попытка
-восстанавливается раньше обычной проверки равенства версий.
-
-Канал изначально выключен. После принятия инфраструктуры и проверки подписанных
-артефактов оператор выполняет `ultra-install enable-auto-upgrade --config
-install.config --confirm ACCEPT`; фиксированная операция проверяет пригодность
-установки перед включением. Одна установка controller-role не включает обновления.
 
 ## Реплики, копии и восстановление
 

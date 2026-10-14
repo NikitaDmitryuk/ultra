@@ -207,7 +207,7 @@ func bridgeMigration(ctx context.Context, o migrationOptions) error {
 	variables["ultra_migration_confirm"] = o.Confirm
 	variables["ultra_migration_network_restored"] = o.NetworkRestored
 	variables["ultra_migration_app_units"] = []string{"ultra-relay.service", "ultra-bot.service"}
-	variables["ultra_migration_automation_units"] = []string{"ultra-ansible-controller.service", "ultra-auto-upgrade.service", "ultra-auto-upgrade.timer", "ultra-recovery-prune.service", "ultra-recovery-prune.timer", "ultra-recovery-backup.timer", "ultra-recovery-backup.service", "ultra-recovery-reconcile.timer", "ultra-recovery-reconcile.service", "ultra-monitor.service", "ultra-monitor.timer", "ultra-monitor-probe.service", "certbot.service", "certbot.timer"}
+	variables["ultra_migration_automation_units"] = []string{"ultra-ansible-controller.service", "ultra-recovery-prune.service", "ultra-recovery-prune.timer", "ultra-recovery-backup.timer", "ultra-recovery-backup.service", "ultra-recovery-reconcile.timer", "ultra-recovery-reconcile.service", "ultra-monitor.service", "ultra-monitor.timer", "ultra-monitor-probe.service", "certbot.service", "certbot.timer"}
 	variables["ultra_migration_probe_executable"] = "/opt/ultra-ansible/current/ultra-install"
 	call := func(phase string) error {
 		inputs := map[string]any{}
