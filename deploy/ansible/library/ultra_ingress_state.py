@@ -73,6 +73,18 @@ def candidate(before, plan, action):
     if before.get('role') != 'bridge':
         raise ValueError('bridge_spec_required')
     prior = before.get('primary_xhttp') or {}
+    if action == 'adopt':
+        if not prior or not prior.get('published', True):
+            raise ValueError('adoption_published_ingress_required')
+        expected = {'host': plan.get('public_host') or plan['domain'], 'server_name': plan['domain'],
+                    'port': 443, 'path': plan['path'], 'backend_port': plan['backend_port']}
+        if any(prior.get(key) != value for key, value in expected.items()):
+            raise ValueError('adoption_publication_plan_mismatch')
+        if before.get('gateway_vless_port') != plan['gateway_port']:
+            raise ValueError('adoption_gateway_plan_mismatch')
+        if plan.get('fingerprint') and prior.get('fingerprint', 'firefox') != plan['fingerprint']:
+            raise ValueError('adoption_fingerprint_plan_mismatch')
+        return json.loads(json.dumps(before))
     if action == 'cutover':
         if not prior or not prior.get('published', True) or prior.get('port') != 443:
             raise ValueError('cutover_requires_published_primary')
@@ -183,7 +195,7 @@ def main():
         'specification': {'type': 'path', 'default': '/etc/ultra-relay/spec.json'},
         'directory': {'type': 'path', 'required': True},
         'plan': {'type': 'dict', 'required': True, 'no_log': True},
-        'action': {'type': 'str', 'choices': ['stage', 'activate', 'rollback', 'cutover'], 'required': True},
+        'action': {'type': 'str', 'choices': ['stage', 'activate', 'rollback', 'cutover', 'adopt'], 'required': True},
         'phase': {'type': 'str', 'choices': ['prepare', 'commit', 'rollback'], 'default': 'prepare'},
     }, supports_check_mode=True)
     try:

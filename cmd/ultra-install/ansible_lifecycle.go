@@ -31,6 +31,11 @@ func lifecycleID(directory string) string {
 // Execution mode is frozen once per plan; controller installation cannot turn
 // an operator gateway into a local target in the middle of its leased operation.
 func localLifecycleBridge(p *installplan.InstallPlan) bool {
+	// Initial native adoption uses fixed Ansible lifecycle operations throughout
+	// its frozen attempt, even after the broker has been installed.
+	if p.BridgeNative {
+		return false
+	}
 	target := p.Bridge.SSHHost + "|" + p.Bridge.Address
 	if p.ControllerLocal != nil && p.ControllerLocalTarget == target {
 		return *p.ControllerLocal

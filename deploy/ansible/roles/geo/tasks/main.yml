@@ -1,26 +1,55 @@
 ---
-- name: Resolve selected geo generation
-  ansible.builtin.uri:
-    url: https://api.github.com/repos/runetfreedom/russia-v2ray-rules-dat/releases/latest
-    return_content: true
-  register: geo_release
-  when: ultra_geo_tag | default('') == ''
-- name: Select immutable geo generation
-  ansible.builtin.set_fact:
-    geo_tag: "{{ ultra_geo_tag | default('') or geo_release.json.tag_name }}"
-- name: Ensure geo directory
-  ansible.builtin.file:
-    path: "{{ ultra_spec.geo_assets_dir }}"
-    state: directory
-    owner: ultra-relay
-    group: ultra-relay
-    mode: "0755"
-- name: Download verified geo assets
-  ansible.builtin.get_url:
-    url: "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/download/{{ geo_tag }}/{{ item }}"
-    checksum: "sha256:https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/download/{{ geo_tag }}/{{ item }}.sha256sum"
-    dest: "{{ ultra_spec.geo_assets_dir }}/{{ item }}"
-    owner: ultra-relay
-    group: ultra-relay
-    mode: "0644"
-  loop: [geoip.dat, geosite.dat]
+- name: Manage selected geo generation
+  when: not (ultra_preserve_runtime | default(false) | bool)
+  block:
+    - name: Resolve selected geo generation
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/runetfreedom/russia-v2ray-rules-dat/releases/latest
+        return_content: true
+      register: geo_release
+      when: ultra_geo_tag | default('') == ''
+    - name: Select immutable geo generation
+      ansible.builtin.set_fact:
+        geo_tag: "{{ ultra_geo_tag | default('') or geo_release.json.tag_name }}"
+    - name: Ensure geo directory
+      ansible.builtin.file:
+        path: "{{ ultra_spec.geo_assets_dir }}"
+        state: directory
+        owner: ultra-relay
+        group: ultra-relay
+        mode: "0755"
+    - name: Download verified geo assets
+      ansible.builtin.get_url:
+        url: "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/download/{{ geo_tag }}/{{ item }}"
+        checksum: "sha256:https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/download/{{ geo_tag }}/{{ item }}.sha256sum"
+        dest: "{{ ultra_spec.geo_assets_dir }}/{{ item }}"
+        owner: ultra-relay
+        group: ultra-relay
+        mode: "0644"
+      loop: [geoip.dat, geosite.dat]
+- name: Verify preserved installed geo generation
+  when: ultra_preserve_runtime | default(false) | bool
+  block:
+    - name: Require frozen geo asset identities
+      ansible.builtin.assert:
+        that:
+          - ultra_geo_assets is defined
+          - ultra_geo_assets | length == 2
+          - ultra_geo_assets | map(attribute='name') | sort | list == ['geoip.dat', 'geosite.dat']
+    - name: Inspect preserved geo assets
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+        follow: false
+        checksum_algorithm: sha256
+      loop: "{{ ultra_geo_assets }}"
+      register: geo_preserved
+    - name: Require unchanged installed geo assets
+      ansible.builtin.assert:
+        that:
+          - item.item.path == ultra_spec.geo_assets_dir + '/' + item.item.name
+          - item.stat.exists
+          - item.stat.isreg | default(false)
+          - not (item.stat.islnk | default(false))
+          - item.stat.size | default(0) == item.item.size
+          - item.stat.checksum | default('') == item.item.sha256
+      loop: "{{ geo_preserved.results }}"

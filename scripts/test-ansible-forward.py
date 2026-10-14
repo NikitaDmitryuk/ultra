@@ -48,3 +48,39 @@ with tempfile.TemporaryDirectory() as temporary:
     except ValueError:
         pass
 print('Ansible forward ownership, repeated reconciliation and foreign-context guards passed')
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    nginx = root / 'etc/nginx'
+    (nginx / 'stream.d').mkdir(parents=True)
+    (nginx / 'conf.d').mkdir()
+    main = nginx / 'nginx.conf'
+    main.write_text(forward.main_candidate('events {}\nhttp {}\n'))
+    for relative, (desired, legacy) in forward.configurations('192.0.2.1', 'bot.example.com', 8444).items():
+        (nginx / relative).write_text(legacy)
+    original_stat = Path.stat
+    from types import SimpleNamespace
+    def fixture_stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        return SimpleNamespace(st_uid=0, st_mode=result.st_mode, st_size=result.st_size)
+    Path.stat = fixture_stat
+    try:
+        before = {path: path.read_bytes() for path in (main, nginx / 'stream.d/bot-proxy.conf', nginx / 'conf.d/acme-proxy.conf')}
+        forward.prepare(root, '192.0.2.1', 'bot.example.com', 8444, verify_existing=True)
+        assert all(path.read_bytes() == data for path, data in before.items())
+        assert not (root / 'var/lib/ultra-ingress/forward-managed.json').exists()
+        for bridge, domain in [('192.0.2.2', 'bot.example.com'), ('192.0.2.1', 'other.example.com')]:
+            try:
+                forward.prepare(root, bridge, domain, 8444, verify_existing=True)
+                raise AssertionError('mismatched preserved forward publication accepted')
+            except ValueError:
+                pass
+        (nginx / 'stream.d/bot-proxy.conf').unlink()
+        try:
+            forward.prepare(root, '192.0.2.1', 'bot.example.com', 8444, verify_existing=True)
+            raise AssertionError('missing preserved forward publication accepted')
+        except ValueError:
+            pass
+    finally:
+        Path.stat = original_stat
+print('Ansible preserved legacy forwarding verified without changes; missing or mismatched publications rejected')

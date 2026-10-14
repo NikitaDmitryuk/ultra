@@ -57,7 +57,11 @@ func applyPlanN(p *installplan.InstallPlan, format string) {
 		return
 	}
 	emitInstallEvent(format, installplan.EventStep, "", "inspecting pinned Ansible targets", "")
-	inventory, inspection, err := inspectBootstrap(ctx, p, directory, python, executable, lockDirectory)
+	preflightPlan := *p
+	if p.AdoptRuntime {
+		preflightPlan.Exits = nil
+	}
+	inventory, inspection, err := inspectBootstrapWithTopology(ctx, &preflightPlan, directory, python, executable, false, lockDirectory)
 	exitOnErr("Ansible target inspection", err)
 	// Read-only architecture discovery is allowed before the reservation. The
 	// actual immutable topology/config snapshot is taken only after the broker
@@ -92,10 +96,19 @@ func applyRemotePlan(p *installplan.InstallPlan, releaseDir string, format strin
 }
 
 func checkPublishedIngressPlan(p *installplan.InstallPlan, existing *config.Spec) error {
-	if !p.FullAutomation() || p.Automation.Ingress == nil || !existing.PrimaryXHTTPIsPublished() {
+	if !p.FullAutomation() || p.Automation.Ingress == nil {
+		return nil
+	}
+	if !existing.PrimaryXHTTPIsPublished() {
+		if p.AdoptRuntime {
+			return fmt.Errorf("adoption_published_ingress_required")
+		}
 		return nil
 	}
 	requested := p.Automation.Ingress
+	if p.AdoptRuntime && existing.GatewayVLESSPort != requested.GatewayPort {
+		return fmt.Errorf("adoption_gateway_plan_mismatch")
+	}
 	active := existing.PrimaryXHTTP
 	if active.ServerName != requested.Domain || active.Host != requested.PublicHost || active.Path != requested.Path || active.BackendPort != requested.BackendPort || active.Port != 443 {
 		return fmt.Errorf("published_ingress_change_requires_explicit_cutover")

@@ -20,10 +20,26 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
+type bootstrapGeoAsset struct {
+	Name string `json:"item"`
+	Stat struct {
+		Path     string `json:"path"`
+		Exists   bool   `json:"exists"`
+		Regular  bool   `json:"isreg"`
+		Symlink  bool   `json:"islnk"`
+		Checksum string `json:"checksum"`
+		Size     int64  `json:"size"`
+	} `json:"stat"`
+}
+
 type bootstrapInspection struct {
-	Architecture string   `json:"architecture"`
-	Capabilities []string `json:"capabilities"`
-	Files        []struct {
+	AuthoritativeRoutes []exits.BootstrapEntry `json:"-"`
+	TopologySHA         string                 `json:"-"`
+	CertificatePin      string                 `json:"certificate_pin"`
+	GeoAssets           []bootstrapGeoAsset    `json:"geo_assets"`
+	Architecture        string                 `json:"architecture"`
+	Capabilities        []string               `json:"capabilities"`
+	Files               []struct {
 		Content string `json:"content"`
 		Source  string `json:"source"`
 	} `json:"files"`
@@ -40,6 +56,10 @@ func (i bootstrapInspection) file(name string) ([]byte, error) {
 
 // bootstrapInventory is a derived inventory; it never reads a second operator inventory.
 func bootstrapInventory(p *installplan.InstallPlan, directory string) (map[string]any, error) {
+	return bootstrapInventoryWithNativeAttestation(p, directory, attestNativeAdoption)
+}
+
+func bootstrapInventoryWithNativeAttestation(p *installplan.InstallPlan, directory string, attest func(*installplan.InstallPlan) (string, error)) (map[string]any, error) {
 	if p.Bridge.RemoteDir != "/etc/ultra-relay" {
 		return nil, fmt.Errorf("ansible bootstrap requires canonical remote directory /etc/ultra-relay")
 	}
@@ -66,7 +86,12 @@ func bootstrapInventory(p *installplan.InstallPlan, directory string) (map[strin
 	}
 	common := map[string]any{"ansible_user": p.SSH.User, "ansible_become": p.SSH.User != "root", "ansible_become_method": "sudo", "ansible_become_flags": "-H -S -n", "ansible_ssh_private_key_file": identity, "ansible_ssh_common_args": "-F /dev/null -o ControlMaster=no -o ControlPath=none -o UpdateHostKeys=no -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=" + shellQuote(pins), "ultra_remote_dir": p.Bridge.RemoteDir, "ultra_inspect_dir": filepath.Join(directory, "inspection")}
 	bridge := map[string]any{"ansible_host": p.Bridge.SSHHost}
-	if localLifecycleBridge(p) {
+	if p.BridgeNative {
+		if _, err := attest(p); err != nil {
+			return nil, err
+		}
+	}
+	if p.BridgeNative || localLifecycleBridge(p) {
 		bridge["ansible_connection"] = "local"
 	}
 	nodes := map[string]any{}
@@ -86,9 +111,33 @@ func bootstrapInventory(p *installplan.InstallPlan, directory string) (map[strin
 }
 
 func inspectBootstrap(ctx context.Context, p *installplan.InstallPlan, directory, python, executable string, lockRoots ...string) (map[string]any, map[string]bootstrapInspection, error) {
+	return inspectBootstrapWithTopology(ctx, p, directory, python, executable, true, lockRoots...)
+}
+
+func inspectBootstrapWithTopology(ctx context.Context, p *installplan.InstallPlan, directory, python, executable string, discoverTopology bool, lockRoots ...string) (map[string]any, map[string]bootstrapInspection, error) {
+	var topology *adoptionTopology
+	if p.AdoptRuntime && discoverTopology {
+		lockRoot := filepath.Dir(directory)
+		if len(lockRoots) > 0 {
+			lockRoot = lockRoots[0]
+		}
+		observed, err := inspectAdoptionTopology(ctx, p, directory, python, executable, lockRoot)
+		if err != nil {
+			return nil, nil, err
+		}
+		topology = &observed
+	}
 	inventory, err := bootstrapInventory(p, directory)
 	if err != nil {
 		return nil, nil, err
+	}
+	var authoritativeRoutes []exits.BootstrapEntry
+	inventory["all"].(map[string]any)["vars"].(map[string]any)["ultra_preserve_runtime"] = p.AdoptRuntime
+	if topology != nil {
+		authoritativeRoutes, err = applyAdoptionTopology(p, inventory, directory, *topology)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	if err = os.MkdirAll(filepath.Join(directory, "inspection"), 0700); err != nil {
 		return nil, nil, err
@@ -120,11 +169,20 @@ func inspectBootstrap(ctx context.Context, p *installplan.InstallPlan, directory
 		}
 		result[alias] = data
 	}
+	bridgeInspection := result["bridge"]
+	bridgeInspection.AuthoritativeRoutes = authoritativeRoutes
+	if topology != nil {
+		bridgeInspection.TopologySHA = topology.SHA256
+		if err := validateAdoptionTopologyInspection(*topology, result); err != nil {
+			return nil, nil, err
+		}
+	}
+	result["bridge"] = bridgeInspection
 	return inventory, result, nil
 }
 
 func bootstrapRenderOptions(p *installplan.InstallPlan, inspection map[string]bootstrapInspection) (installplan.RenderOptions, error) {
-	opts := installplan.RenderOptions{}
+	opts := installplan.RenderOptions{PreserveRuntime: p.AdoptRuntime}
 	raw, err := inspection["bridge"].file("spec.json")
 	if err != nil {
 		return opts, err
@@ -144,6 +202,7 @@ func bootstrapRenderOptions(p *installplan.InstallPlan, inspection map[string]bo
 		return opts, fmt.Errorf("existing target is not a bridge")
 	}
 	opts.ExistingBridge = &prior
+	opts.ExistingBridgeJSON = append([]byte(nil), raw...)
 	if err = checkPublishedIngressPlan(p, &prior); err != nil {
 		return opts, err
 	}
@@ -168,11 +227,36 @@ func bootstrapRenderOptions(p *installplan.InstallPlan, inspection map[string]bo
 			return opts, fmt.Errorf("existing bootstrap routes are invalid")
 		}
 	}
+	if p.AdoptRuntime && len(inspection["bridge"].AuthoritativeRoutes) > 0 {
+		opts.PriorBootstrap = append([]exits.BootstrapEntry(nil), inspection["bridge"].AuthoritativeRoutes...)
+	}
 	if len(opts.PriorBootstrap) == 0 && prior.Exit.Address != "" {
+		if p.AdoptRuntime {
+			return opts, fmt.Errorf("runtime adoption requires existing bootstrap routes")
+		}
 		opts.PriorBootstrap = []exits.BootstrapEntry{{Name: "primary", Address: prior.Exit.Address, Port: prior.Exit.Port, TunnelUUID: prior.Exit.TunnelUUID, Priority: 100}}
 	}
 	for n := range p.Exits {
 		ex := &p.Exits[n]
+		if p.AdoptRuntime {
+			raw, err = inspection["exit_"+strconv.Itoa(n)].file("spec.json")
+			if err != nil || len(raw) == 0 {
+				return opts, fmt.Errorf("runtime adoption requires each existing exit specification")
+			}
+			var old config.Spec
+			if err = json.Unmarshal(raw, &old); err != nil || old.Role != config.RoleExit {
+				return opts, fmt.Errorf("existing exit specification is invalid")
+			}
+			if opts.ExistingExits == nil {
+				opts.ExistingExits = map[string]*config.Spec{}
+			}
+			opts.ExistingExits[ex.Name] = &old
+			if opts.ExistingExitJSON == nil {
+				opts.ExistingExitJSON = map[string][]byte{}
+			}
+			opts.ExistingExitJSON[ex.Name] = append([]byte(nil), raw...)
+			continue
+		}
 		if ex.TunnelUUID != "" {
 			continue
 		}
@@ -219,6 +303,7 @@ func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.Desir
 	nodes := children["exits"].(map[string]any)["hosts"].(map[string]any)
 	all["vars"].(map[string]any)["ultra_host_bootstrap"] = true
 	all["vars"].(map[string]any)["ultra_bridge_ipv4"] = p.Bridge.Address
+	all["vars"].(map[string]any)["ultra_preserve_runtime"] = p.AdoptRuntime
 	exitAliases := map[string]string{}
 	binary := func(arch, kind string) (string, error) {
 		value := p.Artifacts.RelayBinary
@@ -253,9 +338,21 @@ func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.Desir
 			return err
 		}
 		vars["ultra_relay_environment"] = mergeBootstrapEnvironment(string(oldEnvironment), ds.ExitEnvs[ex.Name])
+		if p.AdoptRuntime {
+			vars["ultra_relay_environment"] = string(oldEnvironment)
+		}
 		vars["ultra_generate_exit_tls"] = p.Features.GenerateExitTLS
 		vars["ultra_warp_enabled"] = p.Features.WARP
 		vars["ultra_warp_port"] = p.Features.WARPPort
+		if p.AdoptRuntime {
+			spec := ds.ExitSpecObjects[ex.Name]
+			vars["ultra_warp_enabled"] = spec.AntiCensor != nil && spec.AntiCensor.WARPProxy
+			port := 40000 // Same effective default as the exit Xray generator.
+			if spec.AntiCensor != nil && spec.AntiCensor.WARPProxyPort > 0 {
+				port = spec.AntiCensor.WARPProxyPort
+			}
+			vars["ultra_warp_port"] = port
+		}
 		exitAliases[ex.Name] = alias
 	}
 	src, err := binary(inspection["bridge"].Architecture, "relay")
@@ -282,11 +379,24 @@ func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.Desir
 		return err
 	}
 	bridge["ultra_relay_environment"] = mergeBootstrapEnvironment(string(oldEnvironment), ds.BridgeEnv)
+	if p.AdoptRuntime {
+		bridge["ultra_relay_environment"] = string(oldEnvironment)
+	}
 	bridge["ultra_bootstrap_entries"] = ds.Bootstrap
 	bridge["ultra_exit_hosts"] = exitAliases
 	bridge["ultra_bot_enabled"] = p.Bot.Enabled
 	bridge["ultra_geo_enabled"] = !p.Features.SkipGeoDownload && ds.BridgeSpecObject.SplitRoutingEnabled()
 	bridge["ultra_geo_tag"] = p.Features.GeoReleaseTag
+	if p.AdoptRuntime {
+		bridge["ultra_geo_enabled"] = ds.BridgeSpecObject.SplitRoutingEnabled()
+		if ds.BridgeSpecObject.SplitRoutingEnabled() {
+			assets, err := preservedBootstrapGeoAssets(ds.BridgeSpecObject.GeoAssetsDir, inspection["bridge"].GeoAssets)
+			if err != nil {
+				return err
+			}
+			bridge["ultra_geo_assets"] = assets
+		}
+	}
 	if ds.PostgresConfig != nil {
 		c := ds.PostgresConfig
 		bridge["ultra_postgres"] = map[string]any{"name": c.DBName, "user": c.DBUser, "password": c.DBPassword, "repl_user": c.ReplUser, "repl_password": c.ReplPassword}
@@ -313,13 +423,44 @@ func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.Desir
 		bridge["ultra_bot_source"] = src
 		bridge["ultra_bot_sha256"] = sum
 		bridge["ultra_bot_environment"] = string(projected)
+		if p.AdoptRuntime {
+			oldBotEnvironment, readErr := inspection["bridge"].file("bot.env")
+			if readErr != nil || len(oldBotEnvironment) == 0 {
+				return fmt.Errorf("runtime adoption requires existing bot environment")
+			}
+			bridge["ultra_bot_environment"] = string(oldBotEnvironment)
+		}
 		oldEnvironment, err := inspection["bridge"].file("environment")
 		if err != nil {
 			return err
 		}
 		bridge["ultra_relay_environment"] = mergeBootstrapEnvironment(string(oldEnvironment), ds.BridgeEnv+fmt.Sprintf("ULTRA_BOT_DOMAIN=%s\nULTRA_BOT_PUBLIC_URL=https://%s\nULTRA_BOT_PORT=%d\nULTRA_BOT_TELEGRAM_SOCKS5=127.0.0.1:10809\n", p.Bot.Domain, p.PublicSubscriptionDomain(), p.Bot.Port))
+		if p.AdoptRuntime {
+			bridge["ultra_relay_environment"] = string(oldEnvironment)
+		}
 	}
 	return nil
+}
+
+// Freeze the installed geo generation rather than resolving a newer release during adoption.
+func preservedBootstrapGeoAssets(directory string, inspected []bootstrapGeoAsset) ([]map[string]any, error) {
+	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || len(inspected) != 2 {
+		return nil, fmt.Errorf("runtime adoption requires known installed geo assets")
+	}
+	assets := make([]map[string]any, 0, 2)
+	seen := map[string]bool{}
+	for _, asset := range inspected {
+		s := asset.Stat
+		checksum, err := hex.DecodeString(s.Checksum)
+		if (asset.Name != "geoip.dat" && asset.Name != "geosite.dat") || seen[asset.Name] ||
+			s.Path != filepath.Join(directory, asset.Name) || !s.Exists || !s.Regular || s.Symlink || s.Size <= 0 ||
+			err != nil || len(checksum) != sha256.Size {
+			return nil, fmt.Errorf("runtime adoption requires verified installed geo assets")
+		}
+		seen[asset.Name] = true
+		assets = append(assets, map[string]any{"name": asset.Name, "path": s.Path, "sha256": strings.ToLower(s.Checksum), "size": s.Size})
+	}
+	return assets, nil
 }
 
 func ensurePrivateBootstrapDirectory(directory string) error {
@@ -382,6 +523,12 @@ func freezeBootstrapInventory(p *installplan.InstallPlan, inventory map[string]a
 		return nil, err
 	}
 	if err = prepareBootstrapVariables(p, desired, inventory, inspection, directory); err != nil {
+		return nil, err
+	}
+	if err = preserveAdoptionJSON(p, desired, inventory); err != nil {
+		return nil, err
+	}
+	if err = prepareAdoptionBaseline(p, inventory, inspection); err != nil {
 		return nil, err
 	}
 	raw, err := json.Marshal(inventory)

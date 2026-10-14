@@ -1,0 +1,61 @@
+---
+- name: Check preserved publication matches the requested ingress plan
+  ultra_ingress_state:
+    directory: "{{ ultra_ingress_transaction }}"
+    plan: "{{ ultra_ingress }}"
+    action: adopt
+    phase: prepare
+  check_mode: true
+  register: ingress_transition
+  no_log: true
+- name: Select preserved publication port
+  ansible.builtin.set_fact:
+    ingress_public_port: "{{ ingress_transition.profile.port }}"
+- name: Assemble publication ownership checks
+  ansible.builtin.set_fact:
+    ingress_adopt_files:
+      - path: /etc/nginx/conf.d/ultra-vpn.conf
+        content: "{{ lookup('template', 'primary.conf.j2') }}"
+      - alternatives:
+          - path: /etc/letsencrypt/renewal-hooks/deploy/ultra-ansible
+            content: "{{ lookup('template', 'renewal-hook.j2') }}"
+          - path: /etc/letsencrypt/renewal-hooks/deploy/ultra-vpn
+            content: "{{ lookup('template', 'legacy-renewal-hook.j2') }}"
+  no_log: true
+- name: Require preserved subscription routing
+  ansible.builtin.set_fact:
+    ingress_adopt_files: >-
+      {{ ingress_adopt_files + [{'path': '/etc/nginx/conf.d/ultra-subscription.conf',
+         'content': lookup('template', 'subscription.conf.j2')}] }}
+  no_log: true
+  when:
+    - ultra_subscription_enabled | default(false) | bool
+    - ultra_subscription_domain != ultra_ingress.domain
+- name: Verify existing ingress ownership and publication without writing files
+  ultra_ingress_adopt:
+    expected: "{{ ingress_adopt_files }}"
+  no_log: true
+- name: Validate preserved relay specification
+  ansible.builtin.command:
+    argv: [/usr/local/bin/ultra-relay, -spec, /etc/ultra-relay/spec.json, -check]
+  changed_when: false
+  no_log: true
+- name: Validate preserved Nginx configuration
+  ansible.builtin.command:
+    argv: [nginx, -t]
+  changed_when: false
+- name: Verify preserved relay readiness
+  ultra_ingress_probe:
+    kind: relay
+  register: ingress_adopt_ready
+  until: ingress_adopt_ready.ready | default(false)
+  retries: 30
+  delay: 2
+  no_log: true
+- name: Verify preserved primary HTTPS handshake with authenticated SNI
+  ultra_ingress_probe:
+    kind: tls
+    address: "{{ ultra_bridge_ipv4 }}"
+    hostname: "{{ ingress_transition.profile.server_name }}"
+    port: "{{ ingress_transition.profile.port }}"
+  no_log: true

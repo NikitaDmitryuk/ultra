@@ -72,7 +72,7 @@ def main_candidate(before):
     return after + '\nstream {\n    include /etc/nginx/stream.d/*.conf;\n}\n'
 
 
-def prepare(root, bridge, domain, port):
+def prepare(root, bridge, domain, port, verify_existing=False):
     nginx = Path(root) / 'etc/nginx'
     configs = configurations(bridge, domain, port)
     legacy_marker = nginx / 'ultra-ingress.sha256.json'
@@ -87,6 +87,9 @@ def prepare(root, bridge, domain, port):
     current = json.loads(current_receipt.read_text()) if current_receipt.exists() else {}
     if not isinstance(current, dict):
         raise ValueError('invalid_forward_receipt')
+    pending = current_receipt.with_name(current_receipt.name + '.pending')
+    if verify_existing and (pending.exists() or pending.is_symlink()):
+        raise ValueError('forward_existing_transaction_pending')
     generated = []
     adopted = {}
     normalize = lambda text: re.sub(r'\s+', '', text)
@@ -95,17 +98,28 @@ def prepare(root, bridge, domain, port):
         path = nginx / relative
         if path.is_symlink():
             raise ValueError('forward_configuration_symlink')
+        if verify_existing and (not path.is_file() or path.stat().st_uid != 0):
+            raise ValueError('forward_existing_publication_required')
         if path.exists():
             previous = path.read_bytes()
+            if verify_existing and normalize(previous.decode()) not in (normalize(desired), normalize(known_old)):
+                raise ValueError('forward_existing_publication_mismatch')
             digest = hashlib.sha256(previous).hexdigest()
+            if verify_existing and ((str(path) in current and current[str(path)] != digest) or
+                                    (relative in legacy and legacy[relative] != digest)):
+                raise ValueError('forward_existing_ownership_drift')
             if normalize(previous.decode()) not in (normalize(desired), normalize(known_old)) and digest != legacy.get(relative) and digest != current.get(str(path)):
                 raise ValueError('foreign_forward_configuration')
             adopted[str(path)] = digest
         generated.append({'path': str(path), 'content': desired, 'mode': '0644'})
+    if verify_existing and (main.is_symlink() or not main.is_file() or main.stat().st_uid != 0):
+        raise ValueError('forward_existing_main_required')
     if main.exists():
         if main.is_symlink():
             raise ValueError('forward_main_symlink')
         before = main.read_text()
+        if verify_existing and main_candidate(before) != before:
+            raise ValueError('forward_existing_stream_include_required')
         generated.append({'path': str(main), 'content': main_candidate(before), 'mode': '0644'})
         adopted[str(main)] = hashlib.sha256(before.encode()).hexdigest()
     return generated, adopted
@@ -118,10 +132,11 @@ def main():
         'domain': {'type': 'str', 'required': True},
         'port': {'type': 'int', 'default': 8444},
         'adopt': {'type': 'bool', 'default': False},
+        'verify_existing': {'type': 'bool', 'default': False},
     }, supports_check_mode=True)
     try:
-        files, observed = prepare(module.params['root'], module.params['bridge'], module.params['domain'], module.params['port'])
-        if module.params['adopt'] and not module.check_mode:
+        files, observed = prepare(module.params['root'], module.params['bridge'], module.params['domain'], module.params['port'], module.params['verify_existing'])
+        if module.params['adopt'] and not module.check_mode and not module.params['verify_existing']:
             root = Path(module.params['root'])
             receipt = root / 'var/lib/ultra-ingress/forward-managed.json'
             receipt.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -133,7 +148,12 @@ def main():
                     raise ValueError('owned_forward_drift')
                 existing[name] = digest
             atomic(receipt, json.dumps(existing, sort_keys=True).encode())
-        module.exit_json(changed=False, files=files)
+        ports = [80, module.params['port']]
+        if module.params['verify_existing']:
+            stream = (Path(module.params['root']) / 'etc/nginx/stream.d/bot-proxy.conf').read_text()
+            if re.search(r'listen\s+443\s*;', stream):
+                ports.append(443)
+        module.exit_json(changed=False, files=files, ports=ports)
     except (OSError, ValueError, KeyError, TypeError):
         module.fail_json(msg='forward_ownership_validation_failed')
 

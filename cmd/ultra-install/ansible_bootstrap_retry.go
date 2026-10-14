@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,7 @@ type frozenBootstrapRetryDependencies struct {
 	readPrivate     func(string) ([]byte, error)
 	readRootPrivate func(string) ([]byte, error)
 	machine         func(*installplan.InstallPlan) bool
+	nativeMachine   func(string) bool
 	operator        func(context.Context, string) (context.Context, func(), error)
 	attach          func(context.Context, string, string) (context.Context, func(), error)
 	replay          func(context.Context, string, string, string) (deployansible.Receipt, error)
@@ -31,7 +33,7 @@ type frozenBootstrapRetryDependencies struct {
 
 func frozenBootstrapStageLeaseDependencies() frozenBootstrapRetryDependencies {
 	return frozenBootstrapRetryDependencies{
-		readPrivate: readBootstrapGenerationInput, readRootPrivate: readRootPrivateBootstrapRetry, machine: localLifecycleMachineIdentity,
+		readPrivate: readBootstrapGenerationInput, readRootPrivate: readRootPrivateBootstrapRetry, machine: localLifecycleMachineIdentity, nativeMachine: validNativeRetryMachine,
 		operator: func(ctx context.Context, path string) (context.Context, func(), error) {
 			if err := validateBootstrapRetryOperatorDirectory(path); err != nil {
 				return ctx, nil, err
@@ -193,6 +195,11 @@ func withFrozenBootstrapStageLeaseWith(ctx context.Context, directory string, de
 	if json.Unmarshal(modeRaw, &mode) != nil || mode.Schema != 1 || mode.LockDirectory != lock {
 		return deployansible.Receipt{}, errors.New("retry_frozen_execution_invalid")
 	}
+	if mode.Native {
+		if mode.Local || deps.nativeMachine == nil || !deps.nativeMachine(mode.NativeMachineSHA) {
+			return deployansible.Receipt{}, errors.New("retry_native_machine_changed")
+		}
+	}
 	if !mode.Local {
 		if lock == bootstrapBrokerLockDirectory {
 			return deployansible.Receipt{}, errors.New("retry_frozen_execution_invalid")
@@ -314,4 +321,15 @@ func validateBootstrapRetryOperatorDirectory(path string) error {
 		}
 	}
 	return nil
+}
+
+func validNativeRetryMachine(expected string) bool {
+	if os.Geteuid() != 0 {
+		return false
+	}
+	machine, err := readNativeAdoptionFile("/etc/machine-id", nil)
+	if err != nil || len(strings.TrimSpace(string(machine))) != 32 {
+		return false
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.TrimSpace(string(machine))))) == expected
 }

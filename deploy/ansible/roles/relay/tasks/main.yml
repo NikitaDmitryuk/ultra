@@ -38,7 +38,7 @@
   ansible.builtin.assert:
     that:
       - not item.stat.exists or (item.stat.isreg and not item.stat.islnk)
-      - item.stat.exists or (ultra_generate_exit_tls | default(true) | bool)
+      - item.stat.exists or ((ultra_generate_exit_tls | default(true) | bool) and not (ultra_preserve_runtime | default(false) | bool))
   loop: "{{ relay_existing_tls.results | default([]) }}"
   when: ultra_spec.role == 'exit'
 - name: Require a complete exit TLS pair or a fully fresh managed pair
@@ -127,6 +127,7 @@
       when:
         - not relay_certificate.stat.exists
         - ultra_generate_exit_tls | default(true) | bool
+        - not (ultra_preserve_runtime | default(false) | bool)
       no_log: true
       notify: Restart ultra relay
     - name: Protect the exit certificate and key

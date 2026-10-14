@@ -4,8 +4,25 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    - name: Inspect bridge artifact before checking a rollback continuation
+      ansible.builtin.stat:
+        path: /usr/local/bin/ultra-relay
+        checksum_algorithm: sha256
+      register: adoption_retry_artifact
+      when: inventory_hostname == 'bridge' and ultra_adoption_rollback | default(false) | bool
+    - name: Verify checkpoint-bound emergency identity for a proven rollback retry
+      ultra_adoption_guard:
+        id: "{{ ultra_lifecycle_id }}"
+        action: "{{ 'rollback-check' if adoption_retry_artifact.stat.checksum | default('') == ultra_relay_sha256 else 'retry-check' }}"
+      register: adoption_retry_baseline
+      when: inventory_hostname == 'bridge' and ultra_adoption_rollback | default(false) | bool
+      no_log: true
     - name: Verify existing owned configuration and pinned installed artifact
       ultra_adopt_probe:
+        verified_rollback_sha256: "{{ adoption_retry_baseline.verified_binary_sha256 | default('') }}"
+        installed_manifest: "{{ ultra_adoption_installed_manifest | default({}) }}"
+        previous_unit_sha256: "{{ ultra_previous_relay_unit_sha256 | default('') }}"
+        preserve_runtime: "{{ ultra_preserve_runtime | default(false) | bool }}"
         specification: "{{ ultra_spec }}"
         environment: "{{ ultra_relay_environment }}"
         unit_sha256: "{{ lookup('file', playbook_dir + '/../roles/relay/templates/ultra-relay.service.j2', rstrip=False) | hash('sha256') }}"

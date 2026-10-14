@@ -14,6 +14,8 @@ import (
 
 type frozenExecution struct {
 	Schema            int    `json:"schema_version"`
+	Native            bool   `json:"native_adoption,omitempty"`
+	NativeMachineSHA  string `json:"native_machine_sha256,omitempty"`
 	Target            string `json:"target"`
 	Local             bool   `json:"local"`
 	LockDirectory     string `json:"lock_directory"`
@@ -51,9 +53,21 @@ func withBootstrapOperatorLock(ctx context.Context, stateRoot string) (context.C
 }
 
 func freezeBootstrapExecution(p *installplan.InstallPlan, directory, stateRoot string) (string, error) {
+	return freezeBootstrapExecutionWith(p, directory, stateRoot, attestNativeAdoption)
+}
+
+func freezeBootstrapExecutionWith(p *installplan.InstallPlan, directory, stateRoot string, attest func(*installplan.InstallPlan) (string, error)) (string, error) {
 	path := filepath.Join(directory, "execution-mode.json")
 	target := p.Bridge.SSHHost + "|" + p.Bridge.Address
 	var frozen frozenExecution
+	nativeMachine := ""
+	if p.BridgeNative {
+		var err error
+		nativeMachine, err = attest(p)
+		if err != nil {
+			return "", err
+		}
+	}
 	if info, err := os.Lstat(path); err == nil {
 		owner, okay := info.Sys().(*syscall.Stat_t)
 		if !okay || owner.Uid != uint32(os.Geteuid()) || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 4096 {
@@ -65,6 +79,9 @@ func freezeBootstrapExecution(p *installplan.InstallPlan, directory, stateRoot s
 		}
 		if json.Unmarshal(raw, &frozen) != nil || frozen.Schema != 1 || frozen.Target != target {
 			return "", errors.New("frozen execution target changed")
+		}
+		if frozen.Native != p.BridgeNative || frozen.NativeMachineSHA != nativeMachine || (frozen.Native && frozen.Local) {
+			return "", errors.New("frozen native execution identity changed")
 		}
 		if frozen.BootstrapEngine != "" && frozen.BootstrapEngine != "components-v1" {
 			return "", errors.New("frozen bootstrap engine unsupported")
@@ -88,7 +105,7 @@ func freezeBootstrapExecution(p *installplan.InstallPlan, directory, stateRoot s
 		if local {
 			lock = "/var/lib/ultra-ansible"
 		}
-		frozen = frozenExecution{Schema: 1, Target: target, Local: local, LockDirectory: lock, OperatorDirectory: filepath.Join(stateRoot, "operator"), BootstrapEngine: "components-v1"}
+		frozen = frozenExecution{Schema: 1, Native: p.BridgeNative, NativeMachineSHA: nativeMachine, Target: target, Local: local, LockDirectory: lock, OperatorDirectory: filepath.Join(stateRoot, "operator"), BootstrapEngine: "components-v1"}
 		raw, err := json.Marshal(frozen)
 		if err != nil {
 			return "", err

@@ -68,6 +68,19 @@ func applyReservedBootstrap(ctx, originalCtx context.Context, p *installplan.Ins
 			returnErr = errors.Join(returnErr, err)
 		}
 	}()
+	if p.AdoptRuntime {
+		if _, err := inspectAdoptionTopology(ctx, p, filepath.Join(directory, "post-gate"), python, executable, stateRoot); err != nil {
+			return err
+		}
+		preflight, err := os.MkdirTemp(directory, "adoption-preflight-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(preflight) //nolint:errcheck
+		if _, err = deployansible.RunLocal(ctx, "adopt", inventory, map[string]any{"ultra_lock_directory": stateRoot, "ultra_adoption_rollback": generation > 1, "ultra_lifecycle_id": lifecycleID(directory)}, filepath.Join(preflight, "compare"), python, executable); err != nil {
+			return err
+		}
+	}
 	operationVars := map[string]any{"ultra_lock_directory": stateRoot}
 	emitInstallEvent(format, installplan.EventStep, "", "applying Ansible bootstrap", "")
 	components, engineErr := bootstrapUsesComponents(directory)
@@ -92,7 +105,11 @@ func applyReservedBootstrap(ctx, originalCtx context.Context, p *installplan.Ins
 	} else if err := runBootstrapComponents(ctx, inventory, operationVars, directory, generation, python, executable); err != nil {
 		return err
 	}
-	if p.FullAutomation() {
+	if p.FullAutomation() && p.AdoptRuntime {
+		if err := ansibleBootstrapIngress(ctx, p, inventory, bootstrapMutationStage(directory, "ingress-adopt", generation), python, executable, "adopt", operationVars, bootstrapMutationOriginalStage(directory, "ingress-adopt", generation)); err != nil {
+			return err
+		}
+	} else if p.FullAutomation() {
 		if err := ansibleBootstrapIngress(ctx, p, inventory, bootstrapMutationStage(directory, "ingress-prepare", generation), python, executable, "prepare", operationVars, bootstrapMutationOriginalStage(directory, "ingress-prepare", generation)); err != nil {
 			return err
 		}

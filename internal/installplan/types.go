@@ -10,6 +10,8 @@ type InstallPlan struct {
 	ControllerLocal *bool             `json:"-"`
 	SourceValues    map[string]string `json:"-"`
 	Automation      *AutomationConfig `json:"automation,omitempty"`
+	BridgeNative    bool              `json:"bridge_native,omitempty"`
+	AdoptRuntime    bool              `json:"adopt_runtime,omitempty"`
 	SchemaVersion   int               `json:"schema_version"`
 	SSH             SSHConfig         `json:"ssh"`
 	Bridge          BridgeConfig      `json:"bridge"`

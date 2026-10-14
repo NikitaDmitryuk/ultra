@@ -21,7 +21,7 @@ func ansibleIngress(ctx context.Context, p *installplan.InstallPlan, inventory m
 
 // Only bootstrap operator re-invocation retries a frozen failed ingress stage.
 func ansibleBootstrapIngress(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, python, executable, action string, operationVars map[string]any, originals ...string) error {
-	if action != "prepare" && action != "activate" {
+	if action != "prepare" && action != "activate" && action != "adopt" {
 		return errors.New("invalid bootstrap ingress action")
 	}
 	original := ""
@@ -35,7 +35,7 @@ func ansibleIngressOperation(ctx context.Context, p *installplan.InstallPlan, in
 	if p.Automation == nil || p.Automation.Ingress == nil {
 		return nil
 	}
-	if action != "prepare" && action != "stage" && action != "activate" && action != "rollback" && action != "experiment" && action != "status" && action != "notice" {
+	if action != "prepare" && action != "stage" && action != "activate" && action != "rollback" && action != "experiment" && action != "status" && action != "notice" && action != "adopt" {
 		return errors.New("invalid ingress action")
 	}
 	var plan map[string]any

@@ -117,7 +117,8 @@ def main():
                     if digest(entry['destination']) != saved['files'][entry['destination']]:
                         raise ValueError('adoption_restored_file_changed')
             module.exit_json(changed=False, verified=True, restore_files=saved['restore_files'],
-                             binary=str(checkpoint.parent / 'rollback-relay'), bot_active=saved.get('bot_active', False))
+                             binary=str(checkpoint.parent / 'rollback-relay'), bot_active=saved.get('bot_active', False),
+                             verified_binary_sha256=(digest(FILES[0]) if module.params['action'] == 'retry-check' else ''))
         if module.params['action'] == 'resume-check':
             saved = read(checkpoint)
             if any(digest(path) != value for path, value in saved['files'].items()):

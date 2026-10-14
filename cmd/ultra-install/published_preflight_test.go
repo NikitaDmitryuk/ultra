@@ -107,3 +107,21 @@ func TestPublishedIngressPlanAllowsExactReuseAndUnpublishedStage(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPublishedIngressAdoptionRejectsUnpublishedAndGatewayChange(t *testing.T) {
+	p := &installplan.InstallPlan{SchemaVersion: 2, AdoptRuntime: true, Automation: &installplan.AutomationConfig{Ingress: &installplan.AutomationIngress{Domain: "edge.example.com", PublicHost: "192.0.2.1", Path: "/connect", BackendPort: 18080, GatewayPort: 18081}}}
+	spec := &config.Spec{GatewayVLESSPort: 18081, PrimaryXHTTP: &config.PrimaryXHTTPIngress{Host: "192.0.2.1", BackendPort: 18080, PublicXHTTPTLSSpec: config.PublicXHTTPTLSSpec{ServerName: "edge.example.com", Port: 443, Path: "/connect"}}}
+	if err := checkPublishedIngressPlan(p, spec); err != nil {
+		t.Fatal(err)
+	}
+	spec.GatewayVLESSPort = 18082
+	if checkPublishedIngressPlan(p, spec) == nil {
+		t.Fatal("adoption changed installed gateway")
+	}
+	spec.GatewayVLESSPort = 18081
+	unpublished := false
+	spec.PrimaryXHTTP.Published = &unpublished
+	if checkPublishedIngressPlan(p, spec) == nil {
+		t.Fatal("adoption accepted unproved publication")
+	}
+}

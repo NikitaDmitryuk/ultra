@@ -195,6 +195,8 @@ test-ansible:
 	python3 scripts/test-ansible-release-identity.py
 	python3 scripts/test-ansible-release-retention.py
 	python3 scripts/test-ansible-ingress.py
+	python3 scripts/test-ansible-adopt-baseline.py
+	python3 scripts/test-ansible-adoption-tls.py
 	python3 scripts/test-ansible-forward.py
 	ANSIBLE_CONFIG="$(CURDIR)/deploy/ansible/ansible.cfg" ansible-lint --offline deploy/ansible/playbooks deploy/ansible/roles
 

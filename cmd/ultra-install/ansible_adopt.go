@@ -20,11 +20,22 @@ func runAdoptCommand(arguments []string) {
 	releaseDirectory := flags.String("release-dir", "", "complete verified release for read-only comparison")
 	prepareConfig := flags.String("prepare-config", "", "write a private schema 2 candidate from managed recovery policy; no host changes")
 	bridgeSSHHost := flags.String("bridge-ssh-host", "", "explicit bridge SSH address for legacy preparation; pins and identity stay unchanged")
+	bridgeNative := flags.Bool("bridge-native", false, "run explicit adoption on the attested bridge with its existing SSH identity")
+	adoptRuntime := flags.Bool("adopt-runtime", false, "compare the reviewed installed runtime without applying feature defaults")
 	_ = flags.Bool("check", true, "read-only comparison; no configuration ownership is assumed")
 	_ = flags.Parse(arguments)
 	p, err := installplan.LoadConfig(*file)
 	exitOnErr("adopt config", err)
 	legacyPreparation := *prepareConfig != ""
+	if *adoptRuntime && legacyPreparation {
+		exitOnErr("adopt runtime", errors.New("adoption_runtime_comparison_requires_candidate"))
+	}
+	p.AdoptRuntime = *adoptRuntime
+	p.BridgeNative = *bridgeNative
+	if p.BridgeNative {
+		_, err = attestNativeAdoption(p)
+		exitOnErr("native adoption", err)
+	}
 	if *bridgeSSHHost != "" {
 		if !legacyPreparation {
 			exitOnErr("adopt SSH endpoint", errors.New("adoption_ssh_override_requires_preparation"))
