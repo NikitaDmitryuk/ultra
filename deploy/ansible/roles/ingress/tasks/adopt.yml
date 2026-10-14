@@ -83,4 +83,8 @@
     address: "{{ ultra_bridge_ipv4 }}"
     hostname: "{{ ingress_transition.profile.server_name }}"
     port: "{{ ingress_transition.profile.port }}"
+  register: ingress_adopt_tls_ready
+  until: ingress_adopt_tls_ready.ready | default(false)
+  retries: 30
+  delay: 2
   no_log: true

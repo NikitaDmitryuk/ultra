@@ -146,6 +146,11 @@ with tempfile.TemporaryDirectory() as temporary:
             return environment.from_string((role / 'templates' / name).read_text()).render(context)
         values['lookup'] = template_lookup
         tasks = yaml.safe_load((role / 'tasks/adopt.yml').read_text())
+        tls_check = next(task for task in tasks if task['name'] ==
+                         'Verify preserved primary HTTPS handshake with authenticated SNI')
+        assert tls_check['register'] == 'ingress_adopt_tls_ready'
+        assert tls_check['retries'] == 30 and tls_check['delay'] == 2
+        assert 'ingress_adopt_tls_ready.ready' in tls_check['until']
         initial = next(task for task in tasks if task['name'] == 'Assemble publication ownership checks')
         values['ingress_adopt_files'] = [
             {'path': item['path'], 'content': environment.from_string(item['content']).render(values)}
