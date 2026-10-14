@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/jackc/pgx/v5"
 	"net/http"
@@ -46,11 +47,11 @@ func (s *Server) handleRevokeSubscription(w http.ResponseWriter, r *http.Request
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
-func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
+func (s *Server) resolveSubscriptionUser(w http.ResponseWriter, r *http.Request) (string, auth.User, bool) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.Subscriptions == nil {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
-		return
+		return "", auth.User{}, false
 	}
 	id, err := s.Subscriptions.Resolve(r.Context(), r.PathValue("token"))
 	if err != nil {
@@ -59,13 +60,27 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		} else {
 			http.Error(w, "subscription unavailable", http.StatusServiceUnavailable)
 		}
-		return
+		return "", auth.User{}, false
 	}
 	u, ok := s.users.Lookup(id)
 	if !ok || !u.IsActive || u.Kind == "socks5" {
 		http.NotFound(w, r)
+		return "", auth.User{}, false
+	}
+	return id, u, true
+}
+
+func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
+	id, u, ok := s.resolveSubscriptionUser(w, r)
+	if !ok {
 		return
 	}
+	s.renderSubscription(w, r, id, u, nil)
+}
+
+// quotaHeaders is supplied only by the cache export, scoped to one confirmed token.
+func (s *Server) renderSubscription(w http.ResponseWriter, r *http.Request, id string, u auth.User, quotaHeaders http.Header) {
+	w.Header().Set("Cache-Control", "no-store")
 	transport := r.URL.Query().Get("transport")
 	format, err := config.ResolveSubscriptionFormat(r.URL.Query().Get("format"), transport, r.UserAgent(), s.spec.HappDefaultJSON)
 	if err != nil {
@@ -108,7 +123,13 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("profile-title", "ultra")
 	w.Header().Set("profile-update-interval", "1")
 	_, _, health, nodes := s.clientExitSelection(u)
-	s.setSubscriptionQuota(r.Context(), w.Header(), u.AccountID, nodes)
+	if quotaHeaders == nil {
+		s.setSubscriptionQuota(r.Context(), w.Header(), u.AccountID, nodes)
+	} else {
+		for key, values := range quotaHeaders {
+			w.Header()[key] = append([]string(nil), values...)
+		}
+	}
 	var experiment *config.ExperimentalProfile
 	if specFile := s.spec.ExperimentalProfileFile; specFile != "" && transport == "" && preview == "" {
 		if permissions, ok := s.Subscriptions.(interface {

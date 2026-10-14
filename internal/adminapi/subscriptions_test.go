@@ -76,8 +76,12 @@ func TestSubscriptionHTTP(t *testing.T) {
 		}
 		if test.json {
 			var profiles []map[string]any
-			if err := json.Unmarshal(w.Body.Bytes(), &profiles); err != nil || len(profiles) != 1 || profiles[0]["remarks"] != "Автоматически" || !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+			if err := json.Unmarshal(w.Body.Bytes(), &profiles); err != nil || len(profiles) != 1 || profiles[0]["remarks"] != automaticProfileName || !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
 				t.Fatal("bad JSON export", err)
+			}
+			meta, ok := profiles[0]["meta"].(map[string]any)
+			if !ok || meta["serverDescription"] != automaticProfileDescription {
+				t.Fatal("missing Happ server description", profiles[0]["meta"])
 			}
 		} else if !strings.HasPrefix(w.Body.String(), "vless://") || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain") {
 			t.Fatal("URI compatibility lost")
