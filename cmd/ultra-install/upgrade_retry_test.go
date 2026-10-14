@@ -302,9 +302,10 @@ output.chmod(0o600)
 				}
 				gate, err := os.ReadFile(filepath.Join(directory, "gate"))
 				expectedGate := "released"
-				if operation == "lifecycle-applying" {
+				switch operation {
+				case "lifecycle-applying":
 					expectedGate = "applying"
-				} else if operation == "lifecycle-foreign" {
+				case "lifecycle-foreign":
 					expectedGate = "foreign-owner"
 				}
 				if err != nil || string(gate) != expectedGate {
