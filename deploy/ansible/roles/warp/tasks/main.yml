@@ -56,12 +56,20 @@
     - name: Select WARP proxy mode
       ansible.builtin.command:
         argv: [warp-cli, --accept-tos, mode, proxy]
-      when: "'WarpProxy' not in warp_settings.stdout and 'Proxy' not in warp_settings.stdout"
+      when: >-
+        warp_settings.stdout is not search('(?m)^[ \t]*(?:\([^()\r\n]*\)[ \t]*)?Mode:[ \t]*(WarpProxy|Proxy)(?: on port [0-9]+)?[ \t]*$')
       changed_when: true
     - name: Configure WARP proxy port
       ansible.builtin.command:
         argv: [warp-cli, --accept-tos, proxy, port, "{{ ultra_warp_port | string }}"]
-      when: "('Proxy Port: ' + ultra_warp_port | string) not in warp_settings.stdout"
+      when: >-
+        not (
+          warp_settings.stdout is search('(?m)^[ \t]*(?:\([^()\r\n]*\)[ \t]*)?Proxy Port:[ \t]*' + (ultra_warp_port | string) + '[ \t]*$')
+          or warp_settings.stdout is search(
+            '(?m)^[ \t]*(?:\([^()\r\n]*\)[ \t]*)?Mode:[ \t]*(WarpProxy|Proxy) on port '
+            + (ultra_warp_port | string) + '[ \t]*$'
+          )
+        )
       changed_when: true
     - name: Inspect WARP connection
       ansible.builtin.command:
@@ -112,8 +120,15 @@
         that:
           - ultra_warp_port | int > 0
           - ultra_warp_port | int <= 65535
-          - warp_preserved.results[0].stdout is search('(?m)^.*Mode:\s*(WarpProxy|Proxy)\s*$')
-          - warp_preserved.results[0].stdout is search('(?m)^.*Proxy Port:\s*' + (ultra_warp_port | string) + '\s*$')
+          - >-
+            warp_preserved.results[0].stdout is search(
+              '(?m)^[ \t]*(?:\([^()\r\n]*\)[ \t]*)?Mode:[ \t]*(WarpProxy|Proxy) on port '
+              + (ultra_warp_port | string) + '[ \t]*$'
+            )
+            or (
+              warp_preserved.results[0].stdout is search('(?m)^[ \t]*(?:\([^()\r\n]*\)[ \t]*)?Mode:[ \t]*(WarpProxy|Proxy)[ \t]*$')
+              and warp_preserved.results[0].stdout is search('(?m)^[ \t]*(?:\([^()\r\n]*\)[ \t]*)?Proxy Port:[ \t]*' + (ultra_warp_port | string) + '[ \t]*$')
+            )
           - >-
             warp_preserved.results[1].stdout is search('(?m)^.*Status(?: update)?:\s*Connected\s*$')
       no_log: true

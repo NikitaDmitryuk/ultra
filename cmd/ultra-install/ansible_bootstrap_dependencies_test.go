@@ -232,13 +232,13 @@ func TestBootstrapPreservedWARPRole(t *testing.T) {
 	directory := t.TempDir()
 	logPath := filepath.Join(directory, "commands")
 	cliPath := filepath.Join(directory, "warp-cli")
-	writeCLI := func(mode string, reportedPort int) {
-		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %s\ncase \"$2\" in\nsettings) printf 'Mode: %s\\nProxy Port: %d\\n';;\nstatus) printf 'Status: Connected\\n';;\n*) exit 91;;\nesac\n", strconv.Quote(logPath), mode, reportedPort)
+	writeCLI := func(settings, status string) {
+		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
+		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %s\ncase \"$2\" in\nsettings) printf '%%s\\n' %s;;\nstatus) printf '%%s\\n' %s;;\n*) exit 91;;\nesac\n", strconv.Quote(logPath), shellQuote(settings), shellQuote(status))
 		if err := os.WriteFile(cliPath, []byte(script), 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	writeCLI("WarpProxy", port)
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -265,22 +265,106 @@ func TestBootstrapPreservedWARPRole(t *testing.T) {
 		command.Env = append(os.Environ(), "PATH="+directory+":"+os.Getenv("PATH"), "ANSIBLE_CONFIG="+configPath, "ANSIBLE_LOCAL_TEMP="+filepath.Join(directory, "local"), "ANSIBLE_REMOTE_TEMP="+filepath.Join(directory, "remote"), "ANSIBLE_NOCOLOR=1")
 		return command.CombinedOutput()
 	}
-	if output, err := run(); err != nil {
-		t.Fatalf("preserved WARP role failed: %v\n%s", err, output)
+	for _, tc := range []struct {
+		name, settings, status string
+		valid                  bool
+	}{
+		{"legacy WarpProxy", fmt.Sprintf("Mode: WarpProxy\nProxy Port: %d", port), "Status: Connected", true},
+		{"legacy Proxy", fmt.Sprintf("Mode: Proxy\nProxy Port: %d", port), "Status update: Connected", true},
+		{"combined user setting", fmt.Sprintf("(user set)\tMode: WarpProxy on port %d", port), "Status update: Connected", true},
+		{"legacy wrong port", fmt.Sprintf("Mode: WarpProxy\nProxy Port: %d", port+1), "Status: Connected", false},
+		{"combined wrong port", fmt.Sprintf("(user set)\tMode: WarpProxy on port %d", port+1), "Status: Connected", false},
+		{"combined conflicting port", fmt.Sprintf("Mode: WarpProxy on port %d\nProxy Port: %d", port+1, port), "Status: Connected", false},
+		{"legacy wrong mode", fmt.Sprintf("Mode: Warp\nProxy Port: %d", port), "Status: Connected", false},
+		{"combined wrong mode", fmt.Sprintf("(user set)\tMode: Warp on port %d", port), "Status: Connected", false},
+		{"combined mode suffix", fmt.Sprintf("Mode: WarpProxy on port %d extra", port), "Status: Connected", false},
+		{"combined wrong prefix", fmt.Sprintf("Other Mode: WarpProxy on port %d", port), "Status: Connected", false},
+		{"combined disconnected", fmt.Sprintf("(user set)\tMode: WarpProxy on port %d", port), "Status: Disconnected", false},
+		{"legacy disconnected", fmt.Sprintf("Mode: WarpProxy\nProxy Port: %d", port), "Status: Connected but unavailable", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeCLI(tc.settings, tc.status)
+			if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			output, runErr := run()
+			if (runErr == nil) != tc.valid {
+				t.Fatalf("valid=%v, error=%v\n%s", tc.valid, runErr, output)
+			}
+			commands, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(commands) != "--accept-tos settings\n--accept-tos status\n" {
+				t.Fatalf("WARP mutating commands called: %s", commands)
+			}
+		})
 	}
-	commands, err := os.ReadFile(logPath)
+}
+
+// Run the actual settings tasks in isolation, without package or service writes.
+func TestBootstrapManagedWARPSettings(t *testing.T) {
+	executable := os.Getenv("ULTRA_TEST_ANSIBLE_PLAYBOOK")
+	if executable == "" {
+		t.Skip("set ULTRA_TEST_ANSIBLE_PLAYBOOK for local Ansible role verification")
+	}
+	directory := t.TempDir()
+	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(commands) != "--accept-tos settings\n--accept-tos status\n" {
-		t.Fatalf("WARP mutating commands called: %s", commands)
+	playbook := filepath.Join(directory, "play.json")
+	python := filepath.Join(filepath.Dir(executable), "python")
+	extract := exec.Command(python, "-c", `import json,sys,yaml
+with open(sys.argv[1]) as f:
+    block = yaml.safe_load(f)[0]['block']
+names = ['Inspect WARP settings', 'Select WARP proxy mode', 'Configure WARP proxy port']
+tasks = [task for task in block if task['name'] in names]
+assert [task['name'] for task in tasks] == names
+with open(sys.argv[2], 'w') as f:
+    json.dump([{'hosts': 'localhost', 'gather_facts': False, 'connection': 'local', 'tasks': tasks}], f)
+`, filepath.Join(cwd, "../../deploy/ansible/roles/warp/tasks/main.yml"), playbook)
+	if output, err := extract.CombinedOutput(); err != nil {
+		t.Fatalf("extract actual role tasks: %v\n%s", err, output)
 	}
-	writeCLI("WarpProxy", port+1)
-	if output, err := run(); err == nil {
-		t.Fatalf("different WARP port accepted\n%s", output)
+	configPath := filepath.Join(directory, "ansible.cfg")
+	if err := os.WriteFile(configPath, []byte("[defaults]\n"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	writeCLI("Warp", port)
-	if output, err := run(); err == nil {
-		t.Fatalf("non-proxy WARP mode accepted\n%s", output)
+	for _, tc := range []struct {
+		name, settings, setters string
+	}{
+		{"combined correct", "(user set)\tMode: WarpProxy on port 40123", ""},
+		{"legacy correct", "Mode: WarpProxy\nProxy Port: 40123", ""},
+		{"combined wrong port", "(user set)\tMode: WarpProxy on port 40124", "--accept-tos proxy port 40123\n"},
+		{"combined wrong mode", "(user set)\tMode: Warp on port 40123", "--accept-tos mode proxy\n--accept-tos proxy port 40123\n"},
+		{"wrong mode with legacy port", "Mode: Warp\nProxy Port: 40123", "--accept-tos mode proxy\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logPath := filepath.Join(directory, "commands")
+			if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %s\nif [ \"$2\" = settings ]; then printf '%%s\\n' '%s'; fi\n", strconv.Quote(logPath), tc.settings)
+			if err := os.WriteFile(filepath.Join(directory, "warp-cli"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			vars, err := json.Marshal(map[string]any{"ultra_warp_port": 40123, "ansible_python_interpreter": python})
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command(executable, "-i", "localhost,", playbook, "-e", string(vars))
+			command.Env = append(os.Environ(), "PATH="+directory+":"+os.Getenv("PATH"), "ANSIBLE_CONFIG="+configPath, "ANSIBLE_LOCAL_TEMP="+filepath.Join(directory, "local"), "ANSIBLE_REMOTE_TEMP="+filepath.Join(directory, "remote"), "ANSIBLE_NOCOLOR=1")
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("managed WARP settings failed: %v\n%s", err, output)
+			}
+			commands, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(commands) != "--accept-tos settings\n"+tc.setters {
+				t.Fatalf("unexpected commands: %s", commands)
+			}
+		})
 	}
 }
