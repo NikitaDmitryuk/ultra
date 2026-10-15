@@ -1433,10 +1433,10 @@ class RemoteProgram(unittest.TestCase):
         self.program = self.program.replace('need(os.geteuid()==0)', 'need(True)').replace('info.st_uid==0', 'info.st_uid==os.geteuid()')
         self.root = self.parent / ('manual-' + self.commit + '-' + D.remote_attempt(self.config, self.version))
 
-    def archive(self, mutate=None, forward_journal=None, forward_prior_operation=None):
-        entries = [('release/release-manifest.json', self.manifest)]
+    def archive(self, mutate=None, forward_journal=None, forward_prior_operation=None, manifest=None, config=None):
+        entries = [('release/release-manifest.json', self.manifest if manifest is None else manifest)]
         entries += [('release/' + name, data) for name, data in self.assets.items()]
-        entries += [('install.config', self.config)]
+        entries += [('install.config', self.config if config is None else config)]
         if forward_journal is not None:
             entries.append(('forward-operation.json', forward_journal))
         if forward_prior_operation is not None:
@@ -1451,7 +1451,7 @@ class RemoteProgram(unittest.TestCase):
                 archive.addfile(entry, io.BytesIO(raw))
         return stream.getvalue()
 
-    def execute(self, mode, data=None, *args, probe_sha='', forward_only=False, forward_sha='', prior_sha='', prior_version='v0.0.1'):
+    def execute(self, mode, data=None, *args, probe_sha='', forward_only=False, forward_sha='', prior_sha='', prior_version='v0.0.1', identity=None):
         if mode == 'run':
             args = (*args, *(['0'] * max(0, 4 - len(args))))
             args = (*args[:3], '1' if forward_only else '0', *args[4:])
@@ -1467,8 +1467,10 @@ class RemoteProgram(unittest.TestCase):
                 args = (*args, probe_sha, forward_sha, prior_sha)
             elif probe_sha:
                 args = (*args, probe_sha)
-        return subprocess.run([D.sys.executable, '-I', '-c', self.program, mode, self.commit, self.version,
-            D.sha(self.manifest), D.sha(self.config), D.remote_attempt(self.config, self.version), *args], input=data, capture_output=True)
+        commit, version, manifest, config, attempt = identity or (
+            self.commit, self.version, self.manifest, self.config, D.remote_attempt(self.config, self.version))
+        return subprocess.run([D.sys.executable, '-I', '-c', self.program, mode, commit, version,
+            D.sha(manifest), D.sha(config), attempt, *args], input=data, capture_output=True)
 
     def absent_operation_fixture(self):
         old_commit = 'b' * 40
@@ -1497,7 +1499,7 @@ class RemoteProgram(unittest.TestCase):
         D.atomic_write(self.parent.parent / 'lifecycle.json', json.dumps({'id': old_id, 'phase': 'applying'}).encode())
         return operation, old_inputs, old_id, proof_raw, D.sha(prior), prior_version
 
-    def chain_fixture(self):
+    def chain_fixture(self, root_is_prior=False):
         state=self.parent.parent
         prior_commit='c'*40
         prior_version='v0.0.'+str(int(prior_commit,16))
@@ -1521,7 +1523,7 @@ class RemoteProgram(unittest.TestCase):
             D.atomic_write(directory/'install.config',config)
             return D.sha(manifest),D.sha(config)
         old_manifest,old_config=inputs(old_commit,old_version,old_attempt)
-        prior_manifest,prior_config=inputs(prior_commit,prior_version,prior_attempt)
+        prior_manifest,prior_config=(None,None) if root_is_prior else inputs(prior_commit,prior_version,prior_attempt)
         proof=json.dumps({'schema':1,'commit':old_commit,'version':old_version,'remote_attempt':old_attempt,
             'stage':'upgrade','mutator_dispatched':True,'manifest_sha256':old_manifest,
             'staged_config_sha256':old_config}).encode()
@@ -1554,13 +1556,32 @@ class RemoteProgram(unittest.TestCase):
         ledger=json.dumps({'version':1,'ids':[old_id],'handoff':{'old_id':old_id,'new_id':prior_id}}).encode()
         D.atomic_write(state/'lifecycle-retired.json',ledger)
         D.atomic_write(state/'lifecycle.json',json.dumps({'id':prior_id,'phase':'applying'}).encode())
-        staged=self.execute('stage',self.archive(forward_journal=proof,forward_prior_operation=history),
-                            forward_sha=proof_sha,prior_sha=history_sha)
+        prior_root_manifest=(json.dumps({'source_commit':prior_commit,'version':prior_version,
+            'assets':[{'name':name,'size':len(raw),'sha256':D.sha(raw)} for name,raw in self.assets.items()]},
+            sort_keys=True,separators=(',',':')).encode())
+        prior_config_raw=b'fixture config'
+        if root_is_prior:
+            prior_manifest=D.sha(prior_root_manifest)
+            prior_config=D.sha(prior_config_raw)
+            history=json.dumps({'schema':1,'commit':prior_commit,'version':prior_version,
+                'remote_attempt':prior_attempt,'stage':'upgrade','mutator_dispatched':True,
+                'manifest_sha256':prior_manifest,'staged_config_sha256':prior_config,
+                'forward_journal_sha256':proof_sha}).encode()
+            history_sha=D.sha(history)
+        root_identity=(prior_commit,prior_version,prior_root_manifest,prior_config_raw,prior_attempt) if root_is_prior else None
+        root_prior=(json.dumps({'commit':old_commit,'version':old_version,'remote_attempt':old_attempt,
+            'manifest_sha256':old_manifest,'staged_config_sha256':old_config,
+            'forward_journal_sha256':proof_sha},sort_keys=True,separators=(',',':')).encode() if root_is_prior else history)
+        root_prior_sha=D.sha(root_prior)
+        staged=self.execute('stage',self.archive(forward_journal=proof,forward_prior_operation=root_prior,
+                                manifest=root_identity[2] if root_identity else None,
+                                config=root_identity[3] if root_identity else None),
+                            forward_sha=proof_sha,prior_sha=root_prior_sha,identity=root_identity)
         self.assertEqual(staged.returncode,0,staged.stderr)
         chain_args=[self.commit,self.version,D.sha(self.manifest),D.sha(self.config),D.remote_attempt(self.config,self.version),
                     prior_commit,prior_version,prior_attempt,prior_manifest,prior_config,history_sha]
         def continued():
-            return self.execute('continue',None,'',proof_sha,history_sha,*chain_args)
+            return self.execute('continue',None,'',proof_sha,root_prior_sha,*chain_args,identity=root_identity)
         first=continued()
         self.assertEqual(first.returncode,0,first.stderr)
         attestation=json.loads(first.stdout)['chain_attestation']
@@ -1571,10 +1592,21 @@ class RemoteProgram(unittest.TestCase):
         def dispatched():
             return self.execute('run',None,self.architecture,'upgrade','0','1','',proof_sha,'1',
                 str(prior),str(self.root/'forward-prior-operation.json'),history_sha,*chain_args,forward_only=True)
-        return continued,dispatched,target,prior,old_id,prior_id,new_id,proof_sha,history_sha,chain_args
+        return continued,dispatched,target,prior,old_id,prior_id,new_id,proof_sha,history_sha,chain_args,root_prior_sha
+
+    def test_chain_continue_from_prior_root_keeps_inherited_journal_distinct(self):
+        continued,_,_,_,_,_,_,proof_sha,chain_prior_sha,_,root_prior_sha=self.chain_fixture(root_is_prior=True)
+        # B's root carries the authenticated A journal, while the requested C
+        # transition names B's own journal as its immediate predecessor.
+        self.assertNotEqual(root_prior_sha,chain_prior_sha)
+        result=continued()
+        self.assertEqual(result.returncode,0,result.stderr)
+        receipt=json.loads(result.stdout)
+        self.assertEqual(receipt['chain_attestation']['proof_sha256'],proof_sha)
+        self.assertEqual(receipt['chain_attestation']['prior_journal_sha256'],chain_prior_sha)
 
     def test_chain_continue_and_run_validate_A_owned_prefix_and_B_owned_restart(self):
-        continued,dispatched,target,prior,old_id,prior_id,new_id,proof_sha,history_sha,args=self.chain_fixture()
+        continued,dispatched,target,prior,old_id,prior_id,new_id,proof_sha,history_sha,args,_=self.chain_fixture()
         for phase in ['start','restart']:
             with self.subTest(phase=phase):
                 if phase=='restart':

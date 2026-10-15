@@ -725,8 +725,15 @@ def verify_chain_continuation(chain_offset=10):
           (commit,version,manifest_sha,config_sha,attempt)==
           (prior_commit,prior_version,prior_manifest,prior_config,prior_attempt)),
          'manual_forward_continuation_chain_invalid')
-    need(not prior_journal_sha or prior_journal_sha==chain_prior_sha,
-         'manual_forward_continuation_predecessor_invalid')
+    root_is_target=(commit,version,manifest_sha,config_sha,attempt)==(
+        target_commit,target_version,target_manifest,target_config,target_attempt)
+    if root_is_target:
+        # Once the target candidate is staged, its saved predecessor journal
+        # must identify the immediate prior candidate passed in chain args.
+        # During the initial B→C attestation root is still B and its saved
+        # journal identifies A; verify(root) binds that older journal by hash.
+        need(bool(prior_journal_sha) and prior_journal_sha==chain_prior_sha,
+             'manual_forward_continuation_predecessor_invalid')
     proof=json.loads(read(root/'forward-operation.json'))
     old_commit=proof.get('commit','');old_version=proof.get('version','')
     need(proof.get('schema')==1 and proof.get('stage')=='upgrade' and proof.get('mutator_dispatched') is True and
@@ -745,7 +752,7 @@ def verify_chain_continuation(chain_offset=10):
          digest(read(prior_inputs/'release/release-manifest.json'))==prior_manifest and
          digest(read(prior_inputs/'install.config'))==prior_config,
          'manual_forward_continuation_predecessor_invalid')
-    if prior_journal_sha:
+    if root_is_target:
         saved_prior=read(root/'forward-prior-operation.json')
         saved_journal=json.loads(saved_prior)
         need(digest(saved_prior)==chain_prior_sha and saved_journal.get('commit')==prior_commit and
