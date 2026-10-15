@@ -660,7 +660,9 @@ func TestLifecycleSupersessionPersistenceFailureKeepsOldClosed(t *testing.T) {
 	if err := os.Mkdir(path, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if result := gate.supersede(id, next, gate.lock); result.Code != "lifecycle_persistence_failed" || gate.current.ID != id || gate.lock == nil || !gate.blocked() {
+	if result := gate.supersede(id, next, gate.lock); result.Code != "lifecycle_persistence_failed" || gate.current.ID != id ||
+		gate.lock == nil ||
+		!gate.blocked() {
 		t.Fatal("failed handoff released or changed reservation", result)
 	}
 	assertRetiredLifecycle(t, gate, id)

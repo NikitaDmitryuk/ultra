@@ -62,25 +62,40 @@ func TestProjectDesiredRuntimeExplicitConfigWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, e := result.DesiredState.BridgeSpecObject, result.DesiredState.ExitSpecObjects["primary"]
-	if b.MimicPreset != "apijson" || e.MimicPreset != b.MimicPreset || b.TunnelTransport != config.TunnelTransportSplitHTTP || e.TunnelTransport != b.TunnelTransport {
+	if b.MimicPreset != "apijson" || e.MimicPreset != b.MimicPreset || b.TunnelTransport != config.TunnelTransportSplitHTTP ||
+		e.TunnelTransport != b.TunnelTransport {
 		t.Fatal("config did not replace installed preset/transport")
 	}
-	if b.SplithttpPath != "/desired" || e.SplithttpPath != b.SplithttpPath || b.SplithttpHost != "tunnel.example.net" || e.SplithttpHost != b.SplithttpHost || b.SplitHTTPTLS.ServerName != b.SplithttpHost {
+	if b.SplithttpPath != "/desired" || e.SplithttpPath != b.SplithttpPath || b.SplithttpHost != "tunnel.example.net" ||
+		e.SplithttpHost != b.SplithttpHost ||
+		b.SplitHTTPTLS.ServerName != b.SplithttpHost {
 		t.Fatal("tunnel peers disagree with desired path/host")
 	}
-	if b.Reality.Dest != "reality.example.net:443" || !reflect.DeepEqual(b.Reality.ServerNames, []string{"sni.example.net"}) || b.Reality.PrivateKey != opts.ExistingBridge.Reality.PrivateKey || b.Reality.PublicKey != opts.ExistingBridge.Reality.PublicKey {
+	if b.Reality.Dest != "reality.example.net:443" || !reflect.DeepEqual(b.Reality.ServerNames, []string{"sni.example.net"}) ||
+		b.Reality.PrivateKey != opts.ExistingBridge.Reality.PrivateKey ||
+		b.Reality.PublicKey != opts.ExistingBridge.Reality.PublicKey {
 		t.Fatal("REALITY values or identity incorrect")
 	}
-	if b.RoutingMode != "ru_direct" || !reflect.DeepEqual(b.DomainDirect, []string{"domain:example.net", "domain:example.org"}) || !reflect.DeepEqual(b.GeositeBlockTags, []string{"ads", "malware"}) || b.VLESSFlow != "none" {
+	if b.RoutingMode != "ru_direct" || !reflect.DeepEqual(b.DomainDirect, []string{"domain:example.net", "domain:example.org"}) ||
+		!reflect.DeepEqual(b.GeositeBlockTags, []string{"ads", "malware"}) ||
+		b.VLESSFlow != "none" {
 		t.Fatal("routing/flow overlay incorrect")
 	}
-	if b.AntiCensor.DisableDOH || b.AntiCensor.Profile != "fast" || b.AntiCensor.SplitHTTPPadding != "100-2000" || b.AntiCensor.SplitHTTPMaxChunkKB != 32 || b.AntiCensor.Fragment == nil || b.AntiCensor.Fragment.Packets != "" || !reflect.DeepEqual(b.AntiCensor.RealityFingerprints, []string{"firefox", "safari"}) {
+	if b.AntiCensor.DisableDOH || b.AntiCensor.Profile != "fast" || b.AntiCensor.SplitHTTPPadding != "100-2000" ||
+		b.AntiCensor.SplitHTTPMaxChunkKB != 32 ||
+		b.AntiCensor.Fragment == nil ||
+		b.AntiCensor.Fragment.Packets != "" ||
+		!reflect.DeepEqual(b.AntiCensor.RealityFingerprints, []string{"firefox", "safari"}) {
 		t.Fatal("anti-censor overlay incorrect")
 	}
-	if !e.AntiCensor.WARPProxy || e.AntiCensor.WARPProxyPort != 40012 || !result.BotEnabled || !b.BotTelegramProxy.Enabled || b.BotTelegramProxy.Port != 10819 {
+	if !e.AntiCensor.WARPProxy || e.AntiCensor.WARPProxyPort != 40012 || !result.BotEnabled || !b.BotTelegramProxy.Enabled ||
+		b.BotTelegramProxy.Port != 10819 {
 		t.Fatal("WARP/bot overlay incorrect")
 	}
-	if result.DesiredState.BridgeEnv != "ULTRA_RELAY_ADMIN_TOKEN=fixture-admin\nULTRA_RELAY_LOG_LEVEL=debug\n"+databaseEnvForFixture(opts) || result.DesiredState.ExitEnvs["primary"] != "ULTRA_RELAY_LOG_LEVEL=debug\n" {
+	if result.DesiredState.BridgeEnv != "ULTRA_RELAY_ADMIN_TOKEN=fixture-admin\nULTRA_RELAY_LOG_LEVEL=debug\n"+databaseEnvForFixture(
+		opts,
+	) ||
+		result.DesiredState.ExitEnvs["primary"] != "ULTRA_RELAY_LOG_LEVEL=debug\n" {
 		t.Fatal("desired environment mismatch")
 	}
 	if len(result.Transitions) == 0 || !reflect.DeepEqual(result.CoordinatedNodes, []string{"primary"}) {
@@ -90,7 +105,9 @@ func TestProjectDesiredRuntimeExplicitConfigWins(t *testing.T) {
 	if string(before) != string(after) || p.Bridge.AdminListen != "127.0.0.1:8443" { // canonical parser initializes AdminListen itself.
 		t.Fatal("projection mutated inspected inputs")
 	}
-	if !reflect.DeepEqual(b.Exit, opts.ExistingBridge.Exit) || b.Database.DSN != opts.ExistingBridge.Database.DSN || e.Exit.TunnelUUID != opts.ExistingExits["primary"].Exit.TunnelUUID || !reflect.DeepEqual(result.DesiredState.Bootstrap, opts.PriorBootstrap) {
+	if !reflect.DeepEqual(b.Exit, opts.ExistingBridge.Exit) || b.Database.DSN != opts.ExistingBridge.Database.DSN ||
+		e.Exit.TunnelUUID != opts.ExistingExits["primary"].Exit.TunnelUUID ||
+		!reflect.DeepEqual(result.DesiredState.Bootstrap, opts.PriorBootstrap) {
 		t.Fatal("projection changed identity or topology")
 	}
 }
@@ -123,16 +140,26 @@ func TestProjectDesiredRuntimeRemovedOptionalsReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, e := result.DesiredState.BridgeSpecObject, result.DesiredState.ExitSpecObjects["primary"]
-	if b.MimicPreset != "apijson" || b.TunnelTransport != config.TunnelTransportSplitHTTP || b.SplithttpPath != "" || b.SplithttpHost != "" || e.SplithttpPath != "" || e.SplithttpHost != "" {
+	if b.MimicPreset != "apijson" || b.TunnelTransport != config.TunnelTransportSplitHTTP || b.SplithttpPath != "" ||
+		b.SplithttpHost != "" ||
+		e.SplithttpPath != "" ||
+		e.SplithttpHost != "" {
 		t.Fatal("removed tunnel overrides retained")
 	}
-	if b.RoutingMode != "" || len(b.DomainDirect) != 0 || len(b.GeositeBlockTags) != 0 || b.AntiCensor.Profile != "" || b.AntiCensor.DisableDOH || b.AntiCensor.Fragment != nil || b.AntiCensor.PublicXHTTPPort != 0 || len(b.AntiCensor.RealityFingerprints) != 0 || b.AntiCensor.SplitHTTPPadding != "" || b.AntiCensor.SplitHTTPMaxChunkKB != 0 {
+	if b.RoutingMode != "" || len(b.DomainDirect) != 0 || len(b.GeositeBlockTags) != 0 || b.AntiCensor.Profile != "" ||
+		b.AntiCensor.DisableDOH ||
+		b.AntiCensor.Fragment != nil ||
+		b.AntiCensor.PublicXHTTPPort != 0 ||
+		len(b.AntiCensor.RealityFingerprints) != 0 ||
+		b.AntiCensor.SplitHTTPPadding != "" ||
+		b.AntiCensor.SplitHTTPMaxChunkKB != 0 {
 		t.Fatal("removed optional overrides retained")
 	}
 	if b.Reality.Dest != "example.com:443" || !reflect.DeepEqual(b.Reality.ServerNames, []string{"example.com"}) {
 		t.Fatal("missing SNI did not return to destination default")
 	}
-	if e.AntiCensor.WARPProxy || e.AntiCensor.WARPProxyPort != 0 || result.BotEnabled || b.BotTelegramProxy.Enabled || b.BotTelegramProxy.Port != 10819 {
+	if e.AntiCensor.WARPProxy || e.AntiCensor.WARPProxyPort != 0 || result.BotEnabled || b.BotTelegramProxy.Enabled ||
+		b.BotTelegramProxy.Port != 10819 {
 		t.Fatal("removed enable flags did not disable services or lost unmanaged proxy port")
 	}
 	if b.VLESSFlow != config.DefaultVLESSFlow {
@@ -169,9 +196,20 @@ func TestProjectDesiredRuntimePreservesUnknownNestedAndDynamicState(t *testing.T
 	if err := json.Unmarshal(opts.ExistingBridgeJSON, opts.ExistingBridge); err != nil {
 		t.Fatal(err)
 	}
-	dynamic := exits.BootstrapEntry{Name: "dynamic", Address: "dynamic.example.com", Port: 9443, TunnelUUID: "22222222-2222-2222-2222-222222222222", Priority: 75}
+	dynamic := exits.BootstrapEntry{
+		Name:       "dynamic",
+		Address:    "dynamic.example.com",
+		Port:       9443,
+		TunnelUUID: "22222222-2222-2222-2222-222222222222",
+		Priority:   75,
+	}
 	opts.PriorBootstrap = append(opts.PriorBootstrap, dynamic)
-	opts.ExistingBridge.Exit = config.ExitTunnelSpec{Address: dynamic.Address, Port: dynamic.Port, TunnelUUID: dynamic.TunnelUUID, PinnedPeerCertSHA256: "dynamic-pin"}
+	opts.ExistingBridge.Exit = config.ExitTunnelSpec{
+		Address:              dynamic.Address,
+		Port:                 dynamic.Port,
+		TunnelUUID:           dynamic.TunnelUUID,
+		PinnedPeerCertSHA256: "dynamic-pin",
+	}
 	runtimeSet(raw, "exit", opts.ExistingBridge.Exit)
 	opts.ExistingBridgeJSON, _ = json.Marshal(raw)
 	result, err := ProjectDesiredRuntime(p, opts)
@@ -188,7 +226,10 @@ func TestProjectDesiredRuntimePreservesUnknownNestedAndDynamicState(t *testing.T
 			t.Fatalf("unknown %s field lost", key)
 		}
 	}
-	if result.DesiredState.BridgeSpecObject.AntiCensor.GRPCInitialWindowSize != 123456 || !reflect.DeepEqual(result.DesiredState.BridgeSpecObject.AntiCensor.WARPDirectDomains, []string{"unmanaged.example.com"}) || result.DesiredState.BridgeSpecObject.Exit != opts.ExistingBridge.Exit || !reflect.DeepEqual(result.DesiredState.Bootstrap, opts.PriorBootstrap) {
+	if result.DesiredState.BridgeSpecObject.AntiCensor.GRPCInitialWindowSize != 123456 ||
+		!reflect.DeepEqual(result.DesiredState.BridgeSpecObject.AntiCensor.WARPDirectDomains, []string{"unmanaged.example.com"}) ||
+		result.DesiredState.BridgeSpecObject.Exit != opts.ExistingBridge.Exit ||
+		!reflect.DeepEqual(result.DesiredState.Bootstrap, opts.PriorBootstrap) {
 		t.Fatal("unmanaged tuning or dynamic topology changed")
 	}
 	if !reflect.DeepEqual(result.CoordinatedNodes, []string{"dynamic", "primary"}) {
@@ -238,7 +279,9 @@ func TestProjectDesiredRuntimeCoordinatesSameNodePortChange(t *testing.T) {
 	if ds.BridgeSpecObject.Exit.Port != 10443 || ds.ExitSpecObjects["primary"].VLESSPort != 10443 || ds.Bootstrap[0].Port != 10443 {
 		t.Fatal("same-node listener change not projected to all peers")
 	}
-	if ds.BridgeSpecObject.Exit.TunnelUUID != opts.ExistingBridge.Exit.TunnelUUID || ds.BridgeSpecObject.Exit.PinnedPeerCertSHA256 != opts.ExistingBridge.Exit.PinnedPeerCertSHA256 || ds.Bootstrap[0].PinnedPeerCertSHA256 != opts.PriorBootstrap[0].PinnedPeerCertSHA256 {
+	if ds.BridgeSpecObject.Exit.TunnelUUID != opts.ExistingBridge.Exit.TunnelUUID ||
+		ds.BridgeSpecObject.Exit.PinnedPeerCertSHA256 != opts.ExistingBridge.Exit.PinnedPeerCertSHA256 ||
+		ds.Bootstrap[0].PinnedPeerCertSHA256 != opts.PriorBootstrap[0].PinnedPeerCertSHA256 {
 		t.Fatal("port change rotated identity or pin")
 	}
 	tunnel, listener := false, false
@@ -254,7 +297,9 @@ func TestProjectDesiredRuntimeCoordinatesSameNodePortChange(t *testing.T) {
 		t.Fatal("port change omitted transition requirements")
 	}
 	afterPlan, _ := json.Marshal(p)
-	if string(beforePlan) != string(afterPlan) || string(beforeBridge) != string(opts.ExistingBridgeJSON) || string(beforeExit) != string(opts.ExistingExitJSON["primary"]) || opts.PriorBootstrap[0].Port != 9443 {
+	if string(beforePlan) != string(afterPlan) || string(beforeBridge) != string(opts.ExistingBridgeJSON) ||
+		string(beforeExit) != string(opts.ExistingExitJSON["primary"]) ||
+		opts.PriorBootstrap[0].Port != 9443 {
 		t.Fatal("projection mutated input snapshot")
 	}
 }
@@ -328,18 +373,23 @@ func TestProjectLocalRuntimeResetsAbsentOptionalsAndPreservesSecrets(t *testing.
 				t.Fatal(err)
 			}
 			projected, _ := runtimeDocument(local.SpecJSON)
-			if !equalJSONValue(source["future_private"], projected["future_private"]) || !equalJSONValue(anti["future_anti"], runtimeObject(projected, "anti_censor")["future_anti"]) {
+			if !equalJSONValue(source["future_private"], projected["future_private"]) ||
+				!equalJSONValue(anti["future_anti"], runtimeObject(projected, "anti_censor")["future_anti"]) {
 				t.Fatal("unknown credential field lost")
 			}
 			var spec config.Spec
 			if err = json.Unmarshal(local.SpecJSON, &spec); err != nil {
 				t.Fatal(err)
 			}
-			if spec.SplithttpHost != "" || spec.SplithttpPath != "" || spec.AntiCensor.Profile != "" || spec.AntiCensor.DisableDOH || spec.AntiCensor.SplitHTTPPadding != "" || spec.AntiCensor.SplitHTTPMaxChunkKB != 0 {
+			if spec.SplithttpHost != "" || spec.SplithttpPath != "" || spec.AntiCensor.Profile != "" || spec.AntiCensor.DisableDOH ||
+				spec.AntiCensor.SplitHTTPPadding != "" ||
+				spec.AntiCensor.SplitHTTPMaxChunkKB != 0 {
 				t.Fatal("removed overrides did not reset")
 			}
 			if tc.role == config.RoleBridge {
-				if spec.BotTelegramProxy.Enabled || spec.Reality.PrivateKey != opts.ExistingBridge.Reality.PrivateKey || spec.Database.DSN != opts.ExistingBridge.Database.DSN || spec.Exit != opts.ExistingBridge.Exit {
+				if spec.BotTelegramProxy.Enabled || spec.Reality.PrivateKey != opts.ExistingBridge.Reality.PrivateKey ||
+					spec.Database.DSN != opts.ExistingBridge.Database.DSN ||
+					spec.Exit != opts.ExistingBridge.Exit {
 					t.Fatal("bridge secrets changed or bot flag did not reset")
 				}
 			} else if spec.AntiCensor.WARPProxy || spec.AntiCensor.WARPProxyPort != 0 || spec.Exit.TunnelUUID != opts.ExistingExits["primary"].Exit.TunnelUUID || spec.ExitCertPaths != opts.ExistingExits["primary"].ExitCertPaths {
@@ -397,7 +447,12 @@ func TestProjectLocalRuntimeDynamicExitPreservesListenerAndIdentity(t *testing.T
 	p.Features.WARPPort = 40025
 	dynamic := *opts.ExistingExits["primary"]
 	dynamic.VLESSPort = 11443
-	dynamic.Exit = config.ExitTunnelSpec{Address: "dynamic.example.net", Port: 12443, TunnelUUID: "22222222-2222-2222-2222-222222222222", PinnedPeerCertSHA256: "dynamic-pin"}
+	dynamic.Exit = config.ExitTunnelSpec{
+		Address:              "dynamic.example.net",
+		Port:                 12443,
+		TunnelUUID:           "22222222-2222-2222-2222-222222222222",
+		PinnedPeerCertSHA256: "dynamic-pin",
+	}
 	raw, _ := json.Marshal(dynamic)
 	result, err := ProjectLocalRuntime(p, raw, config.RoleExit, "")
 	if err != nil {
@@ -410,7 +465,9 @@ func TestProjectLocalRuntimeDynamicExitPreservesListenerAndIdentity(t *testing.T
 	if projected.VLESSPort != dynamic.VLESSPort || projected.Exit != dynamic.Exit || projected.ExitCertPaths != dynamic.ExitCertPaths {
 		t.Fatal("dynamic listener or identity changed")
 	}
-	if projected.MimicPreset != "apijson" || projected.TunnelTransport != config.TunnelTransportSplitHTTP || !projected.AntiCensor.WARPProxy || projected.AntiCensor.WARPProxyPort != 40025 {
+	if projected.MimicPreset != "apijson" || projected.TunnelTransport != config.TunnelTransportSplitHTTP ||
+		!projected.AntiCensor.WARPProxy ||
+		projected.AntiCensor.WARPProxyPort != 40025 {
 		t.Fatal("dynamic feature overlay missing")
 	}
 	for _, transition := range result.Transitions {

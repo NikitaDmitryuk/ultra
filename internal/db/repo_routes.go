@@ -3,8 +3,9 @@ package db
 import (
 	"context"
 	"errors"
-	"github.com/jackc/pgx/v5"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/google/uuid"
@@ -24,13 +25,22 @@ func (r *RouteRepo) Attach(ctx context.Context, users []auth.User) ([]auth.User,
 		ExitID     *string
 		Published  bool
 	}
-	e := r.db.orm.WithContext(ctx).Table("vpn_route_credentials AS c").Select("c.user_uuid, c.uuid, l.id AS location_id, l.name, l.exit_id, (l.published AND l.applied) AS published").Joins("JOIN vpn_locations l ON l.id = c.location_id").Order("l.name, c.uuid").Find(&rows).Error
+	e := r.db.orm.WithContext(ctx).
+		Table("vpn_route_credentials AS c").
+		Select("c.user_uuid, c.uuid, l.id AS location_id, l.name, l.exit_id, (l.published AND l.applied) AS published").
+		Joins("JOIN vpn_locations l ON l.id = c.location_id").
+		Order("l.name, c.uuid").
+		Find(&rows).
+		Error
 	if e != nil {
 		return nil, e
 	}
 	byOwner := map[string][]auth.RouteCredential{}
 	for _, row := range rows {
-		byOwner[row.UserUUID] = append(byOwner[row.UserUUID], auth.RouteCredential{UUID: row.UUID, LocationID: row.LocationID, Name: row.Name, ExitID: row.ExitID, Published: row.Published})
+		byOwner[row.UserUUID] = append(
+			byOwner[row.UserUUID],
+			auth.RouteCredential{UUID: row.UUID, LocationID: row.LocationID, Name: row.Name, ExitID: row.ExitID, Published: row.Published},
+		)
 	}
 
 	for i := range users {
@@ -41,7 +51,14 @@ func (r *RouteRepo) Attach(ctx context.Context, users []auth.User) ([]auth.User,
 		ExitID string
 		Reason string
 	}
-	e = r.db.orm.WithContext(ctx).Table("users AS u").Select("u.uuid, b.exit_id, COALESCE(NULLIF(q.reason, ''), 'quota_pending') AS reason").Joins("CROSS JOIN exit_traffic_budgets b").Joins("LEFT JOIN user_exit_quotas q ON q.user_uuid = u.uuid AND q.exit_id = b.exit_id").Where("COALESCE(q.blocked, true)").Find(&quotaRows).Error
+	e = r.db.orm.WithContext(ctx).
+		Table("users AS u").
+		Select("u.uuid, b.exit_id, COALESCE(NULLIF(q.reason, ''), 'quota_pending') AS reason").
+		Joins("CROSS JOIN exit_traffic_budgets b").
+		Joins("LEFT JOIN user_exit_quotas q ON q.user_uuid = u.uuid AND q.exit_id = b.exit_id").
+		Where("COALESCE(q.blocked, true)").
+		Find(&quotaRows).
+		Error
 	if e != nil {
 		return nil, e
 	}
@@ -80,7 +97,8 @@ func (r *RouteRepo) Publish(ctx context.Context, region, name, exitID string) er
 		return e
 	}
 	var location, oldExit *string
-	e = tx.QueryRow(ctx, `SELECT id::text,exit_id::text FROM vpn_locations WHERE provider_region=$1 FOR UPDATE`, region).Scan(&location, &oldExit)
+	e = tx.QueryRow(ctx, `SELECT id::text,exit_id::text FROM vpn_locations WHERE provider_region=$1 FOR UPDATE`, region).
+		Scan(&location, &oldExit)
 	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
 		return e
 	}
@@ -98,14 +116,22 @@ func (r *RouteRepo) Publish(ctx context.Context, region, name, exitID string) er
 			return e
 		}
 	}
-	_, e = tx.Exec(ctx, `INSERT INTO vpn_route_credentials(uuid,user_uuid,location_id) SELECT gen_random_uuid(),uuid,$1 FROM users WHERE kind='vless' AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=users.account_id) ON CONFLICT DO NOTHING`, id)
+	_, e = tx.Exec(
+		ctx,
+		`INSERT INTO vpn_route_credentials(uuid,user_uuid,location_id) SELECT gen_random_uuid(),uuid,$1 FROM users WHERE kind='vless' AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=users.account_id) ON CONFLICT DO NOTHING`,
+		id,
+	)
 	if e != nil {
 		return e
 	}
 	return tx.Commit(ctx)
 }
 func (r *RouteRepo) Unpublish(ctx context.Context, exitID string) error {
-	return r.db.orm.WithContext(ctx).Table("vpn_locations").Where("exit_id = ?", exitID).Updates(map[string]any{"published": false, "exit_id": nil}).Error
+	return r.db.orm.WithContext(ctx).
+		Table("vpn_locations").
+		Where("exit_id = ?", exitID).
+		Updates(map[string]any{"published": false, "exit_id": nil}).
+		Error
 }
 func (r *RouteRepo) SetPin(ctx context.Context, exitID, pin string) error {
 	return r.db.orm.WithContext(ctx).Table("exit_nodes").Where("id = ?", exitID).Update("pinned_peer_cert_sha256", pin).Error
@@ -124,7 +150,11 @@ func (r *RouteRepo) ReplicationState(ctx context.Context, id, state string, free
 	if required > 0 {
 		updates["required_bytes"] = required
 	}
-	return r.db.orm.WithContext(ctx).Table("node_replication").Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "node_id"}}, DoUpdates: clause.Assignments(updates)}).Create(row).Error
+	return r.db.orm.WithContext(ctx).
+		Table("node_replication").
+		Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "node_id"}}, DoUpdates: clause.Assignments(updates)}).
+		Create(row).
+		Error
 }
 
 func (r *RouteRepo) ReplicationStatuses(ctx context.Context) (any, error) {
@@ -138,7 +168,13 @@ func (r *RouteRepo) ReplicationStatuses(ctx context.Context) (any, error) {
 		CheckedAt *time.Time `json:"checked_at"`
 	}
 	out := []item{}
-	e := r.db.orm.WithContext(ctx).Table("exit_nodes AS e").Select("e.id, COALESCE(NULLIF(e.display_name, ''), NULLIF(e.city, ''), e.name) AS name, CASE WHEN n.checked_at < NOW() - INTERVAL '90 seconds' THEN 'stale' ELSE COALESCE(n.state, 'not_configured') END AS state, COALESCE(n.free_bytes, 0) AS free, COALESCE(n.required_bytes, 0) AS required, n.checked_at").Joins("LEFT JOIN node_replication n ON n.node_id = e.id").Order("e.name").Find(&out).Error
+	e := r.db.orm.WithContext(ctx).
+		Table("exit_nodes AS e").
+		Select("e.id, COALESCE(NULLIF(e.display_name, ''), NULLIF(e.city, ''), e.name) AS name, CASE WHEN n.checked_at < NOW() - INTERVAL '90 seconds' THEN 'stale' ELSE COALESCE(n.state, 'not_configured') END AS state, COALESCE(n.free_bytes, 0) AS free, COALESCE(n.required_bytes, 0) AS required, n.checked_at").
+		Joins("LEFT JOIN node_replication n ON n.node_id = e.id").
+		Order("e.name").
+		Find(&out).
+		Error
 	return out, e
 }
 
@@ -161,16 +197,26 @@ func (r *RouteRepo) PrepareManual(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
-	_, e = tx.Exec(ctx, `UPDATE vpn_locations l SET published=false WHERE provider_region IS NULL AND published AND NOT EXISTS(SELECT 1 FROM exit_nodes e WHERE e.id=l.exit_id AND enabled)`)
+	_, e = tx.Exec(
+		ctx,
+		`UPDATE vpn_locations l SET published=false WHERE provider_region IS NULL AND published AND NOT EXISTS(SELECT 1 FROM exit_nodes e WHERE e.id=l.exit_id AND enabled)`,
+	)
 	if e != nil {
 		return e
 	}
-	_, e = tx.Exec(ctx, `INSERT INTO vpn_route_credentials(uuid,user_uuid,location_id) SELECT gen_random_uuid(),u.uuid,l.id FROM users u CROSS JOIN vpn_locations l WHERE u.kind='vless' AND l.provider_region IS NULL AND l.published AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=u.account_id) ON CONFLICT DO NOTHING`)
+	_, e = tx.Exec(
+		ctx,
+		`INSERT INTO vpn_route_credentials(uuid,user_uuid,location_id) SELECT gen_random_uuid(),u.uuid,l.id FROM users u CROSS JOIN vpn_locations l WHERE u.kind='vless' AND l.provider_region IS NULL AND l.published AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=u.account_id) ON CONFLICT DO NOTHING`,
+	)
 	if e != nil {
 		return e
 	}
 	return tx.Commit(ctx)
 }
 func (r *RouteRepo) AppliedManual(ctx context.Context) error {
-	return r.db.orm.WithContext(ctx).Table("vpn_locations").Where("provider_region IS NULL AND published AND NOT applied").Update("applied", true).Error
+	return r.db.orm.WithContext(ctx).
+		Table("vpn_locations").
+		Where("provider_region IS NULL AND published AND NOT applied").
+		Update("applied", true).
+		Error
 }

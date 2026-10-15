@@ -4,10 +4,11 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 func TestOfflineRuntimeArchiveBoundaries(t *testing.T) {

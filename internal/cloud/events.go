@@ -32,7 +32,17 @@ func (s *Service) advanceLogged(ctx context.Context, op Operation) error {
 		log = slog.Default()
 	}
 	if report {
-		log.Info("cloud operation stage started", "operation_id", op.ID, "phase", op.Phase, "region", op.Offer.Region.ID, "plan", op.Offer.Plan.ID)
+		log.Info(
+			"cloud operation stage started",
+			"operation_id",
+			op.ID,
+			"phase",
+			op.Phase,
+			"region",
+			op.Offer.Region.ID,
+			"plan",
+			op.Offer.Plan.ID,
+		)
 	}
 	err := s.advance(ctx, op)
 	end, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -60,6 +70,24 @@ func (s *Service) advanceLogged(ctx context.Context, op Operation) error {
 	if event.Outcome == "failed" {
 		level = slog.LevelWarn
 	}
-	log.Log(end, level, "cloud operation stage finished", "operation_id", op.ID, "phase", op.Phase, "outcome", event.Outcome, "error_code", event.Code, "http_status", event.HTTPStatus, "duration_ms", event.DurationMS, "journal_saved", saved)
+	log.Log(
+		end,
+		level,
+		"cloud operation stage finished",
+		"operation_id",
+		op.ID,
+		"phase",
+		op.Phase,
+		"outcome",
+		event.Outcome,
+		"error_code",
+		event.Code,
+		"http_status",
+		event.HTTPStatus,
+		"duration_ms",
+		event.DurationMS,
+		"journal_saved",
+		saved,
+	)
 	return err
 }

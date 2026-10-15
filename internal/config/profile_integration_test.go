@@ -50,7 +50,17 @@ func testCertificate(t *testing.T) (string, string) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	c := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "example.com"}, DNSNames: []string{"example.com"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	c := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "example.com"},
+		DNSNames:              []string{"example.com"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
 	der, e := x509.CreateCertificate(rand.Reader, c, c, &key.PublicKey, key)
 	if e != nil {
 		t.Fatal(e)
@@ -115,7 +125,9 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 	defer decoy.Close()
 	roots := x509.NewCertPool()
 	roots.AddCert(destination.Certificate())
-	alternate := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(strings.Repeat("y", 65536))) }))
+	alternate := httptest.NewUnstartedServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(strings.Repeat("y", 65536))) }),
+	)
 	alternate.TLS = destination.TLS.Clone()
 	alternate.StartTLS()
 	defer alternate.Close()
@@ -146,9 +158,21 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 	s.PublicHost = "127.0.0.1"
 	s.ListenAddress = "127.0.0.1"
 	s.VLESSPort = freePort(t)
-	s.Reality = RealitySpec{PrivateKey: keys.PrivateKey, PublicKey: keys.PublicKey, Dest: camouflage.Listener.Addr().String(), ServerNames: []string{"example.com"}}
+	s.Reality = RealitySpec{
+		PrivateKey:  keys.PrivateKey,
+		PublicKey:   keys.PublicKey,
+		Dest:        camouflage.Listener.Addr().String(),
+		ServerNames: []string{"example.com"},
+	}
 	s.AntiCensor = &AntiCensorSpec{PublicXHTTPPort: freePort(t)}
-	s.PublicXHTTPTLS = &PublicXHTTPTLSSpec{Port: freePort(t), ServerName: "example.com", CertificateFile: certFile, KeyFile: keyFile, Path: "/test", Mode: "stream-up"}
+	s.PublicXHTTPTLS = &PublicXHTTPTLSSpec{
+		Port:            freePort(t),
+		ServerName:      "example.com",
+		CertificateFile: certFile,
+		KeyFile:         keyFile,
+		Path:            "/test",
+		Mode:            "stream-up",
+	}
 	user := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", Name: "test", IsActive: true, Kind: "vless"}
 	strat, _ := mimic.New("steamlike")
 	data, e := BuildBridgeXRayJSON(s, []auth.User{user}, nil, "", strat, "error")
@@ -214,13 +238,16 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 					return e
 				}
 				defer func() { _ = client.Close() }()
-				tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "example.com", MinVersion: tls.VersionTLS13}, DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-					d, e := xnet.ParseDestination(network + ":" + addr)
-					if e != nil {
-						return nil, e
-					}
-					return core.Dial(ctx, client.Instance(), d)
-				}}
+				tr := &http.Transport{
+					TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "example.com", MinVersion: tls.VersionTLS13},
+					DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+						d, e := xnet.ParseDestination(network + ":" + addr)
+						if e != nil {
+							return nil, e
+						}
+						return core.Dial(ctx, client.Instance(), d)
+					},
+				}
 				defer tr.CloseIdleConnections()
 				hc := &http.Client{Transport: tr, Timeout: 3 * time.Second}
 				resp, e := hc.Get(destination.URL)
@@ -244,7 +271,13 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 				if _, e = io.ReadFull(stream.Body, make([]byte, 1024)); e != nil {
 					return e
 				}
-				server["outbounds"] = []any{map[string]any{"protocol": "freedom", "tag": "egress", "settings": localFreedomSettings(alternate.Listener.Addr().String())}}
+				server["outbounds"] = []any{
+					map[string]any{
+						"protocol": "freedom",
+						"tag":      "egress",
+						"settings": localFreedomSettings(alternate.Listener.Addr().String()),
+					},
+				}
 				next, _ := json.Marshal(server)
 				if e = relay.Reload(next); e != nil {
 					return e

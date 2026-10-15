@@ -30,7 +30,13 @@ func forwardFixture(t *testing.T) (forwardUpgradeJournal, string, string) {
 			t.Fatal(err)
 		}
 	}
-	config := []byte(fmt.Sprintf("INSTALL_SCHEMA_VERSION=2\nBRIDGE_IP=192.0.2.1\nMAIN_EXIT_IP=192.0.2.2\nBOT_DOMAIN=sync.example.com\nVPN_DOMAIN=edge.example.com\nACME_EMAIL=owner@example.com\nPUBLIC_XHTTP_PATH=/connect\nREUSE_BRIDGE_SPEC=true\nULTRA_AUTOMATION_VERSION=%s\nULTRA_AUTOMATION_RELEASE_DIR=%s\nULTRA_AUTOMATION_AGE_RECIPIENT=age1fixture\nULTRA_AUTOMATION_BRIDGE_PROVIDER=fixture\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/pins\nULTRA_AUTOMATION_STATIC_NODES=[{\"name\":\"NL\",\"address\":\"192.0.2.2\",\"provider\":\"fixture\"}]\nULTRA_AUTOMATION_ADMIN_TELEGRAM_ID=123\n", version, filepath.Join(input, "release")))
+	config := []byte(
+		fmt.Sprintf(
+			"INSTALL_SCHEMA_VERSION=2\nBRIDGE_IP=192.0.2.1\nMAIN_EXIT_IP=192.0.2.2\nBOT_DOMAIN=sync.example.com\nVPN_DOMAIN=edge.example.com\nACME_EMAIL=owner@example.com\nPUBLIC_XHTTP_PATH=/connect\nREUSE_BRIDGE_SPEC=true\nULTRA_AUTOMATION_VERSION=%s\nULTRA_AUTOMATION_RELEASE_DIR=%s\nULTRA_AUTOMATION_AGE_RECIPIENT=age1fixture\nULTRA_AUTOMATION_BRIDGE_PROVIDER=fixture\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/pins\nULTRA_AUTOMATION_STATIC_NODES=[{\"name\":\"NL\",\"address\":\"192.0.2.2\",\"provider\":\"fixture\"}]\nULTRA_AUTOMATION_ADMIN_TELEGRAM_ID=123\n",
+			version,
+			filepath.Join(input, "release"),
+		),
+	)
 	write := func(path string, raw []byte) {
 		t.Helper()
 		if err := os.WriteFile(path, raw, 0600); err != nil {
@@ -48,15 +54,47 @@ func forwardFixture(t *testing.T) (forwardUpgradeJournal, string, string) {
 	if err = freezeOperatorPlan(directory, plan, filepath.Join(input, "release")); err != nil {
 		t.Fatal(err)
 	}
-	inventory := map[string]any{"all": map[string]any{"children": map[string]any{"bridge": map[string]any{"hosts": map[string]any{"bridge": map[string]any{"ansible_host": "192.0.2.1"}}}, "exits": map[string]any{"hosts": map[string]any{"exit_a": map[string]any{"ansible_host": "192.0.2.2"}, "exit_b": map[string]any{"ansible_host": "192.0.2.3"}}}}}}
+	inventory := map[string]any{
+		"all": map[string]any{
+			"children": map[string]any{
+				"bridge": map[string]any{"hosts": map[string]any{"bridge": map[string]any{"ansible_host": "192.0.2.1"}}},
+				"exits": map[string]any{
+					"hosts": map[string]any{
+						"exit_a": map[string]any{"ansible_host": "192.0.2.2"},
+						"exit_b": map[string]any{"ansible_host": "192.0.2.3"},
+					},
+				},
+			},
+		},
+	}
 	manifestSHA := strings.Repeat("b", 64)
-	request, _ := json.Marshal(map[string]any{"inventory": inventory, "variables": map[string]any{"ultra_lifecycle_id": lifecycleID(directory), "ultra_release_manifest_sha256": manifestSHA, "ultra_release_manifest": map[string]any{"source_commit": commit, "version": version}}})
+	request, _ := json.Marshal(
+		map[string]any{
+			"inventory": inventory,
+			"variables": map[string]any{
+				"ultra_lifecycle_id":            lifecycleID(directory),
+				"ultra_release_manifest_sha256": manifestSHA,
+				"ultra_release_manifest":        map[string]any{"source_commit": commit, "version": version},
+			},
+		},
+	)
 	write(filepath.Join(directory, "activate", "request.json"), request)
 	job, _ := json.Marshal(map[string]any{"schema_version": 1, "operation": "upgrade", "request_sha256": digestSHA256(request)})
 	for _, name := range []string{"job.json", "receipt.json"} {
 		write(filepath.Join(directory, "activate", name), job)
 	}
-	journal, _ := json.Marshal(map[string]any{"schema": 1, "commit": commit, "version": version, "remote_attempt": attempt, "stage": "upgrade", "mutator_dispatched": true, "manifest_sha256": manifestSHA, "staged_config_sha256": digestSHA256(config)})
+	journal, _ := json.Marshal(
+		map[string]any{
+			"schema":               1,
+			"commit":               commit,
+			"version":              version,
+			"remote_attempt":       attempt,
+			"stage":                "upgrade",
+			"mutator_dispatched":   true,
+			"manifest_sha256":      manifestSHA,
+			"staged_config_sha256": digestSHA256(config),
+		},
+	)
 	path := filepath.Join(root, "archived-manual.json")
 	write(path, journal)
 	return forwardUpgradeJournal{path, digestSHA256(journal)}, root, directory
@@ -187,7 +225,12 @@ func forwardReplayFixture(t *testing.T) (forwardUpgradeJournal, forwardOldOperat
 			job["state"] = "succeeded"
 			job["result"] = output
 			writeForwardJSON(t, filepath.Join(stage, "receipt.json"), job)
-			return deployansible.Receipt{State: "succeeded", RequestSHA256: sha, BinarySHA256: sha, Result: deployansible.Result{Values: output}}, nil
+			return deployansible.Receipt{
+				State:         "succeeded",
+				RequestSHA256: sha,
+				BinarySHA256:  sha,
+				Result:        deployansible.Result{Values: output},
+			}, nil
 		},
 		supersede: func(ctx context.Context, oldID, newID string) error {
 			if !held {
@@ -197,7 +240,11 @@ func forwardReplayFixture(t *testing.T) (forwardUpgradeJournal, forwardOldOperat
 				t.Fatalf("intent not durable before supersede: %v", err)
 			}
 			events = append(events, "supersede")
-			writeForwardJSON(t, filepath.Join(root, "lifecycle-retired.json"), map[string]any{"version": 1, "ids": []string{oldID}, "handoff": map[string]any{"old_id": oldID, "new_id": newID}})
+			writeForwardJSON(
+				t,
+				filepath.Join(root, "lifecycle-retired.json"),
+				map[string]any{"version": 1, "ids": []string{oldID}, "handoff": map[string]any{"old_id": oldID, "new_id": newID}},
+			)
 			writeForwardJSON(t, filepath.Join(root, "lifecycle.json"), map[string]any{"id": newID, "phase": "applying"})
 			return nil
 		},
@@ -297,13 +344,38 @@ func TestForwardHandoffReplayRejectsChangedEvidence(t *testing.T) {
 			case "ledger":
 				err = os.WriteFile(filepath.Join(root, "lifecycle-retired.json"), []byte("{}"), 0600)
 			case "new-retired":
-				writeForwardJSON(t, filepath.Join(root, "lifecycle-retired.json"), map[string]any{"version": 1, "ids": []string{old.ID, lifecycleID(directory)}, "handoff": map[string]any{"old_id": old.ID, "new_id": lifecycleID(directory)}})
+				writeForwardJSON(
+					t,
+					filepath.Join(root, "lifecycle-retired.json"),
+					map[string]any{
+						"version": 1,
+						"ids":     []string{old.ID, lifecycleID(directory)},
+						"handoff": map[string]any{"old_id": old.ID, "new_id": lifecycleID(directory)},
+					},
+				)
 			case "unknown-ledger-field":
-				writeForwardJSON(t, filepath.Join(root, "lifecycle-retired.json"), map[string]any{"version": 1, "ids": []string{old.ID}, "handoff": map[string]any{"old_id": old.ID, "new_id": lifecycleID(directory)}, "unknown": true})
+				writeForwardJSON(
+					t,
+					filepath.Join(root, "lifecycle-retired.json"),
+					map[string]any{
+						"version": 1,
+						"ids":     []string{old.ID},
+						"handoff": map[string]any{"old_id": old.ID, "new_id": lifecycleID(directory)},
+						"unknown": true,
+					},
+				)
 			case "released":
-				writeForwardJSON(t, filepath.Join(root, "lifecycle.json"), map[string]any{"id": lifecycleID(directory), "phase": "released"})
+				writeForwardJSON(
+					t,
+					filepath.Join(root, "lifecycle.json"),
+					map[string]any{"id": lifecycleID(directory), "phase": "released"},
+				)
 			case "foreign":
-				writeForwardJSON(t, filepath.Join(root, "lifecycle.json"), map[string]any{"id": lifecycleID("foreign"), "phase": "applying"})
+				writeForwardJSON(
+					t,
+					filepath.Join(root, "lifecycle.json"),
+					map[string]any{"id": lifecycleID("foreign"), "phase": "applying"},
+				)
 			case "symlink":
 				err = os.Rename(path, path+".real")
 				if err == nil {

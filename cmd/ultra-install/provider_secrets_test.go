@@ -1,10 +1,11 @@
 package main
 
 import (
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 func TestProviderSecretsCanonicalProjection(t *testing.T) {
@@ -13,7 +14,10 @@ func TestProviderSecretsCanonicalProjection(t *testing.T) {
 	if err := os.WriteFile(env, []byte("ULTRA_VULTR_API_KEY=compute-fixture\nULTRA_VULTR_DNS_API_KEY=dns-fixture\nTELEGRAM_BOT_TOKEN=bot-fixture\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	p := &installplan.InstallPlan{Secrets: installplan.SecretsConfig{EnvFile: env}, Automation: &installplan.AutomationConfig{CloudKeyFile: "/old-compat", DNS: &installplan.AutomationDNS{Provider: "vultr"}}}
+	p := &installplan.InstallPlan{
+		Secrets:    installplan.SecretsConfig{EnvFile: env},
+		Automation: &installplan.AutomationConfig{CloudKeyFile: "/old-compat", DNS: &installplan.AutomationDNS{Provider: "vultr"}},
+	}
 	compute, dns, err := prepareProviderSecrets(p, d)
 	if err != nil {
 		t.Fatal(err)

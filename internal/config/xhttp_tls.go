@@ -85,14 +85,37 @@ func buildXHTTPTLSExport(s *Spec, u auth.User, host string, t *PublicXHTTPTLSSpe
 	child.PublicXHTTPTLS = t
 	s = &child
 	w := resolveXrayWire(s)
-	outbound := map[string]any{"tag": w.ClientOutboundTag, "protocol": "vless", "settings": map[string]any{"vnext": []any{map[string]any{"address": host, "port": t.Port, "users": []any{vlessUserFieldsNoFlow(s, u.UUID)}}}}, "streamSettings": publicTLSStream(s, false)}
+	outbound := map[string]any{
+		"tag":      w.ClientOutboundTag,
+		"protocol": "vless",
+		"settings": map[string]any{
+			"vnext": []any{map[string]any{"address": host, "port": t.Port, "users": []any{vlessUserFieldsNoFlow(s, u.UUID)}}},
+		},
+		"streamSettings": publicTLSStream(s, false),
+	}
 	extra, _ := json.Marshal(publicTLSSettings(s, false))
 	mode := t.Mode
 	if mode == "" {
 		mode = "stream-up"
 	}
-	q := url.Values{"type": {"xhttp"}, "security": {"tls"}, "encryption": {"none"}, "sni": {t.ServerName}, "fp": {t.clientFingerprint()}, "alpn": {"h2"}, "path": {t.Path}, "mode": {mode}, "extra": {string(extra)}}
-	uri := fmt.Sprintf("vless://%s@%s?%s#%s", u.UUID, net.JoinHostPort(host, strconv.Itoa(t.Port)), q.Encode(), url.PathEscape(u.Name+" XHTTP TLS"))
+	q := url.Values{
+		"type":       {"xhttp"},
+		"security":   {"tls"},
+		"encryption": {"none"},
+		"sni":        {t.ServerName},
+		"fp":         {t.clientFingerprint()},
+		"alpn":       {"h2"},
+		"path":       {t.Path},
+		"mode":       {mode},
+		"extra":      {string(extra)},
+	}
+	uri := fmt.Sprintf(
+		"vless://%s@%s?%s#%s",
+		u.UUID,
+		net.JoinHostPort(host, strconv.Itoa(t.Port)),
+		q.Encode(),
+		url.PathEscape(u.Name+" XHTTP TLS"),
+	)
 	return &ClientExport{VLESSURI: uri, XRayOutboundJSON: outbound}
 }
 

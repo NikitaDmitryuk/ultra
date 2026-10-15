@@ -7,20 +7,34 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
-func ansibleIngress(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, python, executable, action string, operationVars map[string]any) error {
+func ansibleIngress(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	directory, python, executable, action string,
+	operationVars map[string]any,
+) error {
 	return ansibleIngressOperation(ctx, p, inventory, directory, python, executable, action, operationVars, false, "")
 }
 
 // Only bootstrap operator re-invocation retries a frozen failed ingress stage.
-func ansibleBootstrapIngress(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, python, executable, action string, operationVars map[string]any, originals ...string) error {
+func ansibleBootstrapIngress(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	directory, python, executable, action string,
+	operationVars map[string]any,
+	originals ...string,
+) error {
 	if action != "prepare" && action != "activate" && action != "adopt" {
 		return errors.New("invalid bootstrap ingress action")
 	}
@@ -31,11 +45,22 @@ func ansibleBootstrapIngress(ctx context.Context, p *installplan.InstallPlan, in
 	return ansibleIngressOperation(ctx, p, inventory, directory, python, executable, action, operationVars, true, original)
 }
 
-func ansibleIngressOperation(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, python, executable, action string, operationVars map[string]any, retry bool, original string) error {
+func ansibleIngressOperation(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	directory, python, executable, action string,
+	operationVars map[string]any,
+	retry bool,
+	original string,
+) error {
 	if p.Automation == nil || p.Automation.Ingress == nil {
 		return nil
 	}
-	if action != "prepare" && action != "stage" && action != "activate" && action != "rollback" && action != "experiment" && action != "status" && action != "notice" && action != "adopt" {
+	if action != "prepare" && action != "stage" && action != "activate" && action != "rollback" && action != "experiment" &&
+		action != "status" &&
+		action != "notice" &&
+		action != "adopt" {
 		return errors.New("invalid ingress action")
 	}
 	var plan map[string]any
@@ -75,7 +100,9 @@ func ansibleIngressOperation(ctx context.Context, p *installplan.InstallPlan, in
 			return err
 		}
 		children := independent["all"].(map[string]any)["children"].(map[string]any)
-		children["forward_ingress"] = map[string]any{"hosts": map[string]any{"subscription_forward": map[string]any{"ansible_host": p.Automation.Ingress.ForwardHost}}}
+		children["forward_ingress"] = map[string]any{
+			"hosts": map[string]any{"subscription_forward": map[string]any{"ansible_host": p.Automation.Ingress.ForwardHost}},
+		}
 		inventory = independent
 		variables["ultra_forward_bridge_ipv4"] = p.Automation.BridgeIPv4
 		variables["ultra_forward_domain"] = p.Bot.Domain

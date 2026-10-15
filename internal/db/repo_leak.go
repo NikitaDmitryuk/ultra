@@ -95,7 +95,10 @@ func (r *TelegramRepo) InsertLeakSignal(ctx context.Context, userUUID, kind stri
 	if err != nil {
 		return err
 	}
-	return r.db.orm.WithContext(ctx).Select("user_uuid", "kind", "score", "detail").Create(&leakSignalRow{UserUUID: fromPGUUID(pgUUID), Kind: kind, Score: int(int32(score)), Detail: raw}).Error
+	return r.db.orm.WithContext(ctx).
+		Select("user_uuid", "kind", "score", "detail").
+		Create(&leakSignalRow{UserUUID: fromPGUUID(pgUUID), Kind: kind, Score: int(int32(score)), Detail: raw}).
+		Error
 }
 
 func (r *TelegramRepo) RecentUserLeakSignals(ctx context.Context, userUUID string, limit int) ([]LeakSignal, error) {

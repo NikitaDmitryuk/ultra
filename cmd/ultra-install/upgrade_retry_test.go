@@ -8,14 +8,15 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	ansibleassets "github.com/NikitaDmitryuk/ultra/deploy/ansible"
-	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	ansibleassets "github.com/NikitaDmitryuk/ultra/deploy/ansible"
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 func TestFailedUpgradeRetryPreservesHistoryAndResetsRollbackCache(t *testing.T) {
@@ -53,7 +54,8 @@ func TestFailedUpgradeRetryPreservesHistoryAndResetsRollbackCache(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, step := range []string{"activate", "rollback"} {
-		if _, err := os.Stat(filepath.Join(directory, step, "receipt.json")); (step == "activate" && !os.IsNotExist(err)) || (step != "activate" && err != nil) {
+		if _, err := os.Stat(filepath.Join(directory, step, "receipt.json")); (step == "activate" && !os.IsNotExist(err)) ||
+			(step != "activate" && err != nil) {
 			t.Fatal("activation cache not cleared or dependent history removed")
 		}
 		if _, err := os.Stat(filepath.Join(directory, "history", step+"-attempt-1.json")); err != nil {
@@ -90,7 +92,16 @@ func TestUpgradeRetryRejectsCommittedOrUnfailedOperations(t *testing.T) {
 	}
 }
 func TestAutomationStatusNeverPublishesPrivateInspection(t *testing.T) {
-	result := publicAutomationStatus(map[string]any{"ready": true, "version": "v2.4.7", "identity": "private", "nodes": []string{"private"}, "pins": "private", "auto_policy": "private"})
+	result := publicAutomationStatus(
+		map[string]any{
+			"ready":       true,
+			"version":     "v2.4.7",
+			"identity":    "private",
+			"nodes":       []string{"private"},
+			"pins":        "private",
+			"auto_policy": "private",
+		},
+	)
 	if len(result) != 2 || result["ready"] != true || result["version"] != "v2.4.7" {
 		t.Fatal("public status projection leaked or dropped fields")
 	}
@@ -157,7 +168,8 @@ result.chmod(0o600)
 	}
 	variables["ultra_upgrade_observed_at"] = activation.Result.Values["activated_at"]
 	// The previous layout reproduces the confirmed immutable-input failure.
-	if _, err = deployansible.RunLocal(ctx, "publish-release", inventory, variables, filepath.Join(root, "publish"), python, executable); err == nil || !strings.Contains(err.Error(), "local operation inputs changed") {
+	if _, err = deployansible.RunLocal(ctx, "publish-release", inventory, variables, filepath.Join(root, "publish"), python, executable); err == nil ||
+		!strings.Contains(err.Error(), "local operation inputs changed") {
 		t.Fatal("old timestamp request unexpectedly accepted")
 	}
 	for _, stage := range []string{"publish", "commit"} {
@@ -206,7 +218,22 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 				if err := os.Mkdir(release, 0700); err != nil {
 					t.Fatal(err)
 				}
-				names := []string{"ultra-relay-linux-amd64", "ultra-relay-linux-arm64", "ultra-bot-linux-amd64", "ultra-bot-linux-arm64", "ultra-client-linux-amd64", "ultra-client-linux-arm64", "ultra-recovery.tar.gz", "ultra-install-linux-amd64", "ultra-install-linux-arm64", "ultra-ansible.tar.gz", "ultra-ansible-runtime-linux-amd64.tar.gz", "ultra-ansible-runtime-linux-arm64.tar.gz", "mobile-bootstrap.sh", "checksums.txt"}
+				names := []string{
+					"ultra-relay-linux-amd64",
+					"ultra-relay-linux-arm64",
+					"ultra-bot-linux-amd64",
+					"ultra-bot-linux-arm64",
+					"ultra-client-linux-amd64",
+					"ultra-client-linux-arm64",
+					"ultra-recovery.tar.gz",
+					"ultra-install-linux-amd64",
+					"ultra-install-linux-arm64",
+					"ultra-ansible.tar.gz",
+					"ultra-ansible-runtime-linux-amd64.tar.gz",
+					"ultra-ansible-runtime-linux-arm64.tar.gz",
+					"mobile-bootstrap.sh",
+					"checksums.txt",
+				}
 				assets := []map[string]any{}
 				for _, name := range names {
 					data := []byte(name)
@@ -233,9 +260,25 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 					if err := os.WriteFile(filepath.Join(release, name), data, 0600); err != nil {
 						t.Fatal(err)
 					}
-					assets = append(assets, map[string]any{"name": name, "sha256": fmt.Sprintf("%x", sha256.Sum256(data)), "size": len(data)})
+					assets = append(
+						assets,
+						map[string]any{"name": name, "sha256": fmt.Sprintf("%x", sha256.Sum256(data)), "size": len(data)},
+					)
 				}
-				manifest := map[string]any{"schema_version": 1, "version": "v2.5.0", "source_commit": strings.Repeat("a", 40), "database_schema_min": 24, "database_schema_max": 25, "capabilities": []string{"service-access-v1", "provider-pool-quota-v1", "lifecycle-gate-v1", "ansible-deploy-v1"}, "assets": assets}
+				manifest := map[string]any{
+					"schema_version":      1,
+					"version":             "v2.5.0",
+					"source_commit":       strings.Repeat("a", 40),
+					"database_schema_min": 24,
+					"database_schema_max": 25,
+					"capabilities": []string{
+						"service-access-v1",
+						"provider-pool-quota-v1",
+						"lifecycle-gate-v1",
+						"ansible-deploy-v1",
+					},
+					"assets": assets,
+				}
 				raw, _ := json.Marshal(manifest)
 				if err := os.WriteFile(filepath.Join(release, "release-manifest.json"), raw, 0600); err != nil {
 					t.Fatal(err)
@@ -244,13 +287,35 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 				if err := os.WriteFile(pins, []byte("fixture"), 0600); err != nil {
 					t.Fatal(err)
 				}
+				domainProbe := filepath.Join(root, "subscription-probe-url")
+				if err := os.WriteFile(domainProbe, []byte("https://sync.example.com/sub/probe-fixture\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				ctx := withUpgradeDomainProbeFile(context.Background(), domainProbe)
 				t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins)
-				p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "REALITY_DEST": "example.com:443", "BRIDGE_SSH_KEY": filepath.Join(root, "identity")})
+				p := installplan.LegacyValuesToPlan(
+					map[string]string{
+						"BRIDGE_IP":      "192.0.2.1",
+						"MAIN_EXIT_IP":   "192.0.2.2",
+						"REALITY_DEST":   "example.com:443",
+						"BRIDGE_SSH_KEY": filepath.Join(root, "identity"),
+					},
+				)
 				completeDeploymentFixture(p, release, pins)
 				p.Bot.Enabled = true
 				p.Bot.Domain = "sync.example.com"
-				p.Automation.Ingress = &installplan.AutomationIngress{Domain: "edge.example.com", Email: "owner@example.com", Path: "/connect"}
-				p.Automation.DNS = &installplan.AutomationDNS{Provider: "vultr", Zone: "example.com", TTL: 300, SubscriptionName: "sync", VPNName: "edge"}
+				p.Automation.Ingress = &installplan.AutomationIngress{
+					Domain: "edge.example.com",
+					Email:  "owner@example.com",
+					Path:   "/connect",
+				}
+				p.Automation.DNS = &installplan.AutomationDNS{
+					Provider:         "vultr",
+					Zone:             "example.com",
+					TTL:              300,
+					SubscriptionName: "sync",
+					VPNName:          "edge",
+				}
 				p.SourceValues = map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2"}
 				local := false
 				p.ControllerLocal = &local
@@ -359,6 +424,8 @@ if operation=='inspect-upgrade-domains':
             'age_recipient_matches':True,'bridge_provider_matches':True,'static_nodes_match':True,'bridge_ipv4':'192.0.2.1',
             'admin_id_matches':True,'backend_port':18080,'gateway_port':18081,'fingerprint':'firefox','path':'/connect','bot_port':8444,
             'bridge_url':'https://sync.example.com/healthz'}
+if operation=='upgrade-domain':
+    result={'verified':True,'phase':variables['ultra_upgrade_domain_action']}
 if operation=='preflight-retry' and variables.get('ultra_legacy_bridge_maintenance') and (root/'activate'/'receipt.json').exists():
     contract=variables.get('ultra_legacy_retry_configuration')
     assert contract and contract['generation']==1, 'legacy candidate retry lacked bound generation'
@@ -384,17 +451,18 @@ output.chmod(0o600)
 				if err := os.WriteFile(executable, []byte(source), 0700); err != nil {
 					t.Fatal(err)
 				}
-				firstErr := ansibleUpgrade(context.Background(), p, release, directory, python, executable, false)
+				firstErr := ansibleUpgrade(ctx, p, release, directory, python, executable, false)
 				if strings.HasPrefix(operation, "controller-") {
 					if firstErr == nil {
 						t.Fatal("controller enforcement preflight accepted unsafe upgrade")
 					}
-					if operation == "controller-preflight-unverified" && firstErr.Error() != "upgrade_controller_enforcement_preflight_unverified" {
+					if operation == "controller-preflight-unverified" &&
+						firstErr.Error() != "upgrade_controller_enforcement_preflight_unverified" {
 						t.Fatalf("missing preflight attestation accepted: %v", firstErr)
 					}
 					// Retry and ordinary re-entry must both inspect the floor anew;
 					// neither may run reservation, resume, or release cleanup.
-					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, retryFailed); err == nil {
+					if err := ansibleUpgrade(ctx, p, release, directory, python, executable, retryFailed); err == nil {
 						t.Fatal("re-entry bypassed controller enforcement preflight")
 					}
 					calls, err := os.ReadFile(filepath.Join(directory, "calls"))
@@ -444,7 +512,8 @@ output.chmod(0o600)
 					if err := os.WriteFile(commitReceipt, corruptRaw, 0600); err != nil {
 						t.Fatal(err)
 					}
-					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, true); err == nil || err.Error() != "upgrade_committed_continuation_receipt_invalid" {
+					if err := ansibleUpgrade(ctx, p, release, directory, python, executable, true); err == nil ||
+						err.Error() != "upgrade_committed_continuation_receipt_invalid" {
 						t.Fatalf("unbound commit continuation accepted: %v", err)
 					}
 					if err := os.WriteFile(commitReceipt, originalReceipt, 0600); err != nil {
@@ -454,7 +523,7 @@ output.chmod(0o600)
 					if readErr != nil {
 						t.Fatal(readErr)
 					}
-					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, true); err != nil {
+					if err := ansibleUpgrade(ctx, p, release, directory, python, executable, true); err != nil {
 						t.Fatalf("legacy committed continuation: %v", err)
 					}
 					after, readErr := os.ReadFile(filepath.Join(directory, "calls"))
@@ -467,7 +536,9 @@ output.chmod(0o600)
 							t.Fatalf("committed retry reran %s: %s", step, continuation)
 						}
 					}
-					if !strings.Contains(continuation, "preflight-retry\n") || !strings.Contains(continuation, "upgrade-runtime-commit\n") || !strings.Contains(continuation, "lifecycle-released\n") {
+					if !strings.Contains(continuation, "preflight-retry\n") ||
+						!strings.Contains(continuation, "upgrade-runtime-commit\n") ||
+						!strings.Contains(continuation, "lifecycle-released\n") {
 						t.Fatalf("committed continuation omitted remaining steps: %s", continuation)
 					}
 					return
@@ -486,7 +557,7 @@ output.chmod(0o600)
 					if err := os.WriteFile(filepath.Join(directory, "fail-once"), []byte("upgrade-runtime-prepare"), 0600); err != nil {
 						t.Fatal(err)
 					}
-					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, true); err == nil {
+					if err := ansibleUpgrade(ctx, p, release, directory, python, executable, true); err == nil {
 						t.Fatal("prepare failure missing")
 					}
 					prepare := upgradeDependentStageDirectory(directory, "runtime-prepare", 2)
@@ -494,10 +565,12 @@ output.chmod(0o600)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if _, err := os.Stat(filepath.Join(upgradeDependentStageDirectory(directory, "runtime-rollback", 2), "job.json")); !os.IsNotExist(err) {
+					if _, err := os.Stat(filepath.Join(upgradeDependentStageDirectory(directory, "runtime-rollback", 2), "job.json")); !os.IsNotExist(
+						err,
+					) {
 						t.Fatal("prepared journal was compensated before activation")
 					}
-					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, true); err != nil {
+					if err := ansibleUpgrade(ctx, p, release, directory, python, executable, true); err != nil {
 						t.Fatalf("prepared generation retry: %v", err)
 					}
 					after, err := os.ReadFile(filepath.Join(prepare, "request.json"))
@@ -514,7 +587,10 @@ output.chmod(0o600)
 					}
 					return
 				}
-				if operation == "runtime-rollback-failure" || operation == "commit-rollback-failure" || operation == "release-rollback-failure" || operation == "legacy-runtime-rollback-failure" || operation == "legacy-commit-rollback-failure" {
+				if operation == "runtime-rollback-failure" || operation == "commit-rollback-failure" ||
+					operation == "release-rollback-failure" ||
+					operation == "legacy-runtime-rollback-failure" ||
+					operation == "legacy-commit-rollback-failure" {
 					if firstErr == nil || !strings.Contains(firstErr.Error(), "rollback_incomplete") {
 						t.Fatalf("missing failed compensation: %v", firstErr)
 					}
@@ -522,7 +598,7 @@ output.chmod(0o600)
 					if err != nil || string(gate) == "released" {
 						t.Fatalf("gate released before verified compensation: %s %v", gate, err)
 					}
-					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, true); err != nil {
+					if err := ansibleUpgrade(ctx, p, release, directory, python, executable, true); err != nil {
 						t.Fatalf("explicit compensation retry: %v", err)
 					}
 					calls, err := os.ReadFile(filepath.Join(directory, "calls"))
@@ -548,11 +624,13 @@ output.chmod(0o600)
 					if firstErr == nil || strings.Contains(firstErr.Error(), "rollback_incomplete") {
 						t.Fatalf("precheckpoint failure did not compensate: %v", firstErr)
 					}
-					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, true); err != nil {
+					if err := ansibleUpgrade(ctx, p, release, directory, python, executable, true); err != nil {
 						t.Fatalf("precheckpoint explicit retry: %v", err)
 					}
 					calls, err := os.ReadFile(filepath.Join(directory, "calls"))
-					if err != nil || !strings.Contains(string(calls), "preflight-retry\n") || strings.Count("\n"+string(calls), "\nupgrade\n") != 2 || strings.Contains(string(calls), "upgrade-runtime-rollback\n") {
+					if err != nil || !strings.Contains(string(calls), "preflight-retry\n") ||
+						strings.Count("\n"+string(calls), "\nupgrade\n") != 2 ||
+						strings.Contains(string(calls), "upgrade-runtime-rollback\n") {
 						t.Fatalf("precheckpoint retry omitted fresh activation: %s %v", calls, err)
 					}
 					return
@@ -609,7 +687,8 @@ output.chmod(0o600)
 						t.Fatal("failed request unavailable", err)
 					}
 					request.Variables["changed"] = true
-					if _, err := runUpgradeInspection(context.Background(), strings.TrimPrefix(operation, "legacy-"), request.Inventory, request.Variables, filepath.Join(directory, failedStage), python, executable); err == nil || err.Error() != "upgrade_inspection_inputs_changed" {
+					if _, err := runUpgradeInspection(context.Background(), strings.TrimPrefix(operation, "legacy-"), request.Inventory, request.Variables, filepath.Join(directory, failedStage), python, executable); err == nil ||
+						err.Error() != "upgrade_inspection_inputs_changed" {
 						t.Fatal("changed inspection inputs accepted", err)
 					}
 					if _, err := os.Stat(filepath.Join(directory, failedStage+"-attempt-2")); !os.IsNotExist(err) {
@@ -627,7 +706,7 @@ output.chmod(0o600)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, retryFailed); err == nil {
+					if err := ansibleUpgrade(ctx, p, release, directory, python, executable, retryFailed); err == nil {
 						t.Fatal("cached successful preflight bypassed new enforcement floor")
 					}
 					after, err := os.ReadFile(filepath.Join(directory, "calls"))
@@ -640,7 +719,7 @@ output.chmod(0o600)
 				}
 				// The next invocation passes the failed inspection and completes the
 				// upgrade, including --retry-failed before an activation job exists.
-				retryErr := ansibleUpgrade(context.Background(), p, release, directory, python, executable, retryFailed)
+				retryErr := ansibleUpgrade(ctx, p, release, directory, python, executable, retryFailed)
 				if retryErr != nil {
 					t.Fatalf("inspection retry did not progress: %v", retryErr)
 				}
@@ -670,14 +749,15 @@ output.chmod(0o600)
 				if operation == "inspect-release-hosts" && strings.Count(string(calls), "inspect-upgrade\n") != 1 {
 					t.Fatal("successful inspection cache was discarded")
 				}
-				if _, err := runUpgradeInspection(context.Background(), "upgrade", nil, nil, directory, python, executable); err == nil || err.Error() != "upgrade_inspection_operation_required" {
+				if _, err := runUpgradeInspection(context.Background(), "upgrade", nil, nil, directory, python, executable); err == nil ||
+					err.Error() != "upgrade_inspection_operation_required" {
 					t.Fatal("mutating operation accepted by inspection retry")
 				}
 				if _, err := os.Stat(filepath.Join(directory, "activate", "receipt.json")); err != nil {
 					t.Fatal("inspection retry never reached activation", err)
 				}
 				before := string(calls)
-				if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, false); err != nil {
+				if err := ansibleUpgrade(ctx, p, release, directory, python, executable, false); err != nil {
 					t.Fatal("completed replay", err)
 				}
 				calls, err = os.ReadFile(filepath.Join(directory, "calls"))

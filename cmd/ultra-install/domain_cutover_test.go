@@ -42,7 +42,8 @@ func TestCutoverCanonicalDeltaPreservesLegacyBackendAndIsRepeatable(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.SchemaVersion != installplan.CurrentSchemaVersion || p.Bot.Domain != "old.example.com" || p.PublicSubscriptionDomain() != "sync.example.com" {
+	if p.SchemaVersion != installplan.CurrentSchemaVersion || p.Bot.Domain != "old.example.com" ||
+		p.PublicSubscriptionDomain() != "sync.example.com" {
 		t.Fatal("schema 2 mapping or old TLS domain changed")
 	}
 	if !strings.Contains(string(first), "BOT_INGRESS_IP=192.0.2.2") || !strings.Contains(string(first), "PUBLIC_HOST=dial.example.net") {

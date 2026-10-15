@@ -56,7 +56,11 @@ func freezeBootstrapExecution(p *installplan.InstallPlan, directory, stateRoot s
 	return freezeBootstrapExecutionWith(p, directory, stateRoot, attestNativeAdoption)
 }
 
-func freezeBootstrapExecutionWith(p *installplan.InstallPlan, directory, stateRoot string, attest func(*installplan.InstallPlan) (string, error)) (string, error) {
+func freezeBootstrapExecutionWith(
+	p *installplan.InstallPlan,
+	directory, stateRoot string,
+	attest func(*installplan.InstallPlan) (string, error),
+) (string, error) {
 	path := filepath.Join(directory, "execution-mode.json")
 	target := p.Bridge.SSHHost + "|" + p.Bridge.Address
 	var frozen frozenExecution
@@ -155,7 +159,11 @@ func writeBootstrapFrozenFile(path string, raw []byte) error {
 	return parent.Sync()
 }
 
-func withFrozenLifecycleLock(ctx context.Context, p *installplan.InstallPlan, lockDirectory, directory string) (context.Context, func(), error) {
+func withFrozenLifecycleLock(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	lockDirectory, directory string,
+) (context.Context, func(), error) {
 	if !localLifecycleBridge(p) {
 		return deployansible.WithOperationLock(ctx, lockDirectory)
 	}

@@ -86,7 +86,14 @@ type Vultr struct {
 }
 
 func NewVultr(key string) *Vultr {
-	return &Vultr{BaseURL: "https://api.vultr.com/v2", Key: key, HTTP: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	return &Vultr{
+		BaseURL: "https://api.vultr.com/v2",
+		Key:     key,
+		HTTP: &http.Client{
+			Timeout:       20 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+	}
 }
 func (v *Vultr) requestOnce(ctx context.Context, method, path string, input, output any) error {
 	var body io.Reader
@@ -250,7 +257,8 @@ func sameSSHKey(a, b string) bool {
 	}
 	left, _, _, leftRest, leftErr := ssh.ParseAuthorizedKey([]byte(a))
 	right, _, _, rightRest, rightErr := ssh.ParseAuthorizedKey([]byte(b))
-	return leftErr == nil && rightErr == nil && len(bytes.TrimSpace(leftRest)) == 0 && len(bytes.TrimSpace(rightRest)) == 0 && bytes.Equal(left.Marshal(), right.Marshal())
+	return leftErr == nil && rightErr == nil && len(bytes.TrimSpace(leftRest)) == 0 && len(bytes.TrimSpace(rightRest)) == 0 &&
+		bytes.Equal(left.Marshal(), right.Marshal())
 }
 
 func (v *Vultr) EnsureFirewall(ctx context.Context, operation, bridgeIP string, tunnelPort int) (string, error) {

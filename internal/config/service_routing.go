@@ -1,9 +1,10 @@
 package config
 
 import (
+	"net/url"
+
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
-	"net/url"
 )
 
 // Service rules precede ordinary split routing: monitor credentials cannot be
@@ -28,7 +29,17 @@ func serviceRouting(users []auth.User, active, block string) []any {
 			}
 		}
 		if len(domains) > 0 {
-			rules = append(rules, map[string]any{"type": "field", "user": []string{u.UUID}, "domain": domains, "network": "tcp", "port": "443", "outboundTag": tag})
+			rules = append(
+				rules,
+				map[string]any{
+					"type":        "field",
+					"user":        []string{u.UUID},
+					"domain":      domains,
+					"network":     "tcp",
+					"port":        "443",
+					"outboundTag": tag,
+				},
+			)
 		}
 		rules = append(rules, map[string]any{"type": "field", "user": []string{u.UUID}, "outboundTag": block})
 	}

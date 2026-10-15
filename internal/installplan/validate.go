@@ -141,7 +141,9 @@ func validatePlanRoles(p *InstallPlan) error {
 		}
 		zone := p.Automation.DNS.Zone
 		label := strings.TrimSuffix(domain, "."+zone)
-		if domain == label || strings.Contains(label, ".") || label == p.Automation.DNS.SubscriptionName || label == p.Automation.DNS.VPNName || domain == p.Bot.Domain {
+		if domain == label || strings.Contains(label, ".") || label == p.Automation.DNS.SubscriptionName ||
+			label == p.Automation.DNS.VPNName ||
+			domain == p.Bot.Domain {
 			return errors.New("MAIN_EXIT_DOMAIN must be a distinct single label in DNS_ZONE")
 		}
 		p.Features.Preset = "standard"
@@ -195,13 +197,16 @@ func validatePlanRoles(p *InstallPlan) error {
 		return errors.New("DATABASE_DUMP requires a dedicated database and fresh bootstrap without REUSE_BRIDGE_SPEC")
 	}
 	if p.AdoptRuntime && p.Database.Enabled {
-		return errors.New("legacy runtime adoption is unavailable for dedicated databases; use an explicitly reviewed bootstrap with reuse_spec")
+		return errors.New(
+			"legacy runtime adoption is unavailable for dedicated databases; use an explicitly reviewed bootstrap with reuse_spec",
+		)
 	}
 	if p.Database.ReplicaHost != "" {
 		return errors.New("database replicas are no longer supported; use a dedicated DB_HOST")
 	}
 	if p.Database.Enabled {
-		if net.ParseIP(p.Database.PrimaryHost).To4() == nil || p.Database.PrimaryHost == p.Bridge.Address || p.Database.PrimaryHost == p.Bridge.SSHHost {
+		if net.ParseIP(p.Database.PrimaryHost).To4() == nil || p.Database.PrimaryHost == p.Bridge.Address ||
+			p.Database.PrimaryHost == p.Bridge.SSHHost {
 			return errors.New("database.primary_host must be the IP of a dedicated database server")
 		}
 		for _, exit := range p.Exits {

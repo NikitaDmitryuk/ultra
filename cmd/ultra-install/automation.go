@@ -92,7 +92,18 @@ func runAutomationCommand(action string, args []string) {
 			exitOnErr("Ansible target upgrade", err)
 			return
 		}
-		exitOnErr("Ansible upgrade", ansibleUpgrade(withUpgradeDomainProbeFile(ctx, *probeFile), p, selectedReleaseDir, *jobDirectory, *python, *ansible, *retryFailed))
+		exitOnErr(
+			"Ansible upgrade",
+			ansibleUpgrade(
+				withUpgradeDomainProbeFile(ctx, *probeFile),
+				p,
+				selectedReleaseDir,
+				*jobDirectory,
+				*python,
+				*ansible,
+				*retryFailed,
+			),
+		)
 		return
 	}
 	if action == "status" {
@@ -181,10 +192,26 @@ func runOperatorUpgradeCommand(args []string) {
 		}
 		ctx = withForwardUpgradeJournal(ctx, *forwardJournalFile, *forwardJournalSHA)
 		if *forwardPrior != "" {
-			ctx = context.WithValue(ctx, forwardPriorCandidateKey{}, forwardPriorCandidate{*forwardPrior, *forwardPriorJournal, *forwardPriorSHA})
+			ctx = context.WithValue(
+				ctx,
+				forwardPriorCandidateKey{},
+				forwardPriorCandidate{*forwardPrior, *forwardPriorJournal, *forwardPriorSHA},
+			)
 		}
 	}
-	exitOnErr("Ansible operator upgrade", ansibleUpgrade(withUpgradeDomainProbeFile(ctx, *probeFile), p, selectedRelease, *jobDirectory, *python, *ansible, *retryFailed, *forwardOnly))
+	exitOnErr(
+		"Ansible operator upgrade",
+		ansibleUpgrade(
+			withUpgradeDomainProbeFile(ctx, *probeFile),
+			p,
+			selectedRelease,
+			*jobDirectory,
+			*python,
+			*ansible,
+			*retryFailed,
+			*forwardOnly,
+		),
+	)
 }
 
 func verifyOperatorUpgradeRelease(releaseDir, sourceCommit, version, manifestSHA, executable string) (*automationRelease, error) {
@@ -254,7 +281,8 @@ func rewriteUpgradeReleaseArgs(args []string, releaseDir string) []string {
 			i++
 			continue
 		}
-		if strings.HasPrefix(arg, "--release=") || strings.HasPrefix(arg, "-release=") || strings.HasPrefix(arg, "--release-dir=") || strings.HasPrefix(arg, "-release-dir=") {
+		if strings.HasPrefix(arg, "--release=") || strings.HasPrefix(arg, "-release=") || strings.HasPrefix(arg, "--release-dir=") ||
+			strings.HasPrefix(arg, "-release-dir=") {
 			continue
 		}
 		filtered = append(filtered, arg)
@@ -294,7 +322,8 @@ func verifyAutomationRelease(releaseDir, expectedVersion string) (*automationRel
 		return nil, errors.New("complete release manifest unavailable")
 	}
 	var manifest automationRelease
-	if json.Unmarshal(raw, &manifest) != nil || !validAutomationVersion(manifest.Version) || (expectedVersion != "" && manifest.Version != expectedVersion) {
+	if json.Unmarshal(raw, &manifest) != nil || !validAutomationVersion(manifest.Version) ||
+		(expectedVersion != "" && manifest.Version != expectedVersion) {
 		return nil, errors.New("release version mismatch")
 	}
 	capable := false
@@ -306,7 +335,8 @@ func verifyAutomationRelease(releaseDir, expectedVersion string) (*automationRel
 	}
 	seen := map[string]bool{}
 	for _, asset := range manifest.Assets {
-		if filepath.Base(asset.Name) != asset.Name || asset.Name == "." || seen[asset.Name] || asset.Size <= 0 || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(asset.SHA) {
+		if filepath.Base(asset.Name) != asset.Name || asset.Name == "." || seen[asset.Name] || asset.Size <= 0 ||
+			!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(asset.SHA) {
 			return nil, errors.New("invalid or repeated release asset")
 		}
 		seen[asset.Name] = true
@@ -325,12 +355,33 @@ func verifyAutomationRelease(releaseDir, expectedVersion string) (*automationRel
 			return nil, errors.New("release checksum mismatch")
 		}
 	}
-	required := []string{"ultra-relay-linux-amd64", "ultra-relay-linux-arm64", "ultra-bot-linux-amd64", "ultra-bot-linux-arm64", "ultra-client-linux-amd64", "ultra-client-linux-arm64", "ultra-recovery.tar.gz"}
+	required := []string{
+		"ultra-relay-linux-amd64",
+		"ultra-relay-linux-arm64",
+		"ultra-bot-linux-amd64",
+		"ultra-bot-linux-arm64",
+		"ultra-client-linux-amd64",
+		"ultra-client-linux-arm64",
+		"ultra-recovery.tar.gz",
+	}
 	if hasAutomationCapability(&manifest, "ansible-deploy-v1") {
-		if manifest.SchemaVersion != 1 || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(manifest.SourceCommit) || manifest.DatabaseSchemaMin <= 0 || manifest.DatabaseSchemaMax < manifest.DatabaseSchemaMin || !hasAutomationCapability(&manifest, "provider-pool-quota-v1") || !hasAutomationCapability(&manifest, "lifecycle-gate-v1") {
+		if manifest.SchemaVersion != 1 || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(manifest.SourceCommit) ||
+			manifest.DatabaseSchemaMin <= 0 ||
+			manifest.DatabaseSchemaMax < manifest.DatabaseSchemaMin ||
+			!hasAutomationCapability(&manifest, "provider-pool-quota-v1") ||
+			!hasAutomationCapability(&manifest, "lifecycle-gate-v1") {
 			return nil, errors.New("invalid Ansible release contract")
 		}
-		required = append(required, "ultra-install-linux-amd64", "ultra-install-linux-arm64", "ultra-ansible.tar.gz", "ultra-ansible-runtime-linux-amd64.tar.gz", "ultra-ansible-runtime-linux-arm64.tar.gz", "mobile-bootstrap.sh", "checksums.txt")
+		required = append(
+			required,
+			"ultra-install-linux-amd64",
+			"ultra-install-linux-arm64",
+			"ultra-ansible.tar.gz",
+			"ultra-ansible-runtime-linux-amd64.tar.gz",
+			"ultra-ansible-runtime-linux-arm64.tar.gz",
+			"mobile-bootstrap.sh",
+			"checksums.txt",
+		)
 	}
 	for _, name := range required {
 		if !seen[name] {
@@ -346,7 +397,13 @@ func validAutomationVersion(version string) bool {
 
 // Familiar operator commands enter the new release through its exact installer,
 // so a retained old CLI never applies its old embedded infrastructure roles.
-func handoffManualUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir string, args []string, minisignPath string) (bool, error) {
+func handoffManualUpgrade(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	releaseDir string,
+	args []string,
+	minisignPath string,
+) (bool, error) {
 	if err := validateMinisignExecutable(minisignPath); err != nil {
 		return false, errors.New("minisign executable required for installer handoff")
 	}

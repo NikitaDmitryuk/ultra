@@ -20,15 +20,34 @@ import (
 
 func TestQuotaWithoutFallbackBlocksActualTransfer(t *testing.T) {
 	var requests atomic.Int32
-	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); w.WriteHeader(http.StatusOK) }))
+	destination := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); w.WriteHeader(http.StatusOK) }),
+	)
 	defer destination.Close()
 	pref := "atl"
-	user := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", PreferredExitID: &pref, FallbackExitID: "ams", ExcludedExitIDs: []string{"atl"}}
-	user.EffectiveExitID = user.SelectExit([]exits.Node{{ID: "atl", Enabled: true}, {ID: "ams", Enabled: true}}, "atl", map[string]exits.Health{"atl": {Eligible: true, PreferredReady: true}, "ams": {}})
+	user := auth.User{
+		UUID:            "2784871e-d8a9-4e1f-b831-3d86aa8653ee",
+		PreferredExitID: &pref,
+		FallbackExitID:  "ams",
+		ExcludedExitIDs: []string{"atl"},
+	}
+	user.EffectiveExitID = user.SelectExit(
+		[]exits.Node{{ID: "atl", Enabled: true}, {ID: "ams", Enabled: true}},
+		"atl",
+		map[string]exits.Health{"atl": {Eligible: true, PreferredReady: true}, "ams": {}},
+	)
 	if user.EffectiveExitID != auth.BlockedExit {
 		t.Fatal("missing fallback did not block")
 	}
-	spec := &Spec{Role: RoleBridge, ListenAddress: "127.0.0.1", PublicHost: "127.0.0.1", VLESSPort: freePort(t), DevMode: true, SplitRouting: BoolPtr(false), Exit: ExitTunnelSpec{Address: "127.0.0.1", Port: freePort(t), TunnelUUID: user.UUID}}
+	spec := &Spec{
+		Role:          RoleBridge,
+		ListenAddress: "127.0.0.1",
+		PublicHost:    "127.0.0.1",
+		VLESSPort:     freePort(t),
+		DevMode:       true,
+		SplitRouting:  BoolPtr(false),
+		Exit:          ExitTunnelSpec{Address: "127.0.0.1", Port: freePort(t), TunnelUUID: user.UUID},
+	}
 	strategy, err := mimic.New("apijson")
 	if err != nil {
 		t.Fatal(err)

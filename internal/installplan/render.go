@@ -224,7 +224,9 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 		}
 		if p.Database.Enabled {
 			u, err := url.Parse(previous.DSN)
-			if err != nil || u.User == nil || u.Hostname() != "127.0.0.1" || u.Port() != "25432" || strings.TrimPrefix(u.Path, "/") != p.Database.Name || u.User.Username() != p.Database.User {
+			if err != nil || u.User == nil || u.Hostname() != "127.0.0.1" || u.Port() != "25432" ||
+				strings.TrimPrefix(u.Path, "/") != p.Database.Name ||
+				u.User.Username() != p.Database.User {
 				return nil, fmt.Errorf("existing database must already use the dedicated DB tunnel; migrate explicitly before reuse")
 			}
 			password, ok := u.User.Password()
@@ -374,7 +376,9 @@ func renderPreservedRuntime(p *InstallPlan, opts RenderOptions) (*DesiredState, 
 	names := make(map[string]bool, len(opts.PriorBootstrap))
 	for _, entry := range opts.PriorBootstrap {
 		key := net.JoinHostPort(entry.Address, fmt.Sprint(entry.Port))
-		if strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Address) == "" || entry.Port <= 0 || entry.Port > 65535 || strings.TrimSpace(entry.TunnelUUID) == "" || names[entry.Name] {
+		if strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Address) == "" || entry.Port <= 0 || entry.Port > 65535 ||
+			strings.TrimSpace(entry.TunnelUUID) == "" ||
+			names[entry.Name] {
 			return nil, fmt.Errorf("adoption existing bootstrap topology is invalid")
 		}
 		if _, exists := routes[key]; exists {
@@ -411,7 +415,8 @@ func renderPreservedRuntime(p *InstallPlan, opts RenderOptions) (*DesiredState, 
 			return nil, fmt.Errorf("adoption requires canonical existing exit certificate paths")
 		}
 		entry, ok := routes[net.JoinHostPort(ex.DialAddr, fmt.Sprint(ex.Port))]
-		if !ok || exit.VLESSPort != ex.Port || entry.TunnelUUID != exit.Exit.TunnelUUID || (ex.TunnelUUID != "" && ex.TunnelUUID != entry.TunnelUUID) {
+		if !ok || exit.VLESSPort != ex.Port || entry.TunnelUUID != exit.Exit.TunnelUUID ||
+			(ex.TunnelUUID != "" && ex.TunnelUUID != entry.TunnelUUID) {
 			return nil, fmt.Errorf("adoption static exit does not match existing bootstrap topology")
 		}
 		ds.ExitSpecs[ex.Name] = raw
@@ -572,5 +577,7 @@ func normalizeDomains(items []string) []string {
 }
 
 func errorsForReuseRender() error {
-	return fmt.Errorf("render for bridge.reuse_spec=true requires reading the remote bridge spec; use apply with read-only Ansible target inspection")
+	return fmt.Errorf(
+		"render for bridge.reuse_spec=true requires reading the remote bridge spec; use apply with read-only Ansible target inspection",
+	)
 }

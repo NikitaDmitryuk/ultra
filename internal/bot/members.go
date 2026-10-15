@@ -35,7 +35,9 @@ func (b *Bot) relayJSON(ctx context.Context, method, path string, input, output 
 	}
 	req.Header.Set("Authorization", "Bearer "+b.adminAPIToken)
 	req.Header.Set("Content-Type", "application/json")
-	response, e := (&http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+	response, e := (&http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(
+		req,
+	)
 	if e != nil {
 		return 0, errors.New("relay unavailable")
 	}
@@ -149,7 +151,13 @@ func (b *Bot) handleMemberStart(ctx context.Context, msg *tgbotapi.Message, toke
 		}
 	}
 	var result db.Member
-	_, e := b.relayJSON(ctx, "POST", "/v1/members/enroll", map[string]any{"telegram_id": msg.From.ID, "name": tgDisplayName(msg.From), "source": source, "token": proof, "chat_id": chatID}, &result)
+	_, e := b.relayJSON(
+		ctx,
+		"POST",
+		"/v1/members/enroll",
+		map[string]any{"telegram_id": msg.From.ID, "name": tgDisplayName(msg.From), "source": source, "token": proof, "chat_id": chatID},
+		&result,
+	)
 	if e != nil {
 		b.reply(msg.Chat.ID, "Приглашение недоступно или сервис временно не отвечает. Попробуйте ещё раз.")
 		return
@@ -444,12 +452,22 @@ func (b *Bot) adminGroup(w http.ResponseWriter, r *http.Request) {
 		var chat struct {
 			InviteLink string `json:"invite_link"`
 		}
-		if b.telegramJSON(c, "getChat", map[string]any{"chat_id": group.ChatID}, &chat) == nil && strings.HasPrefix(chat.InviteLink, "https://t.me/") {
+		if b.telegramJSON(c, "getChat", map[string]any{"chat_id": group.ChatID}, &chat) == nil &&
+			strings.HasPrefix(chat.InviteLink, "https://t.me/") {
 			groupURL = chat.InviteLink
 		}
 		cancel()
 	}
-	jsonOK(w, map[string]any{"chat_id": group.ChatID, "title": group.Title, "enabled": group.Enabled, "group_url": groupURL, "url": "https://t.me/" + b.telegramSelf().UserName + "?start=vpn_g_" + group.Code})
+	jsonOK(
+		w,
+		map[string]any{
+			"chat_id":   group.ChatID,
+			"title":     group.Title,
+			"enabled":   group.Enabled,
+			"group_url": groupURL,
+			"url":       "https://t.me/" + b.telegramSelf().UserName + "?start=vpn_g_" + group.Code,
+		},
+	)
 }
 
 func (b *Bot) adminMemberTraffic(w http.ResponseWriter, r *http.Request) {

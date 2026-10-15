@@ -15,7 +15,8 @@ import (
 // This opt-in imports an explicit endpoint, never an ambient SSH alias or its
 // ProxyCommand. The inspection still requires the original identity and pins.
 func adoptionSSHOverride(p *installplan.InstallPlan, host string) (*installplan.InstallPlan, error) {
-	if p == nil || p.SchemaVersion != installplan.CurrentSchemaVersion || p.Automation != nil || len(p.SourceValues) == 0 || net.ParseIP(host) == nil {
+	if p == nil || p.SchemaVersion != installplan.CurrentSchemaVersion || p.Automation != nil || len(p.SourceValues) == 0 ||
+		net.ParseIP(host) == nil {
 		return nil, errors.New("adoption_explicit_ssh_address_required")
 	}
 	values := make(map[string]string, len(p.SourceValues)+1)
@@ -32,12 +33,18 @@ type adoptionPolicyError struct{ stage string }
 
 func (*adoptionPolicyError) Error() string { return "adoption_policy_missing_or_conflicting" }
 
-func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspection, version, release, pins string) (*installplan.InstallPlan, []byte, error) {
+func prepareAdoptionConfig(
+	p *installplan.InstallPlan,
+	inspection bootstrapInspection,
+	version, release, pins string,
+) (*installplan.InstallPlan, []byte, error) {
 	stage := "input"
 	fail := func() (*installplan.InstallPlan, []byte, error) {
 		return nil, nil, &adoptionPolicyError{stage: stage}
 	}
-	if p == nil || p.SchemaVersion != installplan.CurrentSchemaVersion || p.Automation != nil || len(p.SourceValues) == 0 || !filepath.IsAbs(release) || !filepath.IsAbs(pins) {
+	if p == nil || p.SchemaVersion != installplan.CurrentSchemaVersion || p.Automation != nil || len(p.SourceValues) == 0 ||
+		!filepath.IsAbs(release) ||
+		!filepath.IsAbs(pins) {
 		return fail()
 	}
 	var deployment struct {
@@ -74,7 +81,16 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 		return fail()
 	}
 	stage = "agreement"
-	if deployment.Version == "" || deployment.BridgeProvider == "" || deployment.BridgeURL == "" || deployment.Database == "" || len(deployment.StaticNodes) == 0 || backup.Source != "bridge" || backup.Recipient == "" || deployment.BridgeProvider != reconcile.BridgeProvider || deployment.BridgeURL != reconcile.BridgeURL || deployment.Database != backup.Database || deployment.Database != reconcile.Database || deployment.Database != p.Database.Name || !reflect.DeepEqual(deployment.StaticNodes, reconcile.StaticNodes) {
+	if deployment.Version == "" || deployment.BridgeProvider == "" || deployment.BridgeURL == "" || deployment.Database == "" ||
+		len(deployment.StaticNodes) == 0 ||
+		backup.Source != "bridge" ||
+		backup.Recipient == "" ||
+		deployment.BridgeProvider != reconcile.BridgeProvider ||
+		deployment.BridgeURL != reconcile.BridgeURL ||
+		deployment.Database != backup.Database ||
+		deployment.Database != reconcile.Database ||
+		deployment.Database != p.Database.Name ||
+		!reflect.DeepEqual(deployment.StaticNodes, reconcile.StaticNodes) {
 		return fail()
 	}
 	stage = "bridge"
@@ -114,7 +130,8 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 	}
 	stage = "subscription"
 	if deployment.IngressMode != "" {
-		if (deployment.IngressMode != "direct" && deployment.IngressMode != "forward") || !set("SUBSCRIPTION_INGRESS_MODE", deployment.IngressMode) {
+		if (deployment.IngressMode != "direct" && deployment.IngressMode != "forward") ||
+			!set("SUBSCRIPTION_INGRESS_MODE", deployment.IngressMode) {
 			return fail()
 		}
 		if deployment.IngressMode == "forward" && (deployment.Ingress == nil || strings.TrimSpace(deployment.Ingress.ForwardHost) == "") {
@@ -314,7 +331,11 @@ func validAdoptionMetadata(name string, raw []byte) bool {
 		}
 	}
 	if ingress, exists := object["ingress"]; exists && string(ingress) != "null" {
-		if !adoptionObjectFields(ingress, "domain email path forward_host public_host backend_port gateway_port status_port experimental_port staging_port", nil) {
+		if !adoptionObjectFields(
+			ingress,
+			"domain email path forward_host public_host backend_port gateway_port status_port experimental_port staging_port",
+			nil,
+		) {
 			return false
 		}
 	}

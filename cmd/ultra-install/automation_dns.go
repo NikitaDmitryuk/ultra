@@ -33,9 +33,15 @@ func prepareAnsibleDNS(p *installplan.InstallPlan, variables map[string]any) err
 	variables["ultra_dns_source_content"] = string(source)
 	variables["ultra_dns_api_key"] = key
 	variables["ultra_dns_config"] = policy
-	variables["ultra_dns_desired"] = map[string]any{"subscription": map[string]string{"name": policy.SubscriptionName, "data": p.Automation.BridgeIPv4}, "vpn": map[string]string{"name": policy.VPNName, "data": p.Automation.BridgeIPv4}}
+	variables["ultra_dns_desired"] = map[string]any{
+		"subscription": map[string]string{"name": policy.SubscriptionName, "data": p.Automation.BridgeIPv4},
+		"vpn":          map[string]string{"name": policy.VPNName, "data": p.Automation.BridgeIPv4},
+	}
 	if p.Features.MainExitDomain != "" {
-		variables["ultra_dns_desired"].(map[string]any)["tunnel"] = map[string]string{"name": strings.TrimSuffix(p.Features.MainExitDomain, "."+policy.Zone), "data": p.Exits[0].DialAddr}
+		variables["ultra_dns_desired"].(map[string]any)["tunnel"] = map[string]string{
+			"name": strings.TrimSuffix(p.Features.MainExitDomain, "."+policy.Zone),
+			"data": p.Exits[0].DialAddr,
+		}
 	}
 	return nil
 }

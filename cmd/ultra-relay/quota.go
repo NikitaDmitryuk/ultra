@@ -3,10 +3,11 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/NikitaDmitryuk/ultra/internal/cloud"
-	"github.com/NikitaDmitryuk/ultra/internal/db"
 	"log/slog"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/cloud"
+	"github.com/NikitaDmitryuk/ultra/internal/db"
 )
 
 func runQuotas(ctx context.Context, database *db.DB, api *cloud.Vultr, apply func(context.Context) error, log *slog.Logger) {
@@ -90,7 +91,20 @@ func refreshBandwidth(ctx context.Context, repo bandwidthRepo, api bandwidthAPI,
 		}
 		// Every exit refers to this same observation. There are no apportioned shares
 		// and no dependency on a nominal plan or individual instance statistics.
-		updates = append(updates, db.BandwidthObservation{ID: b.ID, Instance: b.Instance, Monthly: b.Monthly, Remaining: pool.Remaining, Accrued: pool.Accrued, AccountUsed: pool.Used, LocalWatermark: watermark, Pool: true, Error: code})
+		updates = append(
+			updates,
+			db.BandwidthObservation{
+				ID:             b.ID,
+				Instance:       b.Instance,
+				Monthly:        b.Monthly,
+				Remaining:      pool.Remaining,
+				Accrued:        pool.Accrued,
+				AccountUsed:    pool.Used,
+				LocalWatermark: watermark,
+				Pool:           true,
+				Error:          code,
+			},
+		)
 	}
 	if saveErr := repo.SaveBandwidth(ctx, updates, now); saveErr != nil {
 		return bandwidthRefreshError{stage: "save_bandwidth", err: saveErr}

@@ -43,7 +43,13 @@ type upgradeInspection struct {
 
 // Upgrade retains a frozen private job directory across process/SSH failures.
 // It never falls back to the former SSH installer after an Ansible error.
-func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir, directory, python, executable string, retryFailed bool, forwardOnlyOption ...bool) (returnErr error) {
+func ansibleUpgrade(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	releaseDir, directory, python, executable string,
+	retryFailed bool,
+	forwardOnlyOption ...bool,
+) (returnErr error) {
 	if p != nil && p.Features.MainExitDomain != "" {
 		return errors.New("managed tunnel TLS upgrade is not supported yet; use fresh bootstrap only")
 	}
@@ -267,7 +273,8 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if reserveErr != nil {
 		return reserveErr
 	}
-	if values := reservation.Result.Values; values["verified"] != true || values["reservation_id"] != lifecycleID(directory) || values["reservation_phase"] != "applying" {
+	if values := reservation.Result.Values; values["verified"] != true || values["reservation_id"] != lifecycleID(directory) ||
+		values["reservation_phase"] != "applying" {
 		return errors.New("upgrade_lifecycle_reservation_unverified")
 	}
 	defer func() {
@@ -290,7 +297,15 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 			returnErr = errors.Join(returnErr, err)
 		}
 	}()
-	inspectionReceipt, err := runUpgradeInspection(ctx, "inspect-upgrade", inventory, map[string]any{"ultra_lock_directory": lockDirectory}, filepath.Join(directory, "inspect"), python, executable)
+	inspectionReceipt, err := runUpgradeInspection(
+		ctx,
+		"inspect-upgrade",
+		inventory,
+		map[string]any{"ultra_lock_directory": lockDirectory},
+		filepath.Join(directory, "inspect"),
+		python,
+		executable,
+	)
 	if err != nil {
 		return err
 	}
@@ -315,7 +330,10 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if inspection.Architecture != "amd64" && inspection.Architecture != "arm64" {
 		return errors.New("upgrade_architecture_invalid")
 	}
-	if inspection.ObservedAt <= 0 || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(inspection.TopologySHA) || len(inspection.Nodes) == 0 || len(inspection.Nodes) > 16 || inspection.Identity == "" {
+	if inspection.ObservedAt <= 0 || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(inspection.TopologySHA) ||
+		len(inspection.Nodes) == 0 ||
+		len(inspection.Nodes) > 16 ||
+		inspection.Identity == "" {
 		return errors.New("upgrade_topology_invalid")
 	}
 	nodes, err := freezeUpgradeExits(inspection, directory)
@@ -339,7 +357,15 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		hostVariables["ultra_upgrade_baseline_nodes"] = baselineNodes
 		hostVariables["ultra_upgrade_baseline_bridge_address"] = p.Bridge.SSHHost
 	}
-	hostReceipt, err := runUpgradeInspection(ctx, "inspect-release-hosts", inventory, hostVariables, filepath.Join(directory, "hosts"), python, executable)
+	hostReceipt, err := runUpgradeInspection(
+		ctx,
+		"inspect-release-hosts",
+		inventory,
+		hostVariables,
+		filepath.Join(directory, "hosts"),
+		python,
+		executable,
+	)
 	if err != nil {
 		return err
 	}
@@ -398,14 +424,22 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		}
 		value.(map[string]any)["ultra_architecture"] = architecture.Architecture
 	}
-	tools, err := extractUpgradeTools(filepath.Join(releaseDir, "ultra-recovery.tar.gz"), filepath.Join(directory, "recovery-bundle"), inspection.ToolHashes)
+	tools, err := extractUpgradeTools(
+		filepath.Join(releaseDir, "ultra-recovery.tar.gz"),
+		filepath.Join(directory, "recovery-bundle"),
+		inspection.ToolHashes,
+	)
 	if err != nil {
 		return err
 	}
 	bridge["ultra_recovery_files"] = tools
 	baselineToolHashes := map[string]string{}
 	if baselineInput != nil {
-		priorTools, toolErr := extractUpgradeTools(filepath.Join(filepath.Dir(baselineInput.Descriptor.Manifest), "ultra-recovery.tar.gz"), filepath.Join(directory, "baseline-tools"), nil)
+		priorTools, toolErr := extractUpgradeTools(
+			filepath.Join(filepath.Dir(baselineInput.Descriptor.Manifest), "ultra-recovery.tar.gz"),
+			filepath.Join(directory, "baseline-tools"),
+			nil,
+		)
 		if toolErr != nil {
 			return toolErr
 		}
@@ -419,7 +453,8 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		selected := []map[string]any{}
 		for _, tool := range tools {
 			base := filepath.Base(tool["destination"].(string))
-			if base == "recovery.py" || base == "monitor.py" || base == "heartbeat.py" || strings.HasPrefix(base, "ultra-monitor") || strings.HasPrefix(base, "ultra-recovery-prune") {
+			if base == "recovery.py" || base == "monitor.py" || base == "heartbeat.py" || strings.HasPrefix(base, "ultra-monitor") ||
+				strings.HasPrefix(base, "ultra-recovery-prune") {
 				if baselineInput != nil {
 					copy := map[string]any{}
 					for key, value := range tool {
@@ -467,7 +502,11 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err != nil {
 		return err
 	}
-	controllerRendered := strings.ReplaceAll(string(controllerUnit), "{{ ultra_controller_directory }}", bridge["ultra_controller_directory"].(string))
+	controllerRendered := strings.ReplaceAll(
+		string(controllerUnit),
+		"{{ ultra_controller_directory }}",
+		bridge["ultra_controller_directory"].(string),
+	)
 	controllerHash := sha256.Sum256([]byte(controllerRendered))
 	bridge["ultra_previous_controller_directory"] = inspection.ControllerDirectory
 	bridge["ultra_previous_controller_unit_sha256"] = inspection.ControllerUnitSHA
@@ -478,7 +517,23 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err != nil {
 		return err
 	}
-	variables := map[string]any{"ultra_lock_directory": lockDirectory, "ultra_upgrade_observed_at": inspection.ObservedAt, "ultra_release_manifest": manifest, "ultra_release_manifest_sha256": manifestSHA, "ultra_previous_manifest_sha256": inspection.PreviousManifestSHA, "ultra_previous_manifest": inspection.Previous, "ultra_release_source": releaseDir, "ultra_release_version": manifest.Version, "ultra_topology_sha256": inspection.TopologySHA, "ultra_bridge_inventory_host": "bridge", "ultra_release_probe_executable": "/var/lib/ultra-ansible/releases/" + manifest.Version + "/ultra-install", "ultra_legacy_bridge_maintenance": legacyBridgeMaintenance, "ultra_legacy_bridge_sha256": legacyBridgeSHA, "ultra_lifecycle_id": lifecycleID(directory), "ultra_forward_only": forwardOnly}
+	variables := map[string]any{
+		"ultra_lock_directory":            lockDirectory,
+		"ultra_upgrade_observed_at":       inspection.ObservedAt,
+		"ultra_release_manifest":          manifest,
+		"ultra_release_manifest_sha256":   manifestSHA,
+		"ultra_previous_manifest_sha256":  inspection.PreviousManifestSHA,
+		"ultra_previous_manifest":         inspection.Previous,
+		"ultra_release_source":            releaseDir,
+		"ultra_release_version":           manifest.Version,
+		"ultra_topology_sha256":           inspection.TopologySHA,
+		"ultra_bridge_inventory_host":     "bridge",
+		"ultra_release_probe_executable":  "/var/lib/ultra-ansible/releases/" + manifest.Version + "/ultra-install",
+		"ultra_legacy_bridge_maintenance": legacyBridgeMaintenance,
+		"ultra_legacy_bridge_sha256":      legacyBridgeSHA,
+		"ultra_lifecycle_id":              lifecycleID(directory),
+		"ultra_forward_only":              forwardOnly,
+	}
 	frozenInventory, err := json.Marshal(inventory)
 	if err != nil {
 		return err
@@ -524,7 +579,15 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 					return err
 				}
 			}
-			contract, contractErr := upgradeAcceptedResumeContract(p, inspection, inventory, variables, directory, domainTransaction, generation)
+			contract, contractErr := upgradeAcceptedResumeContract(
+				p,
+				inspection,
+				inventory,
+				variables,
+				directory,
+				domainTransaction,
+				generation,
+			)
 			if contractErr != nil {
 				return contractErr
 			}
@@ -570,7 +633,18 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 			}
 			// A failed commit can leave the first candidate applied. Restore that
 			// attempt's exact baseline before a new generation takes its snapshots.
-			untouched, inspectErr := untouchedLegacyUpgrade(ctx, legacyBridgeMaintenance, p, inspection, inventory, variables, directory, python, executable, previousGeneration)
+			untouched, inspectErr := untouchedLegacyUpgrade(
+				ctx,
+				legacyBridgeMaintenance,
+				p,
+				inspection,
+				inventory,
+				variables,
+				directory,
+				python,
+				executable,
+				previousGeneration,
+			)
 			if inspectErr != nil {
 				return errors.New("upgrade_legacy_compensation_inspection_failed")
 			}
@@ -683,7 +757,20 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		// The accepted release already owns these runtime/domain images. Never
 		// rerun preparation, activation, publication, readiness, or compensation.
 		preActivation, resumeCompleted = false, true
-		return finishUpgradeCommit(ctx, p, inspection, inventory, variables, directory, python, executable, domainTransaction, generation, retryFailed, manifest.Version)
+		return finishUpgradeCommit(
+			ctx,
+			p,
+			inspection,
+			inventory,
+			variables,
+			directory,
+			python,
+			executable,
+			domainTransaction,
+			generation,
+			retryFailed,
+			manifest.Version,
+		)
 	}
 	if domainTransaction.Changed {
 		domainPrepareAttempted = true
@@ -695,7 +782,15 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		return err
 	}
 	preActivation = false
-	activation, activationErr := deployansible.RunLocal(ctx, "upgrade", inventory, variables, filepath.Join(directory, "activate"), python, executable)
+	activation, activationErr := deployansible.RunLocal(
+		ctx,
+		"upgrade",
+		inventory,
+		variables,
+		filepath.Join(directory, "activate"),
+		python,
+		executable,
+	)
 	err = activationErr
 	if err == nil {
 		timestamp, parseErr := activationTimestamp(activation.Result.Values["activated_at"])
@@ -712,11 +807,27 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		err = domainTransaction.phase(ctx, inventory, directory, python, executable, "apply", generation)
 	}
 	if err == nil {
-		_, err = deployansible.RunLocal(ctx, "publish-release", inventory, variables, upgradeDependentStageDirectory(directory, "publish", generation), python, executable)
+		_, err = deployansible.RunLocal(
+			ctx,
+			"publish-release",
+			inventory,
+			variables,
+			upgradeDependentStageDirectory(directory, "publish", generation),
+			python,
+			executable,
+		)
 	}
 	if err == nil {
 		if legacyBridgeMaintenance {
-			acceptedResume, err = upgradeAcceptedResumeContract(p, inspection, inventory, variables, directory, domainTransaction, generation)
+			acceptedResume, err = upgradeAcceptedResumeContract(
+				p,
+				inspection,
+				inventory,
+				variables,
+				directory,
+				domainTransaction,
+				generation,
+			)
 		}
 	}
 	if err == nil {
@@ -781,7 +892,18 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		if leaseErr := ansibleResumeFrozenLifecycle(cleanup, p, inventory, directory, python, executable); leaseErr != nil {
 			return errors.Join(err, leaseErr)
 		}
-		untouched, inspectErr := untouchedLegacyUpgrade(cleanup, legacyBridgeMaintenance, p, inspection, inventory, variables, directory, python, executable, generation)
+		untouched, inspectErr := untouchedLegacyUpgrade(
+			cleanup,
+			legacyBridgeMaintenance,
+			p,
+			inspection,
+			inventory,
+			variables,
+			directory,
+			python,
+			executable,
+			generation,
+		)
 		if inspectErr != nil {
 			return errors.Join(err, errors.New("upgrade_legacy_compensation_inspection_failed"))
 		}
@@ -798,7 +920,18 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 				return errors.Join(err, errors.New("upgrade_runtime_rollback_incomplete"))
 			}
 		}
-		rollbackErr := runUpgradeReleaseRollback(cleanup, p, inspection, inventory, variables, directory, python, executable, generation, false)
+		rollbackErr := runUpgradeReleaseRollback(
+			cleanup,
+			p,
+			inspection,
+			inventory,
+			variables,
+			directory,
+			python,
+			executable,
+			generation,
+			false,
+		)
 		if rollbackErr != nil {
 			return errors.Join(err, errors.New("upgrade_compatible_rollback_incomplete"))
 		}
@@ -821,7 +954,15 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	}
 	err = domainTransaction.phase(ctx, inventory, directory, python, executable, "accept", generation)
 	if err == nil {
-		_, err = deployansible.RunLocal(ctx, "commit-release", inventory, variables, upgradeDependentStageDirectory(directory, "commit", generation), python, executable)
+		_, err = deployansible.RunLocal(
+			ctx,
+			"commit-release",
+			inventory,
+			variables,
+			upgradeDependentStageDirectory(directory, "commit", generation),
+			python,
+			executable,
+		)
 	}
 	if err != nil {
 		if forwardOnly {
@@ -846,7 +987,20 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		}
 		return err
 	}
-	err = finishUpgradeCommit(ctx, p, inspection, inventory, variables, directory, python, executable, domainTransaction, generation, retryFailed, manifest.Version)
+	err = finishUpgradeCommit(
+		ctx,
+		p,
+		inspection,
+		inventory,
+		variables,
+		directory,
+		python,
+		executable,
+		domainTransaction,
+		generation,
+		retryFailed,
+		manifest.Version,
+	)
 	forwardReleaseComplete = err == nil
 	return err
 }
@@ -869,7 +1023,16 @@ func verifyCommittedUpgradeContinuation(directory string, inventory, variables m
 			Binary    string `json:"binary_sha256"`
 		}
 		var receipt deployansible.Receipt
-		if jobErr != nil || requestErr != nil || receiptErr != nil || marshalErr != nil || string(requestRaw) != string(expected) || json.Unmarshal(jobRaw, &job) != nil || json.Unmarshal(receiptRaw, &receipt) != nil || job.Operation != operation || job.Request != fmt.Sprintf("%x", sha256.Sum256(expected)) || !runtimeHostValidDigest(job.Binary) || receipt.RequestSHA256 != job.Request || receipt.BinarySHA256 != job.Binary || receipt.State != "succeeded" || receipt.Result.Values["verified"] != true {
+		if jobErr != nil || requestErr != nil || receiptErr != nil || marshalErr != nil || string(requestRaw) != string(expected) ||
+			json.Unmarshal(jobRaw, &job) != nil ||
+			json.Unmarshal(receiptRaw, &receipt) != nil ||
+			job.Operation != operation ||
+			job.Request != fmt.Sprintf("%x", sha256.Sum256(expected)) ||
+			!runtimeHostValidDigest(job.Binary) ||
+			receipt.RequestSHA256 != job.Request ||
+			receipt.BinarySHA256 != job.Binary ||
+			receipt.State != "succeeded" ||
+			receipt.Result.Values["verified"] != true {
 			return deployansible.Receipt{}, errors.New("upgrade_committed_continuation_receipt_invalid")
 		}
 		return receipt, nil
@@ -891,7 +1054,17 @@ func verifyCommittedUpgradeContinuation(directory string, inventory, variables m
 	return err
 }
 
-func finishUpgradeCommit(ctx context.Context, p *installplan.InstallPlan, inspection upgradeInspection, inventory, variables map[string]any, directory, python, executable string, domainTransaction *upgradeDomainTransaction, generation int, retryFailed bool, version string) error {
+func finishUpgradeCommit(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inspection upgradeInspection,
+	inventory, variables map[string]any,
+	directory, python, executable string,
+	domainTransaction *upgradeDomainTransaction,
+	generation int,
+	retryFailed bool,
+	version string,
+) error {
 	var err error
 	// Old endpoints are retired only after the release commit succeeded. These
 	// durable phases retry the same generation; failures preserve the gate.
@@ -923,8 +1096,14 @@ func finishUpgradeCommit(ctx context.Context, p *installplan.InstallPlan, inspec
 // Failed read-only inspections get a new immutable job on the next invocation.
 // Successful and interrupted jobs retain their original cache/resume semantics.
 // The caller holds the fleet lease; activation and other mutations never use this.
-func runUpgradeInspection(ctx context.Context, operation string, inventory, variables map[string]any, directory, python, executable string) (deployansible.Receipt, error) {
-	if operation != "inspect-upgrade" && operation != "inspect-release-hosts" && operation != "inspect-upgrade-runtime" && operation != "inspect-upgrade-domains" {
+func runUpgradeInspection(
+	ctx context.Context,
+	operation string,
+	inventory, variables map[string]any,
+	directory, python, executable string,
+) (deployansible.Receipt, error) {
+	if operation != "inspect-upgrade" && operation != "inspect-release-hosts" && operation != "inspect-upgrade-runtime" &&
+		operation != "inspect-upgrade-domains" {
 		return deployansible.Receipt{}, errors.New("upgrade_inspection_operation_required")
 	}
 	request, err := json.Marshal(map[string]any{"inventory": inventory, "variables": variables})
@@ -955,7 +1134,12 @@ func runUpgradeInspection(ctx context.Context, operation string, inventory, vari
 			Request   string `json:"request_sha256"`
 			Binary    string `json:"binary_sha256"`
 		}
-		if jobErr != nil || requestErr != nil || json.Unmarshal(jobRaw, &job) != nil || string(requestRaw) != string(request) || job.Operation != operation || job.Request != hash || receipt.RequestSHA256 != hash || job.Binary == "" || receipt.BinarySHA256 != job.Binary {
+		if jobErr != nil || requestErr != nil || json.Unmarshal(jobRaw, &job) != nil || string(requestRaw) != string(request) ||
+			job.Operation != operation ||
+			job.Request != hash ||
+			receipt.RequestSHA256 != hash ||
+			job.Binary == "" ||
+			receipt.BinarySHA256 != job.Binary {
 			return deployansible.Receipt{}, errors.New("upgrade_inspection_inputs_changed")
 		}
 	}
@@ -1017,7 +1201,9 @@ func compatibleAnsibleRelease(previous, target *automationRelease) error {
 			return fmt.Errorf("upgrade_compatible_%s_required", capability)
 		}
 	}
-	if target.DatabaseSchemaMin <= 0 || target.DatabaseSchemaMax < target.DatabaseSchemaMin || previous.DatabaseSchemaMin > target.DatabaseSchemaMin || previous.DatabaseSchemaMax < target.DatabaseSchemaMax {
+	if target.DatabaseSchemaMin <= 0 || target.DatabaseSchemaMax < target.DatabaseSchemaMin ||
+		previous.DatabaseSchemaMin > target.DatabaseSchemaMin ||
+		previous.DatabaseSchemaMax < target.DatabaseSchemaMax {
 		return errors.New("upgrade_compatible_schema_required")
 	}
 	return nil
@@ -1038,7 +1224,10 @@ func activationTimestamp(value any) (int64, error) {
 }
 
 func freezeUpgradeExits(inspection upgradeInspection, directory string) (map[string]any, error) {
-	if inspection.ObservedAt <= 0 || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(inspection.TopologySHA) || len(inspection.Nodes) == 0 || len(inspection.Nodes) > 16 || inspection.Identity == "" {
+	if inspection.ObservedAt <= 0 || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(inspection.TopologySHA) ||
+		len(inspection.Nodes) == 0 ||
+		len(inspection.Nodes) > 16 ||
+		inspection.Identity == "" {
 		return nil, errors.New("upgrade_topology_invalid")
 	}
 	identityPath := filepath.Join(directory, "identity")
@@ -1058,7 +1247,16 @@ func freezeUpgradeExits(inspection upgradeInspection, directory string) (map[str
 		if err := writeUpgradeInput(pins, []byte(node.Pins)); err != nil {
 			return nil, err
 		}
-		nodes[alias] = map[string]any{"ansible_host": node.Address, "ansible_user": "root", "ansible_ssh_private_key_file": identityPath, "ansible_ssh_args": "-F /dev/null -o ControlMaster=no -o ControlPath=none", "ansible_ssh_common_args": "-o BatchMode=yes -o UpdateHostKeys=no -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=" + shellQuote(pins), "ultra_exit_id": node.ID}
+		nodes[alias] = map[string]any{
+			"ansible_host":                 node.Address,
+			"ansible_user":                 "root",
+			"ansible_ssh_private_key_file": identityPath,
+			"ansible_ssh_args":             "-F /dev/null -o ControlMaster=no -o ControlPath=none",
+			"ansible_ssh_common_args": "-o BatchMode=yes -o UpdateHostKeys=no -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=" + shellQuote(
+				pins,
+			),
+			"ultra_exit_id": node.ID,
+		}
 	}
 	return nodes, nil
 }

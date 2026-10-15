@@ -2,10 +2,11 @@ package config
 
 import (
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/exits"
-	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 	"strings"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/exits"
+	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 )
 
 func TestOmitTunnelSNIRequiresPinnedIP(t *testing.T) {
@@ -72,7 +73,10 @@ func TestTunnelSNIAutomaticPerPinnedPeer(t *testing.T) {
 				spec.TunnelTransport = transport
 				spec.TunnelTLSProvision = tc.provision
 				spec.SplitHTTPTLS.SNIMode = tc.mode
-				nodes := []exits.Node{{ID: "pinned", Address: tc.address, Port: 443, Enabled: true, PinnedPeerCertSHA256: tc.pin}, {ID: "domain", Address: "other.example.com", Port: 443, Enabled: true, PinnedPeerCertSHA256: validPin}}
+				nodes := []exits.Node{
+					{ID: "pinned", Address: tc.address, Port: 443, Enabled: true, PinnedPeerCertSHA256: tc.pin},
+					{ID: "domain", Address: "other.example.com", Port: 443, Enabled: true, PinnedPeerCertSHA256: validPin},
+				}
 				data, err := BuildBridgeXRayJSON(spec, nil, nodes, "pinned", strat, "none")
 				if err != nil {
 					t.Fatal(err)

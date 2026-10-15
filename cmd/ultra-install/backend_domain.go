@@ -27,7 +27,11 @@ func runBackendDomainCommand(args []string) {
 	domain := fs.String("domain", "", "distinct owned backend TLS hostname")
 	zone := fs.String("zone", "", "existing managed DNS zone")
 	action := fs.String("action", "apply", "apply, accept, rollback or accept-rollback; only acceptance updates canonical BOT_DOMAIN")
-	previous := fs.String("previous-domain", "", "previous backend name; required when canonical config already has the target and for rollback after acceptance")
+	previous := fs.String(
+		"previous-domain",
+		"",
+		"previous backend name; required when canonical config already has the target and for rollback after acceptance",
+	)
 	pins := fs.String("known-hosts", "", "verified absolute SSH known_hosts file")
 	email := fs.String("acme-email", "", "ACME email, defaults to canonical ACME_EMAIL")
 	_ = fs.Parse(args)
@@ -68,10 +72,14 @@ func backendDomainPolicy(p *installplan.InstallPlan, domain, zone, action, previ
 		return nil, errors.New("backend migration requires existing managed public ingress and DNS")
 	}
 	public, vpn := p.PublicSubscriptionDomain(), p.Automation.Ingress.Domain
-	if !validHost(zone) || !validHost(domain) || !validHost(old) || !validHost(public) || !validHost(vpn) || !strings.HasSuffix(domain, "."+zone) || !label.MatchString(strings.TrimSuffix(domain, "."+zone)) || zone != p.Automation.DNS.Zone {
+	if !validHost(zone) || !validHost(domain) || !validHost(old) || !validHost(public) || !validHost(vpn) ||
+		!strings.HasSuffix(domain, "."+zone) ||
+		!label.MatchString(strings.TrimSuffix(domain, "."+zone)) ||
+		zone != p.Automation.DNS.Zone {
 		return nil, errors.New("backend hostname must be one label in the existing managed zone")
 	}
-	if domain == old || domain == public || domain == vpn || !filepath.IsAbs(pins) || !strings.Contains(email, "@") || strings.ContainsAny(email, "\r\n\x00") {
+	if domain == old || domain == public || domain == vpn || !filepath.IsAbs(pins) || !strings.Contains(email, "@") ||
+		strings.ContainsAny(email, "\r\n\x00") {
 		return nil, errors.New("distinct backend, pinned SSH and ACME email required")
 	}
 	if action != "apply" && action != "accept" && action != "rollback" && action != "accept-rollback" {
@@ -178,7 +186,10 @@ func applyBackendDomain(p *installplan.InstallPlan, file, domain, zone, action, 
 		}
 		rollback["ultra_backend_action"] = "rollback"
 		if recoveryErr := runBackendDomainStage(cleanup, inventory, rollback, directory, python, executable); recoveryErr != nil {
-			return errors.Join(err, fmt.Errorf("backend rollback unconfirmed; retry apply or rollback with the same migration: %w", recoveryErr))
+			return errors.Join(
+				err,
+				fmt.Errorf("backend rollback unconfirmed; retry apply or rollback with the same migration: %w", recoveryErr),
+			)
 		}
 		if releaseErr := ansibleLifecycle(cleanup, p, inventory, directory, python, executable, "released", false); releaseErr != nil {
 			return errors.Join(err, releaseErr)

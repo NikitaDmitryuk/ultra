@@ -20,6 +20,7 @@ from unittest.mock import patch
 SPEC = importlib.util.spec_from_file_location('manual_deploy', Path(__file__).with_name('manual-deploy.py'))
 D = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(D)
+SUBSCRIPTION_PROBE_INPUT = D.subscription_probe_input
 
 
 class ManualDeploy(unittest.TestCase):
@@ -39,31 +40,43 @@ class ManualDeploy(unittest.TestCase):
         self.bundle.mkdir()
         (self.bundle / 'release-manifest.json').write_bytes(b'fixture-manifest')
         self.calls = []
+        self.probe_inputs = {}
 
     def run_fixture(self, command, cwd, stage, capture=False, env=None):
         self.calls.append((stage, command))
 
+    def read_probe_input(self, path, limit=4096):
+        path = Path(path)
+        if path in self.probe_inputs and path.exists():
+            return self.probe_inputs[path][:limit + 1]
+        return SUBSCRIPTION_PROBE_INPUT(path, limit)
+
     def rollout(self, adopt=False, runner=None, config_path=None, retry_failed=False, probe_env_file=None, forward_only=False, continue_forward_only=False):
-        with patch.object(D, 'run', runner or self.run_fixture), patch.object(D.platform, 'system', return_value='Linux'), patch.object(D.platform, 'machine', return_value='x86_64'), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        probe_input = self.read_probe_input if hasattr(self, 'probe_inputs') else SUBSCRIPTION_PROBE_INPUT
+        with patch.object(D, 'subscription_probe_input', side_effect=probe_input), patch.object(D, 'run', runner or self.run_fixture), patch.object(D.platform, 'system', return_value='Linux'), patch.object(D.platform, 'machine', return_value='x86_64'), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             D.rollout(self.repo, self.root, self.bundle, self.commit, self.version, adopt, config_path, retry_failed, probe_env_file, forward_only, continue_forward_only)
 
     def probe_env(self, value=b'https://old.example.com/sub/probe-value'):
         path = self.repo / '.env'
-        path.write_bytes(b'IGNORED_SETTING="$(must-not-execute)\xff\nULTRA_SUBSCRIPTION_PROBE_URL=' + value + b'\n')
+        self.probe_inputs[path] = b'IGNORED_SETTING="$(must-not-execute)\xff\nULTRA_SUBSCRIPTION_PROBE_URL=' + value + b'\n'
+        path.write_bytes(b'private fixture input\n')
         path.chmod(0o600)
         return path
 
     def test_probe_env_allowlist_literals_and_invalid_inputs(self):
         path = self.probe_env(b'"https://old.example.com/sub/probe-value" # comment')
-        self.assertEqual(D.subscription_probe_from_env(path), b'https://old.example.com/sub/probe-value')
+        with patch.object(D, 'subscription_probe_input', side_effect=self.read_probe_input):
+            self.assertEqual(D.subscription_probe_from_env(path), b'https://old.example.com/sub/probe-value')
         for value in (b'', b'http://old.example.com/sub/token', b'https://old.example.com/sub/token?secret=1',
                       b'https://old.example.com/sub/token#fragment', b'https://user@old.example.com/sub/token',
                       b'https://old.example.com:443/sub/token', b'"$(secret)"', b'"unterminated', b'\xff',
                       b'https://old.example.com/sub/token\nULTRA_SUBSCRIPTION_PROBE_URL=https://old.example.com/sub/other'):
             with self.subTest(value=value):
                 self.probe_env(value)
-                with self.assertRaisesRegex(D.DeployError, '^subscription_probe_env_invalid$'):
-                    D.subscription_probe_from_env(path)
+                with patch.object(D, 'subscription_probe_input', side_effect=self.read_probe_input):
+                    with self.assertRaisesRegex(D.DeployError, '^subscription_probe_env_invalid$'):
+                        D.subscription_probe_from_env(path)
+        self.probe_inputs.pop(path)
         path.write_bytes(b'OTHER=private-value\n')
         self.assertIsNone(D.subscription_probe_from_env(path, optional=True))
         with self.assertRaisesRegex(D.DeployError, '^subscription_probe_env_key_missing$'):
@@ -183,7 +196,9 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
         config = canonical / 'install.config'
         D.atomic_write(config, self.original)
         secret = b'https://old.example.com/sub/canonical-token'
-        D.atomic_write(canonical / '.env', b'ULTRA_SUBSCRIPTION_PROBE_URL=' + secret + b'\n')
+        canonical_env = canonical / '.env'
+        D.atomic_write(canonical_env, b'private fixture input\n')
+        self.probe_inputs[canonical_env] = b'ULTRA_SUBSCRIPTION_PROBE_URL=' + secret + b'\n'
         self.probe_env(b'https://old.example.com/sub/wrong-checkout-token')
         def runner(command, cwd, stage, **kwargs):
             if stage == 'upgrade':
@@ -198,7 +213,7 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
 
     def test_subscription_probe_requires_explicit_private_regular_file(self):
         probe = self.repo / 'probe'
-        raw = b'https://old.example.com/sub/fixture-token\n'
+        raw = b'fixture input\n'
         probe.write_bytes(raw)
         probe.chmod(0o600)
         self.assertEqual(D.subscription_probe_input(probe), raw)
@@ -231,7 +246,7 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
         alias = self.repo / 'alias'
         alias.symlink_to(self.root, target_is_directory=True)
         probe = self.root / 'probe'
-        probe.write_bytes(b'https://old.example.com/sub/fixture-token')
+        probe.write_bytes(b'fixture input')
         probe.chmod(0o600)
         with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
             D.subscription_probe_input(alias / 'probe')
@@ -605,6 +620,7 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
 class NativeDeploy(unittest.TestCase):
     rollout = ManualDeploy.rollout
     probe_env = ManualDeploy.probe_env
+    read_probe_input = ManualDeploy.read_probe_input
     run_fixture = ManualDeploy.run_fixture
 
     def setUp(self):

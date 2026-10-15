@@ -390,7 +390,14 @@ func (b *Bot) flushOutboxOnce(ctx context.Context) {
 				after, terminal := telegramFailure(sendErr)
 				if hasClaims {
 					c, cancel := context.WithTimeout(ctx, 8*time.Second)
-					err = durable.RetryClaim(c, n.ID, n.Attempts, time.Now().Add(retryDelay(n.Attempts, after)), "telegram_delivery_failed", terminal)
+					err = durable.RetryClaim(
+						c,
+						n.ID,
+						n.Attempts,
+						time.Now().Add(retryDelay(n.Attempts, after)),
+						"telegram_delivery_failed",
+						terminal,
+					)
 					cancel()
 					if err != nil {
 						logger.Warn("outbox retry could not be saved", "id", n.ID)

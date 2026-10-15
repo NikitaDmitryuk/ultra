@@ -3,10 +3,11 @@ package db
 import (
 	"context"
 	"errors"
-	"github.com/google/uuid"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func removeAccountingExtension(t *testing.T, d *DB) {
@@ -76,7 +77,8 @@ func TestAccountingSchemaMigrationCompatibility(t *testing.T) {
 					t.Fatalf("partial extension not rejected: %v", err)
 				}
 				var exists bool
-				if e := d.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=23)`).Scan(&exists); e != nil || exists {
+				if e := d.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=23)`).Scan(&exists); e != nil ||
+					exists {
 					t.Fatal("partial migration recorded 23")
 				}
 				return
@@ -89,19 +91,22 @@ func TestAccountingSchemaMigrationCompatibility(t *testing.T) {
 			}
 			if kind == "ours22" {
 				var unchanged bool
-				if err := d.Pool.QueryRow(ctx, `SELECT charged_bytes=512 AND uplink_bytes=0 AND downlink_bytes=0 FROM account_exit_usage WHERE exit_id='history'`).Scan(&unchanged); err != nil || !unchanged {
+				if err := d.Pool.QueryRow(ctx, `SELECT charged_bytes=512 AND uplink_bytes=0 AND downlink_bytes=0 FROM account_exit_usage WHERE exit_id='history'`).Scan(&unchanged); err != nil ||
+					!unchanged {
 					t.Fatal("compatible22 expense changed")
 				}
 			}
 			if kind != "ours22" {
 				var correct bool
-				if err = d.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM account_exit_usage WHERE account_id=$1 AND exit_id='history' AND uplink_bytes=123 AND downlink_bytes=456)`, id).Scan(&correct); err != nil || !correct {
+				if err = d.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM account_exit_usage WHERE account_id=$1 AND exit_id='history' AND uplink_bytes=123 AND downlink_bytes=456)`, id).Scan(&correct); err != nil ||
+					!correct {
 					t.Fatal("repair lost historical expense")
 				}
 			}
 			if kind != "fresh21" {
 				var recorded time.Time
-				if e := d.Pool.QueryRow(ctx, `SELECT applied_at FROM schema_migrations WHERE version=22`).Scan(&recorded); e != nil || !recorded.Equal(original22) {
+				if e := d.Pool.QueryRow(ctx, `SELECT applied_at FROM schema_migrations WHERE version=22`).Scan(&recorded); e != nil ||
+					!recorded.Equal(original22) {
 					t.Fatal("repair rewrote original version22 marker")
 				}
 			}
@@ -155,11 +160,13 @@ func TestRecoveredAccountingMigrationClone(t *testing.T) {
 		t.Fatal("isolated recovered clone operation failed")
 	}
 	var recorded time.Time
-	if err = d.Pool.QueryRow(ctx, `SELECT applied_at FROM schema_migrations WHERE version=22`).Scan(&recorded); err != nil || !recorded.Equal(original22) {
+	if err = d.Pool.QueryRow(ctx, `SELECT applied_at FROM schema_migrations WHERE version=22`).Scan(&recorded); err != nil ||
+		!recorded.Equal(original22) {
 		t.Fatal("clone repair rewrote original marker")
 	}
 	var preserved bool
-	if err = d.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM users)=$1 AND (SELECT COALESCE(sum(uplink_bytes),0)::bigint FROM account_exit_usage)=$2 AND (SELECT COALESCE(sum(downlink_bytes),0)::bigint FROM account_exit_usage)=$3 AND NOT EXISTS(SELECT 1 FROM users WHERE account_id<>uuid)`, usersBefore, upBefore, downBefore).Scan(&preserved); err != nil || !preserved {
+	if err = d.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM users)=$1 AND (SELECT COALESCE(sum(uplink_bytes),0)::bigint FROM account_exit_usage)=$2 AND (SELECT COALESCE(sum(downlink_bytes),0)::bigint FROM account_exit_usage)=$3 AND NOT EXISTS(SELECT 1 FROM users WHERE account_id<>uuid)`, usersBefore, upBefore, downBefore).Scan(&preserved); err != nil ||
+		!preserved {
 		t.Fatal("recovered accounting backfill did not preserve source data")
 	}
 	if err = d.migrate(ctx); err != nil {

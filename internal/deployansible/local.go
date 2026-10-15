@@ -50,14 +50,24 @@ func WithOperationLock(ctx context.Context, directory string) (context.Context, 
 // RunLocal runs an operator-owned, fixed operation. It is deliberately unavailable
 // through the relay socket: inventory and source paths are trusted operator inputs.
 // Reusing a directory resumes exactly the same frozen inputs after interruption.
-func RunLocal(ctx context.Context, operation string, inventory, variables map[string]any, directory, python, executable string) (Receipt, error) {
+func RunLocal(
+	ctx context.Context,
+	operation string,
+	inventory, variables map[string]any,
+	directory, python, executable string,
+) (Receipt, error) {
 	return runLocal(ctx, operation, inventory, variables, directory, python, executable, false, "")
 }
 
 // RunLocalRetryFailed is an explicit operator retry. Successful cached stages stay
 // cached; terminal failures are archived before a new attempt can execute.
 // It is not used by typed workers or automatic upgrades.
-func RunLocalRetryFailed(ctx context.Context, operation string, inventory, variables map[string]any, directory, python, executable string) (Receipt, error) {
+func RunLocalRetryFailed(
+	ctx context.Context,
+	operation string,
+	inventory, variables map[string]any,
+	directory, python, executable string,
+) (Receipt, error) {
 	if !localRetryOperation(operation, variables) {
 		return Receipt{}, errors.New("retry_bootstrap_operation_required")
 	}
@@ -94,8 +104,60 @@ func localRetryOperation(operation string, variables map[string]any) bool {
 	return false
 }
 
-func runLocal(ctx context.Context, operation string, inventory, variables map[string]any, directory, python, executable string, retry bool, source string) (Receipt, error) {
-	allowed := map[string]bool{"bootstrap-forward-broker": true, "contain-upgrade": true, "drain-upgrade-workers": true, "retain-artifacts": true, "resume-schedules": true, "rollback-adoption": true, "reserve-rolledback-bootstrap": true, "resume-adoption": true, "lifecycle": true, "prepare-controller": true, "inspect-bootstrap": true, "inspect-upgrade": true, "preflight-retry": true, "status-automation": true, "inspect-release-hosts": true, "resume-automation": true, "configure-bot": true, "configure-exit-operator": true, "ingress": true, "bootstrap": true, "bootstrap-postgres": true, "bootstrap-exit": true, "bootstrap-bridge": true, "bootstrap-automation": true, "verify-bootstrap-automation": true, "adopt": true, "adopt-topology": true, "upgrade": true, "rollback": true, "reconcile": true, "restore": true, "restore-database": true, "restore-peer": true, "verify-release": true, "commit-release": true, "publish-release": true, "domain-cutover": true, "backend-domain": true, "upgrade-dns-migration": true, "inspect-upgrade-runtime": true, "inspect-upgrade-maintenance": true, "upgrade-runtime": true, "inspect-upgrade-domains": true, "upgrade-domain": true}
+func runLocal(
+	ctx context.Context,
+	operation string,
+	inventory, variables map[string]any,
+	directory, python, executable string,
+	retry bool,
+	source string,
+) (Receipt, error) {
+	allowed := map[string]bool{
+		"bootstrap-forward-broker":     true,
+		"contain-upgrade":              true,
+		"drain-upgrade-workers":        true,
+		"retain-artifacts":             true,
+		"resume-schedules":             true,
+		"rollback-adoption":            true,
+		"reserve-rolledback-bootstrap": true,
+		"resume-adoption":              true,
+		"lifecycle":                    true,
+		"prepare-controller":           true,
+		"inspect-bootstrap":            true,
+		"inspect-upgrade":              true,
+		"preflight-retry":              true,
+		"status-automation":            true,
+		"inspect-release-hosts":        true,
+		"resume-automation":            true,
+		"configure-bot":                true,
+		"configure-exit-operator":      true,
+		"ingress":                      true,
+		"bootstrap":                    true,
+		"bootstrap-postgres":           true,
+		"bootstrap-exit":               true,
+		"bootstrap-bridge":             true,
+		"bootstrap-automation":         true,
+		"verify-bootstrap-automation":  true,
+		"adopt":                        true,
+		"adopt-topology":               true,
+		"upgrade":                      true,
+		"rollback":                     true,
+		"reconcile":                    true,
+		"restore":                      true,
+		"restore-database":             true,
+		"restore-peer":                 true,
+		"verify-release":               true,
+		"commit-release":               true,
+		"publish-release":              true,
+		"domain-cutover":               true,
+		"backend-domain":               true,
+		"upgrade-dns-migration":        true,
+		"inspect-upgrade-runtime":      true,
+		"inspect-upgrade-maintenance":  true,
+		"upgrade-runtime":              true,
+		"inspect-upgrade-domains":      true,
+		"upgrade-domain":               true,
+	}
 	if !allowed[operation] || !filepath.IsAbs(directory) || !filepath.IsAbs(python) || !filepath.IsAbs(executable) {
 		return Receipt{}, errors.New("invalid local operation or executor paths")
 	}
@@ -157,7 +219,17 @@ func runLocal(ctx context.Context, operation string, inventory, variables map[st
 		}
 	}
 	bundle := filepath.Join(directory, "bundle")
-	command := exec.CommandContext(ctx, python, filepath.Join(bundle, "controller.py"), "--job", directory, "--bundle", bundle, "--executable", executable)
+	command := exec.CommandContext(
+		ctx,
+		python,
+		filepath.Join(bundle, "controller.py"),
+		"--job",
+		directory,
+		"--bundle",
+		bundle,
+		"--executable",
+		executable,
+	)
 	isolateCommand(command)
 	command.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 	runErr := command.Run()

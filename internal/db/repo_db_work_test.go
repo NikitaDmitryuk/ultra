@@ -64,9 +64,29 @@ func TestBatchSetWritesPreserveDestinationsAndBoundStatements(t *testing.T) {
 	repo := NewTrafficRepo(counted)
 	batch := runtimestate.TrafficBatch{Version: 1, NodeID: uuid.NewString(), BatchID: uuid.NewString(), CollectedAt: at}
 	for i := range 30 {
-		batch.Samples = append(batch.Samples, runtimestate.Sample{AccountID: u.AccountID, ExitID: "exit", ExitTag: "to-exit-exit", UplinkBytes: 1, DownlinkBytes: 2, ChargeTotalBytes: int64(100 + i)})
+		batch.Samples = append(
+			batch.Samples,
+			runtimestate.Sample{
+				AccountID:        u.AccountID,
+				ExitID:           "exit",
+				ExitTag:          "to-exit-exit",
+				UplinkBytes:      1,
+				DownlinkBytes:    2,
+				ChargeTotalBytes: int64(100 + i),
+			},
+		)
 	}
-	batch.Samples = append(batch.Samples, runtimestate.Sample{AccountID: u.AccountID, ExitID: "direct", ExitTag: "direct", UplinkBytes: 7, Period: "2025-12", ChargeTotalBytes: 70})
+	batch.Samples = append(
+		batch.Samples,
+		runtimestate.Sample{
+			AccountID:        u.AccountID,
+			ExitID:           "direct",
+			ExitTag:          "direct",
+			UplinkBytes:      7,
+			Period:           "2025-12",
+			ChargeTotalBytes: 70,
+		},
+	)
 	if err := repo.RecordBatch(ctx, batch); err != nil {
 		t.Fatal(err)
 	}
@@ -74,24 +94,36 @@ func TestBatchSetWritesPreserveDestinationsAndBoundStatements(t *testing.T) {
 		t.Fatalf("31 samples used %d statements; want 10", got)
 	}
 	var up, down, charge int64
-	if err := d.Pool.QueryRow(ctx, `SELECT uplink_bytes,downlink_bytes,charged_bytes FROM account_exit_usage WHERE account_id=$1 AND exit_id='exit' AND period='2026-01'`, u.AccountID).Scan(&up, &down, &charge); err != nil || up != 30 || down != 60 || charge != 129 {
+	if err := d.Pool.QueryRow(ctx, `SELECT uplink_bytes,downlink_bytes,charged_bytes FROM account_exit_usage WHERE account_id=$1 AND exit_id='exit' AND period='2026-01'`, u.AccountID).Scan(&up, &down, &charge); err != nil ||
+		up != 30 ||
+		down != 60 ||
+		charge != 129 {
 		t.Fatalf("account %d %d %d: %v", up, down, charge, err)
 	}
 	var rawRows int
 	var last time.Time
-	if err := d.Pool.QueryRow(ctx, `SELECT COUNT(*),SUM(uplink_bytes)::bigint,SUM(downlink_bytes)::bigint,MAX(collected_at) FROM traffic_stats WHERE user_uuid=$1`, user).Scan(&rawRows, &up, &down, &last); err != nil || rawRows != 2 || up != 37 || down != 60 || !last.Equal(at) {
+	if err := d.Pool.QueryRow(ctx, `SELECT COUNT(*),SUM(uplink_bytes)::bigint,SUM(downlink_bytes)::bigint,MAX(collected_at) FROM traffic_stats WHERE user_uuid=$1`, user).Scan(&rawRows, &up, &down, &last); err != nil ||
+		rawRows != 2 ||
+		up != 37 ||
+		down != 60 ||
+		!last.Equal(at) {
 		t.Fatalf("raw rows=%d bytes=%d/%d last=%v: %v", rawRows, up, down, last, err)
 	}
-	if err := d.Pool.QueryRow(ctx, `SELECT uplink_bytes,downlink_bytes FROM monthly_traffic WHERE user_uuid=$1 AND year=2026 AND month=1`, user).Scan(&up, &down); err != nil || up != 37 || down != 60 {
+	if err := d.Pool.QueryRow(ctx, `SELECT uplink_bytes,downlink_bytes FROM monthly_traffic WHERE user_uuid=$1 AND year=2026 AND month=1`, user).Scan(&up, &down); err != nil ||
+		up != 37 ||
+		down != 60 {
 		t.Fatalf("monthly %d/%d: %v", up, down, err)
 	}
-	if err := d.Pool.QueryRow(ctx, `SELECT SUM(uplink_bytes)::bigint,SUM(downlink_bytes)::bigint FROM daily_route_traffic WHERE user_uuid=$1 AND day='2026-01-31'`, user).Scan(&up, &down); err != nil || up != 37 || down != 60 {
+	if err := d.Pool.QueryRow(ctx, `SELECT SUM(uplink_bytes)::bigint,SUM(downlink_bytes)::bigint FROM daily_route_traffic WHERE user_uuid=$1 AND day='2026-01-31'`, user).Scan(&up, &down); err != nil ||
+		up != 37 ||
+		down != 60 {
 		t.Fatalf("daily %d/%d: %v", up, down, err)
 	}
 	if err := repo.RecordBatch(ctx, batch); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Pool.QueryRow(ctx, `SELECT SUM(uplink_bytes)::bigint FROM traffic_stats WHERE user_uuid=$1`, user).Scan(&up); err != nil || up != 37 {
+	if err := d.Pool.QueryRow(ctx, `SELECT SUM(uplink_bytes)::bigint FROM traffic_stats WHERE user_uuid=$1`, user).Scan(&up); err != nil ||
+		up != 37 {
 		t.Fatalf("replay %d: %v", up, err)
 	}
 }
@@ -115,7 +147,8 @@ func TestLeakObservationBatchPreservesPollCountsAndWindows(t *testing.T) {
 		t.Fatalf("two poll batches: %d statements", got)
 	}
 	var sessions int64
-	if err := d.Pool.QueryRow(ctx, `SELECT sessions_seen FROM user_ip_observations WHERE user_uuid=$1 AND ip='192.0.2.1'`, user).Scan(&sessions); err != nil || sessions != 4 {
+	if err := d.Pool.QueryRow(ctx, `SELECT sessions_seen FROM user_ip_observations WHERE user_uuid=$1 AND ip='192.0.2.1'`, user).Scan(&sessions); err != nil ||
+		sessions != 4 {
 		t.Fatalf("sessions=%d: %v", sessions, err)
 	}
 	if _, err := d.Pool.Exec(ctx, `UPDATE user_ip_observations SET last_seen_at=NOW()-INTERVAL '2 hours' WHERE user_uuid=$1 AND ip='192.0.2.1'`, user); err != nil {
@@ -173,7 +206,8 @@ func TestQuotaWorkIndependentOfUserCountAndIdleRowsUnchanged(t *testing.T) {
 	if err != nil || changed {
 		t.Fatalf("idle calculation changed=%v: %v", changed, err)
 	}
-	if err := d.Pool.QueryRow(ctx, `SELECT xmin::text FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, user, exit).Scan(&after); err != nil || before != after {
+	if err := d.Pool.QueryRow(ctx, `SELECT xmin::text FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, user, exit).Scan(&after); err != nil ||
+		before != after {
 		t.Fatalf("idle quota rewritten %s -> %s: %v", before, after, err)
 	}
 	for range 30 {
@@ -196,16 +230,24 @@ func TestBatchSetWriteFailureRollsBackIdentityAndTombstone(t *testing.T) {
 	ctx := context.Background()
 	owner := uuid.NewString()
 	at := time.Now().UTC()
-	b := runtimestate.TrafficBatch{Version: 1, NodeID: uuid.NewString(), BatchID: uuid.NewString(), CollectedAt: at, Samples: []runtimestate.Sample{
-		{AccountID: owner, ExitID: "direct", UplinkBytes: 1<<63 - 1},
-		{AccountID: owner, ExitID: "direct", UplinkBytes: 1},
-	}}
+	b := runtimestate.TrafficBatch{
+		Version:     1,
+		NodeID:      uuid.NewString(),
+		BatchID:     uuid.NewString(),
+		CollectedAt: at,
+		Samples: []runtimestate.Sample{
+			{AccountID: owner, ExitID: "direct", UplinkBytes: 1<<63 - 1},
+			{AccountID: owner, ExitID: "direct", UplinkBytes: 1},
+		},
+	}
 	repo := NewTrafficRepo(d)
 	if err := repo.RecordBatch(ctx, b); err == nil {
 		t.Fatal("overflowing aggregate accepted")
 	}
 	var identities, owners int
-	if err := d.Pool.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM traffic_batches WHERE node_id=$1 AND batch_id=$2),(SELECT COUNT(*) FROM traffic_accounts WHERE account_id=$3)`, b.NodeID, b.BatchID, owner).Scan(&identities, &owners); err != nil || identities != 0 || owners != 0 {
+	if err := d.Pool.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM traffic_batches WHERE node_id=$1 AND batch_id=$2),(SELECT COUNT(*) FROM traffic_accounts WHERE account_id=$3)`, b.NodeID, b.BatchID, owner).Scan(&identities, &owners); err != nil ||
+		identities != 0 ||
+		owners != 0 {
 		t.Fatalf("partial commit identities=%d owners=%d: %v", identities, owners, err)
 	}
 	b.Samples[0].UplinkBytes = 2

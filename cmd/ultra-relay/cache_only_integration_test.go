@@ -86,7 +86,15 @@ func cacheTestCertificate(t *testing.T) (cert, key, pin string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "cache.test"}, DNSNames: []string{"cache.test"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "cache.test"},
+		DNSNames:     []string{"cache.test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &private.PublicKey, private)
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +127,16 @@ func cacheTestExit(t *testing.T, spec *config.Spec, redirect string, strategy mi
 	}
 	// Only these loopback fixtures permit local destinations. Real exit configs
 	// retain Xray's protection of private destination addresses.
-	cfg["outbounds"] = []any{map[string]any{"protocol": "freedom", "tag": "direct", "settings": map[string]any{"redirect": redirect, "finalRules": []any{map[string]any{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}}}
+	cfg["outbounds"] = []any{
+		map[string]any{
+			"protocol": "freedom",
+			"tag":      "direct",
+			"settings": map[string]any{
+				"redirect":   redirect,
+				"finalRules": []any{map[string]any{"action": "allow", "ip": []string{"127.0.0.0/8"}}},
+			},
+		},
+	}
 	delete(cfg, "routing")
 	raw, _ = json.Marshal(cfg)
 	runner := new(proxy.Runner)
@@ -193,9 +210,13 @@ func TestCacheOnlyRealStartupRestartFailoverAndJournal(t *testing.T) {
 			_ = conn.Close()
 		}
 	}()
-	payloadA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, strings.Repeat("a", 65536)) }))
+	payloadA := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, strings.Repeat("a", 65536)) }),
+	)
 	defer payloadA.Close()
-	payloadB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, strings.Repeat("b", 65536)) }))
+	payloadB := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, strings.Repeat("b", 65536)) }),
+	)
 	defer payloadB.Close()
 	cert, key, pin := cacheTestCertificate(t)
 	strategy, err := mimic.New("apijson")
@@ -203,8 +224,40 @@ func TestCacheOnlyRealStartupRestartFailoverAndJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	tunnelUUID := "11111111-2222-3333-4444-555555555555"
-	spec := &config.Spec{Role: config.RoleBridge, DevMode: true, ListenAddress: "127.0.0.1", VLESSPort: cacheTestPort(t), AdminListen: fmt.Sprintf("127.0.0.1:%d", cacheTestPort(t)), PublicHost: "127.0.0.1", SplitRouting: config.BoolPtr(false), SplithttpHost: "cache.test", SplitHTTPTLS: config.SplitHTTPTLSSpec{ServerName: "cache.test"}, TunnelTLSProvision: config.TunnelTLSSelfSigned, ProbeURLs: []string{payloadA.URL}, Database: &config.DatabaseSpec{DSN: "postgres://invalid:invalid@" + dbSpy.Addr().String() + "/no_control"}}
-	nodes := []exits.Node{{ID: "a", Address: "127.0.0.1", Port: cacheTestPort(t), TunnelUUID: tunnelUUID, PinnedPeerCertSHA256: pin, Priority: 100, Enabled: true}, {ID: "b", Address: "127.0.0.1", Port: cacheTestPort(t), TunnelUUID: tunnelUUID, PinnedPeerCertSHA256: pin, Priority: 200, Enabled: true}}
+	spec := &config.Spec{
+		Role:               config.RoleBridge,
+		DevMode:            true,
+		ListenAddress:      "127.0.0.1",
+		VLESSPort:          cacheTestPort(t),
+		AdminListen:        fmt.Sprintf("127.0.0.1:%d", cacheTestPort(t)),
+		PublicHost:         "127.0.0.1",
+		SplitRouting:       config.BoolPtr(false),
+		SplithttpHost:      "cache.test",
+		SplitHTTPTLS:       config.SplitHTTPTLSSpec{ServerName: "cache.test"},
+		TunnelTLSProvision: config.TunnelTLSSelfSigned,
+		ProbeURLs:          []string{payloadA.URL},
+		Database:           &config.DatabaseSpec{DSN: "postgres://invalid:invalid@" + dbSpy.Addr().String() + "/no_control"},
+	}
+	nodes := []exits.Node{
+		{
+			ID:                   "a",
+			Address:              "127.0.0.1",
+			Port:                 cacheTestPort(t),
+			TunnelUUID:           tunnelUUID,
+			PinnedPeerCertSHA256: pin,
+			Priority:             100,
+			Enabled:              true,
+		},
+		{
+			ID:                   "b",
+			Address:              "127.0.0.1",
+			Port:                 cacheTestPort(t),
+			TunnelUUID:           tunnelUUID,
+			PinnedPeerCertSHA256: pin,
+			Priority:             200,
+			Enabled:              true,
+		},
+	}
 	makeExit := func(n exits.Node, dest string) *proxy.Runner {
 		s := *spec
 		s.Role = config.RoleExit
@@ -216,15 +269,35 @@ func TestCacheOnlyRealStartupRestartFailoverAndJournal(t *testing.T) {
 	exitA := makeExit(nodes[0], payloadA.Listener.Addr().String())
 	_ = makeExit(nodes[1], payloadB.Listener.Addr().String())
 	pref := "a"
-	owner := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", AccountID: "owner", IsActive: true, Routes: []auth.RouteCredential{{UUID: "3b7d2c48-cc5c-4ae4-b054-2dd59ce9e27b", ExitID: &pref}}}
+	owner := auth.User{
+		UUID:      "2784871e-d8a9-4e1f-b831-3d86aa8653ee",
+		AccountID: "owner",
+		IsActive:  true,
+		Routes:    []auth.RouteCredential{{UUID: "3b7d2c48-cc5c-4ae4-b054-2dd59ce9e27b", ExitID: &pref}},
+	}
 	now := time.Now().UTC()
 	limits := []runtimestate.QuotaLimit{}
 	for _, n := range nodes {
 		for _, id := range []string{"owner", ""} {
-			limits = append(limits, runtimestate.QuotaLimit{AccountID: id, ExitID: n.ID, Period: now.Format("2006-01"), LimitBytes: 8 * 1024 * 1024, ExpiresAt: now.Add(runtimeLease)})
+			limits = append(
+				limits,
+				runtimestate.QuotaLimit{
+					AccountID:  id,
+					ExitID:     n.ID,
+					Period:     now.Format("2006-01"),
+					LimitBytes: 8 * 1024 * 1024,
+					ExpiresAt:  now.Add(runtimeLease),
+				},
+			)
 		}
 	}
-	snapshot := runtimeSnapshotV1{Version: 1, Fingerprint: runtimeFingerprint(spec), Users: snapshotUsers([]auth.User{owner}), Nodes: nodes, Limits: limits}
+	snapshot := runtimeSnapshotV1{
+		Version:     1,
+		Fingerprint: runtimeFingerprint(spec),
+		Users:       snapshotUsers([]auth.User{owner}),
+		Nodes:       nodes,
+		Limits:      limits,
+	}
 	raw, _ := json.Marshal(snapshot)
 	path := filepath.Join(t.TempDir(), "runtime.db")
 	state, err := runtimestate.Open(path)
@@ -248,7 +321,26 @@ func TestCacheOnlyRealStartupRestartFailoverAndJournal(t *testing.T) {
 	if runtime["mode"] != "cache_only" || runtime["control_disabled"] != true || diagnostics["control_ready"] != false {
 		t.Fatal("unexpected emergency diagnostics", runtime)
 	}
-	clientJSON, _ := json.Marshal(map[string]any{"log": map[string]any{"loglevel": "error"}, "outbounds": []any{map[string]any{"protocol": "vless", "settings": map[string]any{"vnext": []any{map[string]any{"address": "127.0.0.1", "port": spec.VLESSPort, "users": []any{map[string]any{"id": owner.Routes[0].UUID, "encryption": "none"}}}}}, "streamSettings": map[string]any{"network": "tcp", "security": "none"}}}})
+	clientJSON, _ := json.Marshal(
+		map[string]any{
+			"log": map[string]any{"loglevel": "error"},
+			"outbounds": []any{
+				map[string]any{
+					"protocol": "vless",
+					"settings": map[string]any{
+						"vnext": []any{
+							map[string]any{
+								"address": "127.0.0.1",
+								"port":    spec.VLESSPort,
+								"users":   []any{map[string]any{"id": owner.Routes[0].UUID, "encryption": "none"}},
+							},
+						},
+					},
+					"streamSettings": map[string]any{"network": "tcp", "security": "none"},
+				},
+			},
+		},
+	)
 	client := new(proxy.Runner)
 	if err = client.StartJSON(clientJSON); err != nil {
 		t.Fatal(err)
@@ -390,7 +482,15 @@ func TestCacheOnlyRealStartupRestartFailoverAndJournal(t *testing.T) {
 func TestCacheOnlyBadStateKeepsOnlyAuthenticatedDiagnostics(t *testing.T) {
 	for _, kind := range []string{"missing", "empty", "corrupt", "expired", "incompatible", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
-			spec := &config.Spec{Role: config.RoleBridge, DevMode: true, ListenAddress: "127.0.0.1", VLESSPort: cacheTestPort(t), AdminListen: fmt.Sprintf("127.0.0.1:%d", cacheTestPort(t)), SplitRouting: config.BoolPtr(false), Database: &config.DatabaseSpec{DSN: "postgres://invalid:invalid@127.0.0.1:1/no_control"}}
+			spec := &config.Spec{
+				Role:          config.RoleBridge,
+				DevMode:       true,
+				ListenAddress: "127.0.0.1",
+				VLESSPort:     cacheTestPort(t),
+				AdminListen:   fmt.Sprintf("127.0.0.1:%d", cacheTestPort(t)),
+				SplitRouting:  config.BoolPtr(false),
+				Database:      &config.DatabaseSpec{DSN: "postgres://invalid:invalid@127.0.0.1:1/no_control"},
+			}
 			path := filepath.Join(t.TempDir(), "runtime.db")
 			now := time.Now().UTC()
 			switch kind {

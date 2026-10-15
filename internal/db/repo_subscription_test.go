@@ -4,8 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"github.com/NikitaDmitryuk/ultra/internal/subscriptionkey"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionkey"
 )
 
 func TestSubscriptionLifecycle(t *testing.T) {
@@ -17,7 +18,10 @@ func TestSubscriptionLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = users.Purge(ctx, user.UUID) })
-	repo := NewSubscriptionRepo(d, &subscriptionkey.Ring{Active: "v1", Keys: map[string]string{"v1": base64.StdEncoding.EncodeToString(make([]byte, 32))}})
+	repo := NewSubscriptionRepo(
+		d,
+		&subscriptionkey.Ring{Active: "v1", Keys: map[string]string{"v1": base64.StdEncoding.EncodeToString(make([]byte, 32))}},
+	)
 	token, err := repo.Rotate(ctx, user.UUID)
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +108,10 @@ func TestIngressNoticeDeduplicates(t *testing.T) {
 	if _, err = d.Pool.Exec(ctx, `UPDATE users SET telegram_id=12345 WHERE uuid=$1`, u.UUID); err != nil {
 		t.Fatal(err)
 	}
-	repo := NewSubscriptionRepo(d, &subscriptionkey.Ring{Active: "v1", Keys: map[string]string{"v1": base64.StdEncoding.EncodeToString(make([]byte, 32))}})
+	repo := NewSubscriptionRepo(
+		d,
+		&subscriptionkey.Ring{Active: "v1", Keys: map[string]string{"v1": base64.StdEncoding.EncodeToString(make([]byte, 32))}},
+	)
 	if _, err = repo.Rotate(ctx, u.UUID); err != nil {
 		t.Fatal(err)
 	}

@@ -32,13 +32,23 @@ func NewBotAdminRepo(db *DB) *BotAdminRepo { return &BotAdminRepo{db: db} }
 // IsAdmin returns true if telegramID is a registered bot admin.
 func (r *BotAdminRepo) IsAdmin(ctx context.Context, telegramID int64) (bool, error) {
 	var rows []BotAdmin
-	err := r.db.orm.WithContext(ctx).Table("bot_admins").Select("telegram_id").Where("telegram_id = ?", telegramID).Limit(1).Find(&rows).Error
+	err := r.db.orm.WithContext(ctx).
+		Table("bot_admins").
+		Select("telegram_id").
+		Where("telegram_id = ?", telegramID).
+		Limit(1).
+		Find(&rows).
+		Error
 	return len(rows) > 0, err
 }
 
 // AddAdmin registers a Telegram user as a bot admin.
 func (r *BotAdminRepo) AddAdmin(ctx context.Context, telegramID int64, name string) error {
-	return r.db.orm.WithContext(ctx).Table("bot_admins").Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "telegram_id"}}, DoUpdates: clause.AssignmentColumns([]string{"telegram_name"})}).Create(map[string]any{"telegram_id": telegramID, "telegram_name": name}).Error
+	return r.db.orm.WithContext(ctx).
+		Table("bot_admins").
+		Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "telegram_id"}}, DoUpdates: clause.AssignmentColumns([]string{"telegram_name"})}).
+		Create(map[string]any{"telegram_id": telegramID, "telegram_name": name}).
+		Error
 }
 
 // ListAdmins returns all registered bot admins.

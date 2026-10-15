@@ -54,7 +54,11 @@ func readUpgradeDomainProbeInput(path, hostname string) (string, string, error) 
 	f := os.NewFile(uintptr(fd), "private-domain-probe")
 	defer f.Close() //nolint:errcheck
 	var info syscall.Stat_t
-	if syscall.Fstat(fd, &info) != nil || info.Mode&syscall.S_IFMT != syscall.S_IFREG || info.Mode&0077 != 0 || info.Uid != uint32(os.Geteuid()) || info.Nlink != 1 || info.Size < 1 || info.Size > 4096 {
+	if syscall.Fstat(fd, &info) != nil || info.Mode&syscall.S_IFMT != syscall.S_IFREG || info.Mode&0077 != 0 ||
+		info.Uid != uint32(os.Geteuid()) ||
+		info.Nlink != 1 ||
+		info.Size < 1 ||
+		info.Size > 4096 {
 		return "", "", errors.New("upgrade_domain_probe_private_file_required")
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, 4097))
@@ -63,7 +67,13 @@ func readUpgradeDomainProbeInput(path, hostname string) (string, string, error) 
 	}
 	value := strings.TrimSuffix(string(raw), "\n")
 	u, err := url.Parse(value)
-	if err != nil || u.Scheme != "https" || u.Host != hostname || u.User != nil || u.RawQuery != "" || u.Fragment != "" || !strings.HasPrefix(u.Path, "/sub/") || len(strings.TrimPrefix(u.Path, "/sub/")) < 1 || strings.ContainsAny(value, " \t\r\n\x00") || !regexp.MustCompile(`^/sub/[A-Za-z0-9_-]+$`).MatchString(u.Path) || len(u.Path) > 1029 || u.RawPath != "" {
+	if err != nil || u.Scheme != "https" || u.Host != hostname || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
+		!strings.HasPrefix(u.Path, "/sub/") ||
+		len(strings.TrimPrefix(u.Path, "/sub/")) < 1 ||
+		strings.ContainsAny(value, " \t\r\n\x00") ||
+		!regexp.MustCompile(`^/sub/[A-Za-z0-9_-]+$`).MatchString(u.Path) ||
+		len(u.Path) > 1029 ||
+		u.RawPath != "" {
 		return "", "", errors.New("upgrade_domain_probe_invalid")
 	}
 	return value, fmt.Sprintf("%x", sha256.Sum256(raw)), nil
@@ -113,7 +123,12 @@ type upgradeDomainTransaction struct {
 	Attempt            int
 }
 
-func inspectUpgradeDomains(ctx context.Context, p *installplan.InstallPlan, inventory, releaseVariables map[string]any, directory, python, executable string) (*upgradeDomainTransaction, error) {
+func inspectUpgradeDomains(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inventory, releaseVariables map[string]any,
+	directory, python, executable string,
+) (*upgradeDomainTransaction, error) {
 	t := &upgradeDomainTransaction{}
 	if err := validateUpgradeDomainConfigPresence(p); err != nil {
 		return nil, err
@@ -126,7 +141,12 @@ func inspectUpgradeDomains(ctx context.Context, p *installplan.InstallPlan, inve
 	if ingress.ForwardHost != "" {
 		ingressMode = "forward"
 	}
-	desired := map[string]any{"subscription": p.PublicSubscriptionDomain(), "vpn": ingress.Domain, "backend": p.Bot.Domain, "public_host": p.Bridge.PublicHost}
+	desired := map[string]any{
+		"subscription": p.PublicSubscriptionDomain(),
+		"vpn":          ingress.Domain,
+		"backend":      p.Bot.Domain,
+		"public_host":  p.Bridge.PublicHost,
+	}
 	policy := map[string]any{
 		"email": ingress.Email, "ingress_mode": ingressMode, "forward_host": ingress.ForwardHost, "dns_ttl": dns.TTL,
 		"backend_port": ingress.BackendPort, "gateway_port": ingress.GatewayPort, "staging_port": ingress.StagingPort,
@@ -137,7 +157,20 @@ func inspectUpgradeDomains(ctx context.Context, p *installplan.InstallPlan, inve
 		"artifact_paths": append([]string{}, p.Automation.ArtifactPaths...)}
 	binding := sha256.Sum256([]byte(lifecycleID(directory)))
 	t.Binding = hex.EncodeToString(binding[:])
-	receipt, err := runUpgradeInspection(ctx, "inspect-upgrade-domains", inventory, map[string]any{"ultra_lock_directory": releaseVariables["ultra_lock_directory"], "ultra_upgrade_domain_transaction": t.Binding, "ultra_upgrade_domain_desired": desired, "ultra_upgrade_domain_policy": policy}, filepath.Join(directory, "domain-inspect"), python, executable)
+	receipt, err := runUpgradeInspection(
+		ctx,
+		"inspect-upgrade-domains",
+		inventory,
+		map[string]any{
+			"ultra_lock_directory":             releaseVariables["ultra_lock_directory"],
+			"ultra_upgrade_domain_transaction": t.Binding,
+			"ultra_upgrade_domain_desired":     desired,
+			"ultra_upgrade_domain_policy":      policy,
+		},
+		filepath.Join(directory, "domain-inspect"),
+		python,
+		executable,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +182,8 @@ func inspectUpgradeDomains(ctx context.Context, p *installplan.InstallPlan, inve
 	if err = validateUpgradeDomainPolicy(e, ingress, dns, p.Automation); err != nil {
 		return nil, err
 	}
-	t.DNSChanged = e.Subscription != p.PublicSubscriptionDomain() || e.VPN != ingress.Domain || e.Backend != p.Bot.Domain || e.PublicHost != p.Bridge.PublicHost
+	t.DNSChanged = e.Subscription != p.PublicSubscriptionDomain() || e.VPN != ingress.Domain || e.Backend != p.Bot.Domain ||
+		e.PublicHost != p.Bridge.PublicHost
 	t.BackendChanged = e.Backend != p.Bot.Domain || e.BotPort != p.Bot.Port
 	t.BackupPathsChanged = upgradeBackupPathsChanged(e)
 	t.Changed = t.DNSChanged || e.Path != ingress.Path || t.BackendChanged || e.BridgeURL != p.Automation.BridgeURL || t.BackupPathsChanged
@@ -194,11 +228,43 @@ func inspectUpgradeDomains(ctx context.Context, p *installplan.InstallPlan, inve
 	for role, name := range map[string]string{"subscription": p.PublicSubscriptionDomain(), "vpn": ingress.Domain, "backend": p.Bot.Domain} {
 		t.Desired[role] = map[string]string{"name": strings.TrimSuffix(name, "."+dns.Zone), "data": ip.String()}
 	}
-	t.Variables = map[string]any{"ultra_lock_directory": releaseVariables["ultra_lock_directory"], "ultra_upgrade_domain_transaction": t.Binding, "ultra_upgrade_domain_desired": desired,
-		"ultra_ingress":            map[string]any{"domain": ingress.Domain, "subscription_domain": p.PublicSubscriptionDomain(), "public_host": p.Bridge.PublicHost, "path": ingress.Path, "backend_port": e.BackendPort, "gateway_port": e.GatewayPort, "staging_port": ingress.StagingPort, "status_port": ingress.StatusPort, "experimental_port": ingress.ExperimentalPort, "forward_host": ingress.ForwardHost, "fingerprint": e.Fingerprint, "email": ingress.Email, "retain_aliases": true},
-		"ultra_backup_state_paths": append([]string{}, p.Automation.StatePaths...), "ultra_backup_artifact_paths": append([]string{}, p.Automation.ArtifactPaths...),
-		"ultra_ingress_email": ingress.Email, "ultra_ingress_domains": uniqueIngressDomains(p.PublicSubscriptionDomain(), ingress.Domain, p.Bot.Domain), "ultra_subscription_enabled": true, "ultra_subscription_domain": p.PublicSubscriptionDomain(), "ultra_bot_domain": p.Bot.Domain, "ultra_bot_port": p.Bot.Port, "ultra_bridge_url": p.Automation.BridgeURL, "ultra_bridge_ipv4": ip.String(), "ultra_cutover_contract_source": string(source),
-		"ultra_backend_old_domain": e.Backend, "ultra_backend_old_public": e.Subscription, "ultra_backend_changed": t.BackendChanged, "ultra_backend_old_port": e.BotPort}
+	t.Variables = map[string]any{
+		"ultra_lock_directory":             releaseVariables["ultra_lock_directory"],
+		"ultra_upgrade_domain_transaction": t.Binding,
+		"ultra_upgrade_domain_desired":     desired,
+		"ultra_ingress": map[string]any{
+			"domain":              ingress.Domain,
+			"subscription_domain": p.PublicSubscriptionDomain(),
+			"public_host":         p.Bridge.PublicHost,
+			"path":                ingress.Path,
+			"backend_port":        e.BackendPort,
+			"gateway_port":        e.GatewayPort,
+			"staging_port":        ingress.StagingPort,
+			"status_port":         ingress.StatusPort,
+			"experimental_port":   ingress.ExperimentalPort,
+			"forward_host":        ingress.ForwardHost,
+			"fingerprint":         e.Fingerprint,
+			"email":               ingress.Email,
+			"retain_aliases":      true,
+		},
+		"ultra_backup_state_paths": append(
+			[]string{},
+			p.Automation.StatePaths...),
+		"ultra_backup_artifact_paths":   append([]string{}, p.Automation.ArtifactPaths...),
+		"ultra_ingress_email":           ingress.Email,
+		"ultra_ingress_domains":         uniqueIngressDomains(p.PublicSubscriptionDomain(), ingress.Domain, p.Bot.Domain),
+		"ultra_subscription_enabled":    true,
+		"ultra_subscription_domain":     p.PublicSubscriptionDomain(),
+		"ultra_bot_domain":              p.Bot.Domain,
+		"ultra_bot_port":                p.Bot.Port,
+		"ultra_bridge_url":              p.Automation.BridgeURL,
+		"ultra_bridge_ipv4":             ip.String(),
+		"ultra_cutover_contract_source": string(source),
+		"ultra_backend_old_domain":      e.Backend,
+		"ultra_backend_old_public":      e.Subscription,
+		"ultra_backend_changed":         t.BackendChanged,
+		"ultra_backend_old_port":        e.BotPort,
+	}
 	return t, nil
 }
 
@@ -225,7 +291,12 @@ func upgradeBackupPathsChanged(e upgradeDomainEvidence) bool {
 	return !e.StatePathsMatch || !e.ArtifactPathsMatch
 }
 
-func validateUpgradeDomainPolicy(e upgradeDomainEvidence, ingress *installplan.AutomationIngress, dns *installplan.AutomationDNS, automation *installplan.AutomationConfig) error {
+func validateUpgradeDomainPolicy(
+	e upgradeDomainEvidence,
+	ingress *installplan.AutomationIngress,
+	dns *installplan.AutomationDNS,
+	automation *installplan.AutomationConfig,
+) error {
 	if ingress == nil || dns == nil || automation == nil {
 		return errors.New("upgrade_domain_policy_required")
 	}
@@ -240,7 +311,8 @@ func validateUpgradeDomainPolicy(e upgradeDomainEvidence, ingress *installplan.A
 	if !e.IngressModeMatches || !e.ForwardHostMatches {
 		return errors.New("upgrade_domain_ingress_mode_migration_required")
 	}
-	if (!e.StagingPortMatches && !e.StagingPortUnrecorded) || (e.StagingPortMatches && e.StagingPortUnrecorded) || !e.StatusPortMatches || !e.ExperimentalPortMatch {
+	if (!e.StagingPortMatches && !e.StagingPortUnrecorded) || (e.StagingPortMatches && e.StagingPortUnrecorded) || !e.StatusPortMatches ||
+		!e.ExperimentalPortMatch {
 		return errors.New("upgrade_domain_ingress_ports_migration_required")
 	}
 	if !e.AgeRecipientMatches {
@@ -255,13 +327,19 @@ func validateUpgradeDomainPolicy(e upgradeDomainEvidence, ingress *installplan.A
 	if !e.AdminIDMatches {
 		return errors.New("upgrade_domain_admin_identity_migration_required")
 	}
-	if e.BackendPort != ingress.BackendPort || e.GatewayPort != ingress.GatewayPort || (e.Fingerprint != "chrome" && e.Fingerprint != "firefox") {
+	if e.BackendPort != ingress.BackendPort || e.GatewayPort != ingress.GatewayPort ||
+		(e.Fingerprint != "chrome" && e.Fingerprint != "firefox") {
 		return errors.New("upgrade_domain_transport_migration_required")
 	}
 	return nil
 }
 
-func (t *upgradeDomainTransaction) phase(ctx context.Context, inventory map[string]any, directory, python, executable, action string, generation int) error {
+func (t *upgradeDomainTransaction) phase(
+	ctx context.Context,
+	inventory map[string]any,
+	directory, python, executable, action string,
+	generation int,
+) error {
 	if t == nil || !t.Changed {
 		return nil
 	}
@@ -315,11 +393,18 @@ func (t *upgradeDomainTransaction) phase(ctx context.Context, inventory map[stri
 		if err != nil {
 			return errors.New("upgrade_domain_dns_source_unavailable")
 		}
-		vars = map[string]any{"ultra_lock_directory": t.Variables["ultra_lock_directory"], "ultra_dns_migration_action": dnsAction, "ultra_dns_migration_operation_id": domainMigrationID(id), "ultra_dns_migration_desired": t.Desired, "ultra_dns_migration_application_source": string(dnsSource)}
+		vars = map[string]any{
+			"ultra_lock_directory":                   t.Variables["ultra_lock_directory"],
+			"ultra_dns_migration_action":             dnsAction,
+			"ultra_dns_migration_operation_id":       domainMigrationID(id),
+			"ultra_dns_migration_desired":            t.Desired,
+			"ultra_dns_migration_application_source": string(dnsSource),
+		}
 		if action == "promote" || action == "retire-dns" {
 			raw, err := readBootstrapGenerationInput(filepath.Join(t.stage(directory, "accept", generation), "receipt.json"))
 			var receipt deployansible.Receipt
-			if err != nil || json.Unmarshal(raw, &receipt) != nil || receipt.State != "succeeded" || receipt.Result.Values["verified"] != true {
+			if err != nil || json.Unmarshal(raw, &receipt) != nil || receipt.State != "succeeded" ||
+				receipt.Result.Values["verified"] != true {
 				return errors.New("upgrade_domain_acceptance_required")
 			}
 			vars["ultra_dns_migration_acceptance_sha256"] = fmt.Sprintf("%x", sha256.Sum256(raw))
@@ -405,7 +490,8 @@ func (t *upgradeDomainTransaction) loadAttempt(directory string, generation int)
 		Generation int `json:"generation"`
 		Attempt    int `json:"attempt"`
 	}
-	if json.Unmarshal(raw, &marker) != nil || marker.Version != 1 || marker.Generation != generation || marker.Attempt < 1 || marker.Attempt > 1000 {
+	if json.Unmarshal(raw, &marker) != nil || marker.Version != 1 || marker.Generation != generation || marker.Attempt < 1 ||
+		marker.Attempt > 1000 {
 		return errors.New("upgrade_domain_attempt_invalid")
 	}
 	t.Attempt = marker.Attempt

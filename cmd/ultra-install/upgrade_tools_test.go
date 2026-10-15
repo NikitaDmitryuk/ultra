@@ -33,7 +33,14 @@ func writeToolFixture(t *testing.T, names []string) string {
 	return path
 }
 func TestUpgradeToolsRejectUnsafeOrIncompleteArchive(t *testing.T) {
-	required := []string{"recovery.py", "monitor.py", "heartbeat.py", "reconcile.py", "ultra-recovery-backup.service", "ultra-recovery-backup.timer"}
+	required := []string{
+		"recovery.py",
+		"monitor.py",
+		"heartbeat.py",
+		"reconcile.py",
+		"ultra-recovery-backup.service",
+		"ultra-recovery-backup.timer",
+	}
 	tools, err := extractUpgradeTools(writeToolFixture(t, required), filepath.Join(t.TempDir(), "tools"), map[string]string{})
 	if err != nil || len(tools) != len(required) {
 		t.Fatalf("complete bundle: %v", err)

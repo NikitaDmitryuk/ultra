@@ -55,7 +55,18 @@ type runtimeSnapshotV1 struct {
 func snapshotUsers(users []auth.User) []persistedUser {
 	out := make([]persistedUser, 0, len(users))
 	for _, u := range users {
-		out = append(out, persistedUser{ServiceTargets: u.ServiceTargets, User: u, AccountID: u.AccountID, Routes: u.Routes, Exclusions: u.ExcludedExitIDs, Reasons: u.ExitExclusionReasons, Fallback: u.FallbackExitID})
+		out = append(
+			out,
+			persistedUser{
+				ServiceTargets: u.ServiceTargets,
+				User:           u,
+				AccountID:      u.AccountID,
+				Routes:         u.Routes,
+				Exclusions:     u.ExcludedExitIDs,
+				Reasons:        u.ExitExclusionReasons,
+				Fallback:       u.FallbackExitID,
+			},
+		)
 	}
 	return out
 }
@@ -82,7 +93,8 @@ func runtimeFingerprint(spec *config.Spec) string {
 }
 func decodeRuntimeSnapshot(snapshot runtimestate.Snapshot, fingerprint string, now time.Time) (runtimeSnapshotV1, error) {
 	var p runtimeSnapshotV1
-	if snapshot.ConfirmedAt.IsZero() || snapshot.ConfirmedAt.After(now.Add(time.Minute)) || !now.Before(snapshot.ConfirmedAt.Add(runtimeLease)) {
+	if snapshot.ConfirmedAt.IsZero() || snapshot.ConfirmedAt.After(now.Add(time.Minute)) ||
+		!now.Before(snapshot.ConfirmedAt.Add(runtimeLease)) {
 		return p, errors.New("runtime snapshot expired or invalid clock")
 	}
 	if err := json.Unmarshal(snapshot.Payload, &p); err != nil {
@@ -156,7 +168,14 @@ func (r *bridgeRuntime) status() any {
 	if r.fault || r.confirmed.IsZero() || !r.now().Before(r.confirmed.Add(runtimeLease)) {
 		mode = "closed"
 	}
-	status := map[string]any{"mode": mode, "revision": r.revision, "applied_revision": r.appliedRevision, "confirmed_at": r.confirmed, "expires_at": r.confirmed.Add(runtimeLease), "error": r.lastError}
+	status := map[string]any{
+		"mode":             mode,
+		"revision":         r.revision,
+		"applied_revision": r.appliedRevision,
+		"confirmed_at":     r.confirmed,
+		"expires_at":       r.confirmed.Add(runtimeLease),
+		"error":            r.lastError,
+	}
 	status["control_disabled"] = r.cacheOnly
 	status["capabilities"] = []string{"provider-pool-quota-v1"}
 	status["backup"] = recoveryStatus("/var/lib/ultra-relay/recovery-status.json", r.now())
@@ -182,7 +201,9 @@ func recoveryStatus(path string, now time.Time) map[string]any {
 		Independent bool  `json:"independent"`
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 4097))
-	if err != nil || len(data) > 4096 || json.Unmarshal(data, &receipt) != nil || receipt.SnapshotAt <= 0 || receipt.CompletedAt < receipt.SnapshotAt || receipt.CompletedAt > now.Add(time.Minute).Unix() {
+	if err != nil || len(data) > 4096 || json.Unmarshal(data, &receipt) != nil || receipt.SnapshotAt <= 0 ||
+		receipt.CompletedAt < receipt.SnapshotAt ||
+		receipt.CompletedAt > now.Add(time.Minute).Unix() {
 		result["error"] = "receipt_invalid"
 		return result
 	}
@@ -251,7 +272,8 @@ func (r *bridgeRuntime) applyLocked(reason string, force bool) (err error) {
 	}
 	users = auth.ExpandRoutes(users)
 	users = applyEffectiveUserExits(users, enabled, active, r.selector.HealthSnapshot())
-	if !force && reflect.DeepEqual(users, r.lastApplied) && reflect.DeepEqual(nodes, r.lastNodes) && active == r.lastActive && r.runner.Status().Error == "" {
+	if !force && reflect.DeepEqual(users, r.lastApplied) && reflect.DeepEqual(nodes, r.lastNodes) && active == r.lastActive &&
+		r.runner.Status().Error == "" {
 		r.applications.Begin(users)
 		r.applications.Finish(nil)
 		r.mu.Lock()
@@ -350,7 +372,13 @@ func (r *bridgeRuntime) refresh(ctx context.Context, database *db.DB, users *aut
 			limits[i].ExpiresAt = until
 		}
 	}
-	payload := runtimeSnapshotV1{Version: 3, Fingerprint: runtimeFingerprint(r.spec), Users: snapshotUsers(live), Nodes: nodes.List(), Limits: limits}
+	payload := runtimeSnapshotV1{
+		Version:     3,
+		Fingerprint: runtimeFingerprint(r.spec),
+		Users:       snapshotUsers(live),
+		Nodes:       nodes.List(),
+		Limits:      limits,
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -377,8 +405,20 @@ func (r *bridgeRuntime) commitCandidate(payload runtimeSnapshotV1, now time.Time
 	oldUsers, oldNodes, oldLimits, oldConfirmed, oldRevision := r.users, r.nodes, r.limits, r.confirmed, r.revision
 	r.mu.RUnlock()
 	live := payload.users()
-	validationUsers := applyEffectiveUserExits(auth.ExpandRoutes(live), exits.FilterEnabled(payload.Nodes), r.selector.ActiveID(), r.selector.HealthSnapshot())
-	validationConfig, validationErr := config.BuildBridgeXRayJSON(r.spec, validationUsers, payload.Nodes, r.selector.ActiveID(), r.strategy, r.logLevel)
+	validationUsers := applyEffectiveUserExits(
+		auth.ExpandRoutes(live),
+		exits.FilterEnabled(payload.Nodes),
+		r.selector.ActiveID(),
+		r.selector.HealthSnapshot(),
+	)
+	validationConfig, validationErr := config.BuildBridgeXRayJSON(
+		r.spec,
+		validationUsers,
+		payload.Nodes,
+		r.selector.ActiveID(),
+		r.strategy,
+		r.logLevel,
+	)
 	if validationErr != nil {
 		return validationErr
 	}
@@ -481,7 +521,8 @@ func (h *runtimeHTTP) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if req.Method == "GET" && (req.URL.Path == "/v1/health" || req.URL.Path == "/v1/hardening") {
-		_ = json.NewEncoder(w).Encode(map[string]any{"runtime": h.runtime.status(), "reload": h.runtime.runner.Status(), "control_ready": false})
+		_ = json.NewEncoder(w).
+			Encode(map[string]any{"runtime": h.runtime.status(), "reload": h.runtime.runner.Status(), "control_ready": false})
 		return
 	}
 	w.Header().Set("Retry-After", "10")
@@ -502,7 +543,16 @@ type bridgeHostRunner interface {
 	ProbeExit(context.Context, exits.Node, []string) exits.Health
 }
 
-func runBridge(ctx context.Context, spec *config.Spec, specPath, statePath, token string, runner bridgeHostRunner, strategy mimic.Strategy, xrayLog string, log *slog.Logger, options ...bridgeOptions) error {
+func runBridge(
+	ctx context.Context,
+	spec *config.Spec,
+	specPath, statePath, token string,
+	runner bridgeHostRunner,
+	strategy mimic.Strategy,
+	xrayLog string,
+	log *slog.Logger,
+	options ...bridgeOptions,
+) error {
 	var opts bridgeOptions
 	if len(options) != 0 {
 		opts = options[0]
@@ -528,7 +578,17 @@ func runBridge(ctx context.Context, spec *config.Spec, specPath, statePath, toke
 		return runClosedDiagnostics(ctx, spec.AdminListen, token, runner, opts.CacheOnly)
 	}
 	defer func() { _ = state.Close() }()
-	r := &bridgeRuntime{state: state, runner: runner, spec: spec, strategy: strategy, logLevel: xrayLog, log: log, now: time.Now, applications: &auth.RouteApplications{}, cacheOnly: opts.CacheOnly}
+	r := &bridgeRuntime{
+		state:        state,
+		runner:       runner,
+		spec:         spec,
+		strategy:     strategy,
+		logLevel:     xrayLog,
+		log:          log,
+		now:          time.Now,
+		applications: &auth.RouteApplications{},
+		cacheOnly:    opts.CacheOnly,
+	}
 	r.selector = exits.NewSelector(func(c context.Context, n exits.Node) exits.Health {
 		return runner.ProbeExit(c, n, spec.HealthTargets())
 	})
@@ -568,7 +628,12 @@ func runBridge(ctx context.Context, spec *config.Spec, specPath, statePath, toke
 		if e != nil {
 			return e
 		}
-		server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second}
+		server := &http.Server{
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      30 * time.Second,
+		}
 		defer func() { _ = server.Close() }()
 		wg.Add(1)
 		go func() {
@@ -588,11 +653,16 @@ func runBridge(ctx context.Context, spec *config.Spec, specPath, statePath, toke
 		if interval <= 0 {
 			interval = 10 * time.Second
 		}
-		r.selector.RunWorker(child, interval, func(context.Context) ([]exits.Node, error) { return exits.FilterEnabled(r.Nodes()), nil }, func() {
-			if e := r.apply("exit health selection", false); e != nil {
-				r.setError("route_apply_failed")
-			}
-		})
+		r.selector.RunWorker(
+			child,
+			interval,
+			func(context.Context) ([]exits.Node, error) { return exits.FilterEnabled(r.Nodes()), nil },
+			func() {
+				if e := r.apply("exit health selection", false); e != nil {
+					r.setError("route_apply_failed")
+				}
+			},
+		)
 	}()
 	wg.Add(1)
 	go func() {
@@ -643,7 +713,13 @@ func runClosedDiagnostics(ctx context.Context, listen, token string, runner runt
 		r.cacheOnly = cacheOnly[0]
 	}
 	h := &runtimeHTTP{token: sha256.Sum256([]byte(token)), runtime: r}
-	server := &http.Server{Addr: listen, Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second}
+	server := &http.Server{
+		Addr:              listen,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+	}
 	listener, err := net.Listen("tcp", listen)
 	if err != nil {
 		return fmt.Errorf("closed diagnostic listener: %w", err)
@@ -746,7 +822,11 @@ func (r *bridgeRuntime) control(ctx context.Context, wg *sync.WaitGroup, handler
 		}
 		subscriptions := db.NewSubscriptionRepo(database, keys)
 		srv.Subscriptions = subscriptions
-		srv.Members = &adminapi.MemberService{Repo: db.NewRuntimeMemberRepo(database, r.state), Subscriptions: subscriptions, Apply: refresh}
+		srv.Members = &adminapi.MemberService{
+			Repo:          db.NewRuntimeMemberRepo(database, r.state),
+			Subscriptions: subscriptions,
+			Apply:         refresh,
+		}
 		wg.Add(1)
 		go func() { defer wg.Done(); srv.Members.Run(ctx) }()
 		handler.install(srv.Handler())

@@ -25,13 +25,29 @@ func completePlanFixture(p *InstallPlan) *InstallPlan {
 	if address == "" {
 		address = p.Bridge.SSHHost
 	}
-	p.Automation = &AutomationConfig{Version: "v2.3.4", ReleaseDir: "/release", AgeRecipient: "age1fixture", BridgeProvider: "bridge-fixture", BridgeIPv4: address, BridgeURL: "https://sync.example.com/healthz", KnownHostsFile: "/pins"}
+	p.Automation = &AutomationConfig{
+		Version:        "v2.3.4",
+		ReleaseDir:     "/release",
+		AgeRecipient:   "age1fixture",
+		BridgeProvider: "bridge-fixture",
+		BridgeIPv4:     address,
+		BridgeURL:      "https://sync.example.com/healthz",
+		KnownHostsFile: "/pins",
+	}
 	for i, e := range p.Exits {
 		name := e.Name
 		if name == "" {
 			name = "primary"
 		}
-		p.Automation.StaticNodes = append(p.Automation.StaticNodes, AutomationNode{Name: name, Address: e.SSHHost, Provider: "exit-fixture", Budget: &StaticBudget{MonthlyBytes: 1000000, IsFallback: i == 0}})
+		p.Automation.StaticNodes = append(
+			p.Automation.StaticNodes,
+			AutomationNode{
+				Name:     name,
+				Address:  e.SSHHost,
+				Provider: "exit-fixture",
+				Budget:   &StaticBudget{MonthlyBytes: 1000000, IsFallback: i == 0},
+			},
+		)
 	}
 	if !p.Bridge.ReuseSpec {
 		p.Bot.Enabled = true
@@ -242,8 +258,23 @@ func TestRenderDesiredStateReusePreservesBridgeMaterial(t *testing.T) {
 		AdminListen:   "127.0.0.1:8443",
 		PublicHost:    "203.0.113.10",
 		SubscriptionBridges: []config.SubscriptionBridge{
-			{ID: "primary", Host: "primary.example.com", Port: 443, PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ServerName: "example.com", ShortID: "ab12"},
-			{ID: "backup", Host: "backup.example.com", Port: 8443, PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ServerName: "example.com", Transport: "xhttp", Path: "/vpn"},
+			{
+				ID:         "primary",
+				Host:       "primary.example.com",
+				Port:       443,
+				PublicKey:  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+				ServerName: "example.com",
+				ShortID:    "ab12",
+			},
+			{
+				ID:         "backup",
+				Host:       "backup.example.com",
+				Port:       8443,
+				PublicKey:  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+				ServerName: "example.com",
+				Transport:  "xhttp",
+				Path:       "/vpn",
+			},
 		},
 		Reality: config.RealitySpec{
 			Dest:        "www.microsoft.com:443",
@@ -290,7 +321,8 @@ func TestRenderDesiredStateReusePreservesBridgeMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderDesiredStateWithOptions: %v", err)
 	}
-	if !ds.BridgeSpecObject.HappDefaultJSON || !reflect.DeepEqual(ds.BridgeSpecObject.ProbeURLs, existing.ProbeURLs) || !reflect.DeepEqual(ds.BridgeSpecObject.Stats, existing.Stats) {
+	if !ds.BridgeSpecObject.HappDefaultJSON || !reflect.DeepEqual(ds.BridgeSpecObject.ProbeURLs, existing.ProbeURLs) ||
+		!reflect.DeepEqual(ds.BridgeSpecObject.Stats, existing.Stats) {
 		t.Fatal("reuse lost client publication or traffic collection configuration")
 	}
 	if ds.DBDSN != existing.Database.DSN || ds.BridgeSpecObject.Database.DSN != existing.Database.DSN || ds.PostgresConfig == nil {
@@ -390,12 +422,19 @@ func TestDoctorReportsMissingBotTokenWithoutNetwork(t *testing.T) {
 }
 
 func TestReusePreservesManagedIngress(t *testing.T) {
-	src := &config.Spec{PrimaryXHTTP: &config.PrimaryXHTTPIngress{Host: "vpn.example", BackendPort: 18080}, LegacyPublicEnabled: config.BoolPtr(false), ExperimentalProfileFile: "/etc/ultra-relay/experimental-profile.json", GatewayVLESSPort: 18081}
+	src := &config.Spec{
+		PrimaryXHTTP:            &config.PrimaryXHTTPIngress{Host: "vpn.example", BackendPort: 18080},
+		LegacyPublicEnabled:     config.BoolPtr(false),
+		ExperimentalProfileFile: "/etc/ultra-relay/experimental-profile.json",
+		GatewayVLESSPort:        18081,
+	}
 	dst := new(config.Spec)
 	if err := applyBridgeOverlay(dst, src); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(dst.PrimaryXHTTP, src.PrimaryXHTTP) || dst.LegacyPublicEnabled == nil || *dst.LegacyPublicEnabled || dst.ExperimentalProfileFile != src.ExperimentalProfileFile || dst.GatewayVLESSPort != 18081 {
+	if !reflect.DeepEqual(dst.PrimaryXHTTP, src.PrimaryXHTTP) || dst.LegacyPublicEnabled == nil || *dst.LegacyPublicEnabled ||
+		dst.ExperimentalProfileFile != src.ExperimentalProfileFile ||
+		dst.GatewayVLESSPort != 18081 {
 		t.Fatal("managed ingress lost during reuse")
 	}
 }
@@ -415,7 +454,18 @@ func TestDedicatedDatabaseRejectsVPNHostsAndReplicas(t *testing.T) {
 }
 
 func TestDedicatedDatabaseUsesTunnelAndExplicitSSHIdentity(t *testing.T) {
-	p := LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "DATABASE_IP": "192.0.2.40", "SSH_USER": "db-admin", "DATABASE_SSH_KEY": "/keys/db", "BRIDGE_SSH_KEY": "/keys/vpn", "REUSE_BRIDGE_SPEC": "false", "REALITY_DEST": "example.com:443"})
+	p := LegacyValuesToPlan(
+		map[string]string{
+			"BRIDGE_IP":         "192.0.2.1",
+			"MAIN_EXIT_IP":      "192.0.2.2",
+			"DATABASE_IP":       "192.0.2.40",
+			"SSH_USER":          "db-admin",
+			"DATABASE_SSH_KEY":  "/keys/db",
+			"BRIDGE_SSH_KEY":    "/keys/vpn",
+			"REUSE_BRIDGE_SPEC": "false",
+			"REALITY_DEST":      "example.com:443",
+		},
+	)
 	completePlanFixture(p)
 	ds, err := RenderDesiredState(p)
 	if err != nil {
@@ -430,7 +480,14 @@ func TestDedicatedDatabaseUsesTunnelAndExplicitSSHIdentity(t *testing.T) {
 }
 
 func TestRoleSSHIdentities(t *testing.T) {
-	p := LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.10", "MAIN_EXIT_IP": "192.0.2.20", "BRIDGE_SSH_KEY": "/keys/bridge", "MAIN_EXIT_SSH_KEY": "/keys/exit"})
+	p := LegacyValuesToPlan(
+		map[string]string{
+			"BRIDGE_IP":         "192.0.2.10",
+			"MAIN_EXIT_IP":      "192.0.2.20",
+			"BRIDGE_SSH_KEY":    "/keys/bridge",
+			"MAIN_EXIT_SSH_KEY": "/keys/exit",
+		},
+	)
 	if p.BridgeSSHIdentity() != "/keys/bridge" || p.ExitSSHIdentity(p.Exits[0]) != "/keys/exit" {
 		t.Fatal("per-server key lost")
 	}
@@ -448,7 +505,8 @@ func TestPublishedDedicatedInstallPlanExampleValidates(t *testing.T) {
 	if err := ValidatePlan(&p); err != nil {
 		t.Fatal(err)
 	}
-	if p.Database.PrimaryHost == p.Bridge.Address || p.Database.SSHIdentity == "" || p.Bridge.SSHIdentity == "" || p.Exits[0].SSHIdentity == "" {
+	if p.Database.PrimaryHost == p.Bridge.Address || p.Database.SSHIdentity == "" || p.Bridge.SSHIdentity == "" ||
+		p.Exits[0].SSHIdentity == "" {
 		t.Fatal("example must declare dedicated roles and their SSH keys")
 	}
 }

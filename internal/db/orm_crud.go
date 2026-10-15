@@ -2,8 +2,9 @@ package db
 
 import (
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
 )
 
 // These projections describe migrated columns only; GORM never owns the schema.
@@ -26,7 +27,19 @@ type userRow struct {
 
 func (userRow) TableName() string { return "users" }
 func (u userRow) user() auth.User {
-	out := auth.User{UUID: u.UUID, AccountID: u.AccountID, Name: u.Name, Kind: u.Kind, IsActive: u.IsActive, DisabledAt: u.DisabledAt, SocksPort: u.SocksPort, LeakPolicy: u.LeakPolicy, LeakMaxConcurrentIPs: u.LeakMaxConcurrentIPs, LeakMaxUniqueIPs24h: u.LeakMaxUniqueIPs24h, PreferredExitID: u.PreferredExitID}
+	out := auth.User{
+		UUID:                 u.UUID,
+		AccountID:            u.AccountID,
+		Name:                 u.Name,
+		Kind:                 u.Kind,
+		IsActive:             u.IsActive,
+		DisabledAt:           u.DisabledAt,
+		SocksPort:            u.SocksPort,
+		LeakPolicy:           u.LeakPolicy,
+		LeakMaxConcurrentIPs: u.LeakMaxConcurrentIPs,
+		LeakMaxUniqueIPs24h:  u.LeakMaxUniqueIPs24h,
+		PreferredExitID:      u.PreferredExitID,
+	}
 	if u.SocksUsername != nil {
 		out.SocksUsername = *u.SocksUsername
 	}
@@ -58,7 +71,15 @@ type notificationRow struct {
 
 func (notificationRow) TableName() string { return "notifications" }
 func (r notificationRow) notification() Notification {
-	n := Notification{ID: r.ID, UserUUID: r.UserUUID, TelegramID: r.TelegramID, Type: r.Type, SentAt: r.SentAt, CreatedAt: r.CreatedAt, Attempts: r.Attempts}
+	n := Notification{
+		ID:         r.ID,
+		UserUUID:   r.UserUUID,
+		TelegramID: r.TelegramID,
+		Type:       r.Type,
+		SentAt:     r.SentAt,
+		CreatedAt:  r.CreatedAt,
+		Attempts:   r.Attempts,
+	}
 	if len(r.Payload) > 0 {
 		_ = json.Unmarshal(r.Payload, &n.Payload)
 	}
@@ -92,7 +113,18 @@ type alertStateRow struct {
 
 func (alertStateRow) TableName() string { return "alert_state" }
 func (r alertStateRow) state() AlertState {
-	s := AlertState{DedupeKey: r.DedupeKey, Type: r.Type, Severity: r.Severity, Channel: r.Channel, Status: r.Status, ConsecutiveFailures: r.ConsecutiveFailures, ConsecutiveSuccesses: r.ConsecutiveSuccesses, LastSeenAt: r.LastSeenAt, LastSentAt: r.LastSentAt, UpdatedAt: r.UpdatedAt}
+	s := AlertState{
+		DedupeKey:            r.DedupeKey,
+		Type:                 r.Type,
+		Severity:             r.Severity,
+		Channel:              r.Channel,
+		Status:               r.Status,
+		ConsecutiveFailures:  r.ConsecutiveFailures,
+		ConsecutiveSuccesses: r.ConsecutiveSuccesses,
+		LastSeenAt:           r.LastSeenAt,
+		LastSentAt:           r.LastSentAt,
+		UpdatedAt:            r.UpdatedAt,
+	}
 	if len(r.LastPayload) > 0 {
 		_ = json.Unmarshal(r.LastPayload, &s.LastPayload)
 	}

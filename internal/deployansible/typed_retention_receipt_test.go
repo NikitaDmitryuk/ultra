@@ -43,7 +43,9 @@ func assertTypedRetentionReceipt(t *testing.T, directory string) {
 	if err = json.Unmarshal(inventoryRaw, &normalized); err != nil {
 		t.Fatal(err)
 	}
-	if receipt.Schema != 1 || receipt.Path != filepath.Join(directory, "bundle") || receipt.Identity["request_sha256"] != hex.EncodeToString(digest[:]) || !reflect.DeepEqual(normalized, receipt.Inventory) {
+	if receipt.Schema != 1 || receipt.Path != filepath.Join(directory, "bundle") ||
+		receipt.Identity["request_sha256"] != hex.EncodeToString(digest[:]) ||
+		!reflect.DeepEqual(normalized, receipt.Inventory) {
 		t.Fatal("typed bundle ownership does not match frozen inputs")
 	}
 }

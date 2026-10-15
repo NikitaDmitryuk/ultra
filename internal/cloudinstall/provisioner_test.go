@@ -4,16 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"testing"
+
 	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
-	"testing"
 )
 
 func TestProvisionedExitPreservesWireTransport(t *testing.T) {
-	bridge := &config.Spec{MimicPreset: "steamlike", SplithttpPath: "/fixture", XrayWire: &config.XrayWireSpec{SplithttpMode: "stream-one", SniffingDestOverride: []string{"tls"}}}
+	bridge := &config.Spec{
+		MimicPreset:   "steamlike",
+		SplithttpPath: "/fixture",
+		XrayWire:      &config.XrayWireSpec{SplithttpMode: "stream-one", SniffingDestOverride: []string{"tls"}},
+	}
 	p := &Provisioner{Bridge: bridge}
 	spec := p.exitSpec(exits.Node{Port: 8443, TunnelUUID: "11111111-2222-3333-4444-555555555555"})
 	strategy, _ := mimic.New(bridge.MimicPreset)

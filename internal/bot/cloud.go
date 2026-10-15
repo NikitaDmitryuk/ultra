@@ -3,9 +3,10 @@ package bot
 import (
 	"encoding/json"
 	"errors"
-	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 	"net/http"
 	"net/url"
+
+	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 )
 
 func (b *Bot) cloudRoutes(mux *http.ServeMux) {

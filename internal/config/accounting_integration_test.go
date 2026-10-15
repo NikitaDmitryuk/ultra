@@ -6,15 +6,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/auth"
-	"github.com/NikitaDmitryuk/ultra/internal/mimic"
-	"github.com/NikitaDmitryuk/ultra/internal/proxy"
-	"github.com/NikitaDmitryuk/ultra/internal/realitykey"
-	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
-	"github.com/google/uuid"
-	"github.com/xtls/reality"
-	xnet "github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/core"
 	"io"
 	"net"
 	"net/http"
@@ -24,6 +15,16 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/mimic"
+	"github.com/NikitaDmitryuk/ultra/internal/proxy"
+	"github.com/NikitaDmitryuk/ultra/internal/realitykey"
+	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
+	"github.com/google/uuid"
+	"github.com/xtls/reality"
+	xnet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/core"
 )
 
 // The pinned REALITY implementation accepts X25519 or X25519MLKEM768 target
@@ -125,8 +126,20 @@ func accountingFixture(t *testing.T, capacity int64, udp, direct bool) (*proxy.R
 	spec.VLESSPort = freePort(t)
 	spec.AntiCensor = &AntiCensorSpec{PublicXHTTPPort: freePort(t)}
 	cert, key := testCertificate(t)
-	spec.PublicXHTTPTLS = &PublicXHTTPTLSSpec{Port: freePort(t), ServerName: "example.com", CertificateFile: cert, KeyFile: key, Path: "/test", Mode: "stream-up"}
-	spec.Reality = RealitySpec{PrivateKey: keys.PrivateKey, PublicKey: keys.PublicKey, Dest: camouflage.Listener.Addr().String(), ServerNames: []string{"example.com"}}
+	spec.PublicXHTTPTLS = &PublicXHTTPTLSSpec{
+		Port:            freePort(t),
+		ServerName:      "example.com",
+		CertificateFile: cert,
+		KeyFile:         key,
+		Path:            "/test",
+		Mode:            "stream-up",
+	}
+	spec.Reality = RealitySpec{
+		PrivateKey:  keys.PrivateKey,
+		PublicKey:   keys.PublicKey,
+		Dest:        camouflage.Listener.Addr().String(),
+		ServerNames: []string{"example.com"},
+	}
 	strategy, e := mimic.New("steamlike")
 	if e != nil {
 		t.Fatal(e)
@@ -145,7 +158,16 @@ func accountingFixture(t *testing.T, capacity int64, udp, direct bool) (*proxy.R
 	if direct {
 		tag = "direct"
 	}
-	cfg["outbounds"] = []any{map[string]any{"protocol": "freedom", "tag": tag, "settings": map[string]any{"domainStrategy": "UseIP", "finalRules": []any{map[string]any{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}}}
+	cfg["outbounds"] = []any{
+		map[string]any{
+			"protocol": "freedom",
+			"tag":      tag,
+			"settings": map[string]any{
+				"domainStrategy": "UseIP",
+				"finalRules":     []any{map[string]any{"action": "allow", "ip": []string{"127.0.0.0/8"}}},
+			},
+		},
+	}
 	delete(cfg, "routing")
 	cfg["dns"] = map[string]any{"hosts": map[string]any{"example.com": "127.0.0.1"}}
 	raw, e = json.Marshal(cfg)
@@ -162,10 +184,31 @@ func accountingFixture(t *testing.T, capacity int64, udp, direct bool) (*proxy.R
 	// prove that the shared provider limiter, rather than an exit limit, stops bytes.
 	pool := runtimestate.ProviderPoolID("vultr")
 	q := []runtimestate.QuotaLimit{
-		{AccountID: user.AccountID, ExitID: "fixture", PoolScope: "vultr", Period: now.Format("2006-01"), LimitBytes: capacity * 10, ExpiresAt: now.Add(time.Hour)},
+		{
+			AccountID:  user.AccountID,
+			ExitID:     "fixture",
+			PoolScope:  "vultr",
+			Period:     now.Format("2006-01"),
+			LimitBytes: capacity * 10,
+			ExpiresAt:  now.Add(time.Hour),
+		},
 		{ExitID: "fixture", PoolScope: "vultr", Period: now.Format("2006-01"), LimitBytes: capacity * 10, ExpiresAt: now.Add(time.Hour)},
-		{AccountID: user.AccountID, ExitID: pool, Scope: "provider_pool", Period: now.Format("2006-01"), LimitBytes: capacity, ExpiresAt: now.Add(time.Hour)},
-		{ExitID: pool, Scope: "provider_pool", Members: []string{"fixture"}, Period: now.Format("2006-01"), LimitBytes: capacity, ExpiresAt: now.Add(time.Hour)},
+		{
+			AccountID:  user.AccountID,
+			ExitID:     pool,
+			Scope:      "provider_pool",
+			Period:     now.Format("2006-01"),
+			LimitBytes: capacity,
+			ExpiresAt:  now.Add(time.Hour),
+		},
+		{
+			ExitID:     pool,
+			Scope:      "provider_pool",
+			Members:    []string{"fixture"},
+			Period:     now.Format("2006-01"),
+			LimitBytes: capacity,
+			ExpiresAt:  now.Add(time.Hour),
+		},
 	}
 	if e = state.SaveSnapshot(runtimestate.Snapshot{ConfirmedAt: now, Payload: []byte(`{}`)}, q); e != nil {
 		t.Fatal(e)
@@ -220,13 +263,16 @@ func TestVisionTLS13ConcurrentQuotaActualTransfer(t *testing.T) {
 	defer destination.Close()
 	roots := x509.NewCertPool()
 	roots.AddCert(destination.Certificate())
-	tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "example.com", MinVersion: tls.VersionTLS13}, DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-		dest, e := xnet.ParseDestination(network + ":" + addr)
-		if e != nil {
-			return nil, e
-		}
-		return core.Dial(ctx, client.Instance(), dest)
-	}}
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "example.com", MinVersion: tls.VersionTLS13},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dest, e := xnet.ParseDestination(network + ":" + addr)
+			if e != nil {
+				return nil, e
+			}
+			return core.Dial(ctx, client.Instance(), dest)
+		},
+	}
 	defer tr.CloseIdleConnections()
 	hc := &http.Client{Transport: tr, Timeout: 5 * time.Second}
 	var wg sync.WaitGroup
@@ -334,7 +380,9 @@ func TestUDPQuotaActualTransfer(t *testing.T) {
 
 func TestBridgeDirectKeepsExitQuotaAndHonorsAuthorization(t *testing.T) {
 	server, client, state, user := accountingFixture(t, 8192, false, true)
-	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, strings.Repeat("d", 65536)) }))
+	destination := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, strings.Repeat("d", 65536)) }),
+	)
 	defer destination.Close()
 	tr := &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dest, e := xnet.ParseDestination(network + ":" + addr)
@@ -368,7 +416,10 @@ func TestBridgeDirectKeepsExitQuotaAndHonorsAuthorization(t *testing.T) {
 	}
 	snapshot.ConfirmedAt = time.Now().Add(-25 * time.Hour)
 	now := time.Now().UTC()
-	limits := []runtimestate.QuotaLimit{{AccountID: user.AccountID, ExitID: "fixture", Period: now.Format("2006-01"), LimitBytes: 8192, ExpiresAt: now.Add(time.Hour)}, {ExitID: "fixture", Period: now.Format("2006-01"), LimitBytes: 8192, ExpiresAt: now.Add(time.Hour)}}
+	limits := []runtimestate.QuotaLimit{
+		{AccountID: user.AccountID, ExitID: "fixture", Period: now.Format("2006-01"), LimitBytes: 8192, ExpiresAt: now.Add(time.Hour)},
+		{ExitID: "fixture", Period: now.Format("2006-01"), LimitBytes: 8192, ExpiresAt: now.Add(time.Hour)},
+	}
 	if e = state.RestoreSnapshot(&snapshot, limits); e != nil {
 		t.Fatal(e)
 	}

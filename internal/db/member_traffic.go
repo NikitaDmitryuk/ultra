@@ -3,9 +3,10 @@ package db
 import (
 	"context"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/quota"
 	"strings"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/quota"
 )
 
 type RouteTraffic struct {
@@ -45,13 +46,27 @@ func (r *MemberRepo) Traffic(ctx context.Context, id int64, now time.Time) (Memb
 	now = now.UTC()
 	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	end := start.AddDate(0, 1, 0)
-	result := MemberTraffic{Today: now.Format("2006-01-02"), DayRoutes: []RoutePoint{}, Hours: []RoutePoint{}, Month: start.Format("2006-01"), Routes: []RouteTraffic{}, Days: []DayTraffic{}}
+	result := MemberTraffic{
+		Today:     now.Format("2006-01-02"),
+		DayRoutes: []RoutePoint{},
+		Hours:     []RoutePoint{},
+		Month:     start.Format("2006-01"),
+		Routes:    []RouteTraffic{},
+		Days:      []DayTraffic{},
+	}
 	filter := `u.enrollment_source IS NOT NULL AND ($1::bigint=0 OR u.telegram_id=$1)`
-	e := r.db.Pool.QueryRow(ctx, `SELECT COALESCE(SUM(t.uplink_bytes),0)::bigint,COALESCE(SUM(t.downlink_bytes),0)::bigint FROM monthly_traffic t JOIN users u ON u.uuid=t.user_uuid WHERE `+filter+` AND t.year=$2 AND t.month=$3`, id, now.Year(), int(now.Month())).Scan(&result.Uplink, &result.Downlink)
+	e := r.db.Pool.QueryRow(ctx, `SELECT COALESCE(SUM(t.uplink_bytes),0)::bigint,COALESCE(SUM(t.downlink_bytes),0)::bigint FROM monthly_traffic t JOIN users u ON u.uuid=t.user_uuid WHERE `+filter+` AND t.year=$2 AND t.month=$3`, id, now.Year(), int(now.Month())).
+		Scan(&result.Uplink, &result.Downlink)
 	if e != nil {
 		return result, e
 	}
-	rows, e := r.db.Pool.Query(ctx, `SELECT t.exit_tag,COALESCE(NULLIF(e.display_name,''),NULLIF(e.country_name,''),NULLIF(e.city,''),e.name,''),COALESCE(e.country_code,''),COALESCE(e.city,''),COALESCE(m.scope,''),SUM(t.uplink_bytes)::bigint,SUM(t.downlink_bytes)::bigint FROM daily_route_traffic t JOIN users u ON u.uuid=t.user_uuid LEFT JOIN exit_nodes e ON 'to-exit-'||e.id::text=t.exit_tag LEFT JOIN quota_exit_membership m ON 'to-exit-'||m.exit_id=t.exit_tag WHERE `+filter+` AND t.day>=$2 AND t.day<$3 GROUP BY t.exit_tag,e.display_name,e.country_name,e.country_code,e.city,e.name,m.scope ORDER BY SUM(t.uplink_bytes+t.downlink_bytes) DESC`, id, start, end)
+	rows, e := r.db.Pool.Query(
+		ctx,
+		`SELECT t.exit_tag,COALESCE(NULLIF(e.display_name,''),NULLIF(e.country_name,''),NULLIF(e.city,''),e.name,''),COALESCE(e.country_code,''),COALESCE(e.city,''),COALESCE(m.scope,''),SUM(t.uplink_bytes)::bigint,SUM(t.downlink_bytes)::bigint FROM daily_route_traffic t JOIN users u ON u.uuid=t.user_uuid LEFT JOIN exit_nodes e ON 'to-exit-'||e.id::text=t.exit_tag LEFT JOIN quota_exit_membership m ON 'to-exit-'||m.exit_id=t.exit_tag WHERE `+filter+` AND t.day>=$2 AND t.day<$3 GROUP BY t.exit_tag,e.display_name,e.country_name,e.country_code,e.city,e.name,m.scope ORDER BY SUM(t.uplink_bytes+t.downlink_bytes) DESC`,
+		id,
+		start,
+		end,
+	)
 	if e != nil {
 		return result, e
 	}
@@ -89,9 +104,23 @@ func (r *MemberRepo) Traffic(ctx context.Context, id int64, now time.Time) (Memb
 		return result, e
 	}
 	if result.Uplink > up || result.Downlink > down {
-		result.Routes = append(result.Routes, RouteTraffic{Tag: "unknown", Name: "Выход не определён · прежняя статистика", Uplink: max(0, result.Uplink-up), Downlink: max(0, result.Downlink-down)})
+		result.Routes = append(
+			result.Routes,
+			RouteTraffic{
+				Tag:      "unknown",
+				Name:     "Выход не определён · прежняя статистика",
+				Uplink:   max(0, result.Uplink-up),
+				Downlink: max(0, result.Downlink-down),
+			},
+		)
 	}
-	rows, e = r.db.Pool.Query(ctx, `SELECT (t.collected_at AT TIME ZONE 'UTC')::date::text,SUM(t.uplink_bytes)::bigint,SUM(t.downlink_bytes)::bigint FROM traffic_stats t JOIN users u ON u.uuid=t.user_uuid WHERE `+filter+` AND t.collected_at>=$2 AND t.collected_at<$3 GROUP BY 1 ORDER BY 1`, id, start, end)
+	rows, e = r.db.Pool.Query(
+		ctx,
+		`SELECT (t.collected_at AT TIME ZONE 'UTC')::date::text,SUM(t.uplink_bytes)::bigint,SUM(t.downlink_bytes)::bigint FROM traffic_stats t JOIN users u ON u.uuid=t.user_uuid WHERE `+filter+` AND t.collected_at>=$2 AND t.collected_at<$3 GROUP BY 1 ORDER BY 1`,
+		id,
+		start,
+		end,
+	)
 	if e != nil {
 		return result, e
 	}
@@ -173,7 +202,16 @@ func (r *MemberRepo) Limits(ctx context.Context, id int64, now time.Time) ([]Mem
 		Applied  *bool
 		Reason   string
 	}
-	e := r.db.orm.WithContext(ctx).Table("exit_traffic_budgets AS b").Select("b.exit_id, COALESCE(NULLIF(n.display_name, ''), NULLIF(n.city, ''), n.name) AS name, b.monthly_bytes AS monthly, b.is_fallback AS fallback, q.used_bytes AS used, q.limit_bytes AS limit, q.day, q.blocked, q.applied, COALESCE(q.reason, '') AS reason").Joins("JOIN exit_nodes n ON n.id = b.exit_id").Joins("JOIN users u ON u.telegram_id = ?", id).Joins("LEFT JOIN user_exit_quotas q ON q.user_uuid = u.uuid AND q.exit_id = b.exit_id").Where("n.enabled AND b.source <> ?", "vultr").Order("n.priority, n.id").Find(&rows).Error
+	e := r.db.orm.WithContext(ctx).
+		Table("exit_traffic_budgets AS b").
+		Select("b.exit_id, COALESCE(NULLIF(n.display_name, ''), NULLIF(n.city, ''), n.name) AS name, b.monthly_bytes AS monthly, b.is_fallback AS fallback, q.used_bytes AS used, q.limit_bytes AS limit, q.day, q.blocked, q.applied, COALESCE(q.reason, '') AS reason").
+		Joins("JOIN exit_nodes n ON n.id = b.exit_id").
+		Joins("JOIN users u ON u.telegram_id = ?", id).
+		Joins("LEFT JOIN user_exit_quotas q ON q.user_uuid = u.uuid AND q.exit_id = b.exit_id").
+		Where("n.enabled AND b.source <> ?", "vultr").
+		Order("n.priority, n.id").
+		Find(&rows).
+		Error
 	if e != nil {
 		return nil, e
 	}

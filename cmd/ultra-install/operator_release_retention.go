@@ -398,7 +398,8 @@ func pruneVerifiedOperatorReleaseCache(cacheDirectory, operatorRoot, publicKey, 
 
 func operatorReleasePathReferenced(path string, refs map[string]bool) bool {
 	for ref := range refs {
-		if ref == path || strings.HasPrefix(ref, path+string(os.PathSeparator)) || strings.HasPrefix(path, strings.TrimSuffix(ref, string(os.PathSeparator))+string(os.PathSeparator)) {
+		if ref == path || strings.HasPrefix(ref, path+string(os.PathSeparator)) ||
+			strings.HasPrefix(path, strings.TrimSuffix(ref, string(os.PathSeparator))+string(os.PathSeparator)) {
 			return true
 		}
 	}
@@ -425,7 +426,8 @@ func operatorReleaseLiveReferences(root, cache string) (map[string]bool, error) 
 			return errors.New("operator_release_retention_metadata_symlink")
 		}
 		if entry.IsDir() {
-			if path != root && (entry.Name() == "bundle" || entry.Name() == "recovery-bundle" || entry.Name() == "ansible-tmp" || entry.Name() == "releases" || entry.Name() == "downloads" || entry.Name() == "__pycache__" || strings.HasPrefix(entry.Name(), "runtime-")) {
+			if path != root &&
+				(entry.Name() == "bundle" || entry.Name() == "recovery-bundle" || entry.Name() == "ansible-tmp" || entry.Name() == "releases" || entry.Name() == "downloads" || entry.Name() == "__pycache__" || strings.HasPrefix(entry.Name(), "runtime-")) {
 				return filepath.SkipDir
 			}
 			if _, err := os.Lstat(filepath.Join(path, operatorCompletionFile)); err == nil {
@@ -500,7 +502,9 @@ func operatorReleaseCacheInventory(path string) (map[string]os.FileInfo, error) 
 			return nil, err
 		}
 		owner, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || owner.Uid != uint32(os.Geteuid()) || owner.Nlink != 1 || !info.Mode().IsRegular() || info.Mode().Perm() != 0400 || info.Size() <= 0 || info.Size() > githubAssetLimit {
+		if !ok || owner.Uid != uint32(os.Geteuid()) || owner.Nlink != 1 || !info.Mode().IsRegular() || info.Mode().Perm() != 0400 ||
+			info.Size() <= 0 ||
+			info.Size() > githubAssetLimit {
 			return nil, errors.New("operator_release_retention_unowned_asset")
 		}
 		total += info.Size()
@@ -518,7 +522,8 @@ func sameReleaseCacheInventory(left, right map[string]os.FileInfo) bool {
 	}
 	for name, before := range left {
 		after, ok := right[name]
-		if !ok || !os.SameFile(before, after) || before.Size() != after.Size() || before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) {
+		if !ok || !os.SameFile(before, after) || before.Size() != after.Size() || before.Mode() != after.Mode() ||
+			!before.ModTime().Equal(after.ModTime()) {
 			return false
 		}
 	}

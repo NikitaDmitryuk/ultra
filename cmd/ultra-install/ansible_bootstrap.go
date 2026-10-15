@@ -60,7 +60,11 @@ func bootstrapInventory(p *installplan.InstallPlan, directory string) (map[strin
 	return bootstrapInventoryWithNativeAttestation(p, directory, attestNativeAdoption)
 }
 
-func bootstrapInventoryWithNativeAttestation(p *installplan.InstallPlan, directory string, attest func(*installplan.InstallPlan) (string, error)) (map[string]any, error) {
+func bootstrapInventoryWithNativeAttestation(
+	p *installplan.InstallPlan,
+	directory string,
+	attest func(*installplan.InstallPlan) (string, error),
+) (map[string]any, error) {
 
 	if p.Bridge.RemoteDir != "/etc/ultra-relay" {
 		return nil, fmt.Errorf("ansible bootstrap requires canonical remote directory /etc/ultra-relay")
@@ -86,7 +90,18 @@ func bootstrapInventoryWithNativeAttestation(p *installplan.InstallPlan, directo
 	if err != nil {
 		return nil, err
 	}
-	common := map[string]any{"ansible_user": p.SSH.User, "ansible_become": p.SSH.User != "root", "ansible_become_method": "sudo", "ansible_become_flags": "-H -S -n", "ansible_ssh_private_key_file": identity, "ansible_ssh_common_args": "-F /dev/null -o ControlMaster=no -o ControlPath=none -o UpdateHostKeys=no -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=" + shellQuote(pins), "ultra_remote_dir": p.Bridge.RemoteDir, "ultra_inspect_dir": filepath.Join(directory, "inspection")}
+	common := map[string]any{
+		"ansible_user":                 p.SSH.User,
+		"ansible_become":               p.SSH.User != "root",
+		"ansible_become_method":        "sudo",
+		"ansible_become_flags":         "-H -S -n",
+		"ansible_ssh_private_key_file": identity,
+		"ansible_ssh_common_args": "-F /dev/null -o ControlMaster=no -o ControlPath=none -o UpdateHostKeys=no -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=" + shellQuote(
+			pins,
+		),
+		"ultra_remote_dir":  p.Bridge.RemoteDir,
+		"ultra_inspect_dir": filepath.Join(directory, "inspection"),
+	}
 	bridge := map[string]any{"ansible_host": p.Bridge.SSHHost}
 	if p.BridgeNative {
 		if _, err := attest(p); err != nil {
@@ -128,19 +143,44 @@ func bootstrapInventoryWithNativeAttestation(p *installplan.InstallPlan, directo
 		if dbUser == "" {
 			dbUser = p.SSH.User
 		}
-		db["database"] = map[string]any{"ansible_host": p.Database.PrimaryHost, "ansible_user": dbUser, "ansible_become": dbUser != "root", "ansible_ssh_private_key_file": dbIdentity}
+		db["database"] = map[string]any{
+			"ansible_host":                 p.Database.PrimaryHost,
+			"ansible_user":                 dbUser,
+			"ansible_become":               dbUser != "root",
+			"ansible_ssh_private_key_file": dbIdentity,
+		}
 		common["ultra_db_tunnel_host"] = p.Database.PrimaryHost
 		common["ultra_db_tunnel_known_hosts_source"] = pins
 
 	}
-	return map[string]any{"all": map[string]any{"vars": common, "children": map[string]any{"bridge": map[string]any{"hosts": map[string]any{"bridge": bridge}}, "exits": map[string]any{"hosts": nodes}, "databases": map[string]any{"hosts": db}}}}, nil
+	return map[string]any{
+		"all": map[string]any{
+			"vars": common,
+			"children": map[string]any{
+				"bridge":    map[string]any{"hosts": map[string]any{"bridge": bridge}},
+				"exits":     map[string]any{"hosts": nodes},
+				"databases": map[string]any{"hosts": db},
+			},
+		},
+	}, nil
 }
 
-func inspectBootstrap(ctx context.Context, p *installplan.InstallPlan, directory, python, executable string, lockRoots ...string) (map[string]any, map[string]bootstrapInspection, error) {
+func inspectBootstrap(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	directory, python, executable string,
+	lockRoots ...string,
+) (map[string]any, map[string]bootstrapInspection, error) {
 	return inspectBootstrapWithTopology(ctx, p, directory, python, executable, true, lockRoots...)
 }
 
-func inspectBootstrapWithTopology(ctx context.Context, p *installplan.InstallPlan, directory, python, executable string, discoverTopology bool, lockRoots ...string) (map[string]any, map[string]bootstrapInspection, error) {
+func inspectBootstrapWithTopology(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	directory, python, executable string,
+	discoverTopology bool,
+	lockRoots ...string,
+) (map[string]any, map[string]bootstrapInspection, error) {
 	var topology *adoptionTopology
 	if p.AdoptRuntime && discoverTopology {
 		lockRoot := filepath.Dir(directory)
@@ -172,7 +212,15 @@ func inspectBootstrapWithTopology(ctx context.Context, p *installplan.InstallPla
 	if len(lockRoots) > 0 {
 		lockRoot = lockRoots[0]
 	}
-	_, err = deployansible.RunLocal(ctx, "inspect-bootstrap", inventory, map[string]any{"ultra_lock_directory": lockRoot}, filepath.Join(directory, "inspect"), python, executable)
+	_, err = deployansible.RunLocal(
+		ctx,
+		"inspect-bootstrap",
+		inventory,
+		map[string]any{"ultra_lock_directory": lockRoot},
+		filepath.Join(directory, "inspect"),
+		python,
+		executable,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -260,7 +308,9 @@ func bootstrapRenderOptions(p *installplan.InstallPlan, inspection map[string]bo
 		if p.AdoptRuntime {
 			return opts, fmt.Errorf("runtime adoption requires existing bootstrap routes")
 		}
-		opts.PriorBootstrap = []exits.BootstrapEntry{{Name: "primary", Address: prior.Exit.Address, Port: prior.Exit.Port, TunnelUUID: prior.Exit.TunnelUUID, Priority: 100}}
+		opts.PriorBootstrap = []exits.BootstrapEntry{
+			{Name: "primary", Address: prior.Exit.Address, Port: prior.Exit.Port, TunnelUUID: prior.Exit.TunnelUUID, Priority: 100},
+		}
 	}
 	for n := range p.Exits {
 		ex := &p.Exits[n]
@@ -322,7 +372,13 @@ func sourceSHA(path string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.DesiredState, inventory map[string]any, inspection map[string]bootstrapInspection, directory string) error {
+func prepareBootstrapVariables(
+	p *installplan.InstallPlan,
+	ds *installplan.DesiredState,
+	inventory map[string]any,
+	inspection map[string]bootstrapInspection,
+	directory string,
+) error {
 	if ds.DBDSN != "" && !p.Database.Enabled {
 		return fmt.Errorf("explicit dedicated DB_HOST required before installing an existing database-backed bridge")
 	}
@@ -437,7 +493,11 @@ func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.Desir
 	}
 	if ds.PostgresConfig != nil {
 		c := ds.PostgresConfig
-		children["databases"].(map[string]any)["hosts"].(map[string]any)["database"].(map[string]any)["ultra_postgres"] = map[string]any{"name": c.DBName, "user": c.DBUser, "password": c.DBPassword}
+		children["databases"].(map[string]any)["hosts"].(map[string]any)["database"].(map[string]any)["ultra_postgres"] = map[string]any{
+			"name":     c.DBName,
+			"user":     c.DBUser,
+			"password": c.DBPassword,
+		}
 		if p.Secrets.DatabaseDumpFile != "" {
 			dbvars := children["databases"].(map[string]any)["hosts"].(map[string]any)["database"].(map[string]any)
 			archive, err := filepath.Abs(p.Secrets.DatabaseDumpFile)
@@ -498,7 +558,15 @@ func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.Desir
 		if err != nil {
 			return err
 		}
-		bridge["ultra_relay_environment"] = mergeBootstrapEnvironment(string(oldEnvironment), ds.BridgeEnv+fmt.Sprintf("ULTRA_BOT_DOMAIN=%s\nULTRA_BOT_PUBLIC_URL=https://%s\nULTRA_BOT_PORT=%d\nULTRA_BOT_TELEGRAM_SOCKS5=127.0.0.1:10809\n", p.Bot.Domain, p.PublicSubscriptionDomain(), p.Bot.Port))
+		bridge["ultra_relay_environment"] = mergeBootstrapEnvironment(
+			string(oldEnvironment),
+			ds.BridgeEnv+fmt.Sprintf(
+				"ULTRA_BOT_DOMAIN=%s\nULTRA_BOT_PUBLIC_URL=https://%s\nULTRA_BOT_PORT=%d\nULTRA_BOT_TELEGRAM_SOCKS5=127.0.0.1:10809\n",
+				p.Bot.Domain,
+				p.PublicSubscriptionDomain(),
+				p.Bot.Port,
+			),
+		)
 		if p.AdoptRuntime {
 			bridge["ultra_relay_environment"] = string(oldEnvironment)
 		}
@@ -544,7 +612,12 @@ func ensurePrivateBootstrapDirectory(directory string) error {
 
 // Freeze generated identities before the first mutating play. Retries adopt the
 // exact original inputs even when the target was only partially configured.
-func freezeBootstrapInventory(p *installplan.InstallPlan, inventory map[string]any, inspection map[string]bootstrapInspection, directory string) (map[string]any, error) {
+func freezeBootstrapInventory(
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	inspection map[string]bootstrapInspection,
+	directory string,
+) (map[string]any, error) {
 	target := filepath.Join(directory, "inventory.frozen.json")
 	read := func() (map[string]any, error) {
 		info, err := os.Lstat(target)

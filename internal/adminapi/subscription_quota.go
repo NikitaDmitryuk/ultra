@@ -52,7 +52,10 @@ func (s *Server) setSubscriptionQuota(ctx context.Context, h http.Header, accoun
 	if q.ObservedAt != nil {
 		observed = q.ObservedAt.UTC().Format(time.RFC3339)
 	}
-	subscriptionmeta.Announce(h, fmt.Sprintf("Общая квота: осталось %.2f ГиБ. Данные: %s (%s).%s", float64(q.Remaining)/(1<<30), observed, q.State, groups))
+	subscriptionmeta.Announce(
+		h,
+		fmt.Sprintf("Общая квота: осталось %.2f ГиБ. Данные: %s (%s).%s", float64(q.Remaining)/(1<<30), observed, q.State, groups),
+	)
 }
 
 func (s *Server) exitQuotaKinds(ctx context.Context) map[string]string {

@@ -21,11 +21,23 @@ type upgradeRuntimeNodeEvidence struct {
 	CertificatePin       string `json:"certificate_pin"`
 }
 
-func upgradeRuntimeRequests(p *installplan.InstallPlan, inspection upgradeInspection, inventory map[string]any, transaction string) (map[string]any, error) {
+func upgradeRuntimeRequests(
+	p *installplan.InstallPlan,
+	inspection upgradeInspection,
+	inventory map[string]any,
+	transaction string,
+) (map[string]any, error) {
 	if p == nil || p.SourceValues == nil {
 		return nil, errors.New("upgrade_canonical_runtime_required")
 	}
-	r := runtimeHostRequest{Transaction: transaction, Role: config.RoleBridge, Bridge: p.Bridge, Database: p.Database, Features: p.Features, BotEnabled: p.Bot.Enabled}
+	r := runtimeHostRequest{
+		Transaction: transaction,
+		Role:        config.RoleBridge,
+		Bridge:      p.Bridge,
+		Database:    p.Database,
+		Features:    p.Features,
+		BotEnabled:  p.Bot.Enabled,
+	}
 	for _, ex := range p.Exits {
 		r.Exits = append(r.Exits, runtimeHostExit{Name: ex.Name, SSHHost: ex.SSHHost, DialAddr: ex.DialAddr, Port: ex.Port})
 	}
@@ -58,20 +70,27 @@ func upgradeRuntimeRequests(p *installplan.InstallPlan, inspection upgradeInspec
 			return nil, errors.New("upgrade_runtime_exit_proof_unavailable")
 		}
 		host, ok := hosts[alias].(map[string]any)
-		if !ok || host["ansible_host"] != node.Address || host["ultra_exit_id"] != node.ID || host["ansible_user"] != "root" || !runtimeHostValidDigest(evidence.TunnelIdentityDigest) || (evidence.CertificatePin != "" && !runtimeHostValidDigest(evidence.CertificatePin)) {
+		if !ok || host["ansible_host"] != node.Address || host["ultra_exit_id"] != node.ID || host["ansible_user"] != "root" ||
+			!runtimeHostValidDigest(evidence.TunnelIdentityDigest) ||
+			(evidence.CertificatePin != "" && !runtimeHostValidDigest(evidence.CertificatePin)) {
 			return nil, errors.New("upgrade_runtime_exit_proof_unavailable")
 		}
 		// Proofs are authorized only for the immutable strict SSH inventory built
 		// from this bridge inspection, never a caller-provided name or address.
 		sshArgs, ok := host["ansible_ssh_common_args"].(string)
-		if !ok || !strings.Contains(sshArgs, "StrictHostKeyChecking=yes") || !strings.Contains(sshArgs, "IdentitiesOnly=yes") || !strings.Contains(sshArgs, "UserKnownHostsFile=") || node.Pins == "" {
+		if !ok || !strings.Contains(sshArgs, "StrictHostKeyChecking=yes") || !strings.Contains(sshArgs, "IdentitiesOnly=yes") ||
+			!strings.Contains(sshArgs, "UserKnownHostsFile=") ||
+			node.Pins == "" {
 			return nil, errors.New("upgrade_runtime_exit_proof_unavailable")
 		}
 		identityPath, ok := host["ansible_ssh_private_key_file"].(string)
-		if !ok || !filepath.IsAbs(identityPath) || filepath.Base(identityPath) != "identity" || host["ansible_ssh_args"] != "-F /dev/null -o ControlMaster=no -o ControlPath=none" {
+		if !ok || !filepath.IsAbs(identityPath) || filepath.Base(identityPath) != "identity" ||
+			host["ansible_ssh_args"] != "-F /dev/null -o ControlMaster=no -o ControlPath=none" {
 			return nil, errors.New("upgrade_runtime_exit_proof_unavailable")
 		}
-		expectedArgs := "-o BatchMode=yes -o UpdateHostKeys=no -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=" + shellQuote(filepath.Join(filepath.Dir(identityPath), alias+".pins"))
+		expectedArgs := "-o BatchMode=yes -o UpdateHostKeys=no -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=" + shellQuote(
+			filepath.Join(filepath.Dir(identityPath), alias+".pins"),
+		)
 		if sshArgs != expectedArgs {
 			return nil, errors.New("upgrade_runtime_exit_proof_unavailable")
 		}
@@ -90,7 +109,12 @@ func upgradeRuntimeRequests(p *installplan.InstallPlan, inspection upgradeInspec
 		}
 		exitRequest := r
 		exitRequest.Role, exitRequest.Node = config.RoleExit, name
-		exitRequest.Proof = &runtimeHostExitProof{Node: name, SSHHost: node.Address, TunnelIdentityDigest: evidence.TunnelIdentityDigest, CertificatePin: evidence.CertificatePin}
+		exitRequest.Proof = &runtimeHostExitProof{
+			Node:                 name,
+			SSHHost:              node.Address,
+			TunnelIdentityDigest: evidence.TunnelIdentityDigest,
+			CertificatePin:       evidence.CertificatePin,
+		}
 		if name == "" {
 			exitRequest.Proof.NodeID, exitRequest.Proof.TopologySHA = node.ID, inspection.TopologySHA
 		}
@@ -107,7 +131,15 @@ func upgradeRuntimeRequests(p *installplan.InstallPlan, inspection upgradeInspec
 	return requests, nil
 }
 
-func runUpgradeRuntimePhase(ctx context.Context, p *installplan.InstallPlan, inspection upgradeInspection, inventory, releaseVariables map[string]any, directory, python, executable, action string, generation int, retryFailed ...bool) error {
+func runUpgradeRuntimePhase(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inspection upgradeInspection,
+	inventory, releaseVariables map[string]any,
+	directory, python, executable, action string,
+	generation int,
+	retryFailed ...bool,
+) error {
 	if action != "prepare" && action != "apply" && action != "rollback" {
 		return errors.New("upgrade_runtime_phase_invalid")
 	}
@@ -132,7 +164,15 @@ func runUpgradeRuntimePhase(ctx context.Context, p *installplan.InstallPlan, ins
 	if (action == "prepare" || action == "rollback") && len(retryFailed) > 0 && retryFailed[0] {
 		run = deployansible.RunLocalRetryFailed
 	}
-	receipt, err := run(ctx, "upgrade-runtime", inventory, variables, upgradeDependentStageDirectory(directory, "runtime-"+action, generation), python, executable)
+	receipt, err := run(
+		ctx,
+		"upgrade-runtime",
+		inventory,
+		variables,
+		upgradeDependentStageDirectory(directory, "runtime-"+action, generation),
+		python,
+		executable,
+	)
 	if err != nil {
 		return err
 	}
@@ -146,14 +186,22 @@ func runUpgradeRuntimePhase(ctx context.Context, p *installplan.InstallPlan, ins
 	}
 	for host := range requests {
 		result, found := hosts[host]
-		if !found || !result.Verified || (action == "prepare" && result.Status != "prepared" && result.Status != "applied") || (action == "apply" && result.Status != "applied") || (action == "rollback" && result.Status != "rolled_back") {
+		if !found || !result.Verified || (action == "prepare" && result.Status != "prepared" && result.Status != "applied") ||
+			(action == "apply" && result.Status != "applied") ||
+			(action == "rollback" && result.Status != "rolled_back") {
 			return errors.New("upgrade_runtime_phase_unverified")
 		}
 	}
 	return nil
 }
 
-func inspectUpgradeDesiredRuntime(ctx context.Context, p *installplan.InstallPlan, inspection upgradeInspection, inventory, releaseVariables map[string]any, directory, python, executable string) error {
+func inspectUpgradeDesiredRuntime(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inspection upgradeInspection,
+	inventory, releaseVariables map[string]any,
+	directory, python, executable string,
+) error {
 	requests, err := upgradeRuntimeRequests(p, inspection, inventory, lifecycleID(directory))
 	if err != nil {
 		return err
@@ -170,7 +218,15 @@ func inspectUpgradeDesiredRuntime(ctx context.Context, p *installplan.InstallPla
 	}
 	variables["ultra_runtime_warp_assets"] = assets
 	variables["ultra_runtime_probe_requests"] = requests
-	receipt, err := runUpgradeInspection(ctx, "inspect-upgrade-runtime", inventory, variables, filepath.Join(directory, "runtime-inspect"), python, executable)
+	receipt, err := runUpgradeInspection(
+		ctx,
+		"inspect-upgrade-runtime",
+		inventory,
+		variables,
+		filepath.Join(directory, "runtime-inspect"),
+		python,
+		executable,
+	)
 	if err != nil {
 		return err
 	}
@@ -200,7 +256,10 @@ func validateUpgradeRuntimeEvidence(values map[string]any, requests map[string]a
 		}
 		for _, transition := range evidence.Transitions {
 			switch transition {
-			case installplan.RuntimeTransitionTLS, installplan.RuntimeTransitionWARP, installplan.RuntimeTransitionListener, installplan.RuntimeTransitionTunnel:
+			case installplan.RuntimeTransitionTLS,
+				installplan.RuntimeTransitionWARP,
+				installplan.RuntimeTransitionListener,
+				installplan.RuntimeTransitionTunnel:
 				if !evidence.EffectsReady {
 					return errors.New("upgrade_runtime_effect_checkpoint_required")
 				}
@@ -240,7 +299,14 @@ func runtimeWarpAssets() (map[string]string, error) {
 
 // Invoke only after release commit and domain retirement, under the fleet lease.
 // It seals newly owned firewall grants; old rules without receipts are retained.
-func runUpgradeRuntimeEffectsCommit(ctx context.Context, p *installplan.InstallPlan, inspection upgradeInspection, inventory, releaseVariables map[string]any, directory, python, executable string, generation int) error {
+func runUpgradeRuntimeEffectsCommit(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inspection upgradeInspection,
+	inventory, releaseVariables map[string]any,
+	directory, python, executable string,
+	generation int,
+) error {
 	requests, err := upgradeRuntimeRequests(p, inspection, inventory, fmt.Sprintf("%s-runtime-%d", lifecycleID(directory), generation))
 	if err != nil {
 		return err
@@ -250,8 +316,23 @@ func runUpgradeRuntimeEffectsCommit(ctx context.Context, p *installplan.InstallP
 	if err != nil {
 		return err
 	}
-	variables := map[string]any{"ultra_lock_directory": releaseVariables["ultra_lock_directory"], "ultra_release_manifest": releaseVariables["ultra_release_manifest"], "ultra_runtime_probe_requests": requests, "ultra_runtime_effect_inputs": runtimeEffectInputs(requests), "ultra_runtime_warp_assets": assets, "ultra_runtime_action": "commit"}
-	receipt, err := deployansible.RunLocalRetryFailed(ctx, "upgrade-runtime", inventory, variables, upgradeDependentStageDirectory(directory, "runtime-effects-commit", generation), python, executable)
+	variables := map[string]any{
+		"ultra_lock_directory":         releaseVariables["ultra_lock_directory"],
+		"ultra_release_manifest":       releaseVariables["ultra_release_manifest"],
+		"ultra_runtime_probe_requests": requests,
+		"ultra_runtime_effect_inputs":  runtimeEffectInputs(requests),
+		"ultra_runtime_warp_assets":    assets,
+		"ultra_runtime_action":         "commit",
+	}
+	receipt, err := deployansible.RunLocalRetryFailed(
+		ctx,
+		"upgrade-runtime",
+		inventory,
+		variables,
+		upgradeDependentStageDirectory(directory, "runtime-effects-commit", generation),
+		python,
+		executable,
+	)
 	if err != nil {
 		return err
 	}
@@ -263,7 +344,15 @@ func runUpgradeRuntimeEffectsCommit(ctx context.Context, p *installplan.InstallP
 
 // Binary rollback finishes by restoring the exact runtime effect service state.
 // The same immutable request binds this final compensation to its host journal.
-func runUpgradeReleaseRollback(ctx context.Context, p *installplan.InstallPlan, inspection upgradeInspection, inventory, releaseVariables map[string]any, directory, python, executable string, generation int, retryFailed bool) error {
+func runUpgradeReleaseRollback(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inspection upgradeInspection,
+	inventory, releaseVariables map[string]any,
+	directory, python, executable string,
+	generation int,
+	retryFailed bool,
+) error {
 	requests, err := upgradeRuntimeRequests(p, inspection, inventory, fmt.Sprintf("%s-runtime-%d", lifecycleID(directory), generation))
 	if err != nil {
 		return err
@@ -284,7 +373,15 @@ func runUpgradeReleaseRollback(ctx context.Context, p *installplan.InstallPlan, 
 	if retryFailed {
 		run = deployansible.RunLocalRetryFailed
 	}
-	receipt, err := run(ctx, "rollback", inventory, variables, upgradeDependentStageDirectory(directory, "rollback", generation), python, executable)
+	receipt, err := run(
+		ctx,
+		"rollback",
+		inventory,
+		variables,
+		upgradeDependentStageDirectory(directory, "rollback", generation),
+		python,
+		executable,
+	)
 	if err != nil {
 		return err
 	}

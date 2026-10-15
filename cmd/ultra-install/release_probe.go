@@ -64,7 +64,11 @@ func releaseProbe(ctx context.Context, specPath, environmentPath, exitID string,
 		return errors.New("probe_credentials_unavailable")
 	}
 	// Intentionally bypass inherited HTTP(S)_PROXY and NO_PROXY.
-	client := &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{
+		Timeout:       8 * time.Second,
+		Transport:     &http.Transport{Proxy: nil},
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	defer client.CloseIdleConnections()
 	endpoint := "/v1/hardening"
 	if exitID != "" {

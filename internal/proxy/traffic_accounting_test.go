@@ -3,15 +3,16 @@ package proxy
 import (
 	"context"
 	"errors"
-	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
-	"github.com/xtls/xray-core/common/buf"
-	"github.com/xtls/xray-core/common/session"
 	"io"
 	"net"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
+	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/session"
 )
 
 type quotaReader struct{ data []byte }
@@ -36,7 +37,10 @@ func TestBothDirectionsSharePretransferQuota(t *testing.T) {
 	}
 	defer func() { _ = store.Close() }()
 	now := time.Now().UTC()
-	limits := []runtimestate.QuotaLimit{{AccountID: "owner", ExitID: "exit", Period: now.Format("2006-01"), LimitBytes: 5, ExpiresAt: now.Add(time.Hour)}, {ExitID: "exit", Period: now.Format("2006-01"), LimitBytes: 5, ExpiresAt: now.Add(time.Hour)}}
+	limits := []runtimestate.QuotaLimit{
+		{AccountID: "owner", ExitID: "exit", Period: now.Format("2006-01"), LimitBytes: 5, ExpiresAt: now.Add(time.Hour)},
+		{ExitID: "exit", Period: now.Format("2006-01"), LimitBytes: 5, ExpiresAt: now.Add(time.Hour)},
+	}
 	if e = store.SaveSnapshot(runtimestate.Snapshot{ConfirmedAt: now, Payload: []byte(`{}`)}, limits); e != nil {
 		t.Fatal(e)
 	}

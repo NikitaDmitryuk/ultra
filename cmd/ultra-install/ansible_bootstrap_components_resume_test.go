@@ -25,7 +25,13 @@ func TestLinkedBootstrapCompletionAuthenticatesEveryComponent(t *testing.T) {
 	if err = os.Mkdir(attempt, 0700); err != nil {
 		t.Fatal(err)
 	}
-	inventory := map[string]any{"all": map[string]any{"children": map[string]any{"exits": map[string]any{"hosts": map[string]any{"exit_0": map[string]any{}, "exit_1": map[string]any{}}}}}}
+	inventory := map[string]any{
+		"all": map[string]any{
+			"children": map[string]any{
+				"exits": map[string]any{"hosts": map[string]any{"exit_0": map[string]any{}, "exit_1": map[string]any{}}},
+			},
+		},
+	}
 	variables := map[string]any{"ultra_lock_directory": root}
 	inventoryRaw, _ := json.Marshal(inventory)
 	if err = os.WriteFile(filepath.Join(attempt, "inventory.frozen.json"), inventoryRaw, 0600); err != nil {

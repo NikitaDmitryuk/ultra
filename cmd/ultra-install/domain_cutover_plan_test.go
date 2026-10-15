@@ -2,17 +2,43 @@ package main
 
 import (
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"reflect"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/config"
 )
 
 func TestDomainCutoverPlannerPreservesSeparateDialAndTLSNames(t *testing.T) {
-	prior := &config.Spec{Role: config.RoleBridge, GatewayVLESSPort: 18082, PrimaryXHTTP: &config.PrimaryXHTTPIngress{Host: "old.example.com", BackendPort: 18080, PublicXHTTPTLSSpec: config.PublicXHTTPTLSSpec{Port: 443, ServerName: "old.example.com", Path: "/existing"}}}
+	prior := &config.Spec{
+		Role:             config.RoleBridge,
+		GatewayVLESSPort: 18082,
+		PrimaryXHTTP: &config.PrimaryXHTTPIngress{
+			Host:               "old.example.com",
+			BackendPort:        18080,
+			PublicXHTTPTLSSpec: config.PublicXHTTPTLSSpec{Port: 443, ServerName: "old.example.com", Path: "/existing"},
+		},
+	}
 	before, _ := json.Marshal(prior)
-	desired := domainCutoverDesired{Subscription: "sync.example.com", VPN: "edge.example.com", PublicHost: "dial.example.net", Zone: "example.com", Email: "ops@example.com", BotDomain: "backend.example.com", BotPort: 8444, BridgeIPv4: "192.0.2.1"}
+	desired := domainCutoverDesired{
+		Subscription: "sync.example.com",
+		VPN:          "edge.example.com",
+		PublicHost:   "dial.example.net",
+		Zone:         "example.com",
+		Email:        "ops@example.com",
+		BotDomain:    "backend.example.com",
+		BotPort:      8444,
+		BridgeIPv4:   "192.0.2.1",
+	}
 	owned := map[string]any{"records": map[string]any{"subscription": "owned"}}
-	vars, err := buildDomainCutoverVariables(desired, prior, "/private/upgrade/domains", "/private/lease", "https://old.example.com/subscription/fixture", "fixture-key", owned)
+	vars, err := buildDomainCutoverVariables(
+		desired,
+		prior,
+		"/private/upgrade/domains",
+		"/private/lease",
+		"https://old.example.com/subscription/fixture",
+		"fixture-key",
+		owned,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +48,8 @@ func TestDomainCutoverPlannerPreservesSeparateDialAndTLSNames(t *testing.T) {
 			t.Fatalf("%s=%v, want %v", key, ingress[key], want)
 		}
 	}
-	if vars["ultra_bot_domain"] != desired.BotDomain || vars["ultra_lock_directory"] != "/private/lease" || !reflect.DeepEqual(vars["ultra_dns_receipt_seed"], owned) {
+	if vars["ultra_bot_domain"] != desired.BotDomain || vars["ultra_lock_directory"] != "/private/lease" ||
+		!reflect.DeepEqual(vars["ultra_dns_receipt_seed"], owned) {
 		t.Fatal("lost caller-owned identity or evidence")
 	}
 	if vars["ultra_dns_config"].(map[string]any)["vpn_name"] != "edge" {
@@ -32,7 +59,15 @@ func TestDomainCutoverPlannerPreservesSeparateDialAndTLSNames(t *testing.T) {
 	if string(before) != string(after) {
 		t.Fatal("planner mutated observed spec")
 	}
-	again, err := buildDomainCutoverVariables(desired, prior, "/private/upgrade/domains", "/private/lease", "https://old.example.com/subscription/fixture", "fixture-key", owned)
+	again, err := buildDomainCutoverVariables(
+		desired,
+		prior,
+		"/private/upgrade/domains",
+		"/private/lease",
+		"https://old.example.com/subscription/fixture",
+		"fixture-key",
+		owned,
+	)
 	if err != nil || !reflect.DeepEqual(vars, again) {
 		t.Fatal("planner is not deterministic")
 	}
@@ -45,8 +80,21 @@ func TestDomainCutoverPlannerPreservesSeparateDialAndTLSNames(t *testing.T) {
 func TestDomainCutoverPlannerRejectsMissingCallerEvidence(t *testing.T) {
 	for _, test := range []string{"unpublished", "relative-directory", "invalid-host", "missing-probe", "missing-key", "missing-ownership", "foreign-zone"} {
 		t.Run(test, func(t *testing.T) {
-			prior := &config.Spec{Role: config.RoleBridge, PrimaryXHTTP: &config.PrimaryXHTTPIngress{PublicXHTTPTLSSpec: config.PublicXHTTPTLSSpec{Port: 443, Path: "/existing"}, BackendPort: 18080}}
-			desired := domainCutoverDesired{Subscription: "sync.example.com", VPN: "edge.example.com", PublicHost: "192.0.2.1", Zone: "example.com", BotPort: 8444, BridgeIPv4: "192.0.2.1"}
+			prior := &config.Spec{
+				Role: config.RoleBridge,
+				PrimaryXHTTP: &config.PrimaryXHTTPIngress{
+					PublicXHTTPTLSSpec: config.PublicXHTTPTLSSpec{Port: 443, Path: "/existing"},
+					BackendPort:        18080,
+				},
+			}
+			desired := domainCutoverDesired{
+				Subscription: "sync.example.com",
+				VPN:          "edge.example.com",
+				PublicHost:   "192.0.2.1",
+				Zone:         "example.com",
+				BotPort:      8444,
+				BridgeIPv4:   "192.0.2.1",
+			}
 			directory, probe, key := "/private/domains", "https://old.example.com/fixture", "fixture-key"
 			owned := map[string]any{"records": "fixture"}
 			switch test {

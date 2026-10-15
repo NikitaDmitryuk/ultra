@@ -42,8 +42,14 @@ func TestSubscriptionCacheReadsSourceOncePerToken(t *testing.T) {
 				user := users.users["u1"]
 				user.AccountID = "owner-account"
 				users.users["u1"] = user
-				spec := &config.Spec{Role: config.RoleBridge, PublicHost: "localhost", VLESSPort: 443, HappDefaultJSON: happDefault, Reality: config.RealitySpec{ServerNames: []string{"vpn.example"}},
-					PublicXHTTPTLS: &config.PublicXHTTPTLSSpec{Port: 5443, ServerName: "vpn.example", Path: "/connect"}}
+				spec := &config.Spec{
+					Role:            config.RoleBridge,
+					PublicHost:      "localhost",
+					VLESSPort:       443,
+					HappDefaultJSON: happDefault,
+					Reality:         config.RealitySpec{ServerNames: []string{"vpn.example"}},
+					PublicXHTTPTLS:  &config.PublicXHTTPTLSSpec{Port: 5443, ServerName: "vpn.example", Path: "/connect"},
+				}
 				server, err := NewServer("127.0.0.1:0", "admin", users, nil, spec, nil, nil, nil, nil, nil)
 				if err != nil {
 					t.Fatal(err)
@@ -85,11 +91,20 @@ func TestSubscriptionCacheReadsSourceOncePerToken(t *testing.T) {
 					if direct.Code != http.StatusOK {
 						t.Fatal(direct.Code)
 					}
-					format, err := config.ResolveSubscriptionFormat(r.URL.Query().Get("format"), r.URL.Query().Get("transport"), r.UserAgent(), happDefault)
+					format, err := config.ResolveSubscriptionFormat(
+						r.URL.Query().Get("format"),
+						r.URL.Query().Get("transport"),
+						r.UserAgent(),
+						happDefault,
+					)
 					if err != nil {
 						t.Fatal(err)
 					}
-					key := fmt.Sprintf("%x?%s", sha256.Sum256([]byte("issued")), config.SubscriptionCacheQuery(format, r.URL.Query().Get("transport")))
+					key := fmt.Sprintf(
+						"%x?%s",
+						sha256.Sum256([]byte("issued")),
+						config.SubscriptionCacheQuery(format, r.URL.Query().Get("transport")),
+					)
 					entry, ok := snapshot.Entries[key]
 					if !ok {
 						t.Fatalf("missing cached variant %s", query)

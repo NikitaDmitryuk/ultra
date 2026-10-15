@@ -188,7 +188,12 @@ func TestCreateSOCKSUserPreservesRelayRejection(t *testing.T) {
 		http.Error(w, "invalid kind", http.StatusBadRequest)
 	}))
 	defer upstream.Close()
-	b := &Bot{botToken: "test-token", adminRepo: &fakeAdminLister{}, adminAPIURL: upstream.URL, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	b := &Bot{
+		botToken:    "test-token",
+		adminRepo:   &fakeAdminLister{},
+		adminAPIURL: upstream.URL,
+		log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
 	mux := http.NewServeMux()
 	b.registerMiniAppRoutes(mux)
 	req := httptest.NewRequest(http.MethodPost, "/api/users", strings.NewReader(`{"name":"removed","kind":"socks5"}`))

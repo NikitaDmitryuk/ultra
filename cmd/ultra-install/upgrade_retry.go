@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"os"
 	"path/filepath"
+
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 )
 
 // Validate explicit retry authorization before runtime compensation mutates the
@@ -64,7 +65,9 @@ func resetFailedUpgradeAttempt(directory string) error {
 		}
 		archiveRaw, archiveErr := os.ReadFile(archivePath)
 		var job, archived map[string]any
-		if archiveErr != nil || json.Unmarshal(jobRaw, &job) != nil || json.Unmarshal(archiveRaw, &archived) != nil || archived["request_sha256"] != job["request_sha256"] || archived["binary_sha256"] != job["binary_sha256"] {
+		if archiveErr != nil || json.Unmarshal(jobRaw, &job) != nil || json.Unmarshal(archiveRaw, &archived) != nil ||
+			archived["request_sha256"] != job["request_sha256"] ||
+			archived["binary_sha256"] != job["binary_sha256"] {
 			return errors.New("retry_job_receipt_conflict")
 		}
 		previous := float64(1)
@@ -325,7 +328,8 @@ func upgradeFailedAttemptStages(directory string, generation int) ([]string, err
 		Generation int `json:"generation"`
 		Attempt    int `json:"attempt"`
 	}
-	if json.Unmarshal(raw, &marker) != nil || marker.Version != 1 || marker.Generation != generation || marker.Attempt < 1 || marker.Attempt > 1000 {
+	if json.Unmarshal(raw, &marker) != nil || marker.Version != 1 || marker.Generation != generation || marker.Attempt < 1 ||
+		marker.Attempt > 1000 {
 		return nil, errors.New("upgrade_domain_attempt_invalid")
 	}
 	for _, action := range []string{"prepare", "apply", "accept", "rollback", "rollback-dns", "promote", "retire", "retire-dns"} {

@@ -61,7 +61,20 @@ result=pathlib.Path(variables['ultra_result_file']); result.write_text(json.dump
 			}
 			defer release()
 			p := &installplan.InstallPlan{Bridge: installplan.BridgeConfig{SSHHost: "192.0.2.1"}}
-			err = applyReservedBootstrap(ctx, context.Background(), p, map[string]any{"all": map[string]any{}}, nil, directory, root, root, python, stub, "human", release)
+			err = applyReservedBootstrap(
+				ctx,
+				context.Background(),
+				p,
+				map[string]any{"all": map[string]any{}},
+				nil,
+				directory,
+				root,
+				root,
+				python,
+				stub,
+				"human",
+				release,
+			)
 			if err == nil {
 				t.Fatal("finalization fault reported success")
 			}

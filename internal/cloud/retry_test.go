@@ -26,14 +26,26 @@ func TestRetryCreatesAttemptOnlyForFailedInstallation(t *testing.T) {
 		t.Run(test.state+"/"+test.phase, func(t *testing.T) {
 			s, provider, _ := testService()
 			store := s.Store.(*memoryStore)
-			op := Operation{ID: "purchase", State: test.state, Phase: test.phase, InstallAttempt: test.attempt, InstanceID: "vm", ExitID: "exit", FirewallID: "firewall", Charged: true}
+			op := Operation{
+				ID:             "purchase",
+				State:          test.state,
+				Phase:          test.phase,
+				InstallAttempt: test.attempt,
+				InstanceID:     "vm",
+				ExitID:         "exit",
+				FirewallID:     "firewall",
+				Charged:        true,
+			}
 			store.ops[op.ID] = op
 			err := s.Action(context.Background(), 1, op.ID, "retry")
 			if test.conflict != errors.Is(err, ErrConflict) || (err != nil && !test.conflict) {
 				t.Fatalf("retry: %v", err)
 			}
 			saved := store.ops[op.ID]
-			if saved.InstallAttempt != test.want || saved.Phase != op.Phase || saved.InstanceID != op.InstanceID || saved.ExitID != op.ExitID || saved.FirewallID != op.FirewallID || !saved.Charged {
+			if saved.InstallAttempt != test.want || saved.Phase != op.Phase || saved.InstanceID != op.InstanceID ||
+				saved.ExitID != op.ExitID ||
+				saved.FirewallID != op.FirewallID ||
+				!saved.Charged {
 				t.Fatalf("retry changed purchase or wrong attempt: %#v", saved)
 			}
 			if provider.creates != 0 {

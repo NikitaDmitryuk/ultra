@@ -152,10 +152,24 @@ func TestUpgradeRuntimeEvidenceAllowsOrdinaryChangesAndRejectsSpecificProvisioni
 func TestUpgradeRuntimeProofBoundToStaticAndDynamicFrozenTargets(t *testing.T) {
 	s, request := runtimeHostFixture(t)
 	_ = s
-	plan := &installplan.InstallPlan{SourceValues: map[string]string{}, Bridge: request.Bridge, Database: request.Database, Features: request.Features}
+	plan := &installplan.InstallPlan{
+		SourceValues: map[string]string{},
+		Bridge:       request.Bridge,
+		Database:     request.Database,
+		Features:     request.Features,
+	}
 	plan.Exits = []installplan.ExitNode{{Name: "primary", SSHHost: "192.0.2.2", DialAddr: "192.0.2.2", Port: 9443}}
 	var inspection upgradeInspection
-	raw := `{"observed_at":1,"topology_sha256":"` + strings.Repeat("a", 64) + `","identity":"fixture","nodes":[{"id":"11111111-1111-1111-1111-111111111111","address":"192.0.2.2","pins":"fixture-pin"},{"id":"22222222-2222-2222-2222-222222222222","address":"192.0.2.3","pins":"fixture-pin"}],"runtime_nodes":{"11111111-1111-1111-1111-111111111111":{"name":"primary","managed":false,"tunnel_identity_digest":"` + strings.Repeat("b", 64) + `"},"22222222-2222-2222-2222-222222222222":{"name":"dynamic","managed":true,"tunnel_identity_digest":"` + strings.Repeat("c", 64) + `"}}}`
+	raw := `{"observed_at":1,"topology_sha256":"` + strings.Repeat(
+		"a",
+		64,
+	) + `","identity":"fixture","nodes":[{"id":"11111111-1111-1111-1111-111111111111","address":"192.0.2.2","pins":"fixture-pin"},{"id":"22222222-2222-2222-2222-222222222222","address":"192.0.2.3","pins":"fixture-pin"}],"runtime_nodes":{"11111111-1111-1111-1111-111111111111":{"name":"primary","managed":false,"tunnel_identity_digest":"` + strings.Repeat(
+		"b",
+		64,
+	) + `"},"22222222-2222-2222-2222-222222222222":{"name":"dynamic","managed":true,"tunnel_identity_digest":"` + strings.Repeat(
+		"c",
+		64,
+	) + `"}}}`
 	if json.Unmarshal([]byte(raw), &inspection) != nil {
 		t.Fatal("fixture")
 	}
@@ -279,7 +293,15 @@ result.chmod(0o600)
 			if err := os.WriteFile(filepath.Join(directory, "domain-generation-3.json"), marker, 0600); err != nil {
 				t.Fatal(err)
 			}
-			transaction := &upgradeDomainTransaction{Changed: true, DNSChanged: true, BackendChanged: true, ProbeFile: probe, Evidence: upgradeDomainEvidence{Subscription: "old.example.com"}, Variables: map[string]any{"ultra_lock_directory": lock, "ultra_subscription_domain": "new.example.com"}, Desired: map[string]any{"subscription": map[string]string{"name": "new", "data": "192.0.2.1"}}}
+			transaction := &upgradeDomainTransaction{
+				Changed:        true,
+				DNSChanged:     true,
+				BackendChanged: true,
+				ProbeFile:      probe,
+				Evidence:       upgradeDomainEvidence{Subscription: "old.example.com"},
+				Variables:      map[string]any{"ultra_lock_directory": lock, "ultra_subscription_domain": "new.example.com"},
+				Desired:        map[string]any{"subscription": map[string]string{"name": "new", "data": "192.0.2.1"}},
+			}
 			inventory := map[string]any{}
 			if err := transaction.phase(ctx, inventory, directory, python, executable, action, 3); err == nil {
 				t.Fatal("initial failure missing")
@@ -302,7 +324,10 @@ result.chmod(0o600)
 				if err := json.Unmarshal(original, &saved); err != nil {
 					t.Fatal(err)
 				}
-				if saved.Variables["ultra_cutover_subscription_url_file"] != probe || saved.Variables["ultra_cutover_subscription_url_sha256"] != transaction.ProbeSHA256 || saved.Variables["ultra_cutover_subscription_source_domain"] != "old.example.com" || saved.Variables["ultra_subscription_domain"] != "new.example.com" {
+				if saved.Variables["ultra_cutover_subscription_url_file"] != probe ||
+					saved.Variables["ultra_cutover_subscription_url_sha256"] != transaction.ProbeSHA256 ||
+					saved.Variables["ultra_cutover_subscription_source_domain"] != "old.example.com" ||
+					saved.Variables["ultra_subscription_domain"] != "new.example.com" {
 					t.Fatal("request does not bind observed probe host separately from acceptance target")
 				}
 			}

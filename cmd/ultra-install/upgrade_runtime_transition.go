@@ -29,7 +29,12 @@ type runtimeTransitionPlan struct {
 	WARPPort       int                                 `json:"warp_port,omitempty"`
 }
 
-func buildRuntimeTransitionPlan(in runtimeProbeInput, raw []byte, kinds []installplan.RuntimeTransitionKind, beforeRaw ...[]byte) (*runtimeTransitionPlan, error) {
+func buildRuntimeTransitionPlan(
+	in runtimeProbeInput,
+	raw []byte,
+	kinds []installplan.RuntimeTransitionKind,
+	beforeRaw ...[]byte,
+) (*runtimeTransitionPlan, error) {
 	var spec config.Spec
 	if json.Unmarshal(raw, &spec) != nil {
 		return nil, runtimeHostError("projection_failed")
@@ -39,13 +44,20 @@ func buildRuntimeTransitionPlan(in runtimeProbeInput, raw []byte, kinds []instal
 		if json.Unmarshal(beforeRaw[0], &prior) != nil {
 			return nil, runtimeHostError("projection_failed")
 		}
-		if (spec.Role == config.RoleExit && prior.VLESSPort != spec.VLESSPort) || (spec.Role == config.RoleBridge && prior.Exit.Port != spec.Exit.Port) {
+		if (spec.Role == config.RoleExit && prior.VLESSPort != spec.VLESSPort) ||
+			(spec.Role == config.RoleBridge && prior.Exit.Port != spec.Exit.Port) {
 			// DB-backed routing uses exits.Node.Port, not spec.Exit.Port. An exact
 			// bridge-local node-row CAS checkpoint must precede either side's switch.
 			return nil, runtimeHostError("tunnel_port_db_checkpoint_required")
 		}
 	}
-	plan := &runtimeTransitionPlan{Role: in.Request.Role, Classes: kinds, Ports: []int{}, BotService: in.Request.Role == config.RoleBridge, BotEnabled: in.Request.BotEnabled}
+	plan := &runtimeTransitionPlan{
+		Role:       in.Request.Role,
+		Classes:    kinds,
+		Ports:      []int{},
+		BotService: in.Request.Role == config.RoleBridge,
+		BotEnabled: in.Request.BotEnabled,
+	}
 	for _, kind := range kinds {
 		switch kind {
 		case installplan.RuntimeTransitionTLS, installplan.RuntimeTransitionTunnel:
@@ -86,7 +98,8 @@ func buildRuntimeTransitionPlan(in runtimeProbeInput, raw []byte, kinds []instal
 		plan.TLSName = spec.SplitHTTPTLS.ServerName
 		plan.TLSProvision = spec.TunnelTLSProvision
 		if spec.Role == config.RoleExit {
-			if spec.ExitCertPaths.CertFile != "/etc/ultra-relay/fullchain.pem" || spec.ExitCertPaths.KeyFile != "/etc/ultra-relay/privkey.pem" {
+			if spec.ExitCertPaths.CertFile != "/etc/ultra-relay/fullchain.pem" ||
+				spec.ExitCertPaths.KeyFile != "/etc/ultra-relay/privkey.pem" {
 				return nil, runtimeHostError("tls_custom_path_migration_required")
 			}
 			if in.Request.Proof != nil {
@@ -97,7 +110,11 @@ func buildRuntimeTransitionPlan(in runtimeProbeInput, raw []byte, kinds []instal
 	return plan, nil
 }
 
-func (s runtimeHostStore) authorizedRuntimeTransitions(in runtimeProbeInput, kinds []installplan.RuntimeTransitionKind, plan *runtimeTransitionPlan) bool {
+func (s runtimeHostStore) authorizedRuntimeTransitions(
+	in runtimeProbeInput,
+	kinds []installplan.RuntimeTransitionKind,
+	plan *runtimeTransitionPlan,
+) bool {
 	if len(kinds) == 0 {
 		return true
 	}
@@ -118,7 +135,8 @@ func (s runtimeHostStore) authorizedRuntimeTransitions(in runtimeProbeInput, kin
 	bound := in
 	bound.Action = ""
 	bound.BotActive = false
-	if json.Unmarshal(image.Data, &binding) != nil || binding.Version != 1 || binding.Binding != runtimeHostDigest(bound) || (binding.State != "prepared" && binding.State != "applying" && binding.State != "applied" && binding.State != "rolled_back") {
+	if json.Unmarshal(image.Data, &binding) != nil || binding.Version != 1 || binding.Binding != runtimeHostDigest(bound) ||
+		(binding.State != "prepared" && binding.State != "applying" && binding.State != "applied" && binding.State != "rolled_back") {
 		return false
 	}
 	if plan == nil || !reflect.DeepEqual(binding.Plan, *plan) {

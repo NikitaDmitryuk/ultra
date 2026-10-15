@@ -14,7 +14,14 @@ import (
 // All mutation errors return through this transaction instead of os.Exit. A
 // legacy adoption restores only application files and a compatible binary; its
 // primary database and durable accounting state are never rolled back.
-func applyReservedBootstrap(ctx, originalCtx context.Context, p *installplan.InstallPlan, inventory map[string]any, inspection map[string]bootstrapInspection, directory, planRoot, stateRoot, python, executable, format string, release func()) (returnErr error) {
+func applyReservedBootstrap(
+	ctx, originalCtx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	inspection map[string]bootstrapInspection,
+	directory, planRoot, stateRoot, python, executable, format string,
+	release func(),
+) (returnErr error) {
 	held := true
 	verified := false
 	if resumed, err := resumeBootstrapFinalization(ctx, p, directory, planRoot, python, executable); resumed || err != nil {
@@ -51,7 +58,15 @@ func applyReservedBootstrap(ctx, originalCtx context.Context, p *installplan.Ins
 			return
 		}
 		stage := bootstrapMutationStage(directory, "rollback-adoption", generation)
-		_, err := deployansible.RunLocal(cleanup, "rollback-adoption", inventory, map[string]any{"ultra_lifecycle_id": lifecycleID(directory)}, stage, python, executable)
+		_, err := deployansible.RunLocal(
+			cleanup,
+			"rollback-adoption",
+			inventory,
+			map[string]any{"ultra_lifecycle_id": lifecycleID(directory)},
+			stage,
+			python,
+			executable,
+		)
 		if err != nil {
 			returnErr = errors.Join(returnErr, errors.New("bootstrap_compatible_rollback_unconfirmed"))
 			return

@@ -30,7 +30,8 @@ func stableVersion(version string) bool {
 }
 
 func validateChannelIdentity(value *channelIdentity) bool {
-	return value == nil || (stableVersion(value.Version) && regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(value.SourceCommit) && regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(value.ManifestSHA256))
+	return value == nil ||
+		(stableVersion(value.Version) && regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(value.SourceCommit) && regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(value.ManifestSHA256))
 }
 
 func readChannelState(path string) (channelState, error) {
@@ -48,7 +49,9 @@ func readChannelState(path string) (channelState, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&state); err != nil || state.Schema != 1 || !validateChannelIdentity(state.Accepted) || !validateChannelIdentity(state.Pending) || len(state.Failed) > 128 {
+	if err = decoder.Decode(&state); err != nil || state.Schema != 1 || !validateChannelIdentity(state.Accepted) ||
+		!validateChannelIdentity(state.Pending) ||
+		len(state.Failed) > 128 {
 		return state, errors.New("auto_channel_state_invalid")
 	}
 	var extra any

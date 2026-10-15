@@ -4,19 +4,36 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"net/url"
+	"testing"
+
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
-	"net/url"
-	"testing"
 )
 
 func TestSubscriptionOnlyAutoAndPublishedEnabledCountries(t *testing.T) {
-	spec := &config.Spec{DevMode: true, PublicHost: "example.com", VLESSPort: 443, PublicEntries: []config.PublicEntry{{ID: "other", Host: "other.example.com", TCPPort: 443}}}
+	spec := &config.Spec{
+		DevMode:       true,
+		PublicHost:    "example.com",
+		VLESSPort:     443,
+		PublicEntries: []config.PublicEntry{{ID: "other", Host: "other.example.com", TCPPort: 443}},
+	}
 	// The public subscription uses the primary listener even when technical exports have alternatives.
 	a, b, c := "a", "b", "c"
-	user := auth.User{UUID: "owner", Routes: []auth.RouteCredential{{UUID: "nl-a", ExitID: &a, Published: true}, {UUID: "nl-b", ExitID: &b, Published: true}, {UUID: "de", ExitID: &c, Published: true}}}
-	nodes := []exits.Node{{ID: a, Enabled: true, Priority: 100, CountryCode: "NL"}, {ID: b, Enabled: true, Priority: 200, CountryCode: "NL"}, {ID: c, Enabled: false, CountryCode: "DE"}}
+	user := auth.User{
+		UUID: "owner",
+		Routes: []auth.RouteCredential{
+			{UUID: "nl-a", ExitID: &a, Published: true},
+			{UUID: "nl-b", ExitID: &b, Published: true},
+			{UUID: "de", ExitID: &c, Published: true},
+		},
+	}
+	nodes := []exits.Node{
+		{ID: a, Enabled: true, Priority: 100, CountryCode: "NL"},
+		{ID: b, Enabled: true, Priority: 200, CountryCode: "NL"},
+		{ID: c, Enabled: false, CountryCode: "DE"},
+	}
 	health := map[string]exits.Health{a: {Eligible: true}, b: {Eligible: true}, c: {Eligible: false}}
 	uris, err := subscriptionURIs(spec, user, nodes, health, "")
 	if err != nil || len(uris) != 2 {
@@ -57,10 +74,21 @@ func TestCountryFlagUsesOnlyCountryRegionCodes(t *testing.T) {
 }
 
 func TestSubscriptionUsesSingleConfiguredXHTTPTransport(t *testing.T) {
-	spec := &config.Spec{PublicHost: "example.com", VLESSPort: 443, Reality: config.RealitySpec{ServerNames: []string{"example.com"}, PublicKey: "test"}, AntiCensor: &config.AntiCensorSpec{PublicXHTTPPort: 8443}}
+	spec := &config.Spec{
+		PublicHost: "example.com",
+		VLESSPort:  443,
+		Reality:    config.RealitySpec{ServerNames: []string{"example.com"}, PublicKey: "test"},
+		AntiCensor: &config.AntiCensorSpec{PublicXHTTPPort: 8443},
+	}
 	exit := "nl"
 	user := auth.User{UUID: "owner", Routes: []auth.RouteCredential{{UUID: "alias", ExitID: &exit, Published: true}}}
-	uris, e := subscriptionURIs(spec, user, []exits.Node{{ID: exit, Enabled: true, CountryCode: "NL"}}, map[string]exits.Health{exit: {Eligible: true}}, "")
+	uris, e := subscriptionURIs(
+		spec,
+		user,
+		[]exits.Node{{ID: exit, Enabled: true, CountryCode: "NL"}},
+		map[string]exits.Health{exit: {Eligible: true}},
+		"",
+	)
 	if e != nil || len(uris) != 2 {
 		t.Fatalf("count=%d err=%v", len(uris), e)
 	}
@@ -99,7 +127,12 @@ func TestHappProfilesPreserveRouteCredentials(t *testing.T) {
 	}}
 	exit := "nl"
 	user := auth.User{UUID: "owner", Routes: []auth.RouteCredential{{UUID: "country", ExitID: &exit, Published: true}}}
-	profiles, err := subscriptionHapp(spec, user, []exits.Node{{ID: exit, Enabled: true, CountryCode: "NL"}}, map[string]exits.Health{exit: {Eligible: true}})
+	profiles, err := subscriptionHapp(
+		spec,
+		user,
+		[]exits.Node{{ID: exit, Enabled: true, CountryCode: "NL"}},
+		map[string]exits.Health{exit: {Eligible: true}},
+	)
 	if err != nil || len(profiles) != 2 {
 		t.Fatalf("profiles=%d err=%v", len(profiles), err)
 	}
@@ -161,7 +194,8 @@ func TestSubscriptionXHTTPTLSPreservesCredentials(t *testing.T) {
 		if u.User.Username() != old.User.Username() || u.Fragment != old.Fragment || u.Hostname() != old.Hostname() {
 			t.Fatal("changed identity or location")
 		}
-		if q.Get("type") != "xhttp" || q.Get("security") != "tls" || q.Get("flow") != "" || q.Get("sni") != "vpn.example" || u.Port() != "5443" {
+		if q.Get("type") != "xhttp" || q.Get("security") != "tls" || q.Get("flow") != "" || q.Get("sni") != "vpn.example" ||
+			u.Port() != "5443" {
 			t.Fatal("wrong TLS transport")
 		}
 	}
@@ -182,8 +216,14 @@ func TestSubscriptionXHTTPTLSPreservesCredentials(t *testing.T) {
 func TestSubscriptionCountriesRemainStableAcrossHealthChanges(t *testing.T) {
 	spec := &config.Spec{DevMode: true, PublicHost: "bridge.example", VLESSPort: 443}
 	nl, us := "nl", "us"
-	user := auth.User{UUID: "owner", Routes: []auth.RouteCredential{{UUID: "nl-route", ExitID: &nl, Published: true}, {UUID: "us-route", ExitID: &us, Published: true}}}
-	nodes := []exits.Node{{ID: nl, Enabled: true, Priority: 100, CountryCode: "NL"}, {ID: us, Enabled: true, Priority: 200, CountryCode: "US"}}
+	user := auth.User{
+		UUID:   "owner",
+		Routes: []auth.RouteCredential{{UUID: "nl-route", ExitID: &nl, Published: true}, {UUID: "us-route", ExitID: &us, Published: true}},
+	}
+	nodes := []exits.Node{
+		{ID: nl, Enabled: true, Priority: 100, CountryCode: "NL"},
+		{ID: us, Enabled: true, Priority: 200, CountryCode: "US"},
+	}
 	healthy := map[string]exits.Health{nl: {Eligible: true}, us: {Eligible: true}}
 	for _, format := range []string{"uri", "happ"} {
 		t.Run(format, func(t *testing.T) {

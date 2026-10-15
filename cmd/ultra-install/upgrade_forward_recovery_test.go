@@ -91,7 +91,11 @@ func TestForwardRecoveryBrokerOrderingAndFailure(t *testing.T) {
 					return errors.New("restart failed")
 				}
 				if kind == "lifecycle-changed" {
-					writeForwardJSON(t, filepath.Join(root, "lifecycle.json"), map[string]any{"id": lifecycleID(directory), "phase": "applying"})
+					writeForwardJSON(
+						t,
+						filepath.Join(root, "lifecycle.json"),
+						map[string]any{"id": lifecycleID(directory), "phase": "applying"},
+					)
 				}
 				return nil
 			}
@@ -161,7 +165,17 @@ func forwardPriorRecoveryFixture(t *testing.T) (forwardUpgradeJournal, forwardOl
 	if err := freezeOperatorPlan(priorDir, plan, release); err != nil {
 		t.Fatal(err)
 	}
-	writeForwardJSON(t, filepath.Join(priorDir, "execution-mode.json"), frozenExecution{Schema: 1, Local: true, Target: plan.Bridge.SSHHost + "|" + plan.Bridge.Address, LockDirectory: root, OperatorDirectory: filepath.Join(root, "operator")})
+	writeForwardJSON(
+		t,
+		filepath.Join(priorDir, "execution-mode.json"),
+		frozenExecution{
+			Schema:            1,
+			Local:             true,
+			Target:            plan.Bridge.SSHHost + "|" + plan.Bridge.Address,
+			LockDirectory:     root,
+			OperatorDirectory: filepath.Join(root, "operator"),
+		},
+	)
 	// Exact prior bundle archived in its immutable release, independent of new code.
 	intent, err := loadForwardIntent(filepath.Join(priorDir, "forward-handoff.json"))
 	if err != nil {
@@ -195,7 +209,22 @@ func forwardPriorRecoveryFixture(t *testing.T) (forwardUpgradeJournal, forwardOl
 	if err := archive.Close(); err != nil {
 		t.Fatal(err)
 	}
-	names := []string{"ultra-relay-linux-amd64", "ultra-relay-linux-arm64", "ultra-bot-linux-amd64", "ultra-bot-linux-arm64", "ultra-client-linux-amd64", "ultra-client-linux-arm64", "ultra-recovery.tar.gz", "ultra-install-linux-amd64", "ultra-install-linux-arm64", "ultra-ansible.tar.gz", "ultra-ansible-runtime-linux-amd64.tar.gz", "ultra-ansible-runtime-linux-arm64.tar.gz", "mobile-bootstrap.sh", "checksums.txt"}
+	names := []string{
+		"ultra-relay-linux-amd64",
+		"ultra-relay-linux-arm64",
+		"ultra-bot-linux-amd64",
+		"ultra-bot-linux-arm64",
+		"ultra-client-linux-amd64",
+		"ultra-client-linux-arm64",
+		"ultra-recovery.tar.gz",
+		"ultra-install-linux-amd64",
+		"ultra-install-linux-arm64",
+		"ultra-ansible.tar.gz",
+		"ultra-ansible-runtime-linux-amd64.tar.gz",
+		"ultra-ansible-runtime-linux-arm64.tar.gz",
+		"mobile-bootstrap.sh",
+		"checksums.txt",
+	}
 	assets := []map[string]any{}
 	for _, name := range names {
 		data := []byte("fixture:" + name)
@@ -209,10 +238,29 @@ func forwardPriorRecoveryFixture(t *testing.T) (forwardUpgradeJournal, forwardOl
 		}
 		assets = append(assets, map[string]any{"name": name, "sha256": digestSHA256(data), "size": len(data)})
 	}
-	manifest := map[string]any{"schema_version": 1, "version": version, "source_commit": commit, "database_schema_min": 24, "database_schema_max": 25, "capabilities": []string{"service-access-v1", "provider-pool-quota-v1", "lifecycle-gate-v1", "ansible-deploy-v1"}, "assets": assets}
+	manifest := map[string]any{
+		"schema_version":      1,
+		"version":             version,
+		"source_commit":       commit,
+		"database_schema_min": 24,
+		"database_schema_max": 25,
+		"capabilities":        []string{"service-access-v1", "provider-pool-quota-v1", "lifecycle-gate-v1", "ansible-deploy-v1"},
+		"assets":              assets,
+	}
 	writeForwardJSON(t, filepath.Join(release, "release-manifest.json"), manifest)
 	manifestRaw, _ := json.Marshal(manifest)
-	journal := map[string]any{"schema": 1, "commit": commit, "version": version, "remote_attempt": attempt, "stage": "upgrade", "mutator_dispatched": true, "forward_only": true, "forward_journal_sha256": proof.SHA256, "manifest_sha256": digestSHA256(manifestRaw), "staged_config_sha256": digestSHA256(raw)}
+	journal := map[string]any{
+		"schema":                 1,
+		"commit":                 commit,
+		"version":                version,
+		"remote_attempt":         attempt,
+		"stage":                  "upgrade",
+		"mutator_dispatched":     true,
+		"forward_only":           true,
+		"forward_journal_sha256": proof.SHA256,
+		"manifest_sha256":        digestSHA256(manifestRaw),
+		"staged_config_sha256":   digestSHA256(raw),
+	}
 	journalRaw, _ := json.Marshal(journal)
 	journalPath := filepath.Join(filepath.Dir(proof.Path), "forward-prior-operation.json")
 	if err := os.WriteFile(journalPath, journalRaw, 0600); err != nil {
@@ -250,7 +298,11 @@ func TestForwardRecoveryPriorCandidateAudit(t *testing.T) {
 				}
 				writeForwardJSON(t, filepath.Join(prior.Directory, "runtime-use.json"), map[string]any{"runtime_directory": runtimeDir})
 			case "current-lifecycle-mismatch":
-				writeForwardJSON(t, filepath.Join(root, "lifecycle.json"), map[string]any{"id": lifecycleID(directory), "phase": "applying"})
+				writeForwardJSON(
+					t,
+					filepath.Join(root, "lifecycle.json"),
+					map[string]any{"id": lifecycleID(directory), "phase": "applying"},
+				)
 			case "foreign-directory":
 				prior.Directory = filepath.Join(root, "upgrade-v0.0.99")
 			case "foreign-proof":
@@ -310,7 +362,12 @@ func TestForwardRecoveryBootstrapStagesRemainBoundOnRetry(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(stage, "request.json"), request, 0600); err != nil {
 				t.Fatal(err)
 			}
-			evidence := map[string]any{"schema_version": 1, "operation": "bootstrap-forward-broker", "request_sha256": digestSHA256(request), "binary_sha256": digestSHA256(request)}
+			evidence := map[string]any{
+				"schema_version": 1,
+				"operation":      "bootstrap-forward-broker",
+				"request_sha256": digestSHA256(request),
+				"binary_sha256":  digestSHA256(request),
+			}
 			writeForwardJSON(t, filepath.Join(stage, "job.json"), evidence)
 			state := kind
 			if state != "running" && state != "failed" && state != "succeeded" {
@@ -346,7 +403,10 @@ func TestForwardRecoveryBootstrapStagesRemainBoundOnRetry(t *testing.T) {
 
 // Populate a retained first-guard failure using the real broker identity inputs,
 // while keeping the prior journal/release audit from the recovery fixture.
-func forwardFailedBootstrapFixture(t *testing.T, legacy bool) (forwardUpgradeJournal, forwardOldOperation, string, string, forwardPriorCandidate, string) {
+func forwardFailedBootstrapFixture(
+	t *testing.T,
+	legacy bool,
+) (forwardUpgradeJournal, forwardOldOperation, string, string, forwardPriorCandidate, string) {
 	t.Helper()
 	proof, old, root, directory, prior := forwardPriorRecoveryFixture(t)
 	intentPath := filepath.Join(prior.Directory, "forward-handoff.json")
@@ -378,7 +438,12 @@ func forwardFailedBootstrapFixture(t *testing.T, legacy bool) (forwardUpgradeJou
 	if err := os.WriteFile(filepath.Join(old.Directory, "activate", "request.json"), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	binding := map[string]any{"schema_version": 1, "operation": "upgrade", "request_sha256": digestSHA256(raw), "binary_sha256": digestSHA256(raw)}
+	binding := map[string]any{
+		"schema_version": 1,
+		"operation":      "upgrade",
+		"request_sha256": digestSHA256(raw),
+		"binary_sha256":  digestSHA256(raw),
+	}
 	for _, name := range []string{"job.json", "receipt.json"} {
 		writeForwardJSON(t, filepath.Join(old.Directory, "activate", name), binding)
 	}
@@ -428,9 +493,18 @@ func forwardFailedBootstrapFixture(t *testing.T, legacy bool) (forwardUpgradeJou
 	if err := os.WriteFile(filepath.Join(stage, "request.json"), request, 0600); err != nil {
 		t.Fatal(err)
 	}
-	binding = map[string]any{"schema_version": 1, "operation": "bootstrap-forward-broker", "request_sha256": digestSHA256(request), "binary_sha256": digestSHA256(request)}
+	binding = map[string]any{
+		"schema_version": 1,
+		"operation":      "bootstrap-forward-broker",
+		"request_sha256": digestSHA256(request),
+		"binary_sha256":  digestSHA256(request),
+	}
 	writeForwardJSON(t, filepath.Join(stage, "job.json"), binding)
-	diagnostic := map[string]any{"stage": "Verify frozen broker identity and predecessor gate before replacement", "node": "bridge", "code": "task_failed"}
+	diagnostic := map[string]any{
+		"stage": "Verify frozen broker identity and predecessor gate before replacement",
+		"node":  "bridge",
+		"code":  "task_failed",
+	}
 	binding["state"], binding["code"], binding["exit_code"], binding["diagnostic"] = "failed", "ansible_failed", 2, diagnostic
 	binding["started_at"], binding["finished_at"] = 1, 2
 	writeForwardJSON(t, filepath.Join(stage, "receipt.json"), binding)
@@ -439,7 +513,55 @@ func forwardFailedBootstrapFixture(t *testing.T, legacy bool) (forwardUpgradeJou
 }
 
 func TestForwardRecoveryPriorFailedBootstrapRequiresFirstGuard(t *testing.T) {
-	kinds := []string{"success", "success-with-drain", "running", "succeeded", "generic-failure", "later-guard", "wrong-node", "wrong-diagnostic-code", "diagnostic-mismatch", "extra-diagnostic-field", "missing-diagnostic", "missing-receipt", "missing-job", "missing-bundle", "exit-one", "exit-string", "missing-exit", "result-file", "receipt-result", "handoff", "activation", "extra-file", "extra-bundle-file", "public-stage", "public-file", "symlink-file", "foreign-owner", "job-operation", "job-schema", "job-request", "receipt-request", "receipt-binary", "extra-receipt-field", "extra-job-field", "changed-inventory", "old-id", "candidate-id", "controller-directory", "old-broker-identity", "target-broker-identity", "installer-path", "runtime-sha", "previous-broker", "extra-variable", "old-activation-job", "old-activation-lifecycle", "old-activation-inventory"}
+	kinds := []string{
+		"success",
+		"success-with-drain",
+		"running",
+		"succeeded",
+		"generic-failure",
+		"later-guard",
+		"wrong-node",
+		"wrong-diagnostic-code",
+		"diagnostic-mismatch",
+		"extra-diagnostic-field",
+		"missing-diagnostic",
+		"missing-receipt",
+		"missing-job",
+		"missing-bundle",
+		"exit-one",
+		"exit-string",
+		"missing-exit",
+		"result-file",
+		"receipt-result",
+		"handoff",
+		"activation",
+		"extra-file",
+		"extra-bundle-file",
+		"public-stage",
+		"public-file",
+		"symlink-file",
+		"foreign-owner",
+		"job-operation",
+		"job-schema",
+		"job-request",
+		"receipt-request",
+		"receipt-binary",
+		"extra-receipt-field",
+		"extra-job-field",
+		"changed-inventory",
+		"old-id",
+		"candidate-id",
+		"controller-directory",
+		"old-broker-identity",
+		"target-broker-identity",
+		"installer-path",
+		"runtime-sha",
+		"previous-broker",
+		"extra-variable",
+		"old-activation-job",
+		"old-activation-lifecycle",
+		"old-activation-inventory",
+	}
 	for _, shape := range []string{"legacy", "current"} {
 		t.Run(shape, func(t *testing.T) {
 			for _, kind := range kinds {
@@ -507,10 +629,18 @@ func TestForwardRecoveryPriorFailedBootstrapRequiresFirstGuard(t *testing.T) {
 						if err := os.WriteFile(filepath.Join(drain, "bundle", "controller.py"), content, 0600); err != nil {
 							t.Fatal(err)
 						}
-						request := map[string]any{"inventory": old.Inventory, "variables": forwardDrainVariables(root, old.ID, lifecycleID(prior.Directory))}
+						request := map[string]any{
+							"inventory": old.Inventory,
+							"variables": forwardDrainVariables(root, old.ID, lifecycleID(prior.Directory)),
+						}
 						raw, _ := json.Marshal(request)
 						writeForwardJSON(t, filepath.Join(drain, "request.json"), request)
-						binding := map[string]any{"schema_version": 1, "operation": "drain-upgrade-workers", "request_sha256": digestSHA256(raw), "binary_sha256": digestSHA256(raw)}
+						binding := map[string]any{
+							"schema_version": 1,
+							"operation":      "drain-upgrade-workers",
+							"request_sha256": digestSHA256(raw),
+							"binary_sha256":  digestSHA256(raw),
+						}
 						writeForwardJSON(t, filepath.Join(drain, "job.json"), binding)
 						result := map[string]any{"verified": true, "old_id": old.ID, "new_id": lifecycleID(prior.Directory)}
 						writeForwardJSON(t, filepath.Join(drain, "result.json"), result)
@@ -553,7 +683,13 @@ func TestForwardRecoveryPriorFailedBootstrapRequiresFirstGuard(t *testing.T) {
 						if err := os.Symlink(receipt, diagnostic); err != nil {
 							t.Fatal(err)
 						}
-					case "job-operation", "job-schema", "job-request", "receipt-request", "receipt-binary", "extra-receipt-field", "extra-job-field":
+					case "job-operation",
+						"job-schema",
+						"job-request",
+						"receipt-request",
+						"receipt-binary",
+						"extra-receipt-field",
+						"extra-job-field":
 						path, key, value := job, "operation", any("upgrade")
 						switch kind {
 						case "job-schema":
@@ -571,7 +707,10 @@ func TestForwardRecoveryPriorFailedBootstrapRequiresFirstGuard(t *testing.T) {
 						}
 						edit(path, func(v map[string]any) { v[key] = value })
 					case "old-activation-job":
-						edit(filepath.Join(old.Directory, "activate", "job.json"), func(v map[string]any) { v["binary_sha256"] = strings.Repeat("f", 64) })
+						edit(
+							filepath.Join(old.Directory, "activate", "job.json"),
+							func(v map[string]any) { v["binary_sha256"] = strings.Repeat("f", 64) },
+						)
 					case "old-activation-lifecycle", "old-activation-inventory":
 						path := filepath.Join(old.Directory, "activate", "request.json")
 						edit(path, func(v map[string]any) {
@@ -583,9 +722,21 @@ func TestForwardRecoveryPriorFailedBootstrapRequiresFirstGuard(t *testing.T) {
 						})
 						raw, _ := os.ReadFile(path)
 						for _, name := range []string{"job.json", "receipt.json"} {
-							edit(filepath.Join(old.Directory, "activate", name), func(v map[string]any) { v["request_sha256"], v["binary_sha256"] = digestSHA256(raw), digestSHA256(raw) })
+							edit(
+								filepath.Join(old.Directory, "activate", name),
+								func(v map[string]any) { v["request_sha256"], v["binary_sha256"] = digestSHA256(raw), digestSHA256(raw) },
+							)
 						}
-					case "changed-inventory", "old-id", "candidate-id", "controller-directory", "old-broker-identity", "target-broker-identity", "installer-path", "runtime-sha", "previous-broker", "extra-variable":
+					case "changed-inventory",
+						"old-id",
+						"candidate-id",
+						"controller-directory",
+						"old-broker-identity",
+						"target-broker-identity",
+						"installer-path",
+						"runtime-sha",
+						"previous-broker",
+						"extra-variable":
 						path := filepath.Join(stage, "request.json")
 						edit(path, func(v map[string]any) {
 							vars := v["variables"].(map[string]any)
@@ -607,7 +758,10 @@ func TestForwardRecoveryPriorFailedBootstrapRequiresFirstGuard(t *testing.T) {
 							case "runtime-sha":
 								vars["ultra_controller_runtime_sha256"] = strings.Repeat("f", 64)
 							case "previous-broker":
-								vars["ultra_forward_previous_broker"] = map[string]any{"directory": "/tmp/foreign", "unit_sha256": strings.Repeat("f", 64)}
+								vars["ultra_forward_previous_broker"] = map[string]any{
+									"directory":   "/tmp/foreign",
+									"unit_sha256": strings.Repeat("f", 64),
+								}
 							case "extra-variable":
 								vars["unknown"] = true
 							}
@@ -616,7 +770,10 @@ func TestForwardRecoveryPriorFailedBootstrapRequiresFirstGuard(t *testing.T) {
 						// independently reconstructed request must still reject the edit.
 						raw, _ := os.ReadFile(path)
 						for _, path := range []string{job, receipt} {
-							edit(path, func(v map[string]any) { v["request_sha256"], v["binary_sha256"] = digestSHA256(raw), digestSHA256(raw) })
+							edit(
+								path,
+								func(v map[string]any) { v["request_sha256"], v["binary_sha256"] = digestSHA256(raw), digestSHA256(raw) },
+							)
 						}
 					}
 					err := verifyForwardPriorCandidate(proof, old, root, directory, prior)
@@ -689,13 +846,21 @@ func TestForwardRecoveryPriorWithoutHandoffIsStrictlyPreMutation(t *testing.T) {
 			case "changed-proof":
 				proof.SHA256 = strings.Repeat("d", 64)
 			case "retired":
-				writeForwardJSON(t, filepath.Join(root, "lifecycle-retired.json"), map[string]any{"version": 1, "ids": []string{lifecycleID(prior.Directory)}})
+				writeForwardJSON(
+					t,
+					filepath.Join(root, "lifecycle-retired.json"),
+					map[string]any{"version": 1, "ids": []string{lifecycleID(prior.Directory)}},
+				)
 			case "public-directory":
 				if err := os.Chmod(prior.Directory, 0755); err != nil {
 					t.Fatal(err)
 				}
 			case "foreign-lifecycle":
-				writeForwardJSON(t, filepath.Join(root, "lifecycle.json"), map[string]any{"id": lifecycleID(directory), "phase": "applying"})
+				writeForwardJSON(
+					t,
+					filepath.Join(root, "lifecycle.json"),
+					map[string]any{"id": lifecycleID(directory), "phase": "applying"},
+				)
 			}
 			journalBefore, err := os.ReadFile(prior.Journal)
 			if err != nil {
@@ -924,7 +1089,8 @@ func TestForwardRecoveryReplaysSameCandidateAfterPreBootstrapCensus(t *testing.T
 			},
 			func(context.Context) error { *events = append(*events, "adopt"); return nil })
 	}
-	if _, _, err := forwardUpgradeHandoff(context.Background(), proof, old, root, directory, "/python", "/ansible", deps); err == nil || *held {
+	if _, _, err := forwardUpgradeHandoff(context.Background(), proof, old, root, directory, "/python", "/ansible", deps); err == nil ||
+		*held {
 		t.Fatal("interruption did not fail closed", err)
 	}
 	if verifyForwardApplying(root, old.ID) != nil {

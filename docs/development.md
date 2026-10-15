@@ -8,6 +8,7 @@
 
 | Изменение | Проверка |
 | --- | --- |
+| Перед каждым коммитом | `make format`, затем `make lint`; проверь итоговый diff после автоформатирования |
 | Только инструкции или документация | `make harness-check`; содержательная сверка с источниками |
 | Состав релиза, manifest или публикация GitHub Release | `python3 scripts/test-release-assets.py`, затем `python3 scripts/test-release-assets.py --dist dist`: реальный комплект должен совпадать с manifest, SHA-256, архитектурами ELF, исходными архивами и закреплёнными offline wheels |
 | Проверяющий инструмент harness | `go test ./tools/harnesscheck`; `make harness-check`; `go vet ./tools/harnesscheck` |
@@ -27,8 +28,13 @@ Ansible-валидации и SSH-интеграции, Nginx, Mini App/release-
 можно выполнить как `env -u DATABASE_URL make test`, чтобы не использовать случайно
 унаследованный DSN. Пропущенную DB-интеграцию явно указывай в результате.
 
-`make format` форматирует весь репозиторий и выполняет `go mod tidy`; для узкой правки
-форматируй только изменённые Go-файлы и проверяй итоговый diff.
+Перед каждым коммитом запусти `make format`, проверь получившийся diff, затем `make lint`.
+Форматирование обязательно, а не best-effort: `goimports`, `gofmt`, `golines` и
+`golangci-lint` имеют закреплённые версии в [Makefile](../Makefile). `make format`
+также выполняет `go mod tidy`. CI запускает те же `make format-check` и `make lint`;
+`format-check` завершится ошибкой, если форматирование изменило checkout. При обновлении
+инструментов меняй версию в Makefile и подтверждай, что локальный запуск и CI используют
+одинаковые команды.
 
 ## PostgreSQL, SQLC и ORM
 

@@ -21,11 +21,23 @@ var bootstrapComponentPin = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 // The full frozen inventory remains the identity boundary for every stage. Only
 // the fixed playbook's target and verified receipt pins vary between components.
-func runBootstrapComponents(ctx context.Context, inventory, variables map[string]any, directory string, generation int, python, executable string) error {
+func runBootstrapComponents(
+	ctx context.Context,
+	inventory, variables map[string]any,
+	directory string,
+	generation int,
+	python, executable string,
+) error {
 	return runBootstrapComponentsAdapted(ctx, inventory, variables, directory, generation, "", python, executable)
 }
 
-func runBootstrapComponentsAdapted(ctx context.Context, inventory, variables map[string]any, directory string, generation int, sourceStage, python, executable string) error {
+func runBootstrapComponentsAdapted(
+	ctx context.Context,
+	inventory, variables map[string]any,
+	directory string,
+	generation int,
+	sourceStage, python, executable string,
+) error {
 	aliases, err := bootstrapComponentExits(inventory)
 	if err != nil {
 		return err
@@ -48,7 +60,15 @@ func runBootstrapComponentsAdapted(ctx context.Context, inventory, variables map
 		var receipt deployansible.Receipt
 		var runErr error
 		if generation == 1 && operation == "bootstrap-postgres" && sourceStage != "" {
-			receipt, runErr = deployansible.RunLocalRetryFailedAdaptedBootstrapPostgres(ctx, inventory, vars, target, sourceStage, python, executable)
+			receipt, runErr = deployansible.RunLocalRetryFailedAdaptedBootstrapPostgres(
+				ctx,
+				inventory,
+				vars,
+				target,
+				sourceStage,
+				python,
+				executable,
+			)
 		} else if target == source {
 			receipt, runErr = deployansible.RunLocalRetryFailed(ctx, operation, inventory, vars, target, python, executable)
 		} else {
@@ -128,7 +148,17 @@ func verifyBootstrapComponentReceipt(directory, operation string, inventory, var
 	var job, receipt map[string]any
 	hash := sha256.Sum256(request)
 	digest := hex.EncodeToString(hash[:])
-	if !bytes.Equal(expected, request) || json.Unmarshal(jobRaw, &job) != nil || json.Unmarshal(receiptRaw, &receipt) != nil || job["operation"] != operation || receipt["operation"] != operation || job["schema_version"] != float64(1) || receipt["schema_version"] != job["schema_version"] || job["request_sha256"] != digest || job["binary_sha256"] != digest || receipt["request_sha256"] != digest || receipt["binary_sha256"] != digest || receipt["attempt"] != job["attempt"] || receipt["state"] != "succeeded" {
+	if !bytes.Equal(expected, request) || json.Unmarshal(jobRaw, &job) != nil || json.Unmarshal(receiptRaw, &receipt) != nil ||
+		job["operation"] != operation ||
+		receipt["operation"] != operation ||
+		job["schema_version"] != float64(1) ||
+		receipt["schema_version"] != job["schema_version"] ||
+		job["request_sha256"] != digest ||
+		job["binary_sha256"] != digest ||
+		receipt["request_sha256"] != digest ||
+		receipt["binary_sha256"] != digest ||
+		receipt["attempt"] != job["attempt"] ||
+		receipt["state"] != "succeeded" {
 		return errors.New("bootstrap_component_receipt_invalid")
 	}
 	result, _ := receipt["result"].(map[string]any)

@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/config"
-	"github.com/NikitaDmitryuk/ultra/internal/subscriptionmeta"
 	"io"
 	"net/http"
 	"net/url"
@@ -16,6 +14,9 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionmeta"
 )
 
 const subscriptionCacheLifetime = 24 * time.Hour
@@ -111,7 +112,9 @@ func (c *subscriptionCache) replace(entries map[string]cachedSubscription) error
 }
 func (c *subscriptionCache) replaceLocked(entries map[string]cachedSubscription) error {
 	// Publish memory only after the durable file has been committed.
-	data, err := json.Marshal(subscriptionCacheSnapshot{Version: 1, HappDefaultJSON: c.happDefaultJSON, BotUsername: c.botUsername, Entries: entries})
+	data, err := json.Marshal(
+		subscriptionCacheSnapshot{Version: 1, HappDefaultJSON: c.happDefaultJSON, BotUsername: c.botUsername, Entries: entries},
+	)
 	if err != nil || len(data) > maxSubscriptionCacheSize {
 		return errors.New("subscription cache too large")
 	}
@@ -221,7 +224,9 @@ func (b *Bot) refreshSubscriptionCache(ctx context.Context) error {
 		return errors.New("subscription cache upstream unavailable")
 	}
 	req.Header.Set("Authorization", "Bearer "+b.adminAPIToken)
-	response, err := (&http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+	response, err := (&http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(
+		req,
+	)
 	if err != nil {
 		return errors.New("subscription cache upstream unavailable")
 	}
@@ -311,7 +316,12 @@ func (b *Bot) serveSubscriptionFallback(w http.ResponseWriter, _ string, token s
 	}
 	c := b.subscriptionCache
 	c.mu.RLock()
-	format, err := config.ResolveSubscriptionFormat(r.URL.Query().Get("format"), r.URL.Query().Get("transport"), r.UserAgent(), c.happDefaultJSON)
+	format, err := config.ResolveSubscriptionFormat(
+		r.URL.Query().Get("format"),
+		r.URL.Query().Get("transport"),
+		r.UserAgent(),
+		c.happDefaultJSON,
+	)
 	if err != nil {
 		c.mu.RUnlock()
 		return false

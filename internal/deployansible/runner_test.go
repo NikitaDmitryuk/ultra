@@ -27,7 +27,23 @@ func fixture(t *testing.T) (string, ExitRequest) {
 	if err := os.WriteFile(binary, []byte("pinned-test-binary"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	return binary, ExitRequest{Host: "192.0.2.2", User: "root", Identity: filepath.Join(root, "identity"), KnownHosts: pins, BridgeIPv4: "192.0.2.1", Spec: config.Spec{ExitCertPaths: config.CertPaths{CertFile: "/etc/ultra-relay/fullchain.pem", KeyFile: "/etc/ultra-relay/privkey.pem"}, Role: config.RoleExit, MimicPreset: "steamlike", ListenAddress: "0.0.0.0", VLESSPort: 8443, Exit: config.ExitTunnelSpec{TunnelUUID: "11111111-2222-3333-4444-555555555555"}, SplithttpHost: "example.com", SplithttpPath: "/fixture"}}
+	return binary, ExitRequest{
+		Host:       "192.0.2.2",
+		User:       "root",
+		Identity:   filepath.Join(root, "identity"),
+		KnownHosts: pins,
+		BridgeIPv4: "192.0.2.1",
+		Spec: config.Spec{
+			ExitCertPaths: config.CertPaths{CertFile: "/etc/ultra-relay/fullchain.pem", KeyFile: "/etc/ultra-relay/privkey.pem"},
+			Role:          config.RoleExit,
+			MimicPreset:   "steamlike",
+			ListenAddress: "0.0.0.0",
+			VLESSPort:     8443,
+			Exit:          config.ExitTunnelSpec{TunnelUUID: "11111111-2222-3333-4444-555555555555"},
+			SplithttpHost: "example.com",
+			SplithttpPath: "/fixture",
+		},
+	}
 }
 
 func TestPrepareProtectsIdentityAndDoesNotOverwrite(t *testing.T) {

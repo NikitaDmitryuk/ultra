@@ -41,7 +41,10 @@ func TestRetentionReceiptExactCreateOnlyInventory(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256([]byte("verified"))
-	if receipt.Schema != 1 || receipt.Path != final || receipt.Identity["request_sha256"] != "identity" || len(receipt.Inventory) != 2 || receipt.Inventory["nested"][0] != "directory" || receipt.Inventory["nested/binary"][1] != hex.EncodeToString(digest[:]) || receipt.Inventory["nested/binary"][2] != float64(0700) {
+	if receipt.Schema != 1 || receipt.Path != final || receipt.Identity["request_sha256"] != "identity" || len(receipt.Inventory) != 2 ||
+		receipt.Inventory["nested"][0] != "directory" ||
+		receipt.Inventory["nested/binary"][1] != hex.EncodeToString(digest[:]) ||
+		receipt.Inventory["nested/binary"][2] != float64(0700) {
 		t.Fatalf("unexpected receipt: %s", raw)
 	}
 	info, _ := os.Stat(path)
@@ -137,7 +140,8 @@ func TestLocalPreparationSealsBundleBeforePublication(t *testing.T) {
 	if err := json.Unmarshal(raw, &receipt); err != nil {
 		t.Fatal(err)
 	}
-	if receipt.Path != filepath.Join(directory, "bundle") || receipt.Identity["request_sha256"] != "request-id" || len(receipt.Inventory) != 1 {
+	if receipt.Path != filepath.Join(directory, "bundle") || receipt.Identity["request_sha256"] != "request-id" ||
+		len(receipt.Inventory) != 1 {
 		t.Fatalf("wrong bundle ownership: %s", raw)
 	}
 }

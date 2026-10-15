@@ -294,7 +294,9 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 	if err = decoder.Decode(&message); err != nil {
 		return Response{Code: "invalid_request"}
 	}
-	if message.Action != "submit" && message.Action != "lease-applying" && message.Action != "lease-resume" && message.Action != "lease-supersede" && len(inputs) != 0 {
+	if message.Action != "submit" && message.Action != "lease-applying" && message.Action != "lease-resume" &&
+		message.Action != "lease-supersede" &&
+		len(inputs) != 0 {
 		return Response{Code: "unexpected_submitted_inputs"}
 	}
 	if message.Action == "lifecycle-status" {

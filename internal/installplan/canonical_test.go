@@ -20,7 +20,8 @@ func TestCanonicalV2MappingAndLegacyBoundary(t *testing.T) {
 	if err := validateAutomation(p); err != nil {
 		t.Fatal(err)
 	}
-	if p.SchemaVersion != 2 || p.SecretsEnvFile() != ".env" || p.Automation.DNS.TTL != 300 || p.Automation.Ingress.Domain != "edge.example.com" {
+	if p.SchemaVersion != 2 || p.SecretsEnvFile() != ".env" || p.Automation.DNS.TTL != 300 ||
+		p.Automation.Ingress.Domain != "edge.example.com" {
 		t.Fatal("mapping lost policy")
 	}
 	delete(v, "INSTALL_SCHEMA_VERSION")
@@ -90,11 +91,21 @@ func TestDNSRoleValidation(t *testing.T) {
 	}
 }
 func TestBotEnvironmentExcludesProvidersAndUnknownKeys(t *testing.T) {
-	out, err := BotEnvironment(map[string]string{"TELEGRAM_BOT_TOKEN": "fixture", "ULTRA_VULTR_API_KEY": "privatecompute", "ULTRA_VULTR_DNS_API_KEY": "privatedns", "ULTRA_SUBSCRIPTION_PROBE_URL": "https://sync.example.com/sub/privateprobe", "ARBITRARY": "privateother", "ULTRA_BOT_PUBLIC_URL": "https://sync.example.com"})
+	out, err := BotEnvironment(
+		map[string]string{
+			"TELEGRAM_BOT_TOKEN":           "fixture",
+			"ULTRA_VULTR_API_KEY":          "privatecompute",
+			"ULTRA_VULTR_DNS_API_KEY":      "privatedns",
+			"ULTRA_SUBSCRIPTION_PROBE_URL": "https://sync.example.com/sub/privateprobe",
+			"ARBITRARY":                    "privateother",
+			"ULTRA_BOT_PUBLIC_URL":         "https://sync.example.com",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(out), "private") || strings.Contains(string(out), "ULTRA_SUBSCRIPTION_PROBE_URL") || !strings.Contains(string(out), "TELEGRAM_BOT_TOKEN=\"fixture\"") {
+	if strings.Contains(string(out), "private") || strings.Contains(string(out), "ULTRA_SUBSCRIPTION_PROBE_URL") ||
+		!strings.Contains(string(out), "TELEGRAM_BOT_TOKEN=\"fixture\"") {
 		t.Fatal("projection leaked or lost bot input")
 	}
 }
@@ -216,12 +227,18 @@ func TestCanonicalIngressPorts(t *testing.T) {
 }
 
 func TestAdoptionPreparationCannotAuthorizeDeployment(t *testing.T) {
-	values := map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "BRIDGE_SSH_KEY": "/identity", "SECRETS_ENV_FILE": "/private/secrets.env"}
+	values := map[string]string{
+		"BRIDGE_IP":        "192.0.2.1",
+		"MAIN_EXIT_IP":     "192.0.2.2",
+		"BRIDGE_SSH_KEY":   "/identity",
+		"SECRETS_ENV_FILE": "/private/secrets.env",
+	}
 	p, err := AdoptionPreparationValuesToPlan(values)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.SchemaVersion != CurrentSchemaVersion || p.Automation != nil || p.BridgeSSHIdentity() != "/identity" || p.SecretsEnvFile() != "/private/secrets.env" {
+	if p.SchemaVersion != CurrentSchemaVersion || p.Automation != nil || p.BridgeSSHIdentity() != "/identity" ||
+		p.SecretsEnvFile() != "/private/secrets.env" {
 		t.Fatal("preparation changed the schema or access inputs")
 	}
 	if err := ValidatePlan(p); err == nil || !strings.Contains(err.Error(), "schema 2 requires automation configuration") {

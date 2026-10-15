@@ -44,7 +44,8 @@ func (r *SubscriptionRepo) issue(ctx context.Context, id string, rotate bool) (s
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck
 	var active bool
-	err = tx.QueryRow(ctx, `SELECT is_active AND kind='vless' AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=users.account_id) FROM users WHERE uuid=$1 FOR UPDATE`, id).Scan(&active)
+	err = tx.QueryRow(ctx, `SELECT is_active AND kind='vless' AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=users.account_id) FROM users WHERE uuid=$1 FOR UPDATE`, id).
+		Scan(&active)
 	if err != nil {
 		return "", err
 	}
@@ -54,7 +55,8 @@ func (r *SubscriptionRepo) issue(ctx context.Context, id string, rotate bool) (s
 	if !rotate {
 		var encrypted []byte
 		var version *string
-		err = tx.QueryRow(ctx, `SELECT encrypted_token,key_version FROM subscription_tokens WHERE user_uuid=$1`, id).Scan(&encrypted, &version)
+		err = tx.QueryRow(ctx, `SELECT encrypted_token,key_version FROM subscription_tokens WHERE user_uuid=$1`, id).
+			Scan(&encrypted, &version)
 		if err == nil {
 			if version == nil || len(encrypted) == 0 {
 				return "", ErrLegacySubscription
@@ -102,7 +104,14 @@ func (r *SubscriptionRepo) Resolve(ctx context.Context, token string) (string, e
 // IsAdminOwner resolves permissions from the subscription owner, never request metadata.
 func (r *SubscriptionRepo) IsAdminOwner(ctx context.Context, id string) (bool, error) {
 	var rows []struct{ UUID string }
-	err := r.db.orm.WithContext(ctx).Table("users AS u").Select("u.uuid").Joins("JOIN bot_admins a ON a.telegram_id = u.telegram_id").Where("u.uuid = ?", id).Limit(1).Find(&rows).Error
+	err := r.db.orm.WithContext(ctx).
+		Table("users AS u").
+		Select("u.uuid").
+		Joins("JOIN bot_admins a ON a.telegram_id = u.telegram_id").
+		Where("u.uuid = ?", id).
+		Limit(1).
+		Find(&rows).
+		Error
 	return len(rows) > 0, err
 }
 
@@ -141,7 +150,12 @@ func (r *SubscriptionRepo) ListActiveTokens(ctx context.Context) ([]string, erro
 		EncryptedToken []byte
 		KeyVersion     string
 	}
-	e := r.activeTokens(ctx).Select("u.uuid, t.encrypted_token, t.key_version").Where("t.encrypted_token IS NOT NULL AND t.key_version IS NOT NULL").Order("u.uuid").Find(&rows).Error
+	e := r.activeTokens(ctx).
+		Select("u.uuid, t.encrypted_token, t.key_version").
+		Where("t.encrypted_token IS NOT NULL AND t.key_version IS NOT NULL").
+		Order("u.uuid").
+		Find(&rows).
+		Error
 	if e != nil {
 		return nil, e
 	}
@@ -162,5 +176,9 @@ func (r *SubscriptionRepo) ListActiveTokens(ctx context.Context) ([]string, erro
 // Build the eligibility predicate once so resolving and exporting tokens agree.
 func (r *SubscriptionRepo) activeTokens(ctx context.Context) *gorm.DB {
 	services := r.db.orm.Table("service_access AS s").Select("1").Where("s.account_id = u.account_id")
-	return r.db.orm.WithContext(ctx).Table("subscription_tokens AS t").Joins("JOIN users u ON u.uuid = t.user_uuid").Where("u.is_active AND u.kind = ? AND NOT u.member_pending", "vless").Where("NOT EXISTS (?)", services)
+	return r.db.orm.WithContext(ctx).
+		Table("subscription_tokens AS t").
+		Joins("JOIN users u ON u.uuid = t.user_uuid").
+		Where("u.is_active AND u.kind = ? AND NOT u.member_pending", "vless").
+		Where("NOT EXISTS (?)", services)
 }

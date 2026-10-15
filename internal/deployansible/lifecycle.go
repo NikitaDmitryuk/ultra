@@ -50,7 +50,8 @@ func openLifecycleGate(directory string) (*lifecycleGate, error) {
 		return nil, errors.New("invalid lifecycle journal")
 	}
 	raw, err := os.ReadFile(path)
-	if err != nil || json.Unmarshal(raw, &g.current) != nil || !jobID.MatchString(g.current.ID) || (g.current.Phase != "applying" && g.current.Phase != "checking" && g.current.Phase != "released") {
+	if err != nil || json.Unmarshal(raw, &g.current) != nil || !jobID.MatchString(g.current.ID) ||
+		(g.current.Phase != "applying" && g.current.Phase != "checking" && g.current.Phase != "released") {
 		return nil, errors.New("invalid lifecycle journal")
 	}
 	if g.retired[g.current.ID] && g.current.Phase == "checking" {

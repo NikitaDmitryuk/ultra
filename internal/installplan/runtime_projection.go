@@ -84,19 +84,36 @@ func ProjectDesiredRuntime(p *InstallPlan, opts RenderOptions) (*RuntimeProjecti
 	for i, entry := range ds.Bootstrap {
 		if port, ok := desiredPorts[entry.Name]; ok {
 			ds.Bootstrap[i].Port = port
-			if entry.Address == ds.BridgeSpecObject.Exit.Address && entry.Port == ds.BridgeSpecObject.Exit.Port && entry.TunnelUUID == ds.BridgeSpecObject.Exit.TunnelUUID {
+			if entry.Address == ds.BridgeSpecObject.Exit.Address && entry.Port == ds.BridgeSpecObject.Exit.Port &&
+				entry.TunnelUUID == ds.BridgeSpecObject.Exit.TunnelUUID {
 				bridgeExitPort = port
 			}
 		}
 	}
 	var transitions []RuntimeTransition
-	ds.BridgeSpec, ds.BridgeSpecObject, transitions, err = projectRuntimeSpec(p, "bridge", ds.BridgeSpec, ds.BridgeSpecObject, false, 0, bridgeExitPort)
+	ds.BridgeSpec, ds.BridgeSpecObject, transitions, err = projectRuntimeSpec(
+		p,
+		"bridge",
+		ds.BridgeSpec,
+		ds.BridgeSpecObject,
+		false,
+		0,
+		bridgeExitPort,
+	)
 	result.Transitions = append(result.Transitions, transitions...)
 	if err != nil {
 		return nil, err
 	}
 	for _, ex := range p.Exits {
-		ds.ExitSpecs[ex.Name], ds.ExitSpecObjects[ex.Name], transitions, err = projectRuntimeSpec(p, ex.Name, ds.ExitSpecs[ex.Name], ds.ExitSpecObjects[ex.Name], true, desiredPorts[ex.Name], 0)
+		ds.ExitSpecs[ex.Name], ds.ExitSpecObjects[ex.Name], transitions, err = projectRuntimeSpec(
+			p,
+			ex.Name,
+			ds.ExitSpecs[ex.Name],
+			ds.ExitSpecObjects[ex.Name],
+			true,
+			desiredPorts[ex.Name],
+			0,
+		)
 		result.Transitions = append(result.Transitions, transitions...)
 		if err != nil {
 			return nil, err
@@ -255,7 +272,14 @@ func ProjectLocalRuntime(p *InstallPlan, raw []byte, role config.Role, nodeName 
 	return &LocalRuntimeProjection{SpecJSON: candidate, Transitions: transitions}, nil
 }
 
-func projectRuntimeSpec(p *InstallPlan, node string, raw []byte, previous *config.Spec, exit bool, exitPort, bridgeExitPort int) ([]byte, *config.Spec, []RuntimeTransition, error) {
+func projectRuntimeSpec(
+	p *InstallPlan,
+	node string,
+	raw []byte,
+	previous *config.Spec,
+	exit bool,
+	exitPort, bridgeExitPort int,
+) ([]byte, *config.Spec, []RuntimeTransition, error) {
 	var transitions []RuntimeTransition
 	strat, err := mimic.New(p.Features.Preset)
 	if err != nil {

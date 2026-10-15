@@ -24,7 +24,13 @@ func TestProofDetectsAllowanceIncreaseAfterStoppedRestart(t *testing.T) {
 	path, baseline := filepath.Join(t.TempDir(), "state.db"), filepath.Join(t.TempDir(), "baseline.json")
 	now := time.Now().UTC()
 	limits := []runtimestate.QuotaLimit{
-		{AccountID: "fixture", ExitID: "exit", Period: now.Format("2006-01"), LimitBytes: runtimestate.ReservationChunk * 4, ExpiresAt: now.Add(time.Hour)},
+		{
+			AccountID:  "fixture",
+			ExitID:     "exit",
+			Period:     now.Format("2006-01"),
+			LimitBytes: runtimestate.ReservationChunk * 4,
+			ExpiresAt:  now.Add(time.Hour),
+		},
 		{ExitID: "exit", Period: now.Format("2006-01"), LimitBytes: runtimestate.ReservationChunk * 4, ExpiresAt: now.Add(time.Hour)},
 	}
 	raw, err := json.Marshal(struct {

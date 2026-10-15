@@ -14,16 +14,81 @@ import (
 
 func adoptionPolicyFixture(t *testing.T) (*installplan.InstallPlan, bootstrapInspection) {
 	t.Helper()
-	p, err := installplan.AdoptionPreparationValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "BRIDGE_SSH_KEY": "/identity", "BOT_ENV_FILE": "/private/secrets.env", "EXIT_TUNNEL_UUID": "preserved-tunnel", "GENERATE_EXIT_TLS": "false", "EXIT_TLS_CERT_FILE": "/private/exit.crt", "EXIT_TLS_KEY_FILE": "/private/exit.key", "ULTRA_INSTALL_SSH_STRICT_HOST_KEY": "true", "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": "/pins", "PUBLIC_HOST": "192.0.2.1"})
+	p, err := installplan.AdoptionPreparationValuesToPlan(
+		map[string]string{
+			"BRIDGE_IP":                         "192.0.2.1",
+			"MAIN_EXIT_IP":                      "192.0.2.2",
+			"BRIDGE_SSH_KEY":                    "/identity",
+			"BOT_ENV_FILE":                      "/private/secrets.env",
+			"EXIT_TUNNEL_UUID":                  "preserved-tunnel",
+			"GENERATE_EXIT_TLS":                 "false",
+			"EXIT_TLS_CERT_FILE":                "/private/exit.crt",
+			"EXIT_TLS_KEY_FILE":                 "/private/exit.key",
+			"ULTRA_INSTALL_SSH_STRICT_HOST_KEY": "true",
+			"ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": "/pins",
+			"PUBLIC_HOST":                       "192.0.2.1",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	nodes := []installplan.AutomationNode{{Name: "primary", Address: "192.0.2.2", Provider: "exit-provider", Budget: &installplan.StaticBudget{MonthlyBytes: 1000000, IsFallback: true}}}
+	nodes := []installplan.AutomationNode{
+		{
+			Name:     "primary",
+			Address:  "192.0.2.2",
+			Provider: "exit-provider",
+			Budget:   &installplan.StaticBudget{MonthlyBytes: 1000000, IsFallback: true},
+		},
+	}
 	documents := map[string]any{
-		"deployment.json": map[string]any{"version": "v1.0.0", "controller_directory": "/opt/ultra-ansible/releases/v1.0.0", "bridge_ipv4": "192.0.2.1", "bridge_provider": "bridge-provider", "bridge_url": "https://sync.example.com/healthz", "database": "ultra_db", "static_nodes": nodes, "ingress": installplan.AutomationIngress{Domain: "edge.example.com", Email: "owner@example.com", Path: "/connect", PublicHost: "192.0.2.1", BackendPort: 19080, GatewayPort: 19081, StatusPort: 19082, ExperimentalPort: 6543, StagingPort: 19443}},
-		"backup.json":     map[string]any{"source": "bridge", "database": "ultra_db", "recipient": "age1fixture", "state_paths": []string{"/etc/ultra-relay", "/srv/operator-data", "/etc/letsencrypt/live/edge.example.com"}, "artifact_paths": []string{"/usr/local/bin/ultra-install", "/opt/ultra-recovery/reconcile.py", "/opt/ultra-ansible/releases/v1.0.0", "/srv/operator-artifacts"}},
-		"reconcile.json":  map[string]any{"database": "ultra_db", "bridge_provider": "bridge-provider", "bridge_url": "https://sync.example.com/healthz", "static_nodes": nodes},
-		"dns.json":        map[string]any{"config": map[string]any{"provider": "vultr", "zone": "example.com", "ttl": 300, "subscription_name": "sync", "vpn_name": "edge", "api_key_file": "/etc/ultra-recovery/dns-api-key"}},
+		"deployment.json": map[string]any{
+			"version":              "v1.0.0",
+			"controller_directory": "/opt/ultra-ansible/releases/v1.0.0",
+			"bridge_ipv4":          "192.0.2.1",
+			"bridge_provider":      "bridge-provider",
+			"bridge_url":           "https://sync.example.com/healthz",
+			"database":             "ultra_db",
+			"static_nodes":         nodes,
+			"ingress": installplan.AutomationIngress{
+				Domain:           "edge.example.com",
+				Email:            "owner@example.com",
+				Path:             "/connect",
+				PublicHost:       "192.0.2.1",
+				BackendPort:      19080,
+				GatewayPort:      19081,
+				StatusPort:       19082,
+				ExperimentalPort: 6543,
+				StagingPort:      19443,
+			},
+		},
+		"backup.json": map[string]any{
+			"source":      "bridge",
+			"database":    "ultra_db",
+			"recipient":   "age1fixture",
+			"state_paths": []string{"/etc/ultra-relay", "/srv/operator-data", "/etc/letsencrypt/live/edge.example.com"},
+			"artifact_paths": []string{
+				"/usr/local/bin/ultra-install",
+				"/opt/ultra-recovery/reconcile.py",
+				"/opt/ultra-ansible/releases/v1.0.0",
+				"/srv/operator-artifacts",
+			},
+		},
+		"reconcile.json": map[string]any{
+			"database":        "ultra_db",
+			"bridge_provider": "bridge-provider",
+			"bridge_url":      "https://sync.example.com/healthz",
+			"static_nodes":    nodes,
+		},
+		"dns.json": map[string]any{
+			"config": map[string]any{
+				"provider":          "vultr",
+				"zone":              "example.com",
+				"ttl":               300,
+				"subscription_name": "sync",
+				"vpn_name":          "edge",
+				"api_key_file":      "/etc/ultra-recovery/dns-api-key",
+			},
+		},
 	}
 	// Legacy canonical bot policy already describes the subscription role.
 	p.SourceValues["SUBSCRIPTION_DOMAIN"] = "sync.example.com"
@@ -55,7 +120,8 @@ func TestAdoptionExplicitSSHOverridePreservesTrustAndSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.SourceValues["BRIDGE_IP"] != original || candidate.Bridge.SSHHost != "192.0.2.1" || candidate.Database.PrimaryHost != "192.0.2.40" {
+	if p.SourceValues["BRIDGE_IP"] != original || candidate.Bridge.SSHHost != "192.0.2.1" ||
+		candidate.Database.PrimaryHost != "192.0.2.40" {
 		t.Fatal("source changed or primary endpoint lost")
 	}
 	for key, value := range p.SourceValues {
@@ -107,10 +173,16 @@ func TestPrepareAdoptionPolicyPreservesCanonicalInputs(t *testing.T) {
 		t.Fatal("prepared schema 2 plan cannot round-trip through JSON", err)
 	}
 	a := candidate.Automation
-	if a.StaticNodes[0].Budget.MonthlyBytes != 1000000 || !a.StaticNodes[0].Budget.IsFallback || candidate.SecretsEnvFile() != "/private/secrets.env" || a.Ingress.BackendPort != 19080 || a.Ingress.StagingPort != 19443 || a.DNS.APIKeyFile != "" || a.AdminTelegramID != 123 {
+	if a.StaticNodes[0].Budget.MonthlyBytes != 1000000 || !a.StaticNodes[0].Budget.IsFallback ||
+		candidate.SecretsEnvFile() != "/private/secrets.env" ||
+		a.Ingress.BackendPort != 19080 ||
+		a.Ingress.StagingPort != 19443 ||
+		a.DNS.APIKeyFile != "" ||
+		a.AdminTelegramID != 123 {
 		t.Fatal("policy was not preserved")
 	}
-	if !reflect.DeepEqual(a.ArtifactPaths, []string{"/srv/operator-artifacts"}) || !reflect.DeepEqual(a.StatePaths, []string{"/srv/operator-data", "/etc/letsencrypt/live/edge.example.com"}) {
+	if !reflect.DeepEqual(a.ArtifactPaths, []string{"/srv/operator-artifacts"}) ||
+		!reflect.DeepEqual(a.StatePaths, []string{"/srv/operator-data", "/etc/letsencrypt/live/edge.example.com"}) {
 		t.Fatal("baseline filtered incorrectly")
 	}
 	path := filepath.Join(t.TempDir(), "candidate")
@@ -118,7 +190,8 @@ func TestPrepareAdoptionPolicyPreservesCanonicalInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := installplan.LoadConfig(path)
-	if err != nil || installplan.ValidatePlan(loaded) != nil || loaded.SchemaVersion != 2 || !reflect.DeepEqual(loaded.Automation.Ingress, a.Ingress) {
+	if err != nil || installplan.ValidatePlan(loaded) != nil || loaded.SchemaVersion != 2 ||
+		!reflect.DeepEqual(loaded.Automation.Ingress, a.Ingress) {
 		t.Fatal("canonical round trip lost ports")
 	}
 	for key, value := range original {
@@ -146,7 +219,8 @@ func TestPrepareAdoptionPolicyFailsClosed(t *testing.T) {
 					i.Files[n].Content = base64.StdEncoding.EncodeToString([]byte("invalid-private-fixture"))
 				}
 			}
-			if _, _, err := prepareAdoptionConfig(p, i, "v2", "/release", "/pins"); err == nil || err.Error() != "adoption_policy_missing_or_conflicting" {
+			if _, _, err := prepareAdoptionConfig(p, i, "v2", "/release", "/pins"); err == nil ||
+				err.Error() != "adoption_policy_missing_or_conflicting" {
 				t.Fatal("missing safe rejection")
 			}
 		})
@@ -225,7 +299,8 @@ func TestAdoptionPreservesPublishedSubscriptionPolicy(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if candidate.SourceValues["SUBSCRIPTION_INGRESS_MODE"] != fixture.mode || candidate.SourceValues["SUBSCRIPTION_DOMAIN"] != fixture.domain {
+			if candidate.SourceValues["SUBSCRIPTION_INGRESS_MODE"] != fixture.mode ||
+				candidate.SourceValues["SUBSCRIPTION_DOMAIN"] != fixture.domain {
 				t.Fatal("published subscription policy lost")
 			}
 			if candidate.Automation.Ingress.ForwardHost != fixture.forward {
@@ -255,7 +330,8 @@ func TestAdoptionDirectModePreservesUnusedLegacyBackend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if candidate.SourceValues["BOT_INGRESS_IP"] != "192.0.2.2" || p.SourceValues["BOT_INGRESS_IP"] != "192.0.2.2" || candidate.Automation.Ingress.ForwardHost != "" {
+	if candidate.SourceValues["BOT_INGRESS_IP"] != "192.0.2.2" || p.SourceValues["BOT_INGRESS_IP"] != "192.0.2.2" ||
+		candidate.Automation.Ingress.ForwardHost != "" {
 		t.Fatal("legacy backend lost or direct mode restored forwarding")
 	}
 }

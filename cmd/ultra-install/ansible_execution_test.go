@@ -113,7 +113,11 @@ func TestFrozenExecutionRejectsChangedOperatorDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	remote := false
-	p := &installplan.InstallPlan{Bridge: installplan.BridgeConfig{SSHHost: "192.0.2.1", Address: "192.0.2.1"}, ControllerLocal: &remote, ControllerLocalTarget: "192.0.2.1|192.0.2.1"}
+	p := &installplan.InstallPlan{
+		Bridge:                installplan.BridgeConfig{SSHHost: "192.0.2.1", Address: "192.0.2.1"},
+		ControllerLocal:       &remote,
+		ControllerLocalTarget: "192.0.2.1|192.0.2.1",
+	}
 	if _, err := freezeBootstrapExecution(p, root, root); err != nil {
 		t.Fatal(err)
 	}

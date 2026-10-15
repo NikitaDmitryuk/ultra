@@ -32,7 +32,17 @@ func readCloudKey(path string) (string, error) {
 	}
 	return key, nil
 }
-func configureCloud(ctx context.Context, wg *sync.WaitGroup, srv *adminapi.Server, database *db.DB, spec *config.Spec, exitMgr *exits.Manager, apply, refresh func(context.Context) error, log *slog.Logger) {
+
+func configureCloud(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	srv *adminapi.Server,
+	database *db.DB,
+	spec *config.Spec,
+	exitMgr *exits.Manager,
+	apply, refresh func(context.Context) error,
+	log *slog.Logger,
+) {
 	socket := os.Getenv("ULTRA_ANSIBLE_SOCKET")
 	if socket == "" {
 		socket = "/run/ultra-ansible/controller.sock"
@@ -52,7 +62,18 @@ func configureCloud(ctx context.Context, wg *sync.WaitGroup, srv *adminapi.Serve
 	if e != nil {
 		return
 	}
-	p := &cloudinstall.Provisioner{DB: database, Bridge: spec, Exits: exitMgr, Routes: routes, Identity: identity, BridgeIP: bridgeIP, StateDir: stateDir, Binary: binary, Apply: apply, Refresh: refresh}
+	p := &cloudinstall.Provisioner{
+		DB:       database,
+		Bridge:   spec,
+		Exits:    exitMgr,
+		Routes:   routes,
+		Identity: identity,
+		BridgeIP: bridgeIP,
+		StateDir: stateDir,
+		Binary:   binary,
+		Apply:    apply,
+		Refresh:  refresh,
+	}
 	p.Configurer = controller
 	var quotaAPI *cloud.Vultr
 	defer func() { wg.Add(1); go func() { defer wg.Done(); runQuotas(ctx, database, quotaAPI, apply, log) }() }()
@@ -68,7 +89,14 @@ func configureCloud(ctx context.Context, wg *sync.WaitGroup, srv *adminapi.Serve
 	api := cloud.NewVultr(key)
 	quotaAPI = api
 	p.API = api
-	srv.Cloud = &cloud.Service{TopologyReady: controller.Ready, IngressInstanceID: os.Getenv("ULTRA_SUBSCRIPTION_INGRESS_INSTANCE_ID"), API: api, Store: store, Provisioner: p, Log: log}
+	srv.Cloud = &cloud.Service{
+		TopologyReady:     controller.Ready,
+		IngressInstanceID: os.Getenv("ULTRA_SUBSCRIPTION_INGRESS_INSTANCE_ID"),
+		API:               api,
+		Store:             store,
+		Provisioner:       p,
+		Log:               log,
+	}
 	wg.Add(1)
 	go func() { defer wg.Done(); srv.Cloud.Run(ctx) }()
 }

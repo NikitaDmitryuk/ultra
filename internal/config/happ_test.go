@@ -18,7 +18,16 @@ func TestHappProfilePublicBridges(t *testing.T) {
 	}
 	spec := &Spec{SubscriptionBridges: []SubscriptionBridge{
 		{ID: "ekb", Host: "ekb.example.com", Port: 443, PublicKey: keys.PublicKey, ServerName: "example.com", ShortID: "ab12"},
-		{ID: "kzn", Host: "kzn.example.com", Port: 8443, PublicKey: keys.PublicKey, ServerName: "example.com", ShortID: "0123456789abcdef", Transport: "xhttp", Path: "/vpn"},
+		{
+			ID:         "kzn",
+			Host:       "kzn.example.com",
+			Port:       8443,
+			PublicKey:  keys.PublicKey,
+			ServerName: "example.com",
+			ShortID:    "0123456789abcdef",
+			Transport:  "xhttp",
+			Path:       "/vpn",
+		},
 	}}
 	u := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee"}
 	profile, err := BuildHappProfile(spec, u, "Автоматически")
@@ -84,10 +93,34 @@ func TestHappMixedTLSRealityEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := &Spec{PrimaryXHTTP: &PrimaryXHTTPIngress{Host: "primary.example", Published: BoolPtr(true), BackendPort: 18080, PublicXHTTPTLSSpec: PublicXHTTPTLSSpec{Port: 443, ServerName: "primary.example", Path: "/vpn"}}, SubscriptionBridges: []SubscriptionBridge{
-		{ID: "https", Host: "primary.example", Port: 443, Security: "tls", Transport: "xhttp", ServerName: "primary.example", Path: "/vpn"},
-		{ID: "reality", Host: "192.0.2.1", Port: 24443, Transport: "tcp", PublicKey: keys.PublicKey, ServerName: "example.com", ShortID: "ab12"},
-	}}
+	spec := &Spec{
+		PrimaryXHTTP: &PrimaryXHTTPIngress{
+			Host:               "primary.example",
+			Published:          BoolPtr(true),
+			BackendPort:        18080,
+			PublicXHTTPTLSSpec: PublicXHTTPTLSSpec{Port: 443, ServerName: "primary.example", Path: "/vpn"},
+		},
+		SubscriptionBridges: []SubscriptionBridge{
+			{
+				ID:         "https",
+				Host:       "primary.example",
+				Port:       443,
+				Security:   "tls",
+				Transport:  "xhttp",
+				ServerName: "primary.example",
+				Path:       "/vpn",
+			},
+			{
+				ID:         "reality",
+				Host:       "192.0.2.1",
+				Port:       24443,
+				Transport:  "tcp",
+				PublicKey:  keys.PublicKey,
+				ServerName: "example.com",
+				ShortID:    "ab12",
+			},
+		},
+	}
 	user := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee"}
 	profile, err := BuildHappProfile(spec, user, "Auto")
 	if err != nil {
@@ -125,8 +158,27 @@ func TestHappFaultPreviewPreservesBalancerAndIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := &Spec{SubscriptionBridges: []SubscriptionBridge{
-		{ID: "primary", Host: "primary.example", Port: 443, Security: "tls", Transport: "xhttp", ServerName: "primary.example", Path: "/vpn", Fingerprint: "firefox"},
-		{ID: "reserve", Host: "reserve.example", Port: 24443, Security: "reality", Transport: "tcp", PublicKey: keys.PublicKey, ServerName: "example.com", ShortID: "ab12", Fingerprint: "firefox"},
+		{
+			ID:          "primary",
+			Host:        "primary.example",
+			Port:        443,
+			Security:    "tls",
+			Transport:   "xhttp",
+			ServerName:  "primary.example",
+			Path:        "/vpn",
+			Fingerprint: "firefox",
+		},
+		{
+			ID:          "reserve",
+			Host:        "reserve.example",
+			Port:        24443,
+			Security:    "reality",
+			Transport:   "tcp",
+			PublicKey:   keys.PublicKey,
+			ServerName:  "example.com",
+			ShortID:     "ab12",
+			Fingerprint: "firefox",
+		},
 	}}
 	profiles, err := BuildHappFaultProfiles(spec, auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee"})
 	if err != nil || len(profiles) != 4 {
@@ -137,7 +189,8 @@ func TestHappFaultPreviewPreservesBalancerAndIsolation(t *testing.T) {
 		if _, err := core.LoadConfig("json", bytes.NewReader(raw)); err != nil {
 			t.Fatal(err)
 		}
-		if bytes.Contains(raw, []byte(`"protocol":"freedom"`)) || !bytes.Contains(raw, []byte(`"fallbackTag":"block"`)) || !bytes.Contains(raw, []byte(`"network":"tcp,udp"`)) {
+		if bytes.Contains(raw, []byte(`"protocol":"freedom"`)) || !bytes.Contains(raw, []byte(`"fallbackTag":"block"`)) ||
+			!bytes.Contains(raw, []byte(`"network":"tcp,udp"`)) {
 			t.Fatal("lost closed fallback", i)
 		}
 		out := p["outbounds"].([]any)

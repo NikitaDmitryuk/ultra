@@ -15,8 +15,22 @@ import (
 func nativeAdoptionFixture(t *testing.T) (*installplan.InstallPlan, []byte, []byte, []byte, []byte, []net.IP) {
 	t.Helper()
 	nodes := []installplan.AutomationNode{{Name: "static", Address: "192.0.2.2", Provider: "fixture"}}
-	p := &installplan.InstallPlan{BridgeNative: true, AdoptRuntime: true, SchemaVersion: 2, Bridge: installplan.BridgeConfig{Address: "192.0.2.1"}, SSH: installplan.SSHConfig{Identity: "/etc/ultra-recovery/identity"}, Database: installplan.DatabaseConfig{Enabled: true, Name: "fixture"}, Automation: &installplan.AutomationConfig{StaticNodes: nodes}}
-	metadata := map[string]any{"database": "fixture", "bridge_provider": "fixture", "bridge_url": "https://sync.example.com/healthz", "ssh_identity_file": p.SSH.Identity, "static_nodes": nodes}
+	p := &installplan.InstallPlan{
+		BridgeNative:  true,
+		AdoptRuntime:  true,
+		SchemaVersion: 2,
+		Bridge:        installplan.BridgeConfig{Address: "192.0.2.1"},
+		SSH:           installplan.SSHConfig{Identity: "/etc/ultra-recovery/identity"},
+		Database:      installplan.DatabaseConfig{Enabled: true, Name: "fixture"},
+		Automation:    &installplan.AutomationConfig{StaticNodes: nodes},
+	}
+	metadata := map[string]any{
+		"database":          "fixture",
+		"bridge_provider":   "fixture",
+		"bridge_url":        "https://sync.example.com/healthz",
+		"ssh_identity_file": p.SSH.Identity,
+		"static_nodes":      nodes,
+	}
 	reconcile, _ := json.Marshal(metadata)
 	metadata["bridge_ipv4"] = p.Bridge.Address
 	deployment, _ := json.Marshal(metadata)

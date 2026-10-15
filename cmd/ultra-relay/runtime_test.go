@@ -38,7 +38,13 @@ func TestRecoveryReceiptFreshness(t *testing.T) {
 		{"future completion", 100, 61, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			data, _ := json.Marshal(map[string]any{"snapshot_at": now.Unix() - tc.age, "completed_at": now.Unix() + tc.completion, "independent": tc.independent})
+			data, _ := json.Marshal(
+				map[string]any{
+					"snapshot_at":  now.Unix() - tc.age,
+					"completed_at": now.Unix() + tc.completion,
+					"independent":  tc.independent,
+				},
+			)
 			if err := os.WriteFile(path, data, 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -176,19 +182,58 @@ func runtimeFixture(t *testing.T) (*bridgeRuntime, *testRuntimeRunner, runtimeSn
 	if e != nil {
 		t.Fatal(e)
 	}
-	spec := &config.Spec{Role: config.RoleBridge, DevMode: true, ListenAddress: "127.0.0.1", VLESSPort: 10443, SplitRouting: config.BoolPtr(false)}
+	spec := &config.Spec{
+		Role:          config.RoleBridge,
+		DevMode:       true,
+		ListenAddress: "127.0.0.1",
+		VLESSPort:     10443,
+		SplitRouting:  config.BoolPtr(false),
+	}
 	runner := &testRuntimeRunner{}
-	r := &bridgeRuntime{state: store, runner: runner, spec: spec, strategy: strat, logLevel: "error", log: slog.New(slog.NewTextHandler(io.Discard, nil)), now: func() time.Time { return now }, applications: &auth.RouteApplications{}, selector: exits.NewSelector(nil)}
+	r := &bridgeRuntime{
+		state:        store,
+		runner:       runner,
+		spec:         spec,
+		strategy:     strat,
+		logLevel:     "error",
+		log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		now:          func() time.Time { return now },
+		applications: &auth.RouteApplications{},
+		selector:     exits.NewSelector(nil),
+	}
 	pref := "a"
-	u := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", AccountID: "account", IsActive: true, Routes: []auth.RouteCredential{{UUID: "3b7d2c48-cc5c-4ae4-b054-2dd59ce9e27b", ExitID: &pref}}}
-	nodes := []exits.Node{{ID: "a", Enabled: true, Priority: 100, Address: "127.0.0.1", Port: 51001, TunnelUUID: "11111111-2222-3333-4444-555555555555"}, {ID: "b", Enabled: true, Priority: 200, Address: "127.0.0.1", Port: 51002, TunnelUUID: "11111111-2222-3333-4444-555555555555"}}
+	u := auth.User{
+		UUID:      "2784871e-d8a9-4e1f-b831-3d86aa8653ee",
+		AccountID: "account",
+		IsActive:  true,
+		Routes:    []auth.RouteCredential{{UUID: "3b7d2c48-cc5c-4ae4-b054-2dd59ce9e27b", ExitID: &pref}},
+	}
+	nodes := []exits.Node{
+		{ID: "a", Enabled: true, Priority: 100, Address: "127.0.0.1", Port: 51001, TunnelUUID: "11111111-2222-3333-4444-555555555555"},
+		{ID: "b", Enabled: true, Priority: 200, Address: "127.0.0.1", Port: 51002, TunnelUUID: "11111111-2222-3333-4444-555555555555"},
+	}
 	limits := []runtimestate.QuotaLimit{}
 	for _, n := range nodes {
 		for _, id := range []string{"account", ""} {
-			limits = append(limits, runtimestate.QuotaLimit{AccountID: id, ExitID: n.ID, Period: now.Format("2006-01"), LimitBytes: 1024 * 1024, ExpiresAt: now.Add(runtimeLease)})
+			limits = append(
+				limits,
+				runtimestate.QuotaLimit{
+					AccountID:  id,
+					ExitID:     n.ID,
+					Period:     now.Format("2006-01"),
+					LimitBytes: 1024 * 1024,
+					ExpiresAt:  now.Add(runtimeLease),
+				},
+			)
 		}
 	}
-	return r, runner, runtimeSnapshotV1{Version: 1, Fingerprint: runtimeFingerprint(spec), Users: snapshotUsers([]auth.User{u}), Nodes: nodes, Limits: limits}
+	return r, runner, runtimeSnapshotV1{
+		Version:     1,
+		Fingerprint: runtimeFingerprint(spec),
+		Users:       snapshotUsers([]auth.User{u}),
+		Nodes:       nodes,
+		Limits:      limits,
+	}
 }
 func commitFixture(t *testing.T, r *bridgeRuntime, p runtimeSnapshotV1) {
 	t.Helper()

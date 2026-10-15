@@ -286,13 +286,21 @@ func legacyMain() {
 		"BRIDGE_IP": *bridgeHost, "MAIN_EXIT_IP": *exitHost, "EXIT_DIAL": *exitDial, "EXIT2": *exit2Host, "EXIT2_DIAL": *exit2Dial, "EXIT2_NAME": *exit2Name, "EXIT2_PRIORITY": strconv.Itoa(*exit2Priority),
 		"SSH_USER": *sshUser, "BRIDGE_SSH_KEY": *identity, "MAIN_EXIT_SSH_KEY": *exitIdentity, "PUBLIC_HOST": *publicHost, "REMOTE_DIR": *remoteDir, "RELAY_BINARY": *binaryPath, "PROJECT_ROOT": *projectRoot,
 		"PRESET": "standard", "REALITY_DEST": *realityDest, "REALITY_SNI": *realitySNI, "VLESS_PORT": strconv.Itoa(*vlessPort), "TUNNEL_PORT": strconv.Itoa(tun),
-		"REUSE_BRIDGE_SPEC": strconv.FormatBool(*reuseBridgeSpec), "GENERATE_EXIT_TLS": strconv.FormatBool(*generateExitTLS), "LOG_LEVEL": logLevelNorm,
+		"REUSE_BRIDGE_SPEC": strconv.FormatBool(
+			*reuseBridgeSpec,
+		), "GENERATE_EXIT_TLS": strconv.FormatBool(*generateExitTLS), "LOG_LEVEL": logLevelNorm,
 		"DATABASE_IP": *dbHost, "DATABASE_SSH_KEY": *dbSSHIdentity, "DB_NAME": *dbName, "DB_USER": *dbUser,
 		"SPLITHTTP_HOST": *splithttpHostFlag, "SPLITHTTP_PATH": *splithttpPathFlag, "SKIP_GEO_DOWNLOAD": strconv.FormatBool(*skipGeoDownload), "GEO_RELEASE_TAG": *geoReleaseTag,
 		"ROUTING_MODE": *routingMode, "GEOSITE_BLOCK_TAGS": *geositeBlockTags, "DOMAIN_DIRECT": *domainDirect,
-		"DOH_DISABLE": strconv.FormatBool(*disableDOH), "FRAGMENT_DISABLE": strconv.FormatBool(*noFragment), "ANTI_CENSOR_PROFILE": *antiCensorProfile,
-		"PUBLIC_XHTTP_PORT": strconv.Itoa(*publicXHTTPPort), "SPLITHTTP_PADDING": *splithttpPadding, "SPLITHTTP_MAX_CHUNK_KB": strconv.Itoa(*splithttpMaxChunkKB), "REALITY_FINGERPRINTS": *realityFPs,
-		"WARP_ENABLE": strconv.FormatBool(*warpFlag), "WARP_PORT": strconv.Itoa(*warpPort), "TRANSPORT": *transportFlag, "VLESS_FLOW": *vlessFlowFlag, "DISABLE_VLESS_FLOW": strconv.FormatBool(*disableVLESSFlow),
+		"DOH_DISABLE": strconv.FormatBool(
+			*disableDOH,
+		), "FRAGMENT_DISABLE": strconv.FormatBool(*noFragment), "ANTI_CENSOR_PROFILE": *antiCensorProfile,
+		"PUBLIC_XHTTP_PORT": strconv.Itoa(
+			*publicXHTTPPort,
+		), "SPLITHTTP_PADDING": *splithttpPadding, "SPLITHTTP_MAX_CHUNK_KB": strconv.Itoa(*splithttpMaxChunkKB), "REALITY_FINGERPRINTS": *realityFPs,
+		"WARP_ENABLE": strconv.FormatBool(
+			*warpFlag,
+		), "WARP_PORT": strconv.Itoa(*warpPort), "TRANSPORT": *transportFlag, "VLESS_FLOW": *vlessFlowFlag, "DISABLE_VLESS_FLOW": strconv.FormatBool(*disableVLESSFlow),
 	}
 	plan := installplan.LegacyValuesToPlan(values)
 	plan.Artifacts.RelayBinary = *binaryPath

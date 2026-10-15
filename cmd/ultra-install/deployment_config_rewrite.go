@@ -24,13 +24,17 @@ func runDeploymentConfigRewrite(args []string) {
 	database := flags.String("database-ip", "", "selected dedicated database IPv4")
 	provider := flags.String("provider", "", "new primary provider")
 	_ = flags.Parse(args)
-	exitOnErr("deployment config rewrite", rewriteDeploymentConfig(*input, *output, *old, *bridge, *ssh, *public, *subscription, *provider, *database))
+	exitOnErr(
+		"deployment config rewrite",
+		rewriteDeploymentConfig(*input, *output, *old, *bridge, *ssh, *public, *subscription, *provider, *database),
+	)
 }
 func rewriteDeploymentConfig(input, output, old, bridge, ssh, public, subscription, provider, database string) error {
 	if net.ParseIP(database).To4() == nil || database == bridge || database == ssh {
 		return errors.New("deployment_rewrite_dedicated_database_invalid")
 	}
-	if net.ParseIP(old).To4() == nil || net.ParseIP(bridge).To4() == nil || !regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`).MatchString(ssh) || !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`).MatchString(provider) {
+	if net.ParseIP(old).To4() == nil || net.ParseIP(bridge).To4() == nil || !regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`).MatchString(ssh) ||
+		!regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`).MatchString(provider) {
 		return errors.New("deployment_rewrite_identity_invalid")
 	}
 	for _, domain := range []string{public, subscription} {
@@ -74,7 +78,9 @@ func rewriteDeploymentConfig(input, output, old, bridge, ssh, public, subscripti
 	values["SUBSCRIPTION_DOMAIN"] = subscription
 	delete(values, "ULTRA_AUTOMATION_BRIDGE_IPV4")
 	values["ULTRA_AUTOMATION_BRIDGE_PROVIDER"] = strings.ToLower(provider)
-	if previous, err := url.Parse(values["ULTRA_AUTOMATION_BRIDGE_URL"]); err == nil && previous.Scheme == "https" && previous.Hostname() != "" && previous.User == nil {
+	if previous, err := url.Parse(values["ULTRA_AUTOMATION_BRIDGE_URL"]); err == nil && previous.Scheme == "https" &&
+		previous.Hostname() != "" &&
+		previous.User == nil {
 		previous.Host = subscription
 		values["ULTRA_AUTOMATION_BRIDGE_URL"] = previous.String()
 	} else {

@@ -4,29 +4,53 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/NikitaDmitryuk/ultra/internal/config"
+
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 func TestAdoptionTopologyUsesDBNamesAndAllEnabledExits(t *testing.T) {
-	p := &installplan.InstallPlan{Exits: []installplan.ExitNode{{Name: "primary", SSHHost: "192.0.2.10"}, {Name: "disabled-old", SSHHost: "192.0.2.99"}}}
+	p := &installplan.InstallPlan{
+		Exits: []installplan.ExitNode{{Name: "primary", SSHHost: "192.0.2.10"}, {Name: "disabled-old", SSHHost: "192.0.2.99"}},
+	}
 	inventory := map[string]any{"all": map[string]any{"children": map[string]any{}}}
 	topology := adoptionTopology{Nodes: []adoptionTopologyNode{
-		{ID: "11111111-1111-4111-8111-111111111111", Name: "actual-static", Address: "192.0.2.10", Port: 8443, TunnelUUID: "22222222-2222-4222-8222-222222222222", CertPin: strings.Repeat("a", 64), Priority: 250, Enabled: true, Pins: "192.0.2.10 ssh-ed25519 fixture\n"},
-		{ID: "33333333-3333-4333-8333-333333333333", Name: "dynamic-us", Address: "192.0.2.20", Port: 9443, TunnelUUID: "44444444-4444-4444-8444-444444444444", CertPin: strings.Repeat("b", 64), Priority: 75, Enabled: true, Pins: "192.0.2.20 ssh-ed25519 fixture\n"},
+		{
+			ID:         "11111111-1111-4111-8111-111111111111",
+			Name:       "actual-static",
+			Address:    "192.0.2.10",
+			Port:       8443,
+			TunnelUUID: "22222222-2222-4222-8222-222222222222",
+			CertPin:    strings.Repeat("a", 64),
+			Priority:   250,
+			Enabled:    true,
+			Pins:       "192.0.2.10 ssh-ed25519 fixture\n",
+		},
+		{
+			ID:         "33333333-3333-4333-8333-333333333333",
+			Name:       "dynamic-us",
+			Address:    "192.0.2.20",
+			Port:       9443,
+			TunnelUUID: "44444444-4444-4444-8444-444444444444",
+			CertPin:    strings.Repeat("b", 64),
+			Priority:   75,
+			Enabled:    true,
+			Pins:       "192.0.2.20 ssh-ed25519 fixture\n",
+		},
 	}}
 	directory := t.TempDir()
 	entries, err := applyAdoptionTopology(p, inventory, directory, topology)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(p.Exits) != 2 || p.Exits[0].Name != "actual-static" || p.Exits[1].Name != "dynamic-us" || entries[1].Priority != 75 || entries[1].PinnedPeerCertSHA256 != strings.Repeat("b", 64) {
+	if len(p.Exits) != 2 || p.Exits[0].Name != "actual-static" || p.Exits[1].Name != "dynamic-us" || entries[1].Priority != 75 ||
+		entries[1].PinnedPeerCertSHA256 != strings.Repeat("b", 64) {
 		t.Fatal("DB topology lost or historical node resurrected")
 	}
 	nodes := inventory["all"].(map[string]any)["children"].(map[string]any)["exits"].(map[string]any)["hosts"].(map[string]any)
@@ -136,7 +160,11 @@ func TestAdoptionTopologyFirstProbeAndRepeatAttestFreshState(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins)
-	p := &installplan.InstallPlan{Bridge: installplan.BridgeConfig{RemoteDir: "/etc/ultra-relay", SSHHost: "192.0.2.1"}, SSH: installplan.SSHConfig{Identity: filepath.Join(root, "identity")}, Database: installplan.DatabaseConfig{Name: "fixture"}}
+	p := &installplan.InstallPlan{
+		Bridge:   installplan.BridgeConfig{RemoteDir: "/etc/ultra-relay", SSHHost: "192.0.2.1"},
+		SSH:      installplan.SSHConfig{Identity: filepath.Join(root, "identity")},
+		Database: installplan.DatabaseConfig{Name: "fixture"},
+	}
 	topology := adoptionTopology{SHA256: strings.Repeat("a", 64), Nodes: []adoptionTopologyNode{{Name: "fixture"}}}
 	raw, _ := json.Marshal(topology)
 	state := filepath.Join(root, "source.json")

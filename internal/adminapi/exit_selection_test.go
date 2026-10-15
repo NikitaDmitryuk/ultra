@@ -28,7 +28,11 @@ func TestClientRoutesMatchAutoAndFixedPolicies(t *testing.T) {
 		selector.ProbeAndSelect(context.Background(), nodes)
 	}
 	server := &Server{exits: manager, selector: selector}
-	owner := auth.User{UUID: "owner", PreferredExitID: &primary, Routes: []auth.RouteCredential{{UUID: "location", ExitID: &primary, Published: true}}}
+	owner := auth.User{
+		UUID:            "owner",
+		PreferredExitID: &primary,
+		Routes:          []auth.RouteCredential{{UUID: "location", ExitID: &primary, Published: true}},
+	}
 	selected, effective, _, _ := server.clientExitSelection(owner)
 	if selected != nil || effective != "reserve" || server.routeReason(owner) != "" {
 		t.Fatal("legacy preference affected Auto", selected, effective, server.routeReason(owner))

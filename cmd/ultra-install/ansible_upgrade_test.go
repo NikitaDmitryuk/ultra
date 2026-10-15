@@ -7,7 +7,11 @@ import (
 )
 
 func TestAnsibleUpgradeRequiresForwardSchemaCompatibleFallback(t *testing.T) {
-	previous := &automationRelease{DatabaseSchemaMin: 24, DatabaseSchemaMax: 25, Capabilities: []string{"service-access-v1", "provider-pool-quota-v1"}}
+	previous := &automationRelease{
+		DatabaseSchemaMin: 24,
+		DatabaseSchemaMax: 25,
+		Capabilities:      []string{"service-access-v1", "provider-pool-quota-v1"},
+	}
 	target := *previous
 	if err := compatibleAnsibleRelease(previous, &target); err != nil {
 		t.Fatal(err)

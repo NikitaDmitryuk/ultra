@@ -27,8 +27,19 @@ func dependencyFixture(t *testing.T) (*installplan.InstallPlan, *installplan.Des
 	p.Artifacts.RelayBinary = binary
 	p.Features.WARP = true
 	p.Features.WARPPort = 40000
-	ds := &installplan.DesiredState{BridgeSpecObject: &config.Spec{SplitRouting: config.BoolPtr(false)}, ExitSpecObjects: map[string]*config.Spec{"primary": {AntiCensor: &config.AntiCensorSpec{WARPProxy: true, WARPProxyPort: 40123}}}}
-	inventory := map[string]any{"all": map[string]any{"vars": map[string]any{}, "children": map[string]any{"bridge": map[string]any{"hosts": map[string]any{"bridge": map[string]any{}}}, "exits": map[string]any{"hosts": map[string]any{"exit_0": map[string]any{}}}}}}
+	ds := &installplan.DesiredState{
+		BridgeSpecObject: &config.Spec{SplitRouting: config.BoolPtr(false)},
+		ExitSpecObjects:  map[string]*config.Spec{"primary": {AntiCensor: &config.AntiCensorSpec{WARPProxy: true, WARPProxyPort: 40123}}},
+	}
+	inventory := map[string]any{
+		"all": map[string]any{
+			"vars": map[string]any{},
+			"children": map[string]any{
+				"bridge": map[string]any{"hosts": map[string]any{"bridge": map[string]any{}}},
+				"exits":  map[string]any{"hosts": map[string]any{"exit_0": map[string]any{}}},
+			},
+		},
+	}
 	return p, ds, inventory, map[string]bootstrapInspection{"bridge": {Architecture: "amd64"}, "exit_0": {Architecture: "amd64"}}
 }
 
@@ -171,7 +182,15 @@ func TestBootstrapPreservedGeoRole(t *testing.T) {
 	if err = os.WriteFile(playbook, []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
-	vars, err := json.Marshal(map[string]any{"ultra_preserve_runtime": true, "ultra_geo_tag": "does-not-exist", "ultra_spec": map[string]any{"geo_assets_dir": directory}, "ultra_geo_assets": assets, "ansible_python_interpreter": filepath.Join(filepath.Dir(executable), "python")})
+	vars, err := json.Marshal(
+		map[string]any{
+			"ultra_preserve_runtime":     true,
+			"ultra_geo_tag":              "does-not-exist",
+			"ultra_spec":                 map[string]any{"geo_assets_dir": directory},
+			"ultra_geo_assets":           assets,
+			"ansible_python_interpreter": filepath.Join(filepath.Dir(executable), "python"),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +204,13 @@ func TestBootstrapPreservedGeoRole(t *testing.T) {
 	}
 	run := func() ([]byte, error) {
 		command := exec.Command(executable, "-i", "localhost,", playbook, "-e", "@"+varsPath)
-		command.Env = append(os.Environ(), "ANSIBLE_CONFIG="+configPath, "ANSIBLE_LOCAL_TEMP="+filepath.Join(directory, "local"), "ANSIBLE_REMOTE_TEMP="+filepath.Join(directory, "remote"), "ANSIBLE_NOCOLOR=1")
+		command.Env = append(
+			os.Environ(),
+			"ANSIBLE_CONFIG="+configPath,
+			"ANSIBLE_LOCAL_TEMP="+filepath.Join(directory, "local"),
+			"ANSIBLE_REMOTE_TEMP="+filepath.Join(directory, "remote"),
+			"ANSIBLE_NOCOLOR=1",
+		)
 		return command.CombinedOutput()
 	}
 	if output, err := run(); err != nil {
@@ -235,7 +260,12 @@ func TestBootstrapPreservedWARPRole(t *testing.T) {
 	cliPath := filepath.Join(directory, "warp-cli")
 	writeCLI := func(settings, status string) {
 		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
-		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %s\ncase \"$2\" in\nsettings) printf '%%s\\n' %s;;\nstatus) printf '%%s\\n' %s;;\n*) exit 91;;\nesac\n", strconv.Quote(logPath), shellQuote(settings), shellQuote(status))
+		script := fmt.Sprintf(
+			"#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %s\ncase \"$2\" in\nsettings) printf '%%s\\n' %s;;\nstatus) printf '%%s\\n' %s;;\n*) exit 91;;\nesac\n",
+			strconv.Quote(logPath),
+			shellQuote(settings),
+			shellQuote(status),
+		)
 		if err := os.WriteFile(cliPath, []byte(script), 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -245,11 +275,20 @@ func TestBootstrapPreservedWARPRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	playbook := filepath.Join(directory, "play.yml")
-	text := fmt.Sprintf("- hosts: localhost\n  gather_facts: false\n  connection: local\n  roles:\n    - %s\n", filepath.Join(cwd, "../../deploy/ansible/roles/warp"))
+	text := fmt.Sprintf(
+		"- hosts: localhost\n  gather_facts: false\n  connection: local\n  roles:\n    - %s\n",
+		filepath.Join(cwd, "../../deploy/ansible/roles/warp"),
+	)
 	if err = os.WriteFile(playbook, []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
-	vars, err := json.Marshal(map[string]any{"ultra_preserve_runtime": true, "ultra_warp_port": port, "ansible_python_interpreter": filepath.Join(filepath.Dir(executable), "python")})
+	vars, err := json.Marshal(
+		map[string]any{
+			"ultra_preserve_runtime":     true,
+			"ultra_warp_port":            port,
+			"ansible_python_interpreter": filepath.Join(filepath.Dir(executable), "python"),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +302,14 @@ func TestBootstrapPreservedWARPRole(t *testing.T) {
 	}
 	run := func() ([]byte, error) {
 		command := exec.Command(executable, "-i", "localhost,", playbook, "-e", "@"+varsPath)
-		command.Env = append(os.Environ(), "PATH="+directory+":"+os.Getenv("PATH"), "ANSIBLE_CONFIG="+configPath, "ANSIBLE_LOCAL_TEMP="+filepath.Join(directory, "local"), "ANSIBLE_REMOTE_TEMP="+filepath.Join(directory, "remote"), "ANSIBLE_NOCOLOR=1")
+		command.Env = append(
+			os.Environ(),
+			"PATH="+directory+":"+os.Getenv("PATH"),
+			"ANSIBLE_CONFIG="+configPath,
+			"ANSIBLE_LOCAL_TEMP="+filepath.Join(directory, "local"),
+			"ANSIBLE_REMOTE_TEMP="+filepath.Join(directory, "remote"),
+			"ANSIBLE_NOCOLOR=1",
+		)
 		return command.CombinedOutput()
 	}
 	for _, tc := range []struct {
@@ -346,7 +392,11 @@ with open(sys.argv[2], 'w') as f:
 			if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
-			script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %s\nif [ \"$2\" = settings ]; then printf '%%s\\n' '%s'; fi\n", strconv.Quote(logPath), tc.settings)
+			script := fmt.Sprintf(
+				"#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %s\nif [ \"$2\" = settings ]; then printf '%%s\\n' '%s'; fi\n",
+				strconv.Quote(logPath),
+				tc.settings,
+			)
 			if err := os.WriteFile(filepath.Join(directory, "warp-cli"), []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -355,7 +405,14 @@ with open(sys.argv[2], 'w') as f:
 				t.Fatal(err)
 			}
 			command := exec.Command(executable, "-i", "localhost,", playbook, "-e", string(vars))
-			command.Env = append(os.Environ(), "PATH="+directory+":"+os.Getenv("PATH"), "ANSIBLE_CONFIG="+configPath, "ANSIBLE_LOCAL_TEMP="+filepath.Join(directory, "local"), "ANSIBLE_REMOTE_TEMP="+filepath.Join(directory, "remote"), "ANSIBLE_NOCOLOR=1")
+			command.Env = append(
+				os.Environ(),
+				"PATH="+directory+":"+os.Getenv("PATH"),
+				"ANSIBLE_CONFIG="+configPath,
+				"ANSIBLE_LOCAL_TEMP="+filepath.Join(directory, "local"),
+				"ANSIBLE_REMOTE_TEMP="+filepath.Join(directory, "remote"),
+				"ANSIBLE_NOCOLOR=1",
+			)
 			if output, err := command.CombinedOutput(); err != nil {
 				t.Fatalf("managed WARP settings failed: %v\n%s", err, output)
 			}
@@ -410,7 +467,8 @@ func TestBootstrapDumpPreflightPrecedesDatabaseMutation(t *testing.T) {
 			t.Fatal(err)
 		}
 		s := string(b)
-		if !strings.Contains(s, "tasks_from: preflight") || strings.Index(s, "tasks_from: preflight") > strings.Index(s, "- role: postgres\n") {
+		if !strings.Contains(s, "tasks_from: preflight") ||
+			strings.Index(s, "tasks_from: preflight") > strings.Index(s, "- role: postgres\n") {
 			t.Fatal("archive must be checked before provisioning")
 		}
 		if !strings.Contains(s, "ansible_host == ultra_db_tunnel_host") {
@@ -424,7 +482,9 @@ func TestBootstrapDumpHelperIsEmbeddedAndFrozenOutsideCheckout(t *testing.T) {
 	p.Secrets.DatabaseDumpFile = filepath.Join(t.TempDir(), "database.dump")
 	p.Secrets.DatabaseDumpSHA256 = strings.Repeat("a", 64)
 	ds.PostgresConfig = &install.PostgresConfig{DBName: "app", DBUser: "app", DBPassword: "fixture"}
-	inv["all"].(map[string]any)["children"].(map[string]any)["databases"] = map[string]any{"hosts": map[string]any{"database": map[string]any{}}}
+	inv["all"].(map[string]any)["children"].(map[string]any)["databases"] = map[string]any{
+		"hosts": map[string]any{"database": map[string]any{}},
+	}
 	directory := t.TempDir()
 	t.Chdir(t.TempDir())
 	if err := prepareBootstrapVariables(p, ds, inv, inspection, directory); err != nil {
@@ -460,7 +520,8 @@ func TestPostgresIdentityObservationGrantTargetsApplicationDatabase(t *testing.T
 		t.Fatal("application grant missing")
 	}
 	grant := s[start:end]
-	if !strings.Contains(grant, "--dbname, \"{{ ultra_postgres.name }}\"") || !strings.Contains(grant, "GRANT EXECUTE ON FUNCTION pg_control_system()") {
+	if !strings.Contains(grant, "--dbname, \"{{ ultra_postgres.name }}\"") ||
+		!strings.Contains(grant, "GRANT EXECUTE ON FUNCTION pg_control_system()") {
 		t.Fatal("grant must run in the app DB")
 	}
 	if strings.Contains(s[:start], "GRANT EXECUTE") {

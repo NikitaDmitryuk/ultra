@@ -2,10 +2,11 @@ package main
 
 import (
 	"errors"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 // prepareProviderSecrets creates disposable projections, never additional operator inputs.

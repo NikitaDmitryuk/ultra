@@ -29,14 +29,36 @@ func baselineFixture(t *testing.T) (upgradeBaselineDescriptor, string, string) {
 		t.Fatal(err)
 	}
 	journal := filepath.Join(root, "operation.json")
-	data, _ := json.Marshal(map[string]any{"schema": 1, "commit": strings.Repeat("a", 40), "version": "v2.5.0", "manifest_sha256": manifestSHA, "remote_attempt": strings.Repeat("c", 64), "mutator_dispatched": true})
+	data, _ := json.Marshal(
+		map[string]any{
+			"schema":             1,
+			"commit":             strings.Repeat("a", 40),
+			"version":            "v2.5.0",
+			"manifest_sha256":    manifestSHA,
+			"remote_attempt":     strings.Repeat("c", 64),
+			"mutator_dispatched": true,
+		},
+	)
 	if err = os.WriteFile(journal, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 	id := "11111111-2222-3333-4444-555555555555"
-	descriptor := upgradeBaselineDescriptor{Schema: 1, Journal: journal, JournalSHA: fmt.Sprintf("%x", sha256.Sum256(data)), Manifest: manifestPath, ManifestSHA: manifestSHA,
-		Bridge: upgradeBaselineProof{Stage: "/root/jobs/rollback", RequestSHA: strings.Repeat("d", 64), Checkpoint: "/var/lib/ultra-ansible/adoption/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/checkpoint.json", CheckpointSHA: strings.Repeat("e", 64)},
-		Exits:  map[string]upgradeBaselineProof{id: {Stage: "/root/jobs/bootstrap-exit_0", RequestSHA: strings.Repeat("f", 64), Alias: "exit_0"}}}
+	descriptor := upgradeBaselineDescriptor{
+		Schema:      1,
+		Journal:     journal,
+		JournalSHA:  fmt.Sprintf("%x", sha256.Sum256(data)),
+		Manifest:    manifestPath,
+		ManifestSHA: manifestSHA,
+		Bridge: upgradeBaselineProof{
+			Stage:         "/root/jobs/rollback",
+			RequestSHA:    strings.Repeat("d", 64),
+			Checkpoint:    "/var/lib/ultra-ansible/adoption/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/checkpoint.json",
+			CheckpointSHA: strings.Repeat("e", 64),
+		},
+		Exits: map[string]upgradeBaselineProof{
+			id: {Stage: "/root/jobs/bootstrap-exit_0", RequestSHA: strings.Repeat("f", 64), Alias: "exit_0"},
+		},
+	}
 	path := filepath.Join(root, "baseline.json")
 	directory := filepath.Join(root, "upgrade")
 	if err = os.Mkdir(directory, 0700); err != nil {
@@ -59,7 +81,13 @@ func TestUpgradeBaselineLocalJournalAndBundleAreBoundAndFrozen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if input.RemoteRelease != "/var/lib/ultra-ansible/operator-inputs/manual-"+strings.Repeat("a", 40)+"-"+strings.Repeat("c", 64)+"/release" {
+	if input.RemoteRelease != "/var/lib/ultra-ansible/operator-inputs/manual-"+strings.Repeat(
+		"a",
+		40,
+	)+"-"+strings.Repeat(
+		"c",
+		64,
+	)+"/release" {
 		t.Fatal("journal attempt not bound to retained bundle")
 	}
 	for _, name := range []string{"baseline.input.json", "baseline.journal.json", "baseline.manifest.json"} {
@@ -73,7 +101,11 @@ func TestUpgradeBaselineLocalJournalAndBundleAreBoundAndFrozen(t *testing.T) {
 	if _, err = prepareUpgradeBaseline("", directory); err == nil {
 		t.Fatal("retry omitted frozen baseline")
 	}
-	d.Exits["11111111-2222-3333-4444-555555555555"] = upgradeBaselineProof{Stage: "/root/other-stage", RequestSHA: strings.Repeat("f", 64), Alias: "exit_0"}
+	d.Exits["11111111-2222-3333-4444-555555555555"] = upgradeBaselineProof{
+		Stage:      "/root/other-stage",
+		RequestSHA: strings.Repeat("f", 64),
+		Alias:      "exit_0",
+	}
 	writeBaselineFixture(t, path, d)
 	if _, err = prepareUpgradeBaseline(path, directory); err == nil {
 		t.Fatal("changed frozen receipt selection accepted")

@@ -3,11 +3,12 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"time"
+
 	"github.com/NikitaDmitryuk/ultra/internal/quota"
 	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 	"github.com/jackc/pgx/v5"
 	"gorm.io/gorm/clause"
-	"time"
 )
 
 type QuotaRepo struct {
@@ -38,13 +39,16 @@ type ExitBudget struct {
 }
 
 func (r *QuotaRepo) Budgets(ctx context.Context) ([]ExitBudget, error) {
-	rows, e := r.db.Pool.Query(ctx, `SELECT n.enabled,b.exit_id::text,COALESCE(NULLIF(n.display_name,''),NULLIF(n.city,''),n.name),b.instance_id,b.monthly_bytes,b.source,b.is_fallback,b.provider_used_bytes,b.account_remaining_bytes,b.observed_at,b.provider_error,b.emergency_started_at,b.emergency_baseline_bytes,b.provider_observed_local_bytes,COALESCE(op.body->'offer'->'plan','{}'::jsonb)
+	rows, e := r.db.Pool.Query(
+		ctx,
+		`SELECT n.enabled,b.exit_id::text,COALESCE(NULLIF(n.display_name,''),NULLIF(n.city,''),n.name),b.instance_id,b.monthly_bytes,b.source,b.is_fallback,b.provider_used_bytes,b.account_remaining_bytes,b.observed_at,b.provider_error,b.emergency_started_at,b.emergency_baseline_bytes,b.provider_observed_local_bytes,COALESCE(op.body->'offer'->'plan','{}'::jsonb)
  FROM exit_traffic_budgets b JOIN exit_nodes n ON n.id=b.exit_id
  LEFT JOIN LATERAL (
  SELECT body FROM cloud_operations WHERE state='ready'
  AND body->>'instance_id'=b.instance_id AND body->>'exit_id'=b.exit_id::text
  ORDER BY created_at DESC,id DESC LIMIT 1
- ) op ON true ORDER BY n.priority,n.id`)
+ ) op ON true ORDER BY n.priority,n.id`,
+	)
 	if e != nil {
 		return nil, e
 	}
@@ -68,7 +72,11 @@ func (r *QuotaRepo) Budgets(ctx context.Context) ([]ExitBudget, error) {
 	return out, rows.Err()
 }
 func (r *QuotaRepo) EnsureVultr(ctx context.Context, id, instance string, monthly int64) error {
-	return r.db.orm.WithContext(ctx).Table("exit_traffic_budgets").Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "exit_id"}}, DoUpdates: clause.AssignmentColumns([]string{"instance_id", "monthly_bytes"})}).Create(map[string]any{"exit_id": id, "instance_id": instance, "monthly_bytes": monthly, "source": "vultr"}).Error
+	return r.db.orm.WithContext(ctx).
+		Table("exit_traffic_budgets").
+		Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "exit_id"}}, DoUpdates: clause.AssignmentColumns([]string{"instance_id", "monthly_bytes"})}).
+		Create(map[string]any{"exit_id": id, "instance_id": instance, "monthly_bytes": monthly, "source": "vultr"}).
+		Error
 }
 
 // Recalculate persists monthly allowances. Only changed exclusions require applying Xray.
@@ -98,7 +106,8 @@ func (r *QuotaRepo) Recalculate(ctx context.Context, now time.Time) (bool, error
 			continue
 		}
 		var used int64
-		e = tx.QueryRow(ctx, `SELECT COALESCE(SUM(GREATEST(uplink_bytes+downlink_bytes,charged_bytes)),0)::bigint FROM account_exit_usage WHERE exit_id=$1 AND period=$2`, b.ID, month.Format("2006-01")).Scan(&used)
+		e = tx.QueryRow(ctx, `SELECT COALESCE(SUM(GREATEST(uplink_bytes+downlink_bytes,charged_bytes)),0)::bigint FROM account_exit_usage WHERE exit_id=$1 AND period=$2`, b.ID, month.Format("2006-01")).
+			Scan(&used)
 		if e != nil {
 			return false, e
 		}
@@ -217,12 +226,21 @@ type QuotaSnapshot struct {
 
 func (r *QuotaRepo) Snapshot(ctx context.Context) ([]QuotaSnapshot, error) {
 	result := []QuotaSnapshot{}
-	err := r.db.orm.WithContext(ctx).Table("user_exit_quotas").Select("user_uuid AS user, exit_id AS exit, day, used_bytes AS used, limit_bytes AS limit, blocked, reason").Where("NOT applied").Find(&result).Error
+	err := r.db.orm.WithContext(ctx).
+		Table("user_exit_quotas").
+		Select("user_uuid AS user, exit_id AS exit, day, used_bytes AS used, limit_bytes AS limit, blocked, reason").
+		Where("NOT applied").
+		Find(&result).
+		Error
 	return result, err
 }
 func (r *QuotaRepo) Acknowledge(ctx context.Context, snapshot []QuotaSnapshot) error {
 	for _, s := range snapshot {
-		err := r.db.orm.WithContext(ctx).Table("user_exit_quotas").Where(map[string]any{"user_uuid": s.User, "exit_id": s.Exit, "day": s.Day, "used_bytes": s.Used, "limit_bytes": s.Limit, "blocked": s.Blocked, "reason": s.Reason}).Update("applied", true).Error
+		err := r.db.orm.WithContext(ctx).
+			Table("user_exit_quotas").
+			Where(map[string]any{"user_uuid": s.User, "exit_id": s.Exit, "day": s.Day, "used_bytes": s.Used, "limit_bytes": s.Limit, "blocked": s.Blocked, "reason": s.Reason}).
+			Update("applied", true).
+			Error
 		if err != nil {
 			return err
 		}
@@ -249,7 +267,12 @@ func (r *QuotaRepo) SaveBandwidth(ctx context.Context, observations []BandwidthO
 		if o.Pool {
 			period := now.UTC().Format("2006-01")
 			if o.Error != "" {
-				_, err = tx.Exec(ctx, `UPDATE provider_quota_pools SET provider_error=$2 WHERE scope='vultr' AND period=$1`, period, o.Error)
+				_, err = tx.Exec(
+					ctx,
+					`UPDATE provider_quota_pools SET provider_error=$2 WHERE scope='vultr' AND period=$1`,
+					period,
+					o.Error,
+				)
 			} else {
 				_, err = tx.Exec(ctx, `INSERT INTO provider_quota_pools(scope,period,accrued_bytes,provider_used_bytes,remaining_bytes,observed_local_bytes,observed_at) VALUES('vultr',$1,$2,$3,$4,$5,$6) ON CONFLICT(scope,period) DO UPDATE SET accrued_bytes=EXCLUDED.accrued_bytes,provider_used_bytes=EXCLUDED.provider_used_bytes,remaining_bytes=EXCLUDED.remaining_bytes,observed_local_bytes=EXCLUDED.observed_local_bytes,observed_at=EXCLUDED.observed_at,provider_error='' WHERE provider_quota_pools.observed_at<=EXCLUDED.observed_at`, period, o.Accrued, o.AccountUsed, o.Remaining, o.LocalWatermark, now)
 			}
@@ -312,7 +335,11 @@ func (r *QuotaRepo) RuntimeLimits(ctx context.Context, now time.Time) ([]runtime
 		deadline := expires
 		global := runtimestate.QuotaLimit{ExitID: b.ID, Period: period, LimitBytes: used + left, UsedBytes: used, ExpiresAt: deadline}
 		out = append(out, global)
-		rows, e := tx.Query(ctx, `SELECT u.account_id::text,q.limit_bytes,q.used_bytes,q.blocked FROM user_exit_quotas q JOIN users u ON u.uuid=q.user_uuid WHERE q.exit_id=$1 AND u.is_active AND NOT u.member_pending`, b.ID)
+		rows, e := tx.Query(
+			ctx,
+			`SELECT u.account_id::text,q.limit_bytes,q.used_bytes,q.blocked FROM user_exit_quotas q JOIN users u ON u.uuid=q.user_uuid WHERE q.exit_id=$1 AND u.is_active AND NOT u.member_pending`,
+			b.ID,
+		)
 		if e != nil {
 			return nil, e
 		}
@@ -327,7 +354,17 @@ func (r *QuotaRepo) RuntimeLimits(ctx context.Context, now time.Time) ([]runtime
 			if blocked {
 				limit = consumed
 			}
-			out = append(out, runtimestate.QuotaLimit{AccountID: account, ExitID: b.ID, Period: period, LimitBytes: limit, UsedBytes: consumed, ExpiresAt: deadline})
+			out = append(
+				out,
+				runtimestate.QuotaLimit{
+					AccountID:  account,
+					ExitID:     b.ID,
+					Period:     period,
+					LimitBytes: limit,
+					UsedBytes:  consumed,
+					ExpiresAt:  deadline,
+				},
+			)
 		}
 		e = rows.Err()
 		rows.Close()
@@ -352,6 +389,13 @@ func (r *QuotaRepo) HasAvailableExit(ctx context.Context, userUUID string) (bool
 	var rows []struct {
 		UserUUID string `gorm:"column:user_uuid"`
 	}
-	err := r.db.orm.WithContext(ctx).Table("user_exit_quotas AS q").Select("q.user_uuid").Joins("JOIN exit_nodes x ON x.id = q.exit_id").Where("q.user_uuid = ? AND NOT q.blocked AND x.enabled", userUUID).Limit(1).Find(&rows).Error
+	err := r.db.orm.WithContext(ctx).
+		Table("user_exit_quotas AS q").
+		Select("q.user_uuid").
+		Joins("JOIN exit_nodes x ON x.id = q.exit_id").
+		Where("q.user_uuid = ? AND NOT q.blocked AND x.enabled", userUUID).
+		Limit(1).
+		Find(&rows).
+		Error
 	return len(rows) > 0, err
 }

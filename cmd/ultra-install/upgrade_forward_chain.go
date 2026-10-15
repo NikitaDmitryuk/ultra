@@ -64,7 +64,9 @@ func sameForwardJSON(a, b any) bool {
 func checkForwardChainLedger(raw []byte, oldID, newID string) (forwardChainLedger, error) {
 	var l forwardChainLedger
 	fail := errors.New("upgrade_forward_chain_retirement_unverified")
-	if decodeForwardChain(raw, &l) != nil || l.Version != 1 || l.IDs == nil || l.Handoff == nil || l.Handoff.OldID != oldID || l.Handoff.NewID != newID || oldID == newID {
+	if decodeForwardChain(raw, &l) != nil || l.Version != 1 || l.IDs == nil || l.Handoff == nil || l.Handoff.OldID != oldID ||
+		l.Handoff.NewID != newID ||
+		oldID == newID {
 		return l, fail
 	}
 	seen := map[string]bool{}
@@ -93,7 +95,11 @@ func forwardSavedRequest(stage string) (map[string]any, map[string]any, error) {
 
 // Validate the exact exported source against A's release archive, then check
 // request identity and terminal receipt/result evidence. Names convey no trust.
-func verifyForwardSavedStage(stage, archive, operation string, inventory, variables, result map[string]any, diagnostic *deployansible.Diagnostic) (map[string]any, error) {
+func verifyForwardSavedStage(
+	stage, archive, operation string,
+	inventory, variables, result map[string]any,
+	diagnostic *deployansible.Diagnostic,
+) (map[string]any, error) {
 	fail := errors.New("upgrade_forward_chain_stage_unverified")
 	if operatorPrivate(stage, true) != nil || verifyForwardDrainFiles(stage, archive) != nil {
 		return nil, fail
@@ -124,11 +130,13 @@ func verifyForwardSavedStage(stage, archive, operation string, inventory, variab
 	for _, name := range []string{"job.json", "receipt.json"} {
 		raw, err := readForwardEvidence(filepath.Join(stage, name))
 		var r record
-		if err != nil || decodeForwardChain(raw, &r) != nil || r.Schema != 1 || r.Operation != operation || r.Request != digest || r.Binary != digest {
+		if err != nil || decodeForwardChain(raw, &r) != nil || r.Schema != 1 || r.Operation != operation || r.Request != digest ||
+			r.Binary != digest {
 			return nil, fail
 		}
 		if name == "job.json" {
-			if r.State != "" || r.Code != "" || r.ExitCode != nil || r.Diagnostic != nil || r.StartedAt != nil || r.FinishedAt != nil || r.Result != nil {
+			if r.State != "" || r.Code != "" || r.ExitCode != nil || r.Diagnostic != nil || r.StartedAt != nil || r.FinishedAt != nil ||
+				r.Result != nil {
 				return nil, fail
 			}
 		} else {
@@ -139,7 +147,10 @@ func verifyForwardSavedStage(stage, archive, operation string, inventory, variab
 		return nil, fail
 	}
 	if diagnostic != nil {
-		if receipt.State != "failed" || receipt.Code != "ansible_failed" || receipt.ExitCode == nil || *receipt.ExitCode != 2 || receipt.Diagnostic == nil || *receipt.Diagnostic != *diagnostic || receipt.Result != nil {
+		if receipt.State != "failed" || receipt.Code != "ansible_failed" || receipt.ExitCode == nil || *receipt.ExitCode != 2 ||
+			receipt.Diagnostic == nil ||
+			*receipt.Diagnostic != *diagnostic ||
+			receipt.Result != nil {
 			return nil, fail
 		}
 		raw, err := readForwardEvidence(filepath.Join(stage, "diagnostic.json"))
@@ -240,7 +251,34 @@ func forwardDomainVariables(p *installplan.InstallPlan, root, directory string) 
 	if ingress.ForwardHost != "" {
 		mode = "forward"
 	}
-	return map[string]any{"ultra_lock_directory": root, "ultra_upgrade_domain_transaction": digestSHA256([]byte(lifecycleID(directory))), "ultra_upgrade_domain_desired": map[string]any{"subscription": p.PublicSubscriptionDomain(), "vpn": ingress.Domain, "backend": p.Bot.Domain, "public_host": p.Bridge.PublicHost}, "ultra_upgrade_domain_policy": map[string]any{"email": ingress.Email, "ingress_mode": mode, "forward_host": ingress.ForwardHost, "dns_ttl": dns.TTL, "backend_port": ingress.BackendPort, "gateway_port": ingress.GatewayPort, "staging_port": ingress.StagingPort, "status_port": ingress.StatusPort, "experimental_port": ingress.ExperimentalPort, "age_recipient": p.Automation.AgeRecipient, "bridge_provider": p.Automation.BridgeProvider, "static_nodes": p.Automation.StaticNodes, "admin_telegram_id": p.Automation.AdminTelegramID, "bridge_ipv4": p.Automation.BridgeIPv4, "state_paths": append([]string{}, p.Automation.StatePaths...), "artifact_paths": append([]string{}, p.Automation.ArtifactPaths...)}}
+	return map[string]any{
+		"ultra_lock_directory":             root,
+		"ultra_upgrade_domain_transaction": digestSHA256([]byte(lifecycleID(directory))),
+		"ultra_upgrade_domain_desired": map[string]any{
+			"subscription": p.PublicSubscriptionDomain(),
+			"vpn":          ingress.Domain,
+			"backend":      p.Bot.Domain,
+			"public_host":  p.Bridge.PublicHost,
+		},
+		"ultra_upgrade_domain_policy": map[string]any{
+			"email":             ingress.Email,
+			"ingress_mode":      mode,
+			"forward_host":      ingress.ForwardHost,
+			"dns_ttl":           dns.TTL,
+			"backend_port":      ingress.BackendPort,
+			"gateway_port":      ingress.GatewayPort,
+			"staging_port":      ingress.StagingPort,
+			"status_port":       ingress.StatusPort,
+			"experimental_port": ingress.ExperimentalPort,
+			"age_recipient":     p.Automation.AgeRecipient,
+			"bridge_provider":   p.Automation.BridgeProvider,
+			"static_nodes":      p.Automation.StaticNodes,
+			"admin_telegram_id": p.Automation.AdminTelegramID,
+			"bridge_ipv4":       p.Automation.BridgeIPv4,
+			"state_paths":       append([]string{}, p.Automation.StatePaths...),
+			"artifact_paths":    append([]string{}, p.Automation.ArtifactPaths...),
+		},
+	}
 }
 func verifyForwardRecoveryTools(directory, archive string) (result error) {
 	fail := errors.New("upgrade_forward_chain_tools_invalid")
@@ -272,7 +310,12 @@ func verifyForwardRecoveryTools(directory, archive string) (result error) {
 		if err == io.EOF {
 			break
 		}
-		if err != nil || h.Typeflag != tar.TypeReg || !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)$`).MatchString(h.Name) || seen[h.Name] || h.Size < 0 || h.Size > 1048576 || len(seen) >= 64 {
+		if err != nil || h.Typeflag != tar.TypeReg ||
+			!regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)$`).MatchString(h.Name) ||
+			seen[h.Name] ||
+			h.Size < 0 ||
+			h.Size > 1048576 ||
+			len(seen) >= 64 {
 			return fail
 		}
 		data, err := io.ReadAll(io.LimitReader(tr, 1048577))
@@ -296,24 +339,47 @@ func verifyForwardRecoveryTools(directory, archive string) (result error) {
 	}
 	return nil
 }
-func verifyForwardPostHandoffArtifacts(old forwardOldOperation, root, directory, release string, plan *installplan.InstallPlan) (map[string]bool, error) {
+
+func verifyForwardPostHandoffArtifacts(
+	old forwardOldOperation,
+	root, directory, release string,
+	plan *installplan.InstallPlan,
+) (map[string]bool, error) {
 	fail := errors.New("upgrade_forward_chain_artifacts_unverified")
-	allowed := map[string]bool{"inspect": true, "hosts": true, "domain-inspect": true, "architectures": true, "recovery-bundle": true, "identity": true, "inventory.frozen.json": true}
+	allowed := map[string]bool{
+		"inspect":               true,
+		"hosts":                 true,
+		"domain-inspect":        true,
+		"architectures":         true,
+		"recovery-bundle":       true,
+		"identity":              true,
+		"inventory.frozen.json": true,
+	}
 	archive := filepath.Join(release, "ultra-ansible.tar.gz")
-	if plan.Automation == nil || plan.Automation.Ingress == nil || plan.Automation.DNS == nil || plan.SourceValues["ULTRA_UPGRADE_BASELINE_FILE"] != "" {
+	if plan.Automation == nil || plan.Automation.Ingress == nil || plan.Automation.DNS == nil ||
+		plan.SourceValues["ULTRA_UPGRADE_BASELINE_FILE"] != "" {
 		return nil, fail
 	}
 	inspectInv, _, err := forwardSavedRequest(filepath.Join(directory, "inspect"))
 	if err != nil || !forwardChainFleet(old.Inventory, inspectInv, true) {
 		return nil, fail
 	}
-	observed, err := verifyForwardSavedStage(filepath.Join(directory, "inspect"), archive, "inspect-upgrade", inspectInv, map[string]any{"ultra_lock_directory": root}, nil, nil)
+	observed, err := verifyForwardSavedStage(
+		filepath.Join(directory, "inspect"),
+		archive,
+		"inspect-upgrade",
+		inspectInv,
+		map[string]any{"ultra_lock_directory": root},
+		nil,
+		nil,
+	)
 	if err != nil {
 		return nil, fail
 	}
 	raw, _ := json.Marshal(observed)
 	var inspection upgradeInspection
-	if json.Unmarshal(raw, &inspection) != nil || inspection.ObservedAt <= 0 || inspection.Identity == "" || len(inspection.Nodes) == 0 || len(inspection.Nodes) > 16 {
+	if json.Unmarshal(raw, &inspection) != nil || inspection.ObservedAt <= 0 || inspection.Identity == "" || len(inspection.Nodes) == 0 ||
+		len(inspection.Nodes) > 16 {
 		return nil, fail
 	}
 	identity, err := readForwardEvidence(filepath.Join(directory, "identity"))
@@ -325,7 +391,11 @@ func verifyForwardPostHandoffArtifacts(old forwardOldOperation, root, directory,
 		return nil, fail
 	}
 	hostInv, hostVars, err := forwardSavedRequest(filepath.Join(directory, "hosts"))
-	if err != nil || !forwardChainFleet(old.Inventory, hostInv, false) || !sameForwardJSON(hostVars, map[string]any{"ultra_lock_directory": root, "ultra_release_inspection_directory": filepath.Join(directory, "architectures")}) {
+	if err != nil || !forwardChainFleet(old.Inventory, hostInv, false) ||
+		!sameForwardJSON(
+			hostVars,
+			map[string]any{"ultra_lock_directory": root, "ultra_release_inspection_directory": filepath.Join(directory, "architectures")},
+		) {
 		return nil, fail
 	}
 	if _, err := verifyForwardSavedStage(filepath.Join(directory, "hosts"), archive, "inspect-release-hosts", hostInv, hostVars, map[string]any{"verified": true}, nil); err != nil {
@@ -334,7 +404,9 @@ func verifyForwardPostHandoffArtifacts(old forwardOldOperation, root, directory,
 	archs := map[string]bool{"bridge.json": true}
 	for _, node := range inspection.Nodes {
 		alias := "exit_" + strings.ReplaceAll(node.ID, "-", "")
-		if !regexp.MustCompile(`^exit_[a-f0-9]{32}$`).MatchString(alias) || archs[alias+".json"] || originalHosts[node.ID] != node.Address || node.Pins == "" {
+		if !regexp.MustCompile(`^exit_[a-f0-9]{32}$`).MatchString(alias) || archs[alias+".json"] ||
+			originalHosts[node.ID] != node.Address ||
+			node.Pins == "" {
 			return nil, fail
 		}
 		archs[alias+".json"] = true
@@ -353,7 +425,8 @@ func verifyForwardPostHandoffArtifacts(old forwardOldOperation, root, directory,
 		var arch struct {
 			Architecture string `json:"architecture"`
 		}
-		if !archs[entry.Name()] || err != nil || decodeForwardChain(raw, &arch) != nil || (arch.Architecture != "amd64" && arch.Architecture != "arm64") {
+		if !archs[entry.Name()] || err != nil || decodeForwardChain(raw, &arch) != nil ||
+			(arch.Architecture != "amd64" && arch.Architecture != "arm64") {
 			return nil, fail
 		}
 	}
@@ -362,7 +435,11 @@ func verifyForwardPostHandoffArtifacts(old forwardOldOperation, root, directory,
 	if err != nil || json.Unmarshal(frozen, &frozenInv) != nil || !forwardChainFleet(old.Inventory, frozenInv, false) {
 		return nil, fail
 	}
-	diagnostic := deployansible.Diagnostic{Stage: "Bind public evidence without exporting environment or credentials", Node: "bridge", Code: "task_failed"}
+	diagnostic := deployansible.Diagnostic{
+		Stage: "Bind public evidence without exporting environment or credentials",
+		Node:  "bridge",
+		Code:  "task_failed",
+	}
 	if _, err := verifyForwardSavedStage(filepath.Join(directory, "domain-inspect"), archive, "inspect-upgrade-domains", frozenInv, forwardDomainVariables(plan, root, directory), nil, &diagnostic); err != nil {
 		return nil, fail
 	}
@@ -378,7 +455,15 @@ func verifyForwardPostHandoffArtifacts(old forwardOldOperation, root, directory,
 		if !strings.HasPrefix(entry.Name(), "forward-maintenance-") {
 			continue
 		}
-		_, err := verifyForwardSavedStage(filepath.Join(directory, entry.Name()), archive, "contain-upgrade", old.Inventory, map[string]any{"ultra_lock_directory": root, "ultra_lifecycle_id": lifecycleID(directory)}, map[string]any{"verified": true, "maintenance_id": lifecycleID(directory)}, nil)
+		_, err := verifyForwardSavedStage(
+			filepath.Join(directory, entry.Name()),
+			archive,
+			"contain-upgrade",
+			old.Inventory,
+			map[string]any{"ultra_lock_directory": root, "ultra_lifecycle_id": lifecycleID(directory)},
+			map[string]any{"verified": true, "maintenance_id": lifecycleID(directory)},
+			nil,
+		)
 		if err != nil {
 			return nil, fail
 		}
@@ -480,7 +565,11 @@ func verifyForwardChainDestination(proof forwardUpgradeJournal, prior forwardOld
 // A failed or explicitly interrupted census is authenticated history only. It
 // may not authorize handoff; the caller always executes a new full census under
 // the predecessor lease before saving an intent or superseding lifecycle state.
-func verifyForwardCensusAttempt(proof forwardUpgradeJournal, old forwardOldOperation, lockDirectory, directory, stage, archive string) error {
+func verifyForwardCensusAttempt(
+	proof forwardUpgradeJournal,
+	old forwardOldOperation,
+	lockDirectory, directory, stage, archive string,
+) error {
 	if _, err := forwardDrainIntent(proof, old, lockDirectory, directory, stage); err == nil {
 		return verifyForwardDrainFiles(stage, archive)
 	}
@@ -581,7 +670,9 @@ func verifyForwardCensusAttempt(proof forwardUpgradeJournal, old forwardOldOpera
 			return fail
 		}
 	case "running":
-		if (receipt.Code != "" && receipt.Code != "interrupted") || receipt.ExitCode != nil || receipt.Diagnostic != nil || receipt.FinishedAt != nil || !diagnosticAbsent {
+		if (receipt.Code != "" && receipt.Code != "interrupted") || receipt.ExitCode != nil || receipt.Diagnostic != nil ||
+			receipt.FinishedAt != nil ||
+			!diagnosticAbsent {
 			return fail
 		}
 	default:
@@ -590,9 +681,18 @@ func verifyForwardCensusAttempt(proof forwardUpgradeJournal, old forwardOldOpera
 	return nil
 }
 
-func forwardUpgradeChainedHandoff(ctx context.Context, proof forwardUpgradeJournal, old forwardOldOperation, root, directory, python, executable string, prior forwardPriorCandidate, deps forwardHandoffDeps) (context.Context, func(), error) {
+func forwardUpgradeChainedHandoff(
+	ctx context.Context,
+	proof forwardUpgradeJournal,
+	old forwardOldOperation,
+	root, directory, python, executable string,
+	prior forwardPriorCandidate,
+	deps forwardHandoffDeps,
+) (context.Context, func(), error) {
 	fail := errors.New("upgrade_forward_chain_unverified")
-	if operatorPrivate(root, true) != nil || operatorPrivate(directory, true) != nil || filepath.Dir(directory) != root || prior.Directory == directory || prior.Directory == old.Directory {
+	if operatorPrivate(root, true) != nil || operatorPrivate(directory, true) != nil || filepath.Dir(directory) != root ||
+		prior.Directory == directory ||
+		prior.Directory == old.Directory {
 		return ctx, nil, fail
 	}
 	verified, err := discoverForwardOldOperation(proof, root)
@@ -626,7 +726,17 @@ func forwardUpgradeChainedHandoff(ctx context.Context, proof forwardUpgradeJourn
 	if err != nil {
 		return ctx, nil, err
 	}
-	expected := forwardChainIntent{OriginalEvidenceSHA: originalEvidence, Schema: 1, ProofSHA: proof.SHA256, PriorJournalSHA: prior.SHA256, OriginalID: old.ID, PriorID: lifecycleID(prior.Directory), NewID: lifecycleID(directory), PriorEvidenceSHA: fingerprint, OriginalHandoffSHA: digestSHA256(handoff)}
+	expected := forwardChainIntent{
+		OriginalEvidenceSHA: originalEvidence,
+		Schema:              1,
+		ProofSHA:            proof.SHA256,
+		PriorJournalSHA:     prior.SHA256,
+		OriginalID:          old.ID,
+		PriorID:             lifecycleID(prior.Directory),
+		NewID:               lifecycleID(directory),
+		PriorEvidenceSHA:    fingerprint,
+		OriginalHandoffSHA:  digestSHA256(handoff),
+	}
 	path := filepath.Join(directory, "forward-chain.json")
 	savedRaw, readErr := readForwardEvidence(path)
 	var saved forwardChainIntent
@@ -670,10 +780,19 @@ func forwardUpgradeChainedHandoff(ctx context.Context, proof forwardUpgradeJourn
 	return ctx, nil, errors.New("upgrade_forward_contained_continuation_unavailable")
 }
 
-func verifyForwardPostHandoffCandidate(proof forwardUpgradeJournal, old forwardOldOperation, root, directory string, prior forwardPriorCandidate) error {
+func verifyForwardPostHandoffCandidate(
+	proof forwardUpgradeJournal,
+	old forwardOldOperation,
+	root, directory string,
+	prior forwardPriorCandidate,
+) error {
 	fail := errors.New("upgrade_forward_prior_candidate_unverified")
-	if operatorPrivate(prior.Directory, true) != nil || prior.Directory == directory || prior.Directory == old.Directory || !filepath.IsAbs(prior.Directory) || filepath.Clean(prior.Directory) != prior.Directory || filepath.Dir(prior.Directory) != root ||
-		prior.Journal != filepath.Join(filepath.Dir(proof.Path), "forward-prior-operation.json") || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(prior.SHA256) {
+	if operatorPrivate(prior.Directory, true) != nil || prior.Directory == directory || prior.Directory == old.Directory ||
+		!filepath.IsAbs(prior.Directory) ||
+		filepath.Clean(prior.Directory) != prior.Directory ||
+		filepath.Dir(prior.Directory) != root ||
+		prior.Journal != filepath.Join(filepath.Dir(proof.Path), "forward-prior-operation.json") ||
+		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(prior.SHA256) {
 		return fail
 	}
 	for _, path := range []string{prior.Directory, prior.Journal, proof.Path} {
@@ -698,8 +817,12 @@ func verifyForwardPostHandoffCandidate(proof forwardUpgradeJournal, old forwardO
 		ConfigSHA   string `json:"staged_config_sha256"`
 		ManifestSHA string `json:"manifest_sha256"`
 	}
-	if json.Unmarshal(raw, &journal) != nil || journal.Schema != 1 || !journal.Dispatched || !journal.Forward || journal.Stage != "upgrade" || journal.ProofSHA != proof.SHA256 ||
-		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(journal.Commit) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(journal.Attempt) || prior.Directory != filepath.Join(root, "upgrade-"+journal.Version) {
+	if json.Unmarshal(raw, &journal) != nil || journal.Schema != 1 || !journal.Dispatched || !journal.Forward ||
+		journal.Stage != "upgrade" ||
+		journal.ProofSHA != proof.SHA256 ||
+		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(journal.Commit) ||
+		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(journal.Attempt) ||
+		prior.Directory != filepath.Join(root, "upgrade-"+journal.Version) {
 		return fail
 	}
 	input := filepath.Join(root, "operator-inputs", "manual-"+journal.Commit+"-"+journal.Attempt)
@@ -713,7 +836,9 @@ func verifyForwardPostHandoffCandidate(proof forwardUpgradeJournal, old forwardO
 	}
 	plan, err := installplan.LoadConfig(config)
 	release := filepath.Join(input, "release")
-	if err != nil || installplan.ValidatePlan(plan) != nil || plan.Automation == nil || plan.Automation.Version != journal.Version || plan.Automation.ReleaseDir != release || matchOperatorPlan(prior.Directory, plan, release) != nil {
+	if err != nil || installplan.ValidatePlan(plan) != nil || plan.Automation == nil || plan.Automation.Version != journal.Version ||
+		plan.Automation.ReleaseDir != release ||
+		matchOperatorPlan(prior.Directory, plan, release) != nil {
 		return fail
 	}
 	if operatorPrivate(release, true) != nil {
@@ -728,13 +853,22 @@ func verifyForwardPostHandoffCandidate(proof forwardUpgradeJournal, old forwardO
 			return fail
 		}
 	}
-	priorManifest, err := verifyOperatorUpgradeRelease(release, journal.Commit, journal.Version, journal.ManifestSHA, filepath.Join(release, "ultra-install-linux-"+runtime.GOARCH))
+	priorManifest, err := verifyOperatorUpgradeRelease(
+		release,
+		journal.Commit,
+		journal.Version,
+		journal.ManifestSHA,
+		filepath.Join(release, "ultra-install-linux-"+runtime.GOARCH),
+	)
 	if err != nil {
 		return fail
 	}
 	modeRaw, err := readForwardEvidence(filepath.Join(prior.Directory, "execution-mode.json"))
 	var mode frozenExecution
-	if err != nil || json.Unmarshal(modeRaw, &mode) != nil || mode.Schema != 1 || !mode.Local || mode.Native || mode.LockDirectory != root || mode.OperatorDirectory != filepath.Join(root, "operator") || mode.Target != plan.Bridge.SSHHost+"|"+plan.Bridge.Address {
+	if err != nil || json.Unmarshal(modeRaw, &mode) != nil || mode.Schema != 1 || !mode.Local || mode.Native ||
+		mode.LockDirectory != root ||
+		mode.OperatorDirectory != filepath.Join(root, "operator") ||
+		mode.Target != plan.Bridge.SSHHost+"|"+plan.Bridge.Address {
 		return fail
 	}
 	// Exact lifecycle ownership is separately proven against the preserved O->A ledger and current A->B ledger.
@@ -770,7 +904,11 @@ func verifyForwardPostHandoffCandidate(proof forwardUpgradeJournal, old forwardO
 		default:
 			if strings.HasPrefix(entry.Name(), "broker-bootstrap-") {
 				variables, err := forwardBootstrapVariables(old, priorManifest, root, prior.Directory, release)
-				result := map[string]any{"verified": true, "old_id": old.ID, "controller_directory": managedControllerDirectory(priorManifest.Version)}
+				result := map[string]any{
+					"verified":             true,
+					"old_id":               old.ID,
+					"controller_directory": managedControllerDirectory(priorManifest.Version),
+				}
 				if err != nil {
 					return fail
 				}

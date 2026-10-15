@@ -33,7 +33,8 @@ func TestPublicSubscriptionProxy(t *testing.T) {
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, r)
 		if part == token {
-			if w.Code != 200 || !strings.HasPrefix(w.Body.String(), "vless://") || w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("support-url") != "https://t.me/ultra_test_bot?start=member" {
+			if w.Code != 200 || !strings.HasPrefix(w.Body.String(), "vless://") || w.Header().Get("Cache-Control") != "no-store" ||
+				w.Header().Get("support-url") != "https://t.me/ultra_test_bot?start=member" {
 				t.Fatal(w.Code)
 			}
 		} else if w.Code != 404 {
@@ -91,7 +92,8 @@ func TestPublicSubscriptionForwardsFormat(t *testing.T) {
 	r.Header.Set("User-Agent", "Happ/3 Android")
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
-	if w.Code != 200 || w.Header().Get("Content-Type") != "application/json; charset=utf-8" || w.Header().Get("Vary") != "User-Agent" || !strings.HasPrefix(w.Body.String(), "[") {
+	if w.Code != 200 || w.Header().Get("Content-Type") != "application/json; charset=utf-8" || w.Header().Get("Vary") != "User-Agent" ||
+		!strings.HasPrefix(w.Body.String(), "[") {
 		t.Fatal("lost JSON response", w.Code)
 	}
 }
@@ -99,7 +101,8 @@ func TestPublicSubscriptionForwardsFormat(t *testing.T) {
 func TestPublicSubscriptionForwardsTransport(t *testing.T) {
 	token := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("format") != "uri" || r.URL.Query().Get("transport") != "xhttp-tls" || r.URL.Query().Has("ignored") || r.Header.Get("Authorization") != "Bearer secret" {
+		if r.URL.Query().Get("format") != "uri" || r.URL.Query().Get("transport") != "xhttp-tls" || r.URL.Query().Has("ignored") ||
+			r.Header.Get("Authorization") != "Bearer secret" {
 			t.Error("lost transport or authorization, or forwarded arbitrary query")
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")

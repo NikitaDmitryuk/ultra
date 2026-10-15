@@ -55,12 +55,19 @@ func (r *QuotaRepo) EnsureStaticBudgets(ctx context.Context, nodes []StaticBudge
 		var monthly int64
 		var source string
 		var fallback bool
-		err = tx.QueryRow(ctx, `SELECT monthly_bytes,source,is_fallback FROM exit_traffic_budgets WHERE exit_id=$1 FOR UPDATE`, ids[0]).Scan(&monthly, &source, &fallback)
+		err = tx.QueryRow(ctx, `SELECT monthly_bytes,source,is_fallback FROM exit_traffic_budgets WHERE exit_id=$1 FOR UPDATE`, ids[0]).
+			Scan(&monthly, &source, &fallback)
 		if errors.Is(err, pgx.ErrNoRows) {
 			if node.Budget == nil {
 				return errors.New("explicit initial static budget required")
 			}
-			_, err = tx.Exec(ctx, `INSERT INTO exit_traffic_budgets(exit_id,monthly_bytes,source,is_fallback) VALUES($1,$2,'manual',$3)`, ids[0], node.Budget.MonthlyBytes, node.Budget.Fallback)
+			_, err = tx.Exec(
+				ctx,
+				`INSERT INTO exit_traffic_budgets(exit_id,monthly_bytes,source,is_fallback) VALUES($1,$2,'manual',$3)`,
+				ids[0],
+				node.Budget.MonthlyBytes,
+				node.Budget.Fallback,
+			)
 			if err != nil {
 				return err
 			}

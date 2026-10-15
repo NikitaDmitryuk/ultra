@@ -83,7 +83,14 @@ func RetryFrozenBootstrap(ctx context.Context, directory, python, executable str
 
 func bootstrapRetryOperation(operation string) bool {
 	switch operation {
-	case "bootstrap", "bootstrap-postgres", "bootstrap-exit", "bootstrap-bridge", "ingress", "configure-bot", "bootstrap-automation", "reserve-rolledback-bootstrap":
+	case "bootstrap",
+		"bootstrap-postgres",
+		"bootstrap-exit",
+		"bootstrap-bridge",
+		"ingress",
+		"configure-bot",
+		"bootstrap-automation",
+		"reserve-rolledback-bootstrap":
 		return true
 	default:
 		return false
@@ -143,7 +150,11 @@ func retryFailedLocalAttemptWith(directory string, syncDir func(string) error) e
 		return err
 	}
 	hash := sha256.Sum256(request)
-	if job["request_sha256"] != hex.EncodeToString(hash[:]) || receipt["request_sha256"] != job["request_sha256"] || receipt["binary_sha256"] != job["binary_sha256"] || receipt["operation"] != job["operation"] || receipt["schema_version"] != job["schema_version"] || job["schema_version"] != float64(1) {
+	if job["request_sha256"] != hex.EncodeToString(hash[:]) || receipt["request_sha256"] != job["request_sha256"] ||
+		receipt["binary_sha256"] != job["binary_sha256"] ||
+		receipt["operation"] != job["operation"] ||
+		receipt["schema_version"] != job["schema_version"] ||
+		job["schema_version"] != float64(1) {
 		return errors.New("retry_job_receipt_conflict")
 	}
 	binary, ok := job["binary_sha256"].(string)
@@ -255,7 +266,11 @@ func retryFailedLocalAttemptWith(directory string, syncDir func(string) error) e
 
 // ResumeFrozenBootstrapRollback retries only the original fixed rollback stage.
 // It is deliberately separate from the bootstrap compatibility CLI allowlist.
-func ResumeFrozenBootstrapRollback(ctx context.Context, inventory, variables map[string]any, directory, python, executable string) (Receipt, error) {
+func ResumeFrozenBootstrapRollback(
+	ctx context.Context,
+	inventory, variables map[string]any,
+	directory, python, executable string,
+) (Receipt, error) {
 	if _, ok := ctx.Value(operationLeaseKey{}).(*operationLease); !ok {
 		return Receipt{}, errors.New("retry requires operation lease")
 	}

@@ -12,7 +12,22 @@ import (
 
 func TestAnsibleReleaseRequiresCompleteCrossArchitectureBundle(t *testing.T) {
 	directory := t.TempDir()
-	names := []string{"ultra-relay-linux-amd64", "ultra-relay-linux-arm64", "ultra-bot-linux-amd64", "ultra-bot-linux-arm64", "ultra-client-linux-amd64", "ultra-client-linux-arm64", "ultra-recovery.tar.gz", "ultra-install-linux-amd64", "ultra-install-linux-arm64", "ultra-ansible.tar.gz", "ultra-ansible-runtime-linux-amd64.tar.gz", "ultra-ansible-runtime-linux-arm64.tar.gz", "mobile-bootstrap.sh", "checksums.txt"}
+	names := []string{
+		"ultra-relay-linux-amd64",
+		"ultra-relay-linux-arm64",
+		"ultra-bot-linux-amd64",
+		"ultra-bot-linux-arm64",
+		"ultra-client-linux-amd64",
+		"ultra-client-linux-arm64",
+		"ultra-recovery.tar.gz",
+		"ultra-install-linux-amd64",
+		"ultra-install-linux-arm64",
+		"ultra-ansible.tar.gz",
+		"ultra-ansible-runtime-linux-amd64.tar.gz",
+		"ultra-ansible-runtime-linux-arm64.tar.gz",
+		"mobile-bootstrap.sh",
+		"checksums.txt",
+	}
 	assets := make([]map[string]any, 0, len(names))
 	for _, name := range names {
 		payload := []byte(name)
@@ -22,7 +37,15 @@ func TestAnsibleReleaseRequiresCompleteCrossArchitectureBundle(t *testing.T) {
 		}
 		assets = append(assets, map[string]any{"name": name, "sha256": hex.EncodeToString(digest[:]), "size": len(payload)})
 	}
-	manifest := map[string]any{"schema_version": 1, "version": "v2.5.0", "source_commit": strings.Repeat("a", 40), "database_schema_min": 24, "database_schema_max": 25, "capabilities": []string{"service-access-v1", "provider-pool-quota-v1", "lifecycle-gate-v1", "ansible-deploy-v1"}, "assets": assets}
+	manifest := map[string]any{
+		"schema_version":      1,
+		"version":             "v2.5.0",
+		"source_commit":       strings.Repeat("a", 40),
+		"database_schema_min": 24,
+		"database_schema_max": 25,
+		"capabilities":        []string{"service-access-v1", "provider-pool-quota-v1", "lifecycle-gate-v1", "ansible-deploy-v1"},
+		"assets":              assets,
+	}
 	verify := func() error {
 		t.Helper()
 		raw, err := json.Marshal(manifest)

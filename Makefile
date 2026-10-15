@@ -1,11 +1,12 @@
-.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay benchmark-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64 release-dist clean harness-check generate-db
+.PHONY: build build-install build-bot test vet lint format format-check install bot-cert relay-logs verify-relay benchmark-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64 release-dist clean harness-check generate-db
 
 BINARY=ultra-relay
 INSTALL_BINARY=ultra-install
 BOT_BINARY=ultra-bot
 
-# Pin tool versions (align with reproducible CI-style runs)
+# Pin tool versions here; CI invokes these same Make targets.
 GOIMPORTS_PKG=golang.org/x/tools/cmd/goimports@v0.50.0
+GOLINES_PKG=github.com/segmentio/golines@v0.13.0
 GOLANGCI_LINT_VERSION=v2.14.0
 SQLC_VERSION=v1.31.1
 
@@ -35,17 +36,17 @@ format:
 	go run $(GOIMPORTS_PKG) -w .
 	@echo "Running gofmt -s..."
 	gofmt -s -w .
-	@if command -v golines >/dev/null 2>&1; then \
-		echo "Running golines..."; \
-		golines --max-len=140 -w .; \
-	else \
-		echo "golines not installed; skip (optional: go install github.com/segmentio/golines@latest)"; \
-	fi
+	@echo "Running golines..."
+	go run $(GOLINES_PKG) --max-len=140 -w .
 	go mod tidy
+
+format-check:
+	$(MAKE) format
+	git diff --exit-code
 
 lint:
 	@echo "Running golangci-lint ($(GOLANGCI_LINT_VERSION))..."
-	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout 5m ./...
 
 install: build-install
 	@bash "$(CURDIR)/scripts/install.sh"

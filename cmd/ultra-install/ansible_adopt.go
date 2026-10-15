@@ -113,7 +113,13 @@ func runAdoptCommand(arguments []string) {
 		}
 		pinPath, err = filepath.Abs(pinPath)
 		exitOnErr("adopt pins", err)
-		_, candidate, prepareErr := prepareAdoptionConfig(p, inspection["bridge"], runtimePlan.Automation.Version, runtimePlan.Automation.ReleaseDir, pinPath)
+		_, candidate, prepareErr := prepareAdoptionConfig(
+			p,
+			inspection["bridge"],
+			runtimePlan.Automation.Version,
+			runtimePlan.Automation.ReleaseDir,
+			pinPath,
+		)
 		var policyError *adoptionPolicyError
 		if errors.As(prepareErr, &policyError) {
 			prepareErr = fmt.Errorf("%s (%s)", policyError.Error(), policyError.stage)
@@ -126,7 +132,15 @@ func runAdoptCommand(arguments []string) {
 	p.Bridge.ReuseSpec = true
 	inventory, err = freezeBootstrapInventory(p, inventory, inspection, directory)
 	exitOnErr("adopt expected state", err)
-	_, err = deployansible.RunLocal(ctx, "adopt", inventory, map[string]any{"ultra_lock_directory": stateRoot}, filepath.Join(directory, "compare"), python, executable)
+	_, err = deployansible.RunLocal(
+		ctx,
+		"adopt",
+		inventory,
+		map[string]any{"ultra_lock_directory": stateRoot},
+		filepath.Join(directory, "compare"),
+		python,
+		executable,
+	)
 	exitOnErr("read-only adoption comparison", err)
 	fmt.Println("adopt: existing deployment matches pinned configuration; no host state changed")
 }

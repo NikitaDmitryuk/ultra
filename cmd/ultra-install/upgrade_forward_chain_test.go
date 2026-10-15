@@ -26,7 +26,13 @@ func cloneForwardMap(t *testing.T, v map[string]any) map[string]any {
 	}
 	return out
 }
-func writeChainStage(t *testing.T, stage, operation string, inventory, variables, result map[string]any, diagnostic *deployansible.Diagnostic) {
+
+func writeChainStage(
+	t *testing.T,
+	stage, operation string,
+	inventory, variables, result map[string]any,
+	diagnostic *deployansible.Diagnostic,
+) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(stage, "bundle"), 0700); err != nil {
 		t.Fatal(err)
@@ -39,7 +45,12 @@ func writeChainStage(t *testing.T, stage, operation string, inventory, variables
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := map[string]any{"schema_version": 1, "operation": operation, "request_sha256": digestSHA256(raw), "binary_sha256": digestSHA256(raw)}
+	job := map[string]any{
+		"schema_version": 1,
+		"operation":      operation,
+		"request_sha256": digestSHA256(raw),
+		"binary_sha256":  digestSHA256(raw),
+	}
 	writeForwardJSON(t, filepath.Join(stage, "job.json"), job)
 	if diagnostic == nil {
 		job["state"] = "succeeded"
@@ -93,13 +104,30 @@ func forwardChainFixture(t *testing.T) *chainFixture {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"job.json", "receipt.json"} {
-		writeForwardJSON(t, filepath.Join(old.Directory, "activate", name), map[string]any{"schema_version": 1, "operation": "upgrade", "request_sha256": digestSHA256(raw), "binary_sha256": digestSHA256(raw)})
+		writeForwardJSON(
+			t,
+			filepath.Join(old.Directory, "activate", name),
+			map[string]any{
+				"schema_version": 1,
+				"operation":      "upgrade",
+				"request_sha256": digestSHA256(raw),
+				"binary_sha256":  digestSHA256(raw),
+			},
+		)
 	}
 	intent, err := loadForwardIntent(filepath.Join(prior.Directory, "forward-handoff.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeChainStage(t, intent.Stage, "drain-upgrade-workers", old.Inventory, forwardDrainVariables(root, old.ID, lifecycleID(prior.Directory)), map[string]any{"verified": true, "old_id": old.ID, "new_id": lifecycleID(prior.Directory)}, nil)
+	writeChainStage(
+		t,
+		intent.Stage,
+		"drain-upgrade-workers",
+		old.Inventory,
+		forwardDrainVariables(root, old.ID, lifecycleID(prior.Directory)),
+		map[string]any{"verified": true, "old_id": old.ID, "new_id": lifecycleID(prior.Directory)},
+		nil,
+	)
 	updated, err := forwardDrainIntent(proof, old, root, prior.Directory, intent.Stage)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +160,14 @@ func forwardChainFixture(t *testing.T) *chainFixture {
 		t.Fatal(err)
 	}
 	writeForwardJSON(t, filepath.Join(prior.Directory, "operator-plan.json"), map[string]string{"plan_sha256": planSHA})
-	tools := []string{"recovery.py", "monitor.py", "heartbeat.py", "reconcile.py", "ultra-recovery-backup.service", "ultra-recovery-backup.timer"}
+	tools := []string{
+		"recovery.py",
+		"monitor.py",
+		"heartbeat.py",
+		"reconcile.py",
+		"ultra-recovery-backup.service",
+		"ultra-recovery-backup.timer",
+	}
 	if err := os.Mkdir(filepath.Join(prior.Directory, "recovery-bundle"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -225,17 +260,61 @@ func forwardChainFixture(t *testing.T) *chainFixture {
 	}
 	bridgeInv := cloneForwardMap(t, old.Inventory)
 	bridgeInv["all"].(map[string]any)["children"].(map[string]any)["exits"] = map[string]any{"hosts": map[string]any{}}
-	writeChainStage(t, filepath.Join(prior.Directory, "inspect"), "inspect-upgrade", bridgeInv, map[string]any{"ultra_lock_directory": root}, map[string]any{"observed_at": 1, "architecture": "amd64", "identity": "fixture-identity", "nodes": nodes}, nil)
-	writeChainStage(t, filepath.Join(prior.Directory, "hosts"), "inspect-release-hosts", old.Inventory, map[string]any{"ultra_lock_directory": root, "ultra_release_inspection_directory": filepath.Join(prior.Directory, "architectures")}, map[string]any{"verified": true}, nil)
+	writeChainStage(
+		t,
+		filepath.Join(prior.Directory, "inspect"),
+		"inspect-upgrade",
+		bridgeInv,
+		map[string]any{"ultra_lock_directory": root},
+		map[string]any{"observed_at": 1, "architecture": "amd64", "identity": "fixture-identity", "nodes": nodes},
+		nil,
+	)
+	writeChainStage(
+		t,
+		filepath.Join(prior.Directory, "hosts"),
+		"inspect-release-hosts",
+		old.Inventory,
+		map[string]any{"ultra_lock_directory": root, "ultra_release_inspection_directory": filepath.Join(prior.Directory, "architectures")},
+		map[string]any{"verified": true},
+		nil,
+	)
 	writeForwardJSON(t, filepath.Join(prior.Directory, "inventory.frozen.json"), old.Inventory)
-	diagnostic := deployansible.Diagnostic{Stage: "Bind public evidence without exporting environment or credentials", Node: "bridge", Code: "task_failed"}
-	writeChainStage(t, filepath.Join(prior.Directory, "domain-inspect"), "inspect-upgrade-domains", old.Inventory, forwardDomainVariables(plan, root, prior.Directory), nil, &diagnostic)
-	writeChainStage(t, filepath.Join(prior.Directory, "forward-maintenance-1"), "contain-upgrade", old.Inventory, map[string]any{"ultra_lock_directory": root, "ultra_lifecycle_id": lifecycleID(prior.Directory)}, map[string]any{"verified": true, "maintenance_id": lifecycleID(prior.Directory)}, nil)
+	diagnostic := deployansible.Diagnostic{
+		Stage: "Bind public evidence without exporting environment or credentials",
+		Node:  "bridge",
+		Code:  "task_failed",
+	}
+	writeChainStage(
+		t,
+		filepath.Join(prior.Directory, "domain-inspect"),
+		"inspect-upgrade-domains",
+		old.Inventory,
+		forwardDomainVariables(plan, root, prior.Directory),
+		nil,
+		&diagnostic,
+	)
+	writeChainStage(
+		t,
+		filepath.Join(prior.Directory, "forward-maintenance-1"),
+		"contain-upgrade",
+		old.Inventory,
+		map[string]any{"ultra_lock_directory": root, "ultra_lifecycle_id": lifecycleID(prior.Directory)},
+		map[string]any{"verified": true, "maintenance_id": lifecycleID(prior.Directory)},
+		nil,
+	)
 	if err := os.Mkdir(directory, 0700); err != nil {
 		t.Fatal(err)
 	}
 	writeForwardJSON(t, filepath.Join(root, "lifecycle.json"), map[string]any{"id": lifecycleID(prior.Directory), "phase": "applying"})
-	writeForwardJSON(t, filepath.Join(root, "lifecycle-retired.json"), map[string]any{"version": 1, "ids": []string{old.ID}, "handoff": map[string]any{"old_id": old.ID, "new_id": lifecycleID(prior.Directory)}})
+	writeForwardJSON(
+		t,
+		filepath.Join(root, "lifecycle-retired.json"),
+		map[string]any{
+			"version": 1,
+			"ids":     []string{old.ID},
+			"handoff": map[string]any{"old_id": old.ID, "new_id": lifecycleID(prior.Directory)},
+		},
+	)
 	f.ledger, err = os.ReadFile(filepath.Join(root, "lifecycle-retired.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -272,7 +351,11 @@ func forwardChainFixture(t *testing.T) *chainFixture {
 				t.Fatal("intent not durable", err)
 			}
 			f.events = append(f.events, "supersede")
-			writeForwardJSON(t, filepath.Join(root, "lifecycle-retired.json"), map[string]any{"version": 1, "ids": []string{old.ID, a}, "handoff": map[string]any{"old_id": a, "new_id": b}})
+			writeForwardJSON(
+				t,
+				filepath.Join(root, "lifecycle-retired.json"),
+				map[string]any{"version": 1, "ids": []string{old.ID, a}, "handoff": map[string]any{"old_id": a, "new_id": b}},
+			)
 			writeForwardJSON(t, filepath.Join(root, "lifecycle.json"), map[string]any{"id": b, "phase": "applying"})
 			return nil
 		},
@@ -299,7 +382,12 @@ func TestForwardChainContainedContinuationUnavailableBeforeMutation(t *testing.T
 				if err := json.Unmarshal(raw, &result); err != nil {
 					t.Fatal(err)
 				}
-				result["contained_baseline"] = map[string]any{"version": 1, "relay_active": true, "bot_active": true, "certbot_active": true}
+				result["contained_baseline"] = map[string]any{
+					"version":        1,
+					"relay_active":   true,
+					"bot_active":     true,
+					"certbot_active": true,
+				}
 				inv, vars, err := forwardSavedRequest(stage)
 				if err != nil {
 					t.Fatal(err)
@@ -349,7 +437,11 @@ func TestForwardChainRejectsUnsafePriorEvidence(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "failed-containment":
-				writeForwardJSON(t, filepath.Join(f.prior.Directory, "forward-maintenance-1", "receipt.json"), map[string]any{"state": "failed"})
+				writeForwardJSON(
+					t,
+					filepath.Join(f.prior.Directory, "forward-maintenance-1", "receipt.json"),
+					map[string]any{"state": "failed"},
+				)
 			case "failed-drain":
 				intent, err := loadForwardIntent(filepath.Join(f.prior.Directory, "forward-handoff.json"))
 				if err != nil {
@@ -359,9 +451,17 @@ func TestForwardChainRejectsUnsafePriorEvidence(t *testing.T) {
 			case "domain-result":
 				writeForwardJSON(t, filepath.Join(f.prior.Directory, "domain-inspect", "result.json"), map[string]any{"verified": true})
 			case "foreign-lifecycle":
-				writeForwardJSON(t, filepath.Join(f.root, "lifecycle.json"), map[string]any{"id": lifecycleID("foreign"), "phase": "applying"})
+				writeForwardJSON(
+					t,
+					filepath.Join(f.root, "lifecycle.json"),
+					map[string]any{"id": lifecycleID("foreign"), "phase": "applying"},
+				)
 			case "released":
-				writeForwardJSON(t, filepath.Join(f.root, "lifecycle.json"), map[string]any{"id": lifecycleID(f.prior.Directory), "phase": "released"})
+				writeForwardJSON(
+					t,
+					filepath.Join(f.root, "lifecycle.json"),
+					map[string]any{"id": lifecycleID(f.prior.Directory), "phase": "released"},
+				)
 			case "prior-retired", "new-retired", "wrong-handoff":
 				ids := []string{f.old.ID}
 				a, b := f.old.ID, lifecycleID(f.prior.Directory)
@@ -374,7 +474,11 @@ func TestForwardChainRejectsUnsafePriorEvidence(t *testing.T) {
 				if kind == "wrong-handoff" {
 					a = lifecycleID("foreign")
 				}
-				writeForwardJSON(t, filepath.Join(f.root, "lifecycle-retired.json"), map[string]any{"version": 1, "ids": ids, "handoff": map[string]any{"old_id": a, "new_id": b}})
+				writeForwardJSON(
+					t,
+					filepath.Join(f.root, "lifecycle-retired.json"),
+					map[string]any{"version": 1, "ids": ids, "handoff": map[string]any{"old_id": a, "new_id": b}},
+				)
 			case "changed-request":
 				writeForwardJSON(t, filepath.Join(f.prior.Directory, "domain-inspect", "request.json"), map[string]any{})
 			case "changed-source":

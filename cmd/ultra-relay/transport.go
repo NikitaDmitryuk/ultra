@@ -7,12 +7,13 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"github.com/xtls/xray-core/core"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/xtls/xray-core/core"
 
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/proxy"
@@ -85,7 +86,8 @@ func runTransport(ctx context.Context, path string, check bool) error {
 		if !ready {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"ready": ready, "reload": runner.Status(), "certificate_not_after": leaf.NotAfter, "checked_at": time.Now().UTC()})
+		_ = json.NewEncoder(w).
+			Encode(map[string]any{"ready": ready, "reload": runner.Status(), "certificate_not_after": leaf.NotAfter, "checked_at": time.Now().UTC()})
 	})
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(listener) }()

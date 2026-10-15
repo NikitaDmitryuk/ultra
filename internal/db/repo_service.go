@@ -20,7 +20,9 @@ func (r *UserRepo) EnsureMonitorAccess(ctx context.Context, targets []string) (a
 	}
 	for _, target := range targets {
 		u, e := url.Parse(target)
-		if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" || (u.Port() != "" && u.Port() != "443") || strings.ContainsAny(u.Hostname(), "* ,\n\r") {
+		if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" ||
+			(u.Port() != "" && u.Port() != "443") ||
+			strings.ContainsAny(u.Hostname(), "* ,\n\r") {
 			return auth.User{}, errors.New("invalid monitor HTTPS target")
 		}
 	}
@@ -68,7 +70,14 @@ func (r *UserRepo) EnsureMonitorAccess(ctx context.Context, targets []string) (a
 	if e = tx.Commit(ctx); e != nil {
 		return auth.User{}, e
 	}
-	return auth.User{UUID: id, AccountID: owner, Name: "Infrastructure monitor", Kind: "vless", IsActive: true, ServiceTargets: targets}, nil
+	return auth.User{
+		UUID:           id,
+		AccountID:      owner,
+		Name:           "Infrastructure monitor",
+		Kind:           "vless",
+		IsActive:       true,
+		ServiceTargets: targets,
+	}, nil
 }
 
 func (r *UserRepo) attachServices(ctx context.Context, users []auth.User) ([]auth.User, error) {

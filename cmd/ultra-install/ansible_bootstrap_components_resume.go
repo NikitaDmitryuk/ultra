@@ -58,7 +58,20 @@ func validateBootstrapComponentContinuation(stage string) (map[string]any, map[s
 		Variables map[string]any `json:"variables"`
 	}
 	var job, receipt map[string]any
-	if json.Unmarshal(input["request.json"], &request) != nil || json.Unmarshal(input["job.json"], &job) != nil || json.Unmarshal(input["receipt.json"], &receipt) != nil || request.Inventory == nil || request.Variables == nil || job["operation"] != "bootstrap" || job["schema_version"] != float64(1) || job["request_sha256"] != baseline["request.json"] || job["binary_sha256"] != baseline["request.json"] || receipt["operation"] != "bootstrap" || receipt["schema_version"] != job["schema_version"] || receipt["attempt"] != job["attempt"] || receipt["request_sha256"] != job["request_sha256"] || receipt["binary_sha256"] != job["binary_sha256"] || (receipt["state"] != "failed" && receipt["state"] != "running") {
+	if json.Unmarshal(input["request.json"], &request) != nil || json.Unmarshal(input["job.json"], &job) != nil ||
+		json.Unmarshal(input["receipt.json"], &receipt) != nil ||
+		request.Inventory == nil ||
+		request.Variables == nil ||
+		job["operation"] != "bootstrap" ||
+		job["schema_version"] != float64(1) ||
+		job["request_sha256"] != baseline["request.json"] ||
+		job["binary_sha256"] != baseline["request.json"] ||
+		receipt["operation"] != "bootstrap" ||
+		receipt["schema_version"] != job["schema_version"] ||
+		receipt["attempt"] != job["attempt"] ||
+		receipt["request_sha256"] != job["request_sha256"] ||
+		receipt["binary_sha256"] != job["binary_sha256"] ||
+		(receipt["state"] != "failed" && receipt["state"] != "running") {
 		return fail(errors.New("bootstrap_component_original_receipt_invalid"))
 	}
 	frozenRaw, err := readBootstrapGenerationInput(filepath.Join(filepath.Dir(stage), "inventory.frozen.json"))
@@ -78,7 +91,12 @@ func validateBootstrapComponentContinuation(stage string) (map[string]any, map[s
 	return request.Inventory, request.Variables, baseline, nil
 }
 
-func assertBootstrapComponentContinuationLifecycle(ctx context.Context, stage string, inventory, variables map[string]any, python, executable string) error {
+func assertBootstrapComponentContinuationLifecycle(
+	ctx context.Context,
+	stage string,
+	inventory, variables map[string]any,
+	python, executable string,
+) error {
 	lock, ok := variables["ultra_lock_directory"].(string)
 	if !ok || !filepath.IsAbs(lock) {
 		return errors.New("bootstrap_component_original_lease_invalid")
@@ -93,7 +111,21 @@ func assertBootstrapComponentContinuationLifecycle(ctx context.Context, stage st
 	if err = os.Remove(target); err != nil {
 		return err
 	}
-	receipt, err := deployansible.RunLocal(ctx, "lifecycle", inventory, map[string]any{"ultra_lock_directory": lock, "ultra_lifecycle_id": lifecycleID(filepath.Dir(stage)), "ultra_lifecycle_phase": "applying", "ultra_lifecycle_resume": true, "ultra_lifecycle_drain": false}, target, python, executable)
+	receipt, err := deployansible.RunLocal(
+		ctx,
+		"lifecycle",
+		inventory,
+		map[string]any{
+			"ultra_lock_directory":   lock,
+			"ultra_lifecycle_id":     lifecycleID(filepath.Dir(stage)),
+			"ultra_lifecycle_phase":  "applying",
+			"ultra_lifecycle_resume": true,
+			"ultra_lifecycle_drain":  false,
+		},
+		target,
+		python,
+		executable,
+	)
 	if err != nil {
 		return err
 	}
@@ -103,7 +135,11 @@ func assertBootstrapComponentContinuationLifecycle(ctx context.Context, stage st
 	return nil
 }
 
-func publishBootstrapComponentContinuation(stage, linkedRoot string, inventory, variables map[string]any, baseline map[string]string) error {
+func publishBootstrapComponentContinuation(
+	stage, linkedRoot string,
+	inventory, variables map[string]any,
+	baseline map[string]string,
+) error {
 	proof, err := bootstrapComponentContinuationProof(stage, linkedRoot, inventory, variables, baseline)
 	if err != nil {
 		return err
@@ -143,7 +179,11 @@ func completedBootstrapComponentContinuation(stage string, inventory, variables 
 	return true, nil
 }
 
-func bootstrapComponentContinuationProof(stage, linkedRoot string, inventory, variables map[string]any, baseline map[string]string) (bootstrapComponentCompletion, error) {
+func bootstrapComponentContinuationProof(
+	stage, linkedRoot string,
+	inventory, variables map[string]any,
+	baseline map[string]string,
+) (bootstrapComponentCompletion, error) {
 	fail := func(err error) (bootstrapComponentCompletion, error) { return bootstrapComponentCompletion{}, err }
 	frozen, originalVars, current, err := validateBootstrapComponentContinuation(stage)
 	if err != nil {
@@ -156,7 +196,8 @@ func bootstrapComponentContinuationProof(stage, linkedRoot string, inventory, va
 			return fail(errors.New("bootstrap_component_original_baseline_changed"))
 		}
 	}
-	if !filepath.IsAbs(linkedRoot) || filepath.Clean(linkedRoot) != linkedRoot || filepath.Dir(linkedRoot) != filepath.Dir(stage) || !regexp.MustCompile(`^linked-components-[a-f0-9]{16}$`).MatchString(filepath.Base(linkedRoot)) {
+	if !filepath.IsAbs(linkedRoot) || filepath.Clean(linkedRoot) != linkedRoot || filepath.Dir(linkedRoot) != filepath.Dir(stage) ||
+		!regexp.MustCompile(`^linked-components-[a-f0-9]{16}$`).MatchString(filepath.Base(linkedRoot)) {
 		return fail(errors.New("bootstrap_component_linked_root_invalid"))
 	}
 	anchor := filepath.Join(linkedRoot, "bootstrap-postgres")
@@ -216,7 +257,10 @@ func bootstrapComponentContinuationProof(stage, linkedRoot string, inventory, va
 				return err
 			}
 			var source map[string]any
-			if json.Unmarshal(sourceRaw, &source) != nil || source["schema"] != float64(1) || source["source"] != anchor || source["operation"] != operation || source["source_request_sha256"] != bootstrapComponentDigest(anchorRequest) || source["bundle_sha256"] != anchorHash {
+			if json.Unmarshal(sourceRaw, &source) != nil || source["schema"] != float64(1) || source["source"] != anchor ||
+				source["operation"] != operation ||
+				source["source_request_sha256"] != bootstrapComponentDigest(anchorRequest) ||
+				source["bundle_sha256"] != anchorHash {
 				return errors.New("bootstrap_component_bundle_source_invalid")
 			}
 			evidence[name+"/source"] = bootstrapComponentDigest(sourceRaw)

@@ -24,7 +24,11 @@ func TestNativeAdoptionFreezesInitialExecutorAcrossBrokerInstallation(t *testing
 	if err := os.Mkdir(directory, 0700); err != nil {
 		t.Fatal(err)
 	}
-	p := &installplan.InstallPlan{BridgeNative: true, AdoptRuntime: true, Bridge: installplan.BridgeConfig{SSHHost: "192.0.2.1", Address: "192.0.2.1"}}
+	p := &installplan.InstallPlan{
+		BridgeNative: true,
+		AdoptRuntime: true,
+		Bridge:       installplan.BridgeConfig{SSHHost: "192.0.2.1", Address: "192.0.2.1"},
+	}
 	sha := strings.Repeat("a", 64)
 	attest := func(*installplan.InstallPlan) (string, error) { return sha, nil }
 	lock, err := freezeBootstrapExecutionWith(p, directory, stateRoot, attest)
@@ -65,12 +69,29 @@ func TestNativeStageRetryChecksMachineBeforeAnyLeaseOrAction(t *testing.T) {
 			const state = "/tmp/native-operator"
 			attempt := state + "/bootstrap-fixture/attempt"
 			directory := attempt + "/bootstrap-exit"
-			request, _ := json.Marshal(map[string]any{"inventory": map[string]any{}, "variables": map[string]any{"ultra_lock_directory": state}})
+			request, _ := json.Marshal(
+				map[string]any{"inventory": map[string]any{}, "variables": map[string]any{"ultra_lock_directory": state}},
+			)
 			hash := sha256.Sum256(request)
 			identity := hex.EncodeToString(hash[:])
-			job, _ := json.Marshal(map[string]any{"schema_version": 1, "operation": "bootstrap-exit", "request_sha256": identity, "binary_sha256": identity})
-			mode, _ := json.Marshal(frozenExecution{Schema: 1, Target: "192.0.2.1|192.0.2.1", Native: true, NativeMachineSHA: strings.Repeat("a", 64), LockDirectory: state, OperatorDirectory: state + "/operator"})
-			files := map[string][]byte{directory + "/request.json": request, directory + "/job.json": job, attempt + "/execution-mode.json": mode}
+			job, _ := json.Marshal(
+				map[string]any{"schema_version": 1, "operation": "bootstrap-exit", "request_sha256": identity, "binary_sha256": identity},
+			)
+			mode, _ := json.Marshal(
+				frozenExecution{
+					Schema:            1,
+					Target:            "192.0.2.1|192.0.2.1",
+					Native:            true,
+					NativeMachineSHA:  strings.Repeat("a", 64),
+					LockDirectory:     state,
+					OperatorDirectory: state + "/operator",
+				},
+			)
+			files := map[string][]byte{
+				directory + "/request.json":      request,
+				directory + "/job.json":          job,
+				attempt + "/execution-mode.json": mode,
+			}
 			locked, acted := false, false
 			deps := frozenBootstrapRetryDependencies{
 				readPrivate: func(path string) ([]byte, error) {
@@ -95,10 +116,15 @@ func TestNativeStageRetryChecksMachineBeforeAnyLeaseOrAction(t *testing.T) {
 					return ctx, func() {}, nil
 				},
 			}
-			_, err := withFrozenBootstrapStageLeaseWith(context.Background(), directory, deps, func(context.Context) (deployansible.Receipt, error) {
-				acted = true
-				return deployansible.Receipt{State: "succeeded"}, nil
-			})
+			_, err := withFrozenBootstrapStageLeaseWith(
+				context.Background(),
+				directory,
+				deps,
+				func(context.Context) (deployansible.Receipt, error) {
+					acted = true
+					return deployansible.Receipt{State: "succeeded"}, nil
+				},
+			)
 			if valid && (err != nil || !locked || !acted) {
 				t.Fatal("valid native retry failed", err)
 			}
@@ -115,8 +141,19 @@ func TestNativeInventoryKeepsExitConnectionsOverSSH(t *testing.T) {
 	if err := os.WriteFile(pins, []byte("fixture host pins"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	p := &installplan.InstallPlan{BridgeNative: true, AdoptRuntime: true, Bridge: installplan.BridgeConfig{RemoteDir: "/etc/ultra-relay", SSHHost: "192.0.2.1"}, SSH: installplan.SSHConfig{User: "root", Identity: filepath.Join(root, "identity")}, Automation: &installplan.AutomationConfig{KnownHostsFile: pins}, Exits: []installplan.ExitNode{{Name: "exit", SSHHost: "192.0.2.2"}}}
-	inventory, err := bootstrapInventoryWithNativeAttestation(p, root, func(*installplan.InstallPlan) (string, error) { return strings.Repeat("a", 64), nil })
+	p := &installplan.InstallPlan{
+		BridgeNative: true,
+		AdoptRuntime: true,
+		Bridge:       installplan.BridgeConfig{RemoteDir: "/etc/ultra-relay", SSHHost: "192.0.2.1"},
+		SSH:          installplan.SSHConfig{User: "root", Identity: filepath.Join(root, "identity")},
+		Automation:   &installplan.AutomationConfig{KnownHostsFile: pins},
+		Exits:        []installplan.ExitNode{{Name: "exit", SSHHost: "192.0.2.2"}},
+	}
+	inventory, err := bootstrapInventoryWithNativeAttestation(
+		p,
+		root,
+		func(*installplan.InstallPlan) (string, error) { return strings.Repeat("a", 64), nil },
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

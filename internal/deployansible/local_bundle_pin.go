@@ -16,7 +16,12 @@ import (
 
 // RunLocalRetryFailedPinned is an operator-only bootstrap generation adapter.
 // The original private stage is the only source; no relay/service API exposes it.
-func RunLocalRetryFailedPinned(ctx context.Context, operation string, inventory, variables map[string]any, directory, source, python, executable string) (Receipt, error) {
+func RunLocalRetryFailedPinned(
+	ctx context.Context,
+	operation string,
+	inventory, variables map[string]any,
+	directory, source, python, executable string,
+) (Receipt, error) {
 	if !bootstrapRetryOperation(operation) || operation == "reserve-rolledback-bootstrap" {
 		return Receipt{}, errors.New("retry_bootstrap_operation_required")
 	}
@@ -47,7 +52,9 @@ func pinnedBootstrapExporter(source, directory, operation string, request []byte
 	}
 	var job map[string]any
 	hash := sha256.Sum256(oldRequest)
-	if json.Unmarshal(jobRaw, &job) != nil || job["schema_version"] != float64(1) || job["request_sha256"] != hex.EncodeToString(hash[:]) || job["binary_sha256"] != job["request_sha256"] || (job["operation"] != operation && job["operation"] != "bootstrap" && job["operation"] != "bootstrap-postgres") {
+	if json.Unmarshal(jobRaw, &job) != nil || job["schema_version"] != float64(1) || job["request_sha256"] != hex.EncodeToString(hash[:]) ||
+		job["binary_sha256"] != job["request_sha256"] ||
+		(job["operation"] != operation && job["operation"] != "bootstrap" && job["operation"] != "bootstrap-postgres") {
 		return nil, errors.New("bootstrap_bundle_source_identity_invalid")
 	}
 	if job["operation"] == "bootstrap-postgres" {
@@ -59,7 +66,8 @@ func pinnedBootstrapExporter(source, directory, operation string, request []byte
 		var original, next struct {
 			Inventory map[string]any `json:"inventory"`
 		}
-		if json.Unmarshal(oldRequest, &original) != nil || json.Unmarshal(request, &next) != nil || original.Inventory == nil || next.Inventory == nil {
+		if json.Unmarshal(oldRequest, &original) != nil || json.Unmarshal(request, &next) != nil || original.Inventory == nil ||
+			next.Inventory == nil {
 			return nil, errors.New("bootstrap_component_inventory_invalid")
 		}
 		a, _ := json.Marshal(original.Inventory)
@@ -84,7 +92,15 @@ func pinnedBootstrapExporter(source, directory, operation string, request []byte
 		return nil, err
 	}
 	digest := sha256.Sum256(raw)
-	pin, _ := json.Marshal(map[string]any{"schema": 1, "source": source, "operation": operation, "source_request_sha256": job["request_sha256"], "bundle_sha256": hex.EncodeToString(digest[:])})
+	pin, _ := json.Marshal(
+		map[string]any{
+			"schema":                1,
+			"source":                source,
+			"operation":             operation,
+			"source_request_sha256": job["request_sha256"],
+			"bundle_sha256":         hex.EncodeToString(digest[:]),
+		},
+	)
 	if _, err = os.Lstat(directory); err == nil {
 		existing, readErr := readRetryPrivate(filepath.Join(directory, "bundle.source.json"))
 		if readErr != nil || !bytes.Equal(existing, pin) {

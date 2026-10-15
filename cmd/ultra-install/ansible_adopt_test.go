@@ -38,7 +38,9 @@ func TestAdoptSSHOverrideRequiresPreparation(t *testing.T) {
 // cache. Its generated credentials cannot authorize access to any real host.
 func TestAdoptPreparesOfflineRuntimeOnCleanCache(t *testing.T) {
 	if os.Getenv("ULTRA_TEST_ADOPT_CHILD") == "1" {
-		runAdoptCommand([]string{"--config", os.Getenv("ULTRA_TEST_ADOPT_CONFIG"), "--release-dir", os.Getenv("ULTRA_TEST_OFFLINE_RELEASE")})
+		runAdoptCommand(
+			[]string{"--config", os.Getenv("ULTRA_TEST_ADOPT_CONFIG"), "--release-dir", os.Getenv("ULTRA_TEST_OFFLINE_RELEASE")},
+		)
 		return
 	}
 	release := os.Getenv("ULTRA_TEST_OFFLINE_RELEASE")
@@ -75,7 +77,11 @@ func TestAdoptPreparesOfflineRuntimeOnCleanCache(t *testing.T) {
 		}
 	}
 	config := filepath.Join(root, "install.config")
-	data := fmt.Sprintf("INSTALL_SCHEMA_VERSION=2\nBRIDGE_IP=127.0.0.1\nMAIN_EXIT_IP=127.0.0.1\nSSH_USER=ultra-adopt-isolated-fixture\nBRIDGE_SSH_KEY=%s\nULTRA_AUTOMATION_VERSION=unused\nULTRA_AUTOMATION_RELEASE_DIR=/unused\nULTRA_AUTOMATION_AGE_RECIPIENT=age1fixture\nULTRA_AUTOMATION_BRIDGE_PROVIDER=fixture\nULTRA_AUTOMATION_BRIDGE_URL=https://example.com/healthz\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE=%s\nULTRA_AUTOMATION_ADMIN_TELEGRAM_ID=123\nULTRA_AUTOMATION_STATIC_NODES=[{\"name\":\"fixture\",\"address\":\"127.0.0.1\",\"provider\":\"fixture\"}]\n", identity, pins)
+	data := fmt.Sprintf(
+		"INSTALL_SCHEMA_VERSION=2\nBRIDGE_IP=127.0.0.1\nMAIN_EXIT_IP=127.0.0.1\nSSH_USER=ultra-adopt-isolated-fixture\nBRIDGE_SSH_KEY=%s\nULTRA_AUTOMATION_VERSION=unused\nULTRA_AUTOMATION_RELEASE_DIR=/unused\nULTRA_AUTOMATION_AGE_RECIPIENT=age1fixture\nULTRA_AUTOMATION_BRIDGE_PROVIDER=fixture\nULTRA_AUTOMATION_BRIDGE_URL=https://example.com/healthz\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE=%s\nULTRA_AUTOMATION_ADMIN_TELEGRAM_ID=123\nULTRA_AUTOMATION_STATIC_NODES=[{\"name\":\"fixture\",\"address\":\"127.0.0.1\",\"provider\":\"fixture\"}]\n",
+		identity,
+		pins,
+	)
 	if err := os.WriteFile(config, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +90,14 @@ func TestAdoptPreparesOfflineRuntimeOnCleanCache(t *testing.T) {
 	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestAdoptPreparesOfflineRuntimeOnCleanCache$")
 	// Explicit environment excludes executor overrides, credentials and user SSH
 	// configuration inherited by the test runner.
-	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + root, "XDG_CACHE_HOME=" + cache, "ULTRA_TEST_ADOPT_CHILD=1", "ULTRA_TEST_ADOPT_CONFIG=" + config, "ULTRA_TEST_OFFLINE_RELEASE=" + release}
+	command.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"HOME=" + root,
+		"XDG_CACHE_HOME=" + cache,
+		"ULTRA_TEST_ADOPT_CHILD=1",
+		"ULTRA_TEST_ADOPT_CONFIG=" + config,
+		"ULTRA_TEST_OFFLINE_RELEASE=" + release,
+	}
 	output, err := command.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatal(ctx.Err())
@@ -120,7 +133,9 @@ func TestAdoptPreparesOfflineRuntimeOnCleanCache(t *testing.T) {
 
 func TestAdoptPreparationAcceptsIncompleteSchema2OnlyForPreparation(t *testing.T) {
 	if os.Getenv("ULTRA_TEST_ADOPT_PREPARATION_CHILD") == "1" {
-		runAdoptCommand([]string{"--config", os.Getenv("ULTRA_TEST_ADOPT_CONFIG"), "--prepare-config", os.Getenv("ULTRA_TEST_ADOPT_CANDIDATE")})
+		runAdoptCommand(
+			[]string{"--config", os.Getenv("ULTRA_TEST_ADOPT_CONFIG"), "--prepare-config", os.Getenv("ULTRA_TEST_ADOPT_CANDIDATE")},
+		)
 		return
 	}
 	root := t.TempDir()
@@ -130,7 +145,11 @@ func TestAdoptPreparationAcceptsIncompleteSchema2OnlyForPreparation(t *testing.T
 		t.Fatal(err)
 	}
 	command := exec.Command(os.Args[0], "-test.run=^TestAdoptPreparationAcceptsIncompleteSchema2OnlyForPreparation$")
-	command.Env = []string{"ULTRA_TEST_ADOPT_PREPARATION_CHILD=1", "ULTRA_TEST_ADOPT_CONFIG=" + config, "ULTRA_TEST_ADOPT_CANDIDATE=" + candidate}
+	command.Env = []string{
+		"ULTRA_TEST_ADOPT_PREPARATION_CHILD=1",
+		"ULTRA_TEST_ADOPT_CONFIG=" + config,
+		"ULTRA_TEST_ADOPT_CANDIDATE=" + candidate,
+	}
 	output, err := command.CombinedOutput()
 	if err == nil || !strings.Contains(string(output), "preparation inputs and explicit verified release required") {
 		t.Fatalf("incomplete policy failed outside preparation gate: %v: %s", err, output)

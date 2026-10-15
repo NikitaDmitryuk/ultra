@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 func retentionOperationFixture(t *testing.T, root, version string) string {
@@ -32,9 +33,28 @@ func retentionOperationFixture(t *testing.T, root, version string) string {
 		if err := os.MkdirAll(filepath.Join(job, "bundle"), 0700); err != nil {
 			t.Fatal(err)
 		}
-		write(filepath.Join(job, "request.json"), map[string]any{"variables": map[string]any{"ultra_release_version": version, "ultra_release_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "ultra_release_manifest": map[string]any{"version": version, "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}})
+		write(
+			filepath.Join(job, "request.json"),
+			map[string]any{
+				"variables": map[string]any{
+					"ultra_release_version":         version,
+					"ultra_release_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					"ultra_release_manifest": map[string]any{
+						"version":       version,
+						"source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					},
+				},
+			},
+		)
 		hash, _ := sourceSHA(filepath.Join(job, "request.json"))
-		write(filepath.Join(job, "job.json"), map[string]any{"schema_version": 1, "request_sha256": hash, "operation": map[string]string{"activate": "upgrade", "publish": "publish-release", "commit": "commit-release", "inspect": "inspect", "verify-failed": "verify-failed"}[stage]})
+		write(
+			filepath.Join(job, "job.json"),
+			map[string]any{
+				"schema_version": 1,
+				"request_sha256": hash,
+				"operation":      map[string]string{"activate": "upgrade", "publish": "publish-release", "commit": "commit-release", "inspect": "inspect", "verify-failed": "verify-failed"}[stage],
+			},
+		)
 		state := "succeeded"
 		if stage == "verify-failed" {
 			state = "failed"
@@ -62,7 +82,15 @@ func retentionOperationFixture(t *testing.T, root, version string) string {
 			inventory["__pycache__"] = []any{"directory", 0700}
 			inventory["__pycache__/controller.cpython-312.pyc"] = []any{"file", hash, 0600}
 		}
-		write(filepath.Join(job, "bundle.retention.json"), map[string]any{"schema": 1, "path": filepath.Join(job, "bundle"), "identity": map[string]string{"request_sha256": hash}, "inventory": inventory})
+		write(
+			filepath.Join(job, "bundle.retention.json"),
+			map[string]any{
+				"schema":    1,
+				"path":      filepath.Join(job, "bundle"),
+				"identity":  map[string]string{"request_sha256": hash},
+				"inventory": inventory,
+			},
+		)
 	}
 	if err := os.Mkdir(filepath.Join(directory, "recovery-bundle"), 0700); err != nil {
 		t.Fatal(err)
@@ -234,7 +262,11 @@ func TestCompletedUpgradeReplayRejectsReplacementSourceWithoutExecuting(t *testi
 	_ = os.Chmod(root, 0700)
 	directory := retentionOperationFixture(t, root, "v1.0.0")
 	release := filepath.Join(root, "release")
-	plan := &installplan.InstallPlan{SchemaVersion: installplan.CurrentSchemaVersion, Bridge: installplan.BridgeConfig{SSHHost: "192.0.2.1", ReuseSpec: true}, Exits: []installplan.ExitNode{{SSHHost: "192.0.2.2"}}}
+	plan := &installplan.InstallPlan{
+		SchemaVersion: installplan.CurrentSchemaVersion,
+		Bridge:        installplan.BridgeConfig{SSHHost: "192.0.2.1", ReuseSpec: true},
+		Exits:         []installplan.ExitNode{{SSHHost: "192.0.2.2"}},
+	}
 	completeDeploymentFixture(plan, release, "/pins")
 	if err := installplan.ValidatePlan(plan); err != nil {
 		t.Fatal(err)
@@ -329,7 +361,10 @@ func TestOperatorCompletionManyStagesUsesBoundReceiptReferences(t *testing.T) {
 		hash, _ := sourceSHA(filepath.Join(stage, "request.json"))
 		write("job.json", map[string]any{"schema_version": 1, "operation": "verify-release", "request_sha256": hash})
 		write("receipt.json", map[string]any{"state": "succeeded", "request_sha256": hash})
-		write("bundle.retention.json", map[string]any{"schema": 1, "path": bundle, "identity": map[string]string{"request_sha256": hash}, "inventory": inventory})
+		write(
+			"bundle.retention.json",
+			map[string]any{"schema": 1, "path": bundle, "identity": map[string]string{"request_sha256": hash}, "inventory": inventory},
+		)
 	}
 	if duplicatedInventoryBytes <= 4<<20 {
 		t.Fatal("fixture did not exceed original completion bound", duplicatedInventoryBytes)
@@ -372,10 +407,26 @@ func TestOperatorCompletionRetiresOnlyInterruptedSupersededObservers(t *testing.
 				t.Fatal(err)
 			}
 		}
-		write("request.json", map[string]any{"variables": map[string]any{"ultra_release_version": "v1.0.0", "ultra_release_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}})
+		write(
+			"request.json",
+			map[string]any{
+				"variables": map[string]any{
+					"ultra_release_version":         "v1.0.0",
+					"ultra_release_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				},
+			},
+		)
 		hash, _ := sourceSHA(filepath.Join(stage, "request.json"))
 		write("job.json", map[string]any{"schema_version": 1, "operation": "verify-release", "request_sha256": hash})
-		write("receipt.json", map[string]any{"state": state, "code": code, "request_sha256": hash, "result": map[string]any{"verified": state == "succeeded"}})
+		write(
+			"receipt.json",
+			map[string]any{
+				"state":          state,
+				"code":           code,
+				"request_sha256": hash,
+				"result":         map[string]any{"verified": state == "succeeded"},
+			},
+		)
 	}
 	makeObserver("verify-interrupted", "running", "interrupted")
 	makeObserver("verify-later-winner", "succeeded", "")
@@ -416,7 +467,17 @@ func retentionPreflightFixture(t *testing.T, stage, state, code string, request 
 		t.Fatal(err)
 	}
 	retentionWriteJSON(t, stage, "job.json", map[string]any{"schema_version": 1, "operation": "inspect-upgrade", "request_sha256": hash})
-	retentionWriteJSON(t, stage, "receipt.json", map[string]any{"state": state, "code": code, "request_sha256": hash, "result": map[string]any{"verified": state == "succeeded", "controller_enforcement_floor_absent": true}})
+	retentionWriteJSON(
+		t,
+		stage,
+		"receipt.json",
+		map[string]any{
+			"state":          state,
+			"code":           code,
+			"request_sha256": hash,
+			"result":         map[string]any{"verified": state == "succeeded", "controller_enforcement_floor_absent": true},
+		},
+	)
 }
 
 func retentionWriteJSON(t *testing.T, stage, name string, value any) {
@@ -445,7 +506,10 @@ func retentionMutateJSON(t *testing.T, stage, name string, mutate func(map[strin
 }
 
 func retentionPreflightRequest() map[string]any {
-	return map[string]any{"inventory": map[string]any{"all": map[string]any{}}, "variables": map[string]any{"ultra_lock_directory": "/private/lock", "ultra_controller_enforcement_preflight_only": true}}
+	return map[string]any{
+		"inventory": map[string]any{"all": map[string]any{}},
+		"variables": map[string]any{"ultra_lock_directory": "/private/lock", "ultra_controller_enforcement_preflight_only": true},
+	}
 }
 
 func TestOperatorCompletionRetiresInterruptedControllerPreflight(t *testing.T) {
@@ -541,7 +605,8 @@ func TestOperatorControllerPreflightRetirementRejectsUnprovenStages(t *testing.T
 			retentionPreflightFixture(t, original, "running", "interrupted", request)
 			// Invalid preflight shapes must fail even when the winner is identical.
 			winnerRequest := retentionPreflightRequest()
-			if name == "extra-request" || name == "extra-variable" || name == "ordinary-inspect" || name == "missing-preflight-flag" || name == "string-preflight-flag" {
+			if name == "extra-request" || name == "extra-variable" || name == "ordinary-inspect" || name == "missing-preflight-flag" ||
+				name == "string-preflight-flag" {
 				winnerRequest = request
 			}
 			retentionPreflightFixture(t, winner, "succeeded", "", winnerRequest)

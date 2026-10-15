@@ -25,11 +25,10 @@ jobs:
         run: go mod download
       - name: Verify dependencies
         run: go mod verify
+      - name: Check formatting
+        run: make format-check
       - name: Lint
-        uses: golangci/golangci-lint-action@v9.3.0
-        with:
-          version: v2.14.0
-          args: --timeout 5m
+        run: make lint
       - name: Vet
         run: make vet
       - name: Check agent context and ADRs
@@ -104,7 +103,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install pinned Ansible validation tools
-        run: python3 -m pip install 'ansible-core==2.20.0' 'ansible-lint==26.1.0'
+        run: python3 -m pip install 'ansible-core==2.20.0' 'ansible-lint==26.10.0'
       - name: Validate Ansible roles
         run: make test-ansible
   ansible-integration:
@@ -125,7 +124,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install pinned Ansible validation tools
-        run: python3 -m pip install 'ansible-core==2.20.0' 'ansible-lint==26.1.0'
+        run: python3 -m pip install 'ansible-core==2.20.0' 'ansible-lint==26.10.0'
       - name: Verify exit role and offline Ansible runtime
         run: |
           python3 scripts/build-ansible-runtime.py --architecture amd64 --output /tmp/ultra-ansible-runtime.tar.gz

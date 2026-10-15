@@ -48,7 +48,8 @@ func TestXHTTPTLSFingerprintExports(t *testing.T) {
 				if err := json.Unmarshal([]byte(uri.Query().Get("extra")), &extra); err != nil {
 					t.Fatal(err)
 				}
-				if download, ok := extra["downloadSettings"].(map[string]any); ok && download["tlsSettings"].(map[string]any)["fingerprint"] != want {
+				if download, ok := extra["downloadSettings"].(map[string]any); ok &&
+					download["tlsSettings"].(map[string]any)["fingerprint"] != want {
 					t.Fatal("download fingerprint mismatch")
 				}
 			}

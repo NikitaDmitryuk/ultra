@@ -92,7 +92,9 @@ func validateAutomation(p *InstallPlan) error {
 		if i.PublicHost == "" {
 			i.PublicHost = a.BridgeIPv4
 		}
-		if !regexp.MustCompile(`^[a-z0-9][a-z0-9.-]+$`).MatchString(i.Domain) || strings.Contains(i.Domain, "..") || !strings.Contains(i.Email, "@") || !regexp.MustCompile(`^/[A-Za-z0-9_-]+$`).MatchString(i.Path) {
+		if !regexp.MustCompile(`^[a-z0-9][a-z0-9.-]+$`).MatchString(i.Domain) || strings.Contains(i.Domain, "..") ||
+			!strings.Contains(i.Email, "@") ||
+			!regexp.MustCompile(`^/[A-Za-z0-9_-]+$`).MatchString(i.Path) {
 			return errors.New("automation ingress requires valid domain, ACME email and path")
 		}
 		if i.ForwardHost != "" && net.ParseIP(i.ForwardHost) == nil {
@@ -127,7 +129,8 @@ func validateAutomation(p *InstallPlan) error {
 			}
 			return true
 		}
-		if d.Provider != "vultr" || !validName(d.Zone) || !label.MatchString(d.SubscriptionName) || !label.MatchString(d.VPNName) || d.SubscriptionName == d.VPNName {
+		if d.Provider != "vultr" || !validName(d.Zone) || !label.MatchString(d.SubscriptionName) || !label.MatchString(d.VPNName) ||
+			d.SubscriptionName == d.VPNName {
 			return errors.New("DNS requires vultr, a valid zone and distinct relative role labels")
 		}
 		if d.TTL == 0 {

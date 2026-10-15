@@ -12,7 +12,16 @@ func TestFreshBridgeCanReusePreservedDedicatedDatabaseCredentials(t *testing.T) 
 	if err := os.WriteFile(path, []byte(`{"database":{"dsn":"postgres://ultra:preserved-fixture-p%40ss%2F%3F%23@127.0.0.1:25432/ultra_db?sslmode=disable"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	p := LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.10", "MAIN_EXIT_IP": "192.0.2.20", "DATABASE_IP": "192.0.2.40", "DB_CREDENTIALS_FILE": path, "REUSE_BRIDGE_SPEC": "false", "REALITY_DEST": "example.com:443"})
+	p := LegacyValuesToPlan(
+		map[string]string{
+			"BRIDGE_IP":           "192.0.2.10",
+			"MAIN_EXIT_IP":        "192.0.2.20",
+			"DATABASE_IP":         "192.0.2.40",
+			"DB_CREDENTIALS_FILE": path,
+			"REUSE_BRIDGE_SPEC":   "false",
+			"REALITY_DEST":        "example.com:443",
+		},
+	)
 	completePlanFixture(p)
 	first, err := RenderDesiredState(p)
 	if err != nil {
@@ -57,7 +66,16 @@ func TestDatabaseCredentialsRejectPublicSymlinkAndWrongIdentity(t *testing.T) {
 	if _, err := ReadDatabaseCredentials(link); err == nil {
 		t.Fatal("symlink credentials accepted")
 	}
-	p := LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.10", "MAIN_EXIT_IP": "192.0.2.20", "DATABASE_IP": "192.0.2.40", "DB_CREDENTIALS_FILE": path, "REUSE_BRIDGE_SPEC": "false", "REALITY_DEST": "example.com:443"})
+	p := LegacyValuesToPlan(
+		map[string]string{
+			"BRIDGE_IP":           "192.0.2.10",
+			"MAIN_EXIT_IP":        "192.0.2.20",
+			"DATABASE_IP":         "192.0.2.40",
+			"DB_CREDENTIALS_FILE": path,
+			"REUSE_BRIDGE_SPEC":   "false",
+			"REALITY_DEST":        "example.com:443",
+		},
+	)
 	completePlanFixture(p)
 	if _, err := RenderDesiredState(p); err == nil {
 		t.Fatal("wrong database identity accepted")

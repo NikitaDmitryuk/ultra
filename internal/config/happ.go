@@ -27,14 +27,19 @@ type SubscriptionBridge struct {
 func validateSubscriptionBridges(bridges []SubscriptionBridge) error {
 	ids := map[string]bool{}
 	for _, b := range bridges {
-		if b.ID == "" || strings.ContainsAny(b.ID, "/ \t\r\n") || ids[b.ID] || b.Host == "" || strings.ContainsAny(b.Host, "/@?# \t\r\n") || b.Port < 1 || b.Port > 65535 || b.ServerName == "" || strings.ContainsAny(b.ServerName, "/@?# \t\r\n") {
+		if b.ID == "" || strings.ContainsAny(b.ID, "/ \t\r\n") || ids[b.ID] || b.Host == "" || strings.ContainsAny(b.Host, "/@?# \t\r\n") ||
+			b.Port < 1 ||
+			b.Port > 65535 ||
+			b.ServerName == "" ||
+			strings.ContainsAny(b.ServerName, "/@?# \t\r\n") {
 			return fmt.Errorf("invalid or duplicate subscription bridge %q", b.ID)
 		}
 		if b.Transport != "" && b.Transport != "tcp" && b.Transport != "xhttp" {
 			return fmt.Errorf("invalid subscription transport for %q", b.ID)
 		}
 		if b.Security == "tls" {
-			if b.Transport != "xhttp" || b.PublicKey != "" || b.ShortID != "" || b.Path == "" || !strings.HasPrefix(b.Path, "/") || strings.ContainsAny(b.Path, "?# \t\r\n") {
+			if b.Transport != "xhttp" || b.PublicKey != "" || b.ShortID != "" || b.Path == "" || !strings.HasPrefix(b.Path, "/") ||
+				strings.ContainsAny(b.Path, "?# \t\r\n") {
 				return fmt.Errorf("invalid TLS subscription endpoint %q", b.ID)
 			}
 			ids[b.ID] = true
@@ -88,7 +93,12 @@ func BuildHappProfile(spec *Spec, user auth.User, name string) (map[string]any, 
 		child.PublicEntries = nil
 		child.SubscriptionBridges = nil
 		child.PublicHost, child.VLESSPort = b.Host, b.Port
-		child.Reality = RealitySpec{PublicKey: b.PublicKey, ServerNames: []string{b.ServerName}, ShortIDs: []string{b.ShortID}, Fingerprint: b.Fingerprint}
+		child.Reality = RealitySpec{
+			PublicKey:   b.PublicKey,
+			ServerNames: []string{b.ServerName},
+			ShortIDs:    []string{b.ShortID},
+			Fingerprint: b.Fingerprint,
+		}
 		child.AntiCensor = nil
 		child.SplithttpPath = b.Path
 		if b.Transport == "xhttp" {
@@ -96,25 +106,56 @@ func BuildHappProfile(spec *Spec, user auth.User, name string) (map[string]any, 
 		}
 		if b.Security == "tls" {
 			child.AntiCensor = nil
-			child.PrimaryXHTTP = &PrimaryXHTTPIngress{Host: b.Host, Published: BoolPtr(true), PublicXHTTPTLSSpec: PublicXHTTPTLSSpec{Port: b.Port, ServerName: b.ServerName, Path: b.Path, Fingerprint: b.Fingerprint, Mode: "stream-up"}}
+			child.PrimaryXHTTP = &PrimaryXHTTPIngress{
+				Host:      b.Host,
+				Published: BoolPtr(true),
+				PublicXHTTPTLSSpec: PublicXHTTPTLSSpec{
+					Port:        b.Port,
+					ServerName:  b.ServerName,
+					Path:        b.Path,
+					Fingerprint: b.Fingerprint,
+					Mode:        "stream-up",
+				},
+			}
 		}
 		if err := add(&child, "bridge-"+b.ID); err != nil {
 			return nil, err
 		}
 	}
 	return map[string]any{
-		"remarks":   name,
-		"log":       map[string]any{"loglevel": "warning"},
-		"inbounds":  []any{map[string]any{"listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": map[string]any{"udp": true}, "tag": "socks"}},
+		"remarks": name,
+		"log":     map[string]any{"loglevel": "warning"},
+		"inbounds": []any{
+			map[string]any{
+				"listen":   "127.0.0.1",
+				"port":     10808,
+				"protocol": "socks",
+				"settings": map[string]any{"udp": true},
+				"tag":      "socks",
+			},
+		},
 		"outbounds": outbounds,
 		"burstObservatory": map[string]any{
 			"subjectSelector": []string{"bridge-"},
-			"pingConfig":      map[string]any{"destination": "https://www.google.com/generate_204", "interval": "10s", "sampling": 1, "timeout": "5s", "httpMethod": "GET"},
+			"pingConfig": map[string]any{
+				"destination": "https://www.google.com/generate_204",
+				"interval":    "10s",
+				"sampling":    1,
+				"timeout":     "5s",
+				"httpMethod":  "GET",
+			},
 		},
 		"routing": map[string]any{
 			"domainStrategy": "AsIs",
-			"balancers":      []any{map[string]any{"tag": "bridges", "selector": []string{"bridge-"}, "fallbackTag": "block", "strategy": map[string]any{"type": "leastPing"}}},
-			"rules":          []any{map[string]any{"type": "field", "network": "tcp,udp", "balancerTag": "bridges"}},
+			"balancers": []any{
+				map[string]any{
+					"tag":         "bridges",
+					"selector":    []string{"bridge-"},
+					"fallbackTag": "block",
+					"strategy":    map[string]any{"type": "leastPing"},
+				},
+			},
+			"rules": []any{map[string]any{"type": "field", "network": "tcp,udp", "balancerTag": "bridges"}},
 		},
 	}, nil
 }

@@ -39,7 +39,12 @@ func (c *PostgresConfig) Defaults() error {
 
 // DSN returns the libpq connection string for the bridge to use.
 func (c *PostgresConfig) DSN(host string) string {
-	u := url.URL{Scheme: "postgres", User: url.UserPassword(c.DBUser, c.DBPassword), Host: net.JoinHostPort(host, strconv.Itoa(c.Port)), Path: "/" + c.DBName}
+	u := url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(c.DBUser, c.DBPassword),
+		Host:   net.JoinHostPort(host, strconv.Itoa(c.Port)),
+		Path:   "/" + c.DBName,
+	}
 	u.RawQuery = "sslmode=disable"
 	return u.String()
 }

@@ -86,7 +86,12 @@ func TestRouteCredentialsLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	exitID := uuid.NewString()
-	_, err = d.Pool.Exec(ctx, `INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid,enabled) VALUES($1,'test','192.0.2.1',443,$2,false)`, exitID, uuid.NewString())
+	_, err = d.Pool.Exec(
+		ctx,
+		`INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid,enabled) VALUES($1,'test','192.0.2.1',443,$2,false)`,
+		exitID,
+		uuid.NewString(),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +122,9 @@ func TestRouteCredentialsLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var savedAlias, savedLoc string
-	if err = d.Pool.QueryRow(ctx, `SELECT uuid::text,location_id::text FROM vpn_route_credentials WHERE user_uuid=$1`, u.UUID).Scan(&savedAlias, &savedLoc); err != nil || savedAlias != alias || savedLoc != loc {
+	if err = d.Pool.QueryRow(ctx, `SELECT uuid::text,location_id::text FROM vpn_route_credentials WHERE user_uuid=$1`, u.UUID).Scan(&savedAlias, &savedLoc); err != nil ||
+		savedAlias != alias ||
+		savedLoc != loc {
 		t.Fatal("publication changed stable credentials", err)
 	}
 	next, err := users.RotateUUID(ctx, u.UUID)
@@ -125,10 +132,13 @@ func TestRouteCredentialsLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var old int
-	if err = d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM vpn_route_credentials WHERE uuid=$1 OR user_uuid=$2`, alias, u.UUID).Scan(&old); err != nil || old != 0 {
+	if err = d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM vpn_route_credentials WHERE uuid=$1 OR user_uuid=$2`, alias, u.UUID).Scan(&old); err != nil ||
+		old != 0 {
 		t.Fatal("old credentials survived reset", err)
 	}
-	if err = d.Pool.QueryRow(ctx, `SELECT uuid::text,location_id::text FROM vpn_route_credentials WHERE user_uuid=$1`, next).Scan(&savedAlias, &savedLoc); err != nil || savedAlias == alias || savedLoc != loc {
+	if err = d.Pool.QueryRow(ctx, `SELECT uuid::text,location_id::text FROM vpn_route_credentials WHERE user_uuid=$1`, next).Scan(&savedAlias, &savedLoc); err != nil ||
+		savedAlias == alias ||
+		savedLoc != loc {
 		t.Fatal("reset lost location", err)
 	}
 }
@@ -157,7 +167,8 @@ func TestConcurrentLocationAndUserCreation(t *testing.T) {
 		}
 	}
 	var missing int
-	if e := d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM users u CROSS JOIN vpn_locations l WHERE u.kind='vless' AND l.published AND NOT EXISTS(SELECT 1 FROM vpn_route_credentials c WHERE c.user_uuid=u.uuid AND c.location_id=l.id)`).Scan(&missing); e != nil || missing != 0 {
+	if e := d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM users u CROSS JOIN vpn_locations l WHERE u.kind='vless' AND l.published AND NOT EXISTS(SELECT 1 FROM vpn_route_credentials c WHERE c.user_uuid=u.uuid AND c.location_id=l.id)`).Scan(&missing); e != nil ||
+		missing != 0 {
 		t.Fatal("concurrent publication missed credentials", missing, e)
 	}
 }
@@ -173,7 +184,15 @@ func TestCloudJournalSurvivesRepositoryRestart(t *testing.T) {
 	if _, e := r.Reserve(ctx, offer); e != nil {
 		t.Fatal(e)
 	}
-	event := cloud.Event{OperationID: offer.ID, Phase: "prepare", Outcome: "failed", Code: "insufficient_funds", HTTPStatus: 400, DurationMS: 450, At: time.Now()}
+	event := cloud.Event{
+		OperationID: offer.ID,
+		Phase:       "prepare",
+		Outcome:     "failed",
+		Code:        "insufficient_funds",
+		HTTPStatus:  400,
+		DurationMS:  450,
+		At:          time.Now(),
+	}
 	if e := r.RecordEvent(ctx, event); e != nil {
 		t.Fatal(e)
 	}

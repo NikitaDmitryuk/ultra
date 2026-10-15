@@ -3,13 +3,14 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"testing"
+	"time"
+
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 	"github.com/NikitaDmitryuk/ultra/internal/quota"
 	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 	"github.com/google/uuid"
-	"testing"
-	"time"
 )
 
 func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
@@ -22,7 +23,14 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 	a := "20000000-0000-0000-0000-000000000001"
 	b := "20000000-0000-0000-0000-000000000002"
 	for i, id := range []string{ams, fra} {
-		_, e := d.Pool.Exec(ctx, `INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid) VALUES($1,$2,'127.0.0.1',$3,$4)`, id, id, 10000+i, id)
+		_, e := d.Pool.Exec(
+			ctx,
+			`INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid) VALUES($1,$2,'127.0.0.1',$3,$4)`,
+			id,
+			id,
+			10000+i,
+			id,
+		)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -36,7 +44,11 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 	if e := repo.EnsureVultr(ctx, fra, "fixture", 1000*quota.GiB); e != nil {
 		t.Fatal(e)
 	}
-	_, e := d.Pool.Exec(ctx, `INSERT INTO exit_traffic_budgets(exit_id,monthly_bytes,source,is_fallback) VALUES($1,32000000000000,'manual',true)`, ams)
+	_, e := d.Pool.Exec(
+		ctx,
+		`INSERT INTO exit_traffic_budgets(exit_id,monthly_bytes,source,is_fallback) VALUES($1,32000000000000,'manual',true)`,
+		ams,
+	)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -46,7 +58,8 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 	var blocked bool
 	check := func(want bool) {
 		t.Helper()
-		if e = d.Pool.QueryRow(ctx, `SELECT blocked FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, a, fra).Scan(&blocked); e != nil || blocked != want {
+		if e = d.Pool.QueryRow(ctx, `SELECT blocked FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, a, fra).Scan(&blocked); e != nil ||
+			blocked != want {
 			t.Fatal("blocked", blocked, e)
 		}
 	}
@@ -58,7 +71,14 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 		t.Fatal(e)
 	}
 	check(false)
-	_, e = d.Pool.Exec(ctx, `INSERT INTO daily_route_traffic(user_uuid,day,exit_tag,uplink_bytes,downlink_bytes) VALUES($1,$2,$3,0,$4)`, a, now.AddDate(0, 0, -1).Format("2006-01-02"), "to-exit-"+fra, 100*quota.GiB)
+	_, e = d.Pool.Exec(
+		ctx,
+		`INSERT INTO daily_route_traffic(user_uuid,day,exit_tag,uplink_bytes,downlink_bytes) VALUES($1,$2,$3,0,$4)`,
+		a,
+		now.AddDate(0, 0, -1).Format("2006-01-02"),
+		"to-exit-"+fra,
+		100*quota.GiB,
+	)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -98,7 +118,8 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 		t.Fatal(e)
 	}
 	var applied bool
-	if e = d.Pool.QueryRow(ctx, `SELECT applied FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, a, fra).Scan(&applied); e != nil || applied {
+	if e = d.Pool.QueryRow(ctx, `SELECT applied FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, a, fra).Scan(&applied); e != nil ||
+		applied {
 		t.Fatal("acknowledged a newer calculation", e)
 	}
 	if e = observeQuotaFixture(t, repo, ctx, fra, 0, 1000*quota.GiB, "", now.AddDate(0, 0, 1)); e != nil {
@@ -115,7 +136,8 @@ func TestQuotaDemandFallbackAndRecovery(t *testing.T) {
 	a = rotated
 	check(true)
 	var usedAfterRotation int64
-	if e = d.Pool.QueryRow(ctx, `SELECT used_bytes FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, a, fra).Scan(&usedAfterRotation); e != nil || usedAfterRotation != 200*quota.GiB {
+	if e = d.Pool.QueryRow(ctx, `SELECT used_bytes FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, a, fra).Scan(&usedAfterRotation); e != nil ||
+		usedAfterRotation != 200*quota.GiB {
 		t.Fatal("rotation reset usage", e)
 	}
 	nextMonth := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
@@ -184,7 +206,13 @@ func TestBudgetPlanMatchesReadyInstanceAndExit(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			opID := uuid.NewString()
-			op := cloud.Operation{ID: opID, State: tt.state, InstanceID: tt.instance, ExitID: tt.exit, Offer: cloud.Offer{Plan: cloud.Plan{ID: tt.plan, Bandwidth: 1024}}}
+			op := cloud.Operation{
+				ID:         opID,
+				State:      tt.state,
+				InstanceID: tt.instance,
+				ExitID:     tt.exit,
+				Offer:      cloud.Offer{Plan: cloud.Plan{ID: tt.plan, Bandwidth: 1024}},
+			}
 			body, err := json.Marshal(op)
 			if err != nil {
 				t.Fatal(err)
@@ -275,7 +303,8 @@ func TestEmergencyBudgetBoundedBySpendAndObservation(t *testing.T) {
 		t.Fatal(e)
 	}
 	var blocked bool
-	if e = d.Pool.QueryRow(ctx, `SELECT blocked FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, user, exit).Scan(&blocked); e != nil || !blocked {
+	if e = d.Pool.QueryRow(ctx, `SELECT blocked FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, user, exit).Scan(&blocked); e != nil ||
+		!blocked {
 		t.Fatalf("exhausted emergency allowed %v %v", blocked, e)
 	}
 	// A repeated provider error cannot create a second allowance.
@@ -327,7 +356,15 @@ func TestEmergencyBudgetBoundedBySpendAndObservation(t *testing.T) {
 	}
 }
 
-func observeQuotaFixture(t *testing.T, r *QuotaRepo, ctx context.Context, id string, used, remaining int64, code string, now time.Time) error {
+func observeQuotaFixture(
+	t *testing.T,
+	r *QuotaRepo,
+	ctx context.Context,
+	id string,
+	used, remaining int64,
+	code string,
+	now time.Time,
+) error {
 	t.Helper()
 	var monthly int64
 	var instance string
@@ -338,5 +375,21 @@ func observeQuotaFixture(t *testing.T, r *QuotaRepo, ctx context.Context, id str
 	if err != nil {
 		return err
 	}
-	return r.SaveBandwidth(ctx, []BandwidthObservation{{ID: id, Instance: instance, Monthly: monthly, Used: used, Remaining: remaining, Accrued: monthly, LocalWatermark: watermark, Pool: true, Error: code}}, now)
+	return r.SaveBandwidth(
+		ctx,
+		[]BandwidthObservation{
+			{
+				ID:             id,
+				Instance:       instance,
+				Monthly:        monthly,
+				Used:           used,
+				Remaining:      remaining,
+				Accrued:        monthly,
+				LocalWatermark: watermark,
+				Pool:           true,
+				Error:          code,
+			},
+		},
+		now,
+	)
 }

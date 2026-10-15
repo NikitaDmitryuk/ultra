@@ -45,7 +45,12 @@ func TestRuntimeTransitionNativeExactBindingApplyAndRollback(t *testing.T) {
 			bound := input
 			bound.Action = ""
 			bound.BotActive = false
-			binding := map[string]any{"version": 1, "state": "prepared", "binding_sha256": runtimeHostDigest(bound), "plan": probe.EffectsPlan}
+			binding := map[string]any{
+				"version":        1,
+				"state":          "prepared",
+				"binding_sha256": runtimeHostDigest(bound),
+				"plan":           probe.EffectsPlan,
+			}
 			raw, _ := json.Marshal(binding)
 			path, _ := store.journalPath(request.Transaction)
 			if err := os.WriteFile(strings.TrimSuffix(path, ".json")+".effects.json", raw, 0600); err != nil {
@@ -147,7 +152,12 @@ func TestRuntimeTunnelPortRequiresAuthoritativeDBCheckpoint(t *testing.T) {
 		}
 		before, _ := json.Marshal(prior)
 		after, _ := json.Marshal(desired)
-		_, err := buildRuntimeTransitionPlan(runtimeProbeInput{Request: runtimeHostRequest{Role: role}}, after, []installplan.RuntimeTransitionKind{installplan.RuntimeTransitionTunnel, installplan.RuntimeTransitionListener}, before)
+		_, err := buildRuntimeTransitionPlan(
+			runtimeProbeInput{Request: runtimeHostRequest{Role: role}},
+			after,
+			[]installplan.RuntimeTransitionKind{installplan.RuntimeTransitionTunnel, installplan.RuntimeTransitionListener},
+			before,
+		)
 		if err == nil || !strings.Contains(err.Error(), "tunnel_port_db_checkpoint_required") {
 			t.Fatal("DB-backed port delta accepted without bridge CAS journal", err)
 		}

@@ -76,7 +76,10 @@ func (r *UserRepo) Remove(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	result := r.db.orm.WithContext(ctx).Table("users").Where("uuid = ? AND is_active", fromPGUUID(pgUUID)).Updates(map[string]any{"is_active": false, "disabled_at": gorm.Expr("NOW()")})
+	result := r.db.orm.WithContext(ctx).
+		Table("users").
+		Where("uuid = ? AND is_active", fromPGUUID(pgUUID)).
+		Updates(map[string]any{"is_active": false, "disabled_at": gorm.Expr("NOW()")})
 	affected, err := result.RowsAffected, result.Error
 	if err != nil {
 		return err
@@ -133,7 +136,10 @@ func (r *UserRepo) Enable(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	result := r.db.orm.WithContext(ctx).Table("users").Where("uuid = ? AND kind = ?", fromPGUUID(pgUUID), "vless").Updates(map[string]any{"is_active": true, "disabled_at": nil})
+	result := r.db.orm.WithContext(ctx).
+		Table("users").
+		Where("uuid = ? AND kind = ?", fromPGUUID(pgUUID), "vless").
+		Updates(map[string]any{"is_active": true, "disabled_at": nil})
 	affected, err := result.RowsAffected, result.Error
 	if err != nil {
 		return err
@@ -155,7 +161,11 @@ func (r *UserRepo) SetPreferredExit(ctx context.Context, id string, exitID *stri
 		return auth.User{}, err
 	}
 	var row userRow
-	result := r.db.orm.WithContext(ctx).Model(&row).Clauses(clause.Returning{}).Where("uuid = ? AND is_active", fromPGUUID(pgUUID)).Update("preferred_exit_id", ptrFromPGUUID(pgExitID))
+	result := r.db.orm.WithContext(ctx).
+		Model(&row).
+		Clauses(clause.Returning{}).
+		Where("uuid = ? AND is_active", fromPGUUID(pgUUID)).
+		Update("preferred_exit_id", ptrFromPGUUID(pgExitID))
 	err = result.Error
 	if err == nil && result.RowsAffected == 0 {
 		err = pgx.ErrNoRows

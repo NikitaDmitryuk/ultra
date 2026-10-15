@@ -97,7 +97,9 @@ func discoverForwardOldOperation(proof forwardUpgradeJournal, stateRoot string) 
 	}
 	plan, err := installplan.LoadConfig(config)
 	release := filepath.Join(input, "release")
-	if err != nil || installplan.ValidatePlan(plan) != nil || plan.Automation == nil || plan.Automation.Version != journal.Version || plan.Automation.ReleaseDir != release || matchOperatorPlan(directory, plan, release) != nil {
+	if err != nil || installplan.ValidatePlan(plan) != nil || plan.Automation == nil || plan.Automation.Version != journal.Version ||
+		plan.Automation.ReleaseDir != release ||
+		matchOperatorPlan(directory, plan, release) != nil {
 		return result, fail
 	}
 	requestRaw, err := readForwardEvidence(filepath.Join(directory, "activate", "request.json"))
@@ -112,7 +114,10 @@ func discoverForwardOldOperation(proof forwardUpgradeJournal, stateRoot string) 
 			Manifest    automationRelease `json:"ultra_release_manifest"`
 		} `json:"variables"`
 	}
-	if json.Unmarshal(requestRaw, &request) != nil || request.Inventory == nil || request.Variables.ID != lifecycleID(directory) || request.Variables.ManifestSHA != journal.ManifestSHA || request.Variables.Manifest.SourceCommit != journal.Commit || request.Variables.Manifest.Version != journal.Version {
+	if json.Unmarshal(requestRaw, &request) != nil || request.Inventory == nil || request.Variables.ID != lifecycleID(directory) ||
+		request.Variables.ManifestSHA != journal.ManifestSHA ||
+		request.Variables.Manifest.SourceCommit != journal.Commit ||
+		request.Variables.Manifest.Version != journal.Version {
 		return result, fail
 	}
 	for _, name := range []string{"job.json", "receipt.json"} {
@@ -122,7 +127,8 @@ func discoverForwardOldOperation(proof forwardUpgradeJournal, stateRoot string) 
 			Operation  string `json:"operation"`
 			RequestSHA string `json:"request_sha256"`
 		}
-		if err != nil || json.Unmarshal(evidence, &job) != nil || job.Schema != 1 || job.Operation != "upgrade" || job.RequestSHA != digestSHA256(requestRaw) {
+		if err != nil || json.Unmarshal(evidence, &job) != nil || job.Schema != 1 || job.Operation != "upgrade" ||
+			job.RequestSHA != digestSHA256(requestRaw) {
 			return result, fail
 		}
 	}
@@ -149,7 +155,11 @@ func discoverForwardOldOperation(proof forwardUpgradeJournal, stateRoot string) 
 
 // The caller already holds the common operator lock. Hold the old OFD through
 // a fresh full-fleet census and durable old-to-new broker supersession.
-func withForwardUpgradeHandoff(ctx context.Context, p *installplan.InstallPlan, lockDirectory, directory, python, executable string) (context.Context, func(), error) {
+func withForwardUpgradeHandoff(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	lockDirectory, directory, python, executable string,
+) (context.Context, func(), error) {
 	proof, ok := ctx.Value(forwardUpgradeJournalKey{}).(forwardUpgradeJournal)
 	if !ok || p.Automation == nil || os.Geteuid() != 0 || lockDirectory != "/var/lib/ultra-ansible" || !localLifecycleBridge(p) {
 		return ctx, nil, errors.New("upgrade_forward_handoff_requires_local_proof")
@@ -164,7 +174,8 @@ func withForwardUpgradeHandoff(ctx context.Context, p *installplan.InstallPlan, 
 	}
 	client := deployansible.Client{Socket: socket}
 	if prior, ok := ctx.Value(forwardPriorCandidateKey{}).(forwardPriorCandidate); ok {
-		if p.Automation == nil || proof.Path != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-operation.json") || prior.Journal != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-prior-operation.json") {
+		if p.Automation == nil || proof.Path != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-operation.json") ||
+			prior.Journal != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-prior-operation.json") {
 			return ctx, nil, errors.New("upgrade_forward_prior_input_location_invalid")
 		}
 	}
@@ -173,7 +184,8 @@ func withForwardUpgradeHandoff(ctx context.Context, p *installplan.InstallPlan, 
 		archive: filepath.Join(p.Automation.ReleaseDir, "ultra-ansible.tar.gz"),
 		prepare: func(leased context.Context) error {
 			if prior, ok := ctx.Value(forwardPriorCandidateKey{}).(forwardPriorCandidate); ok {
-				if p.Automation == nil || proof.Path != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-operation.json") || prior.Journal != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-prior-operation.json") {
+				if p.Automation == nil || proof.Path != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-operation.json") ||
+					prior.Journal != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-prior-operation.json") {
 					return errors.New("upgrade_forward_prior_input_location_invalid")
 				}
 				if err := verifyForwardPriorCandidate(proof, old, lockDirectory, directory, prior); err != nil {
@@ -186,7 +198,16 @@ func withForwardUpgradeHandoff(ctx context.Context, p *installplan.InstallPlan, 
 				}
 				return prepareForwardRecovery(leased, os.IsNotExist(intentErr),
 					func(censusCtx context.Context) error {
-						_, err := runForwardCensus(censusCtx, proof, old, lockDirectory, directory, python, executable, deployansible.RunLocal)
+						_, err := runForwardCensus(
+							censusCtx,
+							proof,
+							old,
+							lockDirectory,
+							directory,
+							python,
+							executable,
+							deployansible.RunLocal,
+						)
 						return err
 					},
 					func(bootstrapCtx context.Context) error {
@@ -228,13 +249,21 @@ func forwardDrainVariables(lockDirectory, oldID, newID string) map[string]any {
 
 // Hash every durable component after checking the fixed operation's exact
 // request, job identity, successful receipt and complete fleet output.
-func forwardDrainIntent(proof forwardUpgradeJournal, old forwardOldOperation, lockDirectory, directory, stage string) (forwardHandoffIntent, error) {
+func forwardDrainIntent(
+	proof forwardUpgradeJournal,
+	old forwardOldOperation,
+	lockDirectory, directory, stage string,
+) (forwardHandoffIntent, error) {
 	fail := errors.New("upgrade_forward_saved_drain_unverified")
 	var intent forwardHandoffIntent
-	if !filepath.IsAbs(stage) || filepath.Clean(stage) != stage || filepath.Dir(stage) != directory || !strings.HasPrefix(filepath.Base(stage), "handoff-drain-") || operatorPrivate(stage, true) != nil {
+	if !filepath.IsAbs(stage) || filepath.Clean(stage) != stage || filepath.Dir(stage) != directory ||
+		!strings.HasPrefix(filepath.Base(stage), "handoff-drain-") ||
+		operatorPrivate(stage, true) != nil {
 		return intent, fail
 	}
-	expected, err := json.Marshal(map[string]any{"inventory": old.Inventory, "variables": forwardDrainVariables(lockDirectory, old.ID, lifecycleID(directory))})
+	expected, err := json.Marshal(
+		map[string]any{"inventory": old.Inventory, "variables": forwardDrainVariables(lockDirectory, old.ID, lifecycleID(directory))},
+	)
 	if err != nil {
 		return intent, fail
 	}
@@ -271,7 +300,8 @@ func forwardDrainIntent(proof forwardUpgradeJournal, old forwardOldOperation, lo
 		schema                     int
 		operation, request, binary string
 	}{{job.Schema, job.Operation, job.RequestSHA, job.BinarySHA}, {receipt.Schema, receipt.Operation, receipt.RequestSHA, receipt.BinarySHA}} {
-		if evidence.schema != 1 || evidence.operation != "drain-upgrade-workers" || evidence.request != digest || evidence.binary != digest {
+		if evidence.schema != 1 || evidence.operation != "drain-upgrade-workers" || evidence.request != digest ||
+			evidence.binary != digest {
 			return intent, fail
 		}
 	}
@@ -279,14 +309,25 @@ func forwardDrainIntent(proof forwardUpgradeJournal, old forwardOldOperation, lo
 	resultJSON, _ := json.Marshal(receipt.Result)
 	expectedJSON, _ := json.Marshal(expectedResult)
 	var output map[string]any
-	if json.Unmarshal(outputRaw, &output) != nil || receipt.State != "succeeded" || receipt.Code != "" || !bytes.Equal(resultJSON, expectedJSON) {
+	if json.Unmarshal(outputRaw, &output) != nil || receipt.State != "succeeded" || receipt.Code != "" ||
+		!bytes.Equal(resultJSON, expectedJSON) {
 		return intent, fail
 	}
 	outputJSON, _ := json.Marshal(output)
 	if !bytes.Equal(outputJSON, expectedJSON) {
 		return intent, fail
 	}
-	return forwardHandoffIntent{1, proof.SHA256, old.ID, lifecycleID(directory), stage, digest, digestSHA256(jobRaw), digestSHA256(receiptRaw), digestSHA256(outputRaw)}, nil
+	return forwardHandoffIntent{
+		1,
+		proof.SHA256,
+		old.ID,
+		lifecycleID(directory),
+		stage,
+		digest,
+		digestSHA256(jobRaw),
+		digestSHA256(receiptRaw),
+		digestSHA256(outputRaw),
+	}, nil
 }
 
 func loadForwardIntent(path string) (forwardHandoffIntent, error) {
@@ -368,7 +409,9 @@ func verifyForwardRetirement(lockDirectory, oldID, newID string) error {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	if err != nil || decoder.Decode(&ledger) != nil || decoder.Decode(new(any)) != io.EOF || ledger.Version != 1 || ledger.Handoff == nil || ledger.Handoff.OldID != oldID || ledger.Handoff.NewID != newID {
+	if err != nil || decoder.Decode(&ledger) != nil || decoder.Decode(new(any)) != io.EOF || ledger.Version != 1 || ledger.Handoff == nil ||
+		ledger.Handoff.OldID != oldID ||
+		ledger.Handoff.NewID != newID {
 		return errors.New("upgrade_forward_retirement_unverified")
 	}
 	seen := map[string]bool{}
@@ -384,14 +427,23 @@ func verifyForwardRetirement(lockDirectory, oldID, newID string) error {
 	return nil
 }
 
-func forwardUpgradeHandoff(ctx context.Context, proof forwardUpgradeJournal, old forwardOldOperation, lockDirectory, directory, python, executable string, deps forwardHandoffDeps) (context.Context, func(), error) {
-	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || operatorPrivate(directory, true) != nil || operatorPrivate(lockDirectory, true) != nil {
+func forwardUpgradeHandoff(
+	ctx context.Context,
+	proof forwardUpgradeJournal,
+	old forwardOldOperation,
+	lockDirectory, directory, python, executable string,
+	deps forwardHandoffDeps,
+) (context.Context, func(), error) {
+	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || operatorPrivate(directory, true) != nil ||
+		operatorPrivate(lockDirectory, true) != nil {
 		return ctx, nil, errors.New("upgrade_forward_handoff_directory_invalid")
 	}
 	stateRaw, err := readForwardEvidence(filepath.Join(lockDirectory, "lifecycle.json"))
 	var state struct{ ID, Phase string }
 	newID := lifecycleID(directory)
-	if prior, ok := ctx.Value(forwardPriorCandidateKey{}).(forwardPriorCandidate); ok && err == nil && json.Unmarshal(stateRaw, &state) == nil && state.ID != old.ID {
+	if prior, ok := ctx.Value(forwardPriorCandidateKey{}).(forwardPriorCandidate); ok && err == nil &&
+		json.Unmarshal(stateRaw, &state) == nil &&
+		state.ID != old.ID {
 		return forwardUpgradeChainedHandoff(ctx, proof, old, lockDirectory, directory, python, executable, prior, deps)
 	}
 	if err != nil || json.Unmarshal(stateRaw, &state) != nil || state.Phase != "applying" || (state.ID != old.ID && state.ID != newID) {
@@ -477,7 +529,13 @@ func prepareForwardRecovery(ctx context.Context, requireCensus bool, census, boo
 	return adopt(ctx)
 }
 
-func runForwardCensus(ctx context.Context, proof forwardUpgradeJournal, old forwardOldOperation, lockDirectory, directory, python, executable string, run func(context.Context, string, map[string]any, map[string]any, string, string, string) (deployansible.Receipt, error)) (forwardHandoffIntent, error) {
+func runForwardCensus(
+	ctx context.Context,
+	proof forwardUpgradeJournal,
+	old forwardOldOperation,
+	lockDirectory, directory, python, executable string,
+	run func(context.Context, string, map[string]any, map[string]any, string, string, string) (deployansible.Receipt, error),
+) (forwardHandoffIntent, error) {
 	stage, err := os.MkdirTemp(directory, "handoff-drain-")
 	if err != nil {
 		return forwardHandoffIntent{}, err
@@ -485,11 +543,20 @@ func runForwardCensus(ctx context.Context, proof forwardUpgradeJournal, old forw
 	if err = os.Remove(stage); err != nil {
 		return forwardHandoffIntent{}, err
 	}
-	receipt, err := run(ctx, "drain-upgrade-workers", old.Inventory, forwardDrainVariables(lockDirectory, old.ID, lifecycleID(directory)), stage, python, executable)
+	receipt, err := run(
+		ctx,
+		"drain-upgrade-workers",
+		old.Inventory,
+		forwardDrainVariables(lockDirectory, old.ID, lifecycleID(directory)),
+		stage,
+		python,
+		executable,
+	)
 	if err != nil {
 		return forwardHandoffIntent{}, err
 	}
-	if receipt.Result.Values["verified"] != true || receipt.Result.Values["old_id"] != old.ID || receipt.Result.Values["new_id"] != lifecycleID(directory) {
+	if receipt.Result.Values["verified"] != true || receipt.Result.Values["old_id"] != old.ID ||
+		receipt.Result.Values["new_id"] != lifecycleID(directory) {
 		return forwardHandoffIntent{}, errors.New("upgrade_forward_fleet_drain_unverified")
 	}
 	intent, err := forwardDrainIntent(proof, old, lockDirectory, directory, stage)

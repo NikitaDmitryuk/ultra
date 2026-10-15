@@ -13,7 +13,15 @@ func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &AutomationConfig{Version: v["ULTRA_AUTOMATION_VERSION"], ReleaseDir: v["ULTRA_AUTOMATION_RELEASE_DIR"], AgeRecipient: v["ULTRA_AUTOMATION_AGE_RECIPIENT"], BridgeProvider: v["ULTRA_AUTOMATION_BRIDGE_PROVIDER"], BridgeIPv4: p.Bridge.Address, BridgeURL: valueDefault(v, "ULTRA_AUTOMATION_BRIDGE_URL", "https://"+p.PublicSubscriptionDomain()+"/healthz"), KnownHostsFile: v["ULTRA_AUTOMATION_KNOWN_HOSTS_FILE"]}
+	a := &AutomationConfig{
+		Version:        v["ULTRA_AUTOMATION_VERSION"],
+		ReleaseDir:     v["ULTRA_AUTOMATION_RELEASE_DIR"],
+		AgeRecipient:   v["ULTRA_AUTOMATION_AGE_RECIPIENT"],
+		BridgeProvider: v["ULTRA_AUTOMATION_BRIDGE_PROVIDER"],
+		BridgeIPv4:     p.Bridge.Address,
+		BridgeURL:      valueDefault(v, "ULTRA_AUTOMATION_BRIDGE_URL", "https://"+p.PublicSubscriptionDomain()+"/healthz"),
+		KnownHostsFile: v["ULTRA_AUTOMATION_KNOWN_HOSTS_FILE"],
+	}
 	if err := json.Unmarshal([]byte(v["ULTRA_AUTOMATION_STATIC_NODES"]), &a.StaticNodes); err != nil {
 		return nil, errors.New("ULTRA_AUTOMATION_STATIC_NODES must be a JSON array of node policy")
 	}
@@ -48,7 +56,13 @@ func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 		}
 	}
 	if domain := v["VPN_DOMAIN"]; domain != "" {
-		a.Ingress = &AutomationIngress{Domain: domain, Email: v["ACME_EMAIL"], Path: v["PUBLIC_XHTTP_PATH"], ForwardHost: v["BOT_INGRESS_IP"], PublicHost: valueDefault(v, "PUBLIC_HOST", a.BridgeIPv4)}
+		a.Ingress = &AutomationIngress{
+			Domain:      domain,
+			Email:       v["ACME_EMAIL"],
+			Path:        v["PUBLIC_XHTTP_PATH"],
+			ForwardHost: v["BOT_INGRESS_IP"],
+			PublicHost:  valueDefault(v, "PUBLIC_HOST", a.BridgeIPv4),
+		}
 	}
 	if a.Ingress != nil {
 		for _, field := range []struct {
@@ -74,7 +88,13 @@ func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 		if err != nil {
 			return nil, errors.New("invalid DNS_TTL")
 		}
-		a.DNS = &AutomationDNS{Provider: provider, Zone: v["DNS_ZONE"], TTL: ttl, SubscriptionName: valueDefault(v, "DNS_SUBSCRIPTION_NAME", "sync"), VPNName: valueDefault(v, "DNS_VPN_NAME", "edge")}
+		a.DNS = &AutomationDNS{
+			Provider:         provider,
+			Zone:             v["DNS_ZONE"],
+			TTL:              ttl,
+			SubscriptionName: valueDefault(v, "DNS_SUBSCRIPTION_NAME", "sync"),
+			VPNName:          valueDefault(v, "DNS_VPN_NAME", "edge"),
+		}
 	}
 	if mode := v["SUBSCRIPTION_INGRESS_MODE"]; mode != "" {
 		if mode != "direct" && mode != "forward" {
@@ -134,7 +154,24 @@ func validateCanonicalDeploymentKeys(v map[string]string) error {
 		switch key {
 		case "PRESET":
 			return errors.New("PRESET is removed; configure MAIN_EXIT_DOMAIN for the managed XHTTP TLS tunnel")
-		case "BRIDGE", "EXIT", "DB_HOST", "IDENTITY", "FRONT", "BACK", "BRIDGE_SSH_HOST", "BRIDGE_SSH_IDENTITY", "EXIT_SSH_IDENTITY", "DB_SSH_IDENTITY", "DB_ENABLE", "DB_REPLICA", "DB_SSH_USER", "EXIT2", "EXIT2_SSH_IDENTITY", "EXIT2_NAME", "EXIT2_DIAL", "EXIT2_PRIORITY":
+		case "BRIDGE",
+			"EXIT",
+			"DB_HOST",
+			"IDENTITY",
+			"FRONT",
+			"BACK",
+			"BRIDGE_SSH_HOST",
+			"BRIDGE_SSH_IDENTITY",
+			"EXIT_SSH_IDENTITY",
+			"DB_SSH_IDENTITY",
+			"DB_ENABLE",
+			"DB_REPLICA",
+			"DB_SSH_USER",
+			"EXIT2",
+			"EXIT2_SSH_IDENTITY",
+			"EXIT2_NAME",
+			"EXIT2_DIAL",
+			"EXIT2_PRIORITY":
 			return errors.New("removed deployment key " + key + "; use the canonical per-server IP and SSH_KEY fields")
 		}
 		if strings.HasPrefix(key, "ULTRA_AUTO_UPGRADE_") {
@@ -155,7 +192,14 @@ func BotEnvironment(values map[string]string) ([]byte, error) {
 	if strings.TrimSpace(values["TELEGRAM_BOT_TOKEN"]) == "" {
 		return nil, errors.New("TELEGRAM_BOT_TOKEN missing")
 	}
-	keys := []string{"TELEGRAM_BOT_TOKEN", "ULTRA_RELAY_ADMIN_TOKEN", "ULTRA_DB_DSN", "ULTRA_BOT_PUBLIC_URL", "ULTRA_BOT_TELEGRAM_SOCKS5", "ULTRA_XRAY_STATS_API"}
+	keys := []string{
+		"TELEGRAM_BOT_TOKEN",
+		"ULTRA_RELAY_ADMIN_TOKEN",
+		"ULTRA_DB_DSN",
+		"ULTRA_BOT_PUBLIC_URL",
+		"ULTRA_BOT_TELEGRAM_SOCKS5",
+		"ULTRA_XRAY_STATS_API",
+	}
 	var out strings.Builder
 	for _, key := range keys {
 		if value, ok := values[key]; ok {
@@ -175,10 +219,17 @@ func BotEnvironment(values map[string]string) ([]byte, error) {
 func DisallowedDeploymentSecret(key string) bool {
 	key = strings.ToUpper(key)
 	switch key {
-	case "TELEGRAM_BOT_TOKEN", "ULTRA_VULTR_API_KEY", "ULTRA_VULTR_DNS_API_KEY", "ULTRA_CUTOVER_SUBSCRIPTION_URL", "ULTRA_SUBSCRIPTION_PROBE_URL", "ULTRA_RELAY_ADMIN_TOKEN", "ULTRA_DB_DSN":
+	case "TELEGRAM_BOT_TOKEN",
+		"ULTRA_VULTR_API_KEY",
+		"ULTRA_VULTR_DNS_API_KEY",
+		"ULTRA_CUTOVER_SUBSCRIPTION_URL",
+		"ULTRA_SUBSCRIPTION_PROBE_URL",
+		"ULTRA_RELAY_ADMIN_TOKEN",
+		"ULTRA_DB_DSN":
 		return true
 	}
 	signing := strings.Contains(key, "MINISIGN") || strings.Contains(key, "SIGNING")
-	private := strings.Contains(key, "SECRET") || strings.Contains(key, "PRIVATE") || strings.Contains(key, "PASSWORD") || strings.Contains(key, "PASSPHRASE")
+	private := strings.Contains(key, "SECRET") || strings.Contains(key, "PRIVATE") || strings.Contains(key, "PASSWORD") ||
+		strings.Contains(key, "PASSPHRASE")
 	return signing && private
 }

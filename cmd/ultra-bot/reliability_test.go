@@ -22,7 +22,16 @@ func TestBotMainHelper(t *testing.T) {
 	if os.Getenv("ULTRA_TEST_BOT_MAIN") != "1" {
 		return
 	}
-	os.Args = []string{"ultra-bot", "-dev", "-port", os.Getenv("ULTRA_TEST_BOT_PORT"), "-data-dir", os.Getenv("ULTRA_TEST_BOT_DATA"), "-admin-api-url", "http://127.0.0.1:1"}
+	os.Args = []string{
+		"ultra-bot",
+		"-dev",
+		"-port",
+		os.Getenv("ULTRA_TEST_BOT_PORT"),
+		"-data-dir",
+		os.Getenv("ULTRA_TEST_BOT_DATA"),
+		"-admin-api-url",
+		"http://127.0.0.1:1",
+	}
 	main()
 }
 func TestRequiredListenerFailureExitsEvenWhenDependenciesOffline(t *testing.T) {
@@ -37,7 +46,15 @@ func TestRequiredListenerFailureExitsEvenWhenDependenciesOffline(t *testing.T) {
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestBotMainHelper$")
 	cmd.Dir = t.TempDir()
-	cmd.Env = []string{"ULTRA_TEST_BOT_MAIN=1", "ULTRA_TEST_BOT_PORT=" + port, "ULTRA_TEST_BOT_DATA=" + t.TempDir(), "TELEGRAM_BOT_TOKEN=test-only", "ULTRA_RELAY_ADMIN_TOKEN=test-only", "ULTRA_DB_DSN=postgres://test:test@127.0.0.1:1/test?sslmode=disable", "ULTRA_BOT_TELEGRAM_SOCKS5=127.0.0.1:1"}
+	cmd.Env = []string{
+		"ULTRA_TEST_BOT_MAIN=1",
+		"ULTRA_TEST_BOT_PORT=" + port,
+		"ULTRA_TEST_BOT_DATA=" + t.TempDir(),
+		"TELEGRAM_BOT_TOKEN=test-only",
+		"ULTRA_RELAY_ADMIN_TOKEN=test-only",
+		"ULTRA_DB_DSN=postgres://test:test@127.0.0.1:1/test?sslmode=disable",
+		"ULTRA_BOT_TELEGRAM_SOCKS5=127.0.0.1:1",
+	}
 	output, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(output), "required HTTP listener failed") {
 		t.Fatalf("listener failure not propagated: %v %s", err, output)
@@ -58,7 +75,18 @@ func TestHTTPAndCachedSubscriptionSurviveOfflineDependenciesAndShutdown(t *testi
 	token := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	digest := sha256.Sum256([]byte(token))
 	key := hex.EncodeToString(digest[:]) + "?"
-	data, err := json.Marshal(map[string]any{"version": 1, "entries": map[string]any{key: map[string]any{"body": []byte("vless://cached\n"), "headers": map[string]string{"Content-Type": "text/plain"}, "confirmed_at": time.Now()}}})
+	data, err := json.Marshal(
+		map[string]any{
+			"version": 1,
+			"entries": map[string]any{
+				key: map[string]any{
+					"body":         []byte("vless://cached\n"),
+					"headers":      map[string]string{"Content-Type": "text/plain"},
+					"confirmed_at": time.Now(),
+				},
+			},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +97,15 @@ func TestHTTPAndCachedSubscriptionSurviveOfflineDependenciesAndShutdown(t *testi
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestBotMainHelper$")
 	cmd.Dir = t.TempDir()
-	cmd.Env = []string{"ULTRA_TEST_BOT_MAIN=1", "ULTRA_TEST_BOT_PORT=" + port, "ULTRA_TEST_BOT_DATA=" + dataDir, "TELEGRAM_BOT_TOKEN=test-only", "ULTRA_RELAY_ADMIN_TOKEN=test-only", "ULTRA_DB_DSN=postgres://test:test@127.0.0.1:1/test?sslmode=disable", "ULTRA_BOT_TELEGRAM_SOCKS5=127.0.0.1:1"}
+	cmd.Env = []string{
+		"ULTRA_TEST_BOT_MAIN=1",
+		"ULTRA_TEST_BOT_PORT=" + port,
+		"ULTRA_TEST_BOT_DATA=" + dataDir,
+		"TELEGRAM_BOT_TOKEN=test-only",
+		"ULTRA_RELAY_ADMIN_TOKEN=test-only",
+		"ULTRA_DB_DSN=postgres://test:test@127.0.0.1:1/test?sslmode=disable",
+		"ULTRA_BOT_TELEGRAM_SOCKS5=127.0.0.1:1",
+	}
 	if err = cmd.Start(); err != nil {
 		t.Fatal(err)
 	}

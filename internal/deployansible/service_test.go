@@ -169,7 +169,8 @@ func TestLifecycleRetirementDispatchAuthorization(t *testing.T) {
 			select {
 			case result := <-done:
 				if os.Geteuid() == 0 {
-					if result.Code != "" || (action == "lease-retire" && (result.State != "released" || gate.blocked())) || (action == "lease-supersede" && (result.State != "applying" || !gate.blocked())) {
+					if result.Code != "" || (action == "lease-retire" && (result.State != "released" || gate.blocked())) ||
+						(action == "lease-supersede" && (result.State != "applying" || !gate.blocked())) {
 						t.Fatal("root retirement dispatch failed", result)
 					}
 				} else if result.Code != "controller_access_denied" || !gate.blocked() || gate.retired[id] {

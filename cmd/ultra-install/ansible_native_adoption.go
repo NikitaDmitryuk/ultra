@@ -23,7 +23,8 @@ import (
 // This explicit initial executor uses the existing fixed lifecycle modules;
 // it never claims an already-attested broker lease or reads a private key.
 func attestNativeAdoption(p *installplan.InstallPlan) (string, error) {
-	if p == nil || !p.BridgeNative || !p.AdoptRuntime || p.SchemaVersion != installplan.CurrentSchemaVersion || p.Automation == nil || os.Geteuid() != 0 {
+	if p == nil || !p.BridgeNative || !p.AdoptRuntime || p.SchemaVersion != installplan.CurrentSchemaVersion || p.Automation == nil ||
+		os.Geteuid() != 0 {
 		return "", errors.New("native_adoption_root_and_explicit_runtime_required")
 	}
 	relay, err := user.Lookup("ultra-relay")
@@ -87,7 +88,12 @@ func readNativeAdoptionFile(path string, relayUID *uint32) ([]byte, error) {
 	})
 }
 
-func readNativeAdoptionOwnedFile(path string, relayUID *uint32, lstat func(string) (os.FileInfo, error), open func(string) (*os.File, error)) ([]byte, error) {
+func readNativeAdoptionOwnedFile(
+	path string,
+	relayUID *uint32,
+	lstat func(string) (os.FileInfo, error),
+	open func(string) (*os.File, error),
+) ([]byte, error) {
 	fail := func() ([]byte, error) { return nil, errors.New("native_adoption_fixed_state_untrusted") }
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return fail()
@@ -129,9 +135,16 @@ func readNativeAdoptionOwnedFile(path string, relayUID *uint32, lstat func(strin
 }
 
 // Pure validation keeps machine/location proof separate from metadata parsing.
-func validateNativeAdoption(p *installplan.InstallPlan, euid int, deploymentRaw, reconcileRaw, specRaw, machine []byte, addresses []net.IP) (string, error) {
+func validateNativeAdoption(
+	p *installplan.InstallPlan,
+	euid int,
+	deploymentRaw, reconcileRaw, specRaw, machine []byte,
+	addresses []net.IP,
+) (string, error) {
 	fail := func() (string, error) { return "", errors.New("native_adoption_machine_or_policy_conflict") }
-	if p == nil || !p.BridgeNative || !p.AdoptRuntime || p.SchemaVersion != installplan.CurrentSchemaVersion || p.Automation == nil || euid != 0 || !p.Database.Enabled {
+	if p == nil || !p.BridgeNative || !p.AdoptRuntime || p.SchemaVersion != installplan.CurrentSchemaVersion || p.Automation == nil ||
+		euid != 0 ||
+		!p.Database.Enabled {
 		return fail()
 	}
 	if !validAdoptionMetadata("deployment.json", deploymentRaw) || !validAdoptionMetadata("reconcile.json", reconcileRaw) {
@@ -153,13 +166,23 @@ func validateNativeAdoption(p *installplan.InstallPlan, euid int, deploymentRaw,
 		Nodes    []installplan.AutomationNode `json:"static_nodes"`
 	}
 	var specification config.Spec
-	if json.Unmarshal(deploymentRaw, &deployment) != nil || json.Unmarshal(reconcileRaw, &reconcile) != nil || json.Unmarshal(specRaw, &specification) != nil || specification.Role != config.RoleBridge {
+	if json.Unmarshal(deploymentRaw, &deployment) != nil || json.Unmarshal(reconcileRaw, &reconcile) != nil ||
+		json.Unmarshal(specRaw, &specification) != nil ||
+		specification.Role != config.RoleBridge {
 		return fail()
 	}
-	if deployment.Database == "" || deployment.Database != p.Database.Name || deployment.Database != reconcile.Database || deployment.Provider == "" || deployment.Provider != reconcile.Provider || deployment.URL == "" || deployment.URL != reconcile.URL || !reflect.DeepEqual(deployment.Nodes, reconcile.Nodes) || !reflect.DeepEqual(deployment.Nodes, p.Automation.StaticNodes) {
+	if deployment.Database == "" || deployment.Database != p.Database.Name || deployment.Database != reconcile.Database ||
+		deployment.Provider == "" ||
+		deployment.Provider != reconcile.Provider ||
+		deployment.URL == "" ||
+		deployment.URL != reconcile.URL ||
+		!reflect.DeepEqual(deployment.Nodes, reconcile.Nodes) ||
+		!reflect.DeepEqual(deployment.Nodes, p.Automation.StaticNodes) {
 		return fail()
 	}
-	if !filepath.IsAbs(p.BridgeSSHIdentity()) || filepath.Clean(p.BridgeSSHIdentity()) != p.BridgeSSHIdentity() || p.BridgeSSHIdentity() != reconcile.Identity || (deployment.Identity != "" && deployment.Identity != reconcile.Identity) {
+	if !filepath.IsAbs(p.BridgeSSHIdentity()) || filepath.Clean(p.BridgeSSHIdentity()) != p.BridgeSSHIdentity() ||
+		p.BridgeSSHIdentity() != reconcile.Identity ||
+		(deployment.Identity != "" && deployment.Identity != reconcile.Identity) {
 		return fail()
 	}
 	address := net.ParseIP(p.Bridge.Address)

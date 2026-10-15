@@ -3,12 +3,13 @@ package proxy
 import (
 	"context"
 	"fmt"
-	xnet "github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/core"
 	"io"
 	"net"
 	"testing"
 	"time"
+
+	xnet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/core"
 )
 
 func TestReloadTerminatesEstablishedTransfer(t *testing.T) {

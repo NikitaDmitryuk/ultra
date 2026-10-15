@@ -105,7 +105,11 @@ func TestArchivedSOCKSCannotBeEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = database.Pool.Exec(context.Background(), "DELETE FROM users WHERE uuid=$1", user.UUID) })
-	_, err = database.Pool.Exec(ctx, "UPDATE users SET kind='socks5',is_active=false,socks_username='historical',socks_password='historical',socks_port=10895 WHERE uuid=$1", user.UUID)
+	_, err = database.Pool.Exec(
+		ctx,
+		"UPDATE users SET kind='socks5',is_active=false,socks_username='historical',socks_password='historical',socks_port=10895 WHERE uuid=$1",
+		user.UUID,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

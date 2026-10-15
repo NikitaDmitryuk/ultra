@@ -101,7 +101,15 @@ func (r *TrafficRepo) RecordSamples(ctx context.Context, samples []TrafficSample
 		}
 
 		exitID := strings.TrimPrefix(s.ExitTag, "to-exit-")
-		_, err = tx.Exec(ctx, `INSERT INTO account_exit_usage(account_id,exit_id,period,uplink_bytes,downlink_bytes) SELECT account_id,$2,$3,$4,$5 FROM users WHERE uuid=$1 ON CONFLICT(account_id,exit_id,period) DO UPDATE SET uplink_bytes=account_exit_usage.uplink_bytes+EXCLUDED.uplink_bytes,downlink_bytes=account_exit_usage.downlink_bytes+EXCLUDED.downlink_bytes`, s.UserUUID, exitID, s.CollectedAt.UTC().Format("2006-01"), s.UplinkBytes, s.DownlinkBytes)
+		_, err = tx.Exec(
+			ctx,
+			`INSERT INTO account_exit_usage(account_id,exit_id,period,uplink_bytes,downlink_bytes) SELECT account_id,$2,$3,$4,$5 FROM users WHERE uuid=$1 ON CONFLICT(account_id,exit_id,period) DO UPDATE SET uplink_bytes=account_exit_usage.uplink_bytes+EXCLUDED.uplink_bytes,downlink_bytes=account_exit_usage.downlink_bytes+EXCLUDED.downlink_bytes`,
+			s.UserUUID,
+			exitID,
+			s.CollectedAt.UTC().Format("2006-01"),
+			s.UplinkBytes,
+			s.DownlinkBytes,
+		)
 		if err != nil {
 			return err
 		}
@@ -137,7 +145,12 @@ func (r *TrafficRepo) RecordSamples(ctx context.Context, samples []TrafficSample
 // GetMonthlyAll returns monthly totals for every user in the given year/month.
 func (r *TrafficRepo) GetMonthlyAll(ctx context.Context, year, month int) ([]MonthlyTotal, error) {
 	out := []MonthlyTotal{}
-	err := r.db.orm.WithContext(ctx).Table("monthly_traffic").Where("year = ? AND month = ?", int32(year), int32(month)).Order("user_uuid").Find(&out).Error
+	err := r.db.orm.WithContext(ctx).
+		Table("monthly_traffic").
+		Where("year = ? AND month = ?", int32(year), int32(month)).
+		Order("user_uuid").
+		Find(&out).
+		Error
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +168,13 @@ func (r *TrafficRepo) GetMonthlyUser(ctx context.Context, userUUID string, year,
 		return MonthlyTotal{UserUUID: userUUID, Year: year, Month: month}, err
 	}
 	t := MonthlyTotal{UserUUID: userUUID, Year: year, Month: month}
-	err = cloudLookupError(r.db.orm.WithContext(ctx).Table("monthly_traffic").Where("user_uuid = ? AND year = ? AND month = ?", fromPGUUID(pgUUID), int32(year), int32(month)).Take(&t).Error)
+	err = cloudLookupError(
+		r.db.orm.WithContext(ctx).
+			Table("monthly_traffic").
+			Where("user_uuid = ? AND year = ? AND month = ?", fromPGUUID(pgUUID), int32(year), int32(month)).
+			Take(&t).
+			Error,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MonthlyTotal{UserUUID: userUUID, Year: year, Month: month}, nil
 	}

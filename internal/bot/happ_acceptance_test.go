@@ -39,7 +39,13 @@ const acceptanceBody = `[{"remarks":"Auto","outbounds":[{"protocol":"blackhole",
 func TestAcceptanceUsesAuthorisedPreviewAndNeverOfflineCache(t *testing.T) {
 	token := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	digest := sha256.Sum256([]byte(token))
-	c := happAcceptance{TokenDigest: hex.EncodeToString(digest[:]), IssuedAt: time.Now().Add(-time.Minute), ExpiresAt: time.Now().Add(time.Minute), PrimaryPort: 25443, ReservePort: 25444}
+	c := happAcceptance{
+		TokenDigest: hex.EncodeToString(digest[:]),
+		IssuedAt:    time.Now().Add(-time.Minute),
+		ExpiresAt:   time.Now().Add(time.Minute),
+		PrimaryPort: 25443,
+		ReservePort: 25444,
+	}
 	path := filepath.Join(t.TempDir(), "acceptance.json")
 	data, _ := json.Marshal(c)
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -75,7 +81,10 @@ func TestAcceptanceUsesAuthorisedPreviewAndNeverOfflineCache(t *testing.T) {
 		return w
 	}
 	w := request("format=happ&preview=reserve-live", token)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"port":25443`) || !strings.Contains(w.Body.String(), `"port":25444`) || !strings.Contains(w.Body.String(), `"id":"fixture"`) || w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Vary") != "User-Agent" {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"port":25443`) || !strings.Contains(w.Body.String(), `"port":25444`) ||
+		!strings.Contains(w.Body.String(), `"id":"fixture"`) ||
+		w.Header().Get("Cache-Control") != "no-store" ||
+		w.Header().Get("Vary") != "User-Agent" {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	upstreamStatus = 404
@@ -110,7 +119,13 @@ func TestAcceptanceExpiryPermissionsAndUnsafeProfile(t *testing.T) {
 	token := "fixture"
 	digest := sha256.Sum256([]byte(token))
 	now := time.Now()
-	c := happAcceptance{TokenDigest: hex.EncodeToString(digest[:]), IssuedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute), PrimaryPort: 25443, ReservePort: 25444}
+	c := happAcceptance{
+		TokenDigest: hex.EncodeToString(digest[:]),
+		IssuedAt:    now.Add(-time.Minute),
+		ExpiresAt:   now.Add(time.Minute),
+		PrimaryPort: 25443,
+		ReservePort: 25444,
+	}
 	path := filepath.Join(t.TempDir(), "config.json")
 	write := func() {
 		t.Helper()

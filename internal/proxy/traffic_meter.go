@@ -3,12 +3,13 @@ package proxy
 import (
 	"context"
 	"errors"
-	"github.com/NikitaDmitryuk/ultra/internal/auth"
-	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 
 	"github.com/google/uuid"
 	"github.com/xtls/xray-core/app/dispatcher"
@@ -148,7 +149,14 @@ func (h *measuredOutbound) Dispatch(ctx context.Context, link *transport.Link) {
 	}
 	// Preserve the concrete stats writer only for unrestricted flows.
 	if leaseStore != nil {
-		measured.Writer = &limitedWriter{Writer: link.Writer, counter: &count.down, store: store, leaseStore: leaseStore, account: account, exit: exitID}
+		measured.Writer = &limitedWriter{
+			Writer:     link.Writer,
+			counter:    &count.down,
+			store:      store,
+			leaseStore: leaseStore,
+			account:    account,
+			exit:       exitID,
+		}
 	} else if writer, ok := link.Writer.(*dispatcher.SizeStatWriter); ok {
 		measured.Writer = &dispatcher.SizeStatWriter{Writer: writer.Writer, Counter: dualCounter{Counter: writer.Counter, extra: &count.down}}
 	} else {

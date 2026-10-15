@@ -220,7 +220,9 @@ func (s *Server) validateClientUser(w http.ResponseWriter, uuid string) (u auth.
 	return u, true
 }
 
-func (s *Server) clientExitSelection(u auth.User) (selectedID *string, effectiveID string, health map[string]exits.Health, nodes []exits.Node) {
+func (s *Server) clientExitSelection(
+	u auth.User,
+) (selectedID *string, effectiveID string, health map[string]exits.Health, nodes []exits.Node) {
 	if s.exits == nil {
 		return nil, "", nil, nil
 	}
@@ -476,7 +478,15 @@ func (s *Server) profileRoutes(u auth.User) []map[string]any {
 				}
 			}
 		}
-		out = append(out, map[string]any{"location_id": route.LocationID, "name": name, "preferred_exit_id": route.ExitID, "effective_exit_id": effective})
+		out = append(
+			out,
+			map[string]any{
+				"location_id":       route.LocationID,
+				"name":              name,
+				"preferred_exit_id": route.ExitID,
+				"effective_exit_id": effective,
+			},
+		)
 	}
 	return out
 }

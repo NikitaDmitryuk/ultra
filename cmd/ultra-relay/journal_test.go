@@ -3,12 +3,13 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/NikitaDmitryuk/ultra/internal/config"
-	boltErrors "go.etcd.io/bbolt/errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/config"
+	boltErrors "go.etcd.io/bbolt/errors"
 
 	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 )
@@ -36,7 +37,16 @@ func TestDrainJournalPreservesUnacknowledgedBatchAndCrashReservations(t *testing
 	now := time.Now().UTC()
 	limits := []runtimestate.QuotaLimit{}
 	for _, account := range []string{"owner", ""} {
-		limits = append(limits, runtimestate.QuotaLimit{AccountID: account, ExitID: "exit", Period: now.Format("2006-01"), LimitBytes: 1 << 20, ExpiresAt: now.Add(time.Hour)})
+		limits = append(
+			limits,
+			runtimestate.QuotaLimit{
+				AccountID:  account,
+				ExitID:     "exit",
+				Period:     now.Format("2006-01"),
+				LimitBytes: 1 << 20,
+				ExpiresAt:  now.Add(time.Hour),
+			},
+		)
 	}
 	if err := state.SaveSnapshot(runtimestate.Snapshot{Revision: 1, ConfirmedAt: now, Payload: []byte(`{}`)}, limits); err != nil {
 		t.Fatal(err)

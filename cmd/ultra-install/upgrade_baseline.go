@@ -71,7 +71,11 @@ func prepareUpgradeBaseline(path, directory string) (*upgradeBaselineInput, erro
 		}
 	}
 	for id, p := range d.Exits {
-		if !regexp.MustCompile(`^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$`).MatchString(id) || !bootstrapComponentAlias.MatchString(p.Alias) || !hashPattern.MatchString(p.RequestSHA) || p.Checkpoint != "" || p.CheckpointSHA != "" {
+		if !regexp.MustCompile(`^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$`).MatchString(id) ||
+			!bootstrapComponentAlias.MatchString(p.Alias) ||
+			!hashPattern.MatchString(p.RequestSHA) ||
+			p.Checkpoint != "" ||
+			p.CheckpointSHA != "" {
 			return nil, errors.New("upgrade_baseline_exit_invalid")
 		}
 	}
@@ -112,7 +116,9 @@ func prepareUpgradeBaseline(path, directory string) (*upgradeBaselineInput, erro
 		Attempt     string `json:"remote_attempt"`
 		Dispatched  bool   `json:"mutator_dispatched"`
 	}
-	if json.Unmarshal(journal, &j) != nil || j.Schema != 1 || !j.Dispatched || j.ManifestSHA != d.ManifestSHA || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(j.Commit) || !regexp.MustCompile(`^[a-f0-9]{16,64}$`).MatchString(j.Attempt) {
+	if json.Unmarshal(journal, &j) != nil || j.Schema != 1 || !j.Dispatched || j.ManifestSHA != d.ManifestSHA ||
+		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(j.Commit) ||
+		!regexp.MustCompile(`^[a-f0-9]{16,64}$`).MatchString(j.Attempt) {
 		return nil, errors.New("upgrade_baseline_journal_invalid")
 	}
 	manifestRaw, err := readPinned(d.Manifest, d.ManifestSHA)
@@ -126,7 +132,11 @@ func prepareUpgradeBaseline(path, directory string) (*upgradeBaselineInput, erro
 	if filepath.Base(d.Manifest) != "release-manifest.json" || manifest.SourceCommit != j.Commit {
 		return nil, errors.New("upgrade_baseline_manifest_unbound")
 	}
-	input := &upgradeBaselineInput{Descriptor: d, Manifest: *manifest, RemoteRelease: "/var/lib/ultra-ansible/operator-inputs/manual-" + j.Commit + "-" + j.Attempt + "/release"}
+	input := &upgradeBaselineInput{
+		Descriptor:    d,
+		Manifest:      *manifest,
+		RemoteRelease: "/var/lib/ultra-ansible/operator-inputs/manual-" + j.Commit + "-" + j.Attempt + "/release",
+	}
 	normalized, _ := json.Marshal(input)
 	for name, data := range map[string][]byte{"baseline.input.json": normalized, "baseline.journal.json": journal, "baseline.manifest.json": manifestRaw} {
 		if err = writeUpgradeInput(filepath.Join(directory, name), data); err != nil {
@@ -143,7 +153,13 @@ func baselineExitProofs(exits map[string]upgradeBaselineProof) []upgradeBaseline
 	return result
 }
 
-func freezeUpgradeBaseline(input *upgradeBaselineInput, result upgradeBaselineResult, inspection upgradeInspection, target *automationRelease, directory string) error {
+func freezeUpgradeBaseline(
+	input *upgradeBaselineInput,
+	result upgradeBaselineResult,
+	inspection upgradeInspection,
+	target *automationRelease,
+	directory string,
+) error {
 	if input == nil {
 		return nil
 	}

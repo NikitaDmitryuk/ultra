@@ -22,10 +22,25 @@ func TestFrozenLocalBootstrapRetryAttachesSameBrokerLease(t *testing.T) {
 			attempt := "/tmp/original-state/bootstrap-plan/attempt-frozen"
 			directory := filepath.Join(attempt, "apply")
 			inventory := syntheticLocalBootstrapRetryInventory(t)
-			request, _ := json.Marshal(map[string]any{"inventory": inventory, "variables": map[string]any{"ultra_lock_directory": bootstrapBrokerLockDirectory}})
+			request, _ := json.Marshal(
+				map[string]any{"inventory": inventory, "variables": map[string]any{"ultra_lock_directory": bootstrapBrokerLockDirectory}},
+			)
 			digest := sha256.Sum256(request)
-			job, _ := json.Marshal(map[string]any{"schema_version": 1, "operation": "bootstrap", "request_sha256": hex.EncodeToString(digest[:]), "binary_sha256": hex.EncodeToString(digest[:])})
-			mode := frozenExecution{Schema: 1, Target: "192.0.2.1|192.0.2.1", Local: true, LockDirectory: bootstrapBrokerLockDirectory, OperatorDirectory: "/tmp/original-state/operator"}
+			job, _ := json.Marshal(
+				map[string]any{
+					"schema_version": 1,
+					"operation":      "bootstrap",
+					"request_sha256": hex.EncodeToString(digest[:]),
+					"binary_sha256":  hex.EncodeToString(digest[:]),
+				},
+			)
+			mode := frozenExecution{
+				Schema:            1,
+				Target:            "192.0.2.1|192.0.2.1",
+				Local:             true,
+				LockDirectory:     bootstrapBrokerLockDirectory,
+				OperatorDirectory: "/tmp/original-state/operator",
+			}
 			if fault == "operator-missing" {
 				mode.OperatorDirectory = ""
 			}
@@ -43,7 +58,12 @@ func TestFrozenLocalBootstrapRetryAttachesSameBrokerLease(t *testing.T) {
 			if fault == "inventory" {
 				frozen = []byte(`{"all":{}}`)
 			}
-			files := map[string][]byte{filepath.Join(directory, "request.json"): request, filepath.Join(directory, "job.json"): job, filepath.Join(attempt, "execution-mode.json"): modeRaw, filepath.Join(attempt, "inventory.frozen.json"): frozen}
+			files := map[string][]byte{
+				filepath.Join(directory, "request.json"):        request,
+				filepath.Join(directory, "job.json"):            job,
+				filepath.Join(attempt, "execution-mode.json"):   modeRaw,
+				filepath.Join(attempt, "inventory.frozen.json"): frozen,
+			}
 			read := func(path string) ([]byte, error) {
 				raw, ok := files[path]
 				if !ok {
@@ -59,7 +79,8 @@ func TestFrozenLocalBootstrapRetryAttachesSameBrokerLease(t *testing.T) {
 				return read(path)
 			},
 				machine: func(p *installplan.InstallPlan) bool {
-					if p.ControllerLocal == nil || !*p.ControllerLocal || p.ControllerLocalTarget != mode.Target || p.Bridge.SSHHost != "192.0.2.1" {
+					if p.ControllerLocal == nil || !*p.ControllerLocal || p.ControllerLocalTarget != mode.Target ||
+						p.Bridge.SSHHost != "192.0.2.1" {
 						t.Fatal("target changed")
 					}
 					return fault != "machine"
@@ -95,7 +116,13 @@ func TestFrozenLocalBootstrapRetryAttachesSameBrokerLease(t *testing.T) {
 					return ctx, func() {}, nil
 				},
 			}
-			_, err := retryFrozenBootstrapOperatorWith(context.Background(), directory, "/usr/bin/python3", "/usr/bin/ansible-playbook", deps)
+			_, err := retryFrozenBootstrapOperatorWith(
+				context.Background(),
+				directory,
+				"/usr/bin/python3",
+				"/usr/bin/ansible-playbook",
+				deps,
+			)
 			if fault == "none" {
 				if err != nil || !attached || !replayed || !released {
 					t.Fatal("local broker replay failed", err)
@@ -115,9 +142,21 @@ func TestFrozenLocalBootstrapRetryAttachesSameBrokerLease(t *testing.T) {
 
 func TestFrozenRemoteBootstrapRetryKeepsOriginalLockRoute(t *testing.T) {
 	directory := "/tmp/legacy-fixture/apply"
-	request, _ := json.Marshal(map[string]any{"inventory": map[string]any{}, "variables": map[string]any{"ultra_lock_directory": "/root/.cache/original-operation"}})
+	request, _ := json.Marshal(
+		map[string]any{
+			"inventory": map[string]any{},
+			"variables": map[string]any{"ultra_lock_directory": "/root/.cache/original-operation"},
+		},
+	)
 	digest := sha256.Sum256(request)
-	job, _ := json.Marshal(map[string]any{"schema_version": 1, "operation": "bootstrap", "request_sha256": hex.EncodeToString(digest[:]), "binary_sha256": hex.EncodeToString(digest[:])})
+	job, _ := json.Marshal(
+		map[string]any{
+			"schema_version": 1,
+			"operation":      "bootstrap",
+			"request_sha256": hex.EncodeToString(digest[:]),
+			"binary_sha256":  hex.EncodeToString(digest[:]),
+		},
+	)
 	remote := false
 	deps := frozenBootstrapRetryDependencies{
 		readPrivate: func(path string) ([]byte, error) {
@@ -150,7 +189,8 @@ func TestFrozenRemoteBootstrapRetryKeepsOriginalLockRoute(t *testing.T) {
 			return deployansible.Receipt{State: "succeeded"}, nil
 		},
 	}
-	if _, err := retryFrozenBootstrapOperatorWith(context.Background(), directory, "/usr/bin/python3", "/usr/bin/ansible-playbook", deps); err != nil || !remote {
+	if _, err := retryFrozenBootstrapOperatorWith(context.Background(), directory, "/usr/bin/python3", "/usr/bin/ansible-playbook", deps); err != nil ||
+		!remote {
 		t.Fatal("remote legacy route changed", err)
 	}
 }
@@ -199,10 +239,27 @@ func TestFrozenLocalBootstrapRetrySerializesTwoInvocations(t *testing.T) {
 	}
 	directory := filepath.Join(stateRoot, "bootstrap-plan", "attempt-frozen", "apply")
 	inventory := syntheticLocalBootstrapRetryInventory(t)
-	request, _ := json.Marshal(map[string]any{"inventory": inventory, "variables": map[string]any{"ultra_lock_directory": bootstrapBrokerLockDirectory}})
+	request, _ := json.Marshal(
+		map[string]any{"inventory": inventory, "variables": map[string]any{"ultra_lock_directory": bootstrapBrokerLockDirectory}},
+	)
 	digest := sha256.Sum256(request)
-	job, _ := json.Marshal(map[string]any{"schema_version": 1, "operation": "bootstrap", "request_sha256": hex.EncodeToString(digest[:]), "binary_sha256": hex.EncodeToString(digest[:])})
-	mode, _ := json.Marshal(frozenExecution{Schema: 1, Target: "192.0.2.1|192.0.2.1", Local: true, LockDirectory: bootstrapBrokerLockDirectory, OperatorDirectory: operatorPath})
+	job, _ := json.Marshal(
+		map[string]any{
+			"schema_version": 1,
+			"operation":      "bootstrap",
+			"request_sha256": hex.EncodeToString(digest[:]),
+			"binary_sha256":  hex.EncodeToString(digest[:]),
+		},
+	)
+	mode, _ := json.Marshal(
+		frozenExecution{
+			Schema:            1,
+			Target:            "192.0.2.1|192.0.2.1",
+			Local:             true,
+			LockDirectory:     bootstrapBrokerLockDirectory,
+			OperatorDirectory: operatorPath,
+		},
+	)
 	frozen, _ := json.Marshal(inventory)
 	read := func(path string) ([]byte, error) {
 		switch filepath.Base(path) {
@@ -219,7 +276,11 @@ func TestFrozenLocalBootstrapRetrySerializesTwoInvocations(t *testing.T) {
 		}
 	}
 	attached := 0
-	deps := frozenBootstrapRetryDependencies{readPrivate: read, readRootPrivate: read, machine: func(*installplan.InstallPlan) bool { return true }, operator: deployansible.WithOperationLock,
+	deps := frozenBootstrapRetryDependencies{
+		readPrivate:     read,
+		readRootPrivate: read,
+		machine:         func(*installplan.InstallPlan) bool { return true },
+		operator:        deployansible.WithOperationLock,
 		attach: func(ctx context.Context, lock, id string) (context.Context, func(), error) {
 			attached++
 			return ctx, func() {}, nil
@@ -276,9 +337,21 @@ func TestFrozenStageLeaseRevalidatesOriginalInputsBeforeInternalCallback(t *test
 	for _, fault := range []string{"none", "request-changed", "job-changed", "receipt-changed"} {
 		t.Run(fault, func(t *testing.T) {
 			directory := "/tmp/frozen-remote/apply"
-			request, _ := json.Marshal(map[string]any{"inventory": map[string]any{}, "variables": map[string]any{"ultra_lock_directory": "/tmp/original-private-lock"}})
+			request, _ := json.Marshal(
+				map[string]any{
+					"inventory": map[string]any{},
+					"variables": map[string]any{"ultra_lock_directory": "/tmp/original-private-lock"},
+				},
+			)
 			digest := sha256.Sum256(request)
-			job, _ := json.Marshal(map[string]any{"schema_version": 1, "operation": "bootstrap", "request_sha256": hex.EncodeToString(digest[:]), "binary_sha256": hex.EncodeToString(digest[:])})
+			job, _ := json.Marshal(
+				map[string]any{
+					"schema_version": 1,
+					"operation":      "bootstrap",
+					"request_sha256": hex.EncodeToString(digest[:]),
+					"binary_sha256":  hex.EncodeToString(digest[:]),
+				},
+			)
 			var receipt []byte
 			locked, called, released := false, false, false
 			deps := frozenBootstrapRetryDependencies{
@@ -320,13 +393,18 @@ func TestFrozenStageLeaseRevalidatesOriginalInputsBeforeInternalCallback(t *test
 					return context.WithValue(ctx, retryAttachmentTestKey{}, path), func() { released = true }, nil
 				},
 			}
-			_, err := withFrozenBootstrapStageLeaseWith(context.Background(), directory, deps, func(ctx context.Context) (deployansible.Receipt, error) {
-				called = true
-				if !locked || ctx.Value(retryAttachmentTestKey{}) != "/tmp/original-private-lock" {
-					t.Fatal("internal callback did not receive original leased context")
-				}
-				return deployansible.Receipt{State: "succeeded"}, nil
-			})
+			_, err := withFrozenBootstrapStageLeaseWith(
+				context.Background(),
+				directory,
+				deps,
+				func(ctx context.Context) (deployansible.Receipt, error) {
+					called = true
+					if !locked || ctx.Value(retryAttachmentTestKey{}) != "/tmp/original-private-lock" {
+						t.Fatal("internal callback did not receive original leased context")
+					}
+					return deployansible.Receipt{State: "succeeded"}, nil
+				},
+			)
 			if fault == "none" {
 				if err != nil || !called {
 					t.Fatal("safe internal callback refused", err)
@@ -364,16 +442,33 @@ func TestRemoteCompatibilityCannotRunWhileCanonicalOperatorChecksWithFleetFree(t
 			if err = os.MkdirAll(directory, 0700); err != nil {
 				t.Fatal(err)
 			}
-			request, _ := json.Marshal(map[string]any{"inventory": map[string]any{}, "variables": map[string]any{"ultra_lock_directory": root}})
+			request, _ := json.Marshal(
+				map[string]any{"inventory": map[string]any{}, "variables": map[string]any{"ultra_lock_directory": root}},
+			)
 			digest := sha256.Sum256(request)
-			job, _ := json.Marshal(map[string]any{"schema_version": 1, "operation": "bootstrap", "request_sha256": hex.EncodeToString(digest[:]), "binary_sha256": hex.EncodeToString(digest[:])})
+			job, _ := json.Marshal(
+				map[string]any{
+					"schema_version": 1,
+					"operation":      "bootstrap",
+					"request_sha256": hex.EncodeToString(digest[:]),
+					"binary_sha256":  hex.EncodeToString(digest[:]),
+				},
+			)
 			for name, raw := range map[string][]byte{"request.json": request, "job.json": job} {
 				if err = os.WriteFile(filepath.Join(directory, name), raw, 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
 			if modeKind == "recorded-operator" {
-				mode, _ := json.Marshal(frozenExecution{Schema: 1, Target: "192.0.2.1|192.0.2.1", Local: false, LockDirectory: root, OperatorDirectory: filepath.Join(root, "operator")})
+				mode, _ := json.Marshal(
+					frozenExecution{
+						Schema:            1,
+						Target:            "192.0.2.1|192.0.2.1",
+						Local:             false,
+						LockDirectory:     root,
+						OperatorDirectory: filepath.Join(root, "operator"),
+					},
+				)
 				if err = os.WriteFile(filepath.Join(filepath.Dir(directory), "execution-mode.json"), mode, 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -410,9 +505,18 @@ func TestRemoteCompatibilityRejectsUnprovedOriginalOperatorDirectory(t *testing.
 			if err := os.MkdirAll(directory, 0700); err != nil {
 				t.Fatal(err)
 			}
-			request, _ := json.Marshal(map[string]any{"inventory": map[string]any{}, "variables": map[string]any{"ultra_lock_directory": root}})
+			request, _ := json.Marshal(
+				map[string]any{"inventory": map[string]any{}, "variables": map[string]any{"ultra_lock_directory": root}},
+			)
 			digest := sha256.Sum256(request)
-			job, _ := json.Marshal(map[string]any{"schema_version": 1, "operation": "bootstrap", "request_sha256": hex.EncodeToString(digest[:]), "binary_sha256": hex.EncodeToString(digest[:])})
+			job, _ := json.Marshal(
+				map[string]any{
+					"schema_version": 1,
+					"operation":      "bootstrap",
+					"request_sha256": hex.EncodeToString(digest[:]),
+					"binary_sha256":  hex.EncodeToString(digest[:]),
+				},
+			)
 			for name, raw := range map[string][]byte{"request.json": request, "job.json": job} {
 				if err := os.WriteFile(filepath.Join(directory, name), raw, 0600); err != nil {
 					t.Fatal(err)
@@ -424,7 +528,14 @@ func TestRemoteCompatibilityRejectsUnprovedOriginalOperatorDirectory(t *testing.
 				}
 			}
 			if kind == "recorded-wrong-parent" {
-				mode, _ := json.Marshal(frozenExecution{Schema: 1, Local: false, LockDirectory: root, OperatorDirectory: filepath.Join(t.TempDir(), "operator")})
+				mode, _ := json.Marshal(
+					frozenExecution{
+						Schema:            1,
+						Local:             false,
+						LockDirectory:     root,
+						OperatorDirectory: filepath.Join(t.TempDir(), "operator"),
+					},
+				)
 				if err := os.WriteFile(filepath.Join(filepath.Dir(directory), "execution-mode.json"), mode, 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -433,7 +544,8 @@ func TestRemoteCompatibilityRejectsUnprovedOriginalOperatorDirectory(t *testing.
 			if _, err := withFrozenBootstrapStageLease(context.Background(), directory, func(context.Context) (deployansible.Receipt, error) {
 				called = true
 				return deployansible.Receipt{}, nil
-			}); err == nil || called {
+			}); err == nil ||
+				called {
 				t.Fatal("unproved original operator lock accepted")
 			}
 		})

@@ -34,7 +34,10 @@ func containForwardUpgradeFailure(ctx context.Context, deps forwardMaintenanceDe
 // A previous maintenance worker may briefly own infrastructure.lock while the
 // lifecycle is checking. Keep retrying only that expected contention; do not
 // retry ownership, transport, or persistence failures as if they were transient.
-func attachForwardMaintenanceLease(ctx context.Context, attach func(context.Context) (context.Context, func(), error)) (context.Context, func(), error) {
+func attachForwardMaintenanceLease(
+	ctx context.Context,
+	attach func(context.Context) (context.Context, func(), error),
+) (context.Context, func(), error) {
 	backoff := 100 * time.Millisecond
 	for {
 		leased, release, err := attach(ctx)
@@ -70,7 +73,15 @@ func stopForwardUpgradeFleet(ctx context.Context, inventory map[string]any, lock
 	if err = os.Remove(stage); err != nil {
 		return err
 	}
-	receipt, err := deployansible.RunLocal(ctx, "contain-upgrade", inventory, map[string]any{"ultra_lock_directory": lockDirectory, "ultra_lifecycle_id": lifecycleID(directory)}, stage, python, executable)
+	receipt, err := deployansible.RunLocal(
+		ctx,
+		"contain-upgrade",
+		inventory,
+		map[string]any{"ultra_lock_directory": lockDirectory, "ultra_lifecycle_id": lifecycleID(directory)},
+		stage,
+		python,
+		executable,
+	)
 	if err != nil {
 		return err
 	}

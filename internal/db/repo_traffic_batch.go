@@ -48,7 +48,10 @@ func (r *TrafficRepo) RecordBatch(ctx context.Context, b runtimestate.TrafficBat
 	if e = qtx.LockTrafficRotation(ctx); e != nil {
 		return e
 	}
-	inserted, e := qtx.InsertTrafficBatchIdentity(ctx, sqlc.InsertTrafficBatchIdentityParams{NodeID: nodeID, BatchID: batchID, Digest: hash[:]})
+	inserted, e := qtx.InsertTrafficBatchIdentity(
+		ctx,
+		sqlc.InsertTrafficBatchIdentityParams{NodeID: nodeID, BatchID: batchID, Digest: hash[:]},
+	)
 	if e != nil {
 		return e
 	}
@@ -66,7 +69,8 @@ func (r *TrafficRepo) RecordBatch(ctx context.Context, b runtimestate.TrafficBat
 	samples := append([]runtimestate.Sample(nil), b.Samples...)
 	for i := range samples {
 		s := &samples[i]
-		if strings.HasPrefix(s.ExitID, "@pool:") || s.AccountID == "" || s.UplinkBytes < 0 || s.DownlinkBytes < 0 || s.ChargeTotalBytes < 0 {
+		if strings.HasPrefix(s.ExitID, "@pool:") || s.AccountID == "" || s.UplinkBytes < 0 || s.DownlinkBytes < 0 ||
+			s.ChargeTotalBytes < 0 {
 			return errors.New("invalid traffic sample")
 		}
 		if s.Period == "" {

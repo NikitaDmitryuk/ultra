@@ -264,7 +264,13 @@ result.chmod(0o600)
 			if err := os.WriteFile(executable, []byte(source), 0700); err != nil {
 				t.Fatal(err)
 			}
-			variables := map[string]any{"ultra_lock_directory": root, "ultra_runtime_action": "rollback", "ultra_runtime_effect_inputs": map[string]string{"bridge": "exact"}, "ultra_upgrade_domain_action": "rollback", "ultra_dns_migration_action": "rollback"}
+			variables := map[string]any{
+				"ultra_lock_directory":        root,
+				"ultra_runtime_action":        "rollback",
+				"ultra_runtime_effect_inputs": map[string]string{"bridge": "exact"},
+				"ultra_upgrade_domain_action": "rollback",
+				"ultra_dns_migration_action":  "rollback",
+			}
 			variables["ultra_runtime_action"] = test.action
 			variables["ultra_upgrade_domain_action"] = test.action
 			variables["ultra_dns_migration_action"] = test.action
@@ -303,7 +309,14 @@ result.chmod(0o600)
 		})
 	}
 	for _, operation := range []string{"upgrade", "restore", "upgrade-runtime", "upgrade-domain", "upgrade-dns-migration", "rollback"} {
-		if localRetryOperation(operation, map[string]any{"ultra_runtime_action": "apply", "ultra_upgrade_domain_action": "arbitrary", "ultra_dns_migration_action": "arbitrary"}) {
+		if localRetryOperation(
+			operation,
+			map[string]any{
+				"ultra_runtime_action":        "apply",
+				"ultra_upgrade_domain_action": "arbitrary",
+				"ultra_dns_migration_action":  "arbitrary",
+			},
+		) {
 			t.Fatalf("unauthorized retry: %s", operation)
 		}
 	}

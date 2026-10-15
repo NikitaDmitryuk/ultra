@@ -18,13 +18,29 @@ func completeDeploymentFixture(p *installplan.InstallPlan, release, pins string)
 	if address == "" {
 		address = p.Bridge.SSHHost
 	}
-	p.Automation = &installplan.AutomationConfig{Version: "v2.5.0", ReleaseDir: release, KnownHostsFile: pins, AgeRecipient: "age1fixture", BridgeProvider: "bridge-fixture", BridgeIPv4: address, BridgeURL: "https://sync.example.com/healthz"}
+	p.Automation = &installplan.AutomationConfig{
+		Version:        "v2.5.0",
+		ReleaseDir:     release,
+		KnownHostsFile: pins,
+		AgeRecipient:   "age1fixture",
+		BridgeProvider: "bridge-fixture",
+		BridgeIPv4:     address,
+		BridgeURL:      "https://sync.example.com/healthz",
+	}
 	for i, e := range p.Exits {
 		name := e.Name
 		if name == "" {
 			name = "primary"
 		}
-		p.Automation.StaticNodes = append(p.Automation.StaticNodes, installplan.AutomationNode{Name: name, Address: e.SSHHost, Provider: "exit-fixture", Budget: &installplan.StaticBudget{MonthlyBytes: 1000000, IsFallback: i == 0}})
+		p.Automation.StaticNodes = append(
+			p.Automation.StaticNodes,
+			installplan.AutomationNode{
+				Name:     name,
+				Address:  e.SSHHost,
+				Provider: "exit-fixture",
+				Budget:   &installplan.StaticBudget{MonthlyBytes: 1000000, IsFallback: i == 0},
+			},
+		)
 	}
 	if !p.Bridge.ReuseSpec {
 		p.Bot.Enabled = true
@@ -45,14 +61,32 @@ func TestBootstrapRetryRetainsGeneratedIdentities(t *testing.T) {
 		}
 	}
 	plan := func() *installplan.InstallPlan {
-		p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "REALITY_DEST": "example.com:443", "REUSE_BRIDGE_SPEC": "false", "DATABASE_IP": "192.0.2.40", "SKIP_GEO_DOWNLOAD": "true"})
+		p := installplan.LegacyValuesToPlan(
+			map[string]string{
+				"BRIDGE_IP":         "192.0.2.1",
+				"MAIN_EXIT_IP":      "192.0.2.2",
+				"REALITY_DEST":      "example.com:443",
+				"REUSE_BRIDGE_SPEC": "false",
+				"DATABASE_IP":       "192.0.2.40",
+				"SKIP_GEO_DOWNLOAD": "true",
+			},
+		)
 		completeDeploymentFixture(p, directory, "/pins")
 		p.Secrets.EnvFile = filepath.Join(directory, "secrets.env")
 		p.Artifacts.RelayBinary = binary
 		return p
 	}
 	inventory := func() map[string]any {
-		return map[string]any{"all": map[string]any{"vars": map[string]any{}, "children": map[string]any{"databases": map[string]any{"hosts": map[string]any{"database": map[string]any{}}}, "bridge": map[string]any{"hosts": map[string]any{"bridge": map[string]any{}}}, "exits": map[string]any{"hosts": map[string]any{"exit_0": map[string]any{}}}}}}
+		return map[string]any{
+			"all": map[string]any{
+				"vars": map[string]any{},
+				"children": map[string]any{
+					"databases": map[string]any{"hosts": map[string]any{"database": map[string]any{}}},
+					"bridge":    map[string]any{"hosts": map[string]any{"bridge": map[string]any{}}},
+					"exits":     map[string]any{"hosts": map[string]any{"exit_0": map[string]any{}}},
+				},
+			},
+		}
 	}
 	inspection := map[string]bootstrapInspection{"bridge": {Architecture: "amd64"}, "exit_0": {Architecture: "amd64"}}
 	first, err := freezeBootstrapInventory(plan(), inventory(), inspection, directory)
@@ -63,7 +97,14 @@ func TestBootstrapRetryRetainsGeneratedIdentities(t *testing.T) {
 	for alias, value := range inspection {
 		partialInspection[alias] = value
 	}
-	rawPartial, _ := json.Marshal(map[string]any{"architecture": "amd64", "files": []map[string]string{{"source": "/etc/ultra-relay/spec.json", "content": base64.StdEncoding.EncodeToString([]byte(`{"role":"bridge"}`))}}})
+	rawPartial, _ := json.Marshal(
+		map[string]any{
+			"architecture": "amd64",
+			"files": []map[string]string{
+				{"source": "/etc/ultra-relay/spec.json", "content": base64.StdEncoding.EncodeToString([]byte(`{"role":"bridge"}`))},
+			},
+		},
+	)
 	var partial bootstrapInspection
 	if err = json.Unmarshal(rawPartial, &partial); err != nil {
 		t.Fatal(err)
@@ -144,7 +185,17 @@ func TestBootstrapDedicatedDatabaseInventory(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins)
-	p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "BRIDGE_SSH_KEY": "/keys/vpn", "MAIN_EXIT_SSH_KEY": "/keys/exit", "DATABASE_IP": "192.0.2.40", "SSH_USER": "db-admin", "DATABASE_SSH_KEY": "/keys/db"})
+	p := installplan.LegacyValuesToPlan(
+		map[string]string{
+			"BRIDGE_IP":         "192.0.2.1",
+			"MAIN_EXIT_IP":      "192.0.2.2",
+			"BRIDGE_SSH_KEY":    "/keys/vpn",
+			"MAIN_EXIT_SSH_KEY": "/keys/exit",
+			"DATABASE_IP":       "192.0.2.40",
+			"SSH_USER":          "db-admin",
+			"DATABASE_SSH_KEY":  "/keys/db",
+		},
+	)
 	completeDeploymentFixture(p, "/release", pins)
 	inventory, err := bootstrapInventory(p, t.TempDir())
 	if err != nil {
@@ -170,7 +221,16 @@ func TestBootstrapSeparateRoleIdentitiesWithoutSharedKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins)
-	p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.10", "MAIN_EXIT_IP": "192.0.2.20", "DATABASE_IP": "192.0.2.40", "BRIDGE_SSH_KEY": "/keys/bridge", "MAIN_EXIT_SSH_KEY": "/keys/exit", "DATABASE_SSH_KEY": "/keys/database"})
+	p := installplan.LegacyValuesToPlan(
+		map[string]string{
+			"BRIDGE_IP":         "192.0.2.10",
+			"MAIN_EXIT_IP":      "192.0.2.20",
+			"DATABASE_IP":       "192.0.2.40",
+			"BRIDGE_SSH_KEY":    "/keys/bridge",
+			"MAIN_EXIT_SSH_KEY": "/keys/exit",
+			"DATABASE_SSH_KEY":  "/keys/database",
+		},
+	)
 	completeDeploymentFixture(p, "/release", pins)
 	inventory, err := bootstrapInventory(p, t.TempDir())
 	if err != nil {

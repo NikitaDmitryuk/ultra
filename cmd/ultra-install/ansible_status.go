@@ -42,7 +42,15 @@ func ansibleAutomationStatus(ctx context.Context, p *installplan.InstallPlan, py
 	if err != nil {
 		return err
 	}
-	receipt, err := deployansible.RunLocal(ctx, "status-automation", inventory, map[string]any{}, filepath.Join(directory, "status"), python, executable)
+	receipt, err := deployansible.RunLocal(
+		ctx,
+		"status-automation",
+		inventory,
+		map[string]any{},
+		filepath.Join(directory, "status"),
+		python,
+		executable,
+	)
 	if err != nil {
 		return errors.New("automation_status_unavailable")
 	}

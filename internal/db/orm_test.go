@@ -104,7 +104,8 @@ func TestORMCloudPersistsZeroFieldsAndEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	var occupied bool
-	if err := d.Pool.QueryRow(ctx, `SELECT occupies_slot FROM cloud_operations WHERE id=$1`, op.ID).Scan(&occupied); err != nil || occupied {
+	if err := d.Pool.QueryRow(ctx, `SELECT occupies_slot FROM cloud_operations WHERE id=$1`, op.ID).Scan(&occupied); err != nil ||
+		occupied {
 		t.Fatalf("false update lost: occupied=%v %v", occupied, err)
 	}
 	got, err := repo.Get(ctx, op.ID)

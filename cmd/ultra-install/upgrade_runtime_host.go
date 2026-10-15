@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"github.com/NikitaDmitryuk/ultra/internal/config"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"io"
 	"net"
 	"net/url"
@@ -21,6 +19,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 // The request excludes credentials, runtime JSON, environment and file paths.
@@ -365,8 +366,18 @@ func (s runtimeHostStore) prepare(r runtimeHostRequest) (runtimeHostResult, erro
 		if err != nil || installed != baseline.RuntimeIdentity {
 			return runtimeHostResult{}, runtimeHostError("migration_required")
 		}
-		p := &installplan.InstallPlan{SchemaVersion: 1, SourceValues: map[string]string{}, Bridge: r.Bridge, Database: r.Database, Features: r.Features, Bot: installplan.BotConfig{Enabled: r.BotEnabled}}
+		p := &installplan.InstallPlan{
+			SchemaVersion: 1,
+			SourceValues:  map[string]string{},
+			Bridge:        r.Bridge,
+			Database:      r.Database,
+			Features:      r.Features,
+			Bot:           installplan.BotConfig{Enabled: r.BotEnabled},
+		}
 		p.Bridge.ReuseSpec = true
+		if strings.TrimSpace(p.Features.LogLevel) == "" {
+			p.Features.LogLevel = "info"
+		}
 		for _, ex := range r.Exits {
 			p.Exits = append(p.Exits, installplan.ExitNode{Name: ex.Name, SSHHost: ex.SSHHost, DialAddr: ex.DialAddr, Port: ex.Port})
 		}
@@ -433,7 +444,8 @@ func (s runtimeHostStore) transition(id string, rollback bool) (runtimeHostResul
 			return runtimeHostResult{}, runtimeHostError("journal_invalid")
 		}
 		var j runtimeHostJournal
-		if json.Unmarshal(saved.Data, &j) != nil || j.Version != 1 || j.Transaction != id || len(j.Before) != len(runtimeHostFiles) || len(j.Candidate) != len(runtimeHostFiles) {
+		if json.Unmarshal(saved.Data, &j) != nil || j.Version != 1 || j.Transaction != id || len(j.Before) != len(runtimeHostFiles) ||
+			len(j.Candidate) != len(runtimeHostFiles) {
 			return runtimeHostResult{}, runtimeHostError("journal_invalid")
 		}
 		if j.State != "prepared" && j.State != "applied" && j.State != "rolled_back" {
@@ -498,11 +510,23 @@ func (s runtimeHostStore) liveBridgeAttestation(r runtimeHostRequest) (runtimeHo
 		value *metadata
 	}{{"etc/ultra-recovery/deployment.json", &deployment}, {"etc/ultra-recovery/reconcile.json", &reconcile}} {
 		img, err := s.image(s.path(entry.path))
-		if err != nil || !img.Exists || img.UID != uint32(os.Geteuid()) || img.Mode&0077 != 0 || json.Unmarshal(img.Data, entry.value) != nil {
+		if err != nil || !img.Exists || img.UID != uint32(os.Geteuid()) || img.Mode&0077 != 0 ||
+			json.Unmarshal(img.Data, entry.value) != nil {
 			return fail()
 		}
 	}
-	if deployment.BridgeIPv4 == "" || deployment.BridgeIPv4 != r.Bridge.Address || r.Bridge.SSHHost != r.Bridge.Address || deployment.Database == "" || deployment.Database != reconcile.Database || deployment.Database != r.Database.Name || deployment.DatabaseHost != r.Database.PrimaryHost || reconcile.DatabaseHost != r.Database.PrimaryHost || !r.Database.Enabled || deployment.Provider == "" || deployment.Provider != reconcile.Provider || deployment.URL != reconcile.URL || !reflect.DeepEqual(deployment.Nodes, reconcile.Nodes) || len(deployment.Nodes) != len(r.Exits) {
+	if deployment.BridgeIPv4 == "" || deployment.BridgeIPv4 != r.Bridge.Address || r.Bridge.SSHHost != r.Bridge.Address ||
+		deployment.Database == "" ||
+		deployment.Database != reconcile.Database ||
+		deployment.Database != r.Database.Name ||
+		deployment.DatabaseHost != r.Database.PrimaryHost ||
+		reconcile.DatabaseHost != r.Database.PrimaryHost ||
+		!r.Database.Enabled ||
+		deployment.Provider == "" ||
+		deployment.Provider != reconcile.Provider ||
+		deployment.URL != reconcile.URL ||
+		!reflect.DeepEqual(deployment.Nodes, reconcile.Nodes) ||
+		len(deployment.Nodes) != len(r.Exits) {
 		return runtimeHostAttestation{}, runtimeHostError("migration_required")
 	}
 	seen := map[string]bool{}
@@ -544,7 +568,10 @@ func (s runtimeHostStore) liveBridgeAttestation(r runtimeHostRequest) (runtimeHo
 			return fail()
 		}
 	}
-	if u.Port() != "25432" || u.Hostname() != "127.0.0.1" || r.Database.PrimaryHost == "" || r.Database.PrimaryHost == r.Bridge.Address || strings.TrimPrefix(u.Path, "/") != r.Database.Name || u.User.Username() != r.Database.User || r.Database.ReplicaHost != "" {
+	if u.Port() != "25432" || u.Hostname() != "127.0.0.1" || r.Database.PrimaryHost == "" || r.Database.PrimaryHost == r.Bridge.Address ||
+		strings.TrimPrefix(u.Path, "/") != r.Database.Name ||
+		u.User.Username() != r.Database.User ||
+		r.Database.ReplicaHost != "" {
 		return runtimeHostAttestation{}, runtimeHostError("migration_required")
 	}
 	desired, err := runtimeHostDesiredIdentity(r)
@@ -563,7 +590,8 @@ func runtimeHostValidDigest(value string) bool {
 	return err == nil && len(raw) == sha256.Size && value == strings.ToLower(value)
 }
 func runtimeHostDynamicProofValid(proof *runtimeHostExitProof) bool {
-	if proof == nil || proof.Node != "" || len(proof.NodeID) != 36 || net.ParseIP(proof.SSHHost) == nil || !runtimeHostValidDigest(proof.TopologySHA) {
+	if proof == nil || proof.Node != "" || len(proof.NodeID) != 36 || net.ParseIP(proof.SSHHost) == nil ||
+		!runtimeHostValidDigest(proof.TopologySHA) {
 		return false
 	}
 	for i, ch := range proof.NodeID {
@@ -584,7 +612,8 @@ func (s runtimeHostStore) liveExitAttestation(r runtimeHostRequest) (runtimeHost
 		return runtimeHostAttestation{}, runtimeHostError("exit_attestation_required")
 	}
 	proof := r.Proof
-	if proof == nil || proof.Node != r.Node || !runtimeHostValidDigest(proof.DesiredIdentity) || !runtimeHostValidDigest(proof.TunnelIdentityDigest) {
+	if proof == nil || proof.Node != r.Node || !runtimeHostValidDigest(proof.DesiredIdentity) ||
+		!runtimeHostValidDigest(proof.TunnelIdentityDigest) {
 		return fail()
 	}
 	desired, err := runtimeHostDesiredIdentity(r)

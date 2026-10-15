@@ -14,7 +14,15 @@ import (
 // The lease and owned remote gate must still be held. A checkpoint is written
 // before any producer stop or release/runtime activation. Never infer this
 // decision from a failed local receipt: inspect the exact live legacy process.
-func untouchedLegacyUpgrade(ctx context.Context, legacy bool, p *installplan.InstallPlan, inspection upgradeInspection, inventory, variables map[string]any, directory, python, executable string, generation int) (bool, error) {
+func untouchedLegacyUpgrade(
+	ctx context.Context,
+	legacy bool,
+	p *installplan.InstallPlan,
+	inspection upgradeInspection,
+	inventory, variables map[string]any,
+	directory, python, executable string,
+	generation int,
+) (bool, error) {
 	if !legacy {
 		return false, nil
 	}
@@ -39,7 +47,15 @@ func untouchedLegacyUpgrade(ctx context.Context, legacy bool, p *installplan.Ins
 		inspectVariables[key] = value
 	}
 	inspectVariables["ultra_legacy_initial_runtime_request_json"] = string(raw)
-	receipt, err := deployansible.RunLocal(ctx, "inspect-upgrade-maintenance", inventory, inspectVariables, inspectionDirectory, python, executable)
+	receipt, err := deployansible.RunLocal(
+		ctx,
+		"inspect-upgrade-maintenance",
+		inventory,
+		inspectVariables,
+		inspectionDirectory,
+		python,
+		executable,
+	)
 	if err != nil {
 		return false, err
 	}

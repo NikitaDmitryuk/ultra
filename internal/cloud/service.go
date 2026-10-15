@@ -134,7 +134,15 @@ func (s *Service) Quote(ctx context.Context, actor int64, region, plan, replace 
 	if !available {
 		return Offer{}, APIError{Code: "region_unavailable"}
 	}
-	offer := Offer{ID: uuid.NewString(), Actor: actor, Region: selected, Plan: tariff, Price: price, ExpiresAt: s.now().Add(5 * time.Minute), ReplaceID: replace}
+	offer := Offer{
+		ID:        uuid.NewString(),
+		Actor:     actor,
+		Region:    selected,
+		Plan:      tariff,
+		Price:     price,
+		ExpiresAt: s.now().Add(5 * time.Minute),
+		ReplaceID: replace,
+	}
 	return offer, s.Store.SaveOffer(ctx, offer)
 }
 func (s *Service) checkOffer(ctx context.Context, o Offer) error {

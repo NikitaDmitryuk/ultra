@@ -23,7 +23,8 @@ func prepareLocalOperation(directory, operation string, raw []byte, id string, e
 		}
 		data, readErr := os.ReadFile(filepath.Join(directory, "job.json"))
 		request, requestErr := os.ReadFile(filepath.Join(directory, "request.json"))
-		if readErr != nil || requestErr != nil || json.Unmarshal(data, &job) != nil || job.Operation != operation || job.Hash != id || !bytes.Equal(request, raw) {
+		if readErr != nil || requestErr != nil || json.Unmarshal(data, &job) != nil || job.Operation != operation || job.Hash != id ||
+			!bytes.Equal(request, raw) {
 			return errors.New("local operation inputs changed")
 		}
 		// A rename may have completed immediately before a parent fsync error.

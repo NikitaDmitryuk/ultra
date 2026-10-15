@@ -57,7 +57,9 @@ func TestOperatorReleaseCachePrunesOnlyVerifiedStaleBundles(t *testing.T) {
 	if err := os.Mkdir(job, 0700); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(map[string]any{"variables": map[string]any{"ultra_relay_source": filepath.Join(paths["v3.0.0"], "ultra-relay-linux-amd64")}})
+	raw, _ := json.Marshal(
+		map[string]any{"variables": map[string]any{"ultra_relay_source": filepath.Join(paths["v3.0.0"], "ultra-relay-linux-amd64")}},
+	)
 	if err := os.WriteFile(filepath.Join(job, "request.json"), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +302,15 @@ func TestOperatorReleaseCacheLeaseBeforeRequestMetadata(t *testing.T) {
 			var err error
 			if kind == "fetch" {
 				var requests []string
-				lease, err = FetchVerifiedGitHubRelease(context.Background(), GitHubReleaseOptions{PublicKey: "trusted-key", StagingBase: cache, MinisignPath: signer, Client: githubFixtureClient(files, inventory, &requests)})
+				lease, err = FetchVerifiedGitHubRelease(
+					context.Background(),
+					GitHubReleaseOptions{
+						PublicKey:    "trusted-key",
+						StagingBase:  cache,
+						MinisignPath: signer,
+						Client:       githubFixtureClient(files, inventory, &requests),
+					},
+				)
 			} else {
 				source := githubPrivateStage(t)
 				for name, content := range files {
@@ -380,14 +390,21 @@ func TestGitHubReleaseCacheFailureReleasesLease(t *testing.T) {
 	root := githubPrivateStage(t)
 	cache := filepath.Join(root, "releases")
 	var requests []string
-	options := GitHubReleaseOptions{PublicKey: "trusted-key", StagingBase: cache, MinisignPath: signer, Client: githubFixtureClient(files, inventory, &requests)}
+	options := GitHubReleaseOptions{
+		PublicKey:    "trusted-key",
+		StagingBase:  cache,
+		MinisignPath: signer,
+		Client:       githubFixtureClient(files, inventory, &requests),
+	}
 	lease, err := FetchVerifiedGitHubRelease(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = lease.Close() })
 	makeReleaseTreeRemovable(t, cache)
-	files["release-manifest.json"] = []byte(strings.Replace(string(files["release-manifest.json"]), strings.Repeat("a", 40), strings.Repeat("b", 40), 1))
+	files["release-manifest.json"] = []byte(
+		strings.Replace(string(files["release-manifest.json"]), strings.Repeat("a", 40), strings.Repeat("b", 40), 1),
+	)
 	if failed, err := FetchVerifiedGitHubRelease(context.Background(), options); err == nil {
 		_ = failed.Close()
 		t.Fatal("changed metadata accepted")
@@ -439,7 +456,9 @@ func TestSnapshotCollisionFailureReleasesLease(t *testing.T) {
 	}
 	path := retentionReleaseFixture(t, cache, "v2.5.0", files)
 	source := githubPrivateStage(t)
-	files["release-manifest.json"] = []byte(strings.Replace(string(files["release-manifest.json"]), strings.Repeat("a", 40), strings.Repeat("b", 40), 1))
+	files["release-manifest.json"] = []byte(
+		strings.Replace(string(files["release-manifest.json"]), strings.Repeat("a", 40), strings.Repeat("b", 40), 1),
+	)
 	for name, contents := range files {
 		if err := os.WriteFile(filepath.Join(source, name), contents, 0600); err != nil {
 			t.Fatal(err)

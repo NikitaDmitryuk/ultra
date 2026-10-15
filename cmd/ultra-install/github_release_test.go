@@ -48,7 +48,21 @@ func (f githubFixtureTransport) RoundTrip(r *http.Request) (*http.Response, erro
 func githubFixture(t *testing.T) (map[string][]byte, githubReleaseInventory, string) {
 	t.Helper()
 	files := map[string][]byte{}
-	names := []string{"ultra-relay-linux-amd64", "ultra-relay-linux-arm64", "ultra-bot-linux-amd64", "ultra-bot-linux-arm64", "ultra-client-linux-amd64", "ultra-client-linux-arm64", "ultra-recovery.tar.gz", "ultra-install-linux-amd64", "ultra-install-linux-arm64", "ultra-ansible.tar.gz", "ultra-ansible-runtime-linux-amd64.tar.gz", "ultra-ansible-runtime-linux-arm64.tar.gz", "mobile-bootstrap.sh"}
+	names := []string{
+		"ultra-relay-linux-amd64",
+		"ultra-relay-linux-arm64",
+		"ultra-bot-linux-amd64",
+		"ultra-bot-linux-arm64",
+		"ultra-client-linux-amd64",
+		"ultra-client-linux-arm64",
+		"ultra-recovery.tar.gz",
+		"ultra-install-linux-amd64",
+		"ultra-install-linux-arm64",
+		"ultra-ansible.tar.gz",
+		"ultra-ansible-runtime-linux-amd64.tar.gz",
+		"ultra-ansible-runtime-linux-arm64.tar.gz",
+		"mobile-bootstrap.sh",
+	}
 	var sums strings.Builder
 	var rows []map[string]any
 	for _, name := range names {
@@ -61,8 +75,19 @@ func githubFixture(t *testing.T) (map[string][]byte, githubReleaseInventory, str
 	}
 	files["checksums.txt"] = []byte(sums.String())
 	digest := sha256.Sum256(files["checksums.txt"])
-	rows = append(rows, map[string]any{"name": "checksums.txt", "sha256": hex.EncodeToString(digest[:]), "size": len(files["checksums.txt"])})
-	manifest := map[string]any{"schema_version": 1, "version": "v2.5.0", "source_commit": strings.Repeat("a", 40), "database_schema_min": 24, "database_schema_max": 25, "capabilities": []string{"service-access-v1", "provider-pool-quota-v1", "lifecycle-gate-v1", "ansible-deploy-v1"}, "assets": rows}
+	rows = append(
+		rows,
+		map[string]any{"name": "checksums.txt", "sha256": hex.EncodeToString(digest[:]), "size": len(files["checksums.txt"])},
+	)
+	manifest := map[string]any{
+		"schema_version":      1,
+		"version":             "v2.5.0",
+		"source_commit":       strings.Repeat("a", 40),
+		"database_schema_min": 24,
+		"database_schema_max": 25,
+		"capabilities":        []string{"service-access-v1", "provider-pool-quota-v1", "lifecycle-gate-v1", "ansible-deploy-v1"},
+		"assets":              rows,
+	}
 	files["release-manifest.json"], _ = json.Marshal(manifest)
 	files["release-manifest.json.minisig"] = []byte("good")
 	files["checksums.txt.minisig"] = []byte("good")
@@ -107,7 +132,13 @@ func githubFixtureClient(files map[string][]byte, inventory githubReleaseInvento
 		if raw == nil {
 			status = 404
 		}
-		return &http.Response{StatusCode: status, ContentLength: int64(len(raw)), Body: io.NopCloser(strings.NewReader(string(raw))), Header: make(http.Header), Request: r}, nil
+		return &http.Response{
+			StatusCode:    status,
+			ContentLength: int64(len(raw)),
+			Body:          io.NopCloser(strings.NewReader(string(raw))),
+			Header:        make(http.Header),
+			Request:       r,
+		}, nil
 	})}
 }
 func TestGitHubReleaseStableLatestAndExplicitTag(t *testing.T) {
@@ -116,7 +147,16 @@ func TestGitHubReleaseStableLatestAndExplicitTag(t *testing.T) {
 			files, inventory, signer := githubFixture(t)
 			var requests []string
 			stage := githubPrivateStage(t)
-			got, err := FetchVerifiedGitHubRelease(context.Background(), GitHubReleaseOptions{Selector: selector, PublicKey: "trusted-key", StagingBase: stage, Client: githubFixtureClient(files, inventory, &requests), MinisignPath: signer})
+			got, err := FetchVerifiedGitHubRelease(
+				context.Background(),
+				GitHubReleaseOptions{
+					Selector:     selector,
+					PublicKey:    "trusted-key",
+					StagingBase:  stage,
+					Client:       githubFixtureClient(files, inventory, &requests),
+					MinisignPath: signer,
+				},
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -204,7 +244,9 @@ func TestGitHubReleaseRejectsChangedSignedContentsForCachedTag(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = first.Close() })
-	files["release-manifest.json"] = []byte(strings.Replace(string(files["release-manifest.json"]), strings.Repeat("a", 40), strings.Repeat("b", 40), 1))
+	files["release-manifest.json"] = []byte(
+		strings.Replace(string(files["release-manifest.json"]), strings.Repeat("a", 40), strings.Repeat("b", 40), 1),
+	)
 	requests = nil
 	if _, err := FetchVerifiedGitHubRelease(context.Background(), GitHubReleaseOptions{
 		Selector: "latest", PublicKey: "trusted-key", StagingBase: stage,
@@ -274,7 +316,26 @@ func TestGitHubReleaseRejectsPrereleaseSelector(t *testing.T) {
 }
 
 func TestGitHubReleaseRejectsInvalidBundles(t *testing.T) {
-	cases := []string{"bad-manifest-signature", "bad-checksum-signature", "corrupt-asset", "missing-signature", "duplicate-asset", "unsafe-name", "unsafe-url", "wrong-tag-url", "extra-asset", "latest-prerelease", "draft", "tag-mismatch", "manifest-tag-mismatch", "checksum-inventory-mismatch", "invalid-source-commit", "invalid-schema-range", "no-ansible-capability", "unexpected-manifest-asset"}
+	cases := []string{
+		"bad-manifest-signature",
+		"bad-checksum-signature",
+		"corrupt-asset",
+		"missing-signature",
+		"duplicate-asset",
+		"unsafe-name",
+		"unsafe-url",
+		"wrong-tag-url",
+		"extra-asset",
+		"latest-prerelease",
+		"draft",
+		"tag-mismatch",
+		"manifest-tag-mismatch",
+		"checksum-inventory-mismatch",
+		"invalid-source-commit",
+		"invalid-schema-range",
+		"no-ansible-capability",
+		"unexpected-manifest-asset",
+	}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			files, inventory, signer := githubFixture(t)
@@ -335,7 +396,9 @@ func TestGitHubReleaseRejectsInvalidBundles(t *testing.T) {
 				}
 				files["release-manifest.json"], _ = json.Marshal(manifest)
 			case "checksum-inventory-mismatch":
-				files["checksums.txt"] = []byte(strings.ReplaceAll(string(files["checksums.txt"]), "ultra-relay-linux-amd64", "ultra-relay-linux-amd65"))
+				files["checksums.txt"] = []byte(
+					strings.ReplaceAll(string(files["checksums.txt"]), "ultra-relay-linux-amd64", "ultra-relay-linux-amd65"),
+				)
 				digest := sha256.Sum256(files["checksums.txt"])
 				var m map[string]any
 				_ = json.Unmarshal(files["release-manifest.json"], &m)
@@ -355,7 +418,16 @@ func TestGitHubReleaseRejectsInvalidBundles(t *testing.T) {
 			}
 			var requests []string
 			stage := githubPrivateStage(t)
-			_, err := FetchVerifiedGitHubRelease(context.Background(), GitHubReleaseOptions{Selector: selector, PublicKey: "trusted-key", StagingBase: stage, Client: githubFixtureClient(files, inventory, &requests), MinisignPath: signer})
+			_, err := FetchVerifiedGitHubRelease(
+				context.Background(),
+				GitHubReleaseOptions{
+					Selector:     selector,
+					PublicKey:    "trusted-key",
+					StagingBase:  stage,
+					Client:       githubFixtureClient(files, inventory, &requests),
+					MinisignPath: signer,
+				},
+			)
 			if err == nil {
 				t.Fatal("invalid release accepted")
 			}
@@ -376,7 +448,12 @@ func TestGitHubReleaseRejectsInvalidBundles(t *testing.T) {
 func TestGitHubReleaseFailClosedPrerequisites(t *testing.T) {
 	files, inventory, signer := githubFixture(t)
 	var requests []string
-	options := GitHubReleaseOptions{PublicKey: "trusted-key", StagingBase: githubPrivateStage(t), Client: githubFixtureClient(files, inventory, &requests), MinisignPath: signer}
+	options := GitHubReleaseOptions{
+		PublicKey:    "trusted-key",
+		StagingBase:  githubPrivateStage(t),
+		Client:       githubFixtureClient(files, inventory, &requests),
+		MinisignPath: signer,
+	}
 	options.PublicKey = ""
 	if _, err := FetchVerifiedGitHubRelease(context.Background(), options); err == nil {
 		t.Fatal("missing key accepted")
@@ -399,7 +476,13 @@ func TestGitHubReleaseDownloadBoundsAndRedirects(t *testing.T) {
 			calls := 0
 			client := githubBoundedClient(&http.Client{Transport: githubFixtureTransport(func(r *http.Request) (*http.Response, error) {
 				calls++
-				response := &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("12345")), ContentLength: -1, Request: r}
+				response := &http.Response{
+					StatusCode:    200,
+					Header:        make(http.Header),
+					Body:          io.NopCloser(strings.NewReader("12345")),
+					ContentLength: -1,
+					Request:       r,
+				}
 				if name == "unsafe-redirect" {
 					response.StatusCode = 302
 					response.Header.Set("Location", "http://example.com/payload")
@@ -438,7 +521,15 @@ func TestGitHubReleaseRejectsUnsafeStagingBase(t *testing.T) {
 				}
 			}
 			var requests []string
-			_, err := FetchVerifiedGitHubRelease(context.Background(), GitHubReleaseOptions{PublicKey: "trusted-key", StagingBase: stage, Client: githubFixtureClient(files, inventory, &requests), MinisignPath: signer})
+			_, err := FetchVerifiedGitHubRelease(
+				context.Background(),
+				GitHubReleaseOptions{
+					PublicKey:    "trusted-key",
+					StagingBase:  stage,
+					Client:       githubFixtureClient(files, inventory, &requests),
+					MinisignPath: signer,
+				},
+			)
 			if err == nil {
 				t.Fatal("unsafe staging base accepted")
 			}

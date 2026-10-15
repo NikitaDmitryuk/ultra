@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/jackc/pgx/v5"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 )
@@ -53,7 +54,8 @@ func TestSubscriptionHTTP(t *testing.T) {
 	if w := request("POST", "/v1/users/u1/subscription", true); w.Code != 200 {
 		t.Fatal(w.Code)
 	}
-	if w := request("GET", "/v1/subscriptions/issued", true); w.Code != 200 || !strings.Contains(w.Body.String(), "vless://u1@localhost") || w.Header().Get("Cache-Control") != "no-store" {
+	if w := request("GET", "/v1/subscriptions/issued", true); w.Code != 200 || !strings.Contains(w.Body.String(), "vless://u1@localhost") ||
+		w.Header().Get("Cache-Control") != "no-store" {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	for _, test := range []struct {
@@ -76,7 +78,9 @@ func TestSubscriptionHTTP(t *testing.T) {
 		}
 		if test.json {
 			var profiles []map[string]any
-			if err := json.Unmarshal(w.Body.Bytes(), &profiles); err != nil || len(profiles) != 1 || profiles[0]["remarks"] != automaticProfileName || !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+			if err := json.Unmarshal(w.Body.Bytes(), &profiles); err != nil || len(profiles) != 1 ||
+				profiles[0]["remarks"] != automaticProfileName ||
+				!strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
 				t.Fatal("bad JSON export", err)
 			}
 			meta, ok := profiles[0]["meta"].(map[string]any)
@@ -97,7 +101,9 @@ func TestSubscriptionHTTP(t *testing.T) {
 	}
 	spec.DevMode = false
 	spec.PublicXHTTPTLS = &config.PublicXHTTPTLSSpec{Port: 5443, ServerName: "vpn.example", Path: "/connect"}
-	if w := request("GET", "/v1/subscriptions/issued?format=uri&transport=xhttp-tls", true); w.Code != 200 || !strings.Contains(w.Body.String(), "security=tls") || !strings.Contains(w.Body.String(), "vless://u1@localhost:5443") {
+	if w := request("GET", "/v1/subscriptions/issued?format=uri&transport=xhttp-tls", true); w.Code != 200 ||
+		!strings.Contains(w.Body.String(), "security=tls") ||
+		!strings.Contains(w.Body.String(), "vless://u1@localhost:5443") {
 		t.Fatal("TLS subscription failed", w.Code)
 	}
 	u := users.users["u1"]
@@ -137,7 +143,11 @@ func TestExperimentUsesOwnerPermissionsAndLiveDescriptor(t *testing.T) {
 	s.Subscriptions = permissions
 	file := filepath.Join(t.TempDir(), "experimental.json")
 	spec.ExperimentalProfileFile = file
-	descriptor := config.ExperimentalProfile{Host: "experiment.example", StatusPort: 18082, Endpoint: config.PublicXHTTPTLSSpec{Port: 5543, ServerName: "site.example", Path: "/test"}}
+	descriptor := config.ExperimentalProfile{
+		Host:       "experiment.example",
+		StatusPort: 18082,
+		Endpoint:   config.PublicXHTTPTLSSpec{Port: 5543, ServerName: "site.example", Path: "/test"},
+	}
 	write := func() {
 		raw, _ := json.Marshal(descriptor)
 		if err := os.WriteFile(file, raw, 0600); err != nil {
@@ -233,7 +243,18 @@ func TestCompleteSubscriptionCacheRequiresConfirmedSource(t *testing.T) {
 
 func TestSubscriptionDefaultAndRestrictedPreview(t *testing.T) {
 	spec := &config.Spec{Role: config.RoleBridge, DevMode: true, PublicHost: "localhost", VLESSPort: 443, HappDefaultJSON: true,
-		SubscriptionPreviewBridges: []config.SubscriptionBridge{{ID: "test", Host: "test.example", Port: 443, Security: "tls", Transport: "xhttp", ServerName: "test.example", Path: "/vpn", Fingerprint: "firefox"}}}
+		SubscriptionPreviewBridges: []config.SubscriptionBridge{
+			{
+				ID:          "test",
+				Host:        "test.example",
+				Port:        443,
+				Security:    "tls",
+				Transport:   "xhttp",
+				ServerName:  "test.example",
+				Path:        "/vpn",
+				Fingerprint: "firefox",
+			},
+		}}
 	server, err := NewServer("127.0.0.1:0", "secret", newFakeUserManager(), nil, spec, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -251,7 +272,8 @@ func TestSubscriptionDefaultAndRestrictedPreview(t *testing.T) {
 	if w := request("", "Happ/3 Android"); w.Code != 200 || !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
 		t.Fatal("default not applied", w.Code)
 	}
-	if w := request("format=uri", "Happ/3"); !strings.HasPrefix(w.Body.String(), "vless://") || strings.Contains(w.Body.String(), "test.example") {
+	if w := request("format=uri", "Happ/3"); !strings.HasPrefix(w.Body.String(), "vless://") ||
+		strings.Contains(w.Body.String(), "test.example") {
 		t.Fatal("preview leaked")
 	}
 	if w := request("format=happ&preview=reserve", "Happ/3"); w.Code != 404 {
@@ -264,10 +286,23 @@ func TestSubscriptionDefaultAndRestrictedPreview(t *testing.T) {
 		t.Fatal("unauthorised fault preview", w.Code)
 	}
 	permissions.allowed = true
-	if w := request("format=happ&preview=reserve", "Happ/3"); w.Code != 200 || !strings.Contains(w.Body.String(), "test.example") || !strings.Contains(w.Body.String(), "firefox") {
+	if w := request("format=happ&preview=reserve", "Happ/3"); w.Code != 200 || !strings.Contains(w.Body.String(), "test.example") ||
+		!strings.Contains(w.Body.String(), "firefox") {
 		t.Fatal("admin preview missing", w.Code)
 	}
-	spec.SubscriptionPreviewBridges = append(spec.SubscriptionPreviewBridges, config.SubscriptionBridge{ID: "reserve", Host: "reserve.example", Port: 24443, Security: "reality", Transport: "tcp", PublicKey: strings.Repeat("A", 43), ServerName: "example.com", Fingerprint: "firefox"})
+	spec.SubscriptionPreviewBridges = append(
+		spec.SubscriptionPreviewBridges,
+		config.SubscriptionBridge{
+			ID:          "reserve",
+			Host:        "reserve.example",
+			Port:        24443,
+			Security:    "reality",
+			Transport:   "tcp",
+			PublicKey:   strings.Repeat("A", 43),
+			ServerName:  "example.com",
+			Fingerprint: "firefox",
+		},
+	)
 	if w := request("format=happ&preview=reserve-test", "Happ/3"); w.Code != 200 {
 		t.Fatal("fault preview", w.Code)
 	} else {

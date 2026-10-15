@@ -104,8 +104,18 @@ func TestForwardBrokerVariablesBindPreviousAndCandidateIdentities(t *testing.T) 
 	if !ok || len(identities) != 3 {
 		t.Fatalf("expected previous, prior target, and signed new target identities: %#v", variables)
 	}
-	wantPrevious := forwardBrokerIdentity{Directory: managedControllerDirectory(previous.Version), InstallerSHA: previousInstaller.SHA, RuntimeSHA: previousRuntime.SHA, UnitSHA: strings.Repeat("e", 64)}
-	wantOld := forwardBrokerIdentity{Directory: managedControllerDirectory(oldTarget.Version), InstallerSHA: oldInstaller.SHA, RuntimeSHA: oldRuntime.SHA, UnitSHA: strings.Repeat("a", 64)}
+	wantPrevious := forwardBrokerIdentity{
+		Directory:    managedControllerDirectory(previous.Version),
+		InstallerSHA: previousInstaller.SHA,
+		RuntimeSHA:   previousRuntime.SHA,
+		UnitSHA:      strings.Repeat("e", 64),
+	}
+	wantOld := forwardBrokerIdentity{
+		Directory:    managedControllerDirectory(oldTarget.Version),
+		InstallerSHA: oldInstaller.SHA,
+		RuntimeSHA:   oldRuntime.SHA,
+		UnitSHA:      strings.Repeat("a", 64),
+	}
 	if identities[0] != wantPrevious || identities[1] != wantOld {
 		t.Fatalf("frozen identities not derived from the predecessor manifests: %#v", identities)
 	}
@@ -139,7 +149,12 @@ func TestForwardBrokerVariablesRetainIndependentControllerProvenance(t *testing.
 	if err := os.WriteFile(path, requestRaw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	proof := map[string]any{"schema_version": 1, "operation": "upgrade", "request_sha256": digestSHA256(requestRaw), "binary_sha256": digestSHA256(requestRaw)}
+	proof := map[string]any{
+		"schema_version": 1,
+		"operation":      "upgrade",
+		"request_sha256": digestSHA256(requestRaw),
+		"binary_sha256":  digestSHA256(requestRaw),
+	}
 	for _, name := range []string{"job.json", "receipt.json"} {
 		writeForwardJSON(t, filepath.Join(old.Directory, "activate", name), proof)
 	}
@@ -218,7 +233,12 @@ func TestForwardBrokerVariablesOmitUnverifiablePreviousIdentity(t *testing.T) {
 			if err := os.WriteFile(path, requestRaw, 0600); err != nil {
 				t.Fatal(err)
 			}
-			proof := map[string]any{"schema_version": 1, "operation": "upgrade", "request_sha256": digestSHA256(requestRaw), "binary_sha256": digestSHA256(requestRaw)}
+			proof := map[string]any{
+				"schema_version": 1,
+				"operation":      "upgrade",
+				"request_sha256": digestSHA256(requestRaw),
+				"binary_sha256":  digestSHA256(requestRaw),
+			}
 			for _, file := range []string{"job.json", "receipt.json"} {
 				writeForwardJSON(t, filepath.Join(old.Directory, "activate", file), proof)
 			}
@@ -229,7 +249,12 @@ func TestForwardBrokerVariablesOmitUnverifiablePreviousIdentity(t *testing.T) {
 			identities, ok := got["ultra_forward_expected_brokers"].([]forwardBrokerIdentity)
 			oldInstaller, _ := upgradeAsset(oldTarget, "ultra-install-linux-amd64")
 			oldRuntime, _ := upgradeAsset(oldTarget, "ultra-ansible-runtime-linux-amd64.tar.gz")
-			wantOld := forwardBrokerIdentity{Directory: managedControllerDirectory(oldTarget.Version), InstallerSHA: oldInstaller.SHA, RuntimeSHA: oldRuntime.SHA, UnitSHA: strings.Repeat("a", 64)}
+			wantOld := forwardBrokerIdentity{
+				Directory:    managedControllerDirectory(oldTarget.Version),
+				InstallerSHA: oldInstaller.SHA,
+				RuntimeSHA:   oldRuntime.SHA,
+				UnitSHA:      strings.Repeat("a", 64),
+			}
 			if !ok || len(identities) != 2 || identities[0] != wantOld || identities[1] != got["ultra_forward_target_broker"] {
 				t.Fatalf("expected only exact old target and candidate identities, got %#v", got)
 			}
@@ -291,7 +316,12 @@ func TestForwardBrokerVariablesRejectMalformedBridgeIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Rebind valid evidence so rejection exercises identity parsing rather than a stale digest.
-			proof := map[string]any{"schema_version": 1, "operation": "upgrade", "request_sha256": digestSHA256(requestRaw), "binary_sha256": digestSHA256(requestRaw)}
+			proof := map[string]any{
+				"schema_version": 1,
+				"operation":      "upgrade",
+				"request_sha256": digestSHA256(requestRaw),
+				"binary_sha256":  digestSHA256(requestRaw),
+			}
 			for _, file := range []string{"job.json", "receipt.json"} {
 				writeForwardJSON(t, filepath.Join(old.Directory, "activate", file), proof)
 			}

@@ -212,7 +212,8 @@ func FetchVerifiedGitHubRelease(ctx context.Context, options GitHubReleaseOption
 		return result, err
 	}
 	var inventory githubReleaseInventory
-	if json.Unmarshal(raw, &inventory) != nil || !stableReleaseTag.MatchString(inventory.Tag) || inventory.Draft || inventory.Prerelease || (!latest && inventory.Tag != selector) {
+	if json.Unmarshal(raw, &inventory) != nil || !stableReleaseTag.MatchString(inventory.Tag) || inventory.Draft || inventory.Prerelease ||
+		(!latest && inventory.Tag != selector) {
 		return result, errors.New("invalid GitHub release identity or stability")
 	}
 	assets := map[string]string{}
@@ -364,7 +365,8 @@ func FetchVerifiedGitHubRelease(ctx context.Context, options GitHubReleaseOption
 		}
 	}()
 	if !renamed {
-		if manifest, verifyErr := verifySignedAutomationRelease(published, options.PublicKey, signer); verifyErr != nil || manifest.Version != inventory.Tag {
+		if manifest, verifyErr := verifySignedAutomationRelease(published, options.PublicKey, signer); verifyErr != nil ||
+			manifest.Version != inventory.Tag {
 			return result, errors.New("signed release cache conflicts with downloaded bundle")
 		}
 		cachedManifestBytes, cachedErr := os.ReadFile(filepath.Join(published, "release-manifest.json"))
@@ -598,7 +600,16 @@ func signedReleaseMetadata(ctx context.Context, directory, key, signer string) (
 			}
 		}
 		verifyContext, cancel := context.WithTimeout(ctx, 30*time.Second)
-		command := exec.CommandContext(verifyContext, signer, "-Vm", filepath.Join(directory, name), "-x", filepath.Join(directory, name+".minisig"), "-P", key)
+		command := exec.CommandContext(
+			verifyContext,
+			signer,
+			"-Vm",
+			filepath.Join(directory, name),
+			"-x",
+			filepath.Join(directory, name+".minisig"),
+			"-P",
+			key,
+		)
 		err := command.Run()
 		cancel()
 		if err != nil {
@@ -610,7 +621,10 @@ func signedReleaseMetadata(ctx context.Context, directory, key, signer string) (
 		return nil, err
 	}
 	var manifest automationRelease
-	if json.Unmarshal(raw, &manifest) != nil || manifest.SchemaVersion != 1 || !stableReleaseTag.MatchString(manifest.Version) || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(manifest.SourceCommit) || manifest.DatabaseSchemaMin <= 0 || manifest.DatabaseSchemaMax < manifest.DatabaseSchemaMin {
+	if json.Unmarshal(raw, &manifest) != nil || manifest.SchemaVersion != 1 || !stableReleaseTag.MatchString(manifest.Version) ||
+		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(manifest.SourceCommit) ||
+		manifest.DatabaseSchemaMin <= 0 ||
+		manifest.DatabaseSchemaMax < manifest.DatabaseSchemaMin {
 		return nil, errors.New("invalid signed release manifest")
 	}
 	if !hasAutomationCapability(&manifest, "ansible-deploy-v1") {
@@ -633,7 +647,12 @@ func signedReleaseMetadata(ctx context.Context, directory, key, signer string) (
 	rows := map[string]string{}
 	var total int64
 	for _, asset := range manifest.Assets {
-		if !required[asset.Name] || !githubAssetName.MatchString(asset.Name) || asset.Name == "release-manifest.json" || strings.HasSuffix(asset.Name, ".minisig") || rows[asset.Name] != "" || !githubSHA.MatchString(asset.SHA) || asset.Size <= 0 || asset.Size > githubAssetLimit {
+		if !required[asset.Name] || !githubAssetName.MatchString(asset.Name) || asset.Name == "release-manifest.json" ||
+			strings.HasSuffix(asset.Name, ".minisig") ||
+			rows[asset.Name] != "" ||
+			!githubSHA.MatchString(asset.SHA) ||
+			asset.Size <= 0 ||
+			asset.Size > githubAssetLimit {
 			return nil, errors.New("invalid signed manifest asset")
 		}
 		total += asset.Size
@@ -673,7 +692,8 @@ func signedReleaseMetadata(ctx context.Context, directory, key, signer string) (
 }
 
 func githubSafeURL(address *url.URL) bool {
-	if address == nil || address.Scheme != "https" || address.User != nil || address.Fragment != "" || address.Opaque != "" || (address.Port() != "" && address.Port() != "443") {
+	if address == nil || address.Scheme != "https" || address.User != nil || address.Fragment != "" || address.Opaque != "" ||
+		(address.Port() != "" && address.Port() != "443") {
 		return false
 	}
 	switch address.Hostname() {

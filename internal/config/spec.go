@@ -372,7 +372,8 @@ func (s *Spec) Validate() error {
 		}
 	}
 	if s.TunnelTLSProvision == TunnelTLSACME && s.MimicPreset == "standard" {
-		if s.SplithttpHost == "" || s.SplitHTTPTLS.ServerName != s.SplithttpHost || s.SplitHTTPTLS.OmitSNI || s.SplitHTTPTLS.SNIMode == "omit" {
+		if s.SplithttpHost == "" || s.SplitHTTPTLS.ServerName != s.SplithttpHost || s.SplitHTTPTLS.OmitSNI ||
+			s.SplitHTTPTLS.SNIMode == "omit" {
 			return errors.New("config: managed tunnel TLS requires aligned HTTP host and TLS server name")
 		}
 	}
@@ -507,7 +508,10 @@ func (s *Spec) validateTransportExtensions() error {
 	}
 	ids := map[string]bool{"primary": true}
 	for _, entry := range s.PublicEntries {
-		if entry.ID == "" || strings.ContainsAny(entry.ID, "/ \t\n") || ids[entry.ID] || entry.Host == "" || strings.ContainsAny(entry.Host, "/@?# \t\r\n") || entry.TCPPort < 1 || entry.TCPPort > 65535 {
+		if entry.ID == "" || strings.ContainsAny(entry.ID, "/ \t\n") || ids[entry.ID] || entry.Host == "" ||
+			strings.ContainsAny(entry.Host, "/@?# \t\r\n") ||
+			entry.TCPPort < 1 ||
+			entry.TCPPort > 65535 {
 			return errors.New("invalid or duplicate public entry")
 		}
 		ids[entry.ID] = true
@@ -557,7 +561,9 @@ func (s *Spec) validateTransportExtensions() error {
 		if t.Port == HealthProbePort {
 			return errors.New("public_xhttp_tls conflicts with an existing listener")
 		}
-		if t.ServerName == "" || strings.ContainsAny(t.ServerName, "/: \t\r\n") || net.ParseIP(t.ServerName) != nil || t.CertificateFile == "" || t.KeyFile == "" {
+		if t.ServerName == "" || strings.ContainsAny(t.ServerName, "/: \t\r\n") || net.ParseIP(t.ServerName) != nil ||
+			t.CertificateFile == "" ||
+			t.KeyFile == "" {
 			return errors.New("public_xhttp_tls requires server_name, certificate_file and key_file")
 		}
 		if t.Mode != "" && t.Mode != "stream-up" && t.Mode != "packet-up" {

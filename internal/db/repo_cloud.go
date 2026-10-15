@@ -189,7 +189,9 @@ func (r *CloudRepo) Audit(ctx context.Context, actor int64, id, action string) e
 }
 
 func (r *CloudRepo) RecordEvent(ctx context.Context, e cloud.Event) error {
-	return r.db.orm.WithContext(ctx).Create(&cloudEventRow{OperationID: e.OperationID, Phase: e.Phase, Outcome: e.Outcome, Code: e.Code, HTTPStatus: e.HTTPStatus, DurationMS: e.DurationMS, CreatedAt: e.At}).Error
+	return r.db.orm.WithContext(ctx).
+		Create(&cloudEventRow{OperationID: e.OperationID, Phase: e.Phase, Outcome: e.Outcome, Code: e.Code, HTTPStatus: e.HTTPStatus, DurationMS: e.DurationMS, CreatedAt: e.At}).
+		Error
 }
 func (r *CloudRepo) Events(ctx context.Context, id string) ([]cloud.Event, error) {
 	rows := []cloudEventRow{}
@@ -198,7 +200,15 @@ func (r *CloudRepo) Events(ctx context.Context, id string) ([]cloud.Event, error
 	}
 	out := make([]cloud.Event, 0, len(rows))
 	for _, row := range rows {
-		v := cloud.Event{OperationID: row.OperationID, Phase: row.Phase, Outcome: row.Outcome, Code: row.Code, HTTPStatus: row.HTTPStatus, DurationMS: row.DurationMS, At: row.CreatedAt}
+		v := cloud.Event{
+			OperationID: row.OperationID,
+			Phase:       row.Phase,
+			Outcome:     row.Outcome,
+			Code:        row.Code,
+			HTTPStatus:  row.HTTPStatus,
+			DurationMS:  row.DurationMS,
+			At:          row.CreatedAt,
+		}
 		if v.Code != "" {
 			v.Message = cloud.ErrorMessage(v.Code)
 		}

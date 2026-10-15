@@ -107,7 +107,8 @@ func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) 
 		return nil, fail
 	}
 	oldTarget, err := readManifest("ultra_release_manifest")
-	if err != nil || oldTarget.Version != oldTargetVersion(old.Directory) || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(oldTarget.SourceCommit) {
+	if err != nil || oldTarget.Version != oldTargetVersion(old.Directory) ||
+		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(oldTarget.SourceCommit) {
 		return nil, fail
 	}
 	if !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(target.SourceCommit) ||
@@ -123,7 +124,8 @@ func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) 
 		return nil, fail
 	}
 	releaseSource, err := readString("ultra_release_source")
-	if err != nil || !filepath.IsAbs(releaseSource) || filepath.Clean(releaseSource) != releaseSource || operatorPrivate(releaseSource, true) != nil {
+	if err != nil || !filepath.IsAbs(releaseSource) || filepath.Clean(releaseSource) != releaseSource ||
+		operatorPrivate(releaseSource, true) != nil {
 		return nil, fail
 	}
 	manifestRaw, err := readForwardEvidence(filepath.Join(releaseSource, "release-manifest.json"))
@@ -217,7 +219,8 @@ func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) 
 	previousDirectory, directoryErr = readBridgeString("ultra_previous_controller_directory")
 	previousUnitSHA, unitErr = readBridgeString("ultra_previous_controller_unit_sha256")
 	if directoryErr == nil && unitErr == nil &&
-		regexp.MustCompile(`^/opt/ultra-ansible/releases/managed-v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$`).MatchString(previousDirectory) &&
+		regexp.MustCompile(`^/opt/ultra-ansible/releases/managed-v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$`).
+			MatchString(previousDirectory) &&
 		sha256DigestPattern.MatchString(previousUnitSHA) {
 		variables["ultra_forward_previous_broker"] = forwardBrokerPredecessor{
 			Directory: previousDirectory,

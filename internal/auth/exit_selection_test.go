@@ -8,8 +8,16 @@ import (
 
 func TestAutoAndFixedExitPolicies(t *testing.T) {
 	primary := "fra"
-	nodes := []exits.Node{{ID: primary, Enabled: true, Priority: 100}, {ID: "ams", Enabled: true, Priority: 200}, {ID: "other", Enabled: true, Priority: 300}}
-	healthy := map[string]exits.Health{"fra": {Eligible: true, PreferredReady: true}, "ams": {Eligible: true, PreferredReady: true}, "other": {Eligible: true, PreferredReady: true}}
+	nodes := []exits.Node{
+		{ID: primary, Enabled: true, Priority: 100},
+		{ID: "ams", Enabled: true, Priority: 200},
+		{ID: "other", Enabled: true, Priority: 300},
+	}
+	healthy := map[string]exits.Health{
+		"fra":   {Eligible: true, PreferredReady: true},
+		"ams":   {Eligible: true, PreferredReady: true},
+		"other": {Eligible: true, PreferredReady: true},
+	}
 	for _, tt := range []struct {
 		name     string
 		fixed    bool

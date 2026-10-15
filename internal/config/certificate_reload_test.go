@@ -16,7 +16,20 @@ func TestCertificateReplacementReloadsOfficialCore(t *testing.T) {
 	if certificate["oneTimeLoading"] != true {
 		t.Fatal("certificate ticker must be disabled")
 	}
-	data, err := json.Marshal(map[string]any{"inbounds": []any{map[string]any{"listen": "127.0.0.1", "port": 0, "protocol": "vless", "settings": map[string]any{"decryption": "none", "clients": []any{}}, "streamSettings": stream}}, "outbounds": []any{map[string]any{"protocol": "freedom"}}})
+	data, err := json.Marshal(
+		map[string]any{
+			"inbounds": []any{
+				map[string]any{
+					"listen":         "127.0.0.1",
+					"port":           0,
+					"protocol":       "vless",
+					"settings":       map[string]any{"decryption": "none", "clients": []any{}},
+					"streamSettings": stream,
+				},
+			},
+			"outbounds": []any{map[string]any{"protocol": "freedom"}},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

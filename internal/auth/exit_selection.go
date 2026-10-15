@@ -1,8 +1,9 @@
 package auth
 
 import (
-	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"slices"
+
+	"github.com/NikitaDmitryuk/ultra/internal/exits"
 )
 
 // BlockedExit is an internal sentinel, never a physical exit ID.

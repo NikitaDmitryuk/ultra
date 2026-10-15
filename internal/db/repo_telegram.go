@@ -89,7 +89,10 @@ func (r *TelegramRepo) EnqueueNotification(ctx context.Context, n Notification) 
 	if err != nil {
 		return err
 	}
-	return r.db.orm.WithContext(ctx).Select("user_uuid", "telegram_id", "type", "payload", "sent_at").Create(&notificationRow{UserUUID: ptrFromPGUUID(userUUID), TelegramID: n.TelegramID, Type: n.Type, Payload: payloadRaw, SentAt: n.SentAt}).Error
+	return r.db.orm.WithContext(ctx).
+		Select("user_uuid", "telegram_id", "type", "payload", "sent_at").
+		Create(&notificationRow{UserUUID: ptrFromPGUUID(userUUID), TelegramID: n.TelegramID, Type: n.Type, Payload: payloadRaw, SentAt: n.SentAt}).
+		Error
 }
 
 // PendingNotifications returns up to limit unsent notifications ordered by creation time.
@@ -162,8 +165,24 @@ func (r *TelegramRepo) UpsertAlertState(ctx context.Context, s AlertState) error
 	if err != nil {
 		return err
 	}
-	row := map[string]any{"dedupe_key": s.DedupeKey, "type": s.Type, "severity": s.Severity, "channel": s.Channel, "status": s.Status, "consecutive_failures": int32(s.ConsecutiveFailures), "consecutive_successes": int32(s.ConsecutiveSuccesses), "last_seen_at": gorm.Expr("NOW()"), "last_sent_at": s.LastSentAt, "last_payload": payloadRaw, "updated_at": gorm.Expr("NOW()")}
-	return r.db.orm.WithContext(ctx).Table("alert_state").Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "dedupe_key"}}, DoUpdates: clause.AssignmentColumns([]string{"type", "severity", "channel", "status", "consecutive_failures", "consecutive_successes", "last_seen_at", "last_sent_at", "last_payload", "updated_at"})}).Create(row).Error
+	row := map[string]any{
+		"dedupe_key":            s.DedupeKey,
+		"type":                  s.Type,
+		"severity":              s.Severity,
+		"channel":               s.Channel,
+		"status":                s.Status,
+		"consecutive_failures":  int32(s.ConsecutiveFailures),
+		"consecutive_successes": int32(s.ConsecutiveSuccesses),
+		"last_seen_at":          gorm.Expr("NOW()"),
+		"last_sent_at":          s.LastSentAt,
+		"last_payload":          payloadRaw,
+		"updated_at":            gorm.Expr("NOW()"),
+	}
+	return r.db.orm.WithContext(ctx).
+		Table("alert_state").
+		Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "dedupe_key"}}, DoUpdates: clause.AssignmentColumns([]string{"type", "severity", "channel", "status", "consecutive_failures", "consecutive_successes", "last_seen_at", "last_sent_at", "last_payload", "updated_at"})}).
+		Create(row).
+		Error
 }
 
 // PruneMonitoringRetention deletes old monitoring rows to keep the DB small on VPS.
@@ -227,7 +246,11 @@ func (r *TelegramRepo) ClaimMemberNotifications(ctx context.Context) ([]MemberNo
 	return out, rows.Err()
 }
 func (r *TelegramRepo) MemberNotificationSent(ctx context.Context, member, admin int64) error {
-	return r.db.orm.WithContext(ctx).Table("vpn_member_notifications").Where("member_id = ? AND admin_id = ?", member, admin).Update("sent_at", gorm.Expr("NOW()")).Error
+	return r.db.orm.WithContext(ctx).
+		Table("vpn_member_notifications").
+		Where("member_id = ? AND admin_id = ?", member, admin).
+		Update("sent_at", gorm.Expr("NOW()")).
+		Error
 }
 
 func (r *TelegramRepo) ClaimNotifications(ctx context.Context, limit int, lease time.Duration) ([]Notification, error) {
@@ -245,7 +268,10 @@ func (r *TelegramRepo) CompleteNotification(ctx context.Context, id int64) error
 	return r.db.Queries.CompleteNotification(ctx, id)
 }
 func (r *TelegramRepo) RetryNotification(ctx context.Context, id int64, next time.Time, lastError string, terminal bool) error {
-	return r.db.Queries.RetryNotification(ctx, sqlc.RetryNotificationParams{ID: id, NextAttemptAt: toPGTime(next), LastError: lastError, Terminal: terminal})
+	return r.db.Queries.RetryNotification(
+		ctx,
+		sqlc.RetryNotificationParams{ID: id, NextAttemptAt: toPGTime(next), LastError: lastError, Terminal: terminal},
+	)
 }
 
 // CompleteClaim rejects acknowledgements from a worker whose lease was replaced.
@@ -260,7 +286,16 @@ func (r *TelegramRepo) CompleteClaim(ctx context.Context, id int64, attempt int)
 	return nil
 }
 func (r *TelegramRepo) RetryClaim(ctx context.Context, id int64, attempt int, next time.Time, lastError string, terminal bool) error {
-	n, err := r.db.Queries.RetryNotificationClaim(ctx, sqlc.RetryNotificationClaimParams{ID: id, Attempts: int32(attempt), NextAttemptAt: toPGTime(next), LastError: lastError, Terminal: terminal})
+	n, err := r.db.Queries.RetryNotificationClaim(
+		ctx,
+		sqlc.RetryNotificationClaimParams{
+			ID:            id,
+			Attempts:      int32(attempt),
+			NextAttemptAt: toPGTime(next),
+			LastError:     lastError,
+			Terminal:      terminal,
+		},
+	)
 	if err != nil {
 		return err
 	}
@@ -271,7 +306,13 @@ func (r *TelegramRepo) RetryClaim(ctx context.Context, id int64, attempt int, ne
 }
 
 func (r *TelegramRepo) CompleteMemberClaim(ctx context.Context, member, admin int64, attempt int) error {
-	tag, err := r.db.Pool.Exec(ctx, `UPDATE vpn_member_notifications SET sent_at=NOW(),lease_until=NULL,last_error='' WHERE member_id=$1 AND admin_id=$2 AND attempts=$3 AND sent_at IS NULL AND next_attempt>NOW() AND lease_until>NOW()`, member, admin, attempt)
+	tag, err := r.db.Pool.Exec(
+		ctx,
+		`UPDATE vpn_member_notifications SET sent_at=NOW(),lease_until=NULL,last_error='' WHERE member_id=$1 AND admin_id=$2 AND attempts=$3 AND sent_at IS NULL AND next_attempt>NOW() AND lease_until>NOW()`,
+		member,
+		admin,
+		attempt,
+	)
 	if err != nil {
 		return err
 	}
@@ -280,8 +321,25 @@ func (r *TelegramRepo) CompleteMemberClaim(ctx context.Context, member, admin in
 	}
 	return nil
 }
-func (r *TelegramRepo) RetryMemberNotification(ctx context.Context, member, admin int64, attempt int, next time.Time, lastError string, terminal bool) error {
-	tag, err := r.db.Pool.Exec(ctx, `UPDATE vpn_member_notifications SET next_attempt=$4,last_error=$5,terminal=$6,lease_until=NULL WHERE member_id=$1 AND admin_id=$2 AND attempts=$3 AND sent_at IS NULL AND next_attempt>NOW() AND lease_until>NOW()`, member, admin, attempt, next, lastError, terminal)
+
+func (r *TelegramRepo) RetryMemberNotification(
+	ctx context.Context,
+	member, admin int64,
+	attempt int,
+	next time.Time,
+	lastError string,
+	terminal bool,
+) error {
+	tag, err := r.db.Pool.Exec(
+		ctx,
+		`UPDATE vpn_member_notifications SET next_attempt=$4,last_error=$5,terminal=$6,lease_until=NULL WHERE member_id=$1 AND admin_id=$2 AND attempts=$3 AND sent_at IS NULL AND next_attempt>NOW() AND lease_until>NOW()`,
+		member,
+		admin,
+		attempt,
+		next,
+		lastError,
+		terminal,
+	)
 	if err != nil {
 		return err
 	}

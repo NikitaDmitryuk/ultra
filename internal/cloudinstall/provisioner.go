@@ -124,7 +124,21 @@ func (p *Provisioner) node(ctx context.Context, op *cloud.Operation, instance cl
 		return n, e
 	}
 	disabled := false
-	n, e = repo.Add(ctx, exits.AddParams{ID: op.ID, Name: "vultr-" + op.Offer.Region.ID, Address: instance.IP, Port: p.port(), Priority: 200, Enabled: &disabled, CountryCode: op.Offer.Region.Country, CountryName: op.Offer.Region.Country, City: op.Offer.Region.City, DisplayName: op.Offer.Region.City + ", " + op.Offer.Region.Country})
+	n, e = repo.Add(
+		ctx,
+		exits.AddParams{
+			ID:          op.ID,
+			Name:        "vultr-" + op.Offer.Region.ID,
+			Address:     instance.IP,
+			Port:        p.port(),
+			Priority:    200,
+			Enabled:     &disabled,
+			CountryCode: op.Offer.Region.Country,
+			CountryName: op.Offer.Region.Country,
+			City:        op.Offer.Region.City,
+			DisplayName: op.Offer.Region.City + ", " + op.Offer.Region.Country,
+		},
+	)
 	if e == nil {
 		op.ExitID = n.ID
 	}
@@ -197,7 +211,12 @@ func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance
 	return nil
 }
 
-func (p *Provisioner) configureExit(ctx context.Context, op *cloud.Operation, binary string, request deployansible.ExitRequest) (deployansible.Result, error) {
+func (p *Provisioner) configureExit(
+	ctx context.Context,
+	op *cloud.Operation,
+	binary string,
+	request deployansible.ExitRequest,
+) (deployansible.Result, error) {
 	jobID, err := configurationAttemptJobID(op.ID, op.InstallAttempt, binary, request)
 	if err != nil {
 		return deployansible.Result{}, err
@@ -318,7 +337,8 @@ func (p *Provisioner) Unpublish(ctx context.Context, op *cloud.Operation) error 
 		return nil
 	}
 	disabled := false
-	if _, e := db.NewExitNodeRepo(p.DB).Update(ctx, op.ExitID, exits.UpdatePatch{Enabled: &disabled}); e != nil && !errors.Is(e, db.ErrExitNotFound) {
+	if _, e := db.NewExitNodeRepo(p.DB).Update(ctx, op.ExitID, exits.UpdatePatch{Enabled: &disabled}); e != nil &&
+		!errors.Is(e, db.ErrExitNotFound) {
 		return e
 	}
 	if e := p.Routes.Unpublish(ctx, op.ExitID); e != nil {

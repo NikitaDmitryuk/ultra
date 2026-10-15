@@ -98,7 +98,10 @@ func runtimeHostTransport(s runtimeHostStore, in runtimeProbeInput) (runtimeProb
 	}
 	defer syscall.Close(fd) //nolint:errcheck
 	var stat syscall.Stat_t
-	if syscall.Fstat(fd, &stat) != nil || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0077 != 0 || stat.Mode&syscall.S_IFMT != syscall.S_IFREG || stat.Nlink != 1 || syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+	if syscall.Fstat(fd, &stat) != nil || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0077 != 0 ||
+		stat.Mode&syscall.S_IFMT != syscall.S_IFREG ||
+		stat.Nlink != 1 ||
+		syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB) != nil {
 		return runtimeProbeResult{}, runtimeHostError("lock_failed")
 	}
 	defer syscall.Flock(fd, syscall.LOCK_UN) //nolint:errcheck
@@ -151,7 +154,8 @@ func runtimeHostTransportLocked(s runtimeHostStore, in runtimeProbeInput) (runti
 		EffectsPlan *runtimeTransitionPlan `json:"effects_plan,omitempty"`
 	}{digest, in.BotActive, nil}
 	if binding.Exists {
-		if binding.UID != uint32(os.Geteuid()) || binding.Mode != 0600 || json.Unmarshal(binding.Data, &proof) != nil || proof.Digest != digest {
+		if binding.UID != uint32(os.Geteuid()) || binding.Mode != 0600 || json.Unmarshal(binding.Data, &proof) != nil ||
+			proof.Digest != digest {
 			return runtimeProbeResult{}, runtimeHostError("request_changed")
 		}
 	} else if (in.Action == "rollback" || in.Action == "status") && !journal.Exists {
@@ -162,25 +166,42 @@ func runtimeHostTransportLocked(s runtimeHostStore, in runtimeProbeInput) (runti
 	if in.Action == "status" {
 		if journal.Exists {
 			var saved runtimeHostJournal
-			if journal.UID != uint32(os.Geteuid()) || journal.Mode != 0600 || json.Unmarshal(journal.Data, &saved) != nil || saved.Version != 1 || saved.Transaction != id || (saved.State != "prepared" && saved.State != "applied" && saved.State != "rolled_back") {
+			if journal.UID != uint32(os.Geteuid()) || journal.Mode != 0600 || json.Unmarshal(journal.Data, &saved) != nil ||
+				saved.Version != 1 ||
+				saved.Transaction != id ||
+				(saved.State != "prepared" && saved.State != "applied" && saved.State != "rolled_back") {
 				return runtimeProbeResult{}, runtimeHostError("journal_invalid")
 			}
 		}
-		return runtimeProbeResult{Verified: true, Bound: journal.Exists, Status: "checked", BotActive: proof.BotActive, EffectsPlan: proof.EffectsPlan}, nil
+		return runtimeProbeResult{
+			Verified:    true,
+			Bound:       journal.Exists,
+			Status:      "checked",
+			BotActive:   proof.BotActive,
+			EffectsPlan: proof.EffectsPlan,
+		}, nil
 	}
 	if in.Action == "prepare" {
 		if journal.Exists {
 			var saved runtimeHostJournal
-			if json.Unmarshal(journal.Data, &saved) != nil || saved.Version != 1 || saved.Transaction != id || (saved.State != "prepared" && saved.State != "applied") {
+			if json.Unmarshal(journal.Data, &saved) != nil || saved.Version != 1 || saved.Transaction != id ||
+				(saved.State != "prepared" && saved.State != "applied") {
 				return runtimeProbeResult{}, runtimeHostError("journal_invalid")
 			}
-			return runtimeProbeResult{Verified: true, Bound: true, Status: saved.State, BotActive: proof.BotActive, EffectsPlan: proof.EffectsPlan}, nil
+			return runtimeProbeResult{
+				Verified:    true,
+				Bound:       true,
+				Status:      saved.State,
+				BotActive:   proof.BotActive,
+				EffectsPlan: proof.EffectsPlan,
+			}, nil
 		}
 		probe, probeErr := inspectRuntimeHost(s, in)
 		if probeErr != nil {
 			return runtimeProbeResult{}, probeErr
 		}
-		if (probe.DomainChanged && !s.authorizedDomainTransition(in)) || !s.authorizedRuntimeTransitions(in, probe.Transitions, probe.EffectsPlan) {
+		if (probe.DomainChanged && !s.authorizedDomainTransition(in)) ||
+			!s.authorizedRuntimeTransitions(in, probe.Transitions, probe.EffectsPlan) {
 			return runtimeProbeResult{}, runtimeHostError("unsupported_transition")
 		}
 		if !binding.Exists {
@@ -191,13 +212,25 @@ func runtimeHostTransportLocked(s runtimeHostStore, in runtimeProbeInput) (runti
 			}
 		}
 		result, prepareErr := s.prepare(in.Request)
-		return runtimeProbeResult{Verified: prepareErr == nil, Bound: prepareErr == nil, Status: result.Status, BotActive: proof.BotActive, EffectsPlan: proof.EffectsPlan}, prepareErr
+		return runtimeProbeResult{
+			Verified:    prepareErr == nil,
+			Bound:       prepareErr == nil,
+			Status:      result.Status,
+			BotActive:   proof.BotActive,
+			EffectsPlan: proof.EffectsPlan,
+		}, prepareErr
 	}
 	if in.Action == "rollback" && !journal.Exists {
 		return runtimeProbeResult{Verified: true, Status: "rolled_back", BotActive: proof.BotActive, EffectsPlan: proof.EffectsPlan}, nil
 	}
 	result, transitionErr := s.transition(id, in.Action == "rollback")
-	return runtimeProbeResult{Verified: transitionErr == nil, Bound: true, Status: result.Status, BotActive: proof.BotActive, EffectsPlan: proof.EffectsPlan}, transitionErr
+	return runtimeProbeResult{
+		Verified:    transitionErr == nil,
+		Bound:       true,
+		Status:      result.Status,
+		BotActive:   proof.BotActive,
+		EffectsPlan: proof.EffectsPlan,
+	}, transitionErr
 }
 
 func inspectRuntimeHostLocked(s runtimeHostStore, in runtimeProbeInput) (runtimeProbeResult, error) {
@@ -246,7 +279,14 @@ func inspectRuntimeHostLocked(s runtimeHostStore, in runtimeProbeInput) (runtime
 	if baseline.DesiredIdentity != desired || baseline.RuntimeIdentity != installed {
 		return runtimeProbeResult{}, runtimeHostError("migration_required")
 	}
-	p := &installplan.InstallPlan{SchemaVersion: 1, SourceValues: map[string]string{}, Bridge: r.Bridge, Database: r.Database, Features: r.Features, Bot: installplan.BotConfig{Enabled: r.BotEnabled}}
+	p := &installplan.InstallPlan{
+		SchemaVersion: 1,
+		SourceValues:  map[string]string{},
+		Bridge:        r.Bridge,
+		Database:      r.Database,
+		Features:      r.Features,
+		Bot:           installplan.BotConfig{Enabled: r.BotEnabled},
+	}
 	p.Bridge.ReuseSpec = true
 	for _, ex := range r.Exits {
 		p.Exits = append(p.Exits, installplan.ExitNode{Name: ex.Name, SSHHost: ex.SSHHost, DialAddr: ex.DialAddr, Port: ex.Port})
@@ -259,7 +299,11 @@ func inspectRuntimeHostLocked(s runtimeHostStore, in runtimeProbeInput) (runtime
 	if json.Unmarshal(specImage.Data, &before) != nil || json.Unmarshal(projection.SpecJSON, &after) != nil {
 		return runtimeProbeResult{}, runtimeHostError("projection_failed")
 	}
-	result := runtimeProbeResult{Verified: true, RuntimeChanged: !reflect.DeepEqual(before, after), Transitions: []installplan.RuntimeTransitionKind{}}
+	result := runtimeProbeResult{
+		Verified:       true,
+		RuntimeChanged: !reflect.DeepEqual(before, after),
+		Transitions:    []installplan.RuntimeTransitionKind{},
+	}
 	environment, err := s.image(s.path(runtimeHostFiles[1]))
 	if err != nil {
 		return runtimeProbeResult{}, err
@@ -303,7 +347,8 @@ func inspectRuntimeHostLocked(s runtimeHostStore, in runtimeProbeInput) (runtime
 			if readErr != nil || !image.Exists || image.UID != uint32(os.Geteuid()) {
 				return runtimeProbeResult{}, runtimeHostError("domain_identity_uncertain")
 			}
-			if !runtimeProbeDirective(image.Data, "server_name", in.SubscriptionDomain) || !runtimeProbeDirective(image.Data, "proxy_ssl_name", in.BotDomain) {
+			if !runtimeProbeDirective(image.Data, "server_name", in.SubscriptionDomain) ||
+				!runtimeProbeDirective(image.Data, "proxy_ssl_name", in.BotDomain) {
 				result.DomainChanged = true
 			}
 		}
@@ -344,8 +389,11 @@ func (s runtimeHostStore) authorizedDomainTransition(in runtimeProbeInput) bool 
 		Desired     map[string]string     `json:"desired"`
 		Evidence    upgradeDomainEvidence `json:"evidence"`
 	}
-	if json.Unmarshal(image.Data, &binding) != nil || binding.Version != 1 || binding.Transaction != in.DomainTransaction || !binding.Evidence.Verified {
+	if json.Unmarshal(image.Data, &binding) != nil || binding.Version != 1 || binding.Transaction != in.DomainTransaction ||
+		!binding.Evidence.Verified {
 		return false
 	}
-	return binding.Desired["subscription"] == in.SubscriptionDomain && binding.Desired["vpn"] == in.VPNDomain && binding.Desired["backend"] == in.BotDomain && binding.Desired["public_host"] == in.Request.Bridge.PublicHost
+	return binding.Desired["subscription"] == in.SubscriptionDomain && binding.Desired["vpn"] == in.VPNDomain &&
+		binding.Desired["backend"] == in.BotDomain &&
+		binding.Desired["public_host"] == in.Request.Bridge.PublicHost
 }

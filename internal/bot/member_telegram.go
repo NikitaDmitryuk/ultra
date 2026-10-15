@@ -49,9 +49,62 @@ func (b *Bot) startPickerKind(ctx context.Context, id int64, kind string) error 
 	b.picker.pending[id] = pickerRequest{Kind: kind, ID: requestID, Expires: time.Now().Add(10 * time.Minute)}
 	b.picker.mu.Unlock()
 	if kind == "group" {
-		return b.telegramJSON(ctx, "sendMessage", map[string]any{"chat_id": id, "text": "Выберите закрытую группу, где вы и бот — администраторы. Если её нет в списке, сначала добавьте бота администратором. После выбора подтвердите включение регистрации.", "reply_markup": map[string]any{"keyboard": [][]any{{map[string]any{"text": "Выбрать закрытую группу", "request_chat": map[string]any{"request_id": requestID, "chat_is_channel": false, "chat_has_username": false, "bot_is_member": true, "user_administrator_rights": groupPickerRights(), "bot_administrator_rights": groupPickerRights(), "request_title": true}}}}, "resize_keyboard": true, "one_time_keyboard": true}}, nil)
+		return b.telegramJSON(
+			ctx,
+			"sendMessage",
+			map[string]any{
+				"chat_id": id,
+				"text":    "Выберите закрытую группу, где вы и бот — администраторы. Если её нет в списке, сначала добавьте бота администратором. После выбора подтвердите включение регистрации.",
+				"reply_markup": map[string]any{
+					"keyboard": [][]any{
+						{
+							map[string]any{
+								"text": "Выбрать закрытую группу",
+								"request_chat": map[string]any{
+									"request_id":                requestID,
+									"chat_is_channel":           false,
+									"chat_has_username":         false,
+									"bot_is_member":             true,
+									"user_administrator_rights": groupPickerRights(),
+									"bot_administrator_rights":  groupPickerRights(),
+									"request_title":             true,
+								},
+							},
+						},
+					},
+					"resize_keyboard":   true,
+					"one_time_keyboard": true,
+				},
+			},
+			nil,
+		)
 	}
-	return b.telegramJSON(ctx, "sendMessage", map[string]any{"chat_id": id, "text": "Выберите получателя VPN-приглашения. Затем подтвердите выдачу. Для числового ID: /invitevpn 123456789", "reply_markup": map[string]any{"keyboard": [][]any{{map[string]any{"text": "Выбрать получателя", "request_users": map[string]any{"request_id": requestID, "user_is_bot": false, "max_quantity": 1, "request_name": true}}}}, "resize_keyboard": true, "one_time_keyboard": true}}, nil)
+	return b.telegramJSON(
+		ctx,
+		"sendMessage",
+		map[string]any{
+			"chat_id": id,
+			"text":    "Выберите получателя VPN-приглашения. Затем подтвердите выдачу. Для числового ID: /invitevpn 123456789",
+			"reply_markup": map[string]any{
+				"keyboard": [][]any{
+					{
+						map[string]any{
+							"text": "Выбрать получателя",
+							"request_users": map[string]any{
+								"request_id":   requestID,
+								"user_is_bot":  false,
+								"max_quantity": 1,
+								"request_name": true,
+							},
+						},
+					},
+				},
+				"resize_keyboard":   true,
+				"one_time_keyboard": true,
+			},
+		},
+		nil,
+	)
 }
 func (b *Bot) pickerHTTP(w http.ResponseWriter, r *http.Request) {
 	actor, ok := b.mustAdmin(w, r)
@@ -72,7 +125,12 @@ func (b *Bot) pickerHTTP(w http.ResponseWriter, r *http.Request) {
 func (b *Bot) inviteVPNCommand(ctx context.Context, msg *tgbotapi.Message) {
 	allowed, e := b.adminRepo.IsAdmin(ctx, msg.From.ID)
 	if e != nil {
-		_ = b.telegramJSON(ctx, "sendMessage", map[string]any{"chat_id": msg.Chat.ID, "text": "Сервис временно недоступен. Попробуйте ещё раз."}, nil)
+		_ = b.telegramJSON(
+			ctx,
+			"sendMessage",
+			map[string]any{"chat_id": msg.Chat.ID, "text": "Сервис временно недоступен. Попробуйте ещё раз."},
+			nil,
+		)
 		return
 	}
 	if !allowed {
@@ -95,7 +153,11 @@ func (b *Bot) inviteVPNCommand(ctx context.Context, msg *tgbotapi.Message) {
 	if _, e = rand.Read(random[:]); e != nil {
 		return
 	}
-	request := pickerRequest{ID: int32(binary.LittleEndian.Uint32(random[:]) & 0x7fffffff), Target: id, Expires: time.Now().Add(10 * time.Minute)}
+	request := pickerRequest{
+		ID:      int32(binary.LittleEndian.Uint32(random[:]) & 0x7fffffff),
+		Target:  id,
+		Expires: time.Now().Add(10 * time.Minute),
+	}
 	b.picker.mu.Lock()
 	if b.picker.pending == nil {
 		b.picker.pending = map[int64]pickerRequest{}
@@ -105,7 +167,24 @@ func (b *Bot) inviteVPNCommand(ctx context.Context, msg *tgbotapi.Message) {
 	b.confirmPicker(ctx, msg.From.ID, request)
 }
 func (b *Bot) confirmPicker(ctx context.Context, actor int64, p pickerRequest) {
-	_ = b.telegramJSON(ctx, "sendMessage", map[string]any{"chat_id": actor, "text": fmt.Sprintf("Выдать VPN-приглашение %s (Telegram ID %d)? Срок — 7 дней, только для этого аккаунта. Административных прав оно не даёт.", p.Title, p.Target), "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "Выдать приглашение", "callback_data": fmt.Sprintf("vpn_confirm:%d", p.ID)}}}}}, nil)
+	_ = b.telegramJSON(
+		ctx,
+		"sendMessage",
+		map[string]any{
+			"chat_id": actor,
+			"text": fmt.Sprintf(
+				"Выдать VPN-приглашение %s (Telegram ID %d)? Срок — 7 дней, только для этого аккаунта. Административных прав оно не даёт.",
+				p.Title,
+				p.Target,
+			),
+			"reply_markup": map[string]any{
+				"inline_keyboard": [][]any{
+					{map[string]any{"text": "Выдать приглашение", "callback_data": fmt.Sprintf("vpn_confirm:%d", p.ID)}},
+				},
+			},
+		},
+		nil,
+	)
 }
 func (b *Bot) handleMemberCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	if cb.From == nil || cb.Message == nil || cb.Message.Chat == nil || cb.Message.Chat.Type != "private" {
@@ -113,7 +192,12 @@ func (b *Bot) handleMemberCallback(ctx context.Context, cb *tgbotapi.CallbackQue
 	}
 	admin, e := b.adminRepo.IsAdmin(ctx, cb.From.ID)
 	if e != nil {
-		_ = b.telegramJSON(ctx, "answerCallbackQuery", map[string]any{"callback_query_id": cb.ID, "text": "Сервис временно недоступен. Попробуйте ещё раз.", "show_alert": true}, nil)
+		_ = b.telegramJSON(
+			ctx,
+			"answerCallbackQuery",
+			map[string]any{"callback_query_id": cb.ID, "text": "Сервис временно недоступен. Попробуйте ещё раз.", "show_alert": true},
+			nil,
+		)
 		return
 	}
 	if !admin {
@@ -126,7 +210,13 @@ func (b *Bot) handleMemberCallback(ctx context.Context, cb *tgbotapi.CallbackQue
 			return
 		}
 		var m db.Member
-		_, e = b.relayJSON(ctx, "POST", fmt.Sprintf("/v1/members/%d/action", id), map[string]any{"action": "disable", "actor": cb.From.ID}, &m)
+		_, e = b.relayJSON(
+			ctx,
+			"POST",
+			fmt.Sprintf("/v1/members/%d/action", id),
+			map[string]any{"action": "disable", "actor": cb.From.ID},
+			&m,
+		)
 		if e != nil {
 			b.reply(cb.From.ID, "Не удалось отключить доступ. Повторите действие.")
 		} else if m.Pending {
@@ -162,12 +252,26 @@ func (b *Bot) handleMemberCallback(ctx context.Context, cb *tgbotapi.CallbackQue
 	var result struct {
 		Token string `json:"token"`
 	}
-	_, e = b.relayJSON(ctx, "POST", "/v1/enrollment/invites", map[string]any{"recipient": p.Target, "actor": cb.From.ID, "recipient_name": p.Title}, &result)
+	_, e = b.relayJSON(
+		ctx,
+		"POST",
+		"/v1/enrollment/invites",
+		map[string]any{"recipient": p.Target, "actor": cb.From.ID, "recipient_name": p.Title},
+		&result,
+	)
 	if e != nil {
 		b.reply(cb.From.ID, "Не удалось выдать приглашение. Повторите выбор получателя.")
 		return
 	}
-	b.reply(cb.From.ID, fmt.Sprintf("Приглашение для Telegram ID %d, действует 7 дней:\nhttps://t.me/%s?start=vpn_i_%s", p.Target, b.telegramSelf().UserName, result.Token))
+	b.reply(
+		cb.From.ID,
+		fmt.Sprintf(
+			"Приглашение для Telegram ID %d, действует 7 дней:\nhttps://t.me/%s?start=vpn_i_%s",
+			p.Target,
+			b.telegramSelf().UserName,
+			result.Token,
+		),
+	)
 }
 
 // Decode new Telegram fields not yet supported by the pinned bot library.
@@ -183,7 +287,12 @@ func (b *Bot) runMemberPolling(ctx context.Context) error {
 	for ctx.Err() == nil {
 		var updates []memberUpdate
 		c, cancel := context.WithTimeout(ctx, 35*time.Second)
-		e := b.telegramJSON(c, "getUpdates", map[string]any{"offset": offset, "timeout": 25, "allowed_updates": []string{"message", "callback_query"}}, &updates)
+		e := b.telegramJSON(
+			c,
+			"getUpdates",
+			map[string]any{"offset": offset, "timeout": 25, "allowed_updates": []string{"message", "callback_query"}},
+			&updates,
+		)
 		cancel()
 		if e != nil {
 			select {
@@ -295,7 +404,25 @@ func (b *Bot) flushMemberNotificationsOnce(ctx context.Context) {
 		sendErr := checkErr
 		if checkErr == nil {
 			c, cancel = context.WithTimeout(ctx, 8*time.Second)
-			sendErr = b.telegramJSON(c, "sendMessage", map[string]any{"chat_id": n.AdminID, "text": fmt.Sprintf("Новый VPN-пользователь: %s\nTelegram ID: %d\nСпособ регистрации: %s", n.Name, n.MemberID, n.Source), "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "Отключить VPN-доступ", "callback_data": fmt.Sprintf("vpn_disable:%d", n.MemberID)}}}}}, nil)
+			sendErr = b.telegramJSON(
+				c,
+				"sendMessage",
+				map[string]any{
+					"chat_id": n.AdminID,
+					"text": fmt.Sprintf(
+						"Новый VPN-пользователь: %s\nTelegram ID: %d\nСпособ регистрации: %s",
+						n.Name,
+						n.MemberID,
+						n.Source,
+					),
+					"reply_markup": map[string]any{
+						"inline_keyboard": [][]any{
+							{map[string]any{"text": "Отключить VPN-доступ", "callback_data": fmt.Sprintf("vpn_disable:%d", n.MemberID)}},
+						},
+					},
+				},
+				nil,
+			)
 			cancel()
 		}
 		c, cancel = context.WithTimeout(ctx, 8*time.Second)

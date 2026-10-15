@@ -3,14 +3,15 @@ package stats
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"testing"
+	"time"
+
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/db"
 	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 	"github.com/google/uuid"
 	xraystats "github.com/xtls/xray-core/features/stats"
-	"path/filepath"
-	"testing"
-	"time"
 )
 
 type measuredStub struct {
@@ -116,7 +117,10 @@ func TestRetryRetainsFullReconciliationMode(t *testing.T) {
 	now := time.Now().UTC()
 	owner := uuid.NewString()
 	period := now.Format("2006-01")
-	limits := []runtimestate.QuotaLimit{{AccountID: owner, ExitID: "exit", Period: period, LimitBytes: 1 << 20, ExpiresAt: now.Add(time.Hour)}, {ExitID: "exit", Period: period, LimitBytes: 1 << 20, ExpiresAt: now.Add(time.Hour)}}
+	limits := []runtimestate.QuotaLimit{
+		{AccountID: owner, ExitID: "exit", Period: period, LimitBytes: 1 << 20, ExpiresAt: now.Add(time.Hour)},
+		{ExitID: "exit", Period: period, LimitBytes: 1 << 20, ExpiresAt: now.Add(time.Hour)},
+	}
 	if e = state.SaveSnapshot(runtimestate.Snapshot{ConfirmedAt: now, Payload: []byte(`{}`)}, limits); e != nil {
 		t.Fatal(e)
 	}
@@ -139,7 +143,8 @@ func TestRetryRetainsFullReconciliationMode(t *testing.T) {
 		t.Fatal(e)
 	}
 	batches, e := state.PendingBatches(10)
-	if e != nil || len(batches) != 1 || batches[0].BatchID != pending.BatchID || batches[0].Samples[0].ChargeTotalBytes != runtimestate.ReservationChunk {
+	if e != nil || len(batches) != 1 || batches[0].BatchID != pending.BatchID ||
+		batches[0].Samples[0].ChargeTotalBytes != runtimestate.ReservationChunk {
 		t.Fatalf("full retry lost %v %v", batches, e)
 	}
 	if c.pending != nil || c.pendingFull {

@@ -95,7 +95,12 @@ func TestStageManualUpgradeInstallerPreservesImmutableRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(contents)
-	target, cleanup, err := stageManualUpgradeInstaller(releaseDir, filepath.Base(source), hex.EncodeToString(digest[:]), int64(len(contents)))
+	target, cleanup, err := stageManualUpgradeInstaller(
+		releaseDir,
+		filepath.Base(source),
+		hex.EncodeToString(digest[:]),
+		int64(len(contents)),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +147,22 @@ func TestVerifyOperatorUpgradeReleaseBindsManifestCommitAndExecutable(t *testing
 		t.Fatal("failed to parse fixture commit")
 	}
 	version := "v0.0." + commitNumber.String()
-	names := []string{"ultra-relay-linux-amd64", "ultra-relay-linux-arm64", "ultra-bot-linux-amd64", "ultra-bot-linux-arm64", "ultra-client-linux-amd64", "ultra-client-linux-arm64", "ultra-recovery.tar.gz", "ultra-install-linux-amd64", "ultra-install-linux-arm64", "ultra-ansible.tar.gz", "ultra-ansible-runtime-linux-amd64.tar.gz", "ultra-ansible-runtime-linux-arm64.tar.gz", "mobile-bootstrap.sh", "checksums.txt"}
+	names := []string{
+		"ultra-relay-linux-amd64",
+		"ultra-relay-linux-arm64",
+		"ultra-bot-linux-amd64",
+		"ultra-bot-linux-arm64",
+		"ultra-client-linux-amd64",
+		"ultra-client-linux-arm64",
+		"ultra-recovery.tar.gz",
+		"ultra-install-linux-amd64",
+		"ultra-install-linux-arm64",
+		"ultra-ansible.tar.gz",
+		"ultra-ansible-runtime-linux-amd64.tar.gz",
+		"ultra-ansible-runtime-linux-arm64.tar.gz",
+		"mobile-bootstrap.sh",
+		"checksums.txt",
+	}
 	assets := make([]map[string]any, 0, len(names))
 	current := filepath.Join(t.TempDir(), "installer")
 	for _, name := range names {
@@ -159,7 +179,15 @@ func TestVerifyOperatorUpgradeReleaseBindsManifestCommitAndExecutable(t *testing
 			t.Fatal(err)
 		}
 	}
-	manifest := map[string]any{"schema_version": 1, "version": version, "source_commit": commit, "database_schema_min": 24, "database_schema_max": 25, "capabilities": []string{"service-access-v1", "provider-pool-quota-v1", "lifecycle-gate-v1", "ansible-deploy-v1"}, "assets": assets}
+	manifest := map[string]any{
+		"schema_version":      1,
+		"version":             version,
+		"source_commit":       commit,
+		"database_schema_min": 24,
+		"database_schema_max": 25,
+		"capabilities":        []string{"service-access-v1", "provider-pool-quota-v1", "lifecycle-gate-v1", "ansible-deploy-v1"},
+		"assets":              assets,
+	}
 	raw, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -194,10 +222,29 @@ func TestVerifyOperatorUpgradeReleaseBindsManifestCommitAndExecutable(t *testing
 
 func TestAutomationReleasePreflightRejectsIncompleteAndModified(t *testing.T) {
 	dir := t.TempDir()
-	p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "REALITY_DEST": "example.com:443"})
+	p := installplan.LegacyValuesToPlan(
+		map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "REALITY_DEST": "example.com:443"},
+	)
 	p.Bridge.ReuseSpec = true
-	p.Automation = &installplan.AutomationConfig{ReleaseDir: dir, Version: "v1.2.3", AgeRecipient: "age1test", BridgeProvider: "a", BridgeIPv4: "192.0.2.1", BridgeURL: "https://example.com/happ", KnownHostsFile: "/pins", StaticNodes: []installplan.AutomationNode{{Name: "NL", Address: "192.0.2.2", Provider: "a"}}}
-	names := []string{"ultra-relay-linux-amd64", "ultra-relay-linux-arm64", "ultra-bot-linux-amd64", "ultra-bot-linux-arm64", "ultra-client-linux-amd64", "ultra-client-linux-arm64", "ultra-recovery.tar.gz"}
+	p.Automation = &installplan.AutomationConfig{
+		ReleaseDir:     dir,
+		Version:        "v1.2.3",
+		AgeRecipient:   "age1test",
+		BridgeProvider: "a",
+		BridgeIPv4:     "192.0.2.1",
+		BridgeURL:      "https://example.com/happ",
+		KnownHostsFile: "/pins",
+		StaticNodes:    []installplan.AutomationNode{{Name: "NL", Address: "192.0.2.2", Provider: "a"}},
+	}
+	names := []string{
+		"ultra-relay-linux-amd64",
+		"ultra-relay-linux-arm64",
+		"ultra-bot-linux-amd64",
+		"ultra-bot-linux-arm64",
+		"ultra-client-linux-amd64",
+		"ultra-client-linux-arm64",
+		"ultra-recovery.tar.gz",
+	}
 	var assets []map[string]any
 	for _, name := range names {
 		data := []byte(name)
