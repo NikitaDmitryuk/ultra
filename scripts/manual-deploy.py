@@ -711,14 +711,15 @@ def verify_continuation():
             verify_private_tree(stage)
             verify_controller_artifacts(stage)
             names={p.name for p in stage.iterdir()}
-            need({'request.json','job.json','receipt.json','result.json'}<=names and
+            need({'request.json','job.json','receipt.json'}<=names and
                  names<={'request.json','job.json','receipt.json','result.json','inventory.json','inventory.yml',
                          'variables.json','variables.yml','bundle','ansible-tmp','bundle.retention.json','diagnostic.json',
                          '.ansible','execution.lock'},
                  'manual_forward_continuation_handoff_evidence_invalid')
             request_raw=read(stage/'request.json');job_raw=read(stage/'job.json')
-            receipt_raw=read(stage/'receipt.json');result_raw=read(stage/'result.json')
-            request=json.loads(request_raw);job=json.loads(job_raw);receipt=json.loads(receipt_raw);result=json.loads(result_raw)
+            receipt_raw=read(stage/'receipt.json')
+            request=json.loads(request_raw);job=json.loads(job_raw);receipt=json.loads(receipt_raw)
+            result=json.loads(read(stage/'result.json')) if 'result.json' in names else None
             reqsha=digest(request_raw)
             if stage in drains:
                 expected_result={'verified':True,'old_id':expected_old_id,'new_id':expected_new_id}
@@ -730,8 +731,54 @@ def verify_continuation():
                          for item in (job,receipt)) and receipt.get('state')=='succeeded' and receipt.get('code','')=='' and
                      result==expected_result and result==receipt.get('result'),
                      'manual_forward_continuation_handoff_evidence_invalid')
+            elif stage in bootstraps and receipt.get('state')=='failed':
+                # The first task is a read-only guard; a failure here precedes
+                # include_role, notifications and restart. The callback records
+                # task identity, not the module's private failure reason.
+                diagnostic={'stage':'Verify frozen broker identity and predecessor gate before replacement',
+                            'node':'bridge','code':'task_failed'}
+                variables=request.get('variables',{})
+                need('result.json' not in names and 'result' not in receipt and
+                     'diagnostic.json' in names and receipt.get('code')=='ansible_failed' and
+                     type(receipt.get('exit_code')) is int and receipt['exit_code']==2 and
+                     receipt.get('diagnostic')==diagnostic and json.loads(read(stage/'diagnostic.json'))==diagnostic and
+                     variables.get('ultra_lock_directory')==str(state) and
+                     variables.get('ultra_forward_old_id')==expected_old_id and
+                     variables.get('ultra_forward_candidate_id')==expected_new_id and
+                     variables.get('ultra_controller_directory')=='/opt/ultra-ansible/releases/managed-'+version and
+                     all(item.get('schema_version')==1 and item.get('operation')=='bootstrap-forward-broker' and
+                         item.get('request_sha256')==reqsha and item.get('binary_sha256')==reqsha for item in (job,receipt)),
+                     'manual_forward_continuation_handoff_evidence_invalid')
+                # Bind the frozen fleet and old broker identity to the original
+                # activation request. Go also rechecks the complete bootstrap
+                # request, signed bundle, lease and live broker before mutation.
+                old_operation=state/('upgrade-'+old_version)
+                verify_private_tree(old_operation)
+                old_request_raw=read(old_operation/'activate/request.json')
+                old_request=json.loads(old_request_raw)
+                need(old_request.get('variables',{}).get('ultra_lifecycle_id')==expected_old_id and
+                     isinstance(request.get('inventory'),dict) and request['inventory']==old_request.get('inventory'),
+                     'manual_forward_continuation_handoff_evidence_invalid')
+                for name in ['job.json','receipt.json']:
+                    item=json.loads(read(old_operation/'activate'/name))
+                    need(item.get('schema_version')==1 and item.get('operation')=='upgrade' and
+                         item.get('request_sha256')==digest(old_request_raw) and item.get('binary_sha256')==digest(old_request_raw),
+                         'manual_forward_continuation_handoff_evidence_invalid')
+                bridge=request['inventory'].get('all',{}).get('children',{}).get('bridge',{}).get('hosts',{})
+                need(set(bridge)=={'bridge'},'manual_forward_continuation_handoff_evidence_invalid')
+                frozen=bridge['bridge']
+                old_identity={'directory':frozen.get('ultra_controller_directory'),
+                    'installer_sha256':frozen.get('ultra_install_sha256'),
+                    'runtime_sha256':frozen.get('ultra_controller_runtime_sha256'),
+                    'unit_sha256':frozen.get('ultra_target_controller_unit_sha256')}
+                need(old_identity['directory']=='/opt/ultra-ansible/releases/managed-'+old_version and
+                     all(isinstance(old_identity[key],str) and re.fullmatch('[a-f0-9]{64}',old_identity[key])
+                         for key in ['installer_sha256','runtime_sha256','unit_sha256']) and
+                     isinstance(variables.get('ultra_forward_expected_brokers'),list) and
+                     old_identity in variables['ultra_forward_expected_brokers'],
+                     'manual_forward_continuation_handoff_evidence_invalid')
             else:
-                need(request.get('variables',{}).get('ultra_lock_directory')==str(state) and
+                need(isinstance(result,dict) and request.get('variables',{}).get('ultra_lock_directory')==str(state) and
                      request.get('variables',{}).get('ultra_forward_old_id')==expected_old_id and
                      all(item.get('schema_version')==1 and item.get('operation')=='bootstrap-forward-broker' and
                          item.get('request_sha256')==reqsha and item.get('binary_sha256')==reqsha

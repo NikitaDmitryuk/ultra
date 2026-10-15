@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -145,6 +146,7 @@ func verifyForwardPriorCandidate(proof forwardUpgradeJournal, old forwardOldOper
 		return fail
 	}
 	drains := 0
+	failedBootstraps := 0
 	hasIntent := false
 	for _, entry := range entries {
 		path := filepath.Join(prior.Directory, entry.Name())
@@ -163,6 +165,14 @@ func verifyForwardPriorCandidate(proof forwardUpgradeJournal, old forwardOldOper
 				return fail
 			}
 		default:
+			if strings.HasPrefix(entry.Name(), "broker-bootstrap-") {
+				variables, err := forwardBootstrapVariables(old, priorManifest, root, prior.Directory, release)
+				if err != nil || verifyForwardFailedBootstrap(path, filepath.Join(release, "ultra-ansible.tar.gz"), old, variables) != nil {
+					return fail
+				}
+				failedBootstraps++
+				continue
+			}
 			if !strings.HasPrefix(entry.Name(), "handoff-drain-") || operatorPrivate(path, true) != nil {
 				return fail
 			}
@@ -178,7 +188,7 @@ func verifyForwardPriorCandidate(proof forwardUpgradeJournal, old forwardOldOper
 	// Verified drain stages can survive a failure before the handoff intent was
 	// published. They authenticate retained artifacts, but do not replace the
 	// caller's fresh census under the old OFD when that intent is absent.
-	if hasIntent && drains == 0 {
+	if hasIntent && (drains == 0 || failedBootstraps != 0) {
 		return fail
 	}
 	return nil
@@ -312,6 +322,115 @@ func verifyForwardControllerWorkspace(directory string) error {
 	})
 }
 
+// Reconstruct the same complete request for a retained stage and a new dispatch.
+func forwardBootstrapVariables(old forwardOldOperation, manifest *automationRelease, root, directory, release string) (map[string]any, error) {
+	fail := errors.New("upgrade_forward_broker_bootstrap_unverified")
+	installer, err := upgradeAsset(manifest, "ultra-install-linux-"+runtime.GOARCH)
+	if err != nil {
+		return nil, fail
+	}
+	offline, err := upgradeAsset(manifest, "ultra-ansible-runtime-linux-"+runtime.GOARCH+".tar.gz")
+	if err != nil {
+		return nil, fail
+	}
+	variables := map[string]any{"ultra_lock_directory": root, "ultra_forward_old_id": old.ID, "ultra_controller_directory": managedControllerDirectory(manifest.Version), "ultra_install_source": filepath.Join(release, installer.Name), "ultra_install_sha256": installer.SHA, "ultra_controller_runtime_archive": filepath.Join(release, offline.Name), "ultra_controller_runtime_sha256": offline.SHA}
+
+	identities, err := forwardBrokerVariables(old, manifest)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range identities {
+		variables[key] = value
+	}
+	variables["ultra_forward_candidate_id"] = lifecycleID(directory)
+	return variables, nil
+}
+
+// Only the exact read-only first guard may fail before a replacement candidate.
+// Its diagnostic identifies the task, not the private module failure reason.
+// The caller must still perform the fresh lease, census and live identity gates.
+func verifyForwardFailedBootstrap(stage, archive string, old forwardOldOperation, variables map[string]any) error {
+	fail := errors.New("upgrade_forward_prior_bootstrap_unverified")
+	if operatorPrivate(old.Directory, true) != nil || operatorPrivate(filepath.Join(old.Directory, "activate"), true) != nil ||
+		operatorPrivate(stage, true) != nil || verifyForwardDrainFiles(stage, archive) != nil {
+		return fail
+	}
+	if _, err := os.Lstat(filepath.Join(stage, "result.json")); !os.IsNotExist(err) {
+		return fail
+	}
+	// Bind the frozen fleet to the original activation request.
+	oldRaw, err := readForwardEvidence(filepath.Join(old.Directory, "activate", "request.json"))
+	var original struct {
+		Inventory map[string]any `json:"inventory"`
+	}
+	if err != nil || json.Unmarshal(oldRaw, &original) != nil || original.Inventory == nil || !reflect.DeepEqual(original.Inventory, old.Inventory) {
+		return fail
+	}
+	expected, err := json.Marshal(map[string]any{"inventory": old.Inventory, "variables": variables})
+	if err != nil {
+		return fail
+	}
+	request, err := readForwardEvidence(filepath.Join(stage, "request.json"))
+	if err != nil {
+		return fail
+	}
+	if !bytes.Equal(request, expected) {
+		// Before predecessor support, the same bootstrap request omitted only
+		// this optional identity. Reconstruct that exact historical shape;
+		// never normalize or discard fields from the retained request itself.
+		legacyVariables := make(map[string]any, len(variables))
+		for key, value := range variables {
+			if key != "ultra_forward_previous_broker" {
+				legacyVariables[key] = value
+			}
+		}
+		legacyExpected, err := json.Marshal(map[string]any{"inventory": old.Inventory, "variables": legacyVariables})
+		if err != nil || !bytes.Equal(request, legacyExpected) {
+			return fail
+		}
+	}
+	diagnostic := deployansible.Diagnostic{Stage: "Verify frozen broker identity and predecessor gate before replacement", Node: "bridge", Code: "task_failed"}
+	decode := func(name string, value any) error {
+		raw, err := readForwardEvidence(filepath.Join(stage, name))
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err != nil || decoder.Decode(value) != nil || decoder.Decode(new(any)) != io.EOF {
+			return fail
+		}
+		return nil
+	}
+	var savedDiagnostic deployansible.Diagnostic
+	if decode("diagnostic.json", &savedDiagnostic) != nil || savedDiagnostic != diagnostic {
+		return fail
+	}
+	for _, name := range []string{"job.json", "receipt.json"} {
+		var evidence struct {
+			Schema     int                       `json:"schema_version"`
+			Operation  string                    `json:"operation"`
+			Request    string                    `json:"request_sha256"`
+			Binary     string                    `json:"binary_sha256"`
+			State      string                    `json:"state,omitempty"`
+			Code       string                    `json:"code,omitempty"`
+			ExitCode   *int                      `json:"exit_code,omitempty"`
+			Diagnostic *deployansible.Diagnostic `json:"diagnostic,omitempty"`
+			StartedAt  *int64                    `json:"started_at,omitempty"`
+			FinishedAt *int64                    `json:"finished_at,omitempty"`
+		}
+		if decode(name, &evidence) != nil || evidence.Schema != 1 || evidence.Operation != "bootstrap-forward-broker" ||
+			evidence.Request != digestSHA256(request) || evidence.Binary != digestSHA256(request) {
+			return fail
+		}
+		if name == "receipt.json" {
+			if evidence.State != "failed" || evidence.Code != "ansible_failed" || evidence.ExitCode == nil || *evidence.ExitCode != 2 || evidence.Diagnostic == nil || *evidence.Diagnostic != diagnostic {
+				return fail
+			}
+		} else if evidence.State != "" || evidence.Code != "" || evidence.ExitCode != nil || evidence.Diagnostic != nil || evidence.StartedAt != nil || evidence.FinishedAt != nil {
+			return fail
+		}
+	}
+	return nil
+}
+
 func bootstrapForwardBroker(ctx context.Context, proof forwardUpgradeJournal, plan *installplan.InstallPlan, old forwardOldOperation, root, directory, python, executable string) error {
 	fail := errors.New("upgrade_forward_broker_bootstrap_unverified")
 	if plan.Automation == nil {
@@ -322,24 +441,10 @@ func bootstrapForwardBroker(ctx context.Context, proof forwardUpgradeJournal, pl
 	if err != nil {
 		return fail
 	}
-	installer, err := upgradeAsset(manifest, "ultra-install-linux-"+runtime.GOARCH)
-	if err != nil {
-		return fail
-	}
-	offline, err := upgradeAsset(manifest, "ultra-ansible-runtime-linux-"+runtime.GOARCH+".tar.gz")
-	if err != nil {
-		return fail
-	}
-	variables := map[string]any{"ultra_lock_directory": root, "ultra_forward_old_id": old.ID, "ultra_controller_directory": managedControllerDirectory(a.Version), "ultra_install_source": filepath.Join(a.ReleaseDir, installer.Name), "ultra_install_sha256": installer.SHA, "ultra_controller_runtime_archive": filepath.Join(a.ReleaseDir, offline.Name), "ultra_controller_runtime_sha256": offline.SHA}
-
-	identities, err := forwardBrokerVariables(old, manifest)
+	variables, err := forwardBootstrapVariables(old, manifest, root, directory, a.ReleaseDir)
 	if err != nil {
 		return err
 	}
-	for key, value := range identities {
-		variables[key] = value
-	}
-	variables["ultra_forward_candidate_id"] = lifecycleID(directory)
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return err

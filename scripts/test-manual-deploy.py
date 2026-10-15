@@ -1622,6 +1622,150 @@ class RemoteProgram(unittest.TestCase):
         self.assertEqual(doctor.returncode, 0, doctor.stderr)
 
 
+    def failed_broker_guard_fixture(self):
+        operation, _, old_id, proof, prior_sha, _ = self.absent_operation_fixture()
+        operation.mkdir(mode=0o700)
+        for name in ['operator-plan.json', 'execution-mode.json']:
+            D.atomic_write(operation / name, b'{}')
+        old_version = json.loads(proof)['version']
+        old_operation = self.parent.parent / ('upgrade-' + old_version)
+        (old_operation / 'activate').mkdir(parents=True, mode=0o700)
+        old_operation.chmod(0o700)
+        identity = {'directory': '/opt/ultra-ansible/releases/managed-' + old_version,
+                    'installer_sha256': '1' * 64, 'runtime_sha256': '2' * 64, 'unit_sha256': '3' * 64}
+        inventory = {'all': {'children': {'bridge': {'hosts': {'bridge': {
+            'ultra_controller_directory': identity['directory'],
+            'ultra_install_sha256': identity['installer_sha256'],
+            'ultra_controller_runtime_sha256': identity['runtime_sha256'],
+            'ultra_target_controller_unit_sha256': identity['unit_sha256']}}}}}}
+        old_request = json.dumps({'inventory': inventory, 'variables': {'ultra_lifecycle_id': old_id}}).encode()
+        old_job = {'schema_version': 1, 'operation': 'upgrade',
+                   'request_sha256': D.sha(old_request), 'binary_sha256': D.sha(old_request)}
+        D.atomic_write(old_operation / 'activate/request.json', old_request)
+        for name in ['job.json', 'receipt.json']:
+            D.atomic_write(old_operation / 'activate' / name, json.dumps(old_job).encode())
+        new_id = str(D.uuid.UUID(bytes=hashlib.sha256(str(operation).encode()).digest()[:16], version=4))
+        stage = operation / 'broker-bootstrap-fixture'
+        stage.mkdir(mode=0o700)
+        request = json.dumps({'inventory': inventory, 'variables': {
+            'ultra_lock_directory': str(self.parent.parent), 'ultra_forward_old_id': old_id,
+            'ultra_forward_candidate_id': new_id, 'ultra_forward_expected_brokers': [identity],
+            'ultra_controller_directory': '/opt/ultra-ansible/releases/managed-' + self.version}}).encode()
+        job = {'schema_version': 1, 'operation': 'bootstrap-forward-broker',
+               'request_sha256': D.sha(request), 'binary_sha256': D.sha(request)}
+        diagnostic = {'stage': 'Verify frozen broker identity and predecessor gate before replacement',
+                      'node': 'bridge', 'code': 'task_failed'}
+        receipt = dict(job, state='failed', code='ansible_failed', exit_code=2, diagnostic=diagnostic)
+        for name, value in [('request.json', request), ('job.json', json.dumps(job).encode()),
+                            ('receipt.json', json.dumps(receipt).encode()),
+                            ('diagnostic.json', json.dumps(diagnostic).encode())]:
+            D.atomic_write(stage / name, value)
+        return operation, stage, proof, prior_sha
+
+    def test_continuation_accepts_only_pre_mutation_failed_broker_guard(self):
+        operation, stage, proof, prior_sha = self.failed_broker_guard_fixture()
+        before = {str(p): p.read_bytes() for p in self.parent.parent.rglob('*') if p.is_file()}
+        continued = self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha)
+        self.assertEqual(continued.returncode, 0, continued.stderr)
+        self.assertEqual(json.loads(continued.stdout)['prior_candidate']['version'], self.version)
+        self.assertFalse((stage / 'result.json').exists())
+        self.assertFalse((operation / 'forward-handoff.json').exists())
+        self.assertFalse(self.result.exists())
+        self.assertEqual({str(p): p.read_bytes() for p in self.parent.parent.rglob('*') if p.is_file()}, before)
+
+    def test_failed_broker_guard_rejects_changed_or_missing_evidence(self):
+        operation, stage, proof, prior_sha = self.failed_broker_guard_fixture()
+        def reject():
+            result = self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(self.result.exists())
+        changes = [('receipt.json', 'state', 'running'), ('receipt.json', 'code', 'controller_failed'),
+                   ('receipt.json', 'exit_code', 1), ('receipt.json', 'exit_code', True),
+                   ('receipt.json', 'operation', 'upgrade'), ('job.json', 'operation', 'upgrade'),
+                   ('job.json', 'request_sha256', 'f' * 64), ('receipt.json', 'binary_sha256', 'f' * 64),
+                   ('receipt.json', 'result', {'verified': True}),
+                   ('diagnostic.json', 'stage', 'Install only immutable broker runtime and service'),
+                   ('diagnostic.json', 'node', 'exit'), ('diagnostic.json', 'code', 'host_unreachable')]
+        for name, key, value in changes:
+            with self.subTest(file=name, field=key, value=value):
+                path = stage / name
+                raw = path.read_bytes()
+                changed = json.loads(raw)
+                changed[key] = value
+                D.atomic_write(path, json.dumps(changed).encode())
+                reject()
+                D.atomic_write(path, raw)
+        for name in ['request.json', 'job.json', 'receipt.json', 'diagnostic.json']:
+            with self.subTest(missing=name):
+                path = stage / name
+                raw = path.read_bytes()
+                path.unlink()
+                reject()
+                D.atomic_write(path, raw)
+        # Even matching diagnostics cannot bless a later, mutating task.
+        receipt_raw = (stage / 'receipt.json').read_bytes()
+        diagnostic_raw = (stage / 'diagnostic.json').read_bytes()
+        diagnostic = json.loads(diagnostic_raw)
+        diagnostic['stage'] = 'Restart even if an earlier attempt already installed this runtime'
+        receipt = json.loads(receipt_raw)
+        receipt['diagnostic'] = diagnostic
+        D.atomic_write(stage / 'diagnostic.json', json.dumps(diagnostic).encode())
+        D.atomic_write(stage / 'receipt.json', json.dumps(receipt).encode())
+        reject()
+        D.atomic_write(stage / 'diagnostic.json', diagnostic_raw)
+        D.atomic_write(stage / 'receipt.json', receipt_raw)
+        # Request hashes alone cannot substitute another fleet or broker.
+        request_raw = (stage / 'request.json').read_bytes()
+        job_raw = (stage / 'job.json').read_bytes()
+        for key, value in [('ultra_forward_old_id', 'foreign'), ('ultra_forward_candidate_id', 'foreign'),
+                           ('ultra_forward_expected_brokers', []), ('ultra_controller_directory', '/tmp/foreign')]:
+            with self.subTest(variable=key):
+                request = json.loads(request_raw)
+                request['variables'][key] = value
+                raw = json.dumps(request).encode()
+                D.atomic_write(stage / 'request.json', raw)
+                for name, saved in [('job.json', job_raw), ('receipt.json', receipt_raw)]:
+                    item = json.loads(saved)
+                    item['request_sha256'] = item['binary_sha256'] = D.sha(raw)
+                    D.atomic_write(stage / name, json.dumps(item).encode())
+                reject()
+        with self.subTest(inventory='changed with matching request hashes'):
+            request = json.loads(request_raw)
+            request['inventory']['all']['children']['bridge']['hosts']['bridge']['ansible_host'] = '192.0.2.99'
+            raw = json.dumps(request).encode()
+            D.atomic_write(stage / 'request.json', raw)
+            for name, saved in [('job.json', job_raw), ('receipt.json', receipt_raw)]:
+                item = json.loads(saved)
+                item['request_sha256'] = item['binary_sha256'] = D.sha(raw)
+                D.atomic_write(stage / name, json.dumps(item).encode())
+            reject()
+        D.atomic_write(stage / 'request.json', request_raw)
+        D.atomic_write(stage / 'job.json', job_raw)
+        D.atomic_write(stage / 'receipt.json', receipt_raw)
+        old_version = json.loads(proof)['version']
+        old_activate = self.parent.parent / ('upgrade-' + old_version) / 'activate'
+        for name in ['request.json', 'job.json', 'receipt.json']:
+            with self.subTest(missing_predecessor=name):
+                path = old_activate / name
+                raw = path.read_bytes()
+                path.unlink()
+                reject()
+                D.atomic_write(path, raw)
+        with self.subTest(missing_prior_journal_digest=True):
+            self.assertNotEqual(self.execute('continue', forward_sha=D.sha(proof)).returncode, 0)
+        for path in [stage / 'result.json', operation / 'forward-handoff.json']:
+            D.atomic_write(path, b'{}')
+            reject()
+            path.unlink()
+        (operation / 'activate').mkdir(mode=0o700)
+        reject()
+        (operation / 'activate').rmdir()
+        lifecycle = self.parent.parent / 'lifecycle.json'
+        original = json.loads(lifecycle.read_bytes())
+        for state in [dict(original, phase='released'), dict(original, id='foreign')]:
+            D.atomic_write(lifecycle, json.dumps(state).encode())
+            reject()
+
     def test_continuation_attests_existing_inputs_and_pre_handoff_lifecycle(self):
         old_commit = 'b' * 40
         old_version = 'v0.0.' + str(int(old_commit, 16))
