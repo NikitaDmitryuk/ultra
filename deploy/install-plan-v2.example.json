@@ -44,8 +44,7 @@
     "env_file": "/secure/.env"
   },
   "features": {
-    "preset": "steamlike",
-    "generate_exit_tls": true
+    "main_exit_domain": "tunnel.example.com"
   },
   "automation": {
     "version": "v1.0.0",

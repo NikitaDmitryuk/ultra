@@ -11,6 +11,8 @@ import (
 func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 	for key := range v {
 		switch key {
+		case "PRESET":
+			return nil, errors.New("PRESET is removed; configure MAIN_EXIT_DOMAIN for the managed XHTTP TLS tunnel")
 		case "BRIDGE", "EXIT", "DB_HOST", "IDENTITY", "FRONT", "BACK", "BRIDGE_SSH_HOST", "BRIDGE_SSH_IDENTITY", "EXIT_SSH_IDENTITY", "DB_SSH_IDENTITY", "DB_ENABLE", "DB_REPLICA", "DB_SSH_USER", "EXIT2", "EXIT2_SSH_IDENTITY", "EXIT2_NAME", "EXIT2_DIAL", "EXIT2_PRIORITY":
 			return nil, errors.New("removed deployment key " + key + "; use the canonical per-server IP and SSH_KEY fields")
 		}
@@ -20,6 +22,9 @@ func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 		if DisallowedDeploymentSecret(key) {
 			return nil, errors.New("secret key " + key + " belongs outside install.config")
 		}
+	}
+	if version := valueDefault(v, "INSTALL_SCHEMA_VERSION", "2"); version != "2" {
+		return nil, errors.New("only install schema 2 is supported")
 	}
 	p := LegacyValuesToPlan(v)
 	if p.Secrets.DatabaseDumpFile != "" {
@@ -33,14 +38,7 @@ func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 	for key, value := range v {
 		p.SourceValues[key] = value
 	}
-	version := valueDefault(v, "INSTALL_SCHEMA_VERSION", "1")
-	if version == "1" {
-		return p, nil
-	}
-	if version != "2" {
-		return nil, errors.New("INSTALL_SCHEMA_VERSION must be 1 or 2")
-	}
-	p.SchemaVersion = 2
+	p.SchemaVersion = CurrentSchemaVersion
 	p.Secrets.EnvFile = valueDefault(v, "SECRETS_ENV_FILE", p.SecretsEnvFile())
 	a := &AutomationConfig{Version: v["ULTRA_AUTOMATION_VERSION"], ReleaseDir: v["ULTRA_AUTOMATION_RELEASE_DIR"], AgeRecipient: v["ULTRA_AUTOMATION_AGE_RECIPIENT"], BridgeProvider: v["ULTRA_AUTOMATION_BRIDGE_PROVIDER"], BridgeIPv4: p.Bridge.Address, BridgeURL: valueDefault(v, "ULTRA_AUTOMATION_BRIDGE_URL", "https://"+p.PublicSubscriptionDomain()+"/healthz"), KnownHostsFile: v["ULTRA_AUTOMATION_KNOWN_HOSTS_FILE"]}
 	if err := json.Unmarshal([]byte(v["ULTRA_AUTOMATION_STATIC_NODES"]), &a.StaticNodes); err != nil {

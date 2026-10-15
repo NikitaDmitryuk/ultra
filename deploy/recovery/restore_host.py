@@ -564,12 +564,23 @@ class Host:
         import dns
         policy = json.loads(dns.private('/etc/ultra-recovery/dns.json').read_text())
         config, previous = policy['config'], dict(policy['desired'])
-        if set(previous) not in ({'subscription', 'vpn'}, {'subscription', 'vpn', 'backend'}):
+        if not ({'subscription', 'vpn'} <= set(previous) <= {'subscription', 'vpn', 'backend', 'tunnel'}):
             raise ValueError('restored_dns_policy_required')
         # Older bootstrap plans may save only the public pair while DNS ownership
         # already includes the separately migrated backend. Move that owned record
         # with the bridge rather than silently retaining the fenced source address.
         receipt = json.loads(dns.private('/etc/ultra-recovery/dns-receipt.json').read_text())
+        # The tunnel belongs to the exit, which is not moved with this bridge.
+        tunnel = receipt.get('records', {}).get('tunnel')
+        if tunnel is not None:
+            if receipt.get('version') != 1 or receipt.get('zone') != config['zone']:
+                raise ValueError('restored_dns_policy_mismatch')
+            dns._validate_owned_row(tunnel)
+            if 'tunnel' in previous and (previous['tunnel'].get('name') != tunnel['name'] or previous['tunnel'].get('data') != tunnel['data']):
+                raise ValueError('restored_dns_policy_mismatch')
+            previous['tunnel'] = {'name': tunnel['name'], 'data': tunnel['data']}
+        elif 'tunnel' in previous:
+            raise ValueError('restored_dns_policy_mismatch')
         backend = receipt.get('records', {}).get('backend')
         if backend is not None:
             if (receipt.get('version') != 1 or receipt.get('zone') != config['zone']
@@ -588,7 +599,7 @@ class Host:
         names = {role: previous[role]['name'] + '.' + config['zone'] for role in previous}
         if names['subscription'] != self.plan['subscription_domain'] or names['vpn'] != self.plan['public_host']:
             raise ValueError('restored_dns_policy_mismatch')
-        desired = {role: dict(previous[role], data=self.plan['new_bridge_address']) for role in previous}
+        desired = {role: dict(previous[role], data=(previous[role]['data'] if role == 'tunnel' else self.plan['new_bridge_address'])) for role in previous}
         backend_port = None
         backend_hostname = None
         if backend is not None:

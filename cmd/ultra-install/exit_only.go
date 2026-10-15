@@ -104,7 +104,7 @@ func runExitOnly(o exitOnlyOpts) {
 
 	preset := strings.TrimSpace(bridge.MimicPreset)
 	if preset == "" {
-		preset = "apijson"
+		preset = "standard"
 	}
 	strat, err := mimic.New(preset)
 	if err != nil {

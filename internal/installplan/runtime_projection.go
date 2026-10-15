@@ -49,7 +49,7 @@ func ProjectDesiredRuntime(p *InstallPlan, opts RenderOptions) (*RuntimeProjecti
 	if p == nil || p.SourceValues == nil {
 		return nil, fmt.Errorf("desired runtime projection requires canonical config presence")
 	}
-	desired, err := validatedRuntimePlan(p)
+	desired, err := validatedRuntimePlan(p, false)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +146,7 @@ func runtimeSet(doc map[string]json.RawMessage, key string, value any) {
 	doc[key], _ = json.Marshal(value)
 }
 
-func validatedRuntimePlan(p *InstallPlan) (*InstallPlan, error) {
+func validatedRuntimePlan(p *InstallPlan, local bool) (*InstallPlan, error) {
 	if p == nil || p.SourceValues == nil {
 		return nil, fmt.Errorf("desired runtime projection requires canonical config presence")
 	}
@@ -162,7 +162,14 @@ func validatedRuntimePlan(p *InstallPlan) (*InstallPlan, error) {
 	desired.SourceValues = p.SourceValues
 	desired.ControllerLocalTarget = p.ControllerLocalTarget
 	desired.ControllerLocal = p.ControllerLocal
-	if err = ValidatePlan(&desired); err != nil {
+	if local && desired.SchemaVersion == 1 {
+		// Local probe/prepare requests are versioned independently of external
+		// installation plans and intentionally omit fleet/automation policy.
+		err = validatePlan(&desired, true)
+	} else {
+		err = ValidatePlan(&desired)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &desired, nil
@@ -183,7 +190,7 @@ type LocalRuntimeProjection struct {
 // The caller must verify node/database identity and coordinate Transitions before
 // activating the candidate; this pure function does not authorize deployment.
 func ProjectLocalRuntime(p *InstallPlan, raw []byte, role config.Role, nodeName string) (*LocalRuntimeProjection, error) {
-	p, err := validatedRuntimePlan(p)
+	p, err := validatedRuntimePlan(p, true)
 	if err != nil {
 		return nil, err
 	}

@@ -1,4 +1,11 @@
 ---
+- name: Reconcile dedicated exit DNS before HTTP-01 issuance
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: dns
+      when: ultra_dns_desired is defined and 'tunnel' in ultra_dns_desired
 - name: Generate application database tunnel identity
   hosts: bridge
   gather_facts: false
@@ -56,6 +63,8 @@
     - host
     - role: warp
       when: ultra_warp_enabled | default(false) | bool
+    - role: tunnel_certificate
+      when: ultra_tunnel_domain | default('') | length > 0
     - relay
 - name: Configure bridge after verified exit activation
   hosts: bridge
@@ -78,7 +87,7 @@
           - item.pinned_peer_cert_sha256 == (hostvars[ultra_exit_hosts[item.name]].relay_fingerprint.stdout.split('=')[-1] | replace(':', '') | lower)
         fail_msg: adopted_exit_certificate_pin_mismatch
       loop: "{{ ultra_bootstrap_entries }}"
-      when: ultra_preserve_runtime | default(false) | bool
+      when: (ultra_preserve_runtime | default(false) | bool) and ultra_spec.tunnel_tls_provision != 'acme_letsencrypt'
       no_log: true
     - name: Require the frozen database topology before bridge activation
       ultra_adopt_topology:
@@ -97,12 +106,17 @@
              hostvars[ultra_exit_hosts[item.name]].relay_fingerprint.stdout.split('=')[-1] | replace(':', '') | lower})] }}
       loop: "{{ ultra_bootstrap_entries }}"
       no_log: true
-      when: not (ultra_preserve_runtime | default(false) | bool)
+      when: not (ultra_preserve_runtime | default(false) | bool) and ultra_spec.tunnel_tls_provision != 'acme_letsencrypt'
+    - name: Use CA authentication for managed tunnel routes
+      ansible.builtin.set_fact:
+        bootstrap_pinned: "{{ ultra_bootstrap_entries }}"
+      when: ultra_spec.tunnel_tls_provision == 'acme_letsencrypt'
+      no_log: true
     - name: Preserve the primary exit certificate pin
       ansible.builtin.set_fact:
         ultra_spec: "{{ ultra_spec | combine({'exit': ultra_spec.exit | combine({'pinned_peer_cert_sha256': bootstrap_pinned[0].pinned_peer_cert_sha256})}) }}"
       no_log: true
-      when: not (ultra_preserve_runtime | default(false) | bool)
+      when: not (ultra_preserve_runtime | default(false) | bool) and ultra_spec.tunnel_tls_provision != 'acme_letsencrypt'
   roles:
     - host
     - role: geo

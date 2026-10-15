@@ -175,7 +175,7 @@ def _execute(config, desired, receiptpath):
     ttl = config.get('ttl', 300)
     if config.get('provider') != 'vultr' or len(zone) > 253 or '.' not in zone or not all(LABEL.fullmatch(x) for x in zone.split('.')):
         fail('invalid_policy')
-    if type(ttl) is not int or not 120 <= ttl <= 86400 or set(desired) not in ({'subscription', 'vpn'}, {'subscription', 'vpn', 'backend'}):
+    if type(ttl) is not int or not 120 <= ttl <= 86400 or not ({'subscription', 'vpn'} <= set(desired) <= {'subscription', 'vpn', 'backend', 'tunnel'}):
         fail('invalid_policy')
     targets = {}
     for role, item in desired.items():
@@ -197,15 +197,15 @@ def _execute(config, desired, receiptpath):
             fail('invalid_receipt')
         if not isinstance(state, dict) or state.get('version') != 1 or state.get('zone') != zone or not isinstance(state.get('records'), dict):
             fail('receipt_policy_mismatch')
-    # Public-only callers must retain an already-owned backend introduced by the
-    # bounded certificate migration. Absence from an older plan is not deletion.
-    if 'backend' in state['records'] and 'backend' not in targets:
-        owned_backend = state['records']['backend']
-        if not isinstance(owned_backend, dict) or set(owned_backend) != {'id', 'type', 'name', 'data', 'ttl'}:
-            fail('invalid_receipt')
-        targets['backend'] = {key: owned_backend[key] for key in ('type', 'name', 'data', 'ttl')}
-        if len({row['name'] for row in targets.values()}) != len(targets):
-            fail('duplicate_roles')
+    # Older bounded public-domain operations retain separately owned records.
+    for role in ('backend', 'tunnel'):
+        if role in state['records'] and role not in targets:
+            owned = state['records'][role]
+            if not isinstance(owned, dict) or set(owned) != {'id', 'type', 'name', 'data', 'ttl'}:
+                fail('invalid_receipt')
+            targets[role] = {key: owned[key] for key in ('type', 'name', 'data', 'ttl')}
+    if len({row['name'] for row in targets.values()}) != len(targets):
+        fail('duplicate_roles')
     if not set(state['records']) <= set(targets):
         fail('invalid_receipt')
     for row in state['records'].values():
@@ -310,7 +310,7 @@ def _read_migration_receipt(path, zone, pending=False):
         fail('invalid_receipt')
     if (not isinstance(state, dict) or state.get('version') != 1
             or state.get('zone') != zone or not isinstance(state.get('records'), dict)
-            or not set(state['records']) <= {'subscription', 'vpn', 'backend'}
+            or not set(state['records']) <= {'subscription', 'vpn', 'backend', 'tunnel'}
             or (not pending and state.get('pending'))):
         fail('invalid_receipt')
     ids, names = set(), set()
@@ -330,7 +330,7 @@ def _migration_targets(config, desired):
             or type(ttl) is not int or not 120 <= ttl <= 86400
             or not isinstance(desired, dict)
             or not {'subscription', 'vpn'} <= set(desired)
-            or not set(desired) <= {'subscription', 'vpn', 'backend'}):
+            or not set(desired) <= {'subscription', 'vpn', 'backend', 'tunnel'}):
         fail('invalid_policy')
     targets = {}
     for role, item in desired.items():
@@ -353,11 +353,11 @@ def _check_migration_candidate(candidate, state):
     if any(candidate['records'].get(role) != row for role, row in state['seed']['records'].items()):
         fail('migration_candidate_changed')
     for role, row in candidate['records'].items():
-        if role == 'backend':
-            if 'backend' not in state['targets']:
+        if role in ('backend', 'tunnel'):
+            if role not in state['targets']:
                 if row != state['seed']['records'].get(role):
                     fail('migration_candidate_changed')
-            elif state['targets']['backend'] is None or not same(row, state['targets']['backend']):
+            elif state['targets'][role] is None or not same(row, state['targets'][role]):
                 fail('migration_candidate_changed')
         elif not same(row, state['targets'][role]):
             fail('migration_candidate_changed')
@@ -446,11 +446,11 @@ def _migration(action, config, desired, old_receipt, new_receipt, journal, accep
                 fail('migration_candidate_exists')
             seed = {'version': 1, 'zone': config['zone'], 'records': {}}
             for role, owned in old['records'].items():
-                if role == 'backend' and 'backend' not in targets:
+                if role in ('backend', 'tunnel') and role not in targets:
                     seed['records'][role] = owned
-                elif role == 'backend' and targets['backend'] is not None and same(owned, targets['backend']):
+                elif role in ('backend', 'tunnel') and targets[role] is not None and same(owned, targets[role]):
                     seed['records'][role] = owned
-                elif role != 'backend' and same(owned, targets[role]):
+                elif role not in ('backend', 'tunnel') and same(owned, targets[role]):
                     seed['records'][role] = owned
             old_names = {row['name'] for row in old['records'].values()}
             if any(target is not None and target['name'] in old_names and role not in seed['records']

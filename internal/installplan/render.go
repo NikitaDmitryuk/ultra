@@ -106,6 +106,9 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 	if p.Features.GenerateExitTLS {
 		tlsProv = config.TunnelTLSSelfSigned
 	}
+	if p.Features.MainExitDomain != "" {
+		tlsProv = config.TunnelTLSACME
+	}
 	var realitySpec config.RealitySpec
 	if p.Bridge.ReuseSpec {
 		realitySpec = opts.ExistingBridge.Reality

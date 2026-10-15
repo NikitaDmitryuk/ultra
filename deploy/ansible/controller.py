@@ -28,6 +28,24 @@ def operation_playbook(operation):
         raise ValueError('unsupported_operation') from None
 
 
+def bootstrap_ca_name(inventory, alias):
+    """Bind CA receipts to the frozen request policy, never self-reported mode."""
+    host = inventory.get('all', {}).get('children', {}).get('exits', {}).get('hosts', {}).get(alias)
+    if not isinstance(host, dict):
+        raise ValueError('invalid_bootstrap_exit_identity')
+    domain = host.get('ultra_tunnel_domain', '')
+    if not domain:
+        return None
+    spec = host.get('ultra_spec', {})
+    tls = spec.get('splithttp_tls', {})
+    if (not isinstance(domain, str) or spec.get('role') != 'exit'
+            or spec.get('tunnel_tls_provision') != 'acme_letsencrypt'
+            or spec.get('splithttp_host') != domain or tls.get('server_name') != domain
+            or tls.get('omit_sni') or tls.get('sni_mode') == 'omit'):
+        raise ValueError('invalid_bootstrap_ca_policy')
+    return domain
+
+
 def atomic(path, data):
     if path.is_symlink():
         raise ValueError('symlinked_receipt_forbidden')
@@ -179,7 +197,13 @@ def execute(directory, executable, bundle):
             state.update(state='failed', code='ansible_failed', exit_code=exit_code)
         else:
             result = load_private(result_path)
-            if job['operation'] in ('configure-exit', 'bootstrap-exit') and not re.fullmatch(r'[a-f0-9]{64}', result.get('cert_pin', '')):
+            ca_name = (bootstrap_ca_name(inventory, variables.get('ultra_bootstrap_exit_host'))
+                       if job['operation'] == 'bootstrap-exit' else None)
+            if ca_name is not None:
+                if ('cert_pin' in result or result.get('tls_auth') != 'ca'
+                        or result.get('tls_server_name') != ca_name):
+                    raise ValueError('invalid_bootstrap_ca_receipt')
+            elif job['operation'] in ('configure-exit', 'bootstrap-exit') and not re.fullmatch(r'[a-f0-9]{64}', result.get('cert_pin', '')):
                 raise ValueError('invalid_certificate_pin')
             if job['operation'] in ('bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge') and result.get('verified') is not True:
                 raise ValueError('invalid_bootstrap_component_acknowledgement')

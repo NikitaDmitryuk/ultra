@@ -1,4 +1,11 @@
 ---
+- name: Reconcile dedicated exit DNS before component certificate issuance
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: dns
+      when: ultra_dns_desired is defined and 'tunnel' in ultra_dns_desired
 - name: Generate application database tunnel identity
   hosts: bridge
   gather_facts: false

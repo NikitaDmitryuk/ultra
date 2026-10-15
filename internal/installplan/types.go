@@ -86,6 +86,7 @@ type SecretsConfig struct {
 }
 
 type FeatureConfig struct {
+	MainExitDomain         string `json:"main_exit_domain,omitempty"`
 	BotTelegramProxy       bool   `json:"bot_telegram_proxy,omitempty"`
 	Preset                 string `json:"preset,omitempty"`
 	Transport              string `json:"transport,omitempty"`
@@ -233,7 +234,7 @@ type AutomationNode struct {
 	Provider string        `json:"provider"`
 }
 
-func (p *InstallPlan) FullAutomation() bool { return p.SchemaVersion >= 2 || p.Automation != nil }
+func (p *InstallPlan) FullAutomation() bool { return p.SchemaVersion == CurrentSchemaVersion }
 
 type AutomationIngress struct {
 	Domain           string `json:"domain"`

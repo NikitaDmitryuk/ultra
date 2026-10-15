@@ -220,7 +220,6 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 		encoded, _ := json.Marshal(extras)
 		values[key] = string(encoded)
 	}
-	values["INSTALL_SCHEMA_VERSION"] = "2"
 	values["REUSE_BRIDGE_SPEC"] = "true"
 	values["ULTRA_AUTOMATION_VERSION"] = version
 	values["ULTRA_AUTOMATION_RELEASE_DIR"] = release

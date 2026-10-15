@@ -371,6 +371,11 @@ func (s *Spec) Validate() error {
 			return errors.New("config: invalid tunnel_tls_provision")
 		}
 	}
+	if s.TunnelTLSProvision == TunnelTLSACME && s.MimicPreset == "standard" {
+		if s.SplithttpHost == "" || s.SplitHTTPTLS.ServerName != s.SplithttpHost || s.SplitHTTPTLS.OmitSNI || s.SplitHTTPTLS.SNIMode == "omit" {
+			return errors.New("config: managed tunnel TLS requires aligned HTTP host and TLS server name")
+		}
+	}
 	if s.VLESSPort <= 0 || s.VLESSPort > 65535 {
 		return errors.New("config: invalid vless_port")
 	}

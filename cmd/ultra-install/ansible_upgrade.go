@@ -44,6 +44,9 @@ type upgradeInspection struct {
 // Upgrade retains a frozen private job directory across process/SSH failures.
 // It never falls back to the former SSH installer after an Ansible error.
 func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir, directory, python, executable string, retryFailed bool, forwardOnlyOption ...bool) (returnErr error) {
+	if p != nil && p.Features.MainExitDomain != "" {
+		return errors.New("managed tunnel TLS upgrade is not supported yet; use fresh bootstrap only")
+	}
 	forwardOnly := len(forwardOnlyOption) == 1 && forwardOnlyOption[0]
 	if len(forwardOnlyOption) > 1 || (forwardOnly && retryFailed) {
 		return errors.New("upgrade_forward_only_arguments_invalid")

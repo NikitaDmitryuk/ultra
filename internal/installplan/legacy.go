@@ -31,7 +31,7 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 	tunnelPort := intDefault(v, "TUNNEL_PORT", vlessPort)
 
 	p := &InstallPlan{
-		SchemaVersion: 1,
+		SchemaVersion: CurrentSchemaVersion,
 		SSH: SSHConfig{
 			User:              sshUser,
 			Identity:          "",
@@ -54,6 +54,7 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 			AdminListen: "127.0.0.1:8443",
 		},
 		Features: FeatureConfig{
+			MainExitDomain:         v["MAIN_EXIT_DOMAIN"],
 			Preset:                 valueDefault(v, "PRESET", "apijson"),
 			Transport:              valueDefault(v, "TRANSPORT", "splithttp"),
 			RoutingMode:            v["ROUTING_MODE"],

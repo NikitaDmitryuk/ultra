@@ -330,6 +330,11 @@ func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.Desir
 	children := all["children"].(map[string]any)
 	bridge := children["bridge"].(map[string]any)["hosts"].(map[string]any)["bridge"].(map[string]any)
 	nodes := children["exits"].(map[string]any)["hosts"].(map[string]any)
+	if p.Features.MainExitDomain != "" {
+		if err := prepareAnsibleDNS(p, bridge); err != nil {
+			return err
+		}
+	}
 	all["vars"].(map[string]any)["ultra_host_bootstrap"] = true
 	all["vars"].(map[string]any)["ultra_bridge_ipv4"] = p.Bridge.Address
 	all["vars"].(map[string]any)["ultra_preserve_runtime"] = p.AdoptRuntime
@@ -371,6 +376,10 @@ func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.Desir
 			vars["ultra_relay_environment"] = string(oldEnvironment)
 		}
 		vars["ultra_generate_exit_tls"] = p.Features.GenerateExitTLS
+		if p.Features.MainExitDomain != "" {
+			vars["ultra_tunnel_domain"] = p.Features.MainExitDomain
+			vars["ultra_tunnel_email"] = p.Automation.Ingress.Email
+		}
 		vars["ultra_warp_enabled"] = p.Features.WARP
 		vars["ultra_warp_port"] = p.Features.WARPPort
 		if p.AdoptRuntime {

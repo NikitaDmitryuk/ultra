@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 )
 
@@ -70,10 +71,16 @@ func runBootstrapComponentsAdapted(ctx context.Context, inventory, variables map
 		if runErr != nil {
 			return runErr
 		}
-		if receipt.Result.Values["exit_host"] != alias || !bootstrapComponentPin.MatchString(receipt.Result.CertPin) {
-			return errors.New("bootstrap_component_exit_receipt_invalid")
+		if err := verifyBootstrapExitResult(inventory, alias, receipt.Result.Values); err != nil {
+			return err
 		}
-		pins[alias] = receipt.Result.CertPin
+		name, err := bootstrapComponentCAName(inventory, alias)
+		if err != nil {
+			return err
+		}
+		if name == "" {
+			pins[alias] = receipt.Result.CertPin
+		}
 	}
 	_, err = run("bootstrap-bridge", "bootstrap-bridge", map[string]any{"ultra_bootstrap_pins": pins})
 	return err
@@ -128,10 +135,54 @@ func verifyBootstrapComponentReceipt(directory, operation string, inventory, var
 	if result["verified"] != true {
 		return errors.New("bootstrap_component_unverified")
 	}
-	if operation == "bootstrap-exit" && (result["exit_host"] != variables["ultra_bootstrap_exit_host"] || !bootstrapComponentPin.MatchString(stringValue(result["cert_pin"]))) {
-		return errors.New("bootstrap_component_exit_receipt_invalid")
+	if operation == "bootstrap-exit" {
+		return verifyBootstrapExitResult(inventory, stringValue(variables["ultra_bootstrap_exit_host"]), result)
 	}
 	return nil
 }
 
 func stringValue(value any) string { text, _ := value.(string); return text }
+
+// Authentication mode comes from the immutable request inventory, never a
+// receipt's self-declared mode. Managed CA certificates rotate without leaf pins.
+func bootstrapComponentCAName(inventory map[string]any, alias string) (string, error) {
+	all, _ := inventory["all"].(map[string]any)
+	children, _ := all["children"].(map[string]any)
+	exits, _ := children["exits"].(map[string]any)
+	hosts, _ := exits["hosts"].(map[string]any)
+	host, ok := hosts[alias].(map[string]any)
+	if !ok {
+		return "", errors.New("bootstrap_component_exit_alias_invalid")
+	}
+	domain := stringValue(host["ultra_tunnel_domain"])
+	if domain == "" {
+		return "", nil
+	}
+	raw, err := json.Marshal(host["ultra_spec"])
+	var spec config.Spec
+	if err != nil || json.Unmarshal(raw, &spec) != nil || spec.Role != config.RoleExit ||
+		spec.TunnelTLSProvision != config.TunnelTLSACME || spec.SplithttpHost != domain ||
+		spec.SplitHTTPTLS.ServerName != domain || spec.SplitHTTPTLS.OmitSNI || spec.SplitHTTPTLS.SNIMode == "omit" {
+		return "", errors.New("bootstrap_component_ca_policy_invalid")
+	}
+	return domain, nil
+}
+
+func verifyBootstrapExitResult(inventory map[string]any, alias string, result map[string]any) error {
+	if result["exit_host"] != alias {
+		return errors.New("bootstrap_component_exit_receipt_invalid")
+	}
+	name, err := bootstrapComponentCAName(inventory, alias)
+	if err != nil {
+		return err
+	}
+	if name != "" {
+		_, pinPresent := result["cert_pin"]
+		if pinPresent || result["tls_auth"] != "ca" || result["tls_server_name"] != name {
+			return errors.New("bootstrap_component_ca_receipt_invalid")
+		}
+	} else if !bootstrapComponentPin.MatchString(stringValue(result["cert_pin"])) {
+		return errors.New("bootstrap_component_exit_receipt_invalid")
+	}
+	return nil
+}

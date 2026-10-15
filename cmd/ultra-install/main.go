@@ -90,16 +90,15 @@ func legacyMain() {
 	identity := flag.String("bridge-ssh-key", "", "bridge operator SSH key path")
 	exitIdentity := flag.String("main-exit-ssh-key", "", "main exit operator SSH key path")
 	publicHost := flag.String("public-host", "", "hostname or IP clients use to reach the bridge (default: -bridge)")
-	preset := flag.String("preset", "apijson", "splithttp template: apijson, steamlike (plusgaming = apijson)")
 	splithttpHostFlag := flag.String(
 		"splithttp-host",
 		"",
-		"override spec splithttp_host and tunnel TLS server name / cert CN (default: preset default host)",
+		"override spec splithttp_host and tunnel TLS server name / cert CN (required for a custom hostname)",
 	)
 	splithttpPathFlag := flag.String(
 		"splithttp-path",
 		"",
-		"override spec splithttp_path (default: random path from preset at install time)",
+		"override spec splithttp_path (default: /ultra-xhttp)",
 	)
 	realityDest := flag.String(
 		"reality-dest",
@@ -286,7 +285,7 @@ func legacyMain() {
 	values := map[string]string{
 		"BRIDGE_IP": *bridgeHost, "MAIN_EXIT_IP": *exitHost, "EXIT_DIAL": *exitDial, "EXIT2": *exit2Host, "EXIT2_DIAL": *exit2Dial, "EXIT2_NAME": *exit2Name, "EXIT2_PRIORITY": strconv.Itoa(*exit2Priority),
 		"SSH_USER": *sshUser, "BRIDGE_SSH_KEY": *identity, "MAIN_EXIT_SSH_KEY": *exitIdentity, "PUBLIC_HOST": *publicHost, "REMOTE_DIR": *remoteDir, "RELAY_BINARY": *binaryPath, "PROJECT_ROOT": *projectRoot,
-		"PRESET": *preset, "REALITY_DEST": *realityDest, "REALITY_SNI": *realitySNI, "VLESS_PORT": strconv.Itoa(*vlessPort), "TUNNEL_PORT": strconv.Itoa(tun),
+		"PRESET": "standard", "REALITY_DEST": *realityDest, "REALITY_SNI": *realitySNI, "VLESS_PORT": strconv.Itoa(*vlessPort), "TUNNEL_PORT": strconv.Itoa(tun),
 		"REUSE_BRIDGE_SPEC": strconv.FormatBool(*reuseBridgeSpec), "GENERATE_EXIT_TLS": strconv.FormatBool(*generateExitTLS), "LOG_LEVEL": logLevelNorm,
 		"DATABASE_IP": *dbHost, "DATABASE_SSH_KEY": *dbSSHIdentity, "DB_NAME": *dbName, "DB_USER": *dbUser,
 		"SPLITHTTP_HOST": *splithttpHostFlag, "SPLITHTTP_PATH": *splithttpPathFlag, "SKIP_GEO_DOWNLOAD": strconv.FormatBool(*skipGeoDownload), "GEO_RELEASE_TAG": *geoReleaseTag,

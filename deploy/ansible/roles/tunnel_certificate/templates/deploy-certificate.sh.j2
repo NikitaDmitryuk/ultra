@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+lineage=/etc/letsencrypt/live/{{ ultra_tunnel_domain }}
+# Certbot invokes global hooks for every lineage. Ignore unrelated certificates.
+[ "${RENEWED_LINEAGE:-}" = "$lineage" ] || exit 0
+openssl x509 -in "$lineage/fullchain.pem" -noout -checkhost {{ ultra_tunnel_domain }}
+openssl x509 -in "$lineage/fullchain.pem" -noout -checkend 86400
+openssl verify -purpose sslserver -verify_hostname {{ ultra_tunnel_domain }} -CApath /etc/ssl/certs -untrusted "$lineage/fullchain.pem" "$lineage/cert.pem"
+cert_key=$(openssl x509 -in "$lineage/cert.pem" -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256)
+private_key=$(openssl pkey -in "$lineage/privkey.pem" -pubout -outform DER | openssl dgst -sha256)
+[ "$cert_key" = "$private_key" ]
+# Existing canonical files must be regular files, never redirected destinations.
+for name in fullchain.pem privkey.pem; do
+    target=/etc/ultra-relay/$name
+    [ ! -L "$target" ]
+    [ ! -e "$target" ] || [ -f "$target" ]
+done
+stage=$(mktemp -d /etc/ultra-relay/.tls-XXXXXX)
+trap 'rm -rf "$stage"' EXIT HUP INT TERM
+install -o ultra-relay -g ultra-relay -m 0600 "$lineage/fullchain.pem" "$stage/fullchain.pem"
+install -o ultra-relay -g ultra-relay -m 0600 "$lineage/privkey.pem" "$stage/privkey.pem"
+mv -f "$stage/fullchain.pem" /etc/ultra-relay/fullchain.pem
+mv -f "$stage/privkey.pem" /etc/ultra-relay/privkey.pem
+# Xray loads the pair once. No leaf pin is distributed: clients verify CA + name.
+if [ "${ULTRA_TUNNEL_BOOTSTRAP:-}" != 1 ] && systemctl is-active --quiet ultra-relay.service; then
+    systemctl restart ultra-relay.service
+fi

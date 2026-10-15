@@ -1,0 +1,102 @@
+---
+- name: Validate dedicated tunnel certificate contract
+  ansible.builtin.assert:
+    that:
+      - ultra_spec.role == 'exit'
+      - ultra_spec.vless_port | int != 80
+      - ultra_spec.tunnel_tls_provision == 'acme_letsencrypt'
+      - ultra_tunnel_domain is match('^[a-z0-9][a-z0-9.-]+[a-z0-9]$')
+      - ultra_spec.splithttp_host == ultra_tunnel_domain
+      - ultra_spec.splithttp_tls.server_name == ultra_tunnel_domain
+      - ultra_tunnel_email | length > 0
+      - not (ultra_preserve_runtime | default(false) | bool)
+- name: Install HTTP-01 certificate dependencies
+  ansible.builtin.apt:
+    name: [nginx, certbot, openssl, ca-certificates]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+- name: Prepare tunnel challenge and deployment directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop: [/var/www/ultra-tunnel-acme, /usr/local/libexec, /etc/letsencrypt/renewal-hooks/deploy]
+- name: Configure the dedicated HTTP-01 endpoint
+  ansible.builtin.copy:
+    content: |
+      server {
+          listen 80;
+          server_name {{ ultra_tunnel_domain }};
+          location ^~ /.well-known/acme-challenge/ { root /var/www/ultra-tunnel-acme; }
+          location / { return 404; }
+      }
+    dest: /etc/nginx/conf.d/ultra-tunnel-acme.conf
+    owner: root
+    group: root
+    mode: '0644'
+- name: Validate HTTP-01 routing
+  ansible.builtin.command:
+    argv: [nginx, -t]
+  changed_when: false
+- name: Activate HTTP-01 routing
+  ansible.builtin.systemd_service:
+    name: nginx
+    enabled: true
+    state: reloaded
+- name: Inspect guest firewall availability
+  ansible.builtin.stat:
+    path: /usr/sbin/ufw
+  register: tunnel_ufw
+- name: Inspect guest firewall policy
+  ansible.builtin.command:
+    argv: [/usr/sbin/ufw, status]
+  register: tunnel_firewall
+  changed_when: false
+  when: tunnel_ufw.stat.exists
+- name: Allow HTTP-01 on an enabled guest firewall
+  ansible.builtin.command:
+    argv: [/usr/sbin/ufw, allow, '80/tcp', comment, ultra-tunnel-acme]
+  register: tunnel_firewall_rule
+  changed_when: "'Skipping' not in tunnel_firewall_rule.stdout"
+  when: "tunnel_ufw.stat.exists and 'Status: active' in tunnel_firewall.stdout"
+- name: Install bounded certificate deployment hook
+  ansible.builtin.template:
+    src: deploy-certificate.sh.j2
+    dest: /etc/letsencrypt/renewal-hooks/deploy/ultra-tunnel
+    owner: root
+    group: root
+    mode: '0700'
+- name: Obtain dedicated exit certificate
+  ansible.builtin.command:
+    argv:
+      - certbot
+      - certonly
+      - --webroot
+      - -w
+      - /var/www/ultra-tunnel-acme
+      - --cert-name
+      - "{{ ultra_tunnel_domain }}"
+      - -d
+      - "{{ ultra_tunnel_domain }}"
+      - --non-interactive
+      - --agree-tos
+      - --email
+      - "{{ ultra_tunnel_email }}"
+    creates: "/etc/letsencrypt/live/{{ ultra_tunnel_domain }}/fullchain.pem"
+  environment:
+    ULTRA_TUNNEL_BOOTSTRAP: '1'
+- name: Validate and deploy the certificate before relay activation
+  ansible.builtin.command:
+    argv: [/etc/letsencrypt/renewal-hooks/deploy/ultra-tunnel]
+  environment:
+    RENEWED_LINEAGE: "/etc/letsencrypt/live/{{ ultra_tunnel_domain }}"
+    ULTRA_TUNNEL_BOOTSTRAP: '1'
+  changed_when: false
+- name: Enable automatic certificate renewal
+  ansible.builtin.systemd_service:
+    name: certbot.timer
+    enabled: true
+    state: started

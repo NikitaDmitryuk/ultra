@@ -228,7 +228,14 @@ func bootstrapComponentContinuationProof(stage, linkedRoot string, inventory, va
 				} `json:"result"`
 			}
 			_ = json.Unmarshal(receipt, &value)
-			pins[stringValue(extra["ultra_bootstrap_exit_host"])] = value.Result.CertPin
+			alias := stringValue(extra["ultra_bootstrap_exit_host"])
+			name, err := bootstrapComponentCAName(inventory, alias)
+			if err != nil {
+				return err
+			}
+			if name == "" {
+				pins[alias] = value.Result.CertPin
+			}
 		}
 		return nil
 	}

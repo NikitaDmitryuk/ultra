@@ -1,5 +1,4 @@
 # Canonical deployment policy; secrets belong only in .env.
-INSTALL_SCHEMA_VERSION=2
 SECRETS_ENV_FILE=.env
 # Trusted public key for verifying signed GitHub release bundles.
 ULTRA_RELEASE_MINISIGN_PUBLIC_KEY=REPLACE_WITH_TRUSTED_MINISIGN_PUBLIC_KEY
@@ -13,7 +12,7 @@ REUSE_BRIDGE_SPEC=false
 REALITY_DEST=origin.example.net:443
 REALITY_SNI=origin.example.net
 VLESS_PORT=24443
-PRESET=steamlike
+MAIN_EXIT_DOMAIN=tunnel.example.com
 DATABASE_IP=192.0.2.40
 DATABASE_SSH_KEY=/secure/database_ed25519
 # Optional local custom-format pg_dump archive for a clean DB host.

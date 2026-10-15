@@ -18,7 +18,7 @@ func validateAutomation(p *InstallPlan) error {
 	}
 	a := p.Automation
 	if a == nil {
-		return errors.New("v2 requires automation configuration; v1 remains supported for legacy installs")
+		return errors.New("schema 2 requires automation configuration; use apply --config with complete deployment policy")
 	}
 	if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$`).MatchString(a.Version) || a.Version == "latest" {
 		return errors.New("automation.version must identify an explicit immutable release")
