@@ -695,11 +695,25 @@ class NativeDeploy(unittest.TestCase):
             self.run_fixture(command, cwd, stage)
             if stage == 'forward_continuation_attestation':
                 state = Path('/var/lib/ultra-ansible') / ('upgrade-' + old['version'])
+                args = D.shlex.split(command[-1])
+                target_version, prior_version, prior_sha = args[-10], args[-5], args[-1]
+                prior_state = Path('/var/lib/ultra-ansible') / ('upgrade-' + prior_version)
+                target_state = Path('/var/lib/ultra-ansible') / ('upgrade-' + target_version)
+                chain = {'phase': 'restart' if record['commit'] == self.commit else 'start',
+                    'proof_sha256': record['forward_journal_sha256'],
+                    'prior_journal_sha256': prior_sha,
+                    'original_id': str(D.uuid.UUID(bytes=hashlib.sha256(str(state).encode()).digest()[:16], version=4)),
+                    'prior_id': str(D.uuid.UUID(bytes=hashlib.sha256(str(prior_state).encode()).digest()[:16], version=4)),
+                    'new_id': str(D.uuid.UUID(bytes=hashlib.sha256(str(target_state).encode()).digest()[:16], version=4)),
+                    'prior_evidence_sha256': 'a' * 64, 'original_handoff_sha256': 'b' * 64,
+                    'original_evidence_sha256': 'c' * 64, 'original_retirement_sha256': 'd' * 64}
                 receipt = {'architecture': 'arm64', 'manifest_sha256': record['manifest_sha256'],
                     'config_sha256': record['staged_config_sha256'], 'attempt': record['remote_attempt'],
                     'forward_journal_sha256': record['forward_journal_sha256'],
-                    'prior_candidate': None,
+                    'prior_candidate': None, 'chain_attestation': chain,
                     'lifecycle_id': str(D.uuid.UUID(bytes=hashlib.sha256(str(state).encode()).digest()[:16], version=4))}
+                if len(args)<24:
+                    receipt.pop('chain_attestation')
                 receipt.update(change or {})
                 return json.dumps(receipt)
         return runner
@@ -726,6 +740,15 @@ class NativeDeploy(unittest.TestCase):
         self.bundle.mkdir()
         self.manifest = json.dumps({'source_commit': self.commit, 'version': self.version, 'assets': []}).encode()
         (self.bundle / 'release-manifest.json').write_bytes(self.manifest)
+
+    def test_continue_new_head_retains_pre_handoff_receipt_without_chain_attestation(self):
+        old=self.failed_forward_fixture()
+        runner=self.continuation_runner(old,{'chain_attestation':None})
+        self.new_candidate_fixture()
+        self.rollout(continue_forward_only=True,runner=runner)
+        upgrade=D.shlex.split(next(command for stage,command in self.calls if stage=='upgrade')[-1])
+        self.assertEqual(upgrade[16],'1')
+        self.assertEqual(upgrade[-6],json.loads(next(self.root.glob('operation.forward-only-retry-*.json')).read_bytes())['commit'])
 
     def test_continue_new_head_rejects_absent_candidate_before_mutating_recovery_state(self):
         self.probe_env()
@@ -760,6 +783,10 @@ class NativeDeploy(unittest.TestCase):
         def runner(command, cwd, stage, **kwargs):
             response = attest(command, cwd, stage, **kwargs)
             if stage == 'forward_continuation_attestation':
+                tokens=D.shlex.split(command[-1])
+                self.assertEqual(tokens[-6:-1],[failed['commit'],failed['version'],failed['remote_attempt'],
+                    failed['manifest_sha256'],failed['staged_config_sha256']])
+                self.assertEqual(tokens[-1],D.sha(failed_raw))
                 self.assertIsNone(json.loads(response)['prior_candidate'])
                 self.assertNotIn('operation_absent', json.loads(response))
             if stage == 'upgrade':
@@ -798,8 +825,15 @@ class NativeDeploy(unittest.TestCase):
                 attested_prior.append(prior_sha)
             if stage == 'upgrade':
                 tokens = D.shlex.split(command[-1])
+                record = json.loads((self.root / 'operation.json').read_bytes())
+                history = json.loads((self.root / record['forward_retry_history']).read_bytes())
+                self.assertTrue(tokens[-13].endswith('/forward-prior-operation.json'))
+                self.assertEqual(tokens[-12], prior_sha)
+                self.assertEqual(tokens[-11:-6], [self.commit, self.version, D.sha(self.manifest),
+                    record['staged_config_sha256'], record['remote_attempt']])
+                self.assertEqual(tokens[-6:-1], [history['commit'], history['version'], history['remote_attempt'],
+                    history['manifest_sha256'], history['staged_config_sha256']])
                 self.assertEqual(tokens[-1], prior_sha)
-                self.assertTrue(tokens[-2].endswith('/forward-prior-operation.json'))
             return response
         with patch.object(D, 'subscription_probe_from_env', side_effect=AssertionError('must not read env')):
             self.rollout(config_path=canonical, continue_forward_only=True, runner=resume)
@@ -1463,6 +1497,133 @@ class RemoteProgram(unittest.TestCase):
         D.atomic_write(self.parent.parent / 'lifecycle.json', json.dumps({'id': old_id, 'phase': 'applying'}).encode())
         return operation, old_inputs, old_id, proof_raw, D.sha(prior), prior_version
 
+    def chain_fixture(self):
+        state=self.parent.parent
+        prior_commit='c'*40
+        prior_version='v0.0.'+str(int(prior_commit,16))
+        prior_attempt='e'*64
+        old_commit='b'*40
+        old_version='v0.0.'+str(int(old_commit,16))
+        old_attempt='d'*64
+        def identity(path):
+            return str(D.uuid.UUID(bytes=hashlib.sha256(str(path).encode()).digest()[:16],version=4))
+        old=state/('upgrade-'+old_version)
+        prior=state/('upgrade-'+prior_version)
+        target=state/('upgrade-'+self.version)
+        old_id,prior_id,new_id=map(identity,(old,prior,target))
+        def inputs(commit,version,attempt):
+            directory=self.parent/('manual-'+commit+'-'+attempt)
+            (directory/'release').mkdir(parents=True,mode=0o700)
+            directory.chmod(0o700)
+            manifest=json.dumps({'source_commit':commit,'version':version}).encode()
+            config=b'fixture config'
+            D.atomic_write(directory/'release/release-manifest.json',manifest)
+            D.atomic_write(directory/'install.config',config)
+            return D.sha(manifest),D.sha(config)
+        old_manifest,old_config=inputs(old_commit,old_version,old_attempt)
+        prior_manifest,prior_config=inputs(prior_commit,prior_version,prior_attempt)
+        proof=json.dumps({'schema':1,'commit':old_commit,'version':old_version,'remote_attempt':old_attempt,
+            'stage':'upgrade','mutator_dispatched':True,'manifest_sha256':old_manifest,
+            'staged_config_sha256':old_config}).encode()
+        proof_sha=D.sha(proof)
+        history=json.dumps({'schema':1,'commit':prior_commit,'version':prior_version,'remote_attempt':prior_attempt,
+            'stage':'upgrade','mutator_dispatched':True,'manifest_sha256':prior_manifest,
+            'staged_config_sha256':prior_config,'forward_journal_sha256':proof_sha}).encode()
+        history_sha=D.sha(history)
+        inventory={'all':{'children':{'bridge':{'hosts':{'bridge':{}}}}}}
+        (old/'activate').mkdir(parents=True,mode=0o700)
+        old.chmod(0o700)
+        request=json.dumps({'inventory':inventory,'variables':{'ultra_lifecycle_id':old_id}}).encode()
+        for name,raw in {'activate/request.json':request,'activate/job.json':b'{}',
+                         'activate/receipt.json':b'{}','operator-plan.json':b'{}'}.items():
+            D.atomic_write(old/name,raw)
+        prior.mkdir(mode=0o700)
+        for name in ['operator-plan.json','execution-mode.json','identity','inventory.frozen.json']:
+            D.atomic_write(prior/name,b'{}')
+        for name in ['inspect','hosts','domain-inspect','architectures','recovery-bundle',
+                     'forward-maintenance-fixture','handoff-drain-fixture']:
+            directory=prior/name
+            directory.mkdir(mode=0o700)
+            if name=='architectures':
+                D.atomic_write(directory/'bridge.json',b'{}')
+            elif name!='recovery-bundle':
+                for artifact in ['request.json','job.json','receipt.json','result.json']:
+                    D.atomic_write(directory/artifact,b'{}')
+        D.atomic_write(prior/'forward-handoff.json',json.dumps({'schema':1,'proof_sha256':proof_sha,
+            'old_id':old_id,'new_id':prior_id,'drain_directory':str(prior/'handoff-drain-fixture')}).encode())
+        ledger=json.dumps({'version':1,'ids':[old_id],'handoff':{'old_id':old_id,'new_id':prior_id}}).encode()
+        D.atomic_write(state/'lifecycle-retired.json',ledger)
+        D.atomic_write(state/'lifecycle.json',json.dumps({'id':prior_id,'phase':'applying'}).encode())
+        staged=self.execute('stage',self.archive(forward_journal=proof,forward_prior_operation=history),
+                            forward_sha=proof_sha,prior_sha=history_sha)
+        self.assertEqual(staged.returncode,0,staged.stderr)
+        chain_args=[self.commit,self.version,D.sha(self.manifest),D.sha(self.config),D.remote_attempt(self.config,self.version),
+                    prior_commit,prior_version,prior_attempt,prior_manifest,prior_config,history_sha]
+        def continued():
+            return self.execute('continue',None,'',proof_sha,history_sha,*chain_args)
+        first=continued()
+        self.assertEqual(first.returncode,0,first.stderr)
+        attestation=json.loads(first.stdout)['chain_attestation']
+        target.mkdir(mode=0o700)
+        chain={key:value for key,value in attestation.items() if key!='phase'}
+        chain.update(schema=1,original_retirement_json=ledger.decode())
+        D.atomic_write(target/'forward-chain.json',json.dumps(chain).encode())
+        def dispatched():
+            return self.execute('run',None,self.architecture,'upgrade','0','1','',proof_sha,'1',
+                str(prior),str(self.root/'forward-prior-operation.json'),history_sha,*chain_args,forward_only=True)
+        return continued,dispatched,target,prior,old_id,prior_id,new_id,proof_sha,history_sha,chain_args
+
+    def test_chain_continue_and_run_validate_A_owned_prefix_and_B_owned_restart(self):
+        continued,dispatched,target,prior,old_id,prior_id,new_id,proof_sha,history_sha,args=self.chain_fixture()
+        for phase in ['start','restart']:
+            with self.subTest(phase=phase):
+                if phase=='restart':
+                    request=json.dumps({'inventory':{'all':{'children':{'bridge':{'hosts':{'bridge':{}}}}}},
+                        'variables':{'ultra_lock_directory':str(self.parent.parent),
+                                     'ultra_forward_old_id':prior_id,'ultra_lifecycle_id':new_id}},
+                        sort_keys=True,separators=(',',':')).encode()
+                    request_sha=D.sha(request)
+                    result={'verified':True,'old_id':prior_id,'new_id':new_id}
+                    job={'schema_version':1,'operation':'drain-upgrade-workers',
+                         'request_sha256':request_sha,'binary_sha256':request_sha}
+                    drain=target/'handoff-drain-fixture'
+                    drain.mkdir(mode=0o700)
+                    raws={'request.json':request,'job.json':json.dumps(job).encode(),
+                          'receipt.json':json.dumps(dict(job,state='succeeded',result=result)).encode(),
+                          'result.json':json.dumps(result).encode()}
+                    for name,raw in raws.items(): D.atomic_write(drain/name,raw)
+                    intent={'schema':1,'proof_sha256':proof_sha,'old_id':prior_id,'new_id':new_id,
+                            'drain_directory':str(drain)}
+                    for key,name in [('request_sha256','request.json'),('job_sha256','job.json'),
+                                     ('receipt_sha256','receipt.json'),('result_sha256','result.json')]:
+                        intent[key]=D.sha(raws[name])
+                    D.atomic_write(target/'forward-handoff.json',json.dumps(intent).encode())
+                    D.atomic_write(self.parent.parent/'lifecycle-retired.json',json.dumps({'version':1,
+                        'ids':[old_id,prior_id],'handoff':{'old_id':prior_id,'new_id':new_id}}).encode())
+                    D.atomic_write(self.parent.parent/'lifecycle.json',json.dumps({'id':new_id,'phase':'applying'}).encode())
+                receipt=continued()
+                self.assertEqual(receipt.returncode,0,receipt.stderr)
+                self.assertEqual(json.loads(receipt.stdout)['chain_attestation']['phase'],phase)
+                run=dispatched()
+                self.assertEqual(run.returncode,0,run.stderr)
+                executed=json.loads(self.result.read_bytes())
+                self.assertIn('--forward-prior-journal-sha256',executed)
+                self.assertIn(history_sha,executed)
+                self.result.unlink()
+                chain=target/'forward-chain.json'
+                raw=chain.read_bytes()
+                changed=json.loads(raw)
+                changed['prior_evidence_sha256']='f'*64
+                D.atomic_write(chain,json.dumps(changed).encode())
+                self.assertNotEqual(continued().returncode,0)
+                self.assertNotEqual(dispatched().returncode,0)
+                self.assertFalse(self.result.exists())
+                D.atomic_write(chain,raw)
+                args[-1]='bad'
+                self.assertNotEqual(continued().returncode,0)
+                self.assertNotEqual(dispatched().returncode,0)
+                args[-1]=history_sha
+
     def test_continuation_accepts_absent_operation_under_lock_and_retries_same_candidate(self):
         operation, _, old_id, proof, prior_sha, prior_version = self.absent_operation_fixture()
         before = {str(p): p.read_bytes() for p in self.parent.parent.rglob('*') if p.is_file()}
@@ -1479,6 +1640,29 @@ class RemoteProgram(unittest.TestCase):
                                   forward_only=True, prior_sha=prior_sha, prior_version=prior_version)
         self.assertEqual(dispatched.returncode, 0, dispatched.stderr)
         self.assertIn('--forward-only', json.loads(self.result.read_bytes()))
+
+    def test_new_head_chain_request_retains_O_owned_pre_handoff_protocol(self):
+        _,_,_,proof,prior_sha,_=self.absent_operation_fixture()
+        # New-head probes include chain inputs, but O still owns the lifecycle.
+        # The absent A prefix must retain its existing pre-handoff receipt.
+        target_commit='f'*40
+        args=[target_commit,'v0.0.'+str(int(target_commit,16)),'1'*64,'2'*64,'3'*64,
+              self.commit,self.version,D.remote_attempt(self.config,self.version),
+              D.sha(self.manifest),D.sha(self.config),'4'*64]
+        result=self.execute('continue',None,'',D.sha(proof),prior_sha,*args)
+        self.assertEqual(result.returncode,0,result.stderr)
+        receipt=json.loads(result.stdout)
+        self.assertTrue(receipt['operation_absent'])
+        self.assertNotIn('chain_attestation',receipt)
+        operation=self.parent.parent/('upgrade-'+self.version)
+        operation.mkdir(mode=0o700)
+        for name in ['execution-mode.json','operator-plan.json']:
+            D.atomic_write(operation/name,b'{}')
+        result=self.execute('continue',None,'',D.sha(proof),prior_sha,*args)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertNotIn('chain_attestation',json.loads(result.stdout))
+        (self.root/'install.config').chmod(0o644)
+        self.assertNotEqual(self.execute('continue',None,'',D.sha(proof),prior_sha,*args).returncode,0)
 
     def test_absent_operation_continuation_rejects_busy_lock(self):
         _, _, _, proof, prior_sha, _ = self.absent_operation_fixture()

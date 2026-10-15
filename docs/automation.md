@@ -381,6 +381,18 @@ SSH transport и lifecycle исходной операции в фазе `applyi
 самостоятельно сверяет подписанный release, frozen plan, предыдущее доказательство,
 stage receipts и отсутствие activation.
 
+Переход от неудачного кандидата A к следующему кандидату B хранит отдельный
+`forward-chain.json` с привязкой исходного handoff O→A и точного retirement ledger.
+Если процесс остановился после публикации этого файла, но до `forward-handoff.json`,
+повтор принимает только такой chain-only prefix при lifecycle A в `applying` и
+неизменном ledger O→A. Он заново выполняет полный fleet census под lease A до
+публикации handoff и supersede A→B; при ledger O→A→B разрешён только проверенный
+restart для B. Сохранённые failed, interrupted и аварийно незавершённые попытки census
+принимаются только как аутентифицированная история с точным inventory, request и
+bundle; receipt может отсутствовать только до старта controller либо оставаться в
+running без кода прерывания. Эти stages не разрешают handoff: перед ним всегда
+запускается новая успешная проверка всей исходной topology.
+
 Если текущий broker не поддерживает atomic lifecycle supersede, upgrade сначала
 проверяет его работающую identity и выполняет broker-only bootstrap из подписанного
 кандидата, удерживая predecessor lock. Для независимо обновлённого Ansible

@@ -151,7 +151,7 @@ func discoverForwardOldOperation(proof forwardUpgradeJournal, stateRoot string) 
 // a fresh full-fleet census and durable old-to-new broker supersession.
 func withForwardUpgradeHandoff(ctx context.Context, p *installplan.InstallPlan, lockDirectory, directory, python, executable string) (context.Context, func(), error) {
 	proof, ok := ctx.Value(forwardUpgradeJournalKey{}).(forwardUpgradeJournal)
-	if !ok || os.Geteuid() != 0 || lockDirectory != "/var/lib/ultra-ansible" || !localLifecycleBridge(p) {
+	if !ok || p.Automation == nil || os.Geteuid() != 0 || lockDirectory != "/var/lib/ultra-ansible" || !localLifecycleBridge(p) {
 		return ctx, nil, errors.New("upgrade_forward_handoff_requires_local_proof")
 	}
 	old, err := discoverForwardOldOperation(proof, lockDirectory)
@@ -163,8 +163,14 @@ func withForwardUpgradeHandoff(ctx context.Context, p *installplan.InstallPlan, 
 		socket = "/run/ultra-ansible/controller.sock"
 	}
 	client := deployansible.Client{Socket: socket}
+	if prior, ok := ctx.Value(forwardPriorCandidateKey{}).(forwardPriorCandidate); ok {
+		if p.Automation == nil || proof.Path != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-operation.json") || prior.Journal != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-prior-operation.json") {
+			return ctx, nil, errors.New("upgrade_forward_prior_input_location_invalid")
+		}
+	}
 	return forwardUpgradeHandoff(ctx, proof, old, lockDirectory, directory, python, executable, forwardHandoffDeps{
 		attach: client.WithLifecycleOperationLock, run: deployansible.RunLocal, supersede: client.SupersedeLifecycle,
+		archive: filepath.Join(p.Automation.ReleaseDir, "ultra-ansible.tar.gz"),
 		prepare: func(leased context.Context) error {
 			if prior, ok := ctx.Value(forwardPriorCandidateKey{}).(forwardPriorCandidate); ok {
 				if p.Automation == nil || proof.Path != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-operation.json") || prior.Journal != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-prior-operation.json") {
@@ -197,6 +203,7 @@ func withForwardUpgradeHandoff(ctx context.Context, p *installplan.InstallPlan, 
 }
 
 type forwardHandoffDeps struct {
+	archive   string
 	prepare   func(context.Context) error
 	attach    func(context.Context, string, string) (context.Context, func(), error)
 	run       func(context.Context, string, map[string]any, map[string]any, string, string, string) (deployansible.Receipt, error)
@@ -384,6 +391,9 @@ func forwardUpgradeHandoff(ctx context.Context, proof forwardUpgradeJournal, old
 	stateRaw, err := readForwardEvidence(filepath.Join(lockDirectory, "lifecycle.json"))
 	var state struct{ ID, Phase string }
 	newID := lifecycleID(directory)
+	if prior, ok := ctx.Value(forwardPriorCandidateKey{}).(forwardPriorCandidate); ok && err == nil && json.Unmarshal(stateRaw, &state) == nil && state.ID != old.ID {
+		return forwardUpgradeChainedHandoff(ctx, proof, old, lockDirectory, directory, python, executable, prior, deps)
+	}
 	if err != nil || json.Unmarshal(stateRaw, &state) != nil || state.Phase != "applying" || (state.ID != old.ID && state.ID != newID) {
 		return ctx, nil, errors.New("upgrade_forward_lifecycle_not_owned")
 	}
