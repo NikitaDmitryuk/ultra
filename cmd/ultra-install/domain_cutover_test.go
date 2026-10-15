@@ -60,3 +60,22 @@ func TestParseCutoverPollIgnoresLoginNoise(t *testing.T) {
 		t.Fatalf("completion receipt lost %q %q", unit, phase)
 	}
 }
+
+func TestDomainCutoverUsesSharedSubscriptionProbeURL(t *testing.T) {
+	url := "https://sync.example.com/sub/fixture-token"
+	key := "fixture-dns-key"
+	gotURL, gotKey, err := domainCutoverProbeInputs(map[string]string{
+		"ULTRA_SUBSCRIPTION_PROBE_URL": url,
+		"ULTRA_VULTR_DNS_API_KEY":      key,
+	})
+	if err != nil || gotURL != url || gotKey != key {
+		t.Fatalf("shared probe inputs = (%q, %q, %v)", gotURL, gotKey, err)
+	}
+
+	if _, _, err = domainCutoverProbeInputs(map[string]string{
+		"ULTRA_CUTOVER_SUBSCRIPTION_URL": url,
+		"ULTRA_VULTR_DNS_API_KEY":        key,
+	}); err == nil {
+		t.Fatal("legacy cutover URL was unexpectedly accepted")
+	}
+}

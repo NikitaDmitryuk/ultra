@@ -468,6 +468,10 @@ CLI и отдельных операций без подходящего мод�
 Записи и файлы принимаются по ownership receipt; чужие изменения блокируют
 замену. Обновление действующего основного endpoint требует отдельного
 `domain-cutover`, не выполняется молча обычным `apply`.
+`domain-cutover` читает общий `ULTRA_SUBSCRIPTION_PROBE_URL` из заданного
+`SECRETS_ENV_FILE` (с прежними источниками пути `BOT_ENV_FILE`/`.env`), а ручной
+upgrade — из локального приватного `.env` рядом с canonical config либо файла,
+явно указанного через `SUBSCRIPTION_PROBE_ENV_FILE`.
 Подробности: [HTTPS-вход](subscription-ingress.md) и [TLS](../deploy/TLS.md).
 
 ## Обновление и откат

@@ -238,10 +238,9 @@ func applyDomainCutover(p *installplan.InstallPlan, configFile, subscription, vp
 	if err != nil {
 		return errors.New("canonical cutover secrets unavailable")
 	}
-	url := strings.TrimSpace(secrets["ULTRA_CUTOVER_SUBSCRIPTION_URL"])
-	key := strings.TrimSpace(secrets["ULTRA_VULTR_DNS_API_KEY"])
-	if url == "" || key == "" || strings.ContainsAny(url+key, "\r\n\x00") {
-		return errors.New("canonical cutover probe URL and DNS key required")
+	url, key, err := domainCutoverProbeInputs(secrets)
+	if err != nil {
+		return err
 	}
 	receiptInfo, err := os.Lstat(receipt)
 	if err != nil || !receiptInfo.Mode().IsRegular() || receiptInfo.Mode().Perm()&0077 != 0 {
@@ -314,6 +313,15 @@ func applyDomainCutover(p *installplan.InstallPlan, configFile, subscription, vp
 	}
 	fmt.Println("domain cutover complete; old ingress preserved; canonical parameters updated")
 	return nil
+}
+
+func domainCutoverProbeInputs(secrets map[string]string) (string, string, error) {
+	url := strings.TrimSpace(secrets["ULTRA_SUBSCRIPTION_PROBE_URL"])
+	key := strings.TrimSpace(secrets["ULTRA_VULTR_DNS_API_KEY"])
+	if url == "" || key == "" || strings.ContainsAny(url+key, "\r\n\x00") {
+		return "", "", errors.New("canonical subscription probe URL and DNS key required")
+	}
+	return url, key, nil
 }
 
 func parseCutoverPoll(output string) (unit, phase string) {

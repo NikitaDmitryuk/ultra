@@ -102,9 +102,12 @@ func TestBotEnvironmentExcludesProvidersAndUnknownKeys(t *testing.T) {
 	}
 }
 
-func TestSubscriptionProbeURLIsDisallowedDeploymentSecret(t *testing.T) {
+func TestSubscriptionProbeURLsAreDisallowedDeploymentSecrets(t *testing.T) {
 	if !DisallowedDeploymentSecret("ULTRA_SUBSCRIPTION_PROBE_URL") {
 		t.Fatal("subscription probe URL is not protected by shared deployment-secret rule")
+	}
+	if !DisallowedDeploymentSecret("ULTRA_CUTOVER_SUBSCRIPTION_URL") {
+		t.Fatal("retired cutover URL is not protected from entering install.config")
 	}
 }
 
