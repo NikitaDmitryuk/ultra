@@ -93,7 +93,7 @@ class OperationMappingTests(unittest.TestCase):
     def test_go_local_boundary_matches_controller_local_operations(self):
         source = (ROOT / 'internal/deployansible/local.go').read_text()
         allowlist = source.split('allowed := map[string]bool{', 1)[1].split('}', 1)[0]
-        self.assertEqual(set(re.findall(r'"([a-z-]+)": true', allowlist)), controller.LOCAL_OPERATIONS)
+        self.assertEqual(set(re.findall(r'"([a-z-]+)":\s+true', allowlist)), controller.LOCAL_OPERATIONS)
 
 
 if __name__ == '__main__':

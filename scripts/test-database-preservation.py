@@ -329,9 +329,11 @@ class Preservation(unittest.TestCase):
         self.assertLess(runtime.index(next(task for task in runtime if task['name'] == 'Require the exact completed host phase')), runtime.index(baseline))
         source = (ROOT / 'cmd/ultra-install/ansible_upgrade.go').read_text()
         prepare = source.index('"prepare", generation, retryFailed)')
-        activation = source.index('deployansible.RunLocal(ctx, "upgrade",', prepare)
+        activation = source.index('"upgrade",', prepare)
+        activation_call = source.rfind('deployansible.RunLocal(', prepare, activation)
         apply = source.index('"apply", generation)', activation)
         self.assertLess(prepare, activation)
+        self.assertGreaterEqual(activation_call, prepare)
         self.assertLess(activation, apply)
 
     def test_worker_detection_uses_executable_prefix_not_broker_option_values(self):

@@ -22,7 +22,7 @@
     - recovery_ufw.stat.exists
 - name: Require a conclusive host firewall state before admitting peers
   ansible.builtin.assert:
-    that: recovery_ufw_status.stdout.startswith('Status: active') or recovery_ufw_status.stdout.startswith('Status: inactive')
+    that: "recovery_ufw_status.stdout.startswith('Status: active') or recovery_ufw_status.stdout.startswith('Status: inactive')"
   when:
     - ultra_recovery_peer_rules is defined
     - recovery_ufw.stat.exists
