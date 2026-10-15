@@ -165,10 +165,39 @@ func withForwardUpgradeHandoff(ctx context.Context, p *installplan.InstallPlan, 
 	client := deployansible.Client{Socket: socket}
 	return forwardUpgradeHandoff(ctx, proof, old, lockDirectory, directory, python, executable, forwardHandoffDeps{
 		attach: client.WithLifecycleOperationLock, run: deployansible.RunLocal, supersede: client.SupersedeLifecycle,
+		prepare: func(leased context.Context) error {
+			if prior, ok := ctx.Value(forwardPriorCandidateKey{}).(forwardPriorCandidate); ok {
+				if p.Automation == nil || proof.Path != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-operation.json") || prior.Journal != filepath.Join(filepath.Dir(p.Automation.ReleaseDir), "forward-prior-operation.json") {
+					return errors.New("upgrade_forward_prior_input_location_invalid")
+				}
+				if err := verifyForwardPriorCandidate(proof, old, lockDirectory, directory, prior); err != nil {
+					return err
+				}
+
+				_, intentErr := os.Lstat(filepath.Join(prior.Directory, "forward-handoff.json"))
+				if intentErr != nil && !os.IsNotExist(intentErr) {
+					return intentErr
+				}
+				return prepareForwardRecovery(leased, os.IsNotExist(intentErr),
+					func(censusCtx context.Context) error {
+						_, err := runForwardCensus(censusCtx, proof, old, lockDirectory, directory, python, executable, deployansible.RunLocal)
+						return err
+					},
+					func(bootstrapCtx context.Context) error {
+						return bootstrapForwardBroker(bootstrapCtx, proof, p, old, lockDirectory, directory, python, executable)
+					},
+					func(adoptCtx context.Context) error {
+						return resumeForwardBroker(adoptCtx, lockDirectory, old.ID, client.ResumeLifecycleWithOperationLock)
+					},
+				)
+			}
+			return nil
+		},
 	})
 }
 
 type forwardHandoffDeps struct {
+	prepare   func(context.Context) error
 	attach    func(context.Context, string, string) (context.Context, func(), error)
 	run       func(context.Context, string, map[string]any, map[string]any, string, string, string) (deployansible.Receipt, error)
 	supersede func(context.Context, string, string) error
@@ -387,21 +416,29 @@ func forwardUpgradeHandoff(ctx context.Context, proof forwardUpgradeJournal, old
 			release()
 		}
 	}()
-	stage, err := os.MkdirTemp(directory, "handoff-drain-")
-	if err != nil {
+	if err = verifyForwardApplying(lockDirectory, old.ID); err != nil {
 		return ctx, nil, err
 	}
-	if err = os.Remove(stage); err != nil {
+	if err = verifyForwardUnretired(lockDirectory, old.ID, newID); err != nil {
 		return ctx, nil, err
 	}
-	receipt, err := deps.run(leased, "drain-upgrade-workers", old.Inventory, forwardDrainVariables(lockDirectory, old.ID, newID), stage, python, executable)
-	if err != nil {
+	if _, activationErr := os.Lstat(filepath.Join(directory, "activate")); !os.IsNotExist(activationErr) {
+		return ctx, nil, errors.New("upgrade_forward_activation_started")
+	}
+	// Recovery may replace the broker only while the attached predecessor OFD
+	// remains live. It must adopt that descriptor before the final handoff census.
+	if deps.prepare != nil {
+		if err = deps.prepare(leased); err != nil {
+			return ctx, nil, err
+		}
+	}
+	if err = verifyForwardUnretired(lockDirectory, old.ID, newID); err != nil {
 		return ctx, nil, err
 	}
-	if receipt.Result.Values["verified"] != true || receipt.Result.Values["old_id"] != old.ID || receipt.Result.Values["new_id"] != newID {
-		return ctx, nil, errors.New("upgrade_forward_fleet_drain_unverified")
+	if err = verifyForwardApplying(lockDirectory, old.ID); err != nil {
+		return ctx, nil, err
 	}
-	intent, err := forwardDrainIntent(proof, old, lockDirectory, directory, stage)
+	intent, err := runForwardCensus(leased, proof, old, lockDirectory, directory, python, executable, deps.run)
 	if err != nil {
 		return ctx, nil, err
 	}
@@ -413,4 +450,42 @@ func forwardUpgradeHandoff(ctx context.Context, proof forwardUpgradeJournal, old
 	}
 	success = true
 	return leased, release, nil
+}
+
+// A candidate with no saved census cannot authorize even a broker replacement.
+// Prove the frozen fleet quiescent first, then bootstrap/adopt; the caller still
+// repeats the census afterwards before publishing its new handoff intent.
+func prepareForwardRecovery(ctx context.Context, requireCensus bool, census, bootstrap, adopt func(context.Context) error) error {
+	if requireCensus {
+		if err := census(ctx); err != nil {
+			return err
+		}
+	}
+	if err := bootstrap(ctx); err != nil {
+		return err
+	}
+	return adopt(ctx)
+}
+
+func runForwardCensus(ctx context.Context, proof forwardUpgradeJournal, old forwardOldOperation, lockDirectory, directory, python, executable string, run func(context.Context, string, map[string]any, map[string]any, string, string, string) (deployansible.Receipt, error)) (forwardHandoffIntent, error) {
+	stage, err := os.MkdirTemp(directory, "handoff-drain-")
+	if err != nil {
+		return forwardHandoffIntent{}, err
+	}
+	if err = os.Remove(stage); err != nil {
+		return forwardHandoffIntent{}, err
+	}
+	receipt, err := run(ctx, "drain-upgrade-workers", old.Inventory, forwardDrainVariables(lockDirectory, old.ID, lifecycleID(directory)), stage, python, executable)
+	if err != nil {
+		return forwardHandoffIntent{}, err
+	}
+	if receipt.Result.Values["verified"] != true || receipt.Result.Values["old_id"] != old.ID || receipt.Result.Values["new_id"] != lifecycleID(directory) {
+		return forwardHandoffIntent{}, errors.New("upgrade_forward_fleet_drain_unverified")
+	}
+	intent, err := forwardDrainIntent(proof, old, lockDirectory, directory, stage)
+	if err != nil {
+		return forwardHandoffIntent{}, err
+	}
+
+	return intent, nil
 }

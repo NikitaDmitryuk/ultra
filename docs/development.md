@@ -14,6 +14,7 @@
 | Go-код | Тесты затронутых пакетов, затем `make test`, `make vet`, `make lint` |
 | Конфигурация Xray, маршрутизация, failover | Тесты `./internal/config ./internal/exits ./internal/proxy`; сборка relay |
 | Ansible upgrade с DNS/domain/runtime effects | `python3 scripts/test-ansible-dns-migration.py`, `test-ansible-upgrade-domain.py`, `test-ansible-upgrade-runtime.py`, `test-ansible-runtime-effects.py`, `test-ansible-accepted-resume.py`, operation mapping и syntax check закреплённым Ansible runtime |
+| Forward-only lifecycle recovery / broker bootstrap | `go test ./cmd/ultra-install ./internal/deployansible`; `python3 scripts/test-manual-deploy.py`; `python3 scripts/test-forward-broker-guard.py`; operation mapping, release retention и syntax check `bootstrap-forward-broker.yml` |
 | SQL, репозитории, миграции | Генерация SQLC при изменении схемы/запросов; `go test ./internal/db` с отдельной тестовой БД |
 | Встроенные web-ресурсы или установочные скрипты | Тесты затронутого Go-пакета, пересборка соответствующего бинарника; для UI — `make test-ui` (Node.js 22+) и проверка затронутого сценария в браузере |
 
@@ -97,19 +98,33 @@ installer всё равно независимо проверяет конфиг
 остановку подтвердить не удалось, команда завершается ошибкой; считать production
 безопасно переведённым в maintenance нельзя.
 
-Для сбоя `--forward-only` до handoff предусмотрен отдельный операторский путь
-`scripts/manual-deploy.py --continue-forward-only --config <canonical-config>`.
-Он сохраняет исходный production-журнал как единственное доказательство predecessor,
-а неудавшийся candidate journal фиксирует отдельно как историю. Продолжение разрешено
-только при неизменных staged input и SSH transport, исходном lifecycle в фазе
-`applying` и каталоге неудавшегося upgrade, содержащем только frozen
-`execution-mode.json` и `operator-plan.json`. Поэтому можно staged новый committed
-`HEAD`, но его upgrade независимо сверяет исходный журнал, frozen plan и текущий
-lifecycle под operator lock; при восстановлении плана из staged-конфига применяется
-та же `ValidatePlan` нормализация/defaults, что и перед записью digest. При
-несовпадении проверка блокирует handoff; digest нельзя обходить. `--retry-failed` для этого не используется. Если
-activation уже началась или удалённая аттестация расходится, продолжение блокируется
-и требуется отдельная reconciliation.
+Для сбоя `--forward-only` до handoff операторский путь
+`scripts/manual-deploy.py --continue-forward-only --config <canonical-config>`
+сохраняет исходный production-журнал и отдельно привязывает журнал предыдущего
+кандидата. Installer повторно проверяет оба журнала, staged config/release, frozen
+plan, lifecycle и отсутствие activation. Допускаются сохранённый handoff с его
+drain evidence и частичные broker-bootstrap stages; все файлы проверяются на
+приватность, а installer сверяет содержимое bundle с подписанным Ansible archive.
+Историческое дерево предыдущего успешного upgrade может содержать inspect, host,
+runtime и Ansible job artifacts; безопасное дерево проверяется без предположения,
+что в нём ровно три элемента, а request/job/receipt activation сверяются отдельно.
+
+Если действующий controller не поддерживает атомарный supersede, recovery под
+удерживаемым predecessor OFD проверяет broker по systemd MainPID, executable и
+unit hashes, устанавливает только immutable broker runtime/unit из подписанного
+кандидата и перезапускает controller. Он повторно принимает тот же OFD, проверяет
+неизменный `oldID/applying`, делает новый полный fleet census и только затем
+сохраняет intent и вызывает атомарный supersede. Повтор может продолжить только тот
+же кандидат с подтверждёнными request/job/receipt; неоднозначный либо неполный
+bootstrap stage блокирует действие. При аварии процесс может потерять kernel OFD,
+но durable `applying` gate остаётся закрытым, пока новый controller не примет тот
+же ID и descriptor. Rollback неизвестного relay и изменение БД этим recovery-путём
+не выполняются.
+
+Изменение staged input/SSH transport, неизвестные файлы, чужая broker identity,
+activation, retirement-конфликт или несовпадение remote attestation блокируют
+продолжение. `--retry-failed` не заменяет этот путь и не разрешает использовать
+неудавшийся candidate как predecessor.
 
 Retirement ledger устанавливает сохраняемый floor контроллера. Rollback и restore
 на узел с ledger блокируются до первой мутации; backup включает оба lifecycle journal

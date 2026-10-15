@@ -760,6 +760,24 @@ class NativeDeploy(unittest.TestCase):
         self.assertEqual([p.read_bytes() for p in self.root.glob('operation.forward-only-abandoned-*.json')], [proof])
         self.assertEqual(len(list(self.root.glob('operation.forward-only-retry-*.json'))), 1)
         self.assertEqual([s for s, _ in self.calls].count('forward_continuation_attestation'), 2)
+        same_candidate = self.continuation_runner(old)
+        prior_sha = json.loads((self.root / 'operation.json').read_bytes())['forward_prior_journal_sha256']
+        attested_prior = []
+        self.stage_mock.reset_mock()
+        def resume(command, cwd, stage, **kwargs):
+            response = same_candidate(command, cwd, stage, **kwargs)
+            if stage == 'forward_continuation_attestation':
+                self.assertIn(prior_sha, command[-1])
+                attested_prior.append(prior_sha)
+            if stage == 'upgrade':
+                tokens = D.shlex.split(command[-1])
+                self.assertEqual(tokens[-1], prior_sha)
+                self.assertTrue(tokens[-2].endswith('/forward-prior-operation.json'))
+            return response
+        with patch.object(D, 'subscription_probe_from_env', side_effect=AssertionError('must not read env')):
+            self.rollout(config_path=canonical, continue_forward_only=True, runner=resume)
+        self.assertEqual(attested_prior, [prior_sha])
+        self.assertFalse(self.stage_mock.called)
 
     def test_continue_new_head_doctor_failure_restores_failed_operation_and_frozen_probe(self):
         self.probe_env()
@@ -1354,12 +1372,14 @@ class RemoteProgram(unittest.TestCase):
         self.program = self.program.replace('need(os.geteuid()==0)', 'need(True)').replace('info.st_uid==0', 'info.st_uid==os.geteuid()')
         self.root = self.parent / ('manual-' + self.commit + '-' + D.remote_attempt(self.config, self.version))
 
-    def archive(self, mutate=None, forward_journal=None):
+    def archive(self, mutate=None, forward_journal=None, forward_prior_operation=None):
         entries = [('release/release-manifest.json', self.manifest)]
         entries += [('release/' + name, data) for name, data in self.assets.items()]
         entries += [('install.config', self.config)]
         if forward_journal is not None:
             entries.append(('forward-operation.json', forward_journal))
+        if forward_prior_operation is not None:
+            entries.append(('forward-prior-operation.json', forward_prior_operation))
         if mutate:
             entries = mutate(entries)
         stream = io.BytesIO()
@@ -1370,7 +1390,7 @@ class RemoteProgram(unittest.TestCase):
                 archive.addfile(entry, io.BytesIO(raw))
         return stream.getvalue()
 
-    def execute(self, mode, data=None, *args, probe_sha='', forward_only=False, forward_sha=''):
+    def execute(self, mode, data=None, *args, probe_sha='', forward_only=False, forward_sha='', prior_sha='', prior_version='v0.0.1'):
         if mode == 'run':
             args = (*args, *(['0'] * max(0, 4 - len(args))))
             args = (*args[:3], '1' if forward_only else '0', *args[4:])
@@ -1378,13 +1398,85 @@ class RemoteProgram(unittest.TestCase):
                 args = (*args, probe_sha, forward_sha)
             elif probe_sha:
                 args = (*args, probe_sha)
+            if prior_sha:
+                args = (*args, str(self.parent.parent / ('upgrade-'+prior_version)),
+                        str(self.root / 'forward-prior-operation.json'), prior_sha)
         else:
             if forward_sha:
-                args = (*args, probe_sha, forward_sha)
+                args = (*args, probe_sha, forward_sha, prior_sha)
             elif probe_sha:
                 args = (*args, probe_sha)
         return subprocess.run([D.sys.executable, '-I', '-c', self.program, mode, self.commit, self.version,
             D.sha(self.manifest), D.sha(self.config), D.remote_attempt(self.config, self.version), *args], input=data, capture_output=True)
+
+    def test_partial_broker_bootstrap_continuation_accepts_prior_digest_and_missing_ledger(self):
+        old_commit = 'b' * 40
+        old_version = 'v0.0.' + str(int(old_commit, 16))
+        proof = json.dumps({'commit': old_commit, 'version': old_version}).encode()
+        forward_sha = D.sha(proof)
+        prior = json.dumps({'commit': old_commit, 'version': old_version}).encode()
+        prior_sha = D.sha(prior)
+        staged = self.execute('stage', self.archive(forward_journal=proof, forward_prior_operation=prior),
+                              forward_sha=forward_sha, prior_sha=prior_sha)
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        operation = self.parent.parent / ('upgrade-' + self.version)
+        operation.mkdir(mode=0o700)
+        for name in ['operator-plan.json', 'execution-mode.json']:
+            D.atomic_write(operation / name, b'{}')
+        old_state = self.parent.parent / ('upgrade-' + old_version)
+        old_id = str(D.uuid.UUID(bytes=hashlib.sha256(str(old_state).encode()).digest()[:16], version=4))
+        D.atomic_write(self.parent.parent / 'lifecycle.json', json.dumps({'id': old_id, 'phase': 'applying'}).encode())
+        new_id = str(D.uuid.UUID(bytes=hashlib.sha256(str(operation).encode()).digest()[:16], version=4))
+        drain = operation / 'handoff-drain-fixture'
+        drain.mkdir(mode=0o700)
+        drain_request = json.dumps({'inventory': {}, 'variables': {
+            'ultra_lock_directory': str(self.parent.parent), 'ultra_forward_old_id': old_id,
+            'ultra_lifecycle_id': new_id}}, sort_keys=True, separators=(',', ':')).encode()
+        drain_sha = D.sha(drain_request)
+        drain_result = {'verified': True, 'old_id': old_id, 'new_id': new_id}
+        drain_receipt = {'schema_version': 1, 'operation': 'drain-upgrade-workers',
+                         'request_sha256': drain_sha, 'binary_sha256': drain_sha,
+                         'state': 'succeeded', 'code': '', 'result': drain_result}
+        drain_rows = {'request.json': drain_request,
+                      'job.json': json.dumps({k: v for k, v in drain_receipt.items() if k not in ('state', 'code', 'result')}).encode(),
+                      'receipt.json': json.dumps(drain_receipt).encode(),
+                      'result.json': json.dumps(drain_result).encode()}
+        for name, raw in drain_rows.items():
+            D.atomic_write(drain / name, raw)
+        bootstrap = operation / 'broker-bootstrap-fixture'
+        bootstrap.mkdir(mode=0o700)
+        request = json.dumps({'inventory': {}, 'variables': {
+            'ultra_lock_directory': str(self.parent.parent), 'ultra_forward_old_id': old_id,
+            'ultra_forward_candidate_id': new_id,
+            'ultra_controller_directory': '/opt/ultra-ansible/releases/managed-'+self.version}},
+            sort_keys=True, separators=(',', ':')).encode()
+        request_sha = D.sha(request)
+        result = {'verified': True, 'old_id': old_id,
+                  'controller_directory': '/opt/ultra-ansible/releases/managed-'+self.version}
+        receipt = {'schema_version': 1, 'operation': 'bootstrap-forward-broker',
+                   'request_sha256': request_sha, 'binary_sha256': request_sha,
+                   'state': 'succeeded', 'code': '', 'result': result}
+        rows = {'request.json': request,
+                'job.json': json.dumps({k: v for k, v in receipt.items() if k not in ('state', 'code', 'result')}).encode(),
+                'receipt.json': json.dumps(receipt).encode(), 'result.json': json.dumps(result).encode()}
+        for name, raw in rows.items():
+            D.atomic_write(bootstrap / name, raw)
+        continued = self.execute('continue', forward_sha=forward_sha, prior_sha=prior_sha)
+        self.assertEqual(continued.returncode, 0, continued.stderr)
+        self.assertEqual(json.loads(continued.stdout)['prior_candidate']['version'], self.version)
+        self.assertFalse((self.parent.parent / 'lifecycle-retired.json').exists())
+        unrelated_old='d'*8+'-'+'d'*4+'-'+'d'*4+'-'+'d'*4+'-'+'d'*12
+        unrelated_new='e'*8+'-'+'e'*4+'-'+'e'*4+'-'+'e'*4+'-'+'e'*12
+        ledger={'version':1,'ids':[unrelated_old],
+                'handoff':{'old_id':unrelated_old,'new_id':unrelated_new}}
+        D.atomic_write(self.parent.parent/'lifecycle-retired.json',json.dumps(ledger).encode())
+        ledger_continued=self.execute('continue',forward_sha=forward_sha,prior_sha=prior_sha)
+        self.assertEqual(ledger_continued.returncode,0,ledger_continued.stderr)
+        doctor = self.execute('run', None, self.architecture, 'doctor', '0', '0', '', forward_sha, '0',
+                              forward_only=False, forward_sha='', prior_sha=prior_sha, prior_version=old_version)
+        # The prior pointer is parsed by the run protocol before any installer action.
+        self.assertEqual(doctor.returncode, 0, doctor.stderr)
+
 
     def test_continuation_attests_existing_inputs_and_pre_handoff_lifecycle(self):
         old_commit = 'b' * 40
@@ -1430,6 +1522,110 @@ class RemoteProgram(unittest.TestCase):
                     D.atomic_write(lifecycle, json.dumps({'id': old_id, 'phase': 'applying'}).encode())
                 elif mutation == 'proof':
                     D.atomic_write(self.root / 'forward-operation.json', proof)
+
+    def test_continuation_accepts_saved_handoff_and_rejects_tampering_and_supersede(self):
+        old_commit='b'*40
+        old_version='v0.0.'+str(int(old_commit,16))
+        old_attempt='c'*64
+        old_manifest=json.dumps({'source_commit':old_commit,'version':old_version,'assets':[]}).encode()
+        old_config=b'ULTRA_AUTOMATION_VERSION='+old_version.encode()+b'\n'
+        old_inputs=self.parent/('manual-'+old_commit+'-'+old_attempt)
+        (old_inputs/'release').mkdir(parents=True,mode=0o700)
+        old_inputs.chmod(0o700)
+        D.atomic_write(old_inputs/'release/release-manifest.json',old_manifest)
+        D.atomic_write(old_inputs/'install.config',old_config)
+        proof={'schema':1,'commit':old_commit,'version':old_version,'remote_attempt':old_attempt,
+               'stage':'upgrade','mutator_dispatched':True,'manifest_sha256':D.sha(old_manifest),
+               'staged_config_sha256':D.sha(old_config)}
+        proof_raw=json.dumps(proof,separators=(',',':')).encode()
+        digest=D.sha(proof_raw)
+        failed=self.parent.parent/('upgrade-'+self.version)
+        failed.mkdir(mode=0o700)
+        for name in ['execution-mode.json','operator-plan.json']:
+            D.atomic_write(failed/name,b'{}')
+        previous=self.parent.parent/('upgrade-'+old_version)
+        (previous/'activate').mkdir(parents=True,mode=0o700)
+        previous.chmod(0o700)
+        for name in ['execution-mode.json','operator-plan.json']:
+            D.atomic_write(previous/name,b'{}')
+        (previous/'inspect').mkdir(mode=0o700)
+        D.atomic_write(previous/'inspect/request.json',b'{}')
+        (previous/'activate/bundle').mkdir(mode=0o700)
+        D.atomic_write(previous/'activate/inventory.json',b'{}')
+        D.atomic_write(previous/'activate/variables.json',b'{}')
+        D.atomic_write(previous/'activate/bundle/controller.py',b'# retained immutable bundle')
+        old_id=str(D.uuid.UUID(bytes=hashlib.sha256(str(previous).encode()).digest()[:16],version=4))
+        new_id=str(D.uuid.UUID(bytes=hashlib.sha256(str(failed).encode()).digest()[:16],version=4))
+        inventory={'all':{'children':{'bridge':{'hosts':{'bridge':{}}},'exits':{'hosts':{'exit_0':{}}}}}}
+        prior_request=json.dumps({'inventory':inventory,'variables':{'ultra_lifecycle_id':old_id}},sort_keys=True,separators=(',',':')).encode()
+        D.atomic_write(previous/'activate/request.json',prior_request)
+        prior_job=json.dumps({'schema_version':1,'operation':'upgrade','request_sha256':D.sha(prior_request),
+                              'binary_sha256':D.sha(prior_request)}).encode()
+        D.atomic_write(previous/'activate/job.json',prior_job)
+        D.atomic_write(previous/'activate/receipt.json',prior_job)
+        D.atomic_write(self.parent.parent/'lifecycle.json',json.dumps({'id':old_id,'phase':'applying'}).encode())
+        drain=failed/'handoff-drain-fixture'
+        drain.mkdir(mode=0o700)
+        request=json.dumps({'inventory':inventory,'variables':{'ultra_lock_directory':str(self.parent.parent),
+            'ultra_forward_old_id':old_id,'ultra_lifecycle_id':new_id}},sort_keys=True,separators=(',',':')).encode()
+        reqsha=D.sha(request)
+        result={'verified':True,'old_id':old_id,'new_id':new_id}
+        receipt={'schema_version':1,'operation':'drain-upgrade-workers','request_sha256':reqsha,
+                 'binary_sha256':reqsha,'state':'succeeded','code':'','result':result}
+        raws={'request.json':request,'job.json':json.dumps({k:v for k,v in receipt.items() if k not in ('state','code','result')}).encode(),
+              'receipt.json':json.dumps(receipt).encode(),'result.json':json.dumps(result).encode()}
+        for name,raw in raws.items(): D.atomic_write(drain/name,raw)
+        (drain/'bundle').mkdir(mode=0o700)
+        D.atomic_write(drain/'inventory.json',json.dumps(inventory).encode())
+        D.atomic_write(drain/'variables.json',json.dumps({'ultra_lock_directory':str(self.parent.parent),
+            'ultra_forward_old_id':old_id,'ultra_lifecycle_id':new_id}).encode())
+        D.atomic_write(drain/'bundle/controller.py',b'# retained immutable bundle')
+        intent={'schema':1,'proof_sha256':digest,'old_id':old_id,'new_id':new_id,'drain_directory':str(drain),
+                'request_sha256':reqsha,'job_sha256':D.sha(raws['job.json']),
+                'receipt_sha256':D.sha(raws['receipt.json']),'result_sha256':D.sha(raws['result.json'])}
+        D.atomic_write(failed/'forward-handoff.json',json.dumps(intent).encode())
+        bootstrap=failed/'broker-bootstrap-fixture'
+        bootstrap.mkdir(mode=0o700)
+        bootstrap_result={'verified':True,'old_id':old_id,'controller_directory':'/opt/ultra-ansible/releases/managed-fixture'}
+        bootstrap_request=json.dumps({'inventory':inventory,'variables':{'ultra_lock_directory':str(self.parent.parent)}},
+                                    sort_keys=True,separators=(',',':')).encode()
+        bootstrap_sha=D.sha(bootstrap_request)
+        bootstrap_receipt={'schema_version':1,'operation':'bootstrap-forward-broker','request_sha256':bootstrap_sha,
+                           'binary_sha256':bootstrap_sha,'state':'succeeded','code':'','result':bootstrap_result}
+        bootstrap_raws={'request.json':bootstrap_request,'job.json':json.dumps({k:v for k,v in bootstrap_receipt.items() if k not in ('state','code','result')}).encode(),
+                        'receipt.json':json.dumps(bootstrap_receipt).encode(),'result.json':json.dumps(bootstrap_result).encode()}
+        for name,raw in bootstrap_raws.items(): D.atomic_write(bootstrap/name,raw)
+        (bootstrap/'bundle').mkdir(mode=0o700)
+        D.atomic_write(bootstrap/'bundle/controller.py',b'# retained immutable bundle')
+        ledger={'version':1,'ids':[],'handoff':{'old_id':'d'*8+'-'+'d'*4+'-'+'d'*4+'-'+'d'*4+'-'+'d'*12,
+                                                 'new_id':'e'*8+'-'+'e'*4+'-'+'e'*4+'-'+'e'*4+'-'+'e'*12}}
+        retired=self.parent.parent/'lifecycle-retired.json'
+        D.atomic_write(retired,json.dumps(ledger).encode())
+        staged=self.execute('stage',self.archive(forward_journal=proof_raw),forward_sha=digest)
+        self.assertEqual(staged.returncode,0,staged.stderr)
+        valid=self.execute('continue',forward_sha=digest)
+        self.assertEqual(valid.returncode,0,valid.stderr)
+        self.assertEqual(json.loads(valid.stdout)['prior_candidate']['commit'],self.commit)
+        mutations=[
+            ('extra_operation',lambda: D.atomic_write(failed/'unexpected',b'new')),
+            ('extra_drain',lambda: D.atomic_write(drain/'unexpected',b'new')),
+            ('activation',lambda: (failed/'activate').mkdir()),
+            ('lifecycle',lambda: D.atomic_write(self.parent.parent/'lifecycle.json',b'{"id":"foreign","phase":"applying"}')),
+            ('retirement',lambda: D.atomic_write(retired,json.dumps({'version':1,'ids':[old_id,new_id],
+                'handoff':{'old_id':old_id,'new_id':new_id}}).encode())),
+            ('job_digest',lambda: D.atomic_write(drain/'job.json',b'{}')),
+        ]
+        for name,mutate in mutations:
+            with self.subTest(name=name):
+                mutate()
+                rejected=self.execute('continue',forward_sha=digest)
+                self.assertNotEqual(rejected.returncode,0)
+                if name=='extra_operation': (failed/'unexpected').unlink()
+                elif name=='extra_drain': (drain/'unexpected').unlink()
+                elif name=='activation': (failed/'activate').rmdir()
+                elif name=='lifecycle': D.atomic_write(self.parent.parent/'lifecycle.json',json.dumps({'id':old_id,'phase':'applying'}).encode())
+                elif name=='retirement': D.atomic_write(retired,json.dumps(ledger).encode())
+                elif name=='job_digest': D.atomic_write(drain/'job.json',raws['job.json'])
 
     def test_remote_probe_exact_archive_private_argv_cleanup_and_replay(self):
         secret = b'https://old.example.com/sub/fixture-token'

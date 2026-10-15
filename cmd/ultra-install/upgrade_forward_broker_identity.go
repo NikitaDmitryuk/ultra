@@ -1,0 +1,213 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"strings"
+
+	ansibleassets "github.com/NikitaDmitryuk/ultra/deploy/ansible"
+)
+
+type forwardBrokerIdentity struct {
+	Directory    string `json:"directory"`
+	InstallerSHA string `json:"installer_sha256"`
+	RuntimeSHA   string `json:"runtime_sha256"`
+	UnitSHA      string `json:"unit_sha256"`
+}
+
+// forwardBrokerVariables derives the only controller identities that may be
+// running before broker recovery: the predecessor request's frozen previous
+// controller or its target controller. It also returns the exact identity for
+// the candidate whose signed runtime is about to be installed.
+func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) (map[string]any, error) {
+	fail := errors.New("upgrade_forward_broker_identity_unverified")
+	if old.Directory == "" || old.ID == "" || target == nil {
+		return nil, fail
+	}
+	raw, err := readForwardEvidence(filepath.Join(old.Directory, "activate", "request.json"))
+	if err != nil {
+		return nil, fail
+	}
+	var request struct {
+		Variables map[string]json.RawMessage `json:"variables"`
+	}
+	if json.Unmarshal(raw, &request) != nil || request.Variables == nil {
+		return nil, fail
+	}
+	requestSHA := digestSHA256(raw)
+	for _, name := range []string{"job.json", "receipt.json"} {
+		evidence, readErr := readForwardEvidence(filepath.Join(old.Directory, "activate", name))
+		var proof struct {
+			Schema     int    `json:"schema_version"`
+			Operation  string `json:"operation"`
+			RequestSHA string `json:"request_sha256"`
+			BinarySHA  string `json:"binary_sha256"`
+		}
+		if readErr != nil || json.Unmarshal(evidence, &proof) != nil || proof.Schema != 1 ||
+			proof.Operation != "upgrade" || proof.RequestSHA != requestSHA || proof.BinarySHA != requestSHA {
+			return nil, fail
+		}
+	}
+	readString := func(key string) (string, error) {
+		var value string
+		err := json.Unmarshal(request.Variables[key], &value)
+		if err != nil || value == "" {
+			return "", fail
+		}
+		return value, nil
+	}
+	readManifest := func(key string) (*automationRelease, error) {
+		var manifest automationRelease
+		if err := json.Unmarshal(request.Variables[key], &manifest); err != nil || !validAutomationVersion(manifest.Version) {
+			return nil, fail
+		}
+		return &manifest, nil
+	}
+	architecture, err := readString("ultra_architecture")
+	if err != nil || (architecture != "amd64" && architecture != "arm64") {
+		return nil, fail
+	}
+	oldID, err := readString("ultra_lifecycle_id")
+	if err != nil || oldID != old.ID || old.ID != lifecycleID(old.Directory) {
+		return nil, fail
+	}
+	previous, err := readManifest("ultra_previous_manifest")
+	if err != nil {
+		return nil, fail
+	}
+	oldTarget, err := readManifest("ultra_release_manifest")
+	if err != nil || oldTarget.Version != oldTargetVersion(old.Directory) || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(oldTarget.SourceCommit) {
+		return nil, fail
+	}
+	if !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(previous.SourceCommit) ||
+		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(target.SourceCommit) ||
+		!validAutomationVersion(target.Version) {
+		return nil, fail
+	}
+	previousManifestSHA, err := readString("ultra_previous_manifest_sha256")
+	if err != nil || !sha256DigestPattern.MatchString(previousManifestSHA) {
+		return nil, fail
+	}
+	oldManifestSHA, err := readString("ultra_release_manifest_sha256")
+	if err != nil || !sha256DigestPattern.MatchString(oldManifestSHA) {
+		return nil, fail
+	}
+	releaseSource, err := readString("ultra_release_source")
+	if err != nil || !filepath.IsAbs(releaseSource) || filepath.Clean(releaseSource) != releaseSource || operatorPrivate(releaseSource, true) != nil {
+		return nil, fail
+	}
+	manifestRaw, err := readForwardEvidence(filepath.Join(releaseSource, "release-manifest.json"))
+	var sourceManifest automationRelease
+	if err != nil || digestSHA256(manifestRaw) != oldManifestSHA || json.Unmarshal(manifestRaw, &sourceManifest) != nil ||
+		!reflect.DeepEqual(sourceManifest, *oldTarget) {
+		return nil, fail
+	}
+	previousDirectory, err := readString("ultra_previous_controller_directory")
+	if err != nil || previousDirectory != managedControllerDirectory(previous.Version) {
+		return nil, fail
+	}
+	previousUnitSHA, err := readString("ultra_previous_controller_unit_sha256")
+	if err != nil || !sha256DigestPattern.MatchString(previousUnitSHA) {
+		return nil, fail
+	}
+	oldTargetDirectory, err := readString("ultra_controller_directory")
+	if err != nil || oldTargetDirectory != managedControllerDirectory(oldTarget.Version) {
+		return nil, fail
+	}
+	oldTargetUnitSHA, err := readString("ultra_target_controller_unit_sha256")
+	if err != nil || !sha256DigestPattern.MatchString(oldTargetUnitSHA) {
+		return nil, fail
+	}
+	oldTargetInstallerSHA, err := readString("ultra_install_sha256")
+	if err != nil || !sha256DigestPattern.MatchString(oldTargetInstallerSHA) {
+		return nil, fail
+	}
+	oldTargetRuntimeSHA, err := readString("ultra_controller_runtime_sha256")
+	if err != nil || !sha256DigestPattern.MatchString(oldTargetRuntimeSHA) {
+		return nil, fail
+	}
+
+	previousInstaller, err := upgradeAsset(previous, "ultra-install-linux-"+architecture)
+	if err != nil || !sha256DigestPattern.MatchString(previousInstaller.SHA) {
+		return nil, fail
+	}
+	previousRuntime, err := upgradeAsset(previous, "ultra-ansible-runtime-linux-"+architecture+".tar.gz")
+	if err != nil || !sha256DigestPattern.MatchString(previousRuntime.SHA) {
+		return nil, fail
+	}
+	oldTargetInstaller, err := upgradeAsset(oldTarget, "ultra-install-linux-"+architecture)
+	if err != nil || oldTargetInstaller.SHA != oldTargetInstallerSHA {
+		return nil, fail
+	}
+	oldTargetRuntime, err := upgradeAsset(oldTarget, "ultra-ansible-runtime-linux-"+architecture+".tar.gz")
+	if err != nil || oldTargetRuntime.SHA != oldTargetRuntimeSHA {
+		return nil, fail
+	}
+
+	oldPreviousIdentity := forwardBrokerIdentity{
+		Directory: previousDirectory, InstallerSHA: previousInstaller.SHA,
+		RuntimeSHA: previousRuntime.SHA, UnitSHA: previousUnitSHA,
+	}
+	oldTargetIdentity := forwardBrokerIdentity{
+		Directory: oldTargetDirectory, InstallerSHA: oldTargetInstaller.SHA,
+		RuntimeSHA: oldTargetRuntime.SHA, UnitSHA: oldTargetUnitSHA,
+	}
+	allowed := []forwardBrokerIdentity{oldPreviousIdentity}
+	if oldTargetIdentity != oldPreviousIdentity {
+		allowed = append(allowed, oldTargetIdentity)
+	}
+
+	targetInstaller, err := upgradeAsset(target, "ultra-install-linux-"+architecture)
+	if err != nil || !sha256DigestPattern.MatchString(targetInstaller.SHA) {
+		return nil, fail
+	}
+	targetRuntime, err := upgradeAsset(target, "ultra-ansible-runtime-linux-"+architecture+".tar.gz")
+	if err != nil || !sha256DigestPattern.MatchString(targetRuntime.SHA) {
+		return nil, fail
+	}
+	unitTemplate, err := ansibleassets.Bundle.ReadFile("roles/controller/templates/ultra-ansible-controller.service.j2")
+	if err != nil {
+		return nil, fail
+	}
+	targetDirectory := managedControllerDirectory(target.Version)
+	unit := strings.ReplaceAll(string(unitTemplate), "{{ ultra_controller_directory }}", targetDirectory)
+	unitDigest := sha256.Sum256([]byte(unit))
+	targetIdentity := forwardBrokerIdentity{
+		Directory: targetDirectory, InstallerSHA: targetInstaller.SHA,
+		RuntimeSHA: targetRuntime.SHA, UnitSHA: hex.EncodeToString(unitDigest[:]),
+	}
+	// A prior bootstrap attempt may already have switched current and restarted
+	// the service before the operator process failed. Accept the exact signed
+	// candidate identity on retry while the predecessor lifecycle remains gated.
+	if !containsForwardBrokerIdentity(allowed, targetIdentity) {
+		allowed = append(allowed, targetIdentity)
+	}
+	return map[string]any{
+		"ultra_forward_expected_brokers": allowed,
+		"ultra_forward_target_broker":    targetIdentity,
+	}, nil
+}
+
+func containsForwardBrokerIdentity(values []forwardBrokerIdentity, target forwardBrokerIdentity) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+var sha256DigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+func oldTargetVersion(directory string) string {
+	base := filepath.Base(directory)
+	if !strings.HasPrefix(base, "upgrade-") {
+		return ""
+	}
+	return strings.TrimPrefix(base, "upgrade-")
+}

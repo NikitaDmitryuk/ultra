@@ -363,14 +363,21 @@ sidecar-lock рядом с canonical config сериализует выклад�
 отдельный явный `scripts/manual-deploy.py --continue-forward-only --config
 /absolute/path/to/install.config`. Он сохраняет digest исходного production-журнала
 из `forward_journal_sha256`, а журнал неудавшегося кандидата хранит отдельно как
-историю повтора. Команда разрешена только до handoff/activation: pinned SSH
-аттестация требует неизменный staged input и lifecycle исходной операции в фазе
-`applying`, а каталог кандидата должен содержать только `execution-mode.json` и
-`operator-plan.json`. Новый committed `HEAD` может быть собран и staged поверх
-этого состояния, но upgrade-команда повторно проверяет исходное доказательство и
-живой lifecycle под broker lock. При изменении входов, появлении activation
-артефактов или смене lifecycle продолжение блокируется; это не эквивалент
-`RETRY_FAILED=1` и не разрешает использовать failed candidate как predecessor.
+историю повтора и передаёт её digest вместе с новым кандидатом. Команда допускает
+сохранённые handoff/drain и broker-bootstrap receipts при неизменных staged input,
+SSH transport и lifecycle исходной операции в фазе `applying`. Installer
+самостоятельно сверяет подписанный release, frozen plan, предыдущее доказательство,
+stage receipts и отсутствие activation.
+
+Если текущий broker не поддерживает atomic lifecycle supersede, upgrade сначала
+проверяет его работающую identity и выполняет broker-only bootstrap из подписанного
+кандидата, удерживая predecessor lock. После restart тот же lock принимается новым
+broker; затем выполняются свежий fleet census, сохранение handoff intent и
+supersede. Повтор разрешён только для того же кандидата; неполный bootstrap stage,
+неизвестные файлы, изменение входов, activation, другой lifecycle или несовпадение
+broker identity блокируют продолжение. При ошибке lifecycle остаётся закрытым в
+`applying`; этот путь не восстанавливает неизвестный relay и не меняет БД.
+`RETRY_FAILED=1` не разрешает использовать failed candidate как predecessor.
 Для принятия уже работающего runtime используйте
 явный запуск:
 

@@ -119,6 +119,9 @@ func runOperatorUpgradeCommand(args []string) {
 	forwardOnly := fs.Bool("forward-only", false, "continue without restoring an unknown previous relay binary")
 	forwardJournalFile := fs.String("forward-journal-file", "", "private archived dispatched-operation journal for forward-only recovery")
 	forwardJournalSHA := fs.String("forward-journal-sha256", "", "SHA-256 of the archived forward-only journal")
+	forwardPrior := fs.String("forward-prior-candidate", "", "exact failed pre-activation candidate operation directory")
+	forwardPriorJournal := fs.String("forward-prior-journal-file", "", "private archived failed candidate journal")
+	forwardPriorSHA := fs.String("forward-prior-journal-sha256", "", "SHA-256 of the archived failed candidate journal")
 	probeFile := fs.String("subscription-probe-url-file", "", "private 0600 HTTPS subscription URL file for domain acceptance")
 	jobDirectory := fs.String("job-dir", "", "persistent private Ansible upgrade directory")
 	python := fs.String("python", "/usr/bin/python3", "controller Python")
@@ -132,6 +135,11 @@ func runOperatorUpgradeCommand(args []string) {
 		(!*forwardOnly && (*forwardJournalFile != "" || *forwardJournalSHA != "")) ||
 		(*forwardJournalSHA != "" && !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(*forwardJournalSHA)) {
 		exitOnErr("operator upgrade arguments", errors.New("complete operator candidate identity required"))
+		return
+	}
+	if (*forwardPrior != "" || *forwardPriorJournal != "" || *forwardPriorSHA != "") &&
+		(!*forwardOnly || *forwardPrior == "" || *forwardPriorJournal == "" || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(*forwardPriorSHA)) {
+		exitOnErr("operator upgrade prior candidate", errors.New("complete prior candidate identity required"))
 		return
 	}
 	configRaw, err := os.ReadFile(*configPath)
@@ -172,6 +180,9 @@ func runOperatorUpgradeCommand(args []string) {
 			return
 		}
 		ctx = withForwardUpgradeJournal(ctx, *forwardJournalFile, *forwardJournalSHA)
+		if *forwardPrior != "" {
+			ctx = context.WithValue(ctx, forwardPriorCandidateKey{}, forwardPriorCandidate{*forwardPrior, *forwardPriorJournal, *forwardPriorSHA})
+		}
 	}
 	exitOnErr("Ansible operator upgrade", ansibleUpgrade(withUpgradeDomainProbeFile(ctx, *probeFile), p, selectedRelease, *jobDirectory, *python, *ansible, *retryFailed, *forwardOnly))
 }

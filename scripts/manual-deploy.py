@@ -532,7 +532,7 @@ def operator_requested():
 # Executed only through pinned SSH. This helper never reads secret environment files.
 # Stage into a fresh private sibling and rename only after every byte is checked.
 REMOTE_PROGRAM = r'''
-import fcntl,hashlib,json,os,platform,re,shutil,stat,sys,tarfile,tempfile
+import fcntl,hashlib,json,os,platform,re,shutil,stat,sys,tarfile,tempfile,uuid
 from pathlib import Path
 def need(ok, code='remote_input_invalid'):
     if not ok: raise ValueError(code)
@@ -541,8 +541,11 @@ mode,commit,version,manifest_sha,config_sha,attempt=sys.argv[1:7]
 probe_sha=(sys.argv[11] if len(sys.argv)>11 else '') if mode=='run' else (sys.argv[7] if len(sys.argv)>7 else '')
 forward_journal_sha=(sys.argv[12] if mode=='run' and len(sys.argv)>12 else
                      (sys.argv[8] if mode in ['stage','cleanup','continue'] and len(sys.argv)>8 else ''))
+prior_journal_sha=(sys.argv[16] if mode=='run' and len(sys.argv)>16 else
+                   (sys.argv[9] if mode in ['stage','cleanup','continue'] and len(sys.argv)>9 else ''))
 need(probe_sha=='' or re.fullmatch('[a-f0-9]{64}',probe_sha))
 need(forward_journal_sha=='' or re.fullmatch('[a-f0-9]{64}',forward_journal_sha))
+need(prior_journal_sha=='' or re.fullmatch('[a-f0-9]{64}',prior_journal_sha))
 need(re.fullmatch('[a-f0-9]{40}',commit) and version=='v0.0.'+str(int(commit,16)))
 need(all(re.fullmatch('[a-f0-9]{64}',x) for x in [manifest_sha,config_sha,attempt]))
 need(os.geteuid()==0)
@@ -560,6 +563,25 @@ def read(path):
     info=path.lstat()
     need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and not info.st_mode&0o077)
     return path.read_bytes()
+def verify_private_tree(directory):
+    """Require private root-owned regular files/directories in retained job trees."""
+    count=0;total=0
+    for base,dirs,files in os.walk(directory,followlinks=False):
+        base=Path(base);info=base.lstat()
+        need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and not info.st_mode&0o077,
+             'manual_forward_continuation_evidence_invalid')
+        for name in dirs+files:
+            item=base/name;info=item.lstat();count+=1
+            need(count<=20000 and info.st_uid==0 and not stat.S_ISLNK(info.st_mode),
+                 'manual_forward_continuation_evidence_invalid')
+            if name in dirs:
+                need(stat.S_ISDIR(info.st_mode) and not info.st_mode&0o077,
+                     'manual_forward_continuation_evidence_invalid')
+            else:
+                need(stat.S_ISREG(info.st_mode) and not info.st_mode&0o077 and info.st_size<=2147483648,
+                     'manual_forward_continuation_evidence_invalid')
+                total+=info.st_size
+                need(total<=4294967296,'manual_forward_continuation_evidence_invalid')
 def verify(directory):
     info=directory.lstat();need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700)
     info=(directory/'release').lstat();need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700)
@@ -572,7 +594,7 @@ def verify(directory):
         need(len(data)==row['size'] and digest(data)==row['sha256'])
     need({x.name for x in (directory/'release').iterdir()}==names|{'release-manifest.json'})
     top={x.name for x in directory.iterdir()}
-    need(top - {'baseline','subscription-probe-url','subscription-probe.sha256','forward-operation.json'} == {'release','install.config'})
+    need(top - {'baseline','subscription-probe-url','subscription-probe.sha256','forward-operation.json','forward-prior-operation.json'} == {'release','install.config'})
     need(('subscription-probe.sha256' in top)==bool(probe_sha))
     if probe_sha:
         need(read(directory/'subscription-probe.sha256')==probe_sha.encode())
@@ -586,6 +608,11 @@ def verify(directory):
         info=(directory/'forward-operation.json').lstat()
         need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600)
         need(digest(read(directory/'forward-operation.json'))==forward_journal_sha)
+    need(('forward-prior-operation.json' in top)==bool(prior_journal_sha))
+    if prior_journal_sha:
+        info=(directory/'forward-prior-operation.json').lstat()
+        need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600)
+        need(digest(read(directory/'forward-prior-operation.json'))==prior_journal_sha)
     if 'baseline' in top:
         baseline=directory/'baseline';info=baseline.lstat()
         need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700)
@@ -621,18 +648,162 @@ def verify_continuation():
     operation=state/('upgrade-'+version)
     info=operation.lstat()
     need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700)
-    need({p.name for p in operation.iterdir()}=={'execution-mode.json','operator-plan.json'},
-         'manual_forward_continuation_requires_pre_handoff')
-    for name in ['execution-mode.json','operator-plan.json']: read(operation/name)
+    operation_names={p.name for p in operation.iterdir()}
+    fixed_names={'execution-mode.json','operator-plan.json','forward-handoff.json','runtime-use.json'}
+    stage_names={name for name in operation_names if name.startswith(('handoff-drain-','broker-bootstrap-'))}
+    expected_old_id=str(uuid.UUID(bytes=hashlib.sha256(str(state/('upgrade-'+old_version)).encode()).digest()[:16],version=4))
+    expected_new_id=str(uuid.UUID(bytes=hashlib.sha256(str(operation).encode()).digest()[:16],version=4))
+    prior_candidate=None
+    need(operation_names==(fixed_names & operation_names)|stage_names and
+         {'execution-mode.json','operator-plan.json'}<=operation_names,
+         'manual_forward_continuation_handoff_inventory_invalid')
+    if not stage_names and 'forward-handoff.json' not in operation_names:
+        for name in ['execution-mode.json','operator-plan.json']:
+            info=(operation/name).lstat()
+            need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600,
+                 'manual_forward_continuation_requires_pre_handoff')
+            read(operation/name)
+    elif stage_names and 'forward-handoff.json' not in operation_names:
+        # A replacement with no saved handoff must census before broker
+        # bootstrap. Retained census/bootstrap evidence is rechecked by Go
+        # against the prior operation before any fleet mutation.
+        need(bool(prior_journal_sha), 'manual_forward_continuation_handoff_evidence_invalid')
+        drains=[p for p in operation.iterdir() if p.name.startswith('handoff-drain-')]
+        bootstraps=[p for p in operation.iterdir() if p.name.startswith('broker-bootstrap-')]
+        for stage in drains+bootstraps:
+            verify_private_tree(stage)
+            names={p.name for p in stage.iterdir()}
+            need({'request.json','job.json','receipt.json','result.json'}<=names and
+                 names<={'request.json','job.json','receipt.json','result.json','inventory.json','inventory.yml',
+                         'variables.json','variables.yml','bundle','ansible-tmp','bundle.retention.json','diagnostic.json'},
+                 'manual_forward_continuation_handoff_evidence_invalid')
+            request_raw=read(stage/'request.json');job_raw=read(stage/'job.json')
+            receipt_raw=read(stage/'receipt.json');result_raw=read(stage/'result.json')
+            request=json.loads(request_raw);job=json.loads(job_raw);receipt=json.loads(receipt_raw);result=json.loads(result_raw)
+            reqsha=digest(request_raw)
+            if stage in drains:
+                expected_result={'verified':True,'old_id':expected_old_id,'new_id':expected_new_id}
+                need(request.get('variables',{}).get('ultra_lock_directory')==str(state) and
+                     request.get('variables',{}).get('ultra_forward_old_id')==expected_old_id and
+                     request.get('variables',{}).get('ultra_lifecycle_id')==expected_new_id and
+                     all(item.get('schema_version')==1 and item.get('operation')=='drain-upgrade-workers' and
+                         item.get('request_sha256')==reqsha and item.get('binary_sha256')==reqsha
+                         for item in (job,receipt)) and receipt.get('state')=='succeeded' and receipt.get('code','')=='' and
+                     result==expected_result and result==receipt.get('result'),
+                     'manual_forward_continuation_handoff_evidence_invalid')
+            else:
+                need(request.get('variables',{}).get('ultra_lock_directory')==str(state) and
+                     request.get('variables',{}).get('ultra_forward_old_id')==expected_old_id and
+                     all(item.get('schema_version')==1 and item.get('operation')=='bootstrap-forward-broker' and
+                         item.get('request_sha256')==reqsha and item.get('binary_sha256')==reqsha
+                         for item in (job,receipt)) and receipt.get('state')=='succeeded' and receipt.get('code','')=='' and
+                     result==receipt.get('result') and result.get('verified') is True and
+                     result.get('old_id')==expected_old_id and
+                     result.get('controller_directory')=='/opt/ultra-ansible/releases/managed-'+version,
+                     'manual_forward_continuation_handoff_evidence_invalid')
+        prior_candidate={'commit':commit,'version':version,'remote_attempt':attempt,
+            'manifest_sha256':manifest_sha,'staged_config_sha256':config_sha,
+            'forward_journal_sha256':forward_journal_sha}
+    else:
+        drains=[p for p in operation.iterdir() if p.name.startswith('handoff-drain-')]
+        bootstraps=[p for p in operation.iterdir() if p.name.startswith('broker-bootstrap-')]
+        need(bool(drains) and 'forward-handoff.json' in operation_names,
+             'manual_forward_continuation_handoff_inventory_invalid')
+        for name in ['execution-mode.json','operator-plan.json','forward-handoff.json']:
+            info=(operation/name).lstat()
+            need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600,
+                 'manual_forward_continuation_handoff_evidence_invalid')
+        intent=json.loads(read(operation/'forward-handoff.json'))
+        for stage in drains+bootstraps:
+            verify_private_tree(stage)
+            names={p.name for p in stage.iterdir()}
+            need({'request.json','job.json','receipt.json','result.json'}<=names and
+                 names<={'request.json','job.json','receipt.json','result.json','inventory.json','inventory.yml',
+                         'variables.json','variables.yml','bundle','ansible-tmp','bundle.retention.json','diagnostic.json'},
+                 'manual_forward_continuation_handoff_evidence_invalid')
+        stage=Path(intent.get('drain_directory',''))
+        need(stage in drains and intent.get('schema')==1 and intent.get('proof_sha256')==forward_journal_sha,
+             'manual_forward_continuation_handoff_evidence_invalid')
+        evidence={name:read(stage/name) for name in ['request.json','job.json','receipt.json','result.json']}
+        need(proof.get('schema')==1 and proof.get('stage')=='upgrade' and proof.get('mutator_dispatched') is True and
+             proof.get('commit')==old_commit and proof.get('version')==old_version and
+             all(re.fullmatch('[a-f0-9]{64}',proof.get(key,'')) for key in
+                 ('remote_attempt','manifest_sha256','staged_config_sha256')),
+             'manual_forward_continuation_predecessor_invalid')
+        old_inputs=parent/('manual-'+old_commit+'-'+proof['remote_attempt'])
+        info=old_inputs.lstat()
+        need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700,
+             'manual_forward_continuation_predecessor_invalid')
+        old_manifest=read(old_inputs/'release/release-manifest.json')
+        old_config=read(old_inputs/'install.config')
+        need(digest(old_manifest)==proof['manifest_sha256'] and digest(old_config)==proof['staged_config_sha256'],
+             'manual_forward_continuation_predecessor_invalid')
+        old_operation=state/('upgrade-'+old_version)
+        old_names={p.name for p in old_operation.iterdir()}
+        need({'execution-mode.json','operator-plan.json','activate'}<=old_names,
+             'manual_forward_continuation_predecessor_invalid')
+        verify_private_tree(old_operation)
+        info=(old_operation/'activate').lstat()
+        need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700 and
+             {'request.json','job.json','receipt.json'}<={p.name for p in (old_operation/'activate').iterdir()},
+             'manual_forward_continuation_predecessor_invalid')
+        prior_request_raw=read(old_operation/'activate/request.json')
+        prior_request=json.loads(prior_request_raw)
+        prior_inventory=prior_request.get('inventory')
+        need(prior_inventory is not None and prior_request.get('variables',{}).get('ultra_lifecycle_id')==expected_old_id,
+             'manual_forward_continuation_predecessor_invalid')
+        for name in ['execution-mode.json','operator-plan.json','activate/request.json','activate/job.json','activate/receipt.json']:
+            path=old_operation/name
+            info=path.lstat()
+            need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600,
+                 'manual_forward_continuation_predecessor_invalid')
+        for name in ['job.json','receipt.json']:
+            item=json.loads(read(old_operation/'activate'/name))
+            need(item.get('schema_version')==1 and item.get('operation')=='upgrade' and
+                 item.get('request_sha256')==digest(prior_request_raw) and item.get('binary_sha256')==digest(prior_request_raw),
+                 'manual_forward_continuation_predecessor_invalid')
+        request=json.loads(evidence['request.json']); job=json.loads(evidence['job.json'])
+        receipt=json.loads(evidence['receipt.json']); result=json.loads(evidence['result.json'])
+        reqsha=digest(evidence['request.json'])
+        variables=request.get('variables',{})
+        expected_request=json.dumps({'inventory':prior_inventory,'variables':{'ultra_lock_directory':str(state),
+            'ultra_forward_old_id':expected_old_id,'ultra_lifecycle_id':expected_new_id}},sort_keys=True,separators=(',',':')).encode()
+        need(evidence['request.json']==expected_request and variables.get('ultra_lock_directory')==str(state) and
+             variables.get('ultra_forward_old_id')==expected_old_id and variables.get('ultra_lifecycle_id')==expected_new_id and
+             all(item.get('schema_version')==1 and item.get('operation')=='drain-upgrade-workers' and
+                 item.get('request_sha256')==reqsha and item.get('binary_sha256')==reqsha for item in (job,receipt)) and
+             receipt.get('state')=='succeeded' and receipt.get('code','')=='' and
+             receipt.get('result')=={'verified':True,'old_id':expected_old_id,'new_id':expected_new_id} and
+             result==receipt.get('result'), 'manual_forward_continuation_handoff_evidence_invalid')
+        need(intent.get('schema')==1 and intent.get('proof_sha256')==forward_journal_sha and
+             intent.get('old_id')==expected_old_id and intent.get('new_id')==expected_new_id and
+             intent.get('drain_directory')==str(stage) and intent.get('request_sha256')==reqsha and
+             intent.get('job_sha256')==digest(evidence['job.json']) and
+             intent.get('receipt_sha256')==digest(evidence['receipt.json']) and
+             intent.get('result_sha256')==digest(evidence['result.json']),
+             'manual_forward_continuation_handoff_evidence_invalid')
+        prior_candidate={'commit':commit,'version':version,'remote_attempt':attempt,
+            'manifest_sha256':manifest_sha,'staged_config_sha256':config_sha,
+            'forward_journal_sha256':forward_journal_sha}
     lifecycle=json.loads(read(state/'lifecycle.json'))
-    import uuid
     old_id=str(uuid.UUID(bytes=hashlib.sha256(str(state/('upgrade-'+old_version)).encode()).digest()[:16],version=4))
     need(lifecycle.get('id')==old_id and lifecycle.get('phase')=='applying',
          'manual_forward_continuation_lifecycle_changed')
     architecture={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine())
     need(architecture in ['amd64','arm64'])
+    lifecycle_retired=state/'lifecycle-retired.json'
+    if prior_candidate and (lifecycle_retired.exists() or lifecycle_retired.is_symlink()):
+        ledger=json.loads(read(lifecycle_retired))
+        handoff=ledger.get('handoff',{})
+        ids=ledger.get('ids',[])
+        need(not (set(ledger)-{'version','ids','handoff'}) and ledger.get('version')==1 and isinstance(ids,list) and
+             len(ids)==len(set(ids)) and all(re.fullmatch('[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}',value) for value in ids) and
+             expected_new_id not in ids and
+             not (handoff.get('old_id')==expected_old_id and handoff.get('new_id')==expected_new_id),
+             'manual_forward_continuation_retirement_changed')
     return {'architecture':architecture,'manifest_sha256':manifest_sha,'config_sha256':config_sha,
-            'attempt':attempt,'forward_journal_sha256':forward_journal_sha,'lifecycle_id':old_id}
+            'attempt':attempt,'forward_journal_sha256':forward_journal_sha,'lifecycle_id':old_id,
+            'prior_candidate':prior_candidate}
 if mode=='continue':
     print(json.dumps(verify_continuation()))
 elif mode=='stage':
@@ -657,6 +828,9 @@ elif mode=='stage':
                     raw=None
                 elif name=='forward-operation.json':
                     need(bool(forward_journal_sha) and member.size<=1048576)
+                    raw=None
+                elif name=='forward-prior-operation.json':
+                    need(bool(prior_journal_sha) and member.size<=1048576)
                     raw=None
                 elif name in ('baseline/descriptor.json','baseline/operator-journal.json'):
                     need(name not in seen and member.size<=4194304)
@@ -686,6 +860,7 @@ elif mode=='stage':
             expected |= {'baseline/descriptor.json','baseline/operator-journal.json'}
         if probe_sha: expected |= {'subscription-probe-url','subscription-probe.sha256'}
         if forward_journal_sha: expected.add('forward-operation.json')
+        if prior_journal_sha: expected.add('forward-prior-operation.json')
         need(rows is not None and seen==expected)
         verify(pending)
         for directory in [pending/'release',pending]:
@@ -707,7 +882,8 @@ elif mode=='stage':
             os.rename(pending,root)
             fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
         architecture={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine());need(platform.system()=='Linux' and architecture)
-        print(json.dumps({'architecture':architecture,'manifest_sha256':manifest_sha,'config_sha256':config_sha,'attempt':attempt}))
+        print(json.dumps({'architecture':architecture,'manifest_sha256':manifest_sha,'config_sha256':config_sha,'attempt':attempt,
+                          'forward_prior_journal_sha256':prior_journal_sha}))
     finally:
         if pending.exists(): shutil.rmtree(pending)
 elif mode=='run':
@@ -718,10 +894,14 @@ elif mode=='run':
     retry_failed=len(sys.argv)>9 and sys.argv[9]=='1'
     forward_only=len(sys.argv)>10 and sys.argv[10]=='1'
     continuation=len(sys.argv)>13 and sys.argv[13]=='1'
-    need(len(sys.argv)<=14 and (len(sys.argv)<=13 or sys.argv[13] in ['0','1']) and
+    need((len(sys.argv)<=14 or (len(sys.argv)==17 and bool(prior_journal_sha))) and
+         (len(sys.argv)<=13 or sys.argv[13] in ['0','1']) and
          (not continuation or (forward_only and action=='upgrade')) and (len(sys.argv)<=9 or sys.argv[9] in ['0','1']) and
          (len(sys.argv)<=10 or sys.argv[10] in ['0','1']) and
-         (not forward_only or (action=='upgrade' and not retry_failed and bool(forward_journal_sha))),
+         (not forward_only or (action=='upgrade' and not retry_failed and bool(forward_journal_sha))) and
+         (not prior_journal_sha or (action in ['doctor','upgrade','status'] and len(sys.argv)==17 and
+          sys.argv[14]==str(parent.parent/('upgrade-'+json.loads(read(root/'forward-prior-operation.json')).get('version',''))) and
+          sys.argv[15]==str(root/'forward-prior-operation.json'))),
          'manual_forward_only_invalid')
     if continuation: verify_continuation()
     binary=root/'release'/('ultra-install-linux-'+architecture)
@@ -736,6 +916,16 @@ elif mode=='run':
         args += ['--job-dir', '/var/lib/ultra-ansible/upgrade-'+version,
                  '--forward-only', '--forward-journal-file', str(root/'forward-operation.json'),
                  '--forward-journal-sha256', forward_journal_sha]
+    if action=='upgrade' and prior_journal_sha:
+        need(len(sys.argv)>15 and sys.argv[15]==str(root/'forward-prior-operation.json'))
+        prior=json.loads(read(root/'forward-prior-operation.json'))
+        prior_version=prior.get('version','')
+        need(re.fullmatch('[a-f0-9]{40}',prior.get('commit','')) and
+             prior_version=='v0.0.'+str(int(prior['commit'],16)) and
+             prior.get('remote_attempt') and sys.argv[14]==str(parent.parent/('upgrade-'+prior_version)))
+        args += ['--forward-prior-candidate',sys.argv[14],
+                 '--forward-prior-journal-file',str(root/'forward-prior-operation.json'),
+                 '--forward-prior-journal-sha256',prior_journal_sha]
     if action=='upgrade' and probe_sha:
         need((root/'subscription-probe-url').exists())
         args += ['--subscription-probe-url-file',str(root/'subscription-probe-url')]
@@ -774,7 +964,7 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
             entry.size = len(config)
             archive.addfile(entry, io.BytesIO(config))
             for name, data in sorted((extra_files or {}).items()):
-                require(name in ('baseline/descriptor.json', 'baseline/operator-journal.json', 'subscription-probe-url', 'subscription-probe.sha256', 'forward-operation.json'), 'private_archive_path_invalid')
+                require(name in ('baseline/descriptor.json', 'baseline/operator-journal.json', 'subscription-probe-url', 'subscription-probe.sha256', 'forward-operation.json', 'forward-prior-operation.json'), 'private_archive_path_invalid')
                 entry = tarfile.TarInfo(name)
                 entry.size = len(data)
                 archive.addfile(entry, io.BytesIO(data))
@@ -782,12 +972,15 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
         attempt = remote_attempt(config, version)
         result = subprocess.run(remote_command(transport, commit, version, manifest_sha, sha(config), attempt, 'stage',
                                               (extra_files or {}).get('subscription-probe.sha256', b'').decode(),
-                                              sha((extra_files or {}).get('forward-operation.json', b'')) if (extra_files or {}).get('forward-operation.json') else ''),
+                                              sha((extra_files or {}).get('forward-operation.json', b'')) if (extra_files or {}).get('forward-operation.json') else '',
+                                              sha((extra_files or {}).get('forward-prior-operation.json', b'')) if (extra_files or {}).get('forward-prior-operation.json') else ''),
                                 cwd=repo, stdin=stream, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
     require(result.returncode == 0, 'bridge_staging_failed')
     receipt = json.loads(result.stdout)
     require(receipt.get('architecture') in ['amd64', 'arm64'] and receipt.get('manifest_sha256') == manifest_sha
-            and receipt.get('config_sha256') == sha(config) and receipt.get('attempt') == attempt, 'bridge_staging_receipt_invalid')
+            and receipt.get('config_sha256') == sha(config) and receipt.get('attempt') == attempt and
+            receipt.get('forward_prior_journal_sha256', '') == (sha(extra_files['forward-prior-operation.json']) if 'forward-prior-operation.json' in (extra_files or {}) else ''),
+            'bridge_staging_receipt_invalid')
     return receipt
 
 
@@ -998,6 +1191,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     if abandoned_record is not None and 'staged_config_sha256' not in abandoned_record:
         abandoned_record = attest_legacy_manual_operation(repo, abandoned_record, transport, transport_binding, current)
     continuation_proof = None
+    continuation_prior_history = None
     continuation_record = dict(existing_record) if continue_forward_only else None
     same_candidate = continue_forward_only and existing_record.get('commit') == commit
     if continue_forward_only:
@@ -1023,6 +1217,19 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         require(re.fullmatch(r'install\.config\.before-' + re.escape(existing_record['version']) + r'-[0-9]+', backup_name),
                 'manual_backup_identity_invalid')
         require(sha(private_file(root / backup_name)) == existing_record.get('previous_sha256'), 'canonical_backup_changed')
+        if same_candidate and existing_record.get('forward_prior_journal_sha256'):
+            history_name=existing_record.get('forward_retry_history','')
+            require(isinstance(history_name,str) and re.fullmatch(r'operation\.forward-only-retry-[0-9]+\.json',history_name),
+                    'manual_forward_preflight_history_changed')
+            history_raw=private_file(root/history_name)
+            require(sha(history_raw)==existing_record.get('forward_retry_history_sha256'),
+                    'manual_forward_preflight_history_changed')
+            continuation_prior_history=json.loads(history_raw)
+            validate_dispatched_manual_operation(continuation_prior_history)
+            require(continuation_prior_history.get('forward_only') is True and
+                    continuation_prior_history.get('version')!='' and
+                    continuation_prior_history.get('forward_journal_sha256')==existing_record.get('forward_journal_sha256'),
+                    'manual_forward_preflight_history_changed')
     if transport:
         # plan only parses/validates policy; unlike doctor it never opens the
         # secrets file. Suppress its output because the plan contains inputs.
@@ -1058,7 +1265,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         if transport and (record.get('probe_sha256') or forward_sha):
             run(remote_command(transport, commit, version, manifest_sha, record['staged_config_sha256'],
                                record['remote_attempt'], 'cleanup', record.get('probe_sha256', ''),
-                               forward_sha), repo, 'probe_cleanup')
+                               forward_sha, record.get('forward_prior_journal_sha256', '')), repo, 'probe_cleanup')
         probe_snapshot.unlink(missing_ok=True)
 
     if journal.exists() and not forward_only:
@@ -1101,7 +1308,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     def attest_continuation():
         failed = continuation_record
         receipt = json.loads(run(remote_command(transport, failed['commit'], failed['version'], failed['manifest_sha256'],
-            failed['staged_config_sha256'], failed['remote_attempt'], 'continue', probe_sha, failed['forward_journal_sha256']),
+            failed['staged_config_sha256'], failed['remote_attempt'], 'continue', probe_sha,
+            failed['forward_journal_sha256'], failed.get('forward_prior_journal_sha256', '')),
             repo, 'forward_continuation_attestation', capture=True))
         predecessor = json.loads(continuation_proof)
         state = Path('/var/lib/ultra-ansible') / ('upgrade-' + predecessor['version'])
@@ -1111,6 +1319,12 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
                 receipt.get('manifest_sha256') == failed['manifest_sha256'] and
                 receipt.get('config_sha256') == failed['staged_config_sha256'] and
                 receipt.get('attempt') == failed['remote_attempt'], 'manual_forward_continuation_receipt_invalid')
+        prior=receipt.get('prior_candidate') or {}
+        require(prior=={'commit':failed['commit'],'version':failed['version'],
+                'remote_attempt':failed['remote_attempt'],'manifest_sha256':failed['manifest_sha256'],
+                'staged_config_sha256':failed['staged_config_sha256'],
+                'forward_journal_sha256':failed['forward_journal_sha256']} or prior=={},
+                'manual_forward_continuation_receipt_invalid')
         return receipt
 
     continuation_receipt = None
@@ -1139,10 +1353,13 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             forward_journal_sha = ''
             if continue_forward_only:
                 history = root / ('operation.forward-only-retry-' + str(time.time_ns()) + '.json')
-                atomic_write(history, private_file(journal))
+                prior_operation_raw = private_file(journal)
+                atomic_write(history, prior_operation_raw)
                 forward_journal_raw = continuation_proof
                 forward_journal_sha = continuation_record['forward_journal_sha256']
                 baseline_files['forward-operation.json'] = forward_journal_raw
+                if not same_candidate:
+                    baseline_files['forward-prior-operation.json'] = prior_operation_raw
             elif forward_only:
                 archived_journal = abandon_dispatched_manual_operation(root, journal, abandoned_record)
                 forward_journal_raw = private_file(archived_journal)
@@ -1157,6 +1374,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             if continue_forward_only:
                 record['forward_retry_history'] = history.name
                 record['forward_retry_history_sha256'] = sha(private_file(history))
+                if not same_candidate:
+                    record['forward_prior_journal_sha256'] = sha(prior_operation_raw)
             if probe_raw is not None:
                 atomic_write(probe_snapshot, probe_raw)
             atomic_write(journal, json.dumps(record).encode())
@@ -1214,11 +1433,25 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             print('manual-deploy: ' + stage, flush=True)
             if transport:
                 stage_forward_only = forward_only and stage == 'upgrade'
+                remote_args = [record['remote_architecture'], stage, '1' if retry_failed else '0',
+                               '1' if stage_forward_only else '0', probe_sha,
+                               record.get('forward_journal_sha256', '') if forward_only else '']
+                if same_candidate and stage=='upgrade':
+                    remote_args.append('1')
+                elif continue_forward_only and not same_candidate:
+                    remote_args += ['0', '/var/lib/ultra-ansible/upgrade-'+continuation_record['version'],
+                                    '/var/lib/ultra-ansible/operator-inputs/manual-'+commit+'-'+attempt+'/forward-prior-operation.json',
+                                    record['forward_prior_journal_sha256']]
+                if same_candidate and record.get('forward_prior_journal_sha256'):
+                    history=continuation_prior_history
+                    require(history is not None, 'manual_forward_preflight_history_changed')
+                    if stage!='upgrade':
+                        remote_args.append('0')
+                    remote_args += ['/var/lib/ultra-ansible/upgrade-'+history['version'],
+                                    '/var/lib/ultra-ansible/operator-inputs/manual-'+commit+'-'+attempt+'/forward-prior-operation.json',
+                                    record['forward_prior_journal_sha256']]
                 command = remote_command(transport, commit, version, manifest_sha, record.get('staged_config_sha256', record['config_sha256']), attempt,
-                                         'run', record['remote_architecture'], stage, '1' if retry_failed else '0',
-                                         '1' if stage_forward_only else '0', probe_sha,
-                                         record.get('forward_journal_sha256', '') if forward_only else '',
-                                         *(['1'] if same_candidate and stage == 'upgrade' else []))
+                                         'run', *remote_args)
             run(command, repo, stage)
     except BaseException:
         if continue_forward_only and not same_candidate:

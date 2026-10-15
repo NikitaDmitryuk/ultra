@@ -1,0 +1,38 @@
+---
+- name: Replace only the broker while the caller retains the predecessor lease
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Verify frozen broker identity and predecessor gate before replacement
+      ultra_forward_broker_guard:
+        action: before
+        old_id: "{{ ultra_forward_old_id }}"
+        candidate_id: "{{ ultra_forward_candidate_id }}"
+        expected_brokers: "{{ ultra_forward_expected_brokers }}"
+        target_broker: "{{ ultra_forward_target_broker }}"
+    - name: Install only immutable broker runtime and service
+      ansible.builtin.include_role:
+        name: controller
+        tasks_from: runtime.yml
+    - name: Complete runtime service notifications before adoption
+      ansible.builtin.meta: flush_handlers
+    - name: Restart even if an earlier attempt already installed this runtime
+      ansible.builtin.systemd_service:
+        name: ultra-ansible-controller.service
+        state: restarted
+        daemon_reload: true
+    - name: Verify the candidate broker identity and closed predecessor gate
+      ultra_forward_broker_guard:
+        action: after
+        old_id: "{{ ultra_forward_old_id }}"
+        candidate_id: "{{ ultra_forward_candidate_id }}"
+        expected_brokers: "{{ ultra_forward_expected_brokers }}"
+        target_broker: "{{ ultra_forward_target_broker }}"
+    - name: Record the broker-only installation acknowledgement
+      ansible.builtin.copy:
+        content: "{{ {'verified': true, 'old_id': ultra_forward_old_id, 'controller_directory': ultra_controller_directory} | to_json }}"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
