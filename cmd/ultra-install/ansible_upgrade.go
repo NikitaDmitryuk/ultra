@@ -507,7 +507,7 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		if activationReceiptErr != nil && !os.IsNotExist(activationReceiptErr) {
 			return activationReceiptErr
 		}
-		preflightVariables := make(map[string]any, len(variables)+1)
+		preflightVariables := make(map[string]any)
 		for key, value := range variables {
 			preflightVariables[key] = value
 		}

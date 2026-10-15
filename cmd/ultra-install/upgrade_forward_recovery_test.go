@@ -17,6 +17,67 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
+func TestVerifyForwardDrainFilesRejectsUnsafeArchivePaths(t *testing.T) {
+	writeArchive := func(t *testing.T, path, name string) {
+		t.Helper()
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gz := gzip.NewWriter(file)
+		archive := tar.NewWriter(gz)
+		data := []byte("controller source")
+		if err = archive.WriteHeader(&tar.Header{Name: name, Mode: 0600, Size: int64(len(data)), Typeflag: tar.TypeReg}); err == nil {
+			_, err = archive.Write(data)
+		}
+		for _, closeErr := range []error{err, archive.Close(), gz.Close(), file.Close()} {
+			if closeErr != nil {
+				t.Fatal(closeErr)
+			}
+		}
+	}
+
+	for _, name := range []string{"../outside", "../../outside", "/outside", "nested/../outside", "nested//outside"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			stage := filepath.Join(root, "stage")
+			if err := os.MkdirAll(filepath.Join(stage, "bundle"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(stage, "bundle", name)
+			if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(destination, []byte("controller source"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			archive := filepath.Join(root, "prior.tar.gz")
+			writeArchive(t, archive, name)
+			if err := verifyForwardDrainFiles(stage, archive); err == nil {
+				t.Fatal("unsafe archive path accepted")
+			}
+		})
+	}
+
+	t.Run("local-file", func(t *testing.T) {
+		root := t.TempDir()
+		stage := filepath.Join(root, "stage")
+		bundle := filepath.Join(stage, "bundle")
+		if err := os.MkdirAll(bundle, 0700); err != nil {
+			t.Fatal(err)
+		}
+		data := []byte("controller source")
+		if err := os.WriteFile(filepath.Join(bundle, "controller.py"), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		archive := filepath.Join(root, "prior.tar.gz")
+		writeArchive(t, archive, "controller.py")
+		if err := verifyForwardDrainFiles(stage, archive); err != nil {
+			t.Fatalf("valid archive rejected: %v", err)
+		}
+	})
+}
+
 func TestForwardRecoveryBrokerOrderingAndFailure(t *testing.T) {
 	for _, kind := range []string{"success", "restart-failure", "lifecycle-changed", "retired", "activation-started"} {
 		t.Run(kind, func(t *testing.T) {

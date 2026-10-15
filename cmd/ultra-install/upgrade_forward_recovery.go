@@ -260,7 +260,7 @@ func verifyForwardDrainFiles(stage, archive string) (result error) {
 			return fail
 		}
 		name := strings.TrimSuffix(header.Name, "/")
-		if name == "" || filepath.Clean(name) != name || filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") || expected[name] {
+		if name == "" || !filepath.IsLocal(name) || filepath.Clean(name) != name || expected[name] {
 			return fail
 		}
 		expected[name] = true
