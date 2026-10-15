@@ -21,8 +21,8 @@ type forwardBrokerIdentity struct {
 }
 
 // forwardBrokerVariables derives the only controller identities that may be
-// running before broker recovery: the predecessor request's frozen previous
-// controller or its target controller. It also returns the exact identity for
+// running before broker recovery: the predecessor request's fully verifiable
+// previous controller or its target controller. It also returns the exact identity for
 // the candidate whose signed runtime is about to be installed.
 func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) (map[string]any, error) {
 	fail := errors.New("upgrade_forward_broker_identity_unverified")
@@ -101,8 +101,7 @@ func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) 
 	if err != nil || oldTarget.Version != oldTargetVersion(old.Directory) || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(oldTarget.SourceCommit) {
 		return nil, fail
 	}
-	if !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(previous.SourceCommit) ||
-		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(target.SourceCommit) ||
+	if !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(target.SourceCommit) ||
 		!validAutomationVersion(target.Version) {
 		return nil, fail
 	}
@@ -124,14 +123,6 @@ func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) 
 		!reflect.DeepEqual(sourceManifest, *oldTarget) {
 		return nil, fail
 	}
-	previousDirectory, err := readBridgeString("ultra_previous_controller_directory")
-	if err != nil || previousDirectory != managedControllerDirectory(previous.Version) {
-		return nil, fail
-	}
-	previousUnitSHA, err := readBridgeString("ultra_previous_controller_unit_sha256")
-	if err != nil || !sha256DigestPattern.MatchString(previousUnitSHA) {
-		return nil, fail
-	}
 	oldTargetDirectory, err := readBridgeString("ultra_controller_directory")
 	if err != nil || oldTargetDirectory != managedControllerDirectory(oldTarget.Version) {
 		return nil, fail
@@ -149,14 +140,6 @@ func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) 
 		return nil, fail
 	}
 
-	previousInstaller, err := upgradeAsset(previous, "ultra-install-linux-"+architecture)
-	if err != nil || !sha256DigestPattern.MatchString(previousInstaller.SHA) {
-		return nil, fail
-	}
-	previousRuntime, err := upgradeAsset(previous, "ultra-ansible-runtime-linux-"+architecture+".tar.gz")
-	if err != nil || !sha256DigestPattern.MatchString(previousRuntime.SHA) {
-		return nil, fail
-	}
 	oldTargetInstaller, err := upgradeAsset(oldTarget, "ultra-install-linux-"+architecture)
 	if err != nil || oldTargetInstaller.SHA != oldTargetInstallerSHA {
 		return nil, fail
@@ -166,16 +149,30 @@ func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) 
 		return nil, fail
 	}
 
-	oldPreviousIdentity := forwardBrokerIdentity{
-		Directory: previousDirectory, InstallerSHA: previousInstaller.SHA,
-		RuntimeSHA: previousRuntime.SHA, UnitSHA: previousUnitSHA,
-	}
 	oldTargetIdentity := forwardBrokerIdentity{
 		Directory: oldTargetDirectory, InstallerSHA: oldTargetInstaller.SHA,
 		RuntimeSHA: oldTargetRuntime.SHA, UnitSHA: oldTargetUnitSHA,
 	}
-	allowed := []forwardBrokerIdentity{oldPreviousIdentity}
-	if oldTargetIdentity != oldPreviousIdentity {
+	// Legacy baselines can lack the signed runtime, source commit, or managed
+	// controller path needed to prove their broker identity. Omit that identity
+	// rather than guessing any field or blocking the verified target identities.
+	// The live guard must still match one complete identity before mutation.
+	allowed := []forwardBrokerIdentity{}
+	previousDirectory, directoryErr := readBridgeString("ultra_previous_controller_directory")
+	previousUnitSHA, unitErr := readBridgeString("ultra_previous_controller_unit_sha256")
+	previousInstaller, installerErr := upgradeAsset(previous, "ultra-install-linux-"+architecture)
+	previousRuntime, runtimeErr := upgradeAsset(previous, "ultra-ansible-runtime-linux-"+architecture+".tar.gz")
+	if regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(previous.SourceCommit) &&
+		directoryErr == nil && previousDirectory == managedControllerDirectory(previous.Version) &&
+		unitErr == nil && sha256DigestPattern.MatchString(previousUnitSHA) &&
+		installerErr == nil && sha256DigestPattern.MatchString(previousInstaller.SHA) &&
+		runtimeErr == nil && sha256DigestPattern.MatchString(previousRuntime.SHA) {
+		allowed = append(allowed, forwardBrokerIdentity{
+			Directory: previousDirectory, InstallerSHA: previousInstaller.SHA,
+			RuntimeSHA: previousRuntime.SHA, UnitSHA: previousUnitSHA,
+		})
+	}
+	if !containsForwardBrokerIdentity(allowed, oldTargetIdentity) {
 		allowed = append(allowed, oldTargetIdentity)
 	}
 

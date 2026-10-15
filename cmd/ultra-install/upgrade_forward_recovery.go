@@ -175,10 +175,10 @@ func verifyForwardPriorCandidate(proof forwardUpgradeJournal, old forwardOldOper
 			drains++
 		}
 	}
-	// An untouched failed candidate can be replaced without inventing a saved
-	// census. Partial handoff evidence is ambiguous and remains unsupported.
-	// The caller must census under the old OFD before bootstrapping its broker.
-	if (hasIntent && drains == 0) || (!hasIntent && drains != 0) {
+	// Verified drain stages can survive a failure before the handoff intent was
+	// published. They authenticate retained artifacts, but do not replace the
+	// caller's fresh census under the old OFD when that intent is absent.
+	if hasIntent && drains == 0 {
 		return fail
 	}
 	return nil

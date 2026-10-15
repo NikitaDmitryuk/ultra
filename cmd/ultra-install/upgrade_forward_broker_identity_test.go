@@ -104,8 +104,9 @@ func TestForwardBrokerVariablesBindPreviousAndCandidateIdentities(t *testing.T) 
 	if !ok || len(identities) != 3 {
 		t.Fatalf("expected previous, prior target, and signed new target identities: %#v", variables)
 	}
-	if identities[0].InstallerSHA != previousInstaller.SHA || identities[0].RuntimeSHA != previousRuntime.SHA ||
-		identities[1].InstallerSHA != oldInstaller.SHA || identities[1].RuntimeSHA != oldRuntime.SHA {
+	wantPrevious := forwardBrokerIdentity{Directory: managedControllerDirectory(previous.Version), InstallerSHA: previousInstaller.SHA, RuntimeSHA: previousRuntime.SHA, UnitSHA: strings.Repeat("e", 64)}
+	wantOld := forwardBrokerIdentity{Directory: managedControllerDirectory(oldTarget.Version), InstallerSHA: oldInstaller.SHA, RuntimeSHA: oldRuntime.SHA, UnitSHA: strings.Repeat("a", 64)}
+	if identities[0] != wantPrevious || identities[1] != wantOld {
 		t.Fatalf("frozen identities not derived from the predecessor manifests: %#v", identities)
 	}
 	targetIdentity, ok := variables["ultra_forward_target_broker"].(forwardBrokerIdentity)
@@ -125,6 +126,77 @@ func brokerTestManifest(version, commit, fill string) *automationRelease {
 		}{Name: name, SHA: strings.Repeat(fill, 64), Size: 1})
 	}
 	return manifest
+}
+
+func TestForwardBrokerVariablesOmitUnverifiablePreviousIdentity(t *testing.T) {
+	for _, name := range []string{"legacy baseline", "missing source commit", "invalid source commit", "legacy directory", "missing directory", "missing unit hash", "invalid unit hash", "missing installer", "invalid installer hash", "missing runtime", "invalid runtime hash", "ambiguous runtime"} {
+		t.Run(name, func(t *testing.T) {
+			old, target, _, oldTarget := forwardBrokerVariablesFixture(t)
+			path := filepath.Join(old.Directory, "activate", "request.json")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var request map[string]any
+			if err := json.Unmarshal(raw, &request); err != nil {
+				t.Fatal(err)
+			}
+			variables := request["variables"].(map[string]any)
+			previous := variables["ultra_previous_manifest"].(map[string]any)
+			bridge := request["inventory"].(map[string]any)["all"].(map[string]any)["children"].(map[string]any)["bridge"].(map[string]any)["hosts"].(map[string]any)["bridge"].(map[string]any)
+			assets := previous["assets"].([]any)
+			switch name {
+			case "legacy baseline":
+				delete(previous, "source_commit")
+				previous["assets"] = assets[:1]
+				bridge["ultra_previous_controller_directory"] = "/opt/ultra-ansible/releases/v0.0.0"
+			case "missing source commit":
+				delete(previous, "source_commit")
+			case "invalid source commit":
+				previous["source_commit"] = "unknown"
+			case "legacy directory":
+				bridge["ultra_previous_controller_directory"] = "/opt/ultra-ansible/releases/v0.0.0"
+			case "missing directory":
+				delete(bridge, "ultra_previous_controller_directory")
+			case "missing unit hash":
+				delete(bridge, "ultra_previous_controller_unit_sha256")
+			case "invalid unit hash":
+				bridge["ultra_previous_controller_unit_sha256"] = "unknown"
+			case "missing installer":
+				previous["assets"] = assets[1:]
+			case "invalid installer hash":
+				assets[0].(map[string]any)["sha256"] = "unknown"
+			case "missing runtime":
+				previous["assets"] = assets[:1]
+			case "invalid runtime hash":
+				assets[1].(map[string]any)["sha256"] = "unknown"
+			case "ambiguous runtime":
+				previous["assets"] = append(assets, assets[1])
+			}
+			requestRaw, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, requestRaw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			proof := map[string]any{"schema_version": 1, "operation": "upgrade", "request_sha256": digestSHA256(requestRaw), "binary_sha256": digestSHA256(requestRaw)}
+			for _, file := range []string{"job.json", "receipt.json"} {
+				writeForwardJSON(t, filepath.Join(old.Directory, "activate", file), proof)
+			}
+			got, err := forwardBrokerVariables(old, target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identities, ok := got["ultra_forward_expected_brokers"].([]forwardBrokerIdentity)
+			oldInstaller, _ := upgradeAsset(oldTarget, "ultra-install-linux-amd64")
+			oldRuntime, _ := upgradeAsset(oldTarget, "ultra-ansible-runtime-linux-amd64.tar.gz")
+			wantOld := forwardBrokerIdentity{Directory: managedControllerDirectory(oldTarget.Version), InstallerSHA: oldInstaller.SHA, RuntimeSHA: oldRuntime.SHA, UnitSHA: strings.Repeat("a", 64)}
+			if !ok || len(identities) != 2 || identities[0] != wantOld || identities[1] != got["ultra_forward_target_broker"] {
+				t.Fatalf("expected only exact old target and candidate identities, got %#v", got)
+			}
+		})
+	}
 }
 
 func TestForwardBrokerVariablesRejectMalformedBridgeIdentity(t *testing.T) {
@@ -165,7 +237,7 @@ func TestForwardBrokerVariablesRejectMalformedBridgeIdentity(t *testing.T) {
 			case "wrong installer hash":
 				bridge["ultra_install_sha256"] = strings.Repeat("f", 64)
 			case "missing unit hash":
-				delete(bridge, "ultra_previous_controller_unit_sha256")
+				delete(bridge, "ultra_target_controller_unit_sha256")
 			case "global identity cannot override bridge":
 				variables["ultra_architecture"] = bridge["ultra_architecture"]
 				delete(bridge, "ultra_architecture")

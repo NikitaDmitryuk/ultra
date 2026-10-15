@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
@@ -355,7 +356,7 @@ func TestForwardRecoveryPriorWithoutHandoffIsStrictlyPreMutation(t *testing.T) {
 				t.Fatal(err)
 			}
 			err = verifyForwardPriorCandidate(proof, old, root, directory, prior)
-			if (kind == "success") != (err == nil) {
+			if (kind == "success" || kind == "drain-only") != (err == nil) {
 				t.Fatalf("%s: %v", kind, err)
 			}
 			journalAfter, readErr := os.ReadFile(prior.Journal)
@@ -369,6 +370,122 @@ func TestForwardRecoveryPriorWithoutHandoffIsStrictlyPreMutation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func forwardPartialDrainFixture(t *testing.T) (forwardUpgradeJournal, forwardOldOperation, string, string, forwardPriorCandidate, string) {
+	t.Helper()
+	proof, old, root, directory, prior := forwardPriorRecoveryFixture(t)
+	intentPath := filepath.Join(prior.Directory, "forward-handoff.json")
+	intent, err := loadForwardIntent(intentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := filepath.Join(prior.Directory, "handoff-drain-second")
+	if err := os.CopyFS(second, os.DirFS(intent.Stage)); err != nil {
+		t.Fatal(err)
+	}
+	if err := filepath.WalkDir(second, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return os.Chmod(path, 0700)
+		}
+		return os.Chmod(path, 0600)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(intentPath); err != nil {
+		t.Fatal(err)
+	}
+	return proof, old, root, directory, prior, second
+}
+
+func TestForwardRecoveryPriorPartialDrainsAudit(t *testing.T) {
+	for _, kind := range []string{"success", "changed-request", "invalid-receipt", "missing-receipt", "invalid-result", "changed-bundle", "unknown-stage-file", "unknown-root-file"} {
+		t.Run(kind, func(t *testing.T) {
+			proof, old, root, directory, prior, stage := forwardPartialDrainFixture(t)
+			switch kind {
+			case "changed-request":
+				writeForwardJSON(t, filepath.Join(stage, "request.json"), map[string]any{})
+			case "invalid-receipt":
+				writeForwardJSON(t, filepath.Join(stage, "receipt.json"), map[string]any{"state": "failed"})
+			case "missing-receipt":
+				if err := os.Remove(filepath.Join(stage, "receipt.json")); err != nil {
+					t.Fatal(err)
+				}
+			case "invalid-result":
+				writeForwardJSON(t, filepath.Join(stage, "result.json"), map[string]any{"verified": false})
+			case "changed-bundle":
+				writeForwardJSON(t, filepath.Join(stage, "bundle", "controller.py"), map[string]any{})
+			case "unknown-stage-file":
+				writeForwardJSON(t, filepath.Join(stage, "unknown"), map[string]any{})
+			case "unknown-root-file":
+				writeForwardJSON(t, filepath.Join(prior.Directory, "unknown"), map[string]any{})
+			}
+			err := verifyForwardPriorCandidate(proof, old, root, directory, prior)
+			if (kind == "success") != (err == nil) {
+				t.Fatalf("%s: %v", kind, err)
+			}
+			if _, err := os.Lstat(filepath.Join(prior.Directory, "forward-handoff.json")); !os.IsNotExist(err) {
+				t.Fatal("partial drains published a handoff", err)
+			}
+		})
+	}
+}
+
+func TestForwardRecoveryPriorPartialDrainsRequireFreshCensus(t *testing.T) {
+	proof, old, root, directory, prior, _ := forwardPartialDrainFixture(t)
+	if err := os.Mkdir(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	held, censusCalled := false, false
+	censusErr := errors.New("fresh census found live workers")
+	deps := forwardHandoffDeps{
+		attach: func(ctx context.Context, lock, id string) (context.Context, func(), error) {
+			if lock != root || id != old.ID || held {
+				t.Fatal("wrong predecessor lease", lock, id)
+			}
+			held = true
+			return ctx, func() { held = false }, nil
+		},
+		prepare: func(ctx context.Context) error {
+			if err := verifyForwardPriorCandidate(proof, old, root, directory, prior); err != nil {
+				return err
+			}
+			// Match the production caller: only the saved handoff intent can
+			// suppress the pre-bootstrap census, never retained drain stages.
+			_, intentErr := os.Lstat(filepath.Join(prior.Directory, "forward-handoff.json"))
+			if !os.IsNotExist(intentErr) {
+				t.Fatal("expected an absent handoff intent", intentErr)
+			}
+			return prepareForwardRecovery(ctx, os.IsNotExist(intentErr),
+				func(context.Context) error {
+					if !held || verifyForwardApplying(root, old.ID) != nil {
+						t.Fatal("fresh census without predecessor lease and gate")
+					}
+					censusCalled = true
+					return censusErr
+				},
+				func(context.Context) error { t.Fatal("bootstrap after failed fresh census"); return nil },
+				func(context.Context) error { t.Fatal("adoption after failed fresh census"); return nil })
+		},
+		run: func(context.Context, string, map[string]any, map[string]any, string, string, string) (deployansible.Receipt, error) {
+			t.Fatal("final census after failed preparation")
+			return deployansible.Receipt{}, nil
+		},
+		supersede: func(context.Context, string, string) error {
+			t.Fatal("supersede after failed fresh census")
+			return nil
+		},
+	}
+	_, _, err := forwardUpgradeHandoff(context.Background(), proof, old, root, directory, "/python", "/ansible", deps)
+	if !errors.Is(err, censusErr) || !censusCalled || held || verifyForwardApplying(root, old.ID) != nil {
+		t.Fatal("partial drains bypassed fresh census or released the durable gate", err, censusCalled, held)
+	}
+	if _, err := os.Lstat(filepath.Join(directory, "forward-handoff.json")); !os.IsNotExist(err) {
+		t.Fatal("failed fresh census published a handoff", err)
 	}
 }
 
