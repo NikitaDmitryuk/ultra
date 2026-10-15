@@ -83,6 +83,10 @@ environment и точные rollback images не передаются в receipt
 принимает только exact journal прерванного upgrade: удерживает broker lease,
 проверяет свежим playbook единственное дерево прежнего worker на bridge и каждом
 узле замороженного inventory, записывает write-ahead handoff и затем меняет lifecycle ID.
+Для legacy journal без digest staged-конфига wrapper требует совпадения канонической
+конфигурации, attempt и закреплённого SSH transport, затем получает недостающий digest
+read-only attestation точного remote root, manifest и request-bound job/receipt;
+installer всё равно независимо проверяет конфигурацию, frozen plan и handoff.
 Свободный flock, `status` и локальные поля `drained`/`quiescent` сами по себе не
 доказывают остановку workers. Перед мутацией создаётся свежий DB snapshot, проверяется
 читаемость custom archive через `pg_restore --list` и независимая доставка. Это не

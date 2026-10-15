@@ -758,14 +758,104 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
     return receipt
 
 
-def validate_dispatched_manual_operation(record):
+# Read-only compatibility attestation recovers only a missing input digest.
+# The installer still revalidates the frozen plan and exact operation, then
+# obtains the broker lease and fleet drain evidence before authorizing mutation.
+REMOTE_LEGACY_ATTEST = r'''
+import fcntl,hashlib,json,os,re,stat,sys,uuid
+from pathlib import Path
+def need(ok):
+    if not ok: raise ValueError('manual_legacy_operation_unverified')
+def digest(raw): return hashlib.sha256(raw).hexdigest()
+def private(path, directory=False):
+    for ancestor in (path,*path.parents):
+        need(not stat.S_ISLNK(ancestor.lstat().st_mode))
+    info=path.lstat()
+    need(info.st_uid==0 and stat.S_IMODE(info.st_mode)==(0o700 if directory else 0o600))
+    need(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))
+def read(path):
+    private(path)
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as stream:
+        info=os.fstat(stream.fileno())
+        need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600 and info.st_size<=4194304)
+        raw=stream.read(4194305);need(len(raw)<=4194304)
+        return raw
+commit,version,attempt,manifest_sha,config_sha_expected=sys.argv[1:]
+need(os.geteuid()==0 and re.fullmatch('[a-f0-9]{40}',commit))
+need(version=='v0.0.'+str(int(commit,16)))
+need(all(re.fullmatch('[a-f0-9]{64}',x) for x in [attempt,manifest_sha,config_sha_expected]))
+state=Path('/var/lib/ultra-ansible')
+parent=state/'operator-inputs'
+private(state,True);private(parent,True)
+lock_path=parent/'manual-deploy.lock';private(lock_path)
+lock=os.open(lock_path,os.O_RDONLY|os.O_NOFOLLOW)
+fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+root=parent/('manual-'+commit+'-'+attempt)
+private(root,True);private(root/'release',True)
+config_sha=digest(read(root/'install.config'));need(config_sha==config_sha_expected)
+manifest_raw=read(root/'release/release-manifest.json')
+need(digest(manifest_raw)==manifest_sha)
+manifest=json.loads(manifest_raw)
+need(manifest.get('source_commit')==commit and manifest.get('version')==version)
+directory=state/('upgrade-'+version)
+private(directory,True);private(directory/'activate',True)
+request_raw=read(directory/'activate/request.json');request=json.loads(request_raw)
+variables=request['variables']
+operation_id=str(uuid.UUID(bytes=hashlib.sha256(str(directory).encode()).digest()[:16],version=4))
+need(variables.get('ultra_lifecycle_id')==operation_id and variables.get('ultra_release_manifest_sha256')==manifest_sha)
+need(variables.get('ultra_release_manifest')==manifest)
+children=request['inventory']['all']['children']
+need(len(children['bridge']['hosts'])==1 and len(children['exits']['hosts'])>0)
+for name in ['job.json','receipt.json']:
+    evidence=json.loads(read(directory/'activate'/name))
+    need(evidence.get('schema_version')==1 and evidence.get('operation')=='upgrade' and evidence.get('request_sha256')==digest(request_raw))
+print(json.dumps({'schema':1,'commit':commit,'version':version,'remote_attempt':attempt,
+                  'manifest_sha256':manifest_sha,'staged_config_sha256':config_sha}))
+'''
+
+
+def attest_legacy_manual_operation(repo, record, transport, binding, current):
+    require(transport and record.get('transport_binding') == binding and
+            record.get('config_sha256') == sha(current) and
+            record.get('remote_attempt') == remote_attempt(current, record['version']),
+            'manual_legacy_operation_binding_changed')
+    old_root = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + record['commit'] + '-' + record['remote_attempt'])
+    values = config_values(current)
+    require(values.get('ULTRA_AUTOMATION_VERSION') == record['version'] and
+            values.get('ULTRA_AUTOMATION_RELEASE_DIR') == str(old_root / 'release'),
+            'manual_legacy_operation_binding_changed')
+    # Reproduce the sole staging transformation without opening a local
+    # baseline descriptor/journal or inventing a claim about the old workers.
+    baseline = old_root / 'baseline/descriptor.json' if values.get('ULTRA_UPGRADE_BASELINE_FILE') else None
+    expected_sha = sha(config_candidate(current, record['version'], old_root / 'release', baseline))
+    command = transport + [shlex.join(['python3', '-I', '-c', REMOTE_LEGACY_ATTEST,
+        record['commit'], record['version'], record['remote_attempt'], record['manifest_sha256'], expected_sha])]
+    raw = run(command, repo, 'legacy_operation_attestation', capture=True)
+    try:
+        receipt = json.loads(raw)
+        require(isinstance(receipt, dict) and receipt.get('schema') == 1 and
+                all(receipt.get(key) == record[key] for key in ('commit', 'version', 'remote_attempt', 'manifest_sha256')) and
+                receipt.get('staged_config_sha256') == expected_sha and
+                isinstance(receipt.get('staged_config_sha256'), str) and
+                re.fullmatch('[a-f0-9]{64}', receipt['staged_config_sha256']),
+                'manual_legacy_operation_receipt_invalid')
+    except (TypeError, ValueError):
+        raise DeployError('manual_legacy_operation_receipt_invalid') from None
+    migrated = dict(record, staged_config_sha256=receipt['staged_config_sha256'])
+    validate_dispatched_manual_operation(migrated)
+    return migrated
+
+
+def validate_dispatched_manual_operation(record, allow_legacy=False):
     require(isinstance(record, dict) and record.get('schema') == 1 and
             record.get('mutator_dispatched') is True and record.get('stage') == 'upgrade' and
             re.fullmatch('[a-f0-9]{40}', record.get('commit', '')) and
             re.fullmatch(r'v0\.0\.(0|[1-9][0-9]*)', record.get('version', '')) and
             record.get('version') == 'v0.0.' + str(int(record['commit'], 16)) and
             all(re.fullmatch('[a-f0-9]{64}', record.get(key, '')) for key in
-                ('remote_attempt', 'manifest_sha256', 'staged_config_sha256')),
+                (('remote_attempt', 'manifest_sha256') if allow_legacy and 'staged_config_sha256' not in record else
+                 ('remote_attempt', 'manifest_sha256', 'staged_config_sha256'))),
             'manual_forward_only_requires_dispatched_upgrade')
 
 
@@ -807,7 +897,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     abandoned_record = None
     if forward_only:
         require(not adopt and not retry_failed, 'manual_forward_only_upgrade_only')
-        validate_dispatched_manual_operation(existing_record)
+        validate_dispatched_manual_operation(existing_record, allow_legacy=True)
         abandoned_record = existing_record
         existing_record = {}
     else:
@@ -821,6 +911,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     validate_config_policy(current)
     operator_inventory = os.environ.get('ULTRA_OPERATOR_INVENTORY')
     transport, transport_binding = operator_transport(operator_inventory, current) if operator_requested() else (None, None)
+    if abandoned_record is not None and 'staged_config_sha256' not in abandoned_record:
+        abandoned_record = attest_legacy_manual_operation(repo, abandoned_record, transport, transport_binding, current)
     if transport:
         # plan only parses/validates policy; unlike doctor it never opens the
         # secrets file. Suppress its output because the plan contains inputs.

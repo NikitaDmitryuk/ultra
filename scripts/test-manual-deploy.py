@@ -674,6 +674,77 @@ class NativeDeploy(unittest.TestCase):
         self.assertEqual(calls['status'][13], '0')
         self.assertEqual(calls['status'][15], forward_sha)
 
+    def legacy_record(self):
+        attempt = D.remote_attempt(self.original, self.version)
+        release = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + self.commit + '-' + attempt) / 'release'
+        self.original = D.config_candidate(self.original, self.version, release)
+        self.config.write_bytes(self.original)
+        _, binding = D.operator_transport(str(self.operator / 'inventory.json'), self.original)
+        return {'schema': 1, 'commit': self.commit, 'version': self.version, 'stage': 'upgrade',
+                'mutator_dispatched': True, 'remote_attempt': D.remote_attempt(self.original, self.version), 'manifest_sha256': 'd' * 64,
+                'config_sha256': D.sha(self.original), 'transport_binding': binding}
+
+    def test_legacy_forward_only_archives_attested_hash_and_preserves_original_fields(self):
+        old = self.legacy_record()
+        D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
+        def runner(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'legacy_operation_attestation':
+                self.assertTrue(kwargs['capture'])
+                self.assertEqual(command[:3], ['ssh', '-F', '/dev/null'])
+                return json.dumps(dict(old, staged_config_sha256=old['config_sha256']))
+        self.rollout(forward_only=True, runner=runner)
+        archived = next(self.root.glob('operation.forward-only-abandoned-*.json'))
+        self.assertEqual(json.loads(archived.read_bytes()), dict(old, staged_config_sha256=old['config_sha256']))
+        self.assertEqual(self.calls[0][0], 'legacy_operation_attestation')
+
+    def test_legacy_forward_only_attests_exact_baseline_relocation(self):
+        # The old local baseline files no longer need to exist for this read.
+        self.original += b'ULTRA_UPGRADE_BASELINE_FILE=/nonexistent/private-baseline.json\n'
+        old = self.legacy_record()
+        old_root = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + self.commit + '-' + old['remote_attempt'])
+        expected = D.config_candidate(self.original, self.version, old_root / 'release', old_root / 'baseline/descriptor.json')
+        self.assertNotEqual(D.sha(expected), old['config_sha256'])
+        D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
+        def runner(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'legacy_operation_attestation':
+                self.assertEqual(D.shlex.split(command[-1])[-1], D.sha(expected))
+                return json.dumps(dict(old, staged_config_sha256=D.sha(expected)))
+        self.rollout(forward_only=True, runner=runner)
+        archived = next(self.root.glob('operation.forward-only-abandoned-*.json'))
+        self.assertEqual(json.loads(archived.read_bytes()), dict(old, staged_config_sha256=D.sha(expected)))
+
+    def test_legacy_forward_only_rejection_preserves_config_and_journal(self):
+        for kind in ('transport', 'config', 'attempt', 'version', 'release', 'failure', 'receipt', 'digest', 'malformed'):
+            with self.subTest(kind=kind):
+                old = self.legacy_record()
+                if kind == 'transport': old['transport_binding'] = 'x' * 64
+                if kind == 'config': old['config_sha256'] = 'f' * 64
+                if kind == 'attempt': old['remote_attempt'] = 'f' * 64
+                if kind in ('version', 'release'):
+                    self.original = D.config_candidate(self.original, 'v0.0.1' if kind == 'version' else self.version,
+                        '/wrong' if kind == 'release' else D.config_values(self.original)['ULTRA_AUTOMATION_RELEASE_DIR'])
+                    self.config.write_bytes(self.original)
+                    old['config_sha256'] = D.sha(self.original)
+                raw = json.dumps(old).encode()
+                D.atomic_write(self.root / 'operation.json', raw)
+                def runner(command, cwd, stage, **kwargs):
+                    if stage == 'legacy_operation_attestation':
+                        if kind == 'failure': raise D.DeployError('fixture_ssh_failure')
+                        if kind == 'malformed': return 'not json'
+                        receipt = dict(old, staged_config_sha256=old['config_sha256'])
+                        if kind == 'receipt': receipt['commit'] = 'f' * 40
+                        if kind == 'digest': receipt['staged_config_sha256'] = 'f' * 64
+                        return json.dumps(receipt)
+                with self.assertRaises(D.DeployError):
+                    self.rollout(forward_only=True, runner=runner)
+                self.assertEqual((self.root / 'operation.json').read_bytes(), raw)
+                self.assertEqual(self.config.read_bytes(), self.original)
+                self.assertFalse(list(self.root.glob('operation.forward-only-abandoned-*')))
+                self.assertFalse(list(self.root.glob('install.config.before-*')))
+                self.stage_mock.assert_not_called()
+
     def test_native_probe_archive_handoff_preserves_dispatched_cleanup_journal(self):
         secret = b'https://old.example.com/sub/fixture-token'
         self.probe_env(secret)
@@ -1292,6 +1363,92 @@ class RuntimeReuse(unittest.TestCase):
         self.write_pair()
         with self.assertRaisesRegex(ValueError, 'unsafe runtime archive'):
             self.runtime.validate_pair(self.cache, self.requirements)
+
+
+class LegacyForwardAttestation(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.state = Path(self.temporary.name) / 'state'
+        self.state.mkdir(mode=0o700)
+        self.parent = self.state / 'operator-inputs'
+        self.parent.mkdir(mode=0o700)
+        D.atomic_write(self.parent / 'manual-deploy.lock', b'')
+        self.commit = 'a' * 40
+        self.version = 'v0.0.' + str(int(self.commit, 16))
+        self.attempt = 'b' * 64
+        self.config = b'INSTALL_SCHEMA_VERSION=2\n'
+        self.manifest = {'source_commit': self.commit, 'version': self.version, 'assets': []}
+        self.manifest_raw = json.dumps(self.manifest).encode()
+        self.root = self.parent / ('manual-' + self.commit + '-' + self.attempt)
+        self.root.mkdir(mode=0o700)
+        (self.root / 'release').mkdir(mode=0o700)
+        D.atomic_write(self.root / 'install.config', self.config)
+        D.atomic_write(self.root / 'release/release-manifest.json', self.manifest_raw)
+        self.directory = self.state / ('upgrade-' + self.version)
+        self.directory.mkdir(mode=0o700)
+        self.activate = self.directory / 'activate'
+        self.activate.mkdir(mode=0o700)
+        import uuid
+        operation_id = str(uuid.UUID(bytes=hashlib.sha256(str(self.directory).encode()).digest()[:16], version=4))
+        request = {'inventory': {'all': {'children': {'bridge': {'hosts': {'bridge': {}}}, 'exits': {'hosts': {'exit_0': {}}}}}},
+                   'variables': {'ultra_lifecycle_id': operation_id, 'ultra_release_manifest_sha256': D.sha(self.manifest_raw),
+                                 'ultra_release_manifest': self.manifest}}
+        self.request_raw = json.dumps(request).encode()
+        D.atomic_write(self.activate / 'request.json', self.request_raw)
+        self.job = {'schema_version': 1, 'operation': 'upgrade', 'request_sha256': D.sha(self.request_raw)}
+        for name in ('job.json', 'receipt.json'):
+            D.atomic_write(self.activate / name, json.dumps(self.job).encode())
+        self.program = D.REMOTE_LEGACY_ATTEST.replace("Path('/var/lib/ultra-ansible')", 'Path(' + repr(str(self.state)) + ')')
+        self.program = self.program.replace('os.geteuid()==0', 'True').replace('info.st_uid==0', 'info.st_uid==os.geteuid()')
+
+    def execute(self):
+        return subprocess.run([D.sys.executable, '-I', '-c', self.program, self.commit, self.version,
+                               self.attempt, D.sha(self.manifest_raw), D.sha(self.config)], capture_output=True)
+
+    def test_attestation_returns_only_exact_identities_without_writing(self):
+        before = {str(p): p.read_bytes() for p in self.state.rglob('*') if p.is_file()}
+        result = self.execute()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {'schema': 1, 'commit': self.commit, 'version': self.version,
+            'remote_attempt': self.attempt, 'manifest_sha256': D.sha(self.manifest_raw), 'staged_config_sha256': D.sha(self.config)})
+        self.assertEqual({str(p): p.read_bytes() for p in self.state.rglob('*') if p.is_file()}, before)
+        self.assertNotIn(self.config, result.stdout)
+
+    def test_attestation_rejects_changed_config_manifest_request_job_receipt(self):
+        for path in (self.root / 'install.config', self.root / 'release/release-manifest.json',
+                     self.activate / 'request.json', self.activate / 'job.json', self.activate / 'receipt.json'):
+            with self.subTest(path=path.name):
+                original = path.read_bytes()
+                D.atomic_write(path, b'{}')
+                self.assertNotEqual(self.execute().returncode, 0)
+                D.atomic_write(path, original)
+
+    def test_attestation_rejects_cross_operation_and_unbound_request_receipts(self):
+        for key, value in (('ultra_lifecycle_id', 'other-operation'), ('ultra_release_manifest_sha256', 'c' * 64),
+                           ('ultra_release_manifest', dict(self.manifest, source_commit='c' * 40))):
+            request = json.loads(self.request_raw)
+            request['variables'][key] = value
+            raw = json.dumps(request).encode()
+            D.atomic_write(self.activate / 'request.json', raw)
+            for name in ('job.json', 'receipt.json'):
+                D.atomic_write(self.activate / name, json.dumps(dict(self.job, request_sha256=D.sha(raw))).encode())
+            self.assertNotEqual(self.execute().returncode, 0)
+
+    def test_attestation_rejects_public_symlink_missing_and_busy_evidence(self):
+        path = self.root / 'install.config'
+        path.chmod(0o644)
+        self.assertNotEqual(self.execute().returncode, 0)
+        path.chmod(0o600)
+        target = self.root / 'copy.config'
+        path.rename(target)
+        path.symlink_to(target)
+        self.assertNotEqual(self.execute().returncode, 0)
+        path.unlink()
+        self.assertNotEqual(self.execute().returncode, 0)
+        target.rename(path)
+        with D.lock(self.parent / 'manual-deploy.lock'):
+            self.assertNotEqual(self.execute().returncode, 0)
 
 
 if __name__ == '__main__':
