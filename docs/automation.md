@@ -146,9 +146,13 @@ ultra-install upgrade --config install.config --release latest
 
 Изменение доменов проходит отдельные DNS, backend и ingress-фазы: старые адреса
 сохраняются до проверки нового TLS, subscription identity/payload и полного tunnel
-через каждый frozen exit. Старые alias и DNS записи удаляются только после commit
-успешного релиза. Смена DNS zone и других неподдерживаемых внешних identity требует
-отдельной миграции.
+через каждый frozen exit. Переход не гарантирует работу клиентов на прежнем домене
+или URI: поддерживаемым считается только endpoint из canonical `install.config`.
+После приёмки старые alias и DNS записи удаляются; до неё они могут оставаться как
+rollback-материал. Автоматически удаляются только alias и DNS records, закреплённые
+ownership receipts текущего cutover. Исторические alias и DNS records из предыдущих
+операций требуют отдельной инвентаризации и очистки; обычный upgrade их не сканирует.
+Смена DNS zone и других неподдерживаемых внешних identity требует отдельной миграции.
 
 Перед активацией релиза `upgrade` сверяет DNS TTL и сохранённую ingress policy с
 `install.config`. Изменения ACME email, DNS TTL, режима/узла forwarding, staging,
@@ -332,7 +336,7 @@ ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 
 При запуске из отдельного worktree путь к каноническому файлу можно передать через
 `INSTALL_CONFIG=/absolute/path/to/install.config make deploy`. Для конфигурации
-допустимы режимы 0600 и 0644; обновление сохраняет исходный режим.
+используйте режим 0600; обновление сохраняет исходный режим.
 
 Для upgrades, меняющих subscription/domain/runtime параметры, добавьте
 `ULTRA_SUBSCRIPTION_PROBE_URL=https://current.example.com/sub/<token>` в приватный
@@ -381,9 +385,9 @@ manifest и config, все хеши assets и совпадение собств�
 с записью manifest; эти значения приходят по pinned SSH transport. Обычная команда
 `upgrade` сохраняет обязательную проверку подписи GitHub Releases. Операторский
 sidecar-lock рядом с canonical config сериализует выкладки из разных worktree,
-передающих один и тот же `INSTALL_CONFIG`. После неудачного upgrade повтор той же
-задачи с recovery preflight запускается явно через `RETRY_FAILED=1 make deploy`;
-значение по умолчанию выключено. Для неудачной `--forward-only` операции есть
+передающих один и тот же `INSTALL_CONFIG`. `RETRY_FAILED=1` включает recovery
+preflight для поддерживаемого retry, но не снимает защиту от повторной отправки
+старого mutator. Для неудачной `--forward-only` операции есть
 отдельный явный `scripts/manual-deploy.py --continue-forward-only --config
 /absolute/path/to/install.config`. Он сохраняет digest исходного production-журнала
 из `forward_journal_sha256`, а журнал неудавшегося кандидата хранит отдельно как
@@ -448,12 +452,16 @@ ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 До запуска изменяющего задания ошибки staging, `doctor` и read-only adoption
 сравнения восстанавливают прежний локальный config и очищают журнал. После отправки
 `upgrade` или `apply` при ошибке новый config и приватный журнал сохраняются, так
-как удалённое задание может продолжаться. Сверьте состояние через `ultra-install
-status` на bridge и продолжайте восстановление по его журналу; не восстанавливайте
-config вручную и не начинайте другой commit, пока операция не разрешена. Повтор
-того же commit продолжает текущую попытку. Канонический `install.config` должен
-оставаться обычным файлом владельца с правами 0600 или 0644. Скрипт сохраняет
-выбранный режим; группам и другим пользователям запрещена запись.
+как удалённое задание может продолжаться. `ultra-install status` сообщает о
+готовности сервисов, но не доказывает завершение старого удалённого задания и не
+снимает блокировку выкладки. Для dispatched `upgrade` используйте описанный выше
+явный `--forward-only` только после его preflight. Dispatched `adoption_apply`
+текущий wrapper продолжить не умеет: он блокирует retry, пока отдельный протокол не
+сделает fencing всех источников dispatch и host-bound подтверждение drain на frozen
+target set. Для такого журнала не восстанавливайте config вручную, не удаляйте
+журнал и не запускайте другой commit; одного `status` недостаточно. Канонический
+`install.config` должен оставаться обычным файлом владельца с правами 0600.
+Группам и другим пользователям запрещена запись.
 
 `make deploy-build` только собирает и проверяет кандидата без изменения config и
 узлов. Общая инструкция по выкладке находится в [README](../README.md).

@@ -112,14 +112,14 @@ func TestRuntimeOnlyDomainConfigSkipsDNSPhases(t *testing.T) {
 }
 
 func TestUpgradeDomainPolicyRejectsUnsupportedConfigOnlyChanges(t *testing.T) {
-	ingress := &installplan.AutomationIngress{BackendPort: 18080, GatewayPort: 18081}
+	ingress := &installplan.AutomationIngress{Path: "/connect", BackendPort: 18080, GatewayPort: 18081}
 	dns := &installplan.AutomationDNS{TTL: 300}
 	automation := &installplan.AutomationConfig{BridgeIPv4: "192.0.2.1"}
 	base := upgradeDomainEvidence{DNSTTL: 300, ACMEEmailMatches: true, IngressModeMatches: true,
 		ForwardHostMatches: true, StagingPortMatches: true, StatusPortMatches: true,
 		ExperimentalPortMatch: true, AgeRecipientMatches: true, BridgeProviderMatches: true,
 		StaticNodesMatch: true, AdminIDMatches: true, StatePathsMatch: true, ArtifactPathsMatch: true,
-		BridgeIPv4: "192.0.2.1", BackendPort: 18080, GatewayPort: 18081, Fingerprint: "firefox"}
+		BridgeIPv4: "192.0.2.1", Path: "/connect", BackendPort: 18080, GatewayPort: 18081, Fingerprint: "firefox"}
 	if err := validateUpgradeDomainPolicy(base, ingress, dns, automation); err != nil {
 		t.Fatalf("unchanged policy rejected: %v", err)
 	}

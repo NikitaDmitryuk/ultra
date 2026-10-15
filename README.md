@@ -199,7 +199,8 @@ ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 проверенными host-key pins. Соединение использует строгую проверку ключей и не
 читает пользовательский `~/.ssh/config`. Эти файлы остаются локальными.
 Для запуска из отдельного worktree передайте канонический файл параметром
-`INSTALL_CONFIG=/absolute/path/to/install.config`; режим 0600 или 0644 сохраняется.
+`INSTALL_CONFIG=/absolute/path/to/install.config`; канонический файл храните с
+правами 0600.
 `ULTRA_OPERATOR_INVENTORY` не требуется; он остаётся совместимым способом
 продолжить adoption по существующему failed-operation артефакту. Создавать и
 поддерживать отдельный inventory вручную не нужно.
@@ -224,9 +225,13 @@ ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 не запускается. Ошибка подготовки или read-only сравнения до отправки mutator
 восстанавливает предыдущий локальный config и удаляет журнал. После отправки
 изменяющей команды при ошибке config и приватный журнал сохраняются: задание на
-bridge может продолжаться. Сначала проверьте состояние через `ultra-install status`
-на bridge и разрешите незавершённую операцию; не меняйте config вручную и не
-запускайте другой commit до этого. Повтор с тем же `HEAD` продолжает тот же журнал.
+bridge может продолжаться. `ultra-install status` показывает готовность сервисов,
+но не доказывает завершение старого удалённого задания и не снимает блокировку
+выкладки. Для dispatched `upgrade` есть отдельный поддерживаемый `--forward-only`
+с явным preflight. Для dispatched `adoption_apply` текущий wrapper блокирует retry:
+до появления протокола fencing всех источников dispatch и host-bound подтверждения
+drain на frozen target set не меняйте config, не удаляйте журнал и не запускайте
+другой commit.
 Подробности и ограничения: [инструкция по автоматизации](docs/automation.md).
 
 ## DNS, TLS и собственный домен
