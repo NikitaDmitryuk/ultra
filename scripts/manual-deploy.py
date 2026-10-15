@@ -659,7 +659,31 @@ def verify_continuation():
          old_version=='v0.0.'+str(int(old_commit,16)), 'manual_forward_continuation_predecessor_invalid')
     state=parent.parent
     operation=state/('upgrade-'+version)
-    info=operation.lstat()
+    try:
+        info=operation.lstat()
+    except FileNotFoundError:
+        # The exclusive manual-deploy lock is held through attestation and exec.
+        # An absent operation has no handoff evidence to promote to a prior
+        # candidate; retry the same signed inputs and let Go recheck the fleet.
+        need(proof.get('schema')==1 and proof.get('stage')=='upgrade' and proof.get('mutator_dispatched') is True and
+             all(re.fullmatch('[a-f0-9]{64}',proof.get(key,'')) for key in
+                 ('remote_attempt','manifest_sha256','staged_config_sha256')),
+             'manual_forward_continuation_predecessor_invalid')
+        old_inputs=parent/('manual-'+old_commit+'-'+proof['remote_attempt'])
+        old_info=old_inputs.lstat()
+        need(stat.S_ISDIR(old_info.st_mode) and old_info.st_uid==0 and stat.S_IMODE(old_info.st_mode)==0o700 and
+             digest(read(old_inputs/'release/release-manifest.json'))==proof['manifest_sha256'] and
+             digest(read(old_inputs/'install.config'))==proof['staged_config_sha256'],
+             'manual_forward_continuation_predecessor_invalid')
+        old_id=str(uuid.UUID(bytes=hashlib.sha256(str(state/('upgrade-'+old_version)).encode()).digest()[:16],version=4))
+        lifecycle=json.loads(read(state/'lifecycle.json'))
+        need(lifecycle.get('id')==old_id and lifecycle.get('phase')=='applying',
+             'manual_forward_continuation_lifecycle_changed')
+        architecture={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine())
+        need(architecture in ['amd64','arm64'])
+        return {'architecture':architecture,'manifest_sha256':manifest_sha,'config_sha256':config_sha,
+                'attempt':attempt,'forward_journal_sha256':forward_journal_sha,'lifecycle_id':old_id,
+                'prior_candidate':{},'operation_absent':True}
     need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700)
     operation_names={p.name for p in operation.iterdir()}
     fixed_names={'execution-mode.json','operator-plan.json','forward-handoff.json','runtime-use.json'}
@@ -1349,6 +1373,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         old_binding = root / ('probe-binding-' + continuation_record['commit'] + '-' + continuation_record['remote_attempt'])
         require(old_binding.exists() and private_file(old_binding) == probe_sha.encode(), 'manual_operation_probe_changed')
         continuation_receipt = attest_continuation()
+        require(same_candidate or continuation_receipt.get('operation_absent') is not True,
+                'manual_forward_continuation_missing_prior_candidate')
 
     record = existing_record
     try:

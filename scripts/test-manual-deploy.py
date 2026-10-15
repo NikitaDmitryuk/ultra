@@ -698,6 +698,7 @@ class NativeDeploy(unittest.TestCase):
                 receipt = {'architecture': 'arm64', 'manifest_sha256': record['manifest_sha256'],
                     'config_sha256': record['staged_config_sha256'], 'attempt': record['remote_attempt'],
                     'forward_journal_sha256': record['forward_journal_sha256'],
+                    'prior_candidate': None,
                     'lifecycle_id': str(D.uuid.UUID(bytes=hashlib.sha256(str(state).encode()).digest()[:16], version=4))}
                 receipt.update(change or {})
                 return json.dumps(receipt)
@@ -708,7 +709,7 @@ class NativeDeploy(unittest.TestCase):
         original_proof = next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes()
         config = self.config.read_bytes()
         with patch.object(D, 'subscription_probe_from_env', side_effect=AssertionError('must not read env')):
-            self.rollout(continue_forward_only=True, runner=self.continuation_runner(old))
+            self.rollout(continue_forward_only=True, runner=self.continuation_runner(old, {'prior_candidate': {}, 'operation_absent': True}))
         self.assertFalse(self.stage_mock.called)
         self.assertEqual(self.config.read_bytes(), config)
         self.assertEqual([p.read_bytes() for p in self.root.glob('operation.forward-only-abandoned-*.json')], [original_proof])
@@ -726,6 +727,29 @@ class NativeDeploy(unittest.TestCase):
         self.manifest = json.dumps({'source_commit': self.commit, 'version': self.version, 'assets': []}).encode()
         (self.bundle / 'release-manifest.json').write_bytes(self.manifest)
 
+    def test_continue_new_head_rejects_absent_candidate_before_mutating_recovery_state(self):
+        self.probe_env()
+        old = self.failed_forward_fixture()
+        attest = self.continuation_runner(old, {'prior_candidate': {}, 'operation_absent': True})
+        self.new_candidate_fixture()
+        canonical = self.repo / 'canonical.config'
+        self.config.rename(canonical)
+        canonical.chmod(0o644)
+        config = canonical.read_bytes()
+        before = {str(p.relative_to(self.root)): (p.read_bytes(), p.stat().st_mode & 0o777)
+                  for p in self.root.rglob('*') if p.is_file()}
+        with patch.object(D, 'subscription_probe_from_env', side_effect=AssertionError('must not read env')):
+            with self.assertRaisesRegex(D.DeployError, '^manual_forward_continuation_missing_prior_candidate$'):
+                self.rollout(config_path=canonical, continue_forward_only=True, runner=attest)
+        self.assertEqual(canonical.read_bytes(), config)
+        self.assertEqual(canonical.stat().st_mode & 0o777, 0o644)
+        self.assertFalse(self.config.exists())
+        self.assertEqual({str(p.relative_to(self.root)): (p.read_bytes(), p.stat().st_mode & 0o777)
+                          for p in self.root.rglob('*') if p.is_file()}, before)
+        self.assertFalse(list(self.root.glob('operation.forward-only-retry-*.json')))
+        self.assertFalse(self.stage_mock.called)
+        self.assertEqual([stage for stage, _ in self.calls], ['canonical_policy', 'forward_continuation_attestation'])
+
     def test_continue_new_head_archives_failed_candidate_as_history_preserving_production_proof(self):
         old = self.failed_forward_fixture()
         failed_raw = (self.root / 'operation.json').read_bytes()
@@ -735,6 +759,9 @@ class NativeDeploy(unittest.TestCase):
         self.new_candidate_fixture()
         def runner(command, cwd, stage, **kwargs):
             response = attest(command, cwd, stage, **kwargs)
+            if stage == 'forward_continuation_attestation':
+                self.assertIsNone(json.loads(response)['prior_candidate'])
+                self.assertNotIn('operation_absent', json.loads(response))
             if stage == 'upgrade':
                 record = json.loads((self.root / 'operation.json').read_bytes())
                 self.assertEqual(record['commit'], self.commit)
@@ -1409,6 +1436,123 @@ class RemoteProgram(unittest.TestCase):
         return subprocess.run([D.sys.executable, '-I', '-c', self.program, mode, self.commit, self.version,
             D.sha(self.manifest), D.sha(self.config), D.remote_attempt(self.config, self.version), *args], input=data, capture_output=True)
 
+    def absent_operation_fixture(self):
+        old_commit = 'b' * 40
+        old_version = 'v0.0.' + str(int(old_commit, 16))
+        old_attempt = 'd' * 64
+        old_inputs = self.parent / ('manual-' + old_commit + '-' + old_attempt)
+        (old_inputs / 'release').mkdir(parents=True, mode=0o700)
+        old_inputs.chmod(0o700)
+        old_manifest = json.dumps({'source_commit': old_commit, 'version': old_version}).encode()
+        old_config = b'INSTALL_SCHEMA_VERSION=2\n'
+        D.atomic_write(old_inputs / 'release/release-manifest.json', old_manifest)
+        D.atomic_write(old_inputs / 'install.config', old_config)
+        proof = {'schema': 1, 'commit': old_commit, 'version': old_version,
+                 'remote_attempt': old_attempt, 'stage': 'upgrade', 'mutator_dispatched': True,
+                 'manifest_sha256': D.sha(old_manifest), 'staged_config_sha256': D.sha(old_config)}
+        proof_raw = json.dumps(proof).encode()
+        prior_commit = 'c' * 40
+        prior_version = 'v0.0.' + str(int(prior_commit, 16))
+        prior = json.dumps({'commit': prior_commit, 'version': prior_version, 'remote_attempt': 'e' * 64}).encode()
+        staged = self.execute('stage', self.archive(forward_journal=proof_raw, forward_prior_operation=prior),
+                              forward_sha=D.sha(proof_raw), prior_sha=D.sha(prior))
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        operation = self.parent.parent / ('upgrade-' + self.version)
+        old_directory = self.parent.parent / ('upgrade-' + old_version)
+        old_id = str(D.uuid.UUID(bytes=hashlib.sha256(str(old_directory).encode()).digest()[:16], version=4))
+        D.atomic_write(self.parent.parent / 'lifecycle.json', json.dumps({'id': old_id, 'phase': 'applying'}).encode())
+        return operation, old_inputs, old_id, proof_raw, D.sha(prior), prior_version
+
+    def test_continuation_accepts_absent_operation_under_lock_and_retries_same_candidate(self):
+        operation, _, old_id, proof, prior_sha, prior_version = self.absent_operation_fixture()
+        before = {str(p): p.read_bytes() for p in self.parent.parent.rglob('*') if p.is_file()}
+        continued = self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha)
+        self.assertEqual(continued.returncode, 0, continued.stderr)
+        receipt = json.loads(continued.stdout)
+        self.assertEqual(receipt['prior_candidate'], {})
+        self.assertIs(receipt['operation_absent'], True)
+        self.assertEqual(receipt['lifecycle_id'], old_id)
+        self.assertFalse(operation.exists())
+        self.assertEqual({str(p): p.read_bytes() for p in self.parent.parent.rglob('*') if p.is_file()}, before)
+        self.assertFalse(self.result.exists())
+        dispatched = self.execute('run', None, self.architecture, 'upgrade', '0', '1', '', D.sha(proof), '1',
+                                  forward_only=True, prior_sha=prior_sha, prior_version=prior_version)
+        self.assertEqual(dispatched.returncode, 0, dispatched.stderr)
+        self.assertIn('--forward-only', json.loads(self.result.read_bytes()))
+
+    def test_absent_operation_continuation_rejects_busy_lock(self):
+        _, _, _, proof, prior_sha, _ = self.absent_operation_fixture()
+        with D.lock(self.parent / 'manual-deploy.lock'):
+            rejected = self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn(b'BlockingIOError', rejected.stderr)
+        self.assertFalse(self.result.exists())
+
+    def test_absent_operation_is_rechecked_before_dispatch_after_attestation(self):
+        operation, _, _, proof, prior_sha, prior_version = self.absent_operation_fixture()
+        continued = self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha)
+        self.assertEqual(continued.returncode, 0, continued.stderr)
+        # A competing dispatch after attestation must not reuse the absence proof.
+        operation.mkdir(mode=0o700)
+        for name in ['operator-plan.json', 'execution-mode.json']:
+            D.atomic_write(operation / name, b'{}')
+        (operation / 'activate').mkdir(mode=0o700)
+        dispatched = self.execute('run', None, self.architecture, 'upgrade', '0', '1', '', D.sha(proof), '1',
+                                  forward_only=True, prior_sha=prior_sha, prior_version=prior_version)
+        self.assertNotEqual(dispatched.returncode, 0)
+        self.assertFalse(self.result.exists())
+
+    def test_absent_operation_continuation_rejects_changed_bindings(self):
+        _, old_inputs, old_id, proof, prior_sha, _ = self.absent_operation_fixture()
+        lifecycle = self.parent.parent / 'lifecycle.json'
+        for path in [self.root / 'install.config', self.root / 'release/fixture-0',
+                     self.root / 'forward-operation.json', self.root / 'forward-prior-operation.json',
+                     old_inputs / 'release/release-manifest.json', old_inputs / 'install.config']:
+            with self.subTest(path=str(path)):
+                original = path.read_bytes()
+                D.atomic_write(path, b'changed')
+                self.assertNotEqual(self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha).returncode, 0)
+                D.atomic_write(path, original)
+        for state in [{'id': 'foreign', 'phase': 'applying'}, {'id': old_id, 'phase': 'released'}]:
+            with self.subTest(lifecycle=state):
+                D.atomic_write(lifecycle, json.dumps(state).encode())
+                self.assertNotEqual(self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha).returncode, 0)
+        D.atomic_write(lifecycle, json.dumps({'id': old_id, 'phase': 'applying'}).encode())
+        for key, value in [('schema', 2), ('stage', 'status'), ('mutator_dispatched', False), ('remote_attempt', 'bad')]:
+            with self.subTest(proof=key):
+                changed = json.loads(proof)
+                changed[key] = value
+                changed_raw = json.dumps(changed).encode()
+                D.atomic_write(self.root / 'forward-operation.json', changed_raw)
+                self.assertNotEqual(self.execute('continue', forward_sha=D.sha(changed_raw), prior_sha=prior_sha).returncode, 0)
+        self.assertFalse(self.result.exists())
+
+    def test_absent_operation_exception_rejects_existing_unsafe_paths(self):
+        operation, _, _, proof, prior_sha, _ = self.absent_operation_fixture()
+        for kind in ['dangling symlink', 'directory symlink', 'file', 'public directory', 'activation', 'drain']:
+            with self.subTest(kind=kind):
+                if kind == 'dangling symlink':
+                    operation.symlink_to(self.parent.parent / 'missing')
+                elif kind == 'directory symlink':
+                    operation.symlink_to(self.root, target_is_directory=True)
+                elif kind == 'file':
+                    D.atomic_write(operation, b'{}')
+                else:
+                    operation.mkdir(mode=0o700)
+                    if kind == 'public directory':
+                        operation.chmod(0o755)
+                    else:
+                        for name in ['operator-plan.json', 'execution-mode.json']:
+                            D.atomic_write(operation / name, b'{}')
+                        (operation / ('activate' if kind == 'activation' else 'handoff-drain-unsafe')).mkdir(mode=0o700)
+                rejected = self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertFalse(self.result.exists())
+                if operation.is_symlink() or operation.is_file():
+                    operation.unlink()
+                else:
+                    D.shutil.rmtree(operation)
+
     def test_partial_broker_bootstrap_continuation_accepts_prior_digest_and_missing_ledger(self):
         old_commit = 'b' * 40
         old_version = 'v0.0.' + str(int(old_commit, 16))
@@ -1496,6 +1640,8 @@ class RemoteProgram(unittest.TestCase):
         receipt = self.execute('continue', forward_sha=digest)
         self.assertEqual(receipt.returncode, 0, receipt.stderr)
         self.assertEqual(json.loads(receipt.stdout)['lifecycle_id'], old_id)
+        self.assertIsNone(json.loads(receipt.stdout)['prior_candidate'])
+        self.assertNotIn('operation_absent', json.loads(receipt.stdout))
         self.assertFalse(self.result.exists())
         dispatched = self.execute('run', None, self.architecture, 'upgrade', '0', '1', '', digest, '1', forward_only=True)
         self.assertEqual(dispatched.returncode, 0, dispatched.stderr)
