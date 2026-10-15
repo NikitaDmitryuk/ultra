@@ -54,7 +54,11 @@ func validateAutomation(p *InstallPlan) error {
 		}
 		addresses[address] = true
 		if n.Budget == nil {
-			if !p.Bridge.ReuseSpec {
+			// A restored database is authoritative for existing static budgets.
+			// EnsureStaticBudgets verifies that every configured exit already has
+			// one and never resets its usage. A genuinely clean database still
+			// needs an explicit operator policy.
+			if !p.Bridge.ReuseSpec && p.Secrets.DatabaseDumpFile == "" {
 				return errors.New("clean static exits require explicit traffic budgets")
 			}
 		} else {

@@ -117,6 +117,20 @@
         ultra_spec: "{{ ultra_spec | combine({'exit': ultra_spec.exit | combine({'pinned_peer_cert_sha256': bootstrap_pinned[0].pinned_peer_cert_sha256})}) }}"
       no_log: true
       when: not (ultra_preserve_runtime | default(false) | bool) and ultra_spec.tunnel_tls_provision != 'acme_letsencrypt'
+    - name: Reconcile uniquely matched imported exit identities before bridge activation
+      ultra_dump_exit_identity:
+        database: "{{ hostvars['database'].ultra_database_import_db }}"
+        user: "{{ hostvars['database'].ultra_database_import_user }}"
+        password: "{{ hostvars['database'].ultra_database_import_password }}"
+        archive_sha256: "{{ hostvars['database'].ultra_database_import_sha256 }}"
+        entries: "{{ bootstrap_pinned }}"
+        tls_policy: "{{ 'ca' if ultra_spec.tunnel_tls_provision == 'acme_letsencrypt' else 'pin' }}"
+      delegate_to: database
+      when:
+        - "'database' in hostvars"
+        - hostvars['database'].ultra_database_import_sha256 | default('') | length > 0
+        - not (ultra_preserve_runtime | default(false) | bool)
+      no_log: true
   roles:
     - host
     - role: geo

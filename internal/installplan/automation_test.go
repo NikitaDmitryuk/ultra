@@ -68,6 +68,11 @@ func TestCleanAutomationRequiresExplicitStaticBudgets(t *testing.T) {
 	if err := validateAutomation(p); err == nil {
 		t.Fatal("clean install accepted absent budget")
 	}
+	p.Secrets.DatabaseDumpFile = "/private/database.dump"
+	if err := validateAutomation(p); err != nil {
+		t.Fatal("restore must use the existing database budget", err)
+	}
+	p.Secrets.DatabaseDumpFile = ""
 	p.Automation.StaticNodes[0].Budget = &StaticBudget{MonthlyBytes: 100000000000, IsFallback: true}
 	if err := validateAutomation(p); err != nil {
 		t.Fatal(err)

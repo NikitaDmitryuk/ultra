@@ -60,6 +60,11 @@ jobs:
         run: go mod download
       - name: Test
         run: make test
+      - name: Verify imported exit identity preservation with PostgreSQL
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q postgresql-client
+          python3 deploy/recovery/test_dump_exit_identity.py --test-dsn "$DATABASE_URL"
       - name: Dump and restore during VPN load
         run: python3 scripts/test-load-pg-recovery.py --container '${{ job.services.postgres.id }}'
   go-race:

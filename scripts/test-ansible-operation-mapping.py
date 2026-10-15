@@ -48,7 +48,9 @@ class OperationMappingTests(unittest.TestCase):
         self.assertIn('- role: warp', exit_stage)
         self.assertIn("'exit_host': inventory_hostname", exit_stage)
         self.assertIn('ultra_bootstrap_pins[ultra_exit_hosts[item.name]]', bridge)
-        self.assertNotIn('hostvars[', bridge)
+        self.assertNotIn('relay_fingerprint', bridge)
+        self.assertNotIn('hostvars[ultra_exit_hosts', bridge)
+        self.assertIn('ultra_dump_exit_identity:', bridge)
         for stage in (postgres, exit_stage, bridge):
             self.assertNotIn('ansible.builtin.shell', stage)
             self.assertIn('verified', stage)
