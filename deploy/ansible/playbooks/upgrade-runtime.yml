@@ -1,0 +1,155 @@
+---
+- name: Prepare all host candidates before runtime mutation
+  hosts: all
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Prepare exact recoverable runtime images
+      ansible.builtin.include_role:
+        name: runtime
+        tasks_from: phase
+      when: ultra_runtime_action == 'prepare'
+- name: Validate complete fleet bindings before coordinated disruption
+  hosts: all
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Read each exact native transaction binding before coordination
+      ansible.builtin.command:
+        argv: [/var/lib/ultra-ansible/runtime-probe/ultra-install, runtime-probe]
+        stdin: "{{ ultra_runtime_probe_requests[inventory_hostname] | combine({'action': 'status'}) | to_json(preprocess_unsafe=False) }}"
+      register: runtime_fleet_binding_raw
+      changed_when: false
+      no_log: true
+      when: ultra_runtime_action in ['apply', 'rollback']
+    - name: Retain only the checked public fleet binding
+      ansible.builtin.set_fact:
+        runtime_fleet_binding: "{{ runtime_fleet_binding_raw.stdout | from_json }}"
+      no_log: true
+      when: ultra_runtime_action in ['apply', 'rollback']
+    - name: Check every effect checkpoint before stopping the bridge
+      ultra_runtime_effects:
+        action: status
+        request_json: "{{ ultra_runtime_effect_inputs[inventory_hostname] }}"
+        warp_assets: "{{ ultra_runtime_warp_assets }}"
+      no_log: true
+      when: ultra_runtime_action in ['apply', 'rollback']
+- name: Quiesce bridge traffic before any peer changes tunnel protocol
+  hosts: bridge
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Require every host to own the frozen coordinated transaction
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].runtime_fleet_binding.verified | bool
+          - hostvars[item].runtime_fleet_binding.bound | bool
+      loop: "{{ groups['all'] }}"
+      when: ultra_runtime_action == 'apply'
+      no_log: true
+    - name: Stop bot traffic for the bound fleet transition
+      ansible.builtin.systemd_service:
+        name: ultra-bot.service
+        state: stopped
+      when: ultra_runtime_action in ['apply', 'rollback'] and runtime_fleet_binding.bound | bool
+    - name: Stop the bridge before serial exit image changes
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: stopped
+      when: ultra_runtime_action in ['apply', 'rollback'] and runtime_fleet_binding.bound | bool
+- name: Transition exits serially before the bridge
+  hosts: exits
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  serial: 1
+  tasks:
+    - name: Apply or restore the request-bound exit image
+      ansible.builtin.include_role:
+        name: runtime
+        tasks_from: phase
+      when: ultra_runtime_action in ['apply', 'rollback']
+    - name: Restart the exit after its exact image transition
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: restarted
+      when: ultra_runtime_action in ['apply', 'rollback'] and runtime_transaction_evidence.bound | bool
+- name: Transition bridge and verify complete fleet payload
+  hosts: bridge
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Apply or restore the request-bound bridge image
+      ansible.builtin.include_role:
+        name: runtime
+        tasks_from: phase
+      when: ultra_runtime_action in ['apply', 'rollback']
+    - name: Start a new payload verification watermark
+      ansible.builtin.command:
+        argv: [date, '+%s%N']
+      register: runtime_payload_since
+      changed_when: false
+      when: ultra_runtime_action in ['apply', 'rollback'] and runtime_transaction_evidence.bound | bool
+    - name: Restart the bridge with the exact runtime image
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: restarted
+      when: ultra_runtime_action in ['apply', 'rollback'] and runtime_transaction_evidence.bound | bool
+    - name: Require new relay readiness and every frozen tunnel payload
+      ansible.builtin.command:
+        argv:
+          - /var/lib/ultra-ansible/runtime-probe/ultra-install
+          - release-probe
+          - --exit-id
+          - "{{ hostvars[item].ultra_exit_id }}"
+          - --since-nanos
+          - "{{ runtime_payload_since.stdout }}"
+      loop: "{{ groups['exits'] }}"
+      changed_when: false
+      no_log: true
+      when: ultra_runtime_action in ['apply', 'rollback'] and runtime_transaction_evidence.bound | bool
+    - name: Restore the captured bot activity after complete payload acceptance
+      ultra_runtime_effects:
+        action: "{{ 'accept' if ultra_runtime_action == 'apply' else 'accept-rollback' }}"
+        request_json: "{{ ultra_runtime_effect_inputs[inventory_hostname] }}"
+        warp_assets: "{{ ultra_runtime_warp_assets }}"
+      when: ultra_runtime_action in ['apply', 'rollback'] and runtime_transaction_evidence.bound | bool
+      no_log: true
+- name: Commit only surviving receipt-owned external effects after release acceptance
+  hosts: all
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Promote candidate firewall grants into the exact ownership ledger
+      ultra_runtime_effects:
+        action: commit
+        request_json: "{{ ultra_runtime_effect_inputs[inventory_hostname] }}"
+        warp_assets: "{{ ultra_runtime_warp_assets }}"
+      register: runtime_committed_effects
+      when: ultra_runtime_action == 'commit'
+      no_log: true
+    - name: Return only the minimal committed dependency acknowledgement
+      ansible.builtin.set_fact:
+        runtime_transaction_evidence: "{{ {'verified': runtime_committed_effects.verified, 'status': 'committed', 'bound': runtime_committed_effects.bound} }}"
+      when: ultra_runtime_action == 'commit'
+      no_log: true
+- name: Return only exact fleet phase acknowledgements
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Collect safe host status
+      ansible.builtin.set_fact:
+        runtime_transaction_hosts: "{{ runtime_transaction_hosts | default({}) | combine({item: hostvars[item].runtime_transaction_evidence}) }}"
+      loop: "{{ groups['all'] }}"
+      no_log: true
+    - name: Save the verified fixed phase
+      ansible.builtin.copy:
+        content: "{{ {'verified': true, 'phase': ultra_runtime_action, 'hosts': runtime_transaction_hosts} | to_json(preprocess_unsafe=False) }}\n"
+        dest: "{{ ultra_result_file }}"
+        mode: '0600'
+      no_log: true

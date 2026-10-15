@@ -151,6 +151,11 @@
       no_log: true
       when: inventory_hostname in groups['bridge'] and release_component == 'ultra-relay'
   rescue:
+    - name: Keep the failed legacy bridge stopped until fleet rollback restores exits
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: stopped
+      when: inventory_hostname in groups['bridge'] and release_component == 'ultra-relay' and (ultra_legacy_bridge_maintenance | default(false) | bool)
     - name: Recheck the compatible fallback before restoring code
       ansible.builtin.stat:
         path: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/{{ release_component }}.previous"
@@ -171,7 +176,9 @@
       ansible.builtin.systemd_service:
         name: "{{ release_component }}.service"
         state: restarted
-      when: not (release_preserve_stopped | default(false) | bool)
+      when:
+        - not (release_preserve_stopped | default(false) | bool)
+        - not (inventory_hostname in groups['bridge'] and release_component == 'ultra-relay' and (ultra_legacy_bridge_maintenance | default(false) | bool))
     - name: Retain the failed outcome after compatible rollback
       ansible.builtin.fail:
         msg: release_activation_failed

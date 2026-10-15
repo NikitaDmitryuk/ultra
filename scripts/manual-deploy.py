@@ -20,6 +20,7 @@ import sys
 import tarfile
 import tempfile
 import time
+from urllib.parse import urlsplit
 
 
 class DeployError(Exception):
@@ -70,6 +71,60 @@ def canonical_file(path):
     require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
             stat.S_IMODE(info.st_mode) in (0o600, 0o644), 'canonical_config_requires_owned_regular_readable_file')
     return path.read_bytes()
+
+
+def subscription_probe_input(path, limit=4096):
+    """Read only the operator's explicit private credential file."""
+    path = Path(path)
+    require(path.is_absolute() and str(path) == os.path.normpath(str(path)), 'subscription_probe_private_file_required')
+    for parent in path.parents:
+        require(not parent.is_symlink(), 'subscription_probe_private_file_required')
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(descriptor)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
+                stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1 and
+                0 < info.st_size <= limit, 'subscription_probe_private_file_required')
+        with os.fdopen(descriptor, 'rb', closefd=False) as stream:
+            raw = stream.read(limit + 1)
+        require(0 < len(raw) <= limit, 'subscription_probe_private_file_required')
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+def subscription_probe_from_env(path, optional=False):
+    """Parse only one allowlisted literal; never source or expand the env file."""
+    try:
+        raw = subscription_probe_input(path, 1024 * 1024)
+    except FileNotFoundError:
+        if optional:
+            return None
+        raise DeployError('subscription_probe_env_file_missing') from None
+    selected = []
+    for line in raw.splitlines():
+        key, separator, value = line.partition(b'=')
+        if key.strip() == b'ULTRA_SUBSCRIPTION_PROBE_URL':
+            require(bool(separator), 'subscription_probe_env_invalid')
+            selected.append(value)
+        elif line.strip().startswith(b'export ULTRA_SUBSCRIPTION_PROBE_URL') or line.strip() == b'ULTRA_SUBSCRIPTION_PROBE_URL':
+            raise DeployError('subscription_probe_env_invalid')
+    require(len(selected) <= 1, 'subscription_probe_env_invalid')
+    require(optional or selected, 'subscription_probe_env_key_missing')
+    if not selected:
+        return None
+    try:
+        words = shlex.split(selected[0].decode('utf-8'), comments=False)
+        require(words and (len(words) == 1 or words[1].startswith('#')), 'subscription_probe_env_invalid')
+        value = words[0]
+        parsed = urlsplit(value)
+        require(len(value.encode()) <= 4096 and parsed.scheme == 'https' and parsed.hostname and
+                parsed.netloc == parsed.hostname and not parsed.query and not parsed.fragment and
+                re.fullmatch(r'/sub/[A-Za-z0-9_-]{1,1024}', parsed.path) and
+                not re.search(r'[\s\x00]', value), 'subscription_probe_env_invalid')
+    except (ValueError, UnicodeError):
+        raise DeployError('subscription_probe_env_invalid') from None
+    return value.encode()
 
 
 def atomic_write(path, raw, preserve_mode=False):
@@ -270,7 +325,7 @@ def validate_config_policy(raw):
     # Match installplan.DisallowedDeploymentSecret before creating any backup,
     # temporary input, or remote copy. The exact built Go parser runs below too.
     forbidden = {'TELEGRAM_BOT_TOKEN', 'ULTRA_VULTR_API_KEY', 'ULTRA_VULTR_DNS_API_KEY',
-                 'ULTRA_CUTOVER_SUBSCRIPTION_URL', 'ULTRA_RELAY_ADMIN_TOKEN', 'ULTRA_DB_DSN'}
+                 'ULTRA_CUTOVER_SUBSCRIPTION_URL', 'ULTRA_SUBSCRIPTION_PROBE_URL', 'ULTRA_RELAY_ADMIN_TOKEN', 'ULTRA_DB_DSN'}
     for line in raw.decode().splitlines():
         if not line.strip() or line.lstrip().startswith('#') or '=' not in line:
             continue
@@ -467,6 +522,8 @@ def need(ok):
     if not ok: raise ValueError('remote_input_invalid')
 def digest(data): return hashlib.sha256(data).hexdigest()
 mode,commit,version,manifest_sha,config_sha,attempt=sys.argv[1:7]
+probe_sha=(sys.argv[10] if len(sys.argv)>10 else '') if mode=='run' else (sys.argv[7] if len(sys.argv)>7 else '')
+need(probe_sha=='' or re.fullmatch('[a-f0-9]{64}',probe_sha))
 need(re.fullmatch('[a-f0-9]{40}',commit) and version=='v0.0.'+str(int(commit,16)))
 need(all(re.fullmatch('[a-f0-9]{64}',x) for x in [manifest_sha,config_sha,attempt]))
 need(os.geteuid()==0)
@@ -495,7 +552,15 @@ def verify(directory):
         need(len(data)==row['size'] and digest(data)==row['sha256'])
     need({x.name for x in (directory/'release').iterdir()}==names|{'release-manifest.json'})
     top={x.name for x in directory.iterdir()}
-    need(top in ({'release','install.config'},{'release','install.config','baseline'}))
+    need(top - {'baseline','subscription-probe-url','subscription-probe.sha256'} == {'release','install.config'})
+    need(('subscription-probe.sha256' in top)==bool(probe_sha))
+    if probe_sha:
+        need(read(directory/'subscription-probe.sha256')==probe_sha.encode())
+        if 'subscription-probe-url' in top:
+            info=(directory/'subscription-probe-url').lstat()
+            need(stat.S_IMODE(info.st_mode)==0o600 and info.st_nlink==1 and 0<info.st_size<=4096)
+            need(digest(read(directory/'subscription-probe-url'))==probe_sha)
+    else: need('subscription-probe-url' not in top)
     if 'baseline' in top:
         baseline=directory/'baseline';info=baseline.lstat()
         need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700)
@@ -532,6 +597,9 @@ if mode=='stage':
                     for row in m['assets']:
                         n=row['name'];need(re.fullmatch('[A-Za-z0-9_.-]+',n) and n not in ['.','..','release-manifest.json'] and n not in rows)
                         rows[n]=row
+                elif name in ('subscription-probe-url','subscription-probe.sha256'):
+                    need(bool(probe_sha) and member.size<=4096)
+                    raw=None
                 elif name in ('baseline/descriptor.json','baseline/operator-journal.json'):
                     need(name not in seen and member.size<=4194304)
                     if not (pending/'baseline').exists():
@@ -558,11 +626,16 @@ if mode=='stage':
         if any(name.startswith('baseline/') for name in seen):
             need({'baseline/descriptor.json','baseline/operator-journal.json'} <= seen)
             expected |= {'baseline/descriptor.json','baseline/operator-journal.json'}
+        if probe_sha: expected |= {'subscription-probe-url','subscription-probe.sha256'}
         need(rows is not None and seen==expected)
         verify(pending)
         for directory in [pending/'release',pending]:
             fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
-        if root.exists() or root.is_symlink(): verify(root)
+        if root.exists() or root.is_symlink():
+            verify(root)
+            if probe_sha and not (root/'subscription-probe-url').exists():
+                os.rename(pending/'subscription-probe-url',root/'subscription-probe-url')
+                fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
         else:
             os.rename(pending,root)
             fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
@@ -575,7 +648,7 @@ elif mode=='run':
     architecture=sys.argv[7];need(architecture in ['amd64','arm64'])
     need(architecture=={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine()))
     action=sys.argv[8];need(action in ['doctor','adoption_check','adoption_apply','upgrade','operator-upgrade','status'])
-    retry_failed=len(sys.argv)>9 and sys.argv[9]=='1';need(len(sys.argv)<=9 or sys.argv[9] in ['0','1'])
+    retry_failed=len(sys.argv)>9 and sys.argv[9]=='1';need(len(sys.argv)<=11 and (len(sys.argv)<=9 or sys.argv[9] in ['0','1']))
     binary=root/'release'/('ultra-install-linux-'+architecture)
     binary.chmod(0o700)
     args={'doctor':['doctor'],'adoption_check':['adopt','--adopt-runtime','--bridge-native','--check','--release-dir',str(root/'release')],
@@ -584,11 +657,19 @@ elif mode=='run':
               '--source-commit',commit,'--version',version,'--manifest-sha256',manifest_sha,
               '--config-sha256',config_sha] + (['--retry-failed'] if retry_failed else []),
           'status':['status']}[action]
+    if action=='upgrade' and probe_sha:
+        need((root/'subscription-probe-url').exists())
+        args += ['--subscription-probe-url-file',str(root/'subscription-probe-url')]
     os.chdir(root)
     # Keep the remote lock across exec and strip unchecked installer overrides.
     os.set_inheritable(lock,True)
     environment={k:v for k,v in os.environ.items() if not k.startswith('ULTRA_') and k not in ['DATABASE_URL','PYTHONPATH','PYTHONHOME','ANSIBLE_CONFIG']}
     os.execve(binary,[str(binary)]+args+['--config',str(root/'install.config')],environment)
+elif mode=='cleanup':
+    verify(root)
+    if probe_sha:
+        (root/'subscription-probe-url').unlink(missing_ok=True)
+        fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
 else: raise ValueError('remote_action_invalid')
 '''
 
@@ -611,13 +692,14 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
             entry.size = len(config)
             archive.addfile(entry, io.BytesIO(config))
             for name, data in sorted((extra_files or {}).items()):
-                require(name in ('baseline/descriptor.json', 'baseline/operator-journal.json'), 'baseline_archive_path_invalid')
+                require(name in ('baseline/descriptor.json', 'baseline/operator-journal.json', 'subscription-probe-url', 'subscription-probe.sha256'), 'private_archive_path_invalid')
                 entry = tarfile.TarInfo(name)
                 entry.size = len(data)
                 archive.addfile(entry, io.BytesIO(data))
         stream.seek(0)
         attempt = remote_attempt(config, version)
-        result = subprocess.run(remote_command(transport, commit, version, manifest_sha, sha(config), attempt, 'stage'),
+        result = subprocess.run(remote_command(transport, commit, version, manifest_sha, sha(config), attempt, 'stage',
+                                              (extra_files or {}).get('subscription-probe.sha256', b'').decode()),
                                 cwd=repo, stdin=stream, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
     require(result.returncode == 0, 'bridge_staging_failed')
     receipt = json.loads(result.stdout)
@@ -626,7 +708,7 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
     return receipt
 
 
-def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_failed=False):
+def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_failed=False, probe_env_file=None):
     architecture = {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(platform.machine())
     require(platform.system() == 'Linux' and architecture, 'operator_requires_linux_amd64_or_arm64')
     config = Path(config_path) if config_path else repo / 'install.config'
@@ -652,8 +734,18 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         staged_config, baseline_files = replay[1], replay[2]
     elif transport:
         staged_config, baseline_files = stage_upgrade_baseline(current, version, remote_release.parent)
+    probe_snapshot = root / 'subscription-probe-url'
+    binding = root / ('probe-binding-' + commit + '-' + (attempt or sha(new)))
+    existing_record = json.loads(private_file(journal)) if journal.exists() else {}
+
+    def cleanup_probe(record):
+        if transport and record.get('probe_sha256'):
+            run(remote_command(transport, commit, version, manifest_sha, record['staged_config_sha256'],
+                               record['remote_attempt'], 'cleanup', record['probe_sha256']), repo, 'probe_cleanup')
+        probe_snapshot.unlink(missing_ok=True)
+
     if journal.exists():
-        record = json.loads(private_file(journal))
+        record = existing_record
         if record.get('stage') == 'completed':
             require(record.get('schema') == 1 and record.get('commit') == commit and
                     record.get('version') == version and record.get('adopt') == adopt and
@@ -667,8 +759,28 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             require(sha(completed) == final_sha, 'manual_completion_config_changed')
             if completed != current:
                 atomic_write(config, completed, preserve_mode=True)
+            cleanup_probe(record)
             journal.unlink()
             return
+
+    probe_raw = None
+    if not adopt:
+        # Retry the frozen credential without reopening .env. Explicit input
+        # requires the same bytes and cannot replace a dispatched credential.
+        if existing_record.get('probe_sha256') and probe_env_file is None:
+            probe_raw = subscription_probe_input(probe_snapshot)
+        else:
+            probe_raw = subscription_probe_from_env(Path(probe_env_file) if probe_env_file else config.parent / '.env',
+                                                    optional=probe_env_file is None)
+    require(not adopt or probe_env_file is None, 'subscription_probe_requires_upgrade')
+    probe_sha = sha(probe_raw) if probe_raw is not None else ''
+    if binding.exists():
+        require(private_file(binding) == probe_sha.encode(), 'manual_operation_probe_changed')
+    if existing_record:
+        require(existing_record.get('probe_sha256', '') == probe_sha, 'manual_operation_probe_changed')
+
+    if journal.exists():
+        record = existing_record
         backup_name = record.get('backup', '')
         require(re.fullmatch(r'install\.config\.before-' + re.escape(version) + r'-[0-9]+', backup_name), 'manual_backup_identity_invalid')
         backup = root / backup_name
@@ -685,10 +797,17 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         atomic_write(backup, current)
         record = {'schema': 1, 'commit': commit, 'version': version, 'adopt': adopt,
                   'backup': backup.name, 'previous_sha256': sha(current), 'config_sha256': sha(new), 'stage': 'prepared', 'mutator_dispatched': False,
-                  'transport_binding': transport_binding, 'manifest_sha256': manifest_sha, 'remote_attempt': attempt}
+                  'transport_binding': transport_binding, 'manifest_sha256': manifest_sha, 'remote_attempt': attempt,
+                  'probe_sha256': probe_sha}
+        if probe_raw is not None:
+            atomic_write(probe_snapshot, probe_raw)
         atomic_write(journal, json.dumps(record).encode())
         require(canonical_file(config) == current, 'canonical_config_changed_before_update')
         atomic_write(config, new, preserve_mode=True)
+    if probe_raw is not None:
+        require(sha(subscription_probe_input(probe_snapshot)) == probe_sha, 'manual_operation_probe_changed')
+        baseline_files.update({'subscription-probe-url': probe_raw, 'subscription-probe.sha256': probe_sha.encode()})
+    atomic_write(binding, probe_sha.encode())
     installer = str(bundle / ('ultra-install-linux-' + architecture))
     commands = [('doctor', [installer, 'doctor', '--config', str(config)])]
     if adopt:
@@ -699,6 +818,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
                                   '--source-commit', commit, '--version', version,
                                   '--manifest-sha256', manifest_sha or sha((bundle / 'release-manifest.json').read_bytes()),
                                   '--config-sha256', sha(new)])]
+        if probe_sha:
+            commands[-1][1].extend(['--subscription-probe-url-file', str(probe_snapshot)])
         if retry_failed:
             commands[-1][1].append('--retry-failed')
     commands += [('status', [installer, 'status', '--config', str(config)])]
@@ -723,25 +844,33 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             print('manual-deploy: ' + stage, flush=True)
             if transport:
                 command = remote_command(transport, commit, version, manifest_sha, record.get('staged_config_sha256', record['config_sha256']), attempt,
-                                         'run', record['remote_architecture'], stage, '1' if retry_failed else '0')
+                                         'run', record['remote_architecture'], stage, '1' if retry_failed else '0', probe_sha)
             run(command, repo, stage)
     except BaseException:
         # Read-only adoption comparison cannot have dispatched a mutating job.
         # After apply/upgrade dispatch, keep exact canonical inputs for recovery.
         if not record.get('mutator_dispatched', False) and record['stage'] in ('bridge_staging', 'doctor', 'adoption_check') and sha(canonical_file(config)) == record['config_sha256']:
+            if transport and probe_sha:
+                try:
+                    run(remote_command(transport, commit, version, manifest_sha, sha(staged_config), attempt,
+                                       'cleanup', probe_sha), repo, 'probe_cleanup')
+                except (DeployError, OSError):
+                    print('manual-deploy: private bridge input cleanup unconfirmed; reconcile staged inputs before another attempt', file=sys.stderr)
             previous = private_file(backup)
             require(sha(previous) == record['previous_sha256'], 'canonical_backup_changed')
             atomic_write(config, previous, preserve_mode=True)
             journal.unlink()
+            probe_snapshot.unlink(missing_ok=True)
+            binding.unlink(missing_ok=True)
         else:
             print('manual-deploy: canonical inputs retained; reconcile the unfinished operation with ultra-install status before recovery; do not deploy another commit', file=sys.stderr)
         raise
-    if 'ULTRA_UPGRADE_BASELINE_FILE' in config_values(canonical_file(config)):
-        completed = remove_config_key(canonical_file(config), 'ULTRA_UPGRADE_BASELINE_FILE')
-        record['stage'] = 'completed'
-        record['final_config_sha256'] = sha(completed)
-        atomic_write(journal, json.dumps(record).encode())
-        atomic_write(config, completed, preserve_mode=True)
+    completed = remove_config_key(canonical_file(config), 'ULTRA_UPGRADE_BASELINE_FILE')
+    record['stage'] = 'completed'
+    record['final_config_sha256'] = sha(completed)
+    atomic_write(journal, json.dumps(record).encode())
+    atomic_write(config, completed, preserve_mode=True)
+    cleanup_probe(record)
     journal.unlink()
 
 
@@ -751,7 +880,10 @@ def main():
     parser.add_argument('--build-only', action='store_true', help='verify/build candidate without changing canonical config or remote hosts')
     parser.add_argument('--config', help='canonical install.config path; defaults to install.config in this checkout')
     parser.add_argument('--retry-failed', action='store_true', help='explicitly retry the same failed upgrade after recovery preflight')
+    parser.add_argument('--subscription-probe-env-file', help='private local env file; read only ULTRA_SUBSCRIPTION_PROBE_URL (default: .env beside canonical config)')
     arguments = parser.parse_args()
+    require(not arguments.subscription_probe_env_file or (not arguments.build_only and os.environ.get('ADOPT') != '1'),
+            'subscription_probe_requires_upgrade')
     repo = Path(__file__).resolve().parents[1]
     config = Path(os.path.abspath(arguments.config)) if arguments.config else repo / 'install.config'
     for executable in ['git', 'make', 'go', 'tar', 'sha256sum', 'bash']:
@@ -781,7 +913,8 @@ def main():
                     for executable in ['ssh', 'ssh-keygen']:
                         require(shutil.which(executable), 'missing_prerequisite_' + executable)
                     operator_transport(os.environ.get('ULTRA_OPERATOR_INVENTORY'), current)
-                rollout(repo, root, bundle, commit, version, os.environ.get('ADOPT') == '1', config, arguments.retry_failed)
+                rollout(repo, root, bundle, commit, version, os.environ.get('ADOPT') == '1', config, arguments.retry_failed,
+                        arguments.subscription_probe_env_file)
     print('manual-deploy: complete', flush=True)
 
 

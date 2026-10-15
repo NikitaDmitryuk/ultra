@@ -17,6 +17,30 @@ def read(path):
     return json.loads(source.read_text())
 
 
+def runtime_node_proofs(database, nodes):
+    """Bind only public tunnel digests to the already inspected DB topology."""
+    query = "SELECT COALESCE(json_agg(json_build_object('id',id::text,'address',address,'tunnel_uuid',tunnel_uuid,'pin',pinned_peer_cert_sha256)), '[]'::json) FROM exit_nodes WHERE enabled"
+    result = subprocess.run(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database, '-c', query],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=8)
+    if len(result.stdout) > 65536:
+        raise ValueError('runtime_identity_unavailable')
+    rows = json.loads(result.stdout)
+    if not isinstance(rows, list) or len(rows) != len(nodes):
+        raise ValueError('runtime_topology_changed')
+    indexed = {row['id']: row for row in rows}
+    if len(indexed) != len(rows):
+        raise ValueError('runtime_topology_changed')
+    for node in nodes:
+        row = indexed.get(node['id'], {})
+        tunnel = row.get('tunnel_uuid', '')
+        pin = row.get('pin', '')
+        if (row.get('address') != node['address'] or not re.fullmatch(r'[0-9a-fA-F-]{36}', tunnel)
+                or (pin and not re.fullmatch(r'[a-f0-9]{64}', pin))):
+            raise ValueError('runtime_identity_unavailable')
+        node['tunnel_identity_digest'] = hashlib.sha256(tunnel.encode()).hexdigest()
+        node['certificate_pin'] = pin
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--status', action='store_true')
@@ -67,6 +91,7 @@ def main():
                           'controller_age_seconds': int(now - controller['updated_at']),
                           'replicas_ready': True, 'reasons': []}))
         return
+    runtime_node_proofs(database, nodes)
     for node in nodes:
         pin = Path(node['known_hosts'])
         if pin.is_symlink() or pin.stat().st_mode & 0o022 or not 0 < pin.stat().st_size <= 65536:
@@ -93,7 +118,7 @@ def main():
         raise ValueError('controller_unit_invalid')
     controller_unit_hash = hashlib.sha256(controller_unit.read_bytes()).hexdigest()
     auto_policy = read('/etc/ultra-ansible/auto-upgrade.json') if Path('/etc/ultra-ansible/auto-upgrade.json').exists() else {'enabled': False}
-    print(json.dumps({'nodes': nodes, 'topology_sha256': digest, 'architecture': architecture, 'observed_at': int(now), 'database_schema': schema_max,
+    print(json.dumps({'nodes': nodes, 'runtime_nodes': {n['id']: {k: n.get(k) for k in ('name', 'managed', 'tunnel_identity_digest', 'certificate_pin')} for n in nodes}, 'topology_sha256': digest, 'architecture': architecture, 'observed_at': int(now), 'database_schema': schema_max,
                       'identity': identity.read_text(), 'previous_manifest': previous, 'previous_manifest_sha256': hashlib.sha256(Path('/opt/ultra-recovery/release-manifest.json').read_bytes()).hexdigest(), 'tool_hashes': tool_hashes, 'auto_policy': auto_policy, 'controller_directory': controller_directory, 'controller_unit_sha256': controller_unit_hash}))
 
 

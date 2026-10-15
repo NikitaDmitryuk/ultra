@@ -117,6 +117,37 @@ class RecoveryTests(unittest.TestCase):
         state=self.root/'state';state.mkdir();(state/'runtime.db').write_text('changing');(state/'spec.json').write_text('{}')
         files=recovery.collect([str(state)])
         self.assertEqual(len(files),1)
+
+    def test_ephemeral_subscription_probe_is_never_captured_from_operation_state(self):
+        state=self.root/'var/lib/ultra-ansible'
+        attempt=state/'domain-cutover'/'operation-123'
+        attempt.mkdir(parents=True)
+        staged=attempt/'subscription-probe-url'
+        staged.write_text('https://sync.example.com/sub/fixture-token')
+        raw_request=attempt/'request.json'
+        raw_request.write_text('{"variables":{"ultra_cutover_subscription_url":"https://sync.example.com/sub/fixture-token"}}')
+        raw_variables=attempt/'variables.json'
+        raw_variables.write_text('{"ultra_cutover_subscription_url":"https://sync.example.com/sub/fixture-token"}')
+        raw_vars_yml=attempt/'variables.yml'
+        raw_vars_yml.write_text('ultra_cutover_subscription_url: https://sync.example.com/sub/fixture-token\n')
+
+        replay=state/'domain-cutover'/'operation-456'
+        replay.mkdir(parents=True)
+        request=replay/'request.json'
+        request.write_text('{"ultra_cutover_subscription_url_file":"subscription-probe-url","ultra_cutover_subscription_url_sha256":"abc123"}')
+        variables=replay/'variables.json'
+        variables.write_text('{"ultra_cutover_subscription_url_file":"subscription-probe-url","ultra_cutover_subscription_url_sha256":"abc123"}')
+        unrelated=[attempt/'receipt.json',attempt/'notes.json',replay/'variables.yml']
+        unrelated[0].write_text('{"status":"complete"}')
+        unrelated[1].write_text('{"unrelated":"kept"}')
+        unrelated[2].write_text('unrelated_setting: kept\n')
+
+        files=recovery.collect([str(state)])
+
+        for sensitive in (staged,raw_request,raw_variables,raw_vars_yml):
+            self.assertNotIn(str(sensitive.relative_to('/')),files)
+        for neighbor in (request,variables,*unrelated):
+            self.assertIn(str(neighbor.relative_to('/')),files)
     def test_only_exact_derived_subscription_cache_is_excluded(self):
         self.assertEqual(recovery.EXCLUDED_FILES,{
             Path('/var/lib/ultra-bot/subscriptions.json'),

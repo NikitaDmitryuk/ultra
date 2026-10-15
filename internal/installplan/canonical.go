@@ -135,7 +135,7 @@ func BotEnvironment(values map[string]string) ([]byte, error) {
 func DisallowedDeploymentSecret(key string) bool {
 	key = strings.ToUpper(key)
 	switch key {
-	case "TELEGRAM_BOT_TOKEN", "ULTRA_VULTR_API_KEY", "ULTRA_VULTR_DNS_API_KEY", "ULTRA_CUTOVER_SUBSCRIPTION_URL", "ULTRA_RELAY_ADMIN_TOKEN", "ULTRA_DB_DSN":
+	case "TELEGRAM_BOT_TOKEN", "ULTRA_VULTR_API_KEY", "ULTRA_VULTR_DNS_API_KEY", "ULTRA_CUTOVER_SUBSCRIPTION_URL", "ULTRA_SUBSCRIPTION_PROBE_URL", "ULTRA_RELAY_ADMIN_TOKEN", "ULTRA_DB_DSN":
 		return true
 	}
 	signing := strings.Contains(key, "MINISIGN") || strings.Contains(key, "SIGNING")

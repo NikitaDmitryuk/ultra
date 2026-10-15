@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	ansibleassets "github.com/NikitaDmitryuk/ultra/deploy/ansible"
 	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"os"
@@ -195,7 +196,7 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 		t.Skip("python unavailable")
 	}
 	for _, retryFailed := range []bool{false, true} {
-		for _, operation := range []string{"inspect-upgrade", "inspect-release-hosts", "legacy-inspect-release-hosts", "lifecycle-applying", "lifecycle-foreign", "legacy-success", "legacy-rollback-failure"} {
+		for _, operation := range []string{"inspect-upgrade", "inspect-release-hosts", "legacy-inspect-release-hosts", "lifecycle-applying", "lifecycle-foreign", "legacy-success", "legacy-precheckpoint-failure", "legacy-rollback-failure", "legacy-runtime-rollback-failure", "legacy-commit-rollback-failure", "legacy-effects-commit-failure", "runtime-rollback-failure", "commit-rollback-failure", "prepared-generation-retry", "release-rollback-failure"} {
 			t.Run(fmt.Sprintf("%s/retry-failed=%t", operation, retryFailed), func(t *testing.T) {
 				root := t.TempDir()
 				if err := os.Chmod(root, 0700); err != nil {
@@ -245,6 +246,7 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 				}
 				t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins)
 				p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE": "192.0.2.1", "EXIT": "192.0.2.2", "REALITY_DEST": "example.com:443", "IDENTITY": filepath.Join(root, "identity")})
+				p.SourceValues = map[string]string{"BRIDGE": "192.0.2.1", "EXIT": "192.0.2.2"}
 				local := false
 				p.ControllerLocal = &local
 				p.ControllerLocalTarget = p.Bridge.SSHHost + "|" + p.Bridge.Address
@@ -276,12 +278,39 @@ if operation=='lifecycle':
         with (root/'calls').open('a') as log: log.write(key+'\n')
         sys.exit(1)
     (root/'gate').write_text(variables['ultra_lifecycle_phase'])
+if operation=='upgrade-runtime':
+    key+='-'+variables['ultra_runtime_action']
 with (root/'calls').open('a') as log: log.write(key+'\n')
 fail=root/'fail-once'
 if fail.exists() and (fail.read_text()==key or fail.read_text()=='legacy-'+key):
     fail.unlink()
     sys.exit(1)
+if fail.exists() and fail.read_text().removeprefix('legacy-') in ('runtime-rollback-failure','commit-rollback-failure'):
+    primary='upgrade' if fail.read_text().removeprefix('legacy-')=='runtime-rollback-failure' else 'commit-release'
+    if operation==primary: sys.exit(1)
+    if key=='upgrade-runtime-rollback':
+        fail.unlink()
+        sys.exit(1)
+if fail.exists() and fail.read_text()=='legacy-effects-commit-failure' and key=='upgrade-runtime-commit':
+    fail.unlink()
+    sys.exit(1)
+if fail.exists() and fail.read_text()=='release-rollback-failure':
+    if operation=='commit-release':sys.exit(1)
+    if operation=='rollback':
+        fail.unlink()
+        sys.exit(1)
+if fail.exists() and fail.read_text()=='prepared-generation-retry' and operation=='commit-release':
+    fail.unlink()
+    sys.exit(1)
+if fail.exists() and fail.read_text()=='legacy-precheckpoint-failure' and operation=='upgrade':
+    fail.unlink()
+    (root/'no-maintenance-checkpoint').touch()
+    sys.exit(1)
 result={'verified':True}
+if operation=='inspect-upgrade-maintenance':
+    result['untouched']=(root/'no-maintenance-checkpoint').exists()
+if operation=='rollback' and (root/'no-maintenance-checkpoint').exists():
+    result['untouched']=True
 if operation=='lifecycle' and variables.get('ultra_lifecycle_reserve_only'):
     result.update({'reservation_id':variables['ultra_lifecycle_id'],'reservation_phase':variables['ultra_lifecycle_phase']})
 if operation=='inspect-upgrade':
@@ -290,6 +319,18 @@ if operation=='inspect-upgrade':
         previous['version']='v2.4.6'
         previous['capabilities']=['service-access-v1','provider-pool-quota-v1']
     result={'database_schema':24,'architecture':'amd64','observed_at':1,'topology_sha256':'a'*64,'identity':'fixture','nodes':[{'id':'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','address':'192.0.2.2','pins':'fixture'}],'previous_manifest':previous}
+    result['runtime_nodes']={'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa': {'name':'primary','managed':False,'tunnel_identity_digest':'b'*64,'certificate_pin':''}}
+if operation=='inspect-upgrade-runtime':
+    result={'verified':True,'hosts':{host:{'verified':True,'runtime_changed':False,'domain_changed':False,'transitions':[]} for host in variables['ultra_runtime_probe_requests']}}
+if operation=='preflight-retry' and variables.get('ultra_legacy_bridge_maintenance') and (root/'activate'/'receipt.json').exists():
+    contract=variables.get('ultra_legacy_retry_configuration')
+    assert contract and contract['generation']==1, 'legacy candidate retry lacked bound generation'
+    assert json.loads(contract['runtime_request_json'])['request']['transaction']==variables['ultra_lifecycle_id']+'-runtime-1'
+    committed=(root/'commit'/'receipt.json').exists() and json.loads((root/'commit'/'receipt.json').read_text())['state']=='succeeded'
+    assert contract['mode']==('committed' if committed else 'compensation')
+if operation=='upgrade-runtime':
+    action=variables['ultra_runtime_action']
+    result={'verified':True,'phase':action,'hosts':{host:{'verified':True,'status':{'prepare':'prepared','apply':'applied','rollback':'rolled_back','commit':'committed'}[action]} for host in variables['ultra_runtime_probe_requests']}}
 if operation=='resume-automation' and not (root/'activate').exists() and variables.get('ultra_legacy_bridge_maintenance'):
     sys.exit(1)
 if operation=='upgrade': result['activated_at']=2
@@ -314,6 +355,139 @@ output.chmod(0o600)
 					calls, err := os.ReadFile(filepath.Join(directory, "calls"))
 					if err != nil || strings.Count(string(calls), "resume-automation\n") != 1 {
 						t.Fatalf("legacy success restored service states more than once: %q %v", calls, err)
+					}
+					return
+				}
+				if operation == "legacy-effects-commit-failure" {
+					if firstErr == nil || firstErr.Error() != "upgrade_runtime_effect_commit_incomplete" {
+						t.Fatalf("missing postcommit failure: %v", firstErr)
+					}
+					// A corrupted commit must fail before any continuation can skip
+					// cached activation and commit validation.
+					commitReceipt := filepath.Join(directory, "commit", "receipt.json")
+					originalReceipt, readErr := os.ReadFile(commitReceipt)
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					var corrupt map[string]any
+					if err := json.Unmarshal(originalReceipt, &corrupt); err != nil {
+						t.Fatal(err)
+					}
+					corrupt["request_sha256"] = strings.Repeat("0", 64)
+					corruptRaw, _ := json.Marshal(corrupt)
+					if err := os.WriteFile(commitReceipt, corruptRaw, 0600); err != nil {
+						t.Fatal(err)
+					}
+					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, true); err == nil || err.Error() != "upgrade_committed_continuation_receipt_invalid" {
+						t.Fatalf("unbound commit continuation accepted: %v", err)
+					}
+					if err := os.WriteFile(commitReceipt, originalReceipt, 0600); err != nil {
+						t.Fatal(err)
+					}
+					before, readErr := os.ReadFile(filepath.Join(directory, "calls"))
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, true); err != nil {
+						t.Fatalf("legacy committed continuation: %v", err)
+					}
+					after, readErr := os.ReadFile(filepath.Join(directory, "calls"))
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					continuation := strings.TrimPrefix(string(after), string(before))
+					for _, step := range []string{"upgrade\n", "upgrade-runtime-prepare", "upgrade-runtime-apply", "upgrade-runtime-rollback", "rollback\n", "resume-automation", "publish-release", "verify-release", "commit-release"} {
+						if strings.Contains(continuation, step) {
+							t.Fatalf("committed retry reran %s: %s", step, continuation)
+						}
+					}
+					if !strings.Contains(continuation, "preflight-retry\n") || !strings.Contains(continuation, "upgrade-runtime-commit\n") || !strings.Contains(continuation, "lifecycle-released\n") {
+						t.Fatalf("committed continuation omitted remaining steps: %s", continuation)
+					}
+					return
+				}
+				if operation == "prepared-generation-retry" {
+					if firstErr == nil {
+						t.Fatal("initial failed attempt missing")
+					}
+					if err := resetFailedUpgradeAttempt(directory); err != nil {
+						t.Fatal(err)
+					}
+					generation, err := upgradeActivationGeneration(directory, false)
+					if err != nil || generation != 2 {
+						t.Fatalf("prepared generation: %d %v", generation, err)
+					}
+					if err := os.WriteFile(filepath.Join(directory, "fail-once"), []byte("upgrade-runtime-prepare"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, true); err == nil {
+						t.Fatal("prepare failure missing")
+					}
+					prepare := upgradeDependentStageDirectory(directory, "runtime-prepare", 2)
+					request, err := os.ReadFile(filepath.Join(prepare, "request.json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := os.Stat(filepath.Join(upgradeDependentStageDirectory(directory, "runtime-rollback", 2), "job.json")); !os.IsNotExist(err) {
+						t.Fatal("prepared journal was compensated before activation")
+					}
+					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, true); err != nil {
+						t.Fatalf("prepared generation retry: %v", err)
+					}
+					after, err := os.ReadFile(filepath.Join(prepare, "request.json"))
+					if err != nil || !bytes.Equal(request, after) {
+						t.Fatal("prepared request changed", err)
+					}
+					calls, err := os.ReadFile(filepath.Join(directory, "calls"))
+					if err != nil || strings.Count(string(calls), "upgrade-runtime-rollback\n") != 1 {
+						t.Fatalf("prepared generation unwound: %s %v", calls, err)
+					}
+					generation, err = upgradeActivationGeneration(directory, false)
+					if err != nil || generation != 2 {
+						t.Fatalf("prepared generation advanced again: %d %v", generation, err)
+					}
+					return
+				}
+				if operation == "runtime-rollback-failure" || operation == "commit-rollback-failure" || operation == "release-rollback-failure" || operation == "legacy-runtime-rollback-failure" || operation == "legacy-commit-rollback-failure" {
+					if firstErr == nil || !strings.Contains(firstErr.Error(), "rollback_incomplete") {
+						t.Fatalf("missing failed compensation: %v", firstErr)
+					}
+					gate, err := os.ReadFile(filepath.Join(directory, "gate"))
+					if err != nil || string(gate) == "released" {
+						t.Fatalf("gate released before verified compensation: %s %v", gate, err)
+					}
+					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, true); err != nil {
+						t.Fatalf("explicit compensation retry: %v", err)
+					}
+					calls, err := os.ReadFile(filepath.Join(directory, "calls"))
+					expectedRuntimeRollbacks := 2
+					if operation == "release-rollback-failure" {
+						expectedRuntimeRollbacks = 1
+					}
+					if err != nil || strings.Count(string(calls), "upgrade-runtime-rollback\n") != expectedRuntimeRollbacks {
+						t.Fatalf("rollback not retried exactly once: %s %v", calls, err)
+					}
+					rollbackIndex := strings.Index(string(calls), "rollback\n")
+					activationIndex := strings.LastIndex(string(calls), "upgrade\n")
+					if rollbackIndex < 0 || rollbackIndex > activationIndex {
+						t.Fatalf("new activation preceded binary compensation: %s", calls)
+					}
+					gate, err = os.ReadFile(filepath.Join(directory, "gate"))
+					if err != nil || string(gate) != "released" {
+						t.Fatalf("completed recovery retained gate: %s %v", gate, err)
+					}
+					return
+				}
+				if operation == "legacy-precheckpoint-failure" {
+					if firstErr == nil || strings.Contains(firstErr.Error(), "rollback_incomplete") {
+						t.Fatalf("precheckpoint failure did not compensate: %v", firstErr)
+					}
+					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, true); err != nil {
+						t.Fatalf("precheckpoint explicit retry: %v", err)
+					}
+					calls, err := os.ReadFile(filepath.Join(directory, "calls"))
+					if err != nil || !strings.Contains(string(calls), "preflight-retry\n") || strings.Count("\n"+string(calls), "\nupgrade\n") != 2 || strings.Contains(string(calls), "upgrade-runtime-rollback\n") {
+						t.Fatalf("precheckpoint retry omitted fresh activation: %s %v", calls, err)
 					}
 					return
 				}
@@ -386,6 +560,11 @@ output.chmod(0o600)
 				if err != nil {
 					t.Fatal(err)
 				}
+				effectCommit := strings.Index(string(calls), "upgrade-runtime-commit\n")
+				releaseCommit := strings.LastIndex(string(calls), "lifecycle-released\n")
+				if effectCommit < 0 || releaseCommit < effectCommit {
+					t.Fatalf("runtime effect commit did not precede lifecycle release: %s", calls)
+				}
 				if failedStage != "" {
 					after, err := os.ReadFile(filepath.Join(directory, failedStage, "receipt.json"))
 					if err != nil || !bytes.Equal(original, after) {
@@ -426,5 +605,61 @@ output.chmod(0o600)
 				}
 			})
 		}
+	}
+}
+
+func TestUpgradeRetryRecognizesOnlyDurableDomainAttempt(t *testing.T) {
+	for _, generation := range []int{1, 3} {
+		for _, action := range []string{"apply", "accept", "rollback", "rollback-dns", "prepare", "promote", "retire", "retire-dns"} {
+			t.Run(fmt.Sprintf("%d/%s", generation, action), func(t *testing.T) {
+				directory := t.TempDir()
+				raw, _ := json.Marshal(map[string]int{"version": 1, "generation": generation, "attempt": 2})
+				if err := os.WriteFile(filepath.Join(directory, fmt.Sprintf("domain-generation-%d.json", generation)), raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				old := upgradeDependentStageDirectory(directory, "domain-"+action, generation)
+				if err := os.Mkdir(old, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(old, "receipt.json"), []byte(`{"state":"failed"}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := requireFailedUpgradeAttempt(directory, generation); err == nil {
+					t.Fatal("guessed an old domain attempt")
+				}
+				stage := upgradeDependentStageDirectory(directory, "domain-"+action+"-attempt-2", generation)
+				if err := os.Mkdir(stage, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(stage, "receipt.json"), []byte(`{"state":"failed"}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := requireFailedUpgradeAttempt(directory, generation); err != nil {
+					t.Fatal(err)
+				}
+				if err := requireFailedUpgradeAttempt(directory, generation+1); err == nil {
+					t.Fatal("accepted another generation")
+				}
+			})
+		}
+	}
+}
+
+func TestReleaseRollbackFinalizesExactBotStateAfterBinaryRestore(t *testing.T) {
+	raw, err := ansibleassets.Bundle.ReadFile("playbooks/rollback.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(raw)
+	restore := strings.Index(source, "Restore the bot executable")
+	start := strings.Index(source, "Start the bot only after restored relay readiness")
+	enabled := strings.Index(source, "Restore prior enabled state and external effects after executable restoration")
+	activity := strings.Index(source, "Restore prior bot activity as the final release compensation")
+	result := strings.Index(source, "Save the verified operation result")
+	if restore < 0 || start < restore || enabled < start || activity < enabled || result < activity {
+		t.Fatal("binary rollback can override exact bot compensation")
+	}
+	if !strings.Contains(source[activity:result], "action: accept-rollback") {
+		t.Fatal("final compensation does not restore captured activity")
 	}
 }

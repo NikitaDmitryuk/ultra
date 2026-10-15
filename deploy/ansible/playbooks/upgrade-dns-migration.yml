@@ -1,0 +1,26 @@
+---
+- name: Perform receipt-bound DNS migration on the bridge
+  hosts: bridge
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Execute DNS migration using bridge-local provider credentials
+      ultra_dns_migration:
+        action: "{{ ultra_dns_migration_action }}"
+        operation_id: "{{ ultra_dns_migration_operation_id }}"
+        desired: "{{ ultra_dns_migration_desired }}"
+        application_source: "{{ ultra_dns_migration_application_source }}"
+        acceptance_sha256: "{{ ultra_dns_migration_acceptance_sha256 | default('') }}"
+      register: dns_migration_result
+      no_log: true
+- name: Return only minimal DNS migration evidence
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Save phase and receipt digest
+      ansible.builtin.copy:
+        content: "{{ {'phase': hostvars[groups['bridge'][0]].dns_migration_result.phase, 'active_receipt_sha256': hostvars[groups['bridge'][0]].dns_migration_result.active_receipt_sha256, 'verified': hostvars[groups['bridge'][0]].dns_migration_result.verified} | to_json }}\n"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      no_log: true

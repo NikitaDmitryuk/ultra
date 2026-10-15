@@ -1,4 +1,8 @@
 ---
+- name: Build canonical cutover plan with retained old domain aliases
+  ansible.builtin.set_fact:
+    ingress_cutover_plan: "{{ ultra_ingress | combine({'retain_aliases': true, 'subscription_domain': ultra_subscription_domain}) if ultra_ingress_action == 'cutover' else ultra_ingress }}"
+  when: ultra_ingress_action in ['stage', 'activate', 'rollback', 'cutover']
 - name: Validate ingress certificate contract
   ansible.builtin.assert:
     that:
@@ -9,7 +13,7 @@
 - name: Prepare durable specification transition before infrastructure changes
   ultra_ingress_state:
     directory: "{{ ultra_ingress_transaction }}"
-    plan: "{{ ultra_ingress }}"
+    plan: "{{ ingress_cutover_plan }}"
     action: "{{ ultra_ingress_action }}"
     phase: prepare
   register: ingress_transition
@@ -35,10 +39,14 @@
   ultra_cutover_probe:
     phase: baseline
     directory: "{{ ultra_ingress_transaction }}"
-    subscription_url: "{{ ultra_cutover_subscription_url }}"
+    subscription_url: "{{ ultra_cutover_subscription_url | default(omit) }}"
+    subscription_url_file: "{{ ultra_cutover_subscription_url_file | default(omit) }}"
+    subscription_url_sha256: "{{ ultra_cutover_subscription_url_sha256 | default(omit) }}"
+    subscription_source_domain: "{{ ultra_cutover_subscription_source_domain | default(omit) }}"
     subscription_domain: "{{ ultra_subscription_domain }}"
     bridge_ipv4: "{{ ultra_bridge_ipv4 }}"
     domain: "{{ ultra_ingress.domain }}"
+    public_host: "{{ ultra_ingress.public_host | default(ultra_ingress.domain) }}"
   no_log: true
   when: ultra_ingress_action == 'cutover'
 - name: Install ingress dependencies
@@ -216,6 +224,7 @@
   when:
     - ultra_ingress_action == 'cutover'
     - not ingress_transition.already_published
+    - not (ingress_cutover_plan.retain_aliases | default(false) | bool)
 - name: Preserve old working domain in an owned alias listener
   ansible.builtin.set_fact:
     ingress_owned_files: >-
@@ -224,6 +233,13 @@
   when:
     - ultra_ingress_action == 'cutover'
     - not ingress_transition.already_published
+    - not (ingress_cutover_plan.retain_aliases | default(false) | bool)
+- name: Preserve journalled old VPN and subscription listeners during operator cutover
+  ansible.builtin.set_fact:
+    ingress_owned_files: "{{ ingress_owned_files + ingress_transition.retained_aliases }}"
+  when:
+    - ultra_ingress_action == 'cutover'
+    - ingress_cutover_plan.retain_aliases | default(false) | bool
 - name: Ensure bot public-origin drop-in directory
   ansible.builtin.file:
     path: /etc/systemd/system/ultra-bot.service.d
@@ -266,7 +282,7 @@
     - name: Commit checked relay specification
       ultra_ingress_state:
         directory: "{{ ultra_ingress_transaction }}"
-        plan: "{{ ultra_ingress }}"
+        plan: "{{ ingress_cutover_plan }}"
         action: "{{ ultra_ingress_action }}"
         phase: commit
       register: ingress_committed
@@ -293,13 +309,28 @@
       ultra_cutover_probe:
         phase: verify
         directory: "{{ ultra_ingress_transaction }}"
-        subscription_url: "{{ ultra_cutover_subscription_url }}"
+        subscription_url: "{{ ultra_cutover_subscription_url | default(omit) }}"
+        subscription_url_file: "{{ ultra_cutover_subscription_url_file | default(omit) }}"
+        subscription_url_sha256: "{{ ultra_cutover_subscription_url_sha256 | default(omit) }}"
+        subscription_source_domain: "{{ ultra_cutover_subscription_source_domain | default(omit) }}"
         subscription_domain: "{{ ultra_subscription_domain }}"
         bridge_ipv4: "{{ ultra_bridge_ipv4 }}"
         domain: "{{ ultra_ingress.domain }}"
+        public_host: "{{ ultra_ingress.public_host | default(ultra_ingress.domain) }}"
+        path: "{{ ultra_ingress.path }}"
       no_log: true
       when: ultra_ingress_action == 'cutover'
   rescue:
+    - name: Restore durable operator cutover before images
+      ultra_owned_file:
+        path: "{{ item.path }}"
+        receipt: /var/lib/ultra-ingress/managed.json
+        state: "{{ 'present' if item.present else 'absent' }}"
+        content: "{{ item.content | b64decode }}"
+        mode: "{{ item.mode }}"
+      loop: "{{ ingress_transition.owned_before_images | default([]) }}"
+      when: ingress_cutover_plan.retain_aliases | default(false) | bool
+      no_log: true
     - name: Restore owned ingress file before images
       ultra_owned_file:
         path: "{{ item.item.path }}"
@@ -308,11 +339,12 @@
         content: "{{ item.content | default('') | b64decode }}"
         mode: "{{ item.item.mode }}"
       loop: "{{ ingress_previous_files.results }}"
+      when: not (ingress_cutover_plan.retain_aliases | default(false) | bool)
       no_log: true
     - name: Restore relay specification before image
       ultra_ingress_state:
         directory: "{{ ultra_ingress_transaction }}"
-        plan: "{{ ultra_ingress }}"
+        plan: "{{ ingress_cutover_plan }}"
         action: "{{ ultra_ingress_action }}"
         phase: rollback
       no_log: true
@@ -345,12 +377,17 @@
 - name: Include published aliases in future recovery generations
   ultra_cutover_finalize:
     subscription_domain: "{{ ultra_subscription_domain }}"
-    ingress: "{{ ultra_ingress }}"
+    ingress: "{{ ingress_cutover_plan }}"
+    bridge_url: "{{ ultra_bridge_url | default('') }}"
   no_log: true
-  when: ultra_ingress_action == 'cutover'
+  when:
+    - ultra_ingress_action == 'cutover'
+    - not (ultra_ingress_defer_finalize | default(false) | bool)
 - name: Capture confirmed domain-publication state
   ansible.builtin.command:
     argv: [python3, /opt/ultra-recovery/recovery.py, capture, --config, /etc/ultra-recovery/backup.json]
   changed_when: true
   no_log: true
-  when: ultra_ingress_action == 'cutover'
+  when:
+    - ultra_ingress_action == 'cutover'
+    - not (ultra_ingress_defer_finalize | default(false) | bool)

@@ -13,6 +13,7 @@
 | Проверяющий инструмент harness | `go test ./tools/harnesscheck`; `make harness-check`; `go vet ./tools/harnesscheck` |
 | Go-код | Тесты затронутых пакетов, затем `make test`, `make vet`, `make lint` |
 | Конфигурация Xray, маршрутизация, failover | Тесты `./internal/config ./internal/exits ./internal/proxy`; сборка relay |
+| Ansible upgrade с DNS/domain/runtime effects | `python3 scripts/test-ansible-dns-migration.py`, `test-ansible-upgrade-domain.py`, `test-ansible-upgrade-runtime.py`, `test-ansible-runtime-effects.py`, `test-ansible-accepted-resume.py`, operation mapping и syntax check закреплённым Ansible runtime |
 | SQL, репозитории, миграции | Генерация SQLC при изменении схемы/запросов; `go test ./internal/db` с отдельной тестовой БД |
 | Встроенные web-ресурсы или установочные скрипты | Тесты затронутого Go-пакета, пересборка соответствующего бинарника; для UI — `make test-ui` (Node.js 22+) и проверка затронутого сценария в браузере |
 
@@ -68,6 +69,14 @@ Mini App встраивается из `internal/bot/embed/miniapp`, Admin UI �
 не проверяет поставляемый интерфейс. QR-коды строит встроенный `qrcode-generator`
 1.4.4 ([исходник с лицензией MIT](../internal/bot/embed/miniapp/vendor/qrcode.js));
 для графиков и QR внешние CDN не нужны.
+
+Upgrade проецирует управляемые runtime-настройки на самом целевом узле: spec,
+environment и точные rollback images не передаются в receipts. Fixed transport
+проверяет installer по manifest и связывает host journal с digest неизменяемого
+запроса; exit proof строится из bridge DB inspection и frozen strict SSH inventory.
+Каждая повторная попытка activation использует отдельную runtime transaction.
+Источники: [transport](../cmd/ultra-install/upgrade_runtime_probe.go),
+[caller](../cmd/ultra-install/upgrade_runtime_integration.go).
 
 Роли и systemd-шаблоны Ansible встраиваются в `ultra-install` из
 [deploy/ansible](../deploy/ansible/assets.go). Изменение установленного YAML отдельно

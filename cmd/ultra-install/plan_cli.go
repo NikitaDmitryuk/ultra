@@ -31,6 +31,8 @@ func handlePlanSubcommand(args []string) bool {
 		runDeploymentConfigRewrite(args[1:])
 	case "release-probe":
 		runReleaseProbeCommand(args[1:])
+	case "runtime-probe":
+		runRuntimeProbeCommand(args[1:])
 	case "ansible-lease":
 		runAnsibleLease(args[1:])
 	case "ansible-run":

@@ -1,0 +1,108 @@
+---
+- name: Verify the fixed transaction executable on this host
+  ansible.builtin.stat:
+    path: /var/lib/ultra-ansible/runtime-probe/ultra-install
+    checksum_algorithm: sha256
+    follow: false
+  register: runtime_transaction_tool
+- name: Require exact manifested root owned transaction code
+  ansible.builtin.assert:
+    that:
+      - runtime_transaction_tool.stat.isreg | default(false)
+      - not runtime_transaction_tool.stat.islnk | default(false)
+      - runtime_transaction_tool.stat.uid == 0
+      - runtime_transaction_tool.stat.mode == '0700'
+      - runtime_transaction_tool.stat.checksum == (ultra_release_manifest.assets | selectattr('name', 'equalto', 'ultra-install-linux-' + ultra_architecture) | first).sha256
+      - ultra_runtime_action in ['prepare', 'apply', 'rollback', 'commit']
+- name: Require the relay active before recording the exact service baseline
+  ansible.builtin.command:
+    argv: [systemctl, is-active, --quiet, ultra-relay.service]
+  changed_when: false
+  when: ultra_runtime_action == 'prepare'
+- name: Observe original bot activity without reading its environment
+  ansible.builtin.command:
+    argv: [systemctl, is-active, --quiet, ultra-bot.service]
+  register: runtime_original_bot
+  changed_when: false
+  failed_when: runtime_original_bot.rc not in [0, 3, 4]
+  when: inventory_hostname == 'bridge' and ultra_runtime_action == 'prepare'
+- name: Inspect binding before touching any bridge service
+  ansible.builtin.command:
+    argv: [/var/lib/ultra-ansible/runtime-probe/ultra-install, runtime-probe]
+    stdin: "{{ ultra_runtime_probe_requests[inventory_hostname] | combine({'action': 'status'}) | to_json(preprocess_unsafe=False) }}"
+  register: runtime_transaction_status
+  changed_when: false
+  no_log: true
+  when: ultra_runtime_action != 'prepare'
+- name: Decode the checked transaction binding
+  ansible.builtin.set_fact:
+    runtime_transaction_binding: "{{ runtime_transaction_status.stdout | from_json }}"
+  no_log: true
+  when: ultra_runtime_action != 'prepare'
+- name: Inspect the complete public effect plan before recording dependency images
+  ansible.builtin.command:
+    argv: [/var/lib/ultra-ansible/runtime-probe/ultra-install, runtime-probe]
+    stdin: "{{ ultra_runtime_effect_inputs[inventory_hostname] }}"
+  register: runtime_prepare_effect_plan
+  changed_when: false
+  no_log: true
+  when: ultra_runtime_action == 'prepare'
+- name: Prepare exact host-only external dependency before images
+  ultra_runtime_effects:
+    action: prepare
+    request_json: "{{ ultra_runtime_effect_inputs[inventory_hostname] }}"
+    plan: "{{ (runtime_prepare_effect_plan.stdout | from_json).effects_plan }}"
+    warp_assets: "{{ ultra_runtime_warp_assets }}"
+  no_log: true
+  when: ultra_runtime_action == 'prepare'
+- name: Verify external journal binding and reject dependency drift
+  ultra_runtime_effects:
+    action: status
+    request_json: "{{ ultra_runtime_effect_inputs[inventory_hostname] }}"
+    warp_assets: "{{ ultra_runtime_warp_assets }}"
+  no_log: true
+  when: ultra_runtime_action != 'prepare'
+- name: Apply exact journalled dependencies before activating candidate listeners
+  ultra_runtime_effects:
+    action: apply
+    request_json: "{{ ultra_runtime_effect_inputs[inventory_hostname] }}"
+    warp_assets: "{{ ultra_runtime_warp_assets }}"
+  no_log: true
+  when: ultra_runtime_action == 'apply' and runtime_transaction_binding.bound | bool
+- name: Stop the bot only for a bound bridge image transition
+  ansible.builtin.systemd_service:
+    name: ultra-bot.service
+    state: stopped
+  when: inventory_hostname == 'bridge' and ultra_runtime_action != 'prepare' and runtime_transaction_binding.bound | bool
+- name: Execute one fixed request-bound host transaction phase
+  ansible.builtin.command:
+    argv: [/var/lib/ultra-ansible/runtime-probe/ultra-install, runtime-probe]
+    stdin: "{{ ultra_runtime_probe_requests[inventory_hostname] | combine({'action': ultra_runtime_action, 'bot_active': (runtime_original_bot.rc | default(3)) == 0}) | to_json(preprocess_unsafe=False) }}"
+  register: runtime_transaction_output
+  changed_when: ultra_runtime_action != 'prepare'
+  no_log: true
+- name: Decode only the minimal transaction acknowledgement
+  ansible.builtin.set_fact:
+    runtime_transaction_evidence: "{{ runtime_transaction_output.stdout | from_json }}"
+  no_log: true
+- name: Require the exact completed host phase
+  ansible.builtin.assert:
+    that:
+      - runtime_transaction_evidence.verified | bool
+      - runtime_transaction_evidence.status in (['prepared', 'applied'] if ultra_runtime_action == 'prepare' else (['applied'] if ultra_runtime_action == 'apply' else ['rolled_back']))
+  no_log: true
+
+- name: Restore dependencies after restoring the exact runtime image
+  ultra_runtime_effects:
+    action: rollback
+    request_json: "{{ ultra_runtime_effect_inputs[inventory_hostname] }}"
+    warp_assets: "{{ ultra_runtime_warp_assets }}"
+  no_log: true
+  when: ultra_runtime_action == 'rollback'
+- name: Verify candidate dependency state before service acceptance
+  ultra_runtime_effects:
+    action: verify
+    request_json: "{{ ultra_runtime_effect_inputs[inventory_hostname] }}"
+    warp_assets: "{{ ultra_runtime_warp_assets }}"
+  no_log: true
+  when: ultra_runtime_action == 'apply'

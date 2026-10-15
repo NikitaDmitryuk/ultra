@@ -8,9 +8,38 @@ import subprocess
 import time
 import http.client
 import os
+import hashlib
+import stat
 from pathlib import Path
 import urllib.parse
 from ansible.module_utils.basic import AnsibleModule
+
+
+def private_subscription_url(parameters):
+    """Consume the frozen credential without putting it in module arguments."""
+    path = parameters.get('subscription_url_file')
+    if not path:
+        return parameters.get('subscription_url')
+    if parameters.get('subscription_url') or not re.fullmatch(r'[a-f0-9]{64}', parameters.get('subscription_url_sha256', '')):
+        raise ValueError('private_subscription_url_invalid')
+    source = Path(path)
+    if not source.is_absolute() or str(source) != os.path.normpath(path) or any(parent.is_symlink() for parent in source.parents):
+        raise ValueError('private_subscription_url_invalid')
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(descriptor, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.geteuid() or info.st_nlink != 1 or not 0 < info.st_size <= 4096:
+            raise ValueError('private_subscription_url_invalid')
+        raw = stream.read(4097)
+    if len(raw) > 4096 or hashlib.sha256(raw).hexdigest() != parameters['subscription_url_sha256']:
+        raise ValueError('private_subscription_url_invalid')
+    value = raw.decode('utf-8').removesuffix('\n')
+    parsed = urllib.parse.urlsplit(value)
+    if (parsed.scheme != 'https' or parsed.netloc != parameters.get('subscription_source_domain') or
+            parsed.query or parsed.fragment or re.search(r'[\s\x00]', value) or
+            not re.fullmatch(r'/sub/[A-Za-z0-9_-]{1,1024}', parsed.path)):
+        raise ValueError('private_subscription_url_invalid')
+    return value
 
 
 def save(path, data):
@@ -28,10 +57,10 @@ def save(path, data):
         os.close(descriptor)
 
 
-def payload(contract, directory, domain, address):
+def payload(contract, directory, domain, address, public_host=None, path=None):
     profile = json.loads(Path('/etc/ultra-recovery/probe.json').read_text())
     old = json.loads((directory / 'before.json').read_text())['primary_xhttp']
-    target = {'domain': domain, 'public_host': domain}
+    target = {'domain': domain, 'public_host': public_host or domain, 'path': path or old['path']}
     try:
         selected = contract.single_alias_probe(profile, old, target, address)
     except ValueError:
@@ -74,10 +103,15 @@ def main():
     module = AnsibleModule(argument_spec={
         'phase': {'type': 'str', 'choices': ['baseline', 'verify'], 'required': True},
         'directory': {'type': 'path', 'required': True},
-        'subscription_url': {'type': 'str', 'required': True, 'no_log': True},
+        'subscription_url': {'type': 'str', 'no_log': True},
+        'subscription_url_file': {'type': 'path'},
+        'subscription_url_sha256': {'type': 'str'},
+        'subscription_source_domain': {'type': 'str'},
         'subscription_domain': {'type': 'str', 'required': True},
         'bridge_ipv4': {'type': 'str', 'required': True},
         'domain': {'type': 'str', 'required': True},
+        'public_host': {'type': 'str'},
+        'path': {'type': 'str'},
     }, supports_check_mode=False)
     try:
         source = Path('/opt/ultra-recovery/cutover_contract.py')
@@ -86,7 +120,7 @@ def main():
         specification = importlib.util.spec_from_file_location('ultra_cutover_contract', source)
         contract = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(contract)
-        parsed = urllib.parse.urlsplit(module.params['subscription_url'])
+        parsed = urllib.parse.urlsplit(private_subscription_url(module.params))
         if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.fragment or not parsed.path.startswith('/sub/') or any(char in parsed.path for char in '\r\n '):
             raise ValueError('private_subscription_url_invalid')
         directory = Path(module.params['directory'])
@@ -104,13 +138,13 @@ def main():
                 body = contract.https(module.params['subscription_domain'], module.params['bridge_ipv4'], 443, path)
                 if json.loads(baseline.read_text()) != contract.subscription_shape(body):
                     raise ValueError('subscription_identity_changed')
-                expected = (module.params['domain'], module.params['domain'])
+                expected = (module.params['public_host'] or module.params['domain'], module.params['domain'])
                 if expected not in contract.subscription_tls_endpoints(body):
                     raise ValueError('new_domain_not_published')
         if module.params['phase'] == 'verify':
-            payload(contract, directory, module.params['domain'], module.params['bridge_ipv4'])
+            payload(contract, directory, module.params['domain'], module.params['bridge_ipv4'], module.params['public_host'], module.params['path'])
         module.exit_json(changed=False, verified=True)
-    except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError, http.client.HTTPException):
+    except (OSError, KeyError, ValueError, TypeError, UnicodeError, subprocess.SubprocessError, http.client.HTTPException):
         module.fail_json(msg='cutover_subscription_probe_failed')
 
 

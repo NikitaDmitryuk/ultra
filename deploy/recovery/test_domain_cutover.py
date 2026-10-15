@@ -32,6 +32,9 @@ class CutoverTests(unittest.TestCase):
         outbound=result['outbounds'][0]
         self.assertEqual(outbound['settings']['vnext'][0]['users'][0]['id'],'monitor-fixture')
         self.assertEqual(outbound['streamSettings']['tlsSettings'],{'serverName':'edge.example.com','fingerprint':'firefox'})
+        self.assertEqual(outbound['streamSettings']['xhttpSettings']['path'],'/connect')
+        changed_path=m.single_alias_probe(profile,self.old()['primary_xhttp'],dict(self.target(),path='/next'),'192.0.2.1')
+        self.assertEqual(changed_path['outbounds'][0]['streamSettings']['xhttpSettings']['path'],'/next')
         self.assertEqual(profile['outbounds'][0]['streamSettings']['tlsSettings']['serverName'],'old.example.com')
 
     def test_alias_first_publication_failure_rolls_back_then_resumes(self):

@@ -18,7 +18,6 @@ import (
 	"strings"
 	"syscall"
 
-	recoveryassets "github.com/NikitaDmitryuk/ultra/deploy/recovery"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
@@ -47,8 +46,12 @@ func runDomainCutoverCommand(args []string) {
 	exitOnErr("domain cutover", applyDomainCutover(p, *file, *subscription, *vpn, *zone, *receipt, *pins, *email))
 }
 
-func cutoverDelta(subscription, vpn, zone string) map[string]string {
-	return map[string]string{"SUBSCRIPTION_DOMAIN": subscription, "VPN_DOMAIN": vpn, "PUBLIC_HOST": vpn,
+func cutoverDelta(subscription, vpn, zone string, publicHosts ...string) map[string]string {
+	publicHost := vpn
+	if len(publicHosts) > 0 && publicHosts[0] != "" {
+		publicHost = publicHosts[0]
+	}
+	return map[string]string{"SUBSCRIPTION_DOMAIN": subscription, "VPN_DOMAIN": vpn, "PUBLIC_HOST": publicHost,
 		"DNS_PROVIDER": "vultr", "DNS_ZONE": zone, "DNS_TTL": "300", "DNS_SUBSCRIPTION_NAME": strings.TrimSuffix(subscription, "."+zone), "DNS_VPN_NAME": strings.TrimSuffix(vpn, "."+zone), "SUBSCRIPTION_INGRESS_MODE": "direct"}
 }
 
@@ -60,6 +63,7 @@ func writeCutoverConfig(file string, delta map[string]string) error {
 	if !info.Mode().IsRegular() {
 		return errors.New("canonical config must be regular")
 	}
+	mode := info.Mode().Perm()
 	raw, err := os.ReadFile(file)
 	if err != nil {
 		return err
@@ -114,7 +118,7 @@ func writeCutoverConfig(file string, delta map[string]string) error {
 		return err
 	}
 	defer os.Remove(f.Name()) //nolint:errcheck
-	if err = f.Chmod(0600); err == nil {
+	if err = f.Chmod(mode); err == nil {
 		_, err = f.Write(data)
 	}
 	if err == nil {
@@ -251,14 +255,6 @@ func applyDomainCutover(p *installplan.InstallPlan, configFile, subscription, vp
 	if err = json.Unmarshal(receiptData, &owned); err != nil {
 		return errors.New("owned DNS receipt invalid")
 	}
-	source, err := recoveryassets.Scripts.ReadFile("dns.py")
-	if err != nil {
-		return err
-	}
-	contract, err := recoveryassets.Scripts.ReadFile("cutover_contract.py")
-	if err != nil {
-		return err
-	}
 	environment, err := inspection["bridge"].file("environment")
 	if err != nil {
 		return err
@@ -284,24 +280,27 @@ func applyDomainCutover(p *installplan.InstallPlan, configFile, subscription, vp
 			}
 		}
 	}
-	gateway := existing.GatewayVLESSPort
-	if gateway == 0 {
-		gateway = 18081
+	publicHost := strings.TrimSpace(p.Bridge.PublicHost)
+	if publicHost == "" {
+		publicHost = vpn
 	}
-	params := map[string]any{"domain": vpn, "public_host": vpn, "path": existing.PrimaryXHTTP.Path, "backend_port": existing.PrimaryXHTTP.BackendPort, "gateway_port": gateway, "staging_port": 18443, "email": email}
-	txnHash := sha256.Sum256([]byte(directory))
-	variables := map[string]any{
-		"ultra_lock_directory": lockDirectory, "ultra_ingress_action": "cutover", "ultra_ingress": params, "ultra_ingress_transaction": "/var/lib/ultra-ingress/ansible-" + hex.EncodeToString(txnHash[:]),
-		"ultra_ingress_email": email, "ultra_ingress_domains": uniqueIngressDomains(subscription, vpn, botDomain), "ultra_subscription_enabled": true, "ultra_subscription_domain": subscription, "ultra_bot_domain": botDomain, "ultra_bot_port": botPort, "ultra_bridge_ipv4": bridgeIP.String(),
-		"ultra_cutover_subscription_url": url, "ultra_cutover_contract_source": string(contract), "ultra_dns_source_content": string(source), "ultra_dns_api_key": key, "ultra_dns_receipt_seed": owned,
-		"ultra_dns_config":  map[string]any{"provider": "vultr", "zone": zone, "ttl": 300, "subscription_name": strings.TrimSuffix(subscription, "."+zone), "vpn_name": strings.TrimSuffix(vpn, "."+zone), "api_key_file": "/etc/ultra-recovery/dns-api-key"},
-		"ultra_dns_desired": map[string]any{"subscription": map[string]string{"name": strings.TrimSuffix(subscription, "."+zone), "data": bridgeIP.String()}, "vpn": map[string]string{"name": strings.TrimSuffix(vpn, "."+zone), "data": bridgeIP.String()}},
+	if p.Automation == nil || p.Automation.Ingress == nil {
+		return errors.New("domain cutover requires canonical ingress policy")
+	}
+	variables, err := buildDomainCutoverVariables(domainCutoverDesired{
+		Subscription: subscription, VPN: vpn, PublicHost: publicHost, Zone: zone,
+		Email: email, BotDomain: botDomain, BotPort: botPort, BridgeIPv4: bridgeIP.String(),
+		StagingPort: p.Automation.Ingress.StagingPort, StatusPort: p.Automation.Ingress.StatusPort,
+		ExperimentalPort: p.Automation.Ingress.ExperimentalPort,
+	}, &existing, directory, lockDirectory, url, key, owned)
+	if err != nil {
+		return err
 	}
 	_, err = deployansible.RunLocal(ctx, "domain-cutover", inventory, variables, filepath.Join(directory, "apply"), python, executable)
 	if err != nil {
 		return err
 	}
-	delta := cutoverDelta(subscription, vpn, zone)
+	delta := cutoverDelta(subscription, vpn, zone, publicHost)
 	delta["ACME_EMAIL"] = email
 	delta["PUBLIC_XHTTP_PATH"] = existing.PrimaryXHTTP.Path
 	if err = writeCutoverConfig(configFile, delta); err != nil {

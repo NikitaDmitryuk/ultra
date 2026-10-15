@@ -58,7 +58,7 @@ func RunLocal(ctx context.Context, operation string, inventory, variables map[st
 // cached; terminal failures are archived before a new attempt can execute.
 // It is not used by typed workers or automatic upgrades.
 func RunLocalRetryFailed(ctx context.Context, operation string, inventory, variables map[string]any, directory, python, executable string) (Receipt, error) {
-	if !bootstrapRetryOperation(operation) {
+	if !localRetryOperation(operation, variables) {
 		return Receipt{}, errors.New("retry_bootstrap_operation_required")
 	}
 	if _, ok := ctx.Value(operationLeaseKey{}).(*operationLease); !ok {
@@ -67,8 +67,35 @@ func RunLocalRetryFailed(ctx context.Context, operation string, inventory, varia
 	return runLocal(ctx, operation, inventory, variables, directory, python, executable, true, "")
 }
 
+func localRetryOperation(operation string, variables map[string]any) bool {
+	if bootstrapRetryOperation(operation) {
+		return true
+	}
+	switch operation {
+	case "upgrade-runtime":
+		switch variables["ultra_runtime_action"] {
+		case "prepare", "commit", "rollback":
+			return true
+		}
+	case "upgrade-domain":
+		switch variables["ultra_upgrade_domain_action"] {
+		case "apply", "accept", "rollback", "retire", "finalize":
+			return true
+		}
+	case "upgrade-dns-migration":
+		switch variables["ultra_dns_migration_action"] {
+		case "prepare", "promote", "retire", "rollback":
+			return true
+		}
+	case "rollback":
+		inputs, ok := variables["ultra_runtime_effect_inputs"].(map[string]string)
+		return ok && len(inputs) > 0
+	}
+	return false
+}
+
 func runLocal(ctx context.Context, operation string, inventory, variables map[string]any, directory, python, executable string, retry bool, source string) (Receipt, error) {
-	allowed := map[string]bool{"retain-artifacts": true, "resume-schedules": true, "rollback-adoption": true, "reserve-rolledback-bootstrap": true, "resume-adoption": true, "lifecycle": true, "prepare-controller": true, "inspect-bootstrap": true, "inspect-upgrade": true, "preflight-retry": true, "status-automation": true, "inspect-release-hosts": true, "resume-automation": true, "configure-bot": true, "configure-exit-operator": true, "ingress": true, "bootstrap": true, "bootstrap-postgres": true, "bootstrap-exit": true, "bootstrap-bridge": true, "bootstrap-automation": true, "verify-bootstrap-automation": true, "adopt": true, "adopt-topology": true, "adopt-replica-tunnels": true, "upgrade": true, "rollback": true, "reconcile": true, "restore": true, "restore-peer": true, "verify-release": true, "commit-release": true, "publish-release": true, "replica": true, "domain-cutover": true, "backend-domain": true, "bridge-migrate": true, "bridge-migrate-inspect": true, "bridge-migrate-fence": true, "bridge-migrate-probe": true, "bridge-migrate-rollback-peers": true}
+	allowed := map[string]bool{"retain-artifacts": true, "resume-schedules": true, "rollback-adoption": true, "reserve-rolledback-bootstrap": true, "resume-adoption": true, "lifecycle": true, "prepare-controller": true, "inspect-bootstrap": true, "inspect-upgrade": true, "preflight-retry": true, "status-automation": true, "inspect-release-hosts": true, "resume-automation": true, "configure-bot": true, "configure-exit-operator": true, "ingress": true, "bootstrap": true, "bootstrap-postgres": true, "bootstrap-exit": true, "bootstrap-bridge": true, "bootstrap-automation": true, "verify-bootstrap-automation": true, "adopt": true, "adopt-topology": true, "adopt-replica-tunnels": true, "upgrade": true, "rollback": true, "reconcile": true, "restore": true, "restore-peer": true, "verify-release": true, "commit-release": true, "publish-release": true, "replica": true, "domain-cutover": true, "backend-domain": true, "bridge-migrate": true, "bridge-migrate-inspect": true, "bridge-migrate-fence": true, "bridge-migrate-probe": true, "bridge-migrate-rollback-peers": true, "upgrade-dns-migration": true, "inspect-upgrade-runtime": true, "inspect-upgrade-maintenance": true, "upgrade-runtime": true, "inspect-upgrade-domains": true, "upgrade-domain": true}
 	if !allowed[operation] || !filepath.IsAbs(directory) || !filepath.IsAbs(python) || !filepath.IsAbs(executable) {
 		return Receipt{}, errors.New("invalid local operation or executor paths")
 	}

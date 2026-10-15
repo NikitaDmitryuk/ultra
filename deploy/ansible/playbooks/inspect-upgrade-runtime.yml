@@ -1,0 +1,98 @@
+---
+- name: Inspect canonical runtime using only the checked fixed host probe
+  hosts: all
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Select the exact host installer asset
+      ansible.builtin.set_fact:
+        runtime_probe_assets: "{{ ultra_release_manifest.assets | selectattr('name', 'equalto', 'ultra-install-linux-' + ultra_architecture) | list }}"
+    - name: Validate the fixed transport contract
+      ansible.builtin.assert:
+        that:
+          - runtime_probe_assets | length == 1
+          - ultra_architecture in ['amd64', 'arm64']
+          - inventory_hostname in ultra_runtime_probe_requests
+          - ultra_release_version is ansible.builtin.match('^v[0-9]+\.[0-9]+\.[0-9]+$')
+    - name: Inspect the immutable installer source
+      ansible.builtin.stat:
+        path: "{{ ultra_release_source }}/ultra-install-linux-{{ ultra_architecture }}"
+        checksum_algorithm: sha256
+        follow: false
+      delegate_to: localhost
+      become: false
+      register: runtime_probe_source
+    - name: Require exact manifested probe bytes
+      ansible.builtin.assert:
+        that:
+          - runtime_probe_source.stat.isreg | default(false)
+          - not runtime_probe_source.stat.islnk | default(false)
+          - runtime_probe_source.stat.checksum == runtime_probe_assets[0].sha256
+          - runtime_probe_source.stat.size | int == runtime_probe_assets[0].size | int
+    - name: Prepare a root owned fixed probe directory
+      ansible.builtin.file:
+        path: /var/lib/ultra-ansible/runtime-probe
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+    - name: Deliver the checked probe without replacing installed components
+      ansible.builtin.copy:
+        src: "{{ ultra_release_source }}/ultra-install-linux-{{ ultra_architecture }}"
+        dest: /var/lib/ultra-ansible/runtime-probe/ultra-install
+        owner: root
+        group: root
+        mode: '0700'
+    - name: Verify exact remote probe bytes before execution
+      ansible.builtin.stat:
+        path: /var/lib/ultra-ansible/runtime-probe/ultra-install
+        checksum_algorithm: sha256
+        follow: false
+      register: runtime_probe_remote
+    - name: Require an owned regular pinned executable
+      ansible.builtin.assert:
+        that:
+          - runtime_probe_remote.stat.isreg | default(false)
+          - not runtime_probe_remote.stat.islnk | default(false)
+          - runtime_probe_remote.stat.uid == 0
+          - runtime_probe_remote.stat.checksum == runtime_probe_assets[0].sha256
+          - runtime_probe_remote.stat.size | int == runtime_probe_assets[0].size | int
+    - name: Inspect runtime without returning files or secrets
+      ansible.builtin.command:
+        argv: [/var/lib/ultra-ansible/runtime-probe/ultra-install, runtime-probe]
+        stdin: "{{ ultra_runtime_probe_requests[inventory_hostname] | to_json(preprocess_unsafe=False) }}"
+      changed_when: false
+      no_log: true
+      register: runtime_probe_output
+    - name: Retain only safe host evidence
+      ansible.builtin.set_fact:
+        runtime_probe_evidence: "{{ runtime_probe_output.stdout | from_json }}"
+      no_log: true
+    - name: Verify every requested external transition prerequisite before activation
+      ultra_runtime_effects:
+        action: inspect
+        request_json: "{{ ultra_runtime_effect_inputs[inventory_hostname] }}"
+        plan: "{{ runtime_probe_evidence.effects_plan }}"
+        warp_assets: "{{ ultra_runtime_warp_assets }}"
+      register: runtime_effect_inspection
+      no_log: true
+    - name: Bind the public transition summary to checked dependency evidence
+      ansible.builtin.set_fact:
+        runtime_probe_evidence: "{{ runtime_probe_evidence | combine({'effects_ready': runtime_effect_inspection.verified}) }}"
+      no_log: true
+- name: Collect exact fleet evidence
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Assemble the fixed host evidence map
+      ansible.builtin.set_fact:
+        runtime_probe_hosts: "{{ runtime_probe_hosts | default({}) | combine({item: hostvars[item].runtime_probe_evidence}) }}"
+      loop: "{{ groups['all'] }}"
+      no_log: true
+    - name: Save only verified public summaries
+      ansible.builtin.copy:
+        content: "{{ {'verified': true, 'hosts': runtime_probe_hosts} | to_json(preprocess_unsafe=False) }}\n"
+        dest: "{{ ultra_result_file }}"
+        mode: '0600'
+      no_log: true

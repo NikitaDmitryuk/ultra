@@ -49,6 +49,11 @@ cutover = state.candidate(published, plan, 'cutover')
 assert cutover['database'] == published['database']
 assert cutover['primary_xhttp']['host'] == 'edge.example.com'
 assert published['primary_xhttp']['host'] == 'old.example.com'
+path_cutover = state.candidate(published, dict(plan, path='/next'), 'cutover')
+assert path_cutover['primary_xhttp']['path'] == '/next'
+assert published['primary_xhttp']['path'] == '/connect'
+assert state.needs_domain_alias(b'server_name edge.example.com;\n', 'edge.example.com') is False
+assert state.needs_domain_alias(b'server_name old.example.com;\n', 'edge.example.com') is True
 recovered = state.recovery_candidate(cutover, published, 18080)
 assert recovered['primary_xhttp'] == published['primary_xhttp']
 assert recovered['database'] == cutover['database']
@@ -247,3 +252,117 @@ with tempfile.TemporaryDirectory() as temporary:
     finally:
         Path.stat = original_stat
 print('Ansible adoption preserves runtime and ingress bytes; frozen-domain cutover dependencies verified; mismatched publication and ownership drift rejected')
+
+# Post-acceptance retirement is pinned to the original cutover transaction,
+# its candidate spec, an acceptance marker, and the exact managed bytes.
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    operation = root / 'operation'
+    operation.mkdir()
+    plan = dict(plan, domain='new.example.com', public_host='public.example.com', path='/next', retain_aliases=True)
+    before = {'role': 'bridge', 'primary_xhttp': {'host': 'old.example.com', 'server_name': 'old.example.com',
+              'port': 443, 'path': '/connect', 'backend_port': 18080}}
+    selected = dict(before, primary_xhttp=dict(before['primary_xhttp'], host=plan['public_host'],
+                     server_name=plan['domain'], path=plan['path']))
+    raw_before, raw_target = json.dumps(before, sort_keys=True).encode(), json.dumps(selected, sort_keys=True).encode()
+    (operation / 'before.json').write_bytes(raw_before)
+    (operation / 'candidate.json').write_bytes(raw_target)
+    (root / 'spec.json').write_bytes(raw_target)
+    aliases = []
+    manifest = {}
+    nginx = root / 'etc/nginx/conf.d'
+    nginx.mkdir(parents=True)
+    for old_content in ('old VPN server block\n', 'old subscription server block\n'):
+        sha = state.digest(old_content.encode())
+        path = '/etc/nginx/conf.d/ultra-domain-alias-' + sha + '.conf'
+        aliases.append({'path': path, 'content': old_content, 'mode': '0644'})
+        (root / path.lstrip('/')).write_text(old_content)
+        manifest[path] = sha
+    unrelated = nginx / 'unrelated.conf'
+    unrelated.write_text('foreign nginx config\n')
+    receipt = root / 'managed.json'
+    receipt.write_text(json.dumps(manifest, sort_keys=True))
+    (operation / 'owned-before.json').write_text(json.dumps({'images': [], 'aliases': aliases}, sort_keys=True))
+    candidate_sha = state.digest(raw_target)
+    request_sha = state.digest(json.dumps({'plan': plan, 'action': 'cutover'}, sort_keys=True).encode())
+    (operation / 'state.json').write_text(json.dumps({'request_sha': request_sha,
+        'before_sha': state.digest(raw_before), 'candidate_sha': candidate_sha}, sort_keys=True))
+    prepare_retirement = lambda selected_plan=plan: state.retire_aliases(
+        root / 'spec.json', operation, selected_plan, receipt, operation / 'acceptance.json', root=root)
+    def reject_retirement(selected_plan=plan):
+        try:
+            prepare_retirement(selected_plan)
+        except ValueError:
+            return
+        raise AssertionError('unsafe alias retirement accepted')
+    target_mismatch = dict(plan, domain='other.example.com')
+    reject_retirement(target_mismatch)
+    reject_retirement()  # No marker means the acceptance action has not succeeded.
+    (operation / 'acceptance.json').write_text(json.dumps({'verified': True, 'transaction_sha256': '0' * 64,
+        'domain': plan['domain'], 'public_host': plan['public_host']}))
+    reject_retirement()  # A marker for any other candidate cannot authorize deletion.
+    (operation / 'acceptance.json').write_text(json.dumps({'verified': True, 'transaction_sha256': candidate_sha,
+        'domain': plan['domain'], 'public_host': plan['public_host']}))
+    retirement = prepare_retirement()
+    assert len(retirement['aliases']) == 2
+    assert retirement['target_path'] == '/next'
+    first = aliases[0]['path']
+    (root / first.lstrip('/')).write_text('foreign replacement\n')
+    reject_retirement()
+    (root / first.lstrip('/')).write_text(aliases[0]['content'])
+    selected_aliases = prepare_retirement()['aliases']
+    assert {item['path'] for item in selected_aliases} == {item['path'] for item in aliases}
+    # Simulate the ownership-safe helper's completed unlink and receipt update,
+    # then retry: the already removed alias is omitted and the remaining one is safe.
+    first_live = root / first.lstrip('/')
+    first_live.unlink()
+    manifest.pop(first)
+    receipt.write_text(json.dumps(manifest, sort_keys=True))
+    retry = prepare_retirement()
+    assert retry['aliases'] == [{'path': aliases[1]['path']}]
+    assert unrelated.read_text() == 'foreign nginx config\n'
+    (operation / 'owned-before.json').write_text(json.dumps({'images': [], 'aliases': []}, sort_keys=True))
+    assert prepare_retirement()['aliases'] == []
+print('Ansible alias retirement requires matching acceptance and candidate; rejects target/byte drift; partial retry is idempotent and leaves unrelated files')
+
+import yaml
+ingress_playbook = yaml.safe_load((source.parents[1] / 'playbooks/ingress.yml').read_text())
+bridge_tasks = ingress_playbook[1]['tasks']
+acceptance_check = next(index for index, task in enumerate(bridge_tasks)
+                        if task.get('name') == 'Verify subscription identities and tunnel payload before recording acceptance')
+marker_write = next(index for index, task in enumerate(bridge_tasks)
+                    if task.get('name') == 'Record verified cutover acceptance for explicit later retirement')
+assert acceptance_check < marker_write
+assert bridge_tasks[acceptance_check]['ultra_cutover_probe']['phase'] == 'verify'
+assert bridge_tasks[acceptance_check]['ultra_cutover_probe']['path'] == "{{ ingress_acceptance_candidate.profile.path | default('') }}"
+retirement_check = next(index for index, task in enumerate(bridge_tasks)
+                        if task.get('name') == 'Verify subscription and tunnel payload after old aliases are retired')
+assert bridge_tasks[retirement_check]['ultra_cutover_probe']['path'] == "{{ ingress_retirement.target_path | default('') }}"
+assert bridge_tasks[marker_write]['ansible.builtin.copy']['dest'] == '{{ ultra_ingress_transaction }}/acceptance.json'
+assert ingress_playbook[0]['tasks'][0]['when'] == "ultra_ingress_action not in ['adopt', 'accept', 'retire']"
+retention_plan = bridge_tasks[0]['ansible.builtin.set_fact']['ingress_retention_plan']
+assert "'subscription_domain': ultra_subscription_domain" in retention_plan
+finalize_source = (source.with_name('ultra_cutover_finalize.py')).read_text()
+assert "target['ingress'] = persisted_ingress(module.params['ingress'])" in finalize_source
+finalizer_spec = importlib.util.spec_from_file_location('finalizer', source.with_name('ultra_cutover_finalize.py'))
+finalizer = importlib.util.module_from_spec(finalizer_spec)
+finalizer_spec.loader.exec_module(finalizer)
+metadata_ingress = finalizer.persisted_ingress({'domain': 'edge.example.com', 'path': '/connect',
+    'subscription_domain': 'sync.example.com', 'fingerprint': 'firefox', 'retain_aliases': True})
+assert metadata_ingress == {'domain': 'edge.example.com', 'path': '/connect'}
+assert finalizer.merge_backup_paths(['/etc/ultra-relay', '/srv/old'], ['/srv/new']) == [
+    '/etc/ultra-relay', '/srv/new', '/srv/old']
+backup_inventory = {'state_paths': ['/etc/ultra-relay', '/srv/old-state'],
+                    'artifact_paths': ['/usr/local/bin/old-tool']}
+inventory = finalizer.apply_backup_paths(backup_inventory, ['/srv/new-state'], ['/usr/local/bin/new-tool'])
+assert inventory == {'/etc/ultra-relay', '/srv/old-state', '/srv/new-state'}
+assert backup_inventory['state_paths'] == ['/etc/ultra-relay', '/srv/new-state', '/srv/old-state']
+assert backup_inventory['artifact_paths'] == ['/usr/local/bin/new-tool', '/usr/local/bin/old-tool']
+for bad in (['relative'], ['/']):
+    try:
+        finalizer.merge_backup_paths([], bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('unsafe recovery path was accepted')
+print('Ingress acceptance marker is ordered after successful readiness, TLS, subscription and payload probes; acceptance/retirement bypass routine configuration roles')

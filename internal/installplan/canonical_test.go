@@ -28,7 +28,7 @@ func TestCanonicalV2MappingAndLegacyBoundary(t *testing.T) {
 	if err != nil || p.FullAutomation() {
 		t.Fatal("v1 acquired automation")
 	}
-	for _, key := range []string{"ULTRA_VULTR_API_KEY", "ULTRA_VULTR_DNS_API_KEY", "ULTRA_CUTOVER_SUBSCRIPTION_URL", "TELEGRAM_BOT_TOKEN"} {
+	for _, key := range []string{"ULTRA_VULTR_API_KEY", "ULTRA_VULTR_DNS_API_KEY", "ULTRA_CUTOVER_SUBSCRIPTION_URL", "ULTRA_SUBSCRIPTION_PROBE_URL", "TELEGRAM_BOT_TOKEN"} {
 		v := canonicalFixture()
 		v[key] = "private-fixture"
 		_, err := CanonicalValuesToPlan(v)
@@ -93,12 +93,18 @@ func TestDNSRoleValidation(t *testing.T) {
 	}
 }
 func TestBotEnvironmentExcludesProvidersAndUnknownKeys(t *testing.T) {
-	out, err := BotEnvironment(map[string]string{"TELEGRAM_BOT_TOKEN": "fixture", "ULTRA_VULTR_API_KEY": "privatecompute", "ULTRA_VULTR_DNS_API_KEY": "privatedns", "ARBITRARY": "privateother", "ULTRA_BOT_PUBLIC_URL": "https://sync.example.com"})
+	out, err := BotEnvironment(map[string]string{"TELEGRAM_BOT_TOKEN": "fixture", "ULTRA_VULTR_API_KEY": "privatecompute", "ULTRA_VULTR_DNS_API_KEY": "privatedns", "ULTRA_SUBSCRIPTION_PROBE_URL": "https://sync.example.com/sub/privateprobe", "ARBITRARY": "privateother", "ULTRA_BOT_PUBLIC_URL": "https://sync.example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(out), "private") || !strings.Contains(string(out), "TELEGRAM_BOT_TOKEN=\"fixture\"") {
+	if strings.Contains(string(out), "private") || strings.Contains(string(out), "ULTRA_SUBSCRIPTION_PROBE_URL") || !strings.Contains(string(out), "TELEGRAM_BOT_TOKEN=\"fixture\"") {
 		t.Fatal("projection leaked or lost bot input")
+	}
+}
+
+func TestSubscriptionProbeURLIsDisallowedDeploymentSecret(t *testing.T) {
+	if !DisallowedDeploymentSecret("ULTRA_SUBSCRIPTION_PROBE_URL") {
+		t.Fatal("subscription probe URL is not protected by shared deployment-secret rule")
 	}
 }
 

@@ -88,9 +88,13 @@
         phase: capture-tool-check
         recovery_tool_hashes: "{{ [ultra_recovery_capture_tool.previous_sha256, ultra_recovery_capture_tool.sha256] | reject('equalto', '') | list }}"
       when: ultra_legacy_bridge_maintenance | default(false) | bool
+    - name: Stage the signed release collector immediately before capture
+      ansible.builtin.include_role:
+        name: release
+        tasks_from: capture-tool
     - name: Create the independent control generation before activation
       ansible.builtin.command:
-        argv: [python3, /opt/ultra-recovery/recovery.py, capture, --config, /etc/ultra-recovery/backup.json]
+        argv: [python3, "/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/capture/recovery.py", capture, --config, /etc/ultra-recovery/backup.json]
       changed_when: false
       no_log: true
     - name: Require fresh delivery to the independently confirmed primary after capture

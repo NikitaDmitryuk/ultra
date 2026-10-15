@@ -12,6 +12,7 @@ import tarfile
 import hashlib
 import shutil
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location('manual_deploy', Path(__file__).with_name('manual-deploy.py'))
@@ -40,14 +41,154 @@ class ManualDeploy(unittest.TestCase):
     def run_fixture(self, command, cwd, stage, capture=False, env=None):
         self.calls.append((stage, command))
 
-    def rollout(self, adopt=False, runner=None, config_path=None, retry_failed=False):
+    def rollout(self, adopt=False, runner=None, config_path=None, retry_failed=False, probe_env_file=None):
         with patch.object(D, 'run', runner or self.run_fixture), patch.object(D.platform, 'system', return_value='Linux'), patch.object(D.platform, 'machine', return_value='x86_64'), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            D.rollout(self.repo, self.root, self.bundle, self.commit, self.version, adopt, config_path, retry_failed)
+            D.rollout(self.repo, self.root, self.bundle, self.commit, self.version, adopt, config_path, retry_failed, probe_env_file)
+
+    def probe_env(self, value=b'https://old.example.com/sub/fixture-token'):
+        path = self.repo / '.env'
+        path.write_bytes(b'IGNORED_SECRET="$(must-not-execute)\xff\nULTRA_SUBSCRIPTION_PROBE_URL=' + value + b'\n')
+        path.chmod(0o600)
+        return path
+
+    def test_probe_env_allowlist_literals_and_invalid_inputs(self):
+        path = self.probe_env(b'"https://old.example.com/sub/fixture-token" # comment')
+        self.assertEqual(D.subscription_probe_from_env(path), b'https://old.example.com/sub/fixture-token')
+        for value in (b'', b'http://old.example.com/sub/token', b'https://old.example.com/sub/token?secret=1',
+                      b'https://old.example.com/sub/token#fragment', b'https://user@old.example.com/sub/token',
+                      b'https://old.example.com:443/sub/token', b'"$(secret)"', b'"unterminated', b'\xff',
+                      b'https://old.example.com/sub/token\nULTRA_SUBSCRIPTION_PROBE_URL=https://old.example.com/sub/other'):
+            with self.subTest(value=value):
+                self.probe_env(value)
+                with self.assertRaisesRegex(D.DeployError, '^subscription_probe_env_invalid$'):
+                    D.subscription_probe_from_env(path)
+        path.write_bytes(b'OTHER=private-value\n')
+        self.assertIsNone(D.subscription_probe_from_env(path, optional=True))
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_env_key_missing$'):
+            D.subscription_probe_from_env(path)
+        path.unlink()
+        self.assertIsNone(D.subscription_probe_from_env(path, optional=True))
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_env_file_missing$'):
+            D.subscription_probe_from_env(path)
+
+    def test_local_probe_snapshot_argv_secrecy_cleanup_and_replay_binding(self):
+        secret = b'https://old.example.com/sub/fixture-token'
+        self.probe_env(secret)
+        def runner(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            self.assertNotIn(secret.decode(), repr(command))
+            if stage == 'upgrade':
+                snapshot = Path(command[command.index('--subscription-probe-url-file') + 1])
+                self.assertEqual(D.subscription_probe_input(snapshot), secret)
+        self.rollout(runner=runner)
+        self.assertFalse((self.root / 'subscription-probe-url').exists())
+        self.assertNotIn(secret, self.config.read_bytes())
+        self.assertEqual(next(self.root.glob('probe-binding-*')).read_bytes(), D.sha(secret).encode())
+        self.probe_env(b'https://old.example.com/sub/replacement')
+        with self.assertRaisesRegex(D.DeployError, '^manual_operation_probe_changed$'):
+            self.rollout()
+
+    def test_local_failed_probe_retry_uses_frozen_bytes_and_rejects_replacement(self):
+        path = self.probe_env()
+        def failed(command, cwd, stage, **kwargs):
+            if stage == 'upgrade':
+                raise D.DeployError('fixture_failed')
+        with self.assertRaisesRegex(D.DeployError, 'fixture_failed'):
+            self.rollout(runner=failed)
+        self.probe_env(b'https://old.example.com/sub/replacement')
+        with self.assertRaisesRegex(D.DeployError, '^manual_operation_probe_changed$'):
+            self.rollout(probe_env_file=path)
+        path.unlink()
+        self.rollout(retry_failed=True)
+        self.assertFalse((self.root / 'subscription-probe-url').exists())
+        self.assertFalse((self.root / 'operation.json').exists())
+
+    def test_probe_read_only_failure_cleans_snapshot_and_binding(self):
+        self.probe_env()
+        def failed(command, cwd, stage, **kwargs):
+            if stage == 'doctor':
+                raise D.DeployError('fixture_failed')
+        with self.assertRaises(D.DeployError):
+            self.rollout(runner=failed)
+        self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertFalse((self.root / 'subscription-probe-url').exists())
+        self.assertFalse(list(self.root.glob('probe-binding-*')))
+
+    def test_invalid_probe_env_fails_before_canonical_update(self):
+        path = self.probe_env(b'not-a-url')
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_env_invalid$'):
+            self.rollout(probe_env_file=path)
+        self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertFalse((self.root / 'operation.json').exists())
+        self.assertFalse(list(self.root.glob('install.config.before-*')))
+
+    def test_probe_default_uses_canonical_config_directory_outside_checkout(self):
+        canonical = self.repo / 'canonical'
+        canonical.mkdir()
+        config = canonical / 'install.config'
+        D.atomic_write(config, self.original)
+        secret = b'https://old.example.com/sub/canonical-token'
+        D.atomic_write(canonical / '.env', b'ULTRA_SUBSCRIPTION_PROBE_URL=' + secret + b'\n')
+        self.probe_env(b'https://old.example.com/sub/wrong-checkout-token')
+        def runner(command, cwd, stage, **kwargs):
+            if stage == 'upgrade':
+                snapshot = Path(command[command.index('--subscription-probe-url-file') + 1])
+                self.assertEqual(snapshot.read_bytes(), secret)
+        self.rollout(config_path=config, runner=runner)
 
     def test_numeric_version_exact_commit_round_trip_and_path_limit(self):
         self.assertRegex(self.version, r'^v[0-9]+\.[0-9]+\.[0-9]+$')
         self.assertEqual(int(self.version[5:]), int(self.commit, 16))
         self.assertLess(len(self.version), 95)
+
+    def test_subscription_probe_requires_explicit_private_regular_file(self):
+        probe = self.repo / 'probe'
+        raw = b'https://old.example.com/sub/fixture-token\n'
+        probe.write_bytes(raw)
+        probe.chmod(0o600)
+        self.assertEqual(D.subscription_probe_input(probe), raw)
+        for mode in (0o644, 0o400):
+            probe.chmod(mode)
+            with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+                D.subscription_probe_input(probe)
+        probe.chmod(0o600)
+        hardlink = self.repo / 'hardlink'
+        os.link(probe, hardlink)
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+            D.subscription_probe_input(probe)
+        hardlink.unlink()
+        link = self.repo / 'link'
+        link.symlink_to(probe)
+        with self.assertRaises(OSError):
+            D.subscription_probe_input(link)
+        for data in (b'', b'x' * 4097):
+            probe.write_bytes(data)
+            with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+                D.subscription_probe_input(probe)
+
+    def test_subscription_probe_rejects_directory_fifo_and_parent_symlink(self):
+        fifo = self.repo / 'fifo'
+        os.mkfifo(fifo, 0o600)
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+            D.subscription_probe_input(fifo)
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+            D.subscription_probe_input(self.repo)
+        alias = self.repo / 'alias'
+        alias.symlink_to(self.root, target_is_directory=True)
+        probe = self.root / 'probe'
+        probe.write_bytes(b'https://old.example.com/sub/fixture-token')
+        probe.chmod(0o600)
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+            D.subscription_probe_input(alias / 'probe')
+        info = probe.stat()
+        foreign = SimpleNamespace(st_mode=info.st_mode, st_uid=os.geteuid() + 1, st_nlink=1, st_size=info.st_size)
+        with patch.object(D.os, 'fstat', return_value=foreign):
+            with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+                D.subscription_probe_input(probe)
+        path = self.probe_env()
+        path.write_bytes(b'x' * (1024 * 1024 + 1))
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+            D.subscription_probe_from_env(path)
 
     def test_canonical_config_lock_is_shared_across_worktree_path_aliases(self):
         alias = self.repo / 'other-worktree'
@@ -339,6 +480,7 @@ class ManualDeploy(unittest.TestCase):
 
 class NativeDeploy(unittest.TestCase):
     rollout = ManualDeploy.rollout
+    probe_env = ManualDeploy.probe_env
     run_fixture = ManualDeploy.run_fixture
 
     def setUp(self):
@@ -408,6 +550,64 @@ class NativeDeploy(unittest.TestCase):
         remote = D.shlex.split(command[-1])
         self.assertEqual(remote[11], 'upgrade')
         self.assertEqual(remote[12], '1')
+
+    def test_native_probe_archive_handoff_and_completed_cleanup_retry(self):
+        secret = b'https://old.example.com/sub/fixture-token'
+        self.probe_env(secret)
+        original_run = self.run_fixture
+        def failed_cleanup(command, cwd, stage, **kwargs):
+            original_run(command, cwd, stage)
+            self.assertNotIn(secret.decode(), repr(command))
+            if stage == 'probe_cleanup':
+                raise D.DeployError('fixture_cleanup_failed')
+        with self.assertRaisesRegex(D.DeployError, 'fixture_cleanup_failed'):
+            self.rollout(runner=failed_cleanup)
+        extra = self.stage_mock.call_args.args[8]
+        self.assertEqual(extra['subscription-probe-url'], secret)
+        self.assertEqual(extra['subscription-probe.sha256'], D.sha(secret).encode())
+        upgrade = next(command for stage, command in self.calls if stage == 'upgrade')
+        self.assertEqual(D.shlex.split(upgrade[-1])[13], D.sha(secret))
+        record = json.loads((self.root / 'operation.json').read_bytes())
+        self.assertEqual(record['stage'], 'completed')
+        self.assertEqual(record['probe_sha256'], D.sha(secret))
+        self.assertNotIn(secret, (self.root / 'operation.json').read_bytes())
+        self.probe_env(b'https://old.example.com/sub/new-token')
+        self.calls.clear()
+        self.rollout()
+        self.assertEqual([stage for stage, _ in self.calls], ['canonical_policy', 'probe_cleanup'])
+        self.assertFalse((self.root / 'operation.json').exists())
+        self.assertFalse((self.root / 'subscription-probe-url').exists())
+
+    def test_native_predispatch_failure_cleans_private_copies(self):
+        self.probe_env()
+        def failed(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'doctor':
+                raise D.DeployError('fixture_failed')
+        with self.assertRaises(D.DeployError):
+            self.rollout(runner=failed)
+        self.assertEqual([stage for stage, _ in self.calls], ['canonical_policy', 'doctor', 'probe_cleanup'])
+        self.assertFalse((self.root / 'subscription-probe-url').exists())
+        self.assertEqual(self.config.read_bytes(), self.original)
+
+    def test_stage_remote_probe_sends_exact_pair_without_env_or_credential_argv(self):
+        secret = b'https://old.example.com/sub/fixture-token'
+        manifest = {'source_commit': self.commit, 'version': self.version, 'assets': []}
+        raw = json.dumps(manifest).encode()
+        (self.bundle / 'release-manifest.json').write_bytes(raw)
+        files = {'subscription-probe-url': secret, 'subscription-probe.sha256': D.sha(secret).encode()}
+        def process(command, **kwargs):
+            self.assertNotIn(secret.decode(), repr(command))
+            with tarfile.open(fileobj=kwargs['stdin'], mode='r|') as archive:
+                entries = {member.name: archive.extractfile(member).read() for member in archive}
+            self.assertEqual(entries, {'release/release-manifest.json': raw, 'install.config': self.original, **files})
+            self.assertEqual(D.shlex.split(command[-1])[-1], D.sha(secret))
+            return subprocess.CompletedProcess(command, 0, json.dumps({'architecture': 'arm64',
+                'manifest_sha256': D.sha(raw), 'config_sha256': D.sha(self.original),
+                'attempt': D.remote_attempt(self.original, self.version)}).encode())
+        with patch.object(D.subprocess, 'run', process):
+            D.stage_remote(self.repo, self.root, self.bundle, self.original, ['ssh', 'fixture'],
+                           self.commit, self.version, D.sha(raw), files)
 
     def test_native_interrupted_staging_is_retryable_without_dispatch(self):
         self.stage_mock.side_effect = D.DeployError('bridge_staging_failed')
@@ -643,9 +843,53 @@ class RemoteProgram(unittest.TestCase):
                 archive.addfile(entry, io.BytesIO(raw))
         return stream.getvalue()
 
-    def execute(self, mode, data=None, *args):
+    def execute(self, mode, data=None, *args, probe_sha=''):
+        if probe_sha:
+            if mode == 'run':
+                args = (*args, *(['0'] if len(args) == 2 else []), probe_sha)
+            else:
+                args = (*args, probe_sha)
         return subprocess.run([D.sys.executable, '-I', '-c', self.program, mode, self.commit, self.version,
             D.sha(self.manifest), D.sha(self.config), D.remote_attempt(self.config, self.version), *args], input=data, capture_output=True)
+
+    def test_remote_probe_exact_archive_private_argv_cleanup_and_replay(self):
+        secret = b'https://old.example.com/sub/fixture-token'
+        probe_sha = D.sha(secret)
+        def archive(raw=secret, binding=probe_sha.encode()):
+            return self.archive(lambda rows: rows + [('subscription-probe-url', raw),
+                                                    ('subscription-probe.sha256', binding)])
+        staged = self.execute('stage', archive(), probe_sha=probe_sha)
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        self.assertNotIn(secret, staged.stdout + staged.stderr)
+        path = self.root / 'subscription-probe-url'
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.read_bytes(), secret)
+        upgraded = self.execute('run', None, self.architecture, 'upgrade', '1', probe_sha=probe_sha)
+        self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+        argv = json.loads(self.result.read_bytes())
+        self.assertEqual(argv[argv.index('--subscription-probe-url-file') + 1], str(path))
+        self.assertNotIn(secret.decode(), repr(argv))
+        for _ in range(2):
+            cleaned = self.execute('cleanup', probe_sha=probe_sha)
+            self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
+            self.assertFalse(path.exists())
+        self.assertEqual((self.root / 'subscription-probe.sha256').read_bytes(), probe_sha.encode())
+        missing = self.execute('run', None, self.architecture, 'upgrade', probe_sha=probe_sha)
+        self.assertNotEqual(missing.returncode, 0)
+        replay = self.execute('stage', archive(), probe_sha=probe_sha)
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual(path.read_bytes(), secret)
+        replacement = b'https://old.example.com/sub/replacement'
+        rejected = self.execute('stage', archive(replacement, D.sha(replacement).encode()), probe_sha=D.sha(replacement))
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(path.read_bytes(), secret)
+        for data in (archive(b'changed'), self.archive(lambda rows: rows + [('subscription-probe.sha256', probe_sha.encode())]),
+                     archive(binding=b'x' * 64)):
+            rejected = self.execute('stage', data, probe_sha=probe_sha)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertNotIn(secret, rejected.stdout + rejected.stderr)
+        path.chmod(0o644)
+        self.assertNotEqual(self.execute('run', None, self.architecture, 'upgrade', probe_sha=probe_sha).returncode, 0)
 
     def test_actual_stage_native_commands_and_no_secret_copy(self):
         staged = self.execute('stage', self.archive())

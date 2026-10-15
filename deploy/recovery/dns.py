@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Owned Vultr A-record reconciliation. No zone creation, deletion, or implicit adoption."""
 import fcntl
+from contextlib import ExitStack
 import http.client
 import ipaddress
 import json
@@ -133,6 +134,13 @@ class API:
                 fail('invalid_record_id')
             url += '/' + str(record_id)
         self.request(operation, url, target)
+
+    def delete_owned(self, owned):
+        """Delete one exact receipt record, refusing any changed ID or contents."""
+        _validate_owned_row(owned)
+        if not _owned_present(self.records(), owned):
+            fail('record_drift')
+        self.request('DELETE', ORIGIN + self.path + '/' + str(owned['id']))
 
 
 def normalized(record):
@@ -272,6 +280,288 @@ def _execute(config, desired, receiptpath):
     return {'ready': True, 'records': state['records']}
 
 
+def _validate_owned_row(row):
+    if (not isinstance(row, dict) or set(row) != {'id', 'type', 'name', 'data', 'ttl'}
+            or row['type'] != 'A' or not re.fullmatch(r'[A-Za-z0-9-]+', str(row['id']))
+            or not isinstance(row['name'], str) or not LABEL.fullmatch(row['name'])
+            or type(row['ttl']) is not int or not 120 <= row['ttl'] <= 86400):
+        fail('invalid_receipt')
+    try:
+        if str(ipaddress.IPv4Address(row['data'])) != row['data']:
+            fail('invalid_receipt')
+    except (ValueError, TypeError):
+        fail('invalid_receipt')
+
+
+def _owned_present(records, owned):
+    current = matching(records, owned['name'])
+    identifiers = [normalized(row) for row in records if row.get('id') == owned['id']]
+    if current == owned and identifiers == [owned]:
+        return True
+    if current is None and not identifiers:
+        return False
+    fail('record_drift')
+
+
+def _read_migration_receipt(path, zone, pending=False):
+    try:
+        state = json.loads(private(path).read_text())
+    except (ValueError, OSError):
+        fail('invalid_receipt')
+    if (not isinstance(state, dict) or state.get('version') != 1
+            or state.get('zone') != zone or not isinstance(state.get('records'), dict)
+            or not set(state['records']) <= {'subscription', 'vpn', 'backend'}
+            or (not pending and state.get('pending'))):
+        fail('invalid_receipt')
+    ids, names = set(), set()
+    for row in state['records'].values():
+        _validate_owned_row(row)
+        if row['id'] in ids or row['name'] in names:
+            fail('invalid_receipt')
+        ids.add(row['id'])
+        names.add(row['name'])
+    return state
+
+
+def _migration_targets(config, desired):
+    zone, ttl = config.get('zone', ''), config.get('ttl', 300)
+    if (config.get('provider') != 'vultr' or not isinstance(zone, str) or len(zone) > 253
+            or '.' not in zone or not all(LABEL.fullmatch(x) for x in zone.split('.'))
+            or type(ttl) is not int or not 120 <= ttl <= 86400
+            or not isinstance(desired, dict)
+            or not {'subscription', 'vpn'} <= set(desired)
+            or not set(desired) <= {'subscription', 'vpn', 'backend'}):
+        fail('invalid_policy')
+    targets = {}
+    for role, item in desired.items():
+        if role == 'backend' and item is None:
+            targets[role] = None
+            continue
+        if not isinstance(item, dict) or not isinstance(item.get('name'), str) or not LABEL.fullmatch(item['name']):
+            fail('invalid_label')
+        try:
+            address = str(ipaddress.IPv4Address(item['data']))
+        except (ValueError, TypeError, KeyError):
+            fail('invalid_address')
+        targets[role] = {'type': 'A', 'name': item['name'], 'data': address, 'ttl': ttl}
+    if len({row['name'] for row in targets.values() if row is not None}) != len([row for row in targets.values() if row is not None]):
+        fail('duplicate_roles')
+    return targets
+
+
+def _check_migration_candidate(candidate, state):
+    if any(candidate['records'].get(role) != row for role, row in state['seed']['records'].items()):
+        fail('migration_candidate_changed')
+    for role, row in candidate['records'].items():
+        if role == 'backend':
+            if 'backend' not in state['targets']:
+                if row != state['seed']['records'].get(role):
+                    fail('migration_candidate_changed')
+            elif state['targets']['backend'] is None or not same(row, state['targets']['backend']):
+                fail('migration_candidate_changed')
+        elif not same(row, state['targets'][role]):
+            fail('migration_candidate_changed')
+        shared = state['seed']['records'].get(role)
+        if shared and row != shared:
+            fail('migration_candidate_changed')
+
+
+def _verify_migration_records(api, receipt, state=None):
+    records = api.records()
+    deleted = set(state.get('deleted', [])) if state else set()
+    pending = state.get('pending_delete') if state else None
+    for owned in receipt['records'].values():
+        present = _owned_present(records, owned)
+        if owned['id'] in deleted:
+            if present:
+                fail('record_drift')
+        elif not present and owned != pending:
+            fail('record_drift')
+
+
+def _migration_delete(api, path, state, source, protected):
+    protected_ids = {row['id'] for row in protected['records'].values()}
+    eligible = {row['id']: row for row in source['records'].values() if row['id'] not in protected_ids}
+    if (not isinstance(state.get('deleted'), list) or not set(state['deleted']) <= set(eligible)
+            or state.get('pending_delete') is not None
+            and state['pending_delete'] not in eligible.values()):
+        fail('invalid_pending')
+    for owned in eligible.values():
+        _verify_migration_records(api, protected)
+        _verify_migration_records(api, source, state)
+        if owned['id'] in state['deleted']:
+            continue
+        if state.get('pending_delete') and state['pending_delete'] != owned:
+            continue
+        if not state.get('pending_delete'):
+            state['pending_delete'] = owned
+            save(path, state)
+        if _owned_present(api.records(), owned):
+            api.delete_owned(owned)
+        if _owned_present(api.records(), owned):
+            fail('delete_unconfirmed')
+        state['deleted'].append(owned['id'])
+        state.pop('pending_delete')
+        save(path, state)
+    # An interrupted later record may skip earlier records until the next retry.
+    if set(state['deleted']) != set(eligible) or state.get('pending_delete'):
+        fail('migration_incomplete')
+    _verify_migration_records(api, protected)
+    _verify_migration_records(api, source, state)
+
+
+def _migration(action, config, desired, old_receipt, new_receipt, journal, acceptance_sha256=None):
+    targets = _migration_targets(config, desired)
+    paths = [Path(os.path.abspath(path)) for path in (old_receipt, new_receipt, journal)]
+    if len(set(paths)) != 3:
+        fail('migration_paths_conflict')
+    with ExitStack() as locks:
+        for path in sorted(paths):
+            path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            fd = os.open(str(path) + '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            lock = locks.enter_context(os.fdopen(fd, 'a'))
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        old_path, new_path, journal_path = paths
+        # A different provider zone needs its own migration; never query or mutate it.
+        try:
+            old_zone = json.loads(private(old_path).read_text()).get('zone')
+        except (ValueError, OSError, AttributeError):
+            fail('invalid_receipt')
+        if old_zone != config['zone']:
+            fail('zone_change_requires_migration')
+        old = _read_migration_receipt(old_path, config['zone'])
+        if not {'subscription', 'vpn'} <= set(old['records']):
+            fail('invalid_receipt')
+        binding = {'version': 1, 'zone': config['zone'], 'old_receipt': str(old_path),
+                   'new_receipt': str(new_path), 'old': old, 'targets': targets}
+        if journal_path.exists() or journal_path.is_symlink():
+            try:
+                state = json.loads(private(journal_path).read_text())
+            except (ValueError, OSError):
+                fail('invalid_receipt')
+            if not isinstance(state, dict) or any(state.get(key) != value for key, value in binding.items()):
+                fail('migration_policy_changed')
+        else:
+            if action != 'prepare' or new_path.exists() or new_path.is_symlink():
+                fail('migration_candidate_exists')
+            seed = {'version': 1, 'zone': config['zone'], 'records': {}}
+            for role, owned in old['records'].items():
+                if role == 'backend' and 'backend' not in targets:
+                    seed['records'][role] = owned
+                elif role == 'backend' and targets['backend'] is not None and same(owned, targets['backend']):
+                    seed['records'][role] = owned
+                elif role != 'backend' and same(owned, targets[role]):
+                    seed['records'][role] = owned
+            old_names = {row['name'] for row in old['records'].values()}
+            if any(target is not None and target['name'] in old_names and role not in seed['records']
+                   for role, target in targets.items()):
+                fail('migration_requires_new_names')
+            state = dict(binding, phase='preparing', seed=seed, deleted=[])
+            save(journal_path, state)
+        if state.get('phase') not in {'preparing', 'prepared', 'promoted', 'retiring', 'retired', 'rolling_back', 'rolled_back'}:
+            fail('invalid_receipt')
+        api = API(config)
+        if state['phase'] == 'preparing':
+            _verify_migration_records(api, old)
+            if not new_path.exists() and not new_path.is_symlink():
+                save(new_path, state['seed'])
+            _check_migration_candidate(_read_migration_receipt(new_path, config['zone'], pending=True), state)
+            if action == 'prepare':
+                execution_desired = {role: item for role, item in desired.items()
+                                     if not (role == 'backend' and item is None)}
+                _execute(config, execution_desired, new_path)
+                _verify_migration_records(api, old)
+                state['new'] = _read_migration_receipt(new_path, config['zone'])
+                state['phase'] = 'prepared'
+                save(journal_path, state)
+            elif action == 'rollback':
+                candidate = _read_migration_receipt(new_path, config['zone'], pending=True)
+                pending = candidate.get('pending')
+                if pending:
+                    if (not isinstance(pending, dict) or pending.get('operation') != 'POST'
+                            or pending.get('before') is not None or pending.get('role') not in targets
+                            or pending.get('target') != targets[pending['role']]
+                            or pending['role'] in candidate['records']):
+                        fail('invalid_pending')
+                    current = matching(api.records(), pending['target']['name'])
+                    if current is None:
+                        fail('pending_create_unconfirmed')
+                    if not same(current, pending['target']):
+                        fail('pending_conflict')
+                    candidate['records'][pending['role']] = current
+                    candidate.pop('pending')
+                    save(new_path, candidate)
+                state['new'] = candidate
+                # Partial preparation is only safe for cleanup, never promotion.
+                state['phase'] = 'rolling_back'
+                save(journal_path, state)
+            else:
+                fail('migration_not_prepared')
+        candidate = _read_migration_receipt(new_path, config['zone'])
+        if candidate != state.get('new'):
+            fail('migration_candidate_changed')
+        phase = state['phase']
+        if action in ('promote', 'retire'):
+            if not isinstance(acceptance_sha256, str) or not re.fullmatch(r'[a-f0-9]{64}', acceptance_sha256):
+                fail('migration_acceptance_required')
+            if phase == 'prepared' and action == 'promote':
+                _verify_migration_records(api, old)
+                _verify_migration_records(api, candidate)
+                state.update(phase='promoted', acceptance_sha256=acceptance_sha256)
+                save(journal_path, state)
+                phase = 'promoted'
+            if phase not in ('promoted', 'retiring', 'retired') or state.get('acceptance_sha256') != acceptance_sha256:
+                fail('migration_acceptance_mismatch')
+            if action == 'retire':
+                state['phase'] = 'retiring'
+                save(journal_path, state)
+                _migration_delete(api, journal_path, state, old, candidate)
+                state['phase'] = 'retired'
+                save(journal_path, state)
+            else:
+                _verify_migration_records(api, candidate)
+                _verify_migration_records(api, old, state if phase in ('retiring', 'retired') else None)
+        elif action == 'rollback':
+            if phase in ('retiring', 'retired'):
+                fail('migration_rollback_unavailable')
+            state['phase'] = 'rolling_back'
+            save(journal_path, state)
+            _migration_delete(api, journal_path, state, candidate, old)
+            state['phase'] = 'rolled_back'
+            save(journal_path, state)
+        elif action == 'prepare':
+            if phase not in ('prepared', 'promoted', 'retired', 'rolled_back'):
+                fail('migration_not_prepared')
+            _verify_migration_records(api, old, state if phase == 'retired' else None)
+            _verify_migration_records(api, candidate, state if phase == 'rolled_back' else None)
+        else:
+            fail('invalid_policy')
+        return {'ready': True, 'phase': state['phase'],
+                'active_receipt': str(old_path if state['phase'] in ('prepared', 'rolled_back') else new_path),
+                'candidate_receipt': str(new_path),
+                'records': old['records'] if state['phase'] == 'rolled_back' else candidate['records']}
+
+
+def prepare_migration(config, desired, old_receipt, new_receipt, journal):
+    """Create a second receipt; existing public/backend records stay live unchanged."""
+    return _migration('prepare', config, desired, old_receipt, new_receipt, journal)
+
+
+def promote_migration(config, desired, old_receipt, new_receipt, journal, acceptance_sha256):
+    """Record the caller's verified whole-operation acceptance hash; no deletion."""
+    return _migration('promote', config, desired, old_receipt, new_receipt, journal, acceptance_sha256)
+
+
+def retire_migration(config, desired, old_receipt, new_receipt, journal, acceptance_sha256):
+    """After promotion, delete only old exact records absent from the new receipt."""
+    return _migration('retire', config, desired, old_receipt, new_receipt, journal, acceptance_sha256)
+
+
+def rollback_migration(config, desired, old_receipt, new_receipt, journal):
+    """Delete only candidate-owned records; unavailable after retirement starts."""
+    return _migration('rollback', config, desired, old_receipt, new_receipt, journal)
+
+
 def wait_ready(config, desired, timeout=120):
     """Bounded resolver and authoritative proof; caller supplies the dig dependency."""
     import subprocess
@@ -290,6 +580,8 @@ def wait_ready(config, desired, timeout=120):
                 raise ValueError('pending nameservers')
             ready = True
             for item in desired.values():
+                if item is None:
+                    continue
                 name = item['name'] + '.' + config['zone']
                 expected = {item['data']}
                 if query(name, 'A') != expected:

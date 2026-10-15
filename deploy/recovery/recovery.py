@@ -29,6 +29,13 @@ EXCLUDED_FILES = {
     Path('/var/lib/ultra-relay/recovery-reconcile-status.json'),
 }
 EXCLUDED_DIRECTORIES = {Path('/var/lib/ultra-relay/releases'), Path('/var/lib/ultra-relay/candidates')}
+# Manual deployment keeps its subscription probe in retryable operation inputs
+# until the cutover completes. Those inputs are selected state, but the URL is
+# an ephemeral credential and must not be copied into recovery bundles.
+EPHEMERAL_PROBE_FILE = 'subscription-probe-url'
+PROBE_INPUT_FILES = {'request.json', 'variables.json', 'vars.yml', 'variables.yml'}
+PROBE_VARIABLE_NAME = b'ultra_cutover_subscription_url'
+PROBE_VARIABLE_FIELD = re.compile(rb'(?<![A-Za-z0-9_])' + PROBE_VARIABLE_NAME + rb'(?![A-Za-z0-9_])["\']?[ \t]{0,16}:')
 # Operation-pinned code and candidate rollback code must survive recovery, but
 # their bytes belong in the versioned artifact rather than every database dump.
 VERSIONED_STATE_PATHS = (
@@ -127,6 +134,8 @@ def collect(paths, excluded_paths=()):
             raise ValueError('required state missing')
         candidates = [path] if path.is_file() else sorted(path.rglob('*'))
         for candidate in candidates:
+            if contains_ephemeral_probe(candidate):
+                continue
             if candidate in EXCLUDED_FILES:
                 continue  # Derived cache and health receipts are recomputed after restore.
             if any(p == candidate or p in candidate.parents for p in excluded_paths):
@@ -146,6 +155,28 @@ def collect(paths, excluded_paths=()):
     if len(result) > MAX_FILES or sum(row['bytes'] for row in result.values()) > MAX_BYTES:
         raise ValueError('state exceeds backup limits')
     return result
+
+
+def contains_ephemeral_probe(path):
+    """Exclude the staged probe URL and serialized operation inputs carrying it.
+
+    The exact URL is never materialized or logged here; only the variable name
+    is searched. Other operation files and unrelated state remain recoverable.
+    """
+    if path.name == EPHEMERAL_PROBE_FILE:
+        return True
+    if path.name not in PROBE_INPUT_FILES or not path.is_file():
+        return False
+    with path.open('rb') as stream:
+        overlap = b''
+        while True:
+            chunk = stream.read(64 * 1024)
+            if not chunk:
+                return False
+            data = overlap + chunk
+            if PROBE_VARIABLE_FIELD.search(data):
+                return True
+            overlap = data[-(len(PROBE_VARIABLE_NAME) + 16):]
 
 
 def capture_artifact_paths(config):

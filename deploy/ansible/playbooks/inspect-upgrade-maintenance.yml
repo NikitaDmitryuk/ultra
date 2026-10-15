@@ -1,0 +1,20 @@
+---
+- name: Inspect the owned legacy activation barrier before compensation
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Prove checkpoint presence or exact running legacy state under the same gate
+      ultra_upgrade_maintenance:
+        id: "{{ ultra_lifecycle_id }}"
+        legacy_sha256: "{{ ultra_legacy_bridge_sha256 }}"
+        phase: rollback-check
+        initial_runtime_request_json: "{{ ultra_legacy_initial_runtime_request_json | default('') }}"
+      register: legacy_compensation_barrier
+    - name: Save the verified public compensation decision
+      ansible.builtin.copy:
+        content: "{{ {'verified': legacy_compensation_barrier.verified, 'untouched': legacy_compensation_barrier.untouched} | to_json(preprocess_unsafe=False) }}\n"
+        dest: "{{ ultra_result_file }}"
+        mode: '0600'
+      delegate_to: localhost
+      become: false

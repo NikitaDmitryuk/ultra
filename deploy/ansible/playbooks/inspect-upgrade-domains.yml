@@ -1,0 +1,24 @@
+---
+- name: Inspect only owned public domain evidence
+  hosts: bridge
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Bind public evidence without exporting environment or credentials
+      ultra_upgrade_domain:
+        transaction: "{{ ultra_upgrade_domain_transaction }}"
+        desired: "{{ ultra_upgrade_domain_desired }}"
+        policy: "{{ ultra_upgrade_domain_policy }}"
+      register: upgrade_domain_evidence
+      no_log: true
+- name: Return only public domain evidence
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Save bound public domain evidence
+      ansible.builtin.copy:
+        content: "{{ hostvars[groups['bridge'][0]].upgrade_domain_evidence | to_json }}\n"
+        dest: "{{ ultra_result_file }}"
+        mode: '0600'
+      no_log: true

@@ -78,6 +78,10 @@ workflow. Перед доверием проверьте, что открыты�
 `ULTRA_AUTOMATION_STATE_PATHS` и `ULTRA_AUTOMATION_ARTIFACT_PATHS` дополняют
 backup inventory. Это JSON-массивы абсолютных путей: отсутствие, пустая строка
 и `[]` не добавляют путей; `null` и неверные типы отклоняются.
+При `upgrade` указанные пути добавляются в recovery inventory перед финальным
+capture после применения релиза. Инвентаризация накопительная: старые пути остаются,
+даже если config-путь убран, поскольку автоматическое удаление могло бы исключить
+пользовательские данные из recovery.
 `adopt --prepare-config /secure/candidate.config --release-dir /secure/releases/vX.Y.Z`
 создаёт новый schema 2 файл с правами 0600 из согласованной recovery-политики;
 существующий файл не перезаписывается. Дополнительные пути из старого backup inventory
@@ -120,8 +124,47 @@ ultra-install upgrade --config install.config --release latest
 не повторяет полную подготовку ОС. `upgrade` без selector выбирает stable
 `latest`; `--release vX.Y.Z` закрепляет конкретный релиз. Для upgrade без
 `--config` используется локальный `install.config`. Явный config выбирает цели
-и deployment policy, но сохраняет текущие runtime-настройки. Локальный
+и deployment policy, а также задаёт желаемые управляемые runtime-настройки.
+Они сверяются с фактической конфигурацией узлов и применяются в составе upgrade;
+удалённые необязательные параметры сбрасываются к валидированным default или
+отключённому состоянию. Сгенерированные identity и секреты сохраняются. Изменения
+состава/адресов узлов и identity базы требуют отдельной миграции и блокируются до
+первой мутации. Параметр без безопасного default должен быть задан явно. Локальный
 `--release-dir` поддержан для уже скачанного подписанного комплекта.
+
+Изменение доменов проходит отдельные DNS, backend и ingress-фазы: старые адреса
+сохраняются до проверки нового TLS, subscription identity/payload и полного tunnel
+через каждый frozen exit. Старые alias и DNS записи удаляются только после commit
+успешного релиза. Смена DNS zone и других неподдерживаемых внешних identity требует
+отдельной миграции.
+
+Перед активацией релиза `upgrade` сверяет DNS TTL и сохранённую ingress policy с
+`install.config`. Изменения ACME email, DNS TTL, режима/узла forwarding, staging,
+status, experimental, backend или gateway port пока требуют отдельной миграции:
+команда останавливается до мутаций вместо того, чтобы считать новое значение
+применённым. В режиме `direct` неиспользуемый `BOT_INGRESS_IP` не меняет эффективную
+конфигурацию. Upgrade также блокирует замену recovery age recipient, bridge provider,
+static-node policy и admin Telegram ID: ключ требует отдельной ротации, а остальные
+значения входят в recovery/topology state. Изменение bridge IPv4 требует отдельной
+миграции. Новые backup paths применяются перед финальным recovery capture.
+`READINESS_TIMEOUT_SEC` задаёт
+длительность локального ожидания проверки после активации.
+
+Runtime-переходы, затрагивающие firewall, WARP или TLS, сначала сохраняют точные
+host-local before-images и request-bound journal. Tunnel peers обновляются по одному
+exit при остановленном bridge; после применения проверяется новый payload на всех
+узлах. Rollback восстанавливает только journalled-owned файлы и состояния, а drift
+останавливает операцию. WARP включается или выключается только при уже установленной
+регистрации; выпуск или ротация TLS-ключей и сертификатов в upgrade не выполняется.
+Сбой финальной фиксации сохраняет lifecycle gate для retry той же generation.
+Legacy retry определяет commit до recovery preflight: после commit проверяет точную
+цепочку runtime/domain candidate по приватным journals и продолжает только
+retirement/finalize и фиксацию effects. До commit preflight допускает только
+journal-bound before/candidate images и их известные сочетания, включая точные
+mode/owner; постороннее изменение блокирует компенсацию. Работающий candidate
+relay проверяется по frozen release SHA и сохранённому compatible fallback;
+producers останавливаются в принадлежащей операции maintenance-границе перед
+новой независимой recovery capture. Исходный checkpoint остаётся неизменным.
 
 Upgrade сначала отдельно подтверждает reservation своего UUID; отказ drain не
 включает legacy fallback. Legacy режим выбирается по проверенному manifest прежнего
@@ -133,6 +176,11 @@ ControlPID и повторная проверка замороженной topol
 их payload проверяется через новый bridge для каждого frozen exit до запуска bot.
 Совместимый rollback запускает и проверяет прежний bridge даже при неизменных байтах,
 затем возвращает сохранённые состояния bot и таймеров до освобождения reservation.
+При запуске принятого кандидата legacy resume проверяет цепочку точных приватных
+образов runtime, ingress и backend той же generation и domain attempt, binding
+runtime/effects и неизменность relay unit. Bot запускается по желаемому `BOT_ENABLE`,
+а таймеры возвращаются в прежнее состояние. Ошибка до активации и rollback по-прежнему
+требуют исходные хеши конфигурации и возвращают исходное состояние bot.
 Для принятой разнородной установки можно явно задать приватный
 `ULTRA_UPGRADE_BASELINE_FILE`: exit остаются на сохранённом операторском комплекте,
 а bridge работает на emergency relay после подтверждённого adoption rollback.
@@ -168,6 +216,17 @@ recovery manifest bridge сохраняют свой прежний контра
 Источники: [адаптер входов](../cmd/ultra-install/upgrade_baseline.go),
 [проверка root-доказательств](../deploy/ansible/library/ultra_upgrade_baseline.py),
 [синтетические проверки](../scripts/test-ansible-upgrade-baseline.py).
+
+Если legacy activation завершилась до записи maintenance checkpoint, rollback
+сначала доказывает владение lifecycle gate, точный работающий legacy executable
+и активные recovery timers, а также исходные runtime images и prepared/rolled-back
+journals той же generation. Проверка выполняется до runtime/domain rollback;
+DNS-подготовка компенсируется отдельно. Только этот проверенный случай пропускает release
+компенсацию и readiness probe: остановки producers и изменения relay/config ещё
+не начинались. Неоднозначное состояние сохраняет закрытый gate для восстановления.
+Первый и повторный синхронный capture используют отдельный collector из проверенного
+подписанного release; активные tools и их rollback inventory обновляются позже.
+Это применяет исключения временного subscription probe URL уже к первому архиву.
 
 Источники: [upgrade](../deploy/ansible/playbooks/upgrade.yml),
 [maintenance barrier](../deploy/ansible/library/ultra_upgrade_maintenance.py),
@@ -250,6 +309,33 @@ ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 При запуске из отдельного worktree путь к каноническому файлу можно передать через
 `INSTALL_CONFIG=/absolute/path/to/install.config make deploy`. Для конфигурации
 допустимы режимы 0600 и 0644; обновление сохраняет исходный режим.
+
+Для upgrades, меняющих subscription/domain/runtime параметры, добавьте
+`ULTRA_SUBSCRIPTION_PROBE_URL=https://current.example.com/sub/<token>` в приватный
+локальный `.env` рядом с canonical `install.config` (обычный файл владельца,
+0600, без symlink/hardlink). Скрипт
+читает только этот literal key, без sourcing, interpolation или process env.
+Hostname URL должен совпадать с текущим публичным subscription endpoint из
+наблюдаемого состояния; при cutover тот же token проверяется на новом endpoint
+из `SUBSCRIPTION_DOMAIN`.
+Из отдельного worktree источник можно указать через
+`SUBSCRIPTION_PROBE_ENV_FILE=/secure/operator/.env make deploy` либо
+`scripts/manual-deploy.py --subscription-probe-env-file /secure/operator/.env`.
+URL не добавляется в `install.config`, аргументы команд или журналы. Его отдельная
+копия 0600 передаётся по pinned SSH для acceptance; весь `.env` не передаётся.
+При отсутствии default `.env`/key обычный upgrade продолжает работу без probe;
+upgrade, требующий acceptance, отклоняется installer до изменения runtime.
+Явно указанный отсутствующий файл/key или небезопасный файл отклоняется до
+изменения canonical config.
+
+Журнал и удалённый staged input связывают probe digest с точными candidate/config
+inputs. Failed retry использует frozen копию; явно переданный новый источник
+должен содержать тот же URL. После успешных upgrade и status копии с URL удаляются,
+а digest остаётся для проверки replay. Interrupted cleanup повторяет только
+очистку completed operation. После завершения повтор того же candidate требует
+тот же allowlisted URL; изменение credential не создаёт новую попытку. До dispatch
+ошибки удаляют локальную копию и пытаются очистить удалённую; если SSH cleanup
+не подтверждён, скрипт сообщает фиксированное предупреждение для reconciliation.
 
 Ключ должен быть выделенным файлом с правами 0600, а host keys — проверенными
 заранее. SSH использует `-F /dev/null`, `StrictHostKeyChecking=yes` и только эти

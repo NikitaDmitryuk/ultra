@@ -28,6 +28,7 @@ func runAutomationCommand(action string, args []string) {
 	releaseDir := fs.String("release-dir", "", "local signed release directory (overrides GitHub selection)")
 	releaseSelector := fs.String("release", "latest", "GitHub release tag, or latest for the stable release")
 	retryFailed := fs.Bool("retry-failed", false, "explicitly retry the same failed frozen Ansible job after recovery preflight")
+	probeFile := fs.String("subscription-probe-url-file", "", "private 0600 HTTPS subscription URL file for domain acceptance")
 	jobDirectory := fs.String("job-dir", "", "persistent private Ansible upgrade directory")
 	python := fs.String("python", "/usr/bin/python3", "controller Python")
 	ansible := fs.String("ansible-playbook", "", "pinned Ansible executable; otherwise resolve exact release runtime")
@@ -91,7 +92,7 @@ func runAutomationCommand(action string, args []string) {
 			exitOnErr("Ansible target upgrade", err)
 			return
 		}
-		exitOnErr("Ansible upgrade", ansibleUpgrade(ctx, p, selectedReleaseDir, *jobDirectory, *python, *ansible, *retryFailed))
+		exitOnErr("Ansible upgrade", ansibleUpgrade(withUpgradeDomainProbeFile(ctx, *probeFile), p, selectedReleaseDir, *jobDirectory, *python, *ansible, *retryFailed))
 		return
 	}
 	if action == "status" {
@@ -115,6 +116,7 @@ func runOperatorUpgradeCommand(args []string) {
 	manifestSHA := fs.String("manifest-sha256", "", "expected release manifest SHA-256")
 	configSHA := fs.String("config-sha256", "", "expected canonical config SHA-256")
 	retryFailed := fs.Bool("retry-failed", false, "explicitly retry the same failed frozen Ansible job after recovery preflight")
+	probeFile := fs.String("subscription-probe-url-file", "", "private 0600 HTTPS subscription URL file for domain acceptance")
 	jobDirectory := fs.String("job-dir", "", "persistent private Ansible upgrade directory")
 	python := fs.String("python", "/usr/bin/python3", "controller Python")
 	ansible := fs.String("ansible-playbook", "", "pinned Ansible executable; otherwise resolve exact release runtime")
@@ -153,7 +155,7 @@ func runOperatorUpgradeCommand(args []string) {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	exitOnErr("Ansible operator upgrade", ansibleUpgrade(ctx, p, selectedRelease, *jobDirectory, *python, *ansible, *retryFailed))
+	exitOnErr("Ansible operator upgrade", ansibleUpgrade(withUpgradeDomainProbeFile(ctx, *probeFile), p, selectedRelease, *jobDirectory, *python, *ansible, *retryFailed))
 }
 
 func verifyOperatorUpgradeRelease(releaseDir, sourceCommit, version, manifestSHA, executable string) (*automationRelease, error) {

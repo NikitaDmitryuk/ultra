@@ -11,6 +11,7 @@ import tempfile
 import types
 import unittest
 import yaml
+from jinja2 import Environment
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,10 +101,41 @@ class Contracts(unittest.TestCase):
     def test_legacy_rollback_starts_unchanged_bridge_before_bot_restore(self):
         plays = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/rollback.yml').read_text())
         self.assertTrue(plays[0].get('any_errors_fatal'))
-        names = [task['name'] for task in plays[1]['tasks']]
+        names = [task['name'] for task in plays[2]['tasks']]
         self.assertLess(names.index('Restore the bridge relay'), names.index('Start the unchanged restored legacy bridge before probing it'))
         self.assertLess(names.index('Start the unchanged restored legacy bridge before probing it'), names.index('Require a usable restored control plane'))
         self.assertLess(names.index('Require a usable restored control plane'), names.index('Restore the original legacy bot state after the restored bridge probe'))
+
+    def test_activation_rescue_keeps_legacy_bridge_stopped_until_fleet_rollback(self):
+        tasks = yaml.safe_load((ROOT / 'deploy/ansible/roles/release/tasks/main.yml').read_text())
+        rescue = next(task['rescue'] for task in tasks if 'rescue' in task)
+        environment = Environment()
+        environment.filters['bool'] = bool
+
+        def enabled(task, variables):
+            conditions = task.get('when', [])
+            if isinstance(conditions, str):
+                conditions = [conditions]
+            return all(environment.compile_expression(condition)(**variables) for condition in conditions)
+
+        for host, component, legacy, preserve, expected in [
+                ('bridge', 'ultra-relay', True, False, ['stopped']),
+                ('bridge', 'ultra-relay', False, False, ['restarted']),
+                ('exit', 'ultra-relay', True, False, ['restarted']),
+                ('bridge', 'ultra-bot', True, False, ['restarted']),
+                ('bridge', 'ultra-bot', True, True, [])]:
+            with self.subTest(host=host, component=component, legacy=legacy, preserve=preserve):
+                variables = {'inventory_hostname': host, 'groups': {'bridge': ['bridge'], 'exits': ['exit']},
+                             'release_component': component, 'ultra_legacy_bridge_maintenance': legacy,
+                             'release_preserve_stopped': preserve}
+                service_states = [task['ansible.builtin.systemd_service']['state'] for task in rescue
+                                  if 'ansible.builtin.systemd_service' in task and enabled(task, variables)]
+                self.assertEqual(service_states, expected)
+        stop = next(index for index, task in enumerate(rescue)
+                    if task.get('ansible.builtin.systemd_service', {}).get('state') == 'stopped')
+        restore = next(index for index, task in enumerate(rescue) if 'ansible.builtin.copy' in task)
+        self.assertLess(stop, restore, 'stop the failed new relay before replacing its executable')
+        self.assertIn('ansible.builtin.fail', rescue[-1], 'local rescue must still trigger fleet rollback')
 
     def test_mixed_baseline_roles_use_frozen_per_host_and_relay_only_emergency(self):
         root = ROOT / 'deploy/ansible/roles/release/tasks'
@@ -161,9 +193,10 @@ class Contracts(unittest.TestCase):
     def test_legacy_cleanup_restores_all_saved_states_before_receipt(self):
         tasks = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/resume-automation.yml').read_text())[0]['tasks']
         restore = next(task for task in tasks if 'ultra_upgrade_maintenance' in task)
-        self.assertEqual(restore['ultra_upgrade_maintenance']['phase'], 'restore-services')
+        self.assertIn('restore-accepted', restore['ultra_upgrade_maintenance']['phase'])
+        self.assertIn('restore-services', restore['ultra_upgrade_maintenance']['phase'])
         self.assertIn('not (ultra_legacy_bridge_maintenance', tasks[0]['when'])
-        rollback = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/rollback.yml').read_text())[1]['tasks']
+        rollback = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/rollback.yml').read_text())[2]['tasks']
         restore = next(task for task in rollback if 'ultra_upgrade_maintenance' in task)
         self.assertEqual(restore['ultra_upgrade_maintenance']['phase'], 'restore-services')
         activation = yaml.safe_load((ROOT / 'deploy/ansible/roles/release/tasks/main.yml').read_text())
@@ -216,10 +249,101 @@ class Contracts(unittest.TestCase):
         phases = [t['ultra_upgrade_maintenance']['phase'] for t in tasks if 'ultra_upgrade_maintenance' in t]
         self.assertEqual(phases, ['retry-checkpoint', 'capture-tool-check', 'recovery-ready'])
         commands = [t['ansible.builtin.command']['argv'] for t in tasks if 'ansible.builtin.command' in t]
-        self.assertEqual(commands, [['python3', '/opt/ultra-recovery/recovery.py', 'capture', '--config', '/etc/ultra-recovery/backup.json']])
+        self.assertEqual(commands, [['python3', '/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/capture/recovery.py', 'capture', '--config', '/etc/ultra-recovery/backup.json']])
         self.assertFalse(any('ansible.builtin.systemd_service' in t for t in tasks))
         freshness = next(t for t in tasks if t['name'] == 'Require fresh independent recovery and unchanged topology')
         self.assertIn('not (legacy_retry_barrier.held', freshness['when'])
+
+    def test_no_checkpoint_compensation_and_retry_require_exact_live_legacy_owner(self):
+        class Done(Exception):
+            pass
+        operation = '11111111-2222-3333-4444-555555555555'
+        sha = hashlib.sha256(b'legacy').hexdigest()
+        gate = {'id': operation, 'phase': 'applying'}
+        active = {'ActiveState': 'active', 'MainPID': '7', 'ControlPID': '0'}
+        module = types.SimpleNamespace(params={'id': operation, 'legacy_sha256': sha, 'initial_runtime_request_json': '{}'}, check_mode=False)
+        module.exit_json = lambda **value: (_ for _ in ()).throw(Done(value))
+        module.fail_json = lambda **value: (_ for _ in ()).throw(Done(dict(value, failed=True)))
+        def invoke():
+            with self.assertRaises(Done) as result:
+                maintenance.main()
+            return result.exception.args[0]
+        with patch.object(maintenance, 'AnsibleModule', return_value=module), patch.object(maintenance.os, 'geteuid', return_value=0), patch.object(maintenance, 'private', return_value=gate), patch.object(maintenance.Path, 'exists', return_value=False), patch.object(maintenance.Path, 'is_symlink', return_value=False), patch.object(maintenance.Path, 'read_bytes', return_value=b'legacy'), patch.object(maintenance.Path, 'is_file', return_value=True), patch.object(maintenance.Path, 'lstat', return_value=types.SimpleNamespace(st_uid=0, st_mode=0o100755)), patch.object(maintenance.Path, 'read_text', return_value='{"role":"bridge"}'), patch.object(maintenance.os, 'readlink', return_value='/usr/local/bin/ultra-relay'), patch.object(maintenance, 'service', return_value=active), patch.object(maintenance, 'hashes', return_value={}), patch.object(maintenance, 'atomic') as save, patch.object(maintenance, 'untouched_runtime', return_value='active') as initial:
+            for phase in ('rollback-check', 'retry-checkpoint'):
+                module.params['phase'] = phase
+                self.assertEqual(invoke(), {'changed': False, 'verified': True, 'held': False, 'untouched': True})
+                gate['id'] = 'foreign'
+                self.assertTrue(invoke()['failed'])
+                gate['id'] = operation
+                gate['phase'] = 'checking'
+                self.assertTrue(invoke()['failed'])
+                gate['phase'] = 'applying'
+                with patch.object(maintenance, 'service', return_value=dict(active, ControlPID='9')):
+                    self.assertTrue(invoke()['failed'])
+                with patch.object(maintenance, 'service', side_effect=lambda mod, unit: dict(active, ActiveState='inactive') if unit in maintenance.SERVICES[1:] else active):
+                    self.assertTrue(invoke()['failed'])
+                with patch.object(maintenance.Path, 'read_bytes', return_value=b'other'):
+                    self.assertTrue(invoke()['failed'])
+                with patch.object(maintenance.Path, 'is_symlink', return_value=True):
+                    self.assertTrue(invoke()['failed'])
+            save.assert_not_called()
+            self.assertTrue(initial.called)
+
+    def test_missing_checkpoint_rejects_partially_applied_runtime_images(self):
+        import base64
+        operation = '11111111-2222-3333-4444-555555555555'
+        transaction = operation + '-runtime-1'
+        request = json.dumps({'request': {'transaction': transaction, 'role': 'bridge'}})
+        binding = hashlib.sha256(request.encode()).hexdigest()
+        image = {'Exists': True, 'Data': base64.b64encode(b'original').decode(), 'Mode': 0o600, 'UID': 0, 'GID': 0}
+        values = {'json': {'Version': 1, 'Transaction': transaction, 'State': 'prepared', 'Before': [image, image]},
+                  'transport.json': {'digest': binding, 'effects_plan': {}},
+                  'effects.json': {'version': 1, 'binding_sha256': binding, 'state': 'prepared', 'plan': {}, 'bot': {'active': 'active'}}}
+        def read(path):
+            key = 'transport.json' if path.name.endswith('.transport.json') else 'effects.json' if path.name.endswith('.effects.json') else 'json'
+            return values[key]
+        metadata = types.SimpleNamespace(st_mode=0o100600, st_uid=0, st_gid=0)
+        live = {name: hashlib.sha256(b'original').hexdigest() for name in maintenance.FILES}
+        with patch.object(maintenance, 'private', side_effect=read), patch.object(maintenance, 'hashes', return_value=live), patch.object(maintenance.Path, 'lstat', return_value=metadata):
+            self.assertEqual(maintenance.untouched_runtime(request, operation), 'active')
+            for name, key in [('json', 'State'), ('effects.json', 'state')]:
+                values[name][key] = 'applied'
+                with self.assertRaises(ValueError):
+                    maintenance.untouched_runtime(request, operation)
+                values[name][key] = 'prepared'
+            live[maintenance.FILES[0]] = '0'*64
+            with self.assertRaises(ValueError):
+                maintenance.untouched_runtime(request, operation)
+
+    def test_no_checkpoint_rollback_skips_every_mutation_and_probe(self):
+        plays = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/rollback.yml').read_text())
+        self.assertEqual(plays[0]['tasks'][0]['ultra_upgrade_maintenance']['phase'], 'rollback-check')
+        self.assertTrue(plays[0]['any_errors_fatal'])
+        environment = Environment()
+        environment.filters['bool'] = bool
+        variables = {'ultra_legacy_bridge_maintenance': True,
+                     'hostvars': {'bridge': {'legacy_rollback_barrier': {'untouched': True}}}}
+        for play in plays[1:]:
+            for task in play['tasks']:
+                if task['name'] == 'Save the verified operation result':
+                    continue
+                self.assertIn('legacy_rollback_barrier.untouched', task['when'], task['name'])
+                self.assertFalse(environment.compile_expression(task['when'])(**variables), task['name'])
+
+    def test_first_and_retry_capture_use_signed_staged_collector(self):
+        for name in ('upgrade.yml', 'preflight-retry.yml'):
+            tasks = yaml.safe_load((ROOT / 'deploy/ansible/playbooks' / name).read_text())[0]['tasks']
+            capture = next(i for i, task in enumerate(tasks) if task.get('ansible.builtin.command', {}).get('argv', [None])[0] == 'python3')
+            self.assertEqual(tasks[capture-1]['ansible.builtin.include_role']['tasks_from'], 'capture-tool')
+            self.assertEqual(tasks[capture]['ansible.builtin.command']['argv'][1], '/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/capture/recovery.py')
+            self.assertTrue(tasks[capture]['no_log'])
+        tasks = yaml.safe_load((ROOT / 'deploy/ansible/roles/release/tasks/capture-tool.yml').read_text())
+        source = next(task['ansible.builtin.assert']['that'] for task in tasks if task['name'] == 'Require exact signed release collector bytes')
+        self.assertIn('release_capture_source.stat.checksum == ultra_recovery_capture_tool.sha256', source)
+        final = tasks[-1]['ansible.builtin.assert']['that']
+        self.assertIn('release_capture_staged.stat.checksum == ultra_recovery_capture_tool.sha256', final)
+        self.assertIn("release_capture_staged.stat.mode == '0600'", final)
+        self.assertIn('release_capture_staged.stat.uid == 0', final)
 
     def test_retry_checkpoint_requires_idle_producers_and_advances_capture_evidence(self):
         class Done(Exception):

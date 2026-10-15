@@ -12,10 +12,13 @@ import (
 func TestCutoverCanonicalDeltaPreservesLegacyBackendAndIsRepeatable(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "install.config")
 	original := "# keep ownership policy\nBOT_DOMAIN=old.example.com\nBOT_INGRESS_IP=192.0.2.2\nPUBLIC_HOST=192.0.2.1\n"
-	if err := os.WriteFile(file, []byte(original), 0600); err != nil {
+	if err := os.WriteFile(file, []byte(original), 0644); err != nil {
 		t.Fatal(err)
 	}
-	delta := cutoverDelta("sync.example.com", "edge.example.com", "example.com")
+	delta := cutoverDelta("sync.example.com", "edge.example.com", "example.com", "dial.example.net")
+	if delta["PUBLIC_HOST"] != "dial.example.net" || delta["VPN_DOMAIN"] != "edge.example.com" {
+		t.Fatal("cutover collapsed the public dial host into the VPN TLS identity")
+	}
 	if err := writeCutoverConfig(file, delta); err != nil {
 		t.Fatal(err)
 	}
@@ -26,6 +29,10 @@ func TestCutoverCanonicalDeltaPreservesLegacyBackendAndIsRepeatable(t *testing.T
 	second, _ := os.ReadFile(file)
 	if string(first) != string(second) {
 		t.Fatal("non-idempotent canonical delta")
+	}
+	info, err := os.Stat(file)
+	if err != nil || info.Mode().Perm() != 0644 {
+		t.Fatalf("canonical config mode changed: %v %v", info, err)
 	}
 	backup, _ := os.ReadFile(file + ".before-domain-cutover")
 	if string(backup) != original {
@@ -38,7 +45,7 @@ func TestCutoverCanonicalDeltaPreservesLegacyBackendAndIsRepeatable(t *testing.T
 	if p.SchemaVersion != 1 || p.Bot.Domain != "old.example.com" || p.PublicSubscriptionDomain() != "sync.example.com" {
 		t.Fatal("legacy semantics or old TLS domain changed")
 	}
-	if !strings.Contains(string(first), "BOT_INGRESS_IP=192.0.2.2") || !strings.Contains(string(first), "PUBLIC_HOST=edge.example.com") {
+	if !strings.Contains(string(first), "BOT_INGRESS_IP=192.0.2.2") || !strings.Contains(string(first), "PUBLIC_HOST=dial.example.net") {
 		t.Fatal("missing compatibility policy")
 	}
 }

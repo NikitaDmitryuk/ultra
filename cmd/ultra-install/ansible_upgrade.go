@@ -21,17 +21,18 @@ import (
 )
 
 type upgradeInspection struct {
-	DatabaseSchema      int               `json:"database_schema"`
-	ControllerDirectory string            `json:"controller_directory"`
-	ControllerUnitSHA   string            `json:"controller_unit_sha256"`
-	ToolHashes          map[string]string `json:"tool_hashes"`
-	AutoPolicy          map[string]any    `json:"auto_policy"`
-	ObservedAt          int64             `json:"observed_at"`
-	Architecture        string            `json:"architecture"`
-	TopologySHA         string            `json:"topology_sha256"`
-	Identity            string            `json:"identity"`
-	PreviousManifestSHA string            `json:"previous_manifest_sha256"`
-	Previous            automationRelease `json:"previous_manifest"`
+	DatabaseSchema      int                                   `json:"database_schema"`
+	ControllerDirectory string                                `json:"controller_directory"`
+	ControllerUnitSHA   string                                `json:"controller_unit_sha256"`
+	ToolHashes          map[string]string                     `json:"tool_hashes"`
+	AutoPolicy          map[string]any                        `json:"auto_policy"`
+	ObservedAt          int64                                 `json:"observed_at"`
+	Architecture        string                                `json:"architecture"`
+	TopologySHA         string                                `json:"topology_sha256"`
+	Identity            string                                `json:"identity"`
+	PreviousManifestSHA string                                `json:"previous_manifest_sha256"`
+	Previous            automationRelease                     `json:"previous_manifest"`
+	RuntimeNodes        map[string]upgradeRuntimeNodeEvidence `json:"runtime_nodes"`
 	Nodes               []struct {
 		ID      string `json:"id"`
 		Address string `json:"address"`
@@ -156,16 +157,23 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	legacyBridgeSHA := ""
 	resumeCompleted := false
 	preActivation := true
+	var domainTransaction *upgradeDomainTransaction
+	domainPrepareAttempted := false
+	domainGeneration := 0
+	var acceptedResume map[string]any
 	// A separate attempt always resumes timers, including after UNREACHABLE.
 	resume := func(cleanup context.Context) error {
 		resumeDirectory, err := os.MkdirTemp(directory, "resume-")
 		if err == nil {
 			_ = os.Remove(resumeDirectory)
 			variables := map[string]any{"ultra_lock_directory": lockDirectory}
-			if legacyBridgeMaintenance && !preActivation {
+			if legacyBridgeMaintenance {
 				variables["ultra_legacy_bridge_maintenance"] = true
 				variables["ultra_legacy_bridge_sha256"] = legacyBridgeSHA
 				variables["ultra_lifecycle_id"] = lifecycleID(directory)
+				if acceptedResume != nil {
+					variables["ultra_legacy_accepted_resume"] = acceptedResume
+				}
 			}
 			_, err = deployansible.RunLocal(cleanup, "resume-automation", inventory, variables, resumeDirectory, python, executable)
 			if err == nil {
@@ -197,6 +205,12 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
+		if domainPrepareAttempted {
+			if domainErr := domainTransaction.phase(cleanup, inventory, directory, python, executable, "rollback-dns", domainGeneration); domainErr != nil {
+				returnErr = errors.Join(returnErr, errors.New("upgrade_domain_preparation_rollback_incomplete"))
+				return
+			}
+		}
 		if err := resume(cleanup); err != nil {
 			returnErr = errors.Join(returnErr, errors.New("upgrade_automation_resume_failed"))
 			return
@@ -387,16 +401,132 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err = writeUpgradeInput(filepath.Join(directory, "inventory.frozen.json"), frozenInventory); err != nil {
 		return err
 	}
+	// Canonical desired settings must be inspected before binary activation.
+	// This operation uses the existing lease and the same pinned fleet inventory.
+	// Unsupported migrations are rejected without touching runtime or endpoints.
+	domainTransaction, err = inspectUpgradeDomains(ctx, p, inventory, variables, directory, python, executable)
+	if err != nil {
+		return err
+	}
+	if domainTransaction.Changed {
+		variables["ultra_upgrade_domain_binding"] = domainTransaction.Binding
+	}
+	if err = inspectUpgradeDesiredRuntime(ctx, p, inspection, inventory, variables, directory, python, executable); err != nil {
+		return err
+	}
+	committedContinuation := retryFailed && upgradeDomainReleaseCommitted(directory)
+	if committedContinuation {
+		if err = verifyCommittedUpgradeContinuation(directory, inventory, variables); err != nil {
+			return err
+		}
+	}
 	if retryFailed {
+		_, activationReceiptErr := os.Lstat(filepath.Join(directory, "activate", "receipt.json"))
+		if activationReceiptErr != nil && !os.IsNotExist(activationReceiptErr) {
+			return activationReceiptErr
+		}
+		preflightVariables := make(map[string]any, len(variables)+1)
+		for key, value := range variables {
+			preflightVariables[key] = value
+		}
+		if legacyBridgeMaintenance && activationReceiptErr == nil {
+			generation, generationErr := upgradeActivationGeneration(directory, true)
+			if generationErr != nil {
+				return generationErr
+			}
+			if !committedContinuation {
+				if err = requireFailedUpgradeAttempt(directory, generation); err != nil {
+					return err
+				}
+			}
+			contract, contractErr := upgradeAcceptedResumeContract(p, inspection, inventory, variables, directory, domainTransaction, generation)
+			if contractErr != nil {
+				return contractErr
+			}
+			contract["mode"] = "compensation"
+			if committedContinuation {
+				contract["mode"] = "committed"
+			}
+			asset, assetErr := upgradeAsset(manifest, "ultra-relay-linux-"+inspection.Architecture)
+			if assetErr != nil {
+				return assetErr
+			}
+			contract["target_sha256"], contract["release_version"] = asset.SHA, manifest.Version
+			preflightVariables["ultra_legacy_retry_configuration"] = contract
+		}
 		preflightDirectory, err := os.MkdirTemp(directory, "retry-preflight-")
 		if err != nil {
 			return err
 		}
 		_ = os.Remove(preflightDirectory)
-		if _, err = deployansible.RunLocal(ctx, "preflight-retry", inventory, variables, preflightDirectory, python, executable); err != nil {
+		if _, err = deployansible.RunLocal(ctx, "preflight-retry", inventory, preflightVariables, preflightDirectory, python, executable); err != nil {
 			return err
 		}
-		if activationStateErr == nil {
+		if activationStateErr == nil && os.IsNotExist(activationReceiptErr) {
+			// The controller writes its receipt before any activation mutation.
+			// A prepared generation must retain its runtime journals unchanged.
+			generation, generationErr := upgradeActivationGeneration(directory, false)
+			if generationErr != nil {
+				return generationErr
+			}
+			if generation > 1 {
+				if err = resetFailedUpgradeAttempt(directory); err != nil {
+					return err
+				}
+			}
+		}
+		if activationStateErr == nil && activationReceiptErr == nil && !committedContinuation {
+			previousGeneration, generationErr := upgradeActivationGeneration(directory, true)
+			if generationErr != nil {
+				return generationErr
+			}
+			if err = requireFailedUpgradeAttempt(directory, previousGeneration); err != nil {
+				return err
+			}
+			// A failed commit can leave the first candidate applied. Restore that
+			// attempt's exact baseline before a new generation takes its snapshots.
+			untouched, inspectErr := untouchedLegacyUpgrade(ctx, legacyBridgeMaintenance, p, inspection, inventory, variables, directory, python, executable, previousGeneration)
+			if inspectErr != nil {
+				return errors.New("upgrade_legacy_compensation_inspection_failed")
+			}
+			if !untouched {
+				if err = domainTransaction.phase(ctx, inventory, directory, python, executable, "rollback", previousGeneration); err != nil {
+					return errors.New("upgrade_retry_domain_rollback_incomplete")
+				}
+			}
+			if err = domainTransaction.phase(ctx, inventory, directory, python, executable, "rollback-dns", previousGeneration); err != nil {
+				return errors.New("upgrade_retry_dns_rollback_incomplete")
+			}
+			if !untouched {
+				if err = runUpgradeRuntimePhase(ctx, p, inspection, inventory, variables, directory, python, executable, "rollback", previousGeneration, true); err != nil {
+					return errors.New("upgrade_retry_runtime_rollback_incomplete")
+				}
+			}
+			// Release stages bind the successful activation watermark, not the
+			// earlier inspection watermark used for a fresh activation.
+			rollbackVariables := map[string]any{}
+			for key, value := range variables {
+				rollbackVariables[key] = value
+			}
+			raw, readErr := readBootstrapGenerationInput(filepath.Join(directory, "activate", "receipt.json"))
+			if readErr == nil {
+				var previous deployansible.Receipt
+				if json.Unmarshal(raw, &previous) != nil {
+					return errors.New("retry_receipt_invalid")
+				}
+				if previous.State == "succeeded" {
+					timestamp, timestampErr := activationTimestamp(previous.Result.Values["activated_at"])
+					if timestampErr != nil || timestamp <= 0 {
+						return errors.New("upgrade_activation_timestamp_invalid")
+					}
+					rollbackVariables["ultra_upgrade_observed_at"] = timestamp
+				}
+			} else if !os.IsNotExist(readErr) {
+				return readErr
+			}
+			if err = runUpgradeReleaseRollback(ctx, p, inspection, inventory, rollbackVariables, directory, python, executable, previousGeneration, true); err != nil {
+				return errors.New("upgrade_retry_release_rollback_incomplete")
+			}
 			if err = resetFailedUpgradeAttempt(directory); err != nil {
 				return err
 			}
@@ -460,6 +590,22 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err != nil {
 		return err
 	}
+	domainGeneration = generation
+	if committedContinuation {
+		// The accepted release already owns these runtime/domain images. Never
+		// rerun preparation, activation, publication, readiness, or compensation.
+		preActivation, resumeCompleted = false, true
+		return finishUpgradeCommit(ctx, p, inspection, inventory, variables, directory, python, executable, domainTransaction, generation, retryFailed, manifest.Version)
+	}
+	if domainTransaction.Changed {
+		domainPrepareAttempted = true
+		if err = domainTransaction.phase(ctx, inventory, directory, python, executable, "prepare", generation); err != nil {
+			return err
+		}
+	}
+	if err = runUpgradeRuntimePhase(ctx, p, inspection, inventory, variables, directory, python, executable, "prepare", generation, retryFailed); err != nil {
+		return err
+	}
 	preActivation = false
 	activation, activationErr := deployansible.RunLocal(ctx, "upgrade", inventory, variables, filepath.Join(directory, "activate"), python, executable)
 	err = activationErr
@@ -472,7 +618,18 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		}
 	}
 	if err == nil {
+		err = runUpgradeRuntimePhase(ctx, p, inspection, inventory, variables, directory, python, executable, "apply", generation)
+	}
+	if err == nil {
+		err = domainTransaction.phase(ctx, inventory, directory, python, executable, "apply", generation)
+	}
+	if err == nil {
 		_, err = deployansible.RunLocal(ctx, "publish-release", inventory, variables, upgradeDependentStageDirectory(directory, "publish", generation), python, executable)
+	}
+	if err == nil {
+		if legacyBridgeMaintenance {
+			acceptedResume, err = upgradeAcceptedResumeContract(p, inspection, inventory, variables, directory, domainTransaction, generation)
+		}
 	}
 	if err == nil {
 		err = resume(ctx)
@@ -483,7 +640,11 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 			releaseLock()
 			lockHeld = false
 			ctx = originalCtx
-			deadline := time.Now().Add(6 * time.Minute)
+			readinessTimeout := 900 * time.Second
+			if p.Automation != nil && p.Automation.ReadinessTimeoutSec > 0 {
+				readinessTimeout = time.Duration(p.Automation.ReadinessTimeoutSec) * time.Second
+			}
+			deadline := time.Now().Add(readinessTimeout)
 			for {
 				verifyDirectory, createErr := os.MkdirTemp(directory, "verify-")
 				if createErr != nil {
@@ -527,7 +688,24 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		if leaseErr := ansibleResumeFrozenLifecycle(cleanup, p, inventory, directory, python, executable); leaseErr != nil {
 			return errors.Join(err, leaseErr)
 		}
-		_, rollbackErr := deployansible.RunLocal(cleanup, "rollback", inventory, variables, upgradeDependentStageDirectory(directory, "rollback", generation), python, executable)
+		untouched, inspectErr := untouchedLegacyUpgrade(cleanup, legacyBridgeMaintenance, p, inspection, inventory, variables, directory, python, executable, generation)
+		if inspectErr != nil {
+			return errors.Join(err, errors.New("upgrade_legacy_compensation_inspection_failed"))
+		}
+		if !untouched {
+			if domainErr := domainTransaction.phase(cleanup, inventory, directory, python, executable, "rollback", generation); domainErr != nil {
+				return errors.Join(err, errors.New("upgrade_domain_rollback_incomplete"))
+			}
+		}
+		if domainErr := domainTransaction.phase(cleanup, inventory, directory, python, executable, "rollback-dns", generation); domainErr != nil {
+			return errors.Join(err, errors.New("upgrade_dns_rollback_incomplete"))
+		}
+		if !untouched {
+			if runtimeErr := runUpgradeRuntimePhase(cleanup, p, inspection, inventory, variables, directory, python, executable, "rollback", generation); runtimeErr != nil {
+				return errors.Join(err, errors.New("upgrade_runtime_rollback_incomplete"))
+			}
+		}
+		rollbackErr := runUpgradeReleaseRollback(cleanup, p, inspection, inventory, variables, directory, python, executable, generation, false)
 		if rollbackErr != nil {
 			return errors.Join(err, errors.New("upgrade_compatible_rollback_incomplete"))
 		}
@@ -548,9 +726,95 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		}
 		lockHeld = true
 	}
-	_, err = deployansible.RunLocal(ctx, "commit-release", inventory, variables, upgradeDependentStageDirectory(directory, "commit", generation), python, executable)
+	err = domainTransaction.phase(ctx, inventory, directory, python, executable, "accept", generation)
+	if err == nil {
+		_, err = deployansible.RunLocal(ctx, "commit-release", inventory, variables, upgradeDependentStageDirectory(directory, "commit", generation), python, executable)
+	}
+	if err != nil {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Minute)
+		defer cancel()
+		if rollbackErr := domainTransaction.phase(cleanup, inventory, directory, python, executable, "rollback", generation); rollbackErr != nil {
+			return errors.Join(err, errors.New("upgrade_domain_commit_rollback_incomplete"))
+		}
+		if rollbackErr := domainTransaction.phase(cleanup, inventory, directory, python, executable, "rollback-dns", generation); rollbackErr != nil {
+			return errors.Join(err, errors.New("upgrade_dns_commit_rollback_incomplete"))
+		}
+		if rollbackErr := runUpgradeRuntimePhase(cleanup, p, inspection, inventory, variables, directory, python, executable, "rollback", generation); rollbackErr != nil {
+			return errors.Join(err, errors.New("upgrade_runtime_commit_rollback_incomplete"))
+		}
+		if rollbackErr := runUpgradeReleaseRollback(cleanup, p, inspection, inventory, variables, directory, python, executable, generation, false); rollbackErr != nil {
+			return errors.Join(err, errors.New("upgrade_release_commit_rollback_incomplete"))
+		}
+		if gateErr := ansibleLifecycle(cleanup, p, inventory, directory, python, executable, "released", false); gateErr != nil {
+			return errors.Join(err, gateErr)
+		}
+		return err
+	}
+	return finishUpgradeCommit(ctx, p, inspection, inventory, variables, directory, python, executable, domainTransaction, generation, retryFailed, manifest.Version)
+}
+
+// Continuation bypasses the normal cached activation/commit calls. Verify their
+// exact frozen requests and private job/receipt bindings before skipping them.
+func verifyCommittedUpgradeContinuation(directory string, inventory, variables map[string]any) error {
+	generation, err := upgradeActivationGeneration(directory, false)
+	if err != nil {
+		return err
+	}
+	verify := func(stage, operation string, expectedVariables map[string]any) (deployansible.Receipt, error) {
+		jobRaw, jobErr := readBootstrapGenerationInput(filepath.Join(stage, "job.json"))
+		requestRaw, requestErr := readBootstrapGenerationInput(filepath.Join(stage, "request.json"))
+		receiptRaw, receiptErr := readBootstrapGenerationInput(filepath.Join(stage, "receipt.json"))
+		expected, marshalErr := json.Marshal(map[string]any{"inventory": inventory, "variables": expectedVariables})
+		var job struct {
+			Operation string `json:"operation"`
+			Request   string `json:"request_sha256"`
+			Binary    string `json:"binary_sha256"`
+		}
+		var receipt deployansible.Receipt
+		if jobErr != nil || requestErr != nil || receiptErr != nil || marshalErr != nil || string(requestRaw) != string(expected) || json.Unmarshal(jobRaw, &job) != nil || json.Unmarshal(receiptRaw, &receipt) != nil || job.Operation != operation || job.Request != fmt.Sprintf("%x", sha256.Sum256(expected)) || !runtimeHostValidDigest(job.Binary) || receipt.RequestSHA256 != job.Request || receipt.BinarySHA256 != job.Binary || receipt.State != "succeeded" || receipt.Result.Values["verified"] != true {
+			return deployansible.Receipt{}, errors.New("upgrade_committed_continuation_receipt_invalid")
+		}
+		return receipt, nil
+	}
+	activation, err := verify(filepath.Join(directory, "activate"), "upgrade", variables)
+	if err != nil {
+		return err
+	}
+	timestamp, err := activationTimestamp(activation.Result.Values["activated_at"])
+	if err != nil {
+		return err
+	}
+	commitVariables := make(map[string]any, len(variables))
+	for key, value := range variables {
+		commitVariables[key] = value
+	}
+	commitVariables["ultra_upgrade_observed_at"] = timestamp
+	_, err = verify(upgradeDependentStageDirectory(directory, "commit", generation), "commit-release", commitVariables)
+	return err
+}
+
+func finishUpgradeCommit(ctx context.Context, p *installplan.InstallPlan, inspection upgradeInspection, inventory, variables map[string]any, directory, python, executable string, domainTransaction *upgradeDomainTransaction, generation int, retryFailed bool, version string) error {
+	var err error
+	// Old endpoints are retired only after the release commit succeeded. These
+	// durable phases retry the same generation; failures preserve the gate.
+	if domainTransaction.DNSChanged {
+		for _, phase := range []string{"promote", "retire", "retire-dns", "finalize"} {
+			if err = domainTransaction.phase(ctx, inventory, directory, python, executable, phase, generation); err != nil {
+				return errors.New("upgrade_domain_post_commit_retirement_incomplete")
+			}
+		}
+	} else if domainTransaction.Changed {
+		if err = domainTransaction.phase(ctx, inventory, directory, python, executable, "finalize", generation); err != nil {
+			return errors.New("upgrade_domain_metadata_finalize_incomplete")
+		}
+	}
+	if err = runUpgradeRuntimeEffectsCommit(ctx, p, inspection, inventory, variables, directory, python, executable, generation); err != nil {
+		// The release and endpoint cutover have committed. Keep the lifecycle gate
+		// held so this exact effect receipt can be safely retried.
+		return errors.New("upgrade_runtime_effect_commit_incomplete")
+	}
 	if err == nil && retryFailed {
-		err = clearRetriedVersionMarker(ctx, inspection.AutoPolicy, directory, manifest.Version)
+		err = clearRetriedVersionMarker(ctx, inspection.AutoPolicy, directory, version)
 	}
 	if err == nil {
 		err = ansibleLifecycle(ctx, p, inventory, directory, python, executable, "released", false)
@@ -562,7 +826,7 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 // Successful and interrupted jobs retain their original cache/resume semantics.
 // The caller holds the fleet lease; activation and other mutations never use this.
 func runUpgradeInspection(ctx context.Context, operation string, inventory, variables map[string]any, directory, python, executable string) (deployansible.Receipt, error) {
-	if operation != "inspect-upgrade" && operation != "inspect-release-hosts" {
+	if operation != "inspect-upgrade" && operation != "inspect-release-hosts" && operation != "inspect-upgrade-runtime" && operation != "inspect-upgrade-domains" {
 		return deployansible.Receipt{}, errors.New("upgrade_inspection_operation_required")
 	}
 	request, err := json.Marshal(map[string]any{"inventory": inventory, "variables": variables})

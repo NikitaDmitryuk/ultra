@@ -14,10 +14,10 @@ spec.loader.exec_module(controller)
 
 class OperationMappingTests(unittest.TestCase):
     def test_every_operation_resolves_to_one_existing_implementation(self):
-        self.assertEqual(len(controller.OPERATIONS), 44)
+        self.assertEqual(len(controller.OPERATIONS), 50)
         self.assertEqual(set(controller.PLAYBOOKS), controller.OPERATIONS)
         selected = {controller.operation_playbook(op) for op in controller.OPERATIONS}
-        self.assertEqual(len(selected), 41)
+        self.assertEqual(len(selected), 47)
         self.assertEqual(selected, {path.name for path in (SOURCE / 'playbooks').glob('*.yml')})
 
     def test_shared_implementation_does_not_merge_operation_identities(self):

@@ -193,6 +193,11 @@ test-ansible:
 	python3 scripts/test-ansible-owned-file.py
 	python3 scripts/test-ansible-input-types.py
 	python3 scripts/test-ansible-operation-mapping.py
+	python3 scripts/test-ansible-dns-migration.py
+	python3 scripts/test-ansible-upgrade-runtime.py
+	python3 scripts/test-ansible-accepted-resume.py
+	python3 scripts/test-ansible-upgrade-domain.py
+	python3 scripts/test-ansible-runtime-effects.py
 	python3 scripts/test-ansible-release-identity.py
 	python3 scripts/test-ansible-upgrade-baseline.py
 	python3 scripts/test-ansible-release-retention.py
@@ -212,7 +217,7 @@ test-ansible-exit: build-install
 # Explicit operator action: builds committed HEAD in isolation, then rolls out.
 .PHONY: deploy deploy-build test-manual-deploy
 deploy:
-	python3 scripts/manual-deploy.py $(if $(INSTALL_CONFIG),--config "$(INSTALL_CONFIG)",) $(if $(filter 1,$(RETRY_FAILED)),--retry-failed,)
+	python3 scripts/manual-deploy.py $(if $(INSTALL_CONFIG),--config "$(INSTALL_CONFIG)",) $(if $(filter 1,$(RETRY_FAILED)),--retry-failed,) $(if $(SUBSCRIPTION_PROBE_ENV_FILE),--subscription-probe-env-file "$(SUBSCRIPTION_PROBE_ENV_FILE)",)
 
 deploy-build:
 	python3 scripts/manual-deploy.py --build-only

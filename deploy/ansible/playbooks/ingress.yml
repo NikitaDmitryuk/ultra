@@ -7,7 +7,7 @@
     - name: Configure forwarding ingress
       ansible.builtin.include_role:
         name: forward_ingress
-      when: ultra_ingress_action != 'adopt'
+      when: ultra_ingress_action not in ['adopt', 'accept', 'retire']
     - name: Verify preserved forwarding ingress
       ansible.builtin.include_role:
         name: forward_ingress
@@ -18,6 +18,138 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    - name: Bind acceptance and retirement to the retained-alias cutover plan
+      ansible.builtin.set_fact:
+        ingress_retention_plan: "{{ ultra_ingress | combine({'retain_aliases': true, 'subscription_domain': ultra_subscription_domain}) }}"
+      when: ultra_ingress_action in ['accept', 'retire']
+    - name: Validate explicit post-acceptance alias retirement request
+      ansible.builtin.assert:
+        that:
+          - ultra_ingress_action == 'retire'
+      when: ultra_ingress_action == 'retire'
+    - name: Validate explicit ingress acceptance request
+      ansible.builtin.assert:
+        that:
+          - ultra_ingress_action == 'accept'
+      when: ultra_ingress_action == 'accept'
+    - name: Reopen the exact cutover candidate for acceptance checks
+      ultra_ingress_state:
+        directory: "{{ ultra_ingress_transaction }}"
+        plan: "{{ ingress_retention_plan }}"
+        action: cutover
+        phase: prepare
+      register: ingress_acceptance_candidate
+      no_log: true
+      when: ultra_ingress_action == 'accept'
+    - name: Read active and candidate spec digests before acceptance
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop:
+        - /etc/ultra-relay/spec.json
+        - "{{ ingress_acceptance_candidate.candidate | default('/nonexistent') }}"
+      register: ingress_acceptance_specs
+      when: ultra_ingress_action == 'accept'
+    - name: Require the active runtime spec to be the journalled candidate
+      ansible.builtin.assert:
+        that:
+          - ingress_acceptance_specs.results[0].stat.checksum == ingress_acceptance_specs.results[1].stat.checksum
+          - ingress_acceptance_specs.results[0].stat.checksum is string
+      when: ultra_ingress_action == 'accept'
+    - name: Verify relay readiness before recording acceptance
+      ultra_ingress_probe:
+        kind: relay
+      register: ingress_acceptance_relay
+      until: ingress_acceptance_relay.ready | default(false)
+      retries: 30
+      delay: 2
+      no_log: true
+      when: ultra_ingress_action == 'accept'
+    - name: Verify target TLS before recording acceptance
+      ultra_ingress_probe:
+        kind: tls
+        address: "{{ ultra_bridge_ipv4 }}"
+        hostname: "{{ ingress_acceptance_candidate.profile.server_name | default('') }}"
+        port: "{{ ingress_acceptance_candidate.profile.port | default(443) }}"
+      no_log: true
+      when: ultra_ingress_action == 'accept'
+    - name: Verify subscription identities and tunnel payload before recording acceptance
+      ultra_cutover_probe:
+        phase: verify
+        directory: "{{ ultra_ingress_transaction }}"
+        subscription_url: "{{ ultra_cutover_subscription_url | default(omit) }}"
+        subscription_url_file: "{{ ultra_cutover_subscription_url_file | default(omit) }}"
+        subscription_url_sha256: "{{ ultra_cutover_subscription_url_sha256 | default(omit) }}"
+        subscription_source_domain: "{{ ultra_cutover_subscription_source_domain | default(omit) }}"
+        subscription_domain: "{{ ultra_subscription_domain }}"
+        bridge_ipv4: "{{ ultra_bridge_ipv4 }}"
+        domain: "{{ ingress_acceptance_candidate.profile.server_name | default('') }}"
+        public_host: "{{ ingress_acceptance_candidate.profile.host | default('') }}"
+        path: "{{ ingress_acceptance_candidate.profile.path | default('') }}"
+      no_log: true
+      when: ultra_ingress_action == 'accept'
+    - name: Record verified cutover acceptance for explicit later retirement
+      ansible.builtin.copy:
+        content: "{{ {'verified': true, 'transaction_sha256': ingress_acceptance_specs.results[1].stat.checksum, 'domain': ingress_acceptance_candidate.profile.server_name, 'public_host': ingress_acceptance_candidate.profile.host} | to_json }}\n"
+        dest: "{{ ultra_ingress_transaction }}/acceptance.json"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      when: ultra_ingress_action == 'accept'
+    - name: Validate cutover candidate, acceptance and exact alias ownership before retirement
+      ultra_ingress_state:
+        directory: "{{ ultra_ingress_transaction }}"
+        plan: "{{ ingress_retention_plan }}"
+        action: cutover
+        phase: retire
+      register: ingress_retirement
+      no_log: true
+      when: ultra_ingress_action == 'retire'
+    - name: Remove only retained, receipt-owned old domain aliases
+      ultra_owned_file:
+        path: "{{ item.path }}"
+        receipt: /var/lib/ultra-ingress/managed.json
+        state: absent
+      loop: "{{ ingress_retirement.aliases | default([]) }}"
+      register: ingress_retired_aliases
+      no_log: true
+      when: ultra_ingress_action == 'retire'
+    - name: Validate ingress after old aliases are retired
+      ansible.builtin.command:
+        argv: [nginx, -t]
+      changed_when: false
+      when: ultra_ingress_action == 'retire'
+    - name: Reload ingress after old aliases are retired
+      ansible.builtin.systemd_service:
+        name: nginx.service
+        state: reloaded
+      when:
+        - ultra_ingress_action == 'retire'
+        - ingress_retired_aliases.changed | default(false)
+    - name: Verify target ingress TLS after old aliases are retired
+      ultra_ingress_probe:
+        kind: tls
+        address: "{{ ultra_bridge_ipv4 }}"
+        hostname: "{{ ingress_retirement.target_domain | default('') }}"
+        port: 443
+      no_log: true
+      when: ultra_ingress_action == 'retire'
+    - name: Verify subscription and tunnel payload after old aliases are retired
+      ultra_cutover_probe:
+        phase: verify
+        directory: "{{ ultra_ingress_transaction }}"
+        subscription_url: "{{ ultra_cutover_subscription_url | default(omit) }}"
+        subscription_url_file: "{{ ultra_cutover_subscription_url_file | default(omit) }}"
+        subscription_url_sha256: "{{ ultra_cutover_subscription_url_sha256 | default(omit) }}"
+        subscription_source_domain: "{{ ultra_cutover_subscription_source_domain | default(omit) }}"
+        subscription_domain: "{{ ultra_subscription_domain }}"
+        bridge_ipv4: "{{ ultra_bridge_ipv4 }}"
+        domain: "{{ ingress_retirement.target_domain | default('') }}"
+        public_host: "{{ ingress_retirement.target_host | default('') }}"
+        path: "{{ ingress_retirement.target_path | default('') }}"
+      no_log: true
+      when: ultra_ingress_action == 'retire'
     - name: Configure bridge ingress and certificates
       ansible.builtin.include_role:
         name: ingress
