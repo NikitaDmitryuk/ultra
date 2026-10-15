@@ -24,7 +24,7 @@ elif [[ -f "$(install_config_default_path)" ]]; then
 	load_install_config "$(install_config_default_path)"
 fi
 
-BRIDGE="${BRIDGE:-${FRONT:-}}"
+BRIDGE="${BRIDGE:-}"
 BOT_DOMAIN="${BOT_DOMAIN:-}"
 BOT_PORT="${BOT_PORT:-8444}"
 

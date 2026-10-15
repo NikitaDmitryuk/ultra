@@ -4,31 +4,9 @@
     that:
       - ultra_postgres.name is match('^[a-z_][a-z0-9_]*$')
       - ultra_postgres.user is match('^[a-z_][a-z0-9_]*$')
-      - ultra_postgres.repl_user is match('^[a-z_][a-z0-9_]*$')
   no_log: true
-- name: Read PostgreSQL host distribution
-  ansible.builtin.setup:
-    gather_subset: [distribution]
-- name: Require supported primary platform
-  ansible.builtin.assert:
-    that:
-      - ansible_facts.distribution in ['Ubuntu', 'Debian']
-- name: Install PostgreSQL repository certificate dependency
-  ansible.builtin.apt:
-    name: ca-certificates
-    state: present
-    update_cache: true
-    cache_valid_time: 3600
-- name: Install PostgreSQL repository signing key
-  ansible.builtin.get_url:
-    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
-    dest: /usr/share/keyrings/ultra-postgresql.asc
-    mode: "0644"
-- name: Configure official PostgreSQL repository
-  ansible.builtin.apt_repository:
-    repo: "deb [signed-by=/usr/share/keyrings/ultra-postgresql.asc] https://apt.postgresql.org/pub/repos/apt {{ ansible_facts.distribution_release }}-pgdg main"
-    filename: ultra-postgresql
-    state: present
+- name: Configure PostgreSQL package repository
+  ansible.builtin.import_tasks: repository.yml
 - name: Install PostgreSQL 16
   ansible.builtin.apt:
     name: [postgresql-16, postgresql-contrib-16]
@@ -48,19 +26,14 @@
   loop:
     - {key: timezone, value: "'UTC'"}
     - {key: log_timezone, value: "'UTC'"}
-    - {key: wal_level, value: replica}
-    - {key: max_wal_senders, value: "10"}
-    - {key: max_replication_slots, value: "10"}
-    - {key: max_slot_wal_keep_size, value: "'1GB'"}
     - {key: listen_addresses, value: "'127.0.0.1'"}
   notify: Restart PostgreSQL
-- name: Install authenticated application and replication access
+- name: Install authenticated application application access
   ansible.builtin.blockinfile:
     path: /etc/postgresql/16/main/pg_hba.conf
     marker: "# {mark} ultra-managed-loopback"
     block: |
       host {{ ultra_postgres.name }} {{ ultra_postgres.user }} 127.0.0.1/32 scram-sha-256
-      host replication {{ ultra_postgres.repl_user }} 127.0.0.1/32 scram-sha-256
   notify: Restart PostgreSQL
 - name: Provision missing database roles without rotating existing credentials
   ansible.builtin.command:
@@ -69,13 +42,25 @@
       SELECT format('CREATE ROLE %I LOGIN PASSWORD %L',
         '{{ ultra_postgres.user }}', '{{ ultra_postgres.password | replace("'", "''") }}')
         WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ ultra_postgres.user }}') \gexec
-      SELECT format('CREATE ROLE %I REPLICATION LOGIN PASSWORD %L',
-        '{{ ultra_postgres.repl_user }}', '{{ ultra_postgres.repl_password | replace("'", "''") }}')
-        WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ ultra_postgres.repl_user }}') \gexec
       SELECT format('CREATE DATABASE %I OWNER %I', '{{ ultra_postgres.name }}', '{{ ultra_postgres.user }}')
         WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '{{ ultra_postgres.name }}') \gexec
   register: postgres_create
   changed_when: "'CREATE' in postgres_create.stdout"
   no_log: true
+- name: Authorize cluster identity observation in the application database
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --dbname, "{{ ultra_postgres.name }}"]
+    stdin: |
+      SELECT format('GRANT EXECUTE ON FUNCTION pg_control_system() TO %I', '{{ ultra_postgres.user }}') \gexec
+  changed_when: false
+  no_log: true
 - name: Apply PostgreSQL settings
   ansible.builtin.meta: flush_handlers
+- name: Verify application login before bridge activation; use DB_CREDENTIALS_FILE for an existing database
+  ansible.builtin.command:
+    argv: [/usr/lib/postgresql/16/bin/psql, --no-psqlrc, --no-password, --host, 127.0.0.1, --username, "{{ ultra_postgres.user }}", --dbname, "{{ ultra_postgres.name }}", --tuples-only, --command, SELECT 1]
+  environment:
+    PGPASSWORD: "{{ ultra_postgres.password }}"
+    PGCONNECT_TIMEOUT: "5"
+  changed_when: false
+  no_log: true

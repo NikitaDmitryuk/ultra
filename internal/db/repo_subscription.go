@@ -8,6 +8,7 @@ import (
 
 	"github.com/NikitaDmitryuk/ultra/internal/subscriptionkey"
 	"github.com/jackc/pgx/v5"
+	"gorm.io/gorm"
 )
 
 var ErrLegacySubscription = errors.New("legacy subscription requires explicit rotation")
@@ -85,8 +86,7 @@ func (r *SubscriptionRepo) issue(ctx context.Context, id string, rotate bool) (s
 	return token, tx.Commit(ctx)
 }
 func (r *SubscriptionRepo) Revoke(ctx context.Context, id string) error {
-	_, err := r.db.Pool.Exec(ctx, `DELETE FROM subscription_tokens WHERE user_uuid=$1`, id)
-	return err
+	return r.db.orm.WithContext(ctx).Table("subscription_tokens").Where("user_uuid = ?", id).Delete(&subscriptionTokenRow{}).Error
 }
 func (r *SubscriptionRepo) Resolve(ctx context.Context, token string) (string, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(token)
@@ -94,17 +94,16 @@ func (r *SubscriptionRepo) Resolve(ctx context.Context, token string) (string, e
 		return "", pgx.ErrNoRows
 	}
 	digest := sha256.Sum256([]byte(token))
-	var id string
-	err = r.db.Pool.QueryRow(ctx, `SELECT u.uuid::text FROM subscription_tokens t JOIN users u ON u.uuid=t.user_uuid
- WHERE t.token_hash=$1 AND u.is_active AND u.kind='vless' AND NOT u.member_pending AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=u.account_id)`, digest[:]).Scan(&id)
-	return id, err
+	var row struct{ UUID string }
+	err = cloudLookupError(r.activeTokens(ctx).Select("u.uuid").Where("t.token_hash = ?", digest[:]).Take(&row).Error)
+	return row.UUID, err
 }
 
 // IsAdminOwner resolves permissions from the subscription owner, never request metadata.
 func (r *SubscriptionRepo) IsAdminOwner(ctx context.Context, id string) (bool, error) {
-	var admin bool
-	err := r.db.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users u JOIN bot_admins a ON a.telegram_id=u.telegram_id WHERE u.uuid=$1)`, id).Scan(&admin)
-	return admin, err
+	var rows []struct{ UUID string }
+	err := r.db.orm.WithContext(ctx).Table("users AS u").Select("u.uuid").Joins("JOIN bot_admins a ON a.telegram_id = u.telegram_id").Where("u.uuid = ?", id).Limit(1).Find(&rows).Error
+	return len(rows) > 0, err
 }
 
 // EnqueueIngressNotice deduplicates a rollout notice across retries and concurrent callers.
@@ -137,26 +136,31 @@ func (r *SubscriptionRepo) ListActiveTokens(ctx context.Context) ([]string, erro
 	if !r.Ready() {
 		return nil, subscriptionkey.ErrUnavailable
 	}
-	rows, e := r.db.Pool.Query(ctx, `SELECT u.uuid::text,t.encrypted_token,t.key_version FROM subscription_tokens t JOIN users u ON u.uuid=t.user_uuid WHERE u.is_active AND u.kind='vless' AND NOT u.member_pending AND t.encrypted_token IS NOT NULL AND t.key_version IS NOT NULL AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=u.account_id) ORDER BY u.uuid`)
+	var rows []struct {
+		UUID           string
+		EncryptedToken []byte
+		KeyVersion     string
+	}
+	e := r.activeTokens(ctx).Select("u.uuid, t.encrypted_token, t.key_version").Where("t.encrypted_token IS NOT NULL AND t.key_version IS NOT NULL").Order("u.uuid").Find(&rows).Error
 	if e != nil {
 		return nil, e
 	}
-	defer rows.Close()
 	out := []string{}
-	for rows.Next() {
-		var id, version string
-		var encrypted []byte
-		if e := rows.Scan(&id, &encrypted, &version); e != nil {
-			return nil, e
-		}
-		if len(encrypted) == 0 {
+	for _, row := range rows {
+		if len(row.EncryptedToken) == 0 {
 			continue
 		}
-		token, e := r.keys.Open(id, encrypted, version)
+		token, e := r.keys.Open(row.UUID, row.EncryptedToken, row.KeyVersion)
 		if e != nil {
 			return nil, e
 		}
 		out = append(out, token)
 	}
-	return out, rows.Err()
+	return out, nil
+}
+
+// Build the eligibility predicate once so resolving and exporting tokens agree.
+func (r *SubscriptionRepo) activeTokens(ctx context.Context) *gorm.DB {
+	services := r.db.orm.Table("service_access AS s").Select("1").Where("s.account_id = u.account_id")
+	return r.db.orm.WithContext(ctx).Table("subscription_tokens AS t").Joins("JOIN users u ON u.uuid = t.user_uuid").Where("u.is_active AND u.kind = ? AND NOT u.member_pending", "vless").Where("NOT EXISTS (?)", services)
 }

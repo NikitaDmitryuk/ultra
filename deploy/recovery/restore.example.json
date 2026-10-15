@@ -11,6 +11,13 @@
     "identity": "/home/operator/.ssh/replacement_vm",
     "known_hosts": "/home/operator/recovery/replacement_known_hosts"
   },
+  "database_host": "192.0.2.30",
+  "database_target": {
+    "host": "root@192.0.2.30",
+    "port": 22,
+    "identity": "/home/operator/.ssh/dedicated_database",
+    "known_hosts": "/home/operator/recovery/database_known_hosts"
+  },
   "ingress": {
     "host": "root@198.51.100.10",
     "port": 22,

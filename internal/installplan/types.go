@@ -33,6 +33,7 @@ type SSHConfig struct {
 }
 
 type BridgeConfig struct {
+	SSHIdentity string `json:"ssh_identity,omitempty"`
 	Address     string `json:"address,omitempty"`
 	SSHHost     string `json:"ssh_host"`
 	PublicHost  string `json:"public_host,omitempty"`
@@ -48,13 +49,14 @@ type BridgeConfig struct {
 }
 
 type ExitNode struct {
-	Name       string `json:"name"`
-	SSHHost    string `json:"ssh_host"`
-	DialAddr   string `json:"dial_addr,omitempty"`
-	Port       int    `json:"port,omitempty"`
-	Priority   int    `json:"priority,omitempty"`
-	Enabled    *bool  `json:"enabled,omitempty"`
-	TunnelUUID string `json:"tunnel_uuid,omitempty"`
+	SSHIdentity string `json:"ssh_identity,omitempty"`
+	Name        string `json:"name"`
+	SSHHost     string `json:"ssh_host"`
+	DialAddr    string `json:"dial_addr,omitempty"`
+	Port        int    `json:"port,omitempty"`
+	Priority    int    `json:"priority,omitempty"`
+	Enabled     *bool  `json:"enabled,omitempty"`
+	TunnelUUID  string `json:"tunnel_uuid,omitempty"`
 }
 
 type DatabaseConfig struct {
@@ -62,6 +64,7 @@ type DatabaseConfig struct {
 	PrimaryHost string `json:"primary_host,omitempty"`
 	ReplicaHost string `json:"replica_host,omitempty"`
 	SSHUser     string `json:"ssh_user,omitempty"`
+	SSHIdentity string `json:"ssh_identity,omitempty"`
 	Name        string `json:"name,omitempty"`
 	User        string `json:"user,omitempty"`
 }
@@ -76,7 +79,10 @@ type BotConfig struct {
 }
 
 type SecretsConfig struct {
-	EnvFile string `json:"env_file,omitempty"`
+	DatabaseDumpFile        string `json:"database_dump_file,omitempty"`
+	DatabaseDumpSHA256      string `json:"database_dump_sha256,omitempty"`
+	DatabaseCredentialsFile string `json:"database_credentials_file,omitempty"`
+	EnvFile                 string `json:"env_file,omitempty"`
 }
 
 type FeatureConfig struct {
@@ -199,21 +205,21 @@ type DoctorReport struct {
 // AutomationConfig contains references and public deployment policy, never secret values.
 // A v2 plan requires automation; v1 plans retain their legacy deployment semantics.
 type AutomationConfig struct {
-	DNS                 *AutomationDNS         `json:"dns,omitempty"`
-	Ingress             *AutomationIngress     `json:"ingress,omitempty"`
-	AdminTelegramID     int64                  `json:"admin_telegram_id,omitempty"`
-	ReleaseDir          string                 `json:"release_dir"`
-	Version             string                 `json:"version"`
-	AgeRecipient        string                 `json:"age_recipient"`
-	BridgeProvider      string                 `json:"bridge_provider"`
-	BridgeIPv4          string                 `json:"bridge_ipv4"`
-	BridgeURL           string                 `json:"bridge_url"`
-	CloudKeyFile        string                 `json:"cloud_key_file,omitempty"`
-	KnownHostsFile      string                 `json:"known_hosts_file"`
-	StaticNodes         []AutomationNode       `json:"static_nodes"`
-	StatePaths          []string               `json:"state_paths,omitempty"`
-	ArtifactPaths       []string               `json:"artifact_paths,omitempty"`
-	ReadinessTimeoutSec int                    `json:"readiness_timeout_sec,omitempty"`
+	DNS                 *AutomationDNS     `json:"dns,omitempty"`
+	Ingress             *AutomationIngress `json:"ingress,omitempty"`
+	AdminTelegramID     int64              `json:"admin_telegram_id,omitempty"`
+	ReleaseDir          string             `json:"release_dir"`
+	Version             string             `json:"version"`
+	AgeRecipient        string             `json:"age_recipient"`
+	BridgeProvider      string             `json:"bridge_provider"`
+	BridgeIPv4          string             `json:"bridge_ipv4"`
+	BridgeURL           string             `json:"bridge_url"`
+	CloudKeyFile        string             `json:"cloud_key_file,omitempty"`
+	KnownHostsFile      string             `json:"known_hosts_file"`
+	StaticNodes         []AutomationNode   `json:"static_nodes"`
+	StatePaths          []string           `json:"state_paths,omitempty"`
+	ArtifactPaths       []string           `json:"artifact_paths,omitempty"`
+	ReadinessTimeoutSec int                `json:"readiness_timeout_sec,omitempty"`
 }
 type StaticBudget struct {
 	MonthlyBytes int64 `json:"monthly_bytes"`
@@ -258,4 +264,18 @@ func (p *InstallPlan) PublicSubscriptionDomain() string {
 		return p.Bot.SubscriptionDomain
 	}
 	return p.Bot.Domain
+}
+
+// Role-specific keys override the shared legacy identity without changing it.
+func (p *InstallPlan) BridgeSSHIdentity() string {
+	if p.Bridge.SSHIdentity != "" {
+		return p.Bridge.SSHIdentity
+	}
+	return p.SSH.Identity
+}
+func (p *InstallPlan) ExitSSHIdentity(node ExitNode) string {
+	if node.SSHIdentity != "" {
+		return node.SSHIdentity
+	}
+	return p.SSH.Identity
 }

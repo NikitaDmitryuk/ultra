@@ -22,13 +22,12 @@ import (
 type Client struct{ Socket string }
 type Message struct {
 	leaseInputs []*os.File
-	Action      string          `json:"action"`
-	ID          string          `json:"id"`
-	NextID      string          `json:"next_id,omitempty"`
-	Binary      string          `json:"binary,omitempty"`
-	Request     *ExitRequest    `json:"request,omitempty"`
-	Replica     *ReplicaRequest `json:"replica,omitempty"`
-	NodeID      string          `json:"node_id,omitempty"`
+	Action      string       `json:"action"`
+	ID          string       `json:"id"`
+	NextID      string       `json:"next_id,omitempty"`
+	Binary      string       `json:"binary,omitempty"`
+	Request     *ExitRequest `json:"request,omitempty"`
+	NodeID      string       `json:"node_id,omitempty"`
 }
 type Response struct {
 	leaseOutputs []*os.File
@@ -68,16 +67,6 @@ func (c Client) exchange(ctx context.Context, message Message) (Response, error)
 			return Response{}, errors.New("exit request required")
 		}
 		inputs, err = openInputs(message.Binary, *message.Request)
-		if err != nil {
-			return Response{}, err
-		}
-		defer closeInputs(inputs)
-	}
-	if message.Action == "submit-replica" {
-		if message.Replica == nil {
-			return Response{}, errors.New("replica request required")
-		}
-		inputs, err = openReplicaInputs(*message.Replica)
 		if err != nil {
 			return Response{}, err
 		}
@@ -305,7 +294,7 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 	if err = decoder.Decode(&message); err != nil {
 		return Response{Code: "invalid_request"}
 	}
-	if message.Action != "submit" && message.Action != "submit-replica" && message.Action != "lease-applying" && message.Action != "lease-resume" && message.Action != "lease-supersede" && len(inputs) != 0 {
+	if message.Action != "submit" && message.Action != "lease-applying" && message.Action != "lease-resume" && message.Action != "lease-supersede" && len(inputs) != 0 {
 		return Response{Code: "unexpected_submitted_inputs"}
 	}
 	if message.Action == "lifecycle-status" {
@@ -358,20 +347,8 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 	}
 	directory := filepath.Join(state, message.ID)
 	switch message.Action {
-	case "submit-replica":
-		if message.Replica == nil || len(inputs) != 2 || message.Replica.ValidatePolicy() != nil {
-			return Response{Code: "invalid_replica_request"}
-		}
-		if err = prepareReplica(directory, "configure-replica", *message.Replica, inputs); err != nil {
-			return Response{Code: "replica_preparation_failed"}
-		}
-	case "stop-replica":
-		if !jobID.MatchString(message.NodeID) {
-			return Response{Code: "invalid_replica_request"}
-		}
-		if err = prepareReplica(directory, "stop-replica", map[string]string{"id": message.NodeID}, nil); err != nil {
-			return Response{Code: "replica_preparation_failed"}
-		}
+	case "submit-replica", "stop-replica":
+		return Response{Code: "replication_no_longer_supported"}
 	case "submit":
 		if message.Request == nil || len(inputs) != 3 {
 			return Response{Code: "exit_request_required"}

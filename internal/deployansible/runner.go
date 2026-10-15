@@ -247,8 +247,8 @@ func Execute(ctx context.Context, directory, python, executable string) (Result,
 		if _, err = hex.DecodeString(receipt.Result.CertPin); err != nil {
 			return Result{}, errors.New("ansible certificate pin invalid")
 		}
-	} else if receipt.Result.Values["verified"] != true {
-		return Result{}, errors.New("ansible replica acknowledgement invalid")
+	} else {
+		return Result{}, errors.New("unsupported typed ansible operation")
 	}
 	return receipt.Result, nil
 }

@@ -14,11 +14,15 @@ spec.loader.exec_module(controller)
 
 class OperationMappingTests(unittest.TestCase):
     def test_every_operation_resolves_to_one_existing_implementation(self):
-        self.assertEqual(len(controller.OPERATIONS), 53)
+        self.assertEqual(len(controller.OPERATIONS), 45)
         self.assertEqual(set(controller.PLAYBOOKS), controller.OPERATIONS)
         selected = {controller.operation_playbook(op) for op in controller.OPERATIONS}
-        self.assertEqual(len(selected), 50)
+        self.assertEqual(len(selected), 43)
+        retired = {'adopt-replica-tunnels.yml', 'replica.yml', 'stop-replica.yml', 'bridge-migrate.yml', 'bridge-migrate-inspect.yml', 'bridge-migrate-fence.yml', 'bridge-migrate-probe.yml', 'bridge-migrate-rollback-peers.yml'}
         self.assertEqual(selected, {path.name for path in (SOURCE / 'playbooks').glob('*.yml')})
+        for op in retired:
+            with self.assertRaisesRegex(ValueError, 'unsupported_operation'):
+                controller.operation_playbook(op.removesuffix('.yml'))
 
     def test_shared_implementation_does_not_merge_operation_identities(self):
         aliases = {'domain-cutover': 'ingress', 'configure-exit-operator': 'configure-exit',
@@ -28,7 +32,7 @@ class OperationMappingTests(unittest.TestCase):
         self.assertIn('configure-exit-operator', controller.LOCAL_OPERATIONS)
         self.assertIn('reserve-rolledback-bootstrap', controller.LOCAL_OPERATIONS)
         self.assertIn('retain-artifacts', controller.LOCAL_OPERATIONS)
-        self.assertIn('adopt-replica-tunnels', controller.LOCAL_OPERATIONS)
+        self.assertIn('restore-database', controller.LOCAL_OPERATIONS)
         for operation in ('bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge'):
             self.assertIn(operation, controller.LOCAL_OPERATIONS)
         self.assertNotIn('configure-exit', controller.LOCAL_OPERATIONS)
@@ -48,6 +52,24 @@ class OperationMappingTests(unittest.TestCase):
         for stage in (postgres, exit_stage, bridge):
             self.assertNotIn('ansible.builtin.shell', stage)
             self.assertIn('verified', stage)
+
+    def test_bridge_installs_only_pg16_clients_before_planner_and_backup(self):
+        import yaml
+        for name in ('bootstrap-postgres.yml', 'bootstrap.yml', 'bootstrap-automation.yml'):
+            plays = yaml.safe_load((SOURCE / 'playbooks' / name).read_text())
+            bridge = next(play for play in plays if play.get('hosts') == 'bridge')
+            self.assertEqual(bridge['roles'][0], 'postgres_client')
+        tasks = yaml.safe_load((SOURCE / 'roles/postgres_client/tasks/main.yml').read_text())
+        packages = [task['ansible.builtin.apt']['name'] for task in tasks if 'ansible.builtin.apt' in task]
+        self.assertEqual(packages, ['postgresql-client-16'])
+        self.assertTrue(any(task.get('ansible.builtin.include_role') == {'name': 'postgres', 'tasks_from': 'repository'} for task in tasks))
+        self.assertTrue(any(task.get('loop') == ['psql', 'pg_dump'] and 'failed_when' in task for task in tasks))
+        provisioning = yaml.safe_load((SOURCE / 'roles/postgres/tasks/main.yml').read_text())
+        auth = provisioning[-1]
+        self.assertIn('--no-password', auth['ansible.builtin.command']['argv'])
+        self.assertIn('PGPASSWORD', auth['environment'])
+        self.assertTrue(auth['no_log'])
+        self.assertEqual(provisioning[-2]['ansible.builtin.meta'], 'flush_handlers')
 
     def test_no_removed_operation_or_caller_chosen_path(self):
         for operation in ['verify', '../ingress', '/tmp/ingress', 'ingress.yml', 'arbitrary']:

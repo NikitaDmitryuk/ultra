@@ -8,7 +8,6 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
-	"github.com/NikitaDmitryuk/ultra/internal/install"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 	"testing"
 )
@@ -55,8 +54,6 @@ func (failedAnsibleConfigurer) ConfigureExit(context.Context, string, string, de
 func TestAnsibleControllerPreflightPreventsPurchasePreparation(t *testing.T) {
 	p := &Provisioner{
 		Configurer: failedAnsibleConfigurer{},
-		CheckReady: func(context.Context) error { return nil },
-		Replica:    func(context.Context, string, install.Remote) (string, error) { return "", nil },
 	}
 	// No API is installed: reaching cloud preparation would panic and fail this regression.
 	if _, err := p.Prepare(context.Background(), &cloud.Operation{}); err == nil || err.Error() != "controller_unavailable" {

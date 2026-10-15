@@ -61,8 +61,12 @@ flowchart LR
 - `internal/auth` управляет пользователями и кешем через интерфейс `DBUserRepo`.
   Интерфейс объявлен здесь, чтобы не создавать цикл `auth → db → auth`.
   См. [DBManager](../internal/auth/dbmanager.go).
-- `internal/db` реализует хранение, преобразования моделей и миграции; SQLC генерирует
-  низкоуровневые запросы. См. [подключение БД](../internal/db/db.go) и [конфигурацию sqlc](../sqlc.yaml).
+- `internal/db` реализует хранение, преобразования моделей и миграции. SQLC генерирует
+  PostgreSQL-запросы; обычный cloud CRUD использует GORM через тот же pgx pool.
+  Нумерованные SQL-миграции остаются единственным владельцем схемы; учёт трафика
+  и транзакционные блокировки выполняются через pgx/SQLC. См.
+  [подключение БД](../internal/db/db.go), [адаптер ORM](../internal/db/orm.go)
+  и [правила разработки](development.md#postgresql-sqlc-и-orm).
 - `internal/exits` управляет списком и выбором exit по health/priority. См.
   [менеджер](../internal/exits/manager.go) и [селектор](../internal/exits/selector.go).
 - `internal/installplan` валидирует и рендерит план; `cmd/ultra-install` передаёт установку
@@ -143,7 +147,10 @@ Mini App проверяет Telegram initData и права администра
 Бот проверяет Telegram, relay применяет изменения пользователей к ядру. Сохраняемый
 номер изменения защищает подтверждение от конкурентной записи.
 [Worker Vultr](vultr.md) работает на bridge; новые локации публикуются после проверки.
-[Реплики PostgreSQL](replication.md) служат ручному восстановлению, запись остаётся на bridge.
+PostgreSQL размещается на отдельном DB-сервере. Bridge подключается через
+закреплённый SSH-туннель с loopback-портом 25432; PostgreSQL на VPN-хостах и
+физические реплики не поддерживаются. Bootstrap создаёт БД, миграции применяет
+relay. См. [контракт развёртывания](automation.md).
 
 ## Управляемый HTTPS VPN-вход
 

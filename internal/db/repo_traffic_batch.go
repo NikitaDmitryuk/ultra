@@ -13,7 +13,6 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/db/sqlc"
 	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // RecordBatch acknowledges only a transaction that contains both deduplication and
@@ -36,17 +35,26 @@ func (r *TrafficRepo) RecordBatch(ctx context.Context, b runtimestate.TrafficBat
 		return e
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	// Share the rotation lock so UUID changes cannot race lookup and legacy aggregates.
-	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(817365007)`); e != nil {
-		return e
-	}
-	tag, e := tx.Exec(ctx, `INSERT INTO traffic_batches(node_id,batch_id,digest) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, b.NodeID, b.BatchID, hash[:])
+	qtx := r.db.Queries.WithTx(tx)
+	nodeID, e := toPGUUID(b.NodeID)
 	if e != nil {
 		return e
 	}
-	if tag.RowsAffected() == 0 {
-		var existing []byte
-		if e = tx.QueryRow(ctx, `SELECT digest FROM traffic_batches WHERE node_id=$1 AND batch_id=$2`, b.NodeID, b.BatchID).Scan(&existing); e != nil {
+	batchID, e := toPGUUID(b.BatchID)
+	if e != nil {
+		return e
+	}
+	// Share the rotation lock so UUID changes cannot race lookup and legacy aggregates.
+	if e = qtx.LockTrafficRotation(ctx); e != nil {
+		return e
+	}
+	inserted, e := qtx.InsertTrafficBatchIdentity(ctx, sqlc.InsertTrafficBatchIdentityParams{NodeID: nodeID, BatchID: batchID, Digest: hash[:]})
+	if e != nil {
+		return e
+	}
+	if inserted == 0 {
+		existing, e := qtx.TrafficBatchDigest(ctx, sqlc.TrafficBatchDigestParams{NodeID: nodeID, BatchID: batchID})
+		if e != nil {
 			return e
 		}
 		if !bytes.Equal(existing, hash[:]) {
@@ -54,53 +62,48 @@ func (r *TrafficRepo) RecordBatch(ctx context.Context, b runtimestate.TrafficBat
 		}
 		return tx.Commit(ctx)
 	}
-	q := r.db.Queries.WithTx(tx)
-	for _, s := range b.Samples {
+	// Normalize a copy: the digest above remains the exact persisted batch identity.
+	samples := append([]runtimestate.Sample(nil), b.Samples...)
+	for i := range samples {
+		s := &samples[i]
 		if strings.HasPrefix(s.ExitID, "@pool:") || s.AccountID == "" || s.UplinkBytes < 0 || s.DownlinkBytes < 0 || s.ChargeTotalBytes < 0 {
 			return errors.New("invalid traffic sample")
 		}
-		period := s.Period
-		if period == "" {
-			period = b.CollectedAt.UTC().Format("2006-01")
+		if s.Period == "" {
+			s.Period = b.CollectedAt.UTC().Format("2006-01")
 		}
-		if _, e := time.Parse("2006-01", period); e != nil {
+		if _, e := time.Parse("2006-01", s.Period); e != nil {
 			return e
 		}
-		// A restored PostgreSQL backup may predate this owner. Preserve the tombstone
-		// and exit cost without recreating a VPN credential.
-		if _, e = tx.Exec(ctx, `INSERT INTO traffic_accounts(account_id) VALUES($1) ON CONFLICT DO NOTHING`, s.AccountID); e != nil {
-			return e
+	}
+	if len(samples) > 0 {
+		payload, err := json.Marshal(samples)
+		if err != nil {
+			return err
 		}
-		if _, e = tx.Exec(ctx, `INSERT INTO account_exit_usage(account_id,exit_id,period,uplink_bytes,downlink_bytes,charged_bytes) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(account_id,exit_id,period) DO UPDATE SET uplink_bytes=account_exit_usage.uplink_bytes+EXCLUDED.uplink_bytes,downlink_bytes=account_exit_usage.downlink_bytes+EXCLUDED.downlink_bytes,charged_bytes=GREATEST(account_exit_usage.charged_bytes,EXCLUDED.charged_bytes)`, s.AccountID, s.ExitID, period, s.UplinkBytes, s.DownlinkBytes, s.ChargeTotalBytes); e != nil {
-			return e
+		// Separate ordered statements ensure tombstones exist before their FK users.
+		// Group at each destination's key: two routes may belong to the same owner.
+		// Raw rows retain the original collection time and physical route tag.
+		batch := &pgx.Batch{}
+		q := sqlc.New(&queuedSQLC{batch: batch})
+		arg := sqlc.InsertBatchTrafficAccountsParams{Samples: payload, CollectedAt: toPGTime(b.CollectedAt.UTC())}
+		if err := q.InsertBatchTrafficAccounts(ctx, arg); err != nil {
+			return err
 		}
-		if s.UplinkBytes == 0 && s.DownlinkBytes == 0 {
-			continue
+		if err := q.UpsertBatchAccountUsage(ctx, sqlc.UpsertBatchAccountUsageParams(arg)); err != nil {
+			return err
 		}
-		var id string
-		e = tx.QueryRow(ctx, `SELECT uuid::text FROM users WHERE account_id=$1`, s.AccountID).Scan(&id)
-		if errors.Is(e, pgx.ErrNoRows) {
-			continue
+		if err := q.InsertBatchRawTraffic(ctx, sqlc.InsertBatchRawTrafficParams(arg)); err != nil {
+			return err
 		}
-		if e != nil {
-			return e
+		if err := q.UpsertBatchDailyTraffic(ctx, sqlc.UpsertBatchDailyTrafficParams(arg)); err != nil {
+			return err
 		}
-		userUUID, e := toPGUUID(id)
-		if e != nil {
-			return e
+		if err := q.UpsertBatchMonthlyTraffic(ctx, sqlc.UpsertBatchMonthlyTrafficParams(arg)); err != nil {
+			return err
 		}
-		at := b.CollectedAt.UTC()
-		if e = q.InsertTrafficSample(ctx, sqlc.InsertTrafficSampleParams{UserUuid: userUUID, ExitTag: s.ExitTag, CollectedAt: toPGTime(at), UplinkBytes: s.UplinkBytes, DownlinkBytes: s.DownlinkBytes}); e != nil {
-			return e
-		}
-		if s.ExitTag != "" {
-			day := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC)
-			if e = q.UpsertDailyRouteTraffic(ctx, sqlc.UpsertDailyRouteTrafficParams{UserUuid: userUUID, Day: pgtype.Date{Time: day, Valid: true}, ExitTag: s.ExitTag, UplinkBytes: s.UplinkBytes, DownlinkBytes: s.DownlinkBytes}); e != nil {
-				return e
-			}
-		}
-		if e = q.UpsertMonthlyTraffic(ctx, sqlc.UpsertMonthlyTrafficParams{UserUuid: userUUID, Year: int32(at.Year()), Month: int32(at.Month()), UplinkBytes: s.UplinkBytes, DownlinkBytes: s.DownlinkBytes}); e != nil {
-			return e
+		if err := tx.SendBatch(ctx, batch).Close(); err != nil {
+			return err
 		}
 	}
 	if e = tx.Commit(ctx); e != nil {

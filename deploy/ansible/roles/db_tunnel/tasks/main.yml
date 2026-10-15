@@ -1,0 +1,10 @@
+---
+- name: Require an explicit database tunnel role stage
+  ansible.builtin.assert:
+    that:
+      - ultra_db_tunnel_stage | default('') in ['generate', 'authorize', 'install']
+    fail_msg: Set ultra_db_tunnel_stage to generate, authorize, or install for the three-stage bridge/database/bridge contract.
+
+- name: Run selected database tunnel stage
+  ansible.builtin.include_tasks: "{{ ultra_db_tunnel_stage }}.yml"
+

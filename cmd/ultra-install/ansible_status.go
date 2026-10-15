@@ -59,7 +59,7 @@ func ansibleAutomationStatus(ctx context.Context, p *installplan.InstallPlan, py
 
 func publicAutomationStatus(values map[string]any) map[string]any {
 	result := map[string]any{}
-	for _, key := range []string{"ready", "independent", "version", "backup_age_seconds", "controller_age_seconds", "replicas_ready", "reasons"} {
+	for _, key := range []string{"ready", "independent", "version", "backup_age_seconds", "controller_age_seconds", "reasons"} {
 		if value, ok := values[key]; ok {
 			result[key] = value
 		}

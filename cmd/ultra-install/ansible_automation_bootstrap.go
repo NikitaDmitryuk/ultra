@@ -78,6 +78,7 @@ func ansibleBootstrapAutomationGeneration(ctx context.Context, p *installplan.In
 		return err
 	}
 	configuration["database"] = p.Database.Name
+	configuration["database_host"] = p.Database.PrimaryHost
 	if p.Database.Name == "" {
 		configuration["database"] = "ultra_db"
 	}

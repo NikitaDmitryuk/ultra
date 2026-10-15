@@ -18,11 +18,19 @@ def read(path):
     return json.loads(source.read_text())
 
 
+def database_query(database, query):
+    sys.path.insert(0, '/opt/ultra-recovery')
+    import db_connection
+    parsed = db_connection.dsn_from_runtime(database)
+    with db_connection.pgpass('/var/lib/ultra-recovery', parsed) as environment:
+        return subprocess.run(db_connection.connection_args(parsed, database, 'psql') + ['-XAtq', '-v', 'ON_ERROR_STOP=1', '-c', query],
+                              env=environment, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=8)
+
+
 def runtime_node_proofs(database, nodes):
     """Bind only public tunnel digests to the already inspected DB topology."""
     query = "SELECT COALESCE(json_agg(json_build_object('id',id::text,'address',address,'tunnel_uuid',tunnel_uuid,'pin',pinned_peer_cert_sha256)), '[]'::json) FROM exit_nodes WHERE enabled"
-    result = subprocess.run(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database, '-c', query],
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=8)
+    result = database_query(database, query)
     if len(result.stdout) > 65536:
         raise ValueError('runtime_identity_unavailable')
     rows = json.loads(result.stdout)
@@ -95,16 +103,10 @@ def main():
     database = config['database']
     if not re.fullmatch(r'[A-Za-z0-9_-]+', database):
         raise ValueError('database_invalid')
-    query = "SELECT count(*)>0 AND bool_and(COALESCE(r.state='streaming' AND r.checked_at>now()-interval '90 seconds',false)) FROM exit_nodes n LEFT JOIN node_replication r ON r.node_id=n.id WHERE n.enabled"
-    evidence = subprocess.run(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database, '-c', query], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=8)
-    schema_evidence = subprocess.run(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database,
-                                     '-c', "SELECT COALESCE(max(version),0)::text || ':' || count(*)::text FROM schema_migrations"],
-                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=8).stdout.decode().strip()
+    schema_evidence = database_query(database, "SELECT COALESCE(max(version),0)::text || ':' || count(*)::text FROM schema_migrations").stdout.decode().strip()
     schema_max, schema_count = map(int, schema_evidence.split(':'))
     if schema_max <= 0 or schema_max != schema_count:
         raise ValueError('partial_database_schema')
-    if evidence.stdout.strip() != b't':
-        raise ValueError('replica_not_ready')
     for unit in ('ultra-recovery-backup.timer', 'ultra-recovery-reconcile.timer'):
         subprocess.run(['systemctl', 'is-active', '--quiet', unit], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
     if args.status:

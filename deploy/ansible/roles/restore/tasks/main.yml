@@ -7,7 +7,7 @@
   ansible.builtin.assert:
     that:
       - >-
-        ultra_restore_phase in ['prepare', 'install', 'database', 'peer_reseed', 'activate',
+        ultra_restore_phase in ['prepare', 'install', 'activate',
         'ingress', 'automation', 'ready', 'migration-bot', 'migration-controller']
       - ultra_restore_id is match('^[a-f0-9]{64}$')
       - ultra_restore_directory == '/var/lib/ultra-restore/' + ultra_restore_id
@@ -41,16 +41,20 @@
     owner: root
     group: root
     mode: "0600"
-  loop: [restore_host.py, restore_common.py, restore_peer.py, recovery.py, dns.py, recovery_status.py]
+  loop: [restore_host.py, restore_common.py, restore_peer.py, restore_firewall.py, reconcile.py, recovery.py, db_connection.py, dns.py, recovery_status.py]
 - name: Recheck fencing before any host preparation
   ansible.builtin.command:
     argv: [python3, "{{ ultra_restore_directory }}/restore_host.py", --directory, "{{ ultra_restore_directory }}", --phase, fence-check]
     stdin: "{{ ultra_restore_plan | to_json(preprocess_unsafe=False) }}"
   changed_when: false
   no_log: true
+- name: Prepare supported PostgreSQL clients for restored backup automation
+  ansible.builtin.include_role:
+    name: postgres_client
+  when: ultra_restore_phase == 'prepare'
 - name: Prepare target dependencies
   ansible.builtin.apt:
-    name: [postgresql-16, postgresql-client-16, nginx, libnginx-mod-stream, certbot, dnsutils, age, openssh-client, curl, openssl, ca-certificates, iproute2]
+    name: [ nginx, libnginx-mod-stream, certbot, dnsutils, age, openssh-client, curl, openssl, ca-certificates, iproute2]
     state: present
     update_cache: true
     cache_valid_time: 3600
@@ -141,6 +145,8 @@
       - "{{ ultra_restore_plan.public_host }}"
       - --subscription-domain
       - "{{ ultra_restore_plan.subscription_domain }}"
+      - --database-ip
+      - "{{ ultra_restore_plan.database_host }}"
       - --provider
       - "{{ ultra_restore_plan.new_bridge_provider }}"
   when:

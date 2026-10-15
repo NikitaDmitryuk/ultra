@@ -38,6 +38,17 @@
     src: "{{ ultra_automation_planner_source }}"
     dest: /var/lib/ultra-automation/bootstrap/bootstrap_plan.py
     mode: "0600"
+- name: Select the authenticated dedicated database tunnel helper
+  ansible.builtin.set_fact:
+    recovery_primary_db_connection_tool: "{{ ultra_automation_tools | selectattr('destination', 'equalto', '/opt/ultra-recovery/db_connection.py') | list }}"
+- name: Require the dedicated database tunnel helper in the verified release
+  ansible.builtin.assert:
+    that: recovery_primary_db_connection_tool | length == 1
+- name: Stage dedicated database tunnel helper beside the planner
+  ansible.builtin.copy:
+    src: "{{ recovery_primary_db_connection_tool[0].source }}"
+    dest: /var/lib/ultra-automation/bootstrap/db_connection.py
+    mode: "0600"
 - name: Inspect existing receiver generations before pausing timers
   ansible.builtin.command:
     argv: [systemctl, show, --property=LoadState, --value, ultra-recovery-backup.timer]

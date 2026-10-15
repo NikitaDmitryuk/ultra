@@ -11,14 +11,13 @@ import signal
 import subprocess
 import time
 
-LOCAL_OPERATIONS = {'bootstrap-forward-broker', 'contain-upgrade', 'drain-upgrade-workers', 'retain-artifacts', 'resume-schedules', 'rollback-adoption', 'reserve-rolledback-bootstrap', 'resume-adoption', 'lifecycle', 'prepare-controller', 'inspect-upgrade', 'preflight-retry', 'status-automation', 'inspect-release-hosts', 'resume-automation', 'configure-bot', 'configure-exit-operator', 'inspect-bootstrap', 'bootstrap', 'bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'bootstrap-automation', 'verify-bootstrap-automation', 'adopt', 'adopt-topology', 'adopt-replica-tunnels', 'upgrade', 'rollback', 'verify-release', 'commit-release', 'publish-release', 'ingress', 'reconcile', 'restore', 'restore-peer', 'replica', 'domain-cutover', 'backend-domain', 'bridge-migrate', 'bridge-migrate-inspect', 'bridge-migrate-fence', 'bridge-migrate-probe', 'bridge-migrate-rollback-peers', 'upgrade-dns-migration', 'inspect-upgrade-runtime', 'inspect-upgrade-maintenance', 'upgrade-runtime', 'inspect-upgrade-domains', 'upgrade-domain'}
-OPERATIONS = {'configure-exit', 'configure-replica', 'stop-replica'} | LOCAL_OPERATIONS
+LOCAL_OPERATIONS = {'bootstrap-forward-broker', 'contain-upgrade', 'drain-upgrade-workers', 'retain-artifacts', 'resume-schedules', 'rollback-adoption', 'reserve-rolledback-bootstrap', 'resume-adoption', 'lifecycle', 'prepare-controller', 'inspect-upgrade', 'preflight-retry', 'status-automation', 'inspect-release-hosts', 'resume-automation', 'configure-bot', 'configure-exit-operator', 'inspect-bootstrap', 'bootstrap', 'bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'bootstrap-automation', 'verify-bootstrap-automation', 'adopt', 'adopt-topology', 'upgrade', 'rollback', 'verify-release', 'commit-release', 'publish-release', 'ingress', 'reconcile', 'restore', 'restore-database', 'restore-peer', 'domain-cutover', 'backend-domain', 'upgrade-dns-migration', 'inspect-upgrade-runtime', 'inspect-upgrade-maintenance', 'upgrade-runtime', 'inspect-upgrade-domains', 'upgrade-domain'}
+OPERATIONS = {'configure-exit'} | LOCAL_OPERATIONS
 
 # Operation identities and authorization stay distinct even when implementation
 # is shared. Never derive a playbook path from caller-provided input.
 PLAYBOOKS = {operation: operation for operation in OPERATIONS}
-PLAYBOOKS.update({'configure-replica': 'replica',
-                 'configure-exit-operator': 'configure-exit',
+PLAYBOOKS.update({'configure-exit-operator': 'configure-exit',
                  'domain-cutover': 'ingress'})
 
 
@@ -115,38 +114,6 @@ def execute(directory, executable, bundle):
         atomic(directory / 'inventory.json', inventory)
         atomic(directory / 'variables.json', variables)
         write_unsafe_variables(directory / 'variables.yml', variables)
-    elif job['operation'] in ('configure-replica', 'stop-replica'):
-        import ipaddress
-        import shlex
-        if not re.fullmatch(r'[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}', request.get('id', '')):
-            raise ValueError('invalid_replica_identity')
-        slot = 'ultra_' + request['id'].replace('-', '')
-        inventory = {'all': {'children': {'bridges': {'hosts': {'bridge': {'ansible_connection': 'local'}}}}}}
-        variables = {'ultra_replica_slot': slot, 'ultra_result_file': str(directory / 'result.json')}
-        if job['operation'] == 'configure-replica':
-            ipaddress.ip_address(request['host'])
-            if not re.fullmatch(r'[a-z_][a-z0-9_]*', request['user']) or not re.fullmatch(r'[a-f0-9]{48,128}', request['password']):
-                raise ValueError('invalid_replica_credentials')
-            if request['architecture'] not in ('x86_64', 'aarch64') or not 1 <= request['primary_port'] <= 65535:
-                raise ValueError('invalid_replica_layout')
-            for name in ('identity', 'known_hosts'):
-                if hashlib.sha256(load_private(directory / name, raw=True)).hexdigest() != job[name + '_sha256']:
-                    raise ValueError('ssh_identity_changed')
-            inventory['all']['children']['replicas'] = {'hosts': {'replica': {
-                'ansible_host': request['host'], 'ansible_user': 'root',
-                'ansible_ssh_private_key_file': str(directory / 'identity'),
-                'ansible_ssh_args': '-F /dev/null -o ControlMaster=no -o ControlPath=none',
-                'ansible_ssh_common_args': '-o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o IdentitiesOnly=yes -o UserKnownHostsFile=' + shlex.quote(str(directory / 'known_hosts')),
-            }}}
-            for key in ('user', 'password', 'primary_port', 'architecture', 'connections', 'workers', 'prepared', 'locks', 'senders'):
-                variables['ultra_replica_' + key] = request[key]
-            variables['ultra_replica_required_bytes'] = request['required_bytes']
-            variables['ultra_replica_address'] = request['host']
-            variables['ultra_replica_identity_source'] = str(directory / 'identity')
-            variables['ultra_replica_known_hosts_source'] = str(directory / 'known_hosts')
-        atomic(directory / 'inventory.json', inventory)
-        atomic(directory / 'variables.json', variables)
-        write_unsafe_variables(directory / 'variables.yml', variables)
     else:
         if request['spec']['role'] != 'exit':
             raise ValueError('exit_spec_required')
@@ -214,12 +181,10 @@ def execute(directory, executable, bundle):
             result = load_private(result_path)
             if job['operation'] in ('configure-exit', 'bootstrap-exit') and not re.fullmatch(r'[a-f0-9]{64}', result.get('cert_pin', '')):
                 raise ValueError('invalid_certificate_pin')
-            if job['operation'] in ('bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'adopt-replica-tunnels') and result.get('verified') is not True:
+            if job['operation'] in ('bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge') and result.get('verified') is not True:
                 raise ValueError('invalid_bootstrap_component_acknowledgement')
             if job['operation'] == 'bootstrap-exit' and result.get('exit_host') != variables.get('ultra_bootstrap_exit_host'):
                 raise ValueError('invalid_bootstrap_exit_identity')
-            if job['operation'] in ('configure-replica', 'stop-replica') and result.get('verified') is not True:
-                raise ValueError('invalid_replica_acknowledgement')
             state.update(state='succeeded', result=result)
     except InterruptedError:
         # Operator/service cancellation is resumable, unlike a terminal timeout.

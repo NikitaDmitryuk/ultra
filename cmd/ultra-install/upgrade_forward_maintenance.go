@@ -31,7 +31,7 @@ func containForwardUpgradeFailure(ctx context.Context, deps forwardMaintenanceDe
 	return nil
 }
 
-// A replica maintenance worker may briefly own infrastructure.lock while the
+// A previous maintenance worker may briefly own infrastructure.lock while the
 // lifecycle is checking. Keep retrying only that expected contention; do not
 // retry ownership, transport, or persistence failures as if they were transient.
 func attachForwardMaintenanceLease(ctx context.Context, attach func(context.Context) (context.Context, func(), error)) (context.Context, func(), error) {

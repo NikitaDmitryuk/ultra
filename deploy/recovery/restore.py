@@ -156,6 +156,7 @@ def _execute(config, diagnostic):
         if config.get('migration_identity') is not None:
             plan['migration_identity'] = config['migration_identity']
         plan.update(architecture=architecture, restore_id=run_id, target_host=config['target']['host'], readiness_timeout=config.get('readiness_timeout', 900), stage_sha256=sha(archive))
+        plan['database_host'] = config['database_host']
         receipt = {'restore_id': run_id, 'snapshot_at': state['snapshot_at'], 'completed': [], 'started_at': started_at}
         receipt_path = directory / 'receipt.json'
         if receipt_path.exists():
@@ -172,7 +173,22 @@ def _execute(config, diagnostic):
             atomic_json(receipt_path, receipt)
             print(json.dumps({'phase': phase, 'complete': True}), flush=True)
         host('prepare')
-        for phase in ('install', 'database', 'peer_reseed', 'activate'):
+        host('install')
+        from restore_host import database_spec
+        spec = json.loads((directory / 'stage/state/etc/ultra-relay/spec.json').read_text())
+        database_name, database_user, _ = database_spec(spec)
+        release = json.loads((directory / 'stage/artifacts/opt/ultra-recovery/release-manifest.json').read_text())
+        database_plan = {'restore_id': run_id, 'database': {'name': database_name, 'user': database_user},
+                         'database_host': config['database_host'], 'stage_sha256': sha(archive),
+                         'dump_sha256': state['files']['database.dump']['sha256'],
+                         'schema_min': release['database_schema_min'], 'schema_max': release['database_schema_max']}
+        diagnostic.stage = 'database'
+        database_result = restore_ansible.database(config, directory, database_plan, archive)
+        receipt['database'] = database_result
+        receipt['completed'].append('database')
+        atomic_json(receipt_path, receipt)
+        print(json.dumps({'phase': 'database', 'complete': True}), flush=True)
+        for phase in ('activate',):
             host(phase)
         if config['ingress_mode'] == 'forward':
             plan['fence'] = current_fence(config)

@@ -197,7 +197,7 @@ class Contracts(unittest.TestCase):
             output = b'25:25' if 'schema_migrations' in argv[-1] else b't'
             return types.SimpleNamespace(stdout=output, returncode=0)
         fake_reconcile = types.SimpleNamespace(desired_nodes=lambda *args: ([], set()), discover=lambda *args: [])
-        with patch.dict(sys.modules, {'reconcile': fake_reconcile}), patch.object(state, 'read', side_effect=lambda path: values[Path(path).name]), patch.object(state.time, 'time', return_value=110), patch.object(state.subprocess, 'run', side_effect=result), patch.object(sys, 'argv', ['state.py', '--status', '--expected', digest, '--not-before', '100']):
+        with patch.dict(sys.modules, {'reconcile': fake_reconcile}), patch.object(state, 'read', side_effect=lambda path: values[Path(path).name]), patch.object(state.time, 'time', return_value=110), patch.object(state.subprocess, 'run', side_effect=result), patch.object(state, 'database_query', side_effect=lambda database, query: result(['psql', query])), patch.object(sys, 'argv', ['state.py', '--status', '--expected', digest, '--not-before', '100']):
             with self.assertRaisesRegex(ValueError, 'post_activation_evidence_required'):
                 state.main()
             values['recovery-reconcile-status.json']['updated_at'] = 101
@@ -519,6 +519,18 @@ class Contracts(unittest.TestCase):
         self.assertIn('release_capture_staged.stat.checksum == ultra_recovery_capture_tool.sha256', final)
         self.assertIn("release_capture_staged.stat.mode == '0600'", final)
         self.assertIn('release_capture_staged.stat.uid == 0', final)
+
+    def test_isolated_capture_stages_signed_transitive_database_dependency(self):
+        for name in ('upgrade.yml', 'preflight-retry.yml'):
+            play = yaml.safe_load((ROOT / 'deploy/ansible/playbooks' / name).read_text())[0]
+            self.assertIn('/opt/ultra-recovery/db_connection.py', play['vars']['ultra_recovery_capture_dependency'])
+        collector = yaml.safe_load((ROOT / 'deploy/ansible/roles/release/tasks/capture-tool.yml').read_text())
+        self.assertEqual(collector[0]['ansible.builtin.include_tasks'], 'capture-dependency.yml')
+        dependency = yaml.safe_load((ROOT / 'deploy/ansible/roles/release/tasks/capture-dependency.yml').read_text())
+        self.assertTrue(any('capture/db_connection.py' in json.dumps(task) for task in dependency))
+        final = dependency[-1]['ansible.builtin.assert']['that']
+        self.assertIn('release_capture_dependency_staged.stat.checksum == ultra_recovery_capture_dependency.sha256', final)
+        self.assertIn("release_capture_dependency_staged.stat.mode == '0600'", final)
 
     def test_retry_checkpoint_requires_idle_producers_and_advances_capture_evidence(self):
         class Done(Exception):

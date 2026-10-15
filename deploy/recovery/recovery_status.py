@@ -4,7 +4,6 @@ import argparse
 import json
 from pathlib import Path
 import re
-import subprocess
 import time
 
 
@@ -50,15 +49,7 @@ def status(not_before):
             reasons.append('backup_stale')
         if state['updated_at'] <= not_before or reconcile['updated_at'] <= not_before or backup['snapshot_at'] <= not_before:
             reasons.append('evidence_before_activation')
-        database = config['database']
-        if not re.fullmatch(r'[A-Za-z0-9_-]+', database):
-            raise ValueError('invalid_database')
-        query = "SELECT count(*)>0 AND bool_and(COALESCE(r.state='streaming' AND r.checked_at>now()-interval '90 seconds',false)) FROM exit_nodes n LEFT JOIN node_replication r ON r.node_id=n.id WHERE n.enabled"
-        result = subprocess.run(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database, '-c', query],
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
-        if result.returncode or result.stdout.strip() != b't':
-            reasons.append('replica_not_fresh_streaming')
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError):
         reasons.append('readiness_evidence_unavailable')
     return {'verified': not reasons, 'ready': not reasons, 'independent': independent, 'reasons': sorted(set(reasons))}
 

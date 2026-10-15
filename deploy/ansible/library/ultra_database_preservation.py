@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import re
 import shlex
+import sys
+import subprocess
 import tempfile
 import time
 import uuid
@@ -49,7 +51,7 @@ def database_selection(spec, database):
     dsn = spec['database']['dsn']
     parsed = urlsplit(dsn)
     if (parsed.scheme not in ('postgres', 'postgresql') or parsed.hostname not in ('localhost', '127.0.0.1', '::1')
-            or (parsed.port or 5432) != 5432 or unquote(parsed.path) != '/' + database
+            or parsed.port != 25432 or unquote(parsed.path) != '/' + database
             or not parsed.username or parsed.fragment
             or set(parse_qs(parsed.query, strict_parsing=True)) - {'sslmode', 'connect_timeout', 'application_name'}):
         raise ValueError('database_identity_migration_required')
@@ -79,7 +81,12 @@ def observe(module, database):
           'applied_at',applied_at AT TIME ZONE 'UTC') ORDER BY version) FROM public.schema_migrations),
       'clients', (SELECT count(*) FROM pg_stat_activity WHERE datname=current_database()
           AND backend_type='client backend' AND pid != pg_backend_pid()))"""
-    code, output, _ = module.run_command(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database, '-c', query])
+    sys.path.insert(0, '/opt/ultra-recovery')
+    import db_connection
+    parsed = db_connection.dsn_from_runtime(database)
+    with db_connection.pgpass('/var/lib/ultra-recovery', parsed) as environment:
+        result = subprocess.run(db_connection.connection_args(parsed, database, 'psql') + ['-XAtq', '-v', 'ON_ERROR_STOP=1', '-c', query], env=environment, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=8)
+        code, output = result.returncode, result.stdout
     if code or len(output) > 1048576:
         raise ValueError('database_preservation_inspection_failed')
     value = validate_observation(json.loads(output))

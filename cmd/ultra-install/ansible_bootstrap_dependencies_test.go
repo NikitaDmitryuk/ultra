@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/install"
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
@@ -366,5 +367,109 @@ with open(sys.argv[2], 'w') as f:
 				t.Fatalf("unexpected commands: %s", commands)
 			}
 		})
+	}
+}
+
+func TestFleetIdentityUsesRootControlledParentAndPrivateRuntimeKey(t *testing.T) {
+	root := filepath.Join("..", "..")
+	read := func(path string) string {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	generate := read("deploy/ansible/roles/fleet_access/tasks/generate.yml")
+	for _, part := range []string{"loop: [/etc, /etc/ultra-fleet]", "follow: false", "item.stat.uid == 0", "mode: \"0750\"", "owner: ultra-relay", "mode: \"0600\""} {
+		if !strings.Contains(generate, part) {
+			t.Fatalf("missing fleet contract %s", part)
+		}
+	}
+	if strings.Index(generate, "Reject writable or linked") > strings.Index(generate, "Create private runtime") {
+		t.Fatal("ancestry check occurs after mutation")
+	}
+	env := read("deploy/ansible/roles/recovery_primary/templates/automation.conf.j2")
+	if !strings.Contains(env, "ULTRA_VULTR_SSH_KEY_FILE=/etc/ultra-fleet/id_ed25519") {
+		t.Fatal("runtime identity not configured")
+	}
+	planner := read("deploy/recovery/bootstrap_plan.py")
+	if !strings.Contains(planner, "state_paths = ['/etc/ultra-fleet'") {
+		t.Fatal("fleet identity not preserved")
+	}
+	automation := read("deploy/ansible/playbooks/bootstrap-automation.yml")
+	if strings.Index(automation, "ultra_fleet_access_stage: authorize") > strings.Index(automation, "- recovery_primary") {
+		t.Fatal("planner runs before authorization")
+	}
+}
+
+func TestBootstrapDumpPreflightPrecedesDatabaseMutation(t *testing.T) {
+	for _, name := range []string{"bootstrap.yml", "bootstrap-postgres.yml"} {
+		b, err := os.ReadFile(filepath.Join("..", "..", "deploy", "ansible", "playbooks", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		if strings.Index(s, "tasks_from: preflight") < 0 || strings.Index(s, "tasks_from: preflight") > strings.Index(s, "- role: postgres\n") {
+			t.Fatal("archive must be checked before provisioning")
+		}
+		if !strings.Contains(s, "ansible_host == ultra_db_tunnel_host") {
+			t.Fatal("dedicated target assertion missing")
+		}
+	}
+}
+
+func TestBootstrapDumpHelperIsEmbeddedAndFrozenOutsideCheckout(t *testing.T) {
+	p, ds, inv, inspection := dependencyFixture(t)
+	p.Secrets.DatabaseDumpFile = filepath.Join(t.TempDir(), "database.dump")
+	p.Secrets.DatabaseDumpSHA256 = strings.Repeat("a", 64)
+	ds.PostgresConfig = &install.PostgresConfig{DBName: "app", DBUser: "app", DBPassword: "fixture"}
+	inv["all"].(map[string]any)["children"].(map[string]any)["databases"] = map[string]any{"hosts": map[string]any{"database": map[string]any{}}}
+	directory := t.TempDir()
+	t.Chdir(t.TempDir())
+	if err := prepareBootstrapVariables(p, ds, inv, inspection, directory); err != nil {
+		t.Fatal(err)
+	}
+	vars := dependencyVars(inv, "databases", "database")
+	helper := filepath.Join(vars["ultra_database_import_script_directory"].(string), "database_dump_import.py")
+	data, err := os.ReadFile(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "def preflight(") {
+		t.Fatal("embedded helper missing")
+	}
+	info, _ := os.Stat(helper)
+	if info.Mode().Perm() != 0600 {
+		t.Fatal("helper not private")
+	}
+	if vars["ultra_database_import_sha256"] != p.Secrets.DatabaseDumpSHA256 {
+		t.Fatal("dump digest not frozen")
+	}
+}
+
+func TestPostgresIdentityObservationGrantTargetsApplicationDatabase(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "deploy", "ansible", "roles", "postgres", "tasks", "main.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	start := strings.Index(s, "- name: Authorize cluster identity observation")
+	end := strings.Index(s, "- name: Apply PostgreSQL settings")
+	if start < 0 || end < start {
+		t.Fatal("application grant missing")
+	}
+	grant := s[start:end]
+	if !strings.Contains(grant, "--dbname, \"{{ ultra_postgres.name }}\"") || !strings.Contains(grant, "GRANT EXECUTE ON FUNCTION pg_control_system()") {
+		t.Fatal("grant must run in the app DB")
+	}
+	if strings.Contains(s[:start], "GRANT EXECUTE") {
+		t.Fatal("grant must not run in default maintenance database")
+	}
+	if strings.Index(s, "CREATE DATABASE") > start {
+		t.Fatal("grant precedes app database creation")
+	}
+	if strings.Index(s, "Verify application login") < end {
+		t.Fatal("login check must follow grant")
 	}
 }

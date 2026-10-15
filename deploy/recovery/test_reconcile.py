@@ -211,6 +211,60 @@ class ReconcileTests(unittest.TestCase):
         with mock.patch.object(reconcile,'execute',side_effect=[subprocess.CompletedProcess([],0,body)]*2), mock.patch.object(reconcile,'ansible_apply'):
             with self.assertRaises(ValueError):reconcile.monitor_ready(self.config,self.primary,'primary',True)
 
+    def test_fresh_receiver_projects_transitive_database_helper(self):
+        with mock.patch.object(reconcile, 'ansible_apply') as apply:
+            reconcile.install(self.config, self.primary)
+        files = apply.call_args.args[2]['ultra_recovery_files']
+        projected = {Path(item['destination']).name: item for item in files}
+        self.assertTrue({'recovery.py', 'db_connection.py', 'monitor.py', 'heartbeat.py'} <= projected.keys())
+        receiver=(Path(__file__).parents[1]/'ansible/roles/recovery/tasks/receiver.yml').read_text()
+        self.assertIn('(recovery|db_connection|monitor|heartbeat)', receiver)
+        # Import in isolation: a developer checkout must not hide a missing module.
+        isolated = self.root / 'isolated-receiver'
+        isolated.mkdir()
+        for name in ('recovery.py', 'db_connection.py'):
+            (isolated / name).write_bytes(Path(projected[name]['source']).read_bytes())
+        subprocess.run([__import__('sys').executable, '-I', '-c',
+                        'import sys; sys.path.insert(0, sys.argv[1]); import recovery', str(isolated)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+    def test_managed_firewall_admission_precedes_peer_ssh(self):
+        rows=[{'id': ID, 'state':'ready', 'phase':'ready', 'enabled':True, 'tunnel_port': 24443}]
+        ports=[{'id':ID,'address':self.primary['address'],'port':24443}]
+        events=[]
+        with mock.patch.object(reconcile,'discover',side_effect=[rows,ports]), mock.patch.object(reconcile,'desired_nodes',return_value=([self.primary],set())), mock.patch.object(reconcile,'cloud_private_file'), mock.patch.object(reconcile,'ensure_provider_peer_rule',side_effect=lambda config,node,peer,port: events.append(('provider',port))), mock.patch.object(reconcile,'ansible_apply',side_effect=lambda config,node,variables: events.append(('ssh',variables))):
+            result=reconcile.admit_restored_bridge(self.config,'192.0.2.99')
+        self.assertEqual(result,{'verified':True,'managed_exits':1,'static_exits':0})
+        self.assertEqual(events[:2],[('provider',22),('provider',24443)])
+        self.assertEqual(events[2],('ssh',{'ultra_recovery_peer_rules':[{'address':'192.0.2.99','port':22},{'address':'192.0.2.99','port':24443}]}))
+        services=(Path(__file__).parents[1]/'ansible/roles/restore/tasks/services.yml').read_text()
+        self.assertLess(services.index('ultra_db_tunnel_stage: install'),services.index('restore_firewall.py'))
+        self.assertLess(services.index('restore_firewall.py'),services.index('Start restored relay first'))
+
+    def test_restore_firewall_no_exits_noop_and_missing_or_mismatched_ports_fail_closed(self):
+        with mock.patch.object(reconcile,'discover',return_value=[]), mock.patch.object(reconcile,'ensure_provider_peer_rule') as provider, mock.patch.object(reconcile,'ansible_apply') as host:
+            self.assertEqual(reconcile.admit_restored_bridge(dict(self.config,static_nodes=[]),'192.0.2.99')['managed_exits'],0)
+            provider.assert_not_called();host.assert_not_called()
+        rows=[{'id':ID,'state':'ready','phase':'ready','enabled':True,'tunnel_port':24443}]
+        for port,identifier in ((None,ID),(0,ID),(65536,ID),(True,ID),('24443',ID),(24443,'different-id')):
+            ports=[{'id':identifier,'address':self.primary['address'],'port':port}]
+            with mock.patch.object(reconcile,'discover',side_effect=[rows,ports]), mock.patch.object(reconcile,'desired_nodes',return_value=([self.primary],set())), mock.patch.object(reconcile,'ensure_provider_peer_rule') as provider, mock.patch.object(reconcile,'ansible_apply') as host:
+                with self.assertRaisesRegex(ValueError,'tunnel_port_unavailable'):
+                    reconcile.admit_restored_bridge(self.config,'192.0.2.99')
+                provider.assert_not_called();host.assert_not_called()
+
+    def test_static_only_firewall_updates_host_without_provider_writes_and_failure_requires_operator(self):
+        ports=[{'id':'NL','address':'192.0.2.2','port':1443}]
+        with mock.patch.object(reconcile,'discover',side_effect=[[],ports]), mock.patch.object(reconcile,'cloud_private_file'), mock.patch.object(reconcile,'ansible_apply') as host, mock.patch.object(reconcile,'ensure_provider_peer_rule') as provider:
+            result=reconcile.admit_restored_bridge(self.config,'192.0.2.99')
+            self.assertEqual(result,{'verified':True,'managed_exits':0,'static_exits':1})
+            provider.assert_not_called()
+            self.assertEqual(host.call_args.args[2]['ultra_recovery_peer_rules'],[{'address':'192.0.2.99','port':22},{'address':'192.0.2.99','port':1443}])
+        with mock.patch.object(reconcile,'discover',side_effect=[[],ports]), mock.patch.object(reconcile,'cloud_private_file'), mock.patch.object(reconcile,'ansible_apply',side_effect=ValueError('unreachable')), mock.patch.object(reconcile,'ensure_provider_peer_rule') as provider:
+            with self.assertRaisesRegex(ValueError,'static_exit_firewall_operator_admission_required'):
+                reconcile.admit_restored_bridge(self.config,'192.0.2.99')
+            provider.assert_not_called()
+
     def test_large_client_projected_without_binary_json_payload(self):
         client=Path(self.config['client_binary'])
         with client.open('wb')as stream:stream.truncate(52_167_976)

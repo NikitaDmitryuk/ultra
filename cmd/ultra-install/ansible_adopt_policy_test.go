@@ -14,7 +14,7 @@ import (
 
 func adoptionPolicyFixture(t *testing.T) (*installplan.InstallPlan, bootstrapInspection) {
 	t.Helper()
-	p, err := installplan.CanonicalValuesToPlan(map[string]string{"BRIDGE": "192.0.2.1", "EXIT": "192.0.2.2", "IDENTITY": "/identity", "BOT_ENV_FILE": "/private/secrets.env", "EXIT_TUNNEL_UUID": "preserved-tunnel", "GENERATE_EXIT_TLS": "false", "EXIT_TLS_CERT_FILE": "/private/exit.crt", "EXIT_TLS_KEY_FILE": "/private/exit.key", "BRIDGE_SSH_HOST": "192.0.2.10", "ULTRA_INSTALL_SSH_STRICT_HOST_KEY": "true", "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": "/pins", "PUBLIC_HOST": "192.0.2.1"})
+	p, err := installplan.CanonicalValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "BRIDGE_SSH_KEY": "/identity", "BOT_ENV_FILE": "/private/secrets.env", "EXIT_TUNNEL_UUID": "preserved-tunnel", "GENERATE_EXIT_TLS": "false", "EXIT_TLS_CERT_FILE": "/private/exit.crt", "EXIT_TLS_KEY_FILE": "/private/exit.key", "ULTRA_INSTALL_SSH_STRICT_HOST_KEY": "true", "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": "/pins", "PUBLIC_HOST": "192.0.2.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,29 +44,29 @@ func adoptionInspectionAdd(i *bootstrapInspection, name string, raw []byte) {
 
 func TestAdoptionExplicitSSHOverridePreservesTrustAndSource(t *testing.T) {
 	p, _ := adoptionPolicyFixture(t)
-	p.SourceValues["BRIDGE_SSH_HOST"] = "bridge-admin"
-	p.SourceValues["DB_HOST"] = "bridge-admin"
+	p.SourceValues["BRIDGE_IP"] = "192.0.2.10"
+	p.SourceValues["DATABASE_IP"] = "192.0.2.40"
 	p, err := installplan.CanonicalValuesToPlan(p.SourceValues)
 	if err != nil {
 		t.Fatal(err)
 	}
-	original := p.SourceValues["BRIDGE_SSH_HOST"]
+	original := p.SourceValues["BRIDGE_IP"]
 	candidate, err := adoptionSSHOverride(p, "192.0.2.1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.SourceValues["BRIDGE_SSH_HOST"] != original || candidate.Bridge.SSHHost != "192.0.2.1" || candidate.Database.PrimaryHost != "192.0.2.1" {
+	if p.SourceValues["BRIDGE_IP"] != original || candidate.Bridge.SSHHost != "192.0.2.1" || candidate.Database.PrimaryHost != "192.0.2.40" {
 		t.Fatal("source changed or primary endpoint lost")
 	}
 	for key, value := range p.SourceValues {
-		if key != "BRIDGE_SSH_HOST" && key != "DB_HOST" && candidate.SourceValues[key] != value {
+		if key != "BRIDGE_IP" && key != "DATABASE_IP" && candidate.SourceValues[key] != value {
 			t.Fatalf("changed preserved parameter %s", key)
 		}
 	}
 	if candidate.SSH != p.SSH || candidate.SecretsEnvFile() != p.SecretsEnvFile() {
 		t.Fatal("SSH trust or secret reference changed")
 	}
-	p.SourceValues["DB_HOST"] = "192.0.2.3"
+	p.SourceValues["DATABASE_IP"] = "192.0.2.3"
 	separate, err := adoptionSSHOverride(p, "192.0.2.1")
 	if err != nil || separate.Database.PrimaryHost != "192.0.2.3" {
 		t.Fatal("independent primary endpoint changed", err)
@@ -140,10 +140,10 @@ func TestPrepareAdoptionPolicyFailsClosed(t *testing.T) {
 			}
 		})
 	}
-	for _, key := range []string{"BRIDGE", "ULTRA_AUTOMATION_AGE_RECIPIENT", "VPN_DOMAIN", "DNS_ZONE"} {
+	for _, key := range []string{"BRIDGE_IP", "ULTRA_AUTOMATION_AGE_RECIPIENT", "VPN_DOMAIN", "DNS_ZONE"} {
 		t.Run(key, func(t *testing.T) {
 			p, i := adoptionPolicyFixture(t)
-			if key == "BRIDGE" {
+			if key == "BRIDGE_IP" {
 				p.Bridge.Address = "192.0.2.9"
 			} else {
 				p.SourceValues[key] = "conflict"

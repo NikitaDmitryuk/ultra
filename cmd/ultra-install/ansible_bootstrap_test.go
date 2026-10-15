@@ -17,12 +17,12 @@ func TestBootstrapRetryRetainsGeneratedIdentities(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan := func() *installplan.InstallPlan {
-		p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE": "192.0.2.1", "EXIT": "192.0.2.2", "REALITY_DEST": "example.com:443", "REUSE_BRIDGE_SPEC": "false", "DB_ENABLE": "true", "SKIP_GEO_DOWNLOAD": "true"})
+		p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "REALITY_DEST": "example.com:443", "REUSE_BRIDGE_SPEC": "false", "DATABASE_IP": "192.0.2.40", "SKIP_GEO_DOWNLOAD": "true"})
 		p.Artifacts.RelayBinary = binary
 		return p
 	}
 	inventory := func() map[string]any {
-		return map[string]any{"all": map[string]any{"vars": map[string]any{}, "children": map[string]any{"bridge": map[string]any{"hosts": map[string]any{"bridge": map[string]any{}}}, "exits": map[string]any{"hosts": map[string]any{"exit_0": map[string]any{}}}}}}
+		return map[string]any{"all": map[string]any{"vars": map[string]any{}, "children": map[string]any{"databases": map[string]any{"hosts": map[string]any{"database": map[string]any{}}}, "bridge": map[string]any{"hosts": map[string]any{"bridge": map[string]any{}}}, "exits": map[string]any{"hosts": map[string]any{"exit_0": map[string]any{}}}}}}
 	}
 	inspection := map[string]bootstrapInspection{"bridge": {Architecture: "amd64"}, "exit_0": {Architecture: "amd64"}}
 	first, err := freezeBootstrapInventory(plan(), inventory(), inspection, directory)
@@ -100,10 +100,58 @@ func TestBootstrapAttemptFreshAfterTotalSuccess(t *testing.T) {
 }
 
 func TestBootstrapRetainsUnrelatedRuntimeReferences(t *testing.T) {
-	previous := "ULTRA_RELAY_LOG_LEVEL=warning\nULTRA_REPLICATION_KEY_FILE=/private/replication\nULTRA_RELAY_ADMIN_TOKEN=old\n"
+	previous := "ULTRA_RELAY_LOG_LEVEL=warning\nULTRA_REPLICATION_KEY_FILE=/private/replication\nCUSTOM_RUNTIME_PATH=/private/custom\nULTRA_RELAY_ADMIN_TOKEN=old\n"
 	desired := "ULTRA_RELAY_ADMIN_TOKEN=retained\nULTRA_RELAY_LOG_LEVEL=info\n"
 	merged := mergeBootstrapEnvironment(previous, desired)
-	if merged != "ULTRA_REPLICATION_KEY_FILE=/private/replication\n"+desired {
+	if merged != "CUSTOM_RUNTIME_PATH=/private/custom\n"+desired {
 		t.Fatal("runtime references lost or owned keys duplicated")
+	}
+}
+
+func TestBootstrapDedicatedDatabaseInventory(t *testing.T) {
+	pins := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(pins, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins)
+	p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "BRIDGE_SSH_KEY": "/keys/vpn", "MAIN_EXIT_SSH_KEY": "/keys/exit", "DATABASE_IP": "192.0.2.40", "SSH_USER": "db-admin", "DATABASE_SSH_KEY": "/keys/db"})
+	inventory, err := bootstrapInventory(p, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	children := inventory["all"].(map[string]any)["children"].(map[string]any)
+	dbs := children["databases"].(map[string]any)["hosts"].(map[string]any)
+	if len(dbs) != 1 {
+		t.Fatal("expected one dedicated DB host")
+	}
+	db := dbs["database"].(map[string]any)
+	if db["ansible_host"] != "192.0.2.40" || db["ansible_user"] != "db-admin" || db["ansible_ssh_private_key_file"] != "/keys/db" {
+		t.Fatal("dedicated database SSH target lost")
+	}
+	if _, ok := dbs["bridge"]; ok {
+		t.Fatal("database provisioned on VPN bridge")
+	}
+}
+
+func TestBootstrapSeparateRoleIdentitiesWithoutSharedKey(t *testing.T) {
+	pins := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(pins, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins)
+	p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.10", "MAIN_EXIT_IP": "192.0.2.20", "DATABASE_IP": "192.0.2.40", "BRIDGE_SSH_KEY": "/keys/bridge", "MAIN_EXIT_SSH_KEY": "/keys/exit", "DATABASE_SSH_KEY": "/keys/database"})
+	inventory, err := bootstrapInventory(p, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := inventory["all"].(map[string]any)
+	children := all["children"].(map[string]any)
+	if all["vars"].(map[string]any)["ansible_ssh_private_key_file"] != "/keys/bridge" {
+		t.Fatal("bridge key lost")
+	}
+	exit := children["exits"].(map[string]any)["hosts"].(map[string]any)["exit_0"].(map[string]any)
+	database := children["databases"].(map[string]any)["hosts"].(map[string]any)["database"].(map[string]any)
+	if exit["ansible_ssh_private_key_file"] != "/keys/exit" || database["ansible_ssh_private_key_file"] != "/keys/database" {
+		t.Fatal("role keys substituted")
 	}
 }

@@ -17,6 +17,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+import db_connection
 
 MAX_BYTES = 512 * 1024 * 1024
 MAX_FILES = 20000
@@ -396,8 +397,10 @@ def create(config):
                 sync_directory(repo)
             snapshot = int(time.time())
             dump = work / 'database.dump'
-            with dump.open('wb') as stream:
-                run(['runuser', '-u', 'postgres', '--', 'pg_dump', '-Fc', '--no-owner', '--no-acl', config['database']], stdout=stream)
+            parsed_dsn = db_connection.dsn_from_runtime(config['database'])
+            with db_connection.pgpass(work, parsed_dsn) as environment, dump.open('wb') as stream:
+                run(db_connection.connection_args(parsed_dsn, config['database'], 'pg_dump') +
+                    ['-Fc', '--no-owner', '--no-acl'], stdout=stream, env=environment)
             if collect(capture_state_paths(config), artifact_paths) != before:
                 raise ValueError('configuration changed during capture; retry next interval')
             # Parse the entire custom-archive TOC before encrypting or delivering.

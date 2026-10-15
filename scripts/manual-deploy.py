@@ -452,19 +452,26 @@ def build_candidate(repo, root, commit, version):
 def config_values(raw):
     # Parse literals only; never source the deployment file or interpolate it.
     values = {}
+    legacy_keys = {'BRIDGE', 'BRIDGE_SSH_HOST', 'BRIDGE_SSH_IDENTITY', 'EXIT',
+                   'EXIT_SSH_IDENTITY', 'EXIT2', 'EXIT2_SSH_IDENTITY', 'DB_HOST',
+                   'IDENTITY', 'FRONT', 'BACK', 'DB_SSH_IDENTITY', 'DB_ENABLE',
+                   'DB_REPLICA', 'DB_SSH_USER', 'EXIT2_NAME', 'EXIT2_DIAL', 'EXIT2_PRIORITY'}
     for line in raw.decode().splitlines():
         if not line.strip() or line.lstrip().startswith('#') or '=' not in line:
             continue
         key, value = line.split('=', 1)
+        key = key.strip()
+        require(key not in legacy_keys, 'operator_legacy_config_key_forbidden')
         tokens = shlex.split(value, comments=True)
-        require(len(tokens) <= 1 and key.strip() not in values, 'operator_config_literal_required')
-        values[key.strip()] = tokens[0] if tokens else ''
+        require(len(tokens) <= 1 and key not in values, 'operator_config_literal_required')
+        values[key] = tokens[0] if tokens else ''
     return values
 
 
 def operator_transport(path, config):
     values = config_values(config)
-    bridge_address = values.get('BRIDGE_SSH_HOST') or values.get('BRIDGE') or values.get('FRONT')
+    bridge_address = values.get('BRIDGE_IP')
+    main_exit_address = values.get('MAIN_EXIT_IP')
     static = json.loads(values.get('ULTRA_AUTOMATION_STATIC_NODES', '[]'))
     local_identity = os.environ.get('ULTRA_OPERATOR_IDENTITY')
     local_pins = os.environ.get('ULTRA_OPERATOR_KNOWN_HOSTS')
@@ -485,18 +492,23 @@ def operator_transport(path, config):
         exits = all_hosts['children']['exits']['hosts']
         source_binding = sha(raw)
     else:
-        require(local_identity and local_pins, 'operator_identity_and_pins_required')
+        bridge_identity = local_identity or values.get('BRIDGE_SSH_KEY')
+        exit_identity = local_identity or values.get('MAIN_EXIT_SSH_KEY')
+        local_pins = local_pins or values.get('ULTRA_AUTOMATION_KNOWN_HOSTS_FILE')
+        require(bridge_identity and exit_identity and local_pins, 'operator_identity_and_pins_required')
         require(static, 'operator_static_jump_required')
         # Local credential references supplement the single canonical topology;
         # they are never written to install.config or sent to the bridge.
-        common = {'ansible_user': 'root', 'ansible_ssh_private_key_file': local_identity,
+        common = {'ansible_user': 'root', 'ansible_ssh_private_key_file': bridge_identity,
                   'ansible_ssh_common_args': shlex.join(['-o', 'StrictHostKeyChecking=yes', '-o', 'IdentitiesOnly=yes',
                                                        '-o', 'UserKnownHostsFile=' + local_pins])}
         bridge = {'ansible_host': bridge_address}
-        exits = {'exit_' + str(index): {'ansible_host': node['address']} for index, node in enumerate(static)}
+        exits = {'exit_' + str(index): {'ansible_host': node['address'], 'ansible_ssh_private_key_file': exit_identity} for index, node in enumerate(static)}
         source_binding = sha(json.dumps({'bridge': bridge_address, 'static': [n['address'] for n in static]}, sort_keys=True).encode())
-    require(bridge.get('ansible_host') == bridge_address and bridge_address == values.get('BRIDGE')
+    require(bridge.get('ansible_host') == bridge_address and main_exit_address
+            and bridge_address and bridge_address != main_exit_address
             and static and {n['address'] for n in static} == {n['ansible_host'] for n in exits.values()}
+            and {n['address'] for n in static} == {main_exit_address}
             and 'exit_0' in exits, 'operator_inventory_topology_changed')
 
     def endpoint(host):

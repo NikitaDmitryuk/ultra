@@ -18,7 +18,7 @@ AUTOMATION_UNITS = (
     'ultra-ansible-controller.service',
 )
 APP_UNITS = ('ultra-relay.service', 'ultra-bot.service')
-PHASES = ('prepare', 'install', 'database', 'peer_reseed', 'activate', 'ingress', 'automation', 'ready')
+PHASES = ('prepare', 'install', 'activate', 'ingress', 'automation', 'ready')
 
 
 def canonical(value):
@@ -81,6 +81,11 @@ def configuration(value):
         raise ValueError('explicit_new_bridge_provider_required')
     value['new_bridge_provider'] = value['new_bridge_provider'].lower()
     endpoint(value['target'])
+    database_target = endpoint(value['database_target'])
+    database_host = str(ipaddress.IPv4Address(value['database_host']))
+    database_endpoint = database_target['host'].rsplit('@', 1)[-1]
+    if database_endpoint != database_host:
+        raise ValueError('restore_database_target_mismatch')
     value.setdefault('ingress_mode', 'forward')
     if value['ingress_mode'] not in ('forward', 'direct'):
         raise ValueError('unsupported_ingress_mode')
@@ -88,6 +93,11 @@ def configuration(value):
         endpoint(value['ingress'])
         if value['target']['host'] == value['ingress']['host']:
             raise ValueError('ingress_must_be_separate')
+    vpn_hosts = {value['new_bridge_address'], value['target']['host'].rsplit('@', 1)[-1]}
+    if value['ingress_mode'] == 'forward':
+        vpn_hosts.add(value['ingress']['host'].rsplit('@', 1)[-1])
+    if database_host in vpn_hosts:
+        raise ValueError('dedicated_database_must_be_separate_from_vpn')
     for key in ('bundle', 'identity', 'fence_file', 'state_dir'):
         path = Path(value[key])
         if not path.is_absolute() or '..' in path.parts or path == Path('/'):
@@ -115,6 +125,8 @@ def plan_id(config, bundle_sha):
     # destinations and the selected immutable generation cannot.
     identity = {key: config[key] for key in ('source', 'old_bridge_address', 'new_bridge_address',
                                             'public_host', 'subscription_domain', 'new_bridge_provider')}
+    identity.update(database_host=config['database_host'],
+                    database_target={key: config['database_target'].get(key, 22) for key in ('host', 'port')})
     identity['ingress_mode'] = config.get('ingress_mode', 'forward')
     if config.get('migration_identity') is not None:
         identity['migration_identity'] = migration_identity(config['migration_identity'])

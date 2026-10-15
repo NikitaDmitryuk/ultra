@@ -16,7 +16,7 @@ func projectionFixture(t *testing.T) (*InstallPlan, RenderOptions) {
 	t.Helper()
 	_, opts := adoptionRenderFixture()
 	values := map[string]string{
-		"BRIDGE": "192.0.2.1", "EXIT": "192.0.2.2", "EXIT_DIAL": "exit.example.com",
+		"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "EXIT_DIAL": "exit.example.com",
 		"VLESS_PORT": "7443", "TUNNEL_PORT": "9443", "PRESET": "steamlike", "TRANSPORT": "grpc",
 		"SPLITHTTP_HOST": "example.com", "SPLITHTTP_PATH": "/installed", "REALITY_DEST": "example.com:443",
 		"PUBLIC_HOST": "vpn.example.com", "GENERATE_EXIT_TLS": "false",

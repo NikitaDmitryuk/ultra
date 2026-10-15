@@ -159,7 +159,7 @@ func validateNativeAdoption(p *installplan.InstallPlan, euid int, deploymentRaw,
 	if deployment.Database == "" || deployment.Database != p.Database.Name || deployment.Database != reconcile.Database || deployment.Provider == "" || deployment.Provider != reconcile.Provider || deployment.URL == "" || deployment.URL != reconcile.URL || !reflect.DeepEqual(deployment.Nodes, reconcile.Nodes) || !reflect.DeepEqual(deployment.Nodes, p.Automation.StaticNodes) {
 		return fail()
 	}
-	if !filepath.IsAbs(p.SSH.Identity) || filepath.Clean(p.SSH.Identity) != p.SSH.Identity || p.SSH.Identity != reconcile.Identity || (deployment.Identity != "" && deployment.Identity != reconcile.Identity) {
+	if !filepath.IsAbs(p.BridgeSSHIdentity()) || filepath.Clean(p.BridgeSSHIdentity()) != p.BridgeSSHIdentity() || p.BridgeSSHIdentity() != reconcile.Identity || (deployment.Identity != "" && deployment.Identity != reconcile.Identity) {
 		return fail()
 	}
 	address := net.ParseIP(p.Bridge.Address)

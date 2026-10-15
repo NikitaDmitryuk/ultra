@@ -3,7 +3,7 @@ package installplan
 import "testing"
 
 func TestAutomationVersionBoundary(t *testing.T) {
-	legacy := LegacyValuesToPlan(map[string]string{"BRIDGE": "192.0.2.1", "EXIT": "192.0.2.2", "REALITY_DEST": "example.com:443"})
+	legacy := LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "REALITY_DEST": "example.com:443"})
 	if legacy.SchemaVersion != 1 || legacy.FullAutomation() {
 		t.Fatal("legacy install acquired new required behavior")
 	}
@@ -31,7 +31,7 @@ func TestAutomationVersionBoundary(t *testing.T) {
 }
 
 func TestCleanAutomationRequiresExplicitStaticBudgets(t *testing.T) {
-	p := LegacyValuesToPlan(map[string]string{"BRIDGE": "192.0.2.1", "EXIT": "192.0.2.2", "REALITY_DEST": "example.com:443"})
+	p := LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "REALITY_DEST": "example.com:443"})
 	p.Bridge.ReuseSpec = false
 	p.SchemaVersion = 2
 	p.Bot.Enabled = true

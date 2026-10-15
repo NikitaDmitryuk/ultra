@@ -16,6 +16,9 @@ import (
 )
 
 func applyPlanN(p *installplan.InstallPlan, format string) {
+	if p.Secrets.DatabaseDumpFile != "" {
+		exitOnErr("local database dump preflight", installplan.VerifyDatabaseDump(p.Secrets.DatabaseDumpFile, p.Secrets.DatabaseDumpSHA256))
+	}
 	if p.Automation == nil {
 		exitOnErr("controller release preflight", fmt.Errorf("independent Ansible controller requires canonical schema 2 configuration and a complete verified release; plan, render and doctor remain read-only"))
 	}

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 
+	recoveryassets "github.com/NikitaDmitryuk/ultra/deploy/recovery"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
@@ -60,10 +61,11 @@ func bootstrapInventory(p *installplan.InstallPlan, directory string) (map[strin
 }
 
 func bootstrapInventoryWithNativeAttestation(p *installplan.InstallPlan, directory string, attest func(*installplan.InstallPlan) (string, error)) (map[string]any, error) {
+
 	if p.Bridge.RemoteDir != "/etc/ultra-relay" {
 		return nil, fmt.Errorf("ansible bootstrap requires canonical remote directory /etc/ultra-relay")
 	}
-	if p.SSH.Identity == "" {
+	if p.BridgeSSHIdentity() == "" {
 		return nil, fmt.Errorf("explicit pinned SSH identity required")
 	}
 	pins := os.Getenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS")
@@ -80,7 +82,7 @@ func bootstrapInventoryWithNativeAttestation(p *installplan.InstallPlan, directo
 	if _, err = os.Stat(pins); err != nil {
 		return nil, fmt.Errorf("SSH pins required: %w", err)
 	}
-	identity, err := filepath.Abs(p.SSH.Identity)
+	identity, err := filepath.Abs(p.BridgeSSHIdentity())
 	if err != nil {
 		return nil, err
 	}
@@ -96,16 +98,40 @@ func bootstrapInventoryWithNativeAttestation(p *installplan.InstallPlan, directo
 	}
 	nodes := map[string]any{}
 	for n, ex := range p.Exits {
-		nodes["exit_"+strconv.Itoa(n)] = map[string]any{"ansible_host": ex.SSHHost}
+		exitIdentity := p.ExitSSHIdentity(ex)
+		if exitIdentity == "" {
+			return nil, fmt.Errorf("explicit pinned exit SSH identity required")
+		}
+		exitIdentity, err = filepath.Abs(exitIdentity)
+		if err != nil {
+			return nil, err
+		}
+		nodes["exit_"+strconv.Itoa(n)] = map[string]any{"ansible_host": ex.SSHHost, "ansible_ssh_private_key_file": exitIdentity}
 	}
 	db := map[string]any{}
 	if p.Database.Enabled {
-		primary := p.Database.PrimaryHost
-		if primary == "" || primary == p.Bridge.SSHHost || primary == p.Bridge.Address {
-			db["bridge"] = map[string]any{}
-		} else {
-			return nil, fmt.Errorf("ansible bootstrap requires primary on bridge; remote primary requires dedicated migration")
+		if p.Database.PrimaryHost == "" || p.Database.PrimaryHost == p.Bridge.SSHHost || p.Database.PrimaryHost == p.Bridge.Address {
+			return nil, fmt.Errorf("dedicated database server required")
 		}
+		dbIdentity := p.Database.SSHIdentity
+		if dbIdentity == "" {
+			dbIdentity = p.SSH.Identity
+		}
+		if dbIdentity == "" {
+			return nil, fmt.Errorf("explicit pinned database SSH identity required")
+		}
+		dbIdentity, err = filepath.Abs(dbIdentity)
+		if err != nil {
+			return nil, err
+		}
+		dbUser := p.Database.SSHUser
+		if dbUser == "" {
+			dbUser = p.SSH.User
+		}
+		db["database"] = map[string]any{"ansible_host": p.Database.PrimaryHost, "ansible_user": dbUser, "ansible_become": dbUser != "root", "ansible_ssh_private_key_file": dbIdentity}
+		common["ultra_db_tunnel_host"] = p.Database.PrimaryHost
+		common["ultra_db_tunnel_known_hosts_source"] = pins
+
 	}
 	return map[string]any{"all": map[string]any{"vars": common, "children": map[string]any{"bridge": map[string]any{"hosts": map[string]any{"bridge": bridge}}, "exits": map[string]any{"hosts": nodes}, "databases": map[string]any{"hosts": db}}}}, nil
 }
@@ -297,6 +323,9 @@ func sourceSHA(path string) (string, error) {
 }
 
 func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.DesiredState, inventory map[string]any, inspection map[string]bootstrapInspection, directory string) error {
+	if ds.DBDSN != "" && !p.Database.Enabled {
+		return fmt.Errorf("explicit dedicated DB_HOST required before installing an existing database-backed bridge")
+	}
 	all := inventory["all"].(map[string]any)
 	children := all["children"].(map[string]any)
 	bridge := children["bridge"].(map[string]any)["hosts"].(map[string]any)["bridge"].(map[string]any)
@@ -399,7 +428,33 @@ func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.Desir
 	}
 	if ds.PostgresConfig != nil {
 		c := ds.PostgresConfig
-		bridge["ultra_postgres"] = map[string]any{"name": c.DBName, "user": c.DBUser, "password": c.DBPassword, "repl_user": c.ReplUser, "repl_password": c.ReplPassword}
+		children["databases"].(map[string]any)["hosts"].(map[string]any)["database"].(map[string]any)["ultra_postgres"] = map[string]any{"name": c.DBName, "user": c.DBUser, "password": c.DBPassword}
+		if p.Secrets.DatabaseDumpFile != "" {
+			dbvars := children["databases"].(map[string]any)["hosts"].(map[string]any)["database"].(map[string]any)
+			archive, err := filepath.Abs(p.Secrets.DatabaseDumpFile)
+			if err != nil {
+				return err
+			}
+			scripts := filepath.Join(directory, "database-import")
+			if err := os.MkdirAll(scripts, 0700); err != nil {
+				return err
+			}
+			helper, err := recoveryassets.Scripts.ReadFile("database_dump_import.py")
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(scripts, "database_dump_import.py"), helper, 0600); err != nil {
+				return err
+			}
+			dbvars["ultra_database_import_dump"] = archive
+			dbvars["ultra_database_import_sha256"] = p.Secrets.DatabaseDumpSHA256
+			dbvars["ultra_database_import_destination"] = "/var/lib/ultra-db-import/bootstrap.dump"
+			dbvars["ultra_database_import_db"] = c.DBName
+			dbvars["ultra_database_import_user"] = c.DBUser
+			dbvars["ultra_database_import_password"] = c.DBPassword
+			dbvars["ultra_database_import_script_directory"] = scripts
+		}
+
 	}
 	if p.Bot.Enabled {
 		src, err := binary(inspection["bridge"].Architecture, "bot")
@@ -655,7 +710,7 @@ func saveBootstrapAttempt(target string, value any) error {
 
 // Preserve unrelated runtime references while replacing only installer-owned keys.
 func mergeBootstrapEnvironment(previous, desired string) string {
-	owned := map[string]bool{}
+	owned := map[string]bool{"ULTRA_REPLICATION_KEY_FILE": true}
 	for _, line := range strings.Split(desired, "\n") {
 		key, _, ok := strings.Cut(line, "=")
 		if ok {

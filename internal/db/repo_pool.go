@@ -325,26 +325,30 @@ func (r *QuotaRepo) poolRuntimeLimits(ctx context.Context, tx pgx.Tx, budgets []
 
 // PreflightBatches checks all pending periods before any can be acknowledged.
 func (r *QuotaRepo) PreflightBatches(ctx context.Context, batches []runtimestate.TrafficBatch) error {
-	var hasPool bool
-	if err := r.db.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quota_exit_membership WHERE scope='vultr')`).Scan(&hasPool); err != nil {
-		return err
-	}
-	if !hasPool {
-		return nil
-	}
+	ids := make([]string, 0)
+	seen := map[string]bool{}
 	for _, batch := range batches {
 		for _, sample := range batch.Samples {
-			if sample.ExitID == "" || sample.ExitID == "direct" || sample.ExitID == "block" {
-				continue
-			}
-			var known bool
-			if err := r.db.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quota_exit_membership WHERE exit_id=$1)`, sample.ExitID).Scan(&known); err != nil {
-				return err
-			}
-			if !known {
-				return errors.New("unclassified pending quota route")
+			id := sample.ExitID
+			if id != "" && id != "direct" && id != "block" && !seen[id] {
+				ids = append(ids, id)
+				seen[id] = true
 			}
 		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var unknown bool
+	err := r.db.Pool.QueryRow(ctx, `SELECT
+ EXISTS(SELECT 1 FROM quota_exit_membership WHERE scope='vultr') AND
+ EXISTS(SELECT 1 FROM unnest($1::text[]) AS pending(exit_id)
+ WHERE NOT EXISTS(SELECT 1 FROM quota_exit_membership m WHERE m.exit_id=pending.exit_id))`, ids).Scan(&unknown)
+	if err != nil {
+		return err
+	}
+	if unknown {
+		return errors.New("unclassified pending quota route")
 	}
 	return nil
 }

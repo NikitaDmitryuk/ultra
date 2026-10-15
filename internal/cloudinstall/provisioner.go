@@ -30,8 +30,6 @@ type ExitConfigurer interface {
 
 type Provisioner struct {
 	Configurer                           ExitConfigurer
-	CheckReady                           func(context.Context) error
-	RemoveReplica                        func(context.Context, string) error
 	API                                  *cloud.Vultr
 	DB                                   *db.DB
 	Bridge                               *config.Spec
@@ -40,7 +38,6 @@ type Provisioner struct {
 	Identity, StateDir, BridgeIP, Binary string
 	Apply                                func(context.Context) error
 	Refresh                              func(context.Context) error
-	Replica                              func(context.Context, string, install.Remote) (string, error)
 }
 
 func (p *Provisioner) port() int {
@@ -60,16 +57,10 @@ func (p *Provisioner) remote(op *cloud.Operation, instance cloud.Instance) (inst
 	return install.Remote{Host: instance.IP, Identity: p.Identity, KnownHosts: filepath.Join(dir, "known_hosts")}, nil
 }
 func (p *Provisioner) Prepare(ctx context.Context, op *cloud.Operation) (cloud.CreateRequest, error) {
-	if p.CheckReady == nil || p.Replica == nil {
-		return cloud.CreateRequest{}, errors.New("replication setup required")
-	}
 	if p.Configurer == nil {
 		return cloud.CreateRequest{}, errors.New("ansible controller required")
 	}
 	if e := p.Configurer.Ready(ctx); e != nil {
-		return cloud.CreateRequest{}, e
-	}
-	if e := p.CheckReady(ctx); e != nil {
 		return cloud.CreateRequest{}, e
 	}
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" || net.ParseIP(p.BridgeIP).To4() == nil {
@@ -203,7 +194,6 @@ func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance
 	if err = p.Routes.SetPin(c, node.ID, result.CertPin); err != nil {
 		return err
 	}
-	op.ReplicationState = "not_configured"
 	return nil
 }
 
@@ -340,10 +330,5 @@ func (p *Provisioner) Unpublish(ctx context.Context, op *cloud.Operation) error 
 	return p.Apply(ctx)
 }
 func (p *Provisioner) Cleanup(ctx context.Context, op *cloud.Operation) error {
-	if p.RemoveReplica != nil {
-		if e := p.RemoveReplica(ctx, op.ExitID); e != nil {
-			return e
-		}
-	}
 	return p.API.DeleteFirewall(ctx, op.FirewallID)
 }

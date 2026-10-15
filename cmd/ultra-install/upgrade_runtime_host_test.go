@@ -21,7 +21,7 @@ func runtimeHostFixture(t *testing.T) (runtimeHostStore, runtimeHostRequest) {
 		}
 	}
 	r := runtimeHostRequest{Transaction: "test-1", Role: config.RoleBridge, Bridge: installplan.BridgeConfig{Address: "192.0.2.1", SSHHost: "192.0.2.1", VLESSPort: 7443, RealityDest: "example.com:443"}, Exits: []runtimeHostExit{{Name: "primary", SSHHost: "192.0.2.2", DialAddr: "exit.example.com", Port: 9443}}, Features: installplan.FeatureConfig{Preset: "apijson", Transport: "grpc"}}
-	spec := config.Spec{SchemaVersion: config.CurrentSpecSchemaVersion, GeoAssetsDir: "/srv/ultra/geo", Role: config.RoleBridge, MimicPreset: "steamlike", VLESSPort: 7443, PublicHost: "vpn.example.com", Reality: config.RealitySpec{PrivateKey: "private-fixture", PublicKey: "public-fixture", Dest: "example.com:443", ServerNames: []string{"example.com"}}, Exit: config.ExitTunnelSpec{Address: "exit.example.com", Port: 9443, TunnelUUID: "11111111-1111-1111-1111-111111111111"}, TunnelTransport: config.TunnelTransportGRPC, AntiCensor: &config.AntiCensorSpec{DisableDOH: true, Profile: "stealth", SplitHTTPMaxChunkKB: 64}, ExitCertPaths: config.CertPaths{CertFile: "/etc/ultra-relay/fullchain.pem", KeyFile: "/etc/ultra-relay/privkey.pem"}, Database: &config.DatabaseSpec{DSN: "postgres://fixture:secret-fixture@127.0.0.1/fixture"}}
+	spec := config.Spec{SchemaVersion: config.CurrentSpecSchemaVersion, GeoAssetsDir: "/srv/ultra/geo", Role: config.RoleBridge, MimicPreset: "steamlike", VLESSPort: 7443, PublicHost: "vpn.example.com", Reality: config.RealitySpec{PrivateKey: "private-fixture", PublicKey: "public-fixture", Dest: "example.com:443", ServerNames: []string{"example.com"}}, Exit: config.ExitTunnelSpec{Address: "exit.example.com", Port: 9443, TunnelUUID: "11111111-1111-1111-1111-111111111111"}, TunnelTransport: config.TunnelTransportGRPC, AntiCensor: &config.AntiCensorSpec{DisableDOH: true, Profile: "stealth", SplitHTTPMaxChunkKB: 64}, ExitCertPaths: config.CertPaths{CertFile: "/etc/ultra-relay/fullchain.pem", KeyFile: "/etc/ultra-relay/privkey.pem"}, Database: &config.DatabaseSpec{DSN: "postgres://fixture:secret-fixture@127.0.0.1:25432/fixture"}}
 	raw, _ := json.Marshal(spec)
 	var doc map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &doc)
@@ -178,7 +178,7 @@ func runtimeHostLiveFixture(t *testing.T) (runtimeHostStore, runtimeHostRequest)
 	if err := os.Remove(s.path(runtimeHostIdentityFile)); err != nil {
 		t.Fatal(err)
 	}
-	r.Database = installplan.DatabaseConfig{Enabled: true, Name: "fixture", User: "fixture", PrimaryHost: r.Bridge.Address}
+	r.Database = installplan.DatabaseConfig{Enabled: true, Name: "fixture", User: "fixture", PrimaryHost: "192.0.2.40"}
 	r.Exits[0].DialAddr = r.Exits[0].SSHHost
 	img, _ := s.image(s.path(runtimeHostFiles[0]))
 	var spec config.Spec
@@ -189,7 +189,7 @@ func runtimeHostLiveFixture(t *testing.T) (runtimeHostStore, runtimeHostRequest)
 	if err := os.WriteFile(s.path(runtimeHostFiles[0]), raw, 0640); err != nil {
 		t.Fatal(err)
 	}
-	metadata := map[string]any{"bridge_ipv4": r.Bridge.Address, "database": "fixture", "bridge_provider": "fixture", "bridge_url": "https://example.com/healthz", "static_nodes": []installplan.AutomationNode{{Name: r.Exits[0].Name, Address: r.Exits[0].SSHHost, Provider: "fixture"}}}
+	metadata := map[string]any{"bridge_ipv4": r.Bridge.Address, "database": "fixture", "database_host": "192.0.2.40", "bridge_provider": "fixture", "bridge_url": "https://example.com/healthz", "static_nodes": []installplan.AutomationNode{{Name: r.Exits[0].Name, Address: r.Exits[0].SSHHost, Provider: "fixture"}}}
 	raw, _ = json.Marshal(metadata)
 	for _, file := range []string{"etc/ultra-recovery/deployment.json", "etc/ultra-recovery/reconcile.json"} {
 		if err := os.WriteFile(s.path(file), raw, 0600); err != nil {

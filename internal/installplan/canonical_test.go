@@ -8,7 +8,7 @@ import (
 
 func canonicalFixture() map[string]string {
 	return map[string]string{
-		"INSTALL_SCHEMA_VERSION": "2", "BRIDGE": "192.0.2.1", "EXIT": "192.0.2.2", "BOT_DOMAIN": "sync.example.com", "VPN_DOMAIN": "edge.example.com", "ACME_EMAIL": "owner@example.com", "PUBLIC_XHTTP_PATH": "/connect", "DNS_PROVIDER": "vultr", "DNS_ZONE": "example.com", "ULTRA_AUTOMATION_VERSION": "v2.1", "ULTRA_AUTOMATION_RELEASE_DIR": "/release", "ULTRA_AUTOMATION_AGE_RECIPIENT": "age1fixture", "ULTRA_AUTOMATION_BRIDGE_PROVIDER": "a", "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": "/pins", "ULTRA_AUTOMATION_ADMIN_TELEGRAM_ID": "123", "ULTRA_AUTOMATION_STATIC_NODES": `[{"name":"NL","address":"192.0.2.2","provider":"a"}]`,
+		"INSTALL_SCHEMA_VERSION": "2", "BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "BOT_DOMAIN": "sync.example.com", "VPN_DOMAIN": "edge.example.com", "ACME_EMAIL": "owner@example.com", "PUBLIC_XHTTP_PATH": "/connect", "DNS_PROVIDER": "vultr", "DNS_ZONE": "example.com", "ULTRA_AUTOMATION_VERSION": "v2.1", "ULTRA_AUTOMATION_RELEASE_DIR": "/release", "ULTRA_AUTOMATION_AGE_RECIPIENT": "age1fixture", "ULTRA_AUTOMATION_BRIDGE_PROVIDER": "a", "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": "/pins", "ULTRA_AUTOMATION_ADMIN_TELEGRAM_ID": "123", "ULTRA_AUTOMATION_STATIC_NODES": `[{"name":"NL","address":"192.0.2.2","provider":"a"}]`,
 	}
 }
 func TestCanonicalV2MappingAndLegacyBoundary(t *testing.T) {
@@ -52,23 +52,16 @@ func TestCanonicalRejectsRemovedAutomaticUpgradePolicy(t *testing.T) {
 	}
 }
 
-func TestCanonicalV2BridgeSSHHostDoesNotChangeServiceAddress(t *testing.T) {
-	v := canonicalFixture()
-	v["BRIDGE_SSH_HOST"] = "bridge-admin"
-	p, err := CanonicalValuesToPlan(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Bridge.Address != "192.0.2.1" || p.Bridge.SSHHost != "bridge-admin" {
-		t.Fatalf("bridge address and SSH target were conflated: %#v", p.Bridge)
-	}
-	if p.Bridge.PublicHost != "192.0.2.1" {
-		t.Fatalf("public host = %q, want service address", p.Bridge.PublicHost)
-	}
-	if p.Automation.BridgeIPv4 != "192.0.2.1" {
-		t.Fatalf("automation bridge IPv4 = %q, want service address", p.Automation.BridgeIPv4)
+func TestCanonicalRetiredRoleInputsAreRejected(t *testing.T) {
+	for _, key := range []string{"BRIDGE", "EXIT", "DB_HOST", "IDENTITY", "BRIDGE_SSH_HOST", "BRIDGE_SSH_IDENTITY", "EXIT_SSH_IDENTITY", "DB_SSH_IDENTITY", "EXIT2", "DB_ENABLE", "DB_REPLICA", "DB_SSH_USER"} {
+		v := canonicalFixture()
+		v[key] = "retired"
+		if _, err := CanonicalValuesToPlan(v); err == nil {
+			t.Fatalf("retired key %s accepted", key)
+		}
 	}
 }
+
 func TestDNSRoleValidation(t *testing.T) {
 	for _, value := range []string{"../vpn", "edge.example.com", "-vpn", "vpn_", ""} {
 		p, _ := CanonicalValuesToPlan(canonicalFixture())

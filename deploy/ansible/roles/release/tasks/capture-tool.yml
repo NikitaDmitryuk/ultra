@@ -1,4 +1,6 @@
 ---
+- name: Stage the signed collector import dependency
+  ansible.builtin.include_tasks: capture-dependency.yml
 # The archive member was extracted only after signed release verification.
 # Keep active tools/fallback inventory unchanged until the normal refresh phase.
 - name: Inspect the signed release capture collector source

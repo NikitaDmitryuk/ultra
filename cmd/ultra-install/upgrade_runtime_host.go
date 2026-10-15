@@ -485,11 +485,12 @@ func (s runtimeHostStore) liveBridgeAttestation(r runtimeHostRequest) (runtimeHo
 		return runtimeHostAttestation{}, runtimeHostError("exit_attestation_required")
 	}
 	type metadata struct {
-		BridgeIPv4 string                       `json:"bridge_ipv4"`
-		Database   string                       `json:"database"`
-		Nodes      []installplan.AutomationNode `json:"static_nodes"`
-		Provider   string                       `json:"bridge_provider"`
-		URL        string                       `json:"bridge_url"`
+		BridgeIPv4   string                       `json:"bridge_ipv4"`
+		Database     string                       `json:"database"`
+		DatabaseHost string                       `json:"database_host"`
+		Nodes        []installplan.AutomationNode `json:"static_nodes"`
+		Provider     string                       `json:"bridge_provider"`
+		URL          string                       `json:"bridge_url"`
 	}
 	var deployment, reconcile metadata
 	for _, entry := range []struct {
@@ -501,7 +502,7 @@ func (s runtimeHostStore) liveBridgeAttestation(r runtimeHostRequest) (runtimeHo
 			return fail()
 		}
 	}
-	if deployment.BridgeIPv4 == "" || deployment.BridgeIPv4 != r.Bridge.Address || r.Bridge.SSHHost != r.Bridge.Address || deployment.Database == "" || deployment.Database != reconcile.Database || deployment.Database != r.Database.Name || !r.Database.Enabled || deployment.Provider == "" || deployment.Provider != reconcile.Provider || deployment.URL != reconcile.URL || !reflect.DeepEqual(deployment.Nodes, reconcile.Nodes) || len(deployment.Nodes) != len(r.Exits) {
+	if deployment.BridgeIPv4 == "" || deployment.BridgeIPv4 != r.Bridge.Address || r.Bridge.SSHHost != r.Bridge.Address || deployment.Database == "" || deployment.Database != reconcile.Database || deployment.Database != r.Database.Name || deployment.DatabaseHost != r.Database.PrimaryHost || reconcile.DatabaseHost != r.Database.PrimaryHost || !r.Database.Enabled || deployment.Provider == "" || deployment.Provider != reconcile.Provider || deployment.URL != reconcile.URL || !reflect.DeepEqual(deployment.Nodes, reconcile.Nodes) || len(deployment.Nodes) != len(r.Exits) {
 		return runtimeHostAttestation{}, runtimeHostError("migration_required")
 	}
 	seen := map[string]bool{}
@@ -543,15 +544,7 @@ func (s runtimeHostStore) liveBridgeAttestation(r runtimeHostRequest) (runtimeHo
 			return fail()
 		}
 	}
-	if u.Port() != "" && u.Port() != "5432" {
-		return fail()
-	}
-	host := u.Hostname()
-	primary := r.Database.PrimaryHost
-	if primary == r.Bridge.Address && (host == "127.0.0.1" || host == "localhost") {
-		host = primary
-	}
-	if primary == "" || host != primary || strings.TrimPrefix(u.Path, "/") != r.Database.Name || u.User.Username() != r.Database.User || r.Database.ReplicaHost != "" {
+	if u.Port() != "25432" || u.Hostname() != "127.0.0.1" || r.Database.PrimaryHost == "" || r.Database.PrimaryHost == r.Bridge.Address || strings.TrimPrefix(u.Path, "/") != r.Database.Name || u.User.Username() != r.Database.User || r.Database.ReplicaHost != "" {
 		return runtimeHostAttestation{}, runtimeHostError("migration_required")
 	}
 	desired, err := runtimeHostDesiredIdentity(r)

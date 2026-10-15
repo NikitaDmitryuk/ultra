@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+import urllib.parse
 from unittest import mock
 import recovery
 
@@ -26,6 +27,11 @@ class RecoveryTests(unittest.TestCase):
         retirement_patch = mock.patch.object(recovery, 'CONTROLLER_RETIREMENT_PATH', str(self.retirement_path))
         retirement_patch.start()
         self.addCleanup(retirement_patch.stop)
+        dsn_patch = mock.patch.object(recovery.db_connection, 'dsn_from_runtime',
+                                      side_effect=lambda database: urllib.parse.urlsplit(
+                                          'postgres://app:fixture%3Asecret@127.0.0.1:25432/' + database))
+        dsn_patch.start()
+        self.addCleanup(dsn_patch.stop)
     def tearDown(self):
         self.tmp.cleanup()
     def args(self, name, data, stamp):
@@ -86,6 +92,11 @@ class RecoveryTests(unittest.TestCase):
         def run(args,**kwargs):
             if args[0] == 'pg_restore':
                 return argparse.Namespace(returncode=0, stdout=b'1; 2615 2200 SCHEMA - public owner\n')
+            if args[0] == 'pg_dump':
+                self.assertNotIn('fixture:secret', args)
+                passfile = Path(kwargs['env']['PGPASSFILE'])
+                self.assertEqual(passfile.stat().st_mode & 0o777, 0o600)
+                self.assertIn(r'app:fixture\:secret', passfile.read_text())
             kwargs['stdout'].write(b'fixture-pg-dump')
             return argparse.Namespace(returncode=0)
         def encrypt(source,target,recipient):target.write_bytes(source.read_bytes())

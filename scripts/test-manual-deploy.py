@@ -522,7 +522,7 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
             D.config_candidate(self.original + b'ULTRA_AUTOMATION_VERSION=v9.9.9\n', self.version, self.bundle)
 
     def test_attempt_identity_normalizes_derived_fields_without_recursion(self):
-        for raw in [self.original, b'BRIDGE=192.0.2.10\n']:
+        for raw in [self.original, b'BRIDGE_IP=192.0.2.10\n']:
             attempt = D.remote_attempt(raw, self.version)
             derived = D.config_candidate(raw, self.version, '/var/lib/ultra-ansible/operator-inputs/manual-' + self.commit + '-' + attempt + '/release')
             self.assertEqual(D.remote_attempt(derived, self.version), attempt)
@@ -622,7 +622,7 @@ class NativeDeploy(unittest.TestCase):
             'ansible_ssh_common_args': '-F /dev/null -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=' + str(self.pins)},
             'children': {'bridge': {'hosts': {'bridge': {'ansible_host': '192.0.2.10'}}},
                          'exits': {'hosts': {'exit_0': {'ansible_host': '192.0.2.20'}}}}}}
-        self.original += b'BRIDGE=192.0.2.10\nBRIDGE_SSH_HOST=192.0.2.10\nULTRA_AUTOMATION_STATIC_NODES=\'[{"address":"192.0.2.20"}]\'\nSECRETS_ENV_FILE=/etc/ultra-relay/.env\n'
+        self.original += b'BRIDGE_IP=192.0.2.10\nMAIN_EXIT_IP=192.0.2.20\nBRIDGE_SSH_KEY=/tmp/bridge-key\nMAIN_EXIT_SSH_KEY=/tmp/exit-key\nDATABASE_IP=192.0.2.30\nDATABASE_SSH_KEY=/tmp/database-key\nULTRA_AUTOMATION_STATIC_NODES=\'[{"address":"192.0.2.20"}]\'\nSECRETS_ENV_FILE=/etc/ultra-relay/.env\n'
         self.config.write_bytes(self.original)
         self.write_inventory()
         self.manifest = json.dumps({'source_commit': self.commit, 'version': self.version, 'assets': []}).encode()
@@ -2588,6 +2588,44 @@ class LegacyForwardAttestation(unittest.TestCase):
         target.rename(path)
         with D.lock(self.parent / 'manual-deploy.lock'):
             self.assertNotEqual(self.execute().returncode, 0)
+
+
+class PerRoleOperatorIdentity(unittest.TestCase):
+    def test_canonical_bridge_and_exit_keys_drive_their_ssh_endpoints(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            bridge=root/'bridge-key';exit=root/'exit-key';pins=root/'known_hosts'
+            for path in (bridge,exit,pins):
+                path.write_bytes(b'synthetic fixture only');path.chmod(0o600)
+            config=("BRIDGE_IP=192.0.2.10\nMAIN_EXIT_IP=192.0.2.20\nDATABASE_IP=192.0.2.30\nBRIDGE_SSH_KEY="+str(bridge)+
+                    "\nMAIN_EXIT_SSH_KEY="+str(exit)+"\nDATABASE_SSH_KEY=/tmp/database-key\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE="+str(pins)+
+                    "\nULTRA_AUTOMATION_STATIC_NODES='[{\"name\":\"primary\",\"address\":\"192.0.2.20\"}]'\n").encode()
+            with patch.dict(os.environ,{'ULTRA_OPERATOR_IDENTITY':'','ULTRA_OPERATOR_KNOWN_HOSTS':''}), \
+                    patch.object(D.subprocess,'run',return_value=subprocess.CompletedProcess([],0)):
+                argv,_=D.operator_transport(None,config)
+            self.assertEqual(argv[-1],'root@192.0.2.10')
+            self.assertEqual(argv[argv.index('-i')+1],str(bridge))
+            self.assertTrue(any('ProxyCommand=' in token and str(exit) in token for token in argv))
+
+    def test_retired_key_contract_matches_go_parser(self):
+        import ast
+        import inspect
+        import re
+        tree = ast.parse(inspect.getsource(D.config_values))
+        legacy = next(node for node in ast.walk(tree)
+                      if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'legacy_keys' for target in node.targets))
+        python_keys = ast.literal_eval(legacy.value)
+        canonical = (Path(__file__).resolve().parents[1] / 'internal/installplan/canonical.go').read_text()
+        retired = canonical.split('case "BRIDGE"', 1)[1].split(':', 1)[0]
+        self.assertEqual(python_keys, {'BRIDGE', *re.findall(r'"([A-Z0-9_]+)"', retired)})
+
+    def test_old_config_aliases_are_rejected_without_fallback(self):
+        for key in ('BRIDGE', 'BRIDGE_SSH_HOST', 'BRIDGE_SSH_IDENTITY', 'EXIT',
+                    'EXIT_SSH_IDENTITY', 'EXIT2', 'EXIT2_SSH_IDENTITY', 'DB_HOST',
+                    'IDENTITY', 'FRONT', 'BACK', 'DB_SSH_IDENTITY', 'DB_ENABLE',
+                   'DB_REPLICA', 'DB_SSH_USER', 'EXIT2_NAME', 'EXIT2_DIAL', 'EXIT2_PRIORITY'):
+            with self.subTest(key=key), self.assertRaisesRegex(D.DeployError, '^operator_legacy_config_key_forbidden$'):
+                D.config_values((key + '=192.0.2.10\n').encode())
 
 
 if __name__ == '__main__':

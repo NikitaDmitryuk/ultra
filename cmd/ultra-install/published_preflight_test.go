@@ -28,7 +28,7 @@ func TestPublishedApplyPreflightProcess(t *testing.T) {
 		return
 	}
 	dir := t.TempDir()
-	p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE": "192.0.2.1", "EXIT": "192.0.2.2", "REALITY_DEST": "example.com:443", "IDENTITY": filepath.Join(dir, "identity")})
+	p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "REALITY_DEST": "example.com:443", "BRIDGE_SSH_KEY": filepath.Join(dir, "identity"), "MAIN_EXIT_SSH_KEY": filepath.Join(dir, "identity")})
 	p.Automation = &installplan.AutomationConfig{Version: "v1.2.3", ReleaseDir: dir, AgeRecipient: "age1fixture", BridgeProvider: "a", BridgeIPv4: "192.0.2.1", BridgeURL: "https://sync.example.com/healthz", KnownHostsFile: filepath.Join(dir, "pins"), StaticNodes: []installplan.AutomationNode{{Name: "NL", Address: "192.0.2.2", Provider: "a"}}, Ingress: &installplan.AutomationIngress{Domain: "edge.example.com", Email: "operator@example.com", Path: "/connect", PublicHost: "192.0.2.1", BackendPort: 18080}}
 	var assets []map[string]any
 	for _, name := range []string{"ultra-relay-linux-amd64", "ultra-relay-linux-arm64", "ultra-bot-linux-amd64", "ultra-bot-linux-arm64", "ultra-client-linux-amd64", "ultra-client-linux-arm64", "ultra-recovery.tar.gz"} {

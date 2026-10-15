@@ -147,7 +147,30 @@ func ValidatePlan(p *InstallPlan) error {
 			return err
 		}
 	}
+	if p.Secrets.DatabaseDumpFile != "" && (!p.Database.Enabled || p.Bridge.ReuseSpec || p.AdoptRuntime) {
+		return errors.New("DATABASE_DUMP requires a dedicated database and fresh bootstrap without REUSE_BRIDGE_SPEC")
+	}
+	if p.AdoptRuntime && p.Database.Enabled {
+		return errors.New("legacy runtime adoption is unavailable for dedicated databases; use an explicitly reviewed bootstrap with reuse_spec")
+	}
+	if p.Database.ReplicaHost != "" {
+		return errors.New("database replicas are no longer supported; use a dedicated DB_HOST")
+	}
 	if p.Database.Enabled {
+		if net.ParseIP(p.Database.PrimaryHost).To4() == nil || p.Database.PrimaryHost == p.Bridge.Address || p.Database.PrimaryHost == p.Bridge.SSHHost {
+			return errors.New("database.primary_host must be the IP of a dedicated database server")
+		}
+		for _, exit := range p.Exits {
+			if p.Database.PrimaryHost == exit.SSHHost || p.Database.PrimaryHost == exit.DialAddr {
+				return errors.New("database server must be separate from VPN exit hosts")
+			}
+		}
+		if p.Database.SSHUser == "" {
+			p.Database.SSHUser = p.SSH.User
+		}
+		if p.Database.SSHIdentity == "" {
+			p.Database.SSHIdentity = p.SSH.Identity
+		}
 		if p.Database.Name == "" {
 			p.Database.Name = "ultra_db"
 		}

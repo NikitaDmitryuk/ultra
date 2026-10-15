@@ -4,6 +4,7 @@
   gather_facts: false
   any_errors_fatal: true
   vars:
+    ultra_recovery_capture_dependency: "{{ ultra_recovery_files | selectattr('destination', 'equalto', '/opt/ultra-recovery/db_connection.py') | list | first }}"
     ultra_recovery_capture_tool: "{{ ultra_recovery_files | selectattr('destination', 'equalto', '/opt/ultra-recovery/recovery.py') | list | first }}"
   tasks:
     - name: Require unchanged frozen topology without waking producers

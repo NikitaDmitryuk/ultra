@@ -10,21 +10,6 @@
     state: stopped
   loop: "{{ ultra_restore_app_units + ultra_restore_automation_units }}"
   when: ultra_restore_phase == 'prepare'
-- name: Inspect independent replica transports on the restore target
-  ansible.builtin.service_facts:
-  when: ultra_restore_phase == 'prepare'
-- name: Stop inherited replica tunnels before primary replacement
-  ansible.builtin.systemd_service:
-    name: "{{ item }}"
-    state: stopped
-    enabled: false
-  loop: "{{ ansible_facts.services | default({}) | list | select('match', '^ultra-replica-tunnel-ultra_[a-f0-9]{32}\\.service$') | list }}"
-  when: ultra_restore_phase == 'prepare'
-- name: Activate restored PostgreSQL settings
-  ansible.builtin.systemd_service:
-    name: postgresql
-    state: restarted
-  when: ultra_restore_phase == 'database'
 - name: Activate restored application services
   when: ultra_restore_phase == 'activate'
   block:
@@ -37,6 +22,25 @@
     - name: Reload restored systemd units
       ansible.builtin.systemd_service:
         daemon_reload: true
+    - name: Activate the dedicated database tunnel before the restored relay
+      ansible.builtin.include_role:
+        name: db_tunnel
+      vars:
+        ultra_db_tunnel_stage: install
+    - name: Admit the recovered bridge to owned managed exits before relay activation
+      ansible.builtin.command:
+        argv: [python3, "{{ ultra_restore_directory }}/restore_firewall.py", --config, /etc/ultra-recovery/reconcile.json, --new-bridge, "{{ ultra_restore_plan.new_bridge_address }}"]
+      register: restore_firewall_admission
+      failed_when: false
+      changed_when: true
+      no_log: true
+    - name: Require exit admission before activating VPN traffic
+      ansible.builtin.assert:
+        that: restore_firewall_admission.rc == 0
+        fail_msg: >-
+          {{ 'static_exit_firewall_operator_admission_required: verify the static exit provider firewall permits the new bridge and pinned SSH access, then retry restore'
+             if 'static_exit_firewall_operator_admission_required' in restore_firewall_admission.stderr | default('')
+             else 'restored_exit_firewall_admission_failed: verify owned exit firewall and pinned SSH access, then retry restore' }}
     - name: Start restored relay first
       ansible.builtin.systemd_service:
         name: ultra-relay.service

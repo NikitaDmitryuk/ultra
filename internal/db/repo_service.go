@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"strings"
@@ -71,23 +72,22 @@ func (r *UserRepo) EnsureMonitorAccess(ctx context.Context, targets []string) (a
 }
 
 func (r *UserRepo) attachServices(ctx context.Context, users []auth.User) ([]auth.User, error) {
-	rows, e := r.db.Pool.Query(ctx, `SELECT account_id::text,targets FROM service_access`)
-	if e != nil {
+	var rows []struct {
+		AccountID string
+		Targets   json.RawMessage `gorm:"type:json"`
+	}
+	if e := r.db.orm.WithContext(ctx).Table("service_access").Select("account_id, array_to_json(targets) AS targets").Find(&rows).Error; e != nil {
 		return nil, e
 	}
-	defer rows.Close()
 	targets := map[string][]string{}
-	for rows.Next() {
-		var owner string
+	for _, row := range rows {
 		var ts []string
-		if e = rows.Scan(&owner, &ts); e != nil {
+		if e := json.Unmarshal(row.Targets, &ts); e != nil {
 			return nil, e
 		}
-		targets[owner] = ts
+		targets[row.AccountID] = ts
 	}
-	if e = rows.Err(); e != nil {
-		return nil, e
-	}
+
 	for i := range users {
 		users[i].ServiceTargets = targets[users[i].AccountID]
 	}

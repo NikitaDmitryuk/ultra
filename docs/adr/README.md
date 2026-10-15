@@ -31,7 +31,7 @@ ADR фиксирует долгосрочный выбор границ комп
 | [0005 — Закрытый допуск и восстановимая подписка](0005-member-access.md) | accepted |
 | [0006 — Сохраняемые операции Vultr](0006-cloud-operations.md) | accepted |
 | [0007 — Учётные данные локаций одного доступа](0007-location-profiles.md) | superseded |
-| [0008 — Асинхронные копии БД и ручное восстановление](0008-database-recovery.md) | accepted |
+| [0008 — Асинхронные копии БД и ручное восстановление](0008-database-recovery.md) | superseded |
 | [0009 — Учёт выходов и адаптивные бюджеты трафика](0009-traffic-budgets.md) | superseded |
 | [0010 — Месячные квоты и подтверждённое применение маршрутов](0010-monthly-quotas-and-route-application.md) | accepted |
 | [0011. Отдельный HTTPS-вход подписок](0011-subscription-ingress.md) | superseded |
@@ -43,3 +43,4 @@ ADR фиксирует долгосрочный выбор границ комп
 | [0018 — Автономный relay и предпочтительная страна](0018-autonomous-relay-and-preferred-country.md) | accepted |
 | [0019 — Общая квота провайдера и личный потолок](0019-provider-pool-quotas.md) | accepted |
 | [0020 — Общий исполнитель инфраструктуры Ansible](0020-ansible-infrastructure.md) | accepted |
+| [0021 — PostgreSQL на отдельном сервере](0021-dedicated-database.md) | accepted |

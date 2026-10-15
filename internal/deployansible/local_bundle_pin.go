@@ -52,7 +52,7 @@ func pinnedBootstrapExporter(source, directory, operation string, request []byte
 	}
 	if job["operation"] == "bootstrap-postgres" {
 		switch operation {
-		case "bootstrap-postgres", "bootstrap-exit", "bootstrap-bridge", "adopt-replica-tunnels", "ingress", "configure-bot", "bootstrap-automation":
+		case "bootstrap-postgres", "bootstrap-exit", "bootstrap-bridge", "ingress", "configure-bot", "bootstrap-automation":
 		default:
 			return nil, errors.New("bootstrap_component_bundle_destination_invalid")
 		}

@@ -2,7 +2,7 @@
 - name: Validate fixed peer recovery action
   ansible.builtin.assert:
     that:
-      - ultra_peer_plan.action in ['reseed', 'forward']
+      - ultra_peer_plan.action == 'forward'
       - ultra_peer_plan.restore_id is match('^[a-f0-9]{64}$')
 - name: Inspect private peer recovery directory
   ansible.builtin.stat:
@@ -32,10 +32,7 @@
     src: "{{ ultra_peer_script_directory }}/{{ item }}"
     dest: "/var/lib/ultra-restore/{{ ultra_peer_plan.restore_id }}/{{ item }}"
     mode: "0600"
-  loop: [restore_peer.py, restore_common.py, recovery.py]
-- name: Apply owned standby retirement
-  ansible.builtin.include_tasks: reseed.yml
-  when: ultra_peer_plan.action == 'reseed'
+  loop: [restore_peer.py, restore_common.py, recovery.py, db_connection.py]
 - name: Apply owned HTTPS forward switch
   ansible.builtin.include_tasks: forward.yml
   when: ultra_peer_plan.action == 'forward'

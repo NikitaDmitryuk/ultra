@@ -9,6 +9,7 @@ source = Path(__file__).resolve().parents[1] / 'deploy/ansible/library/ultra_ado
 spec = importlib.util.spec_from_file_location('adopt_probe', source)
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
+probe.database_query = lambda instance, database, query: instance.run_command(['psql', '-c', query])
 installed = b'previous compatible release'
 candidate = b'incoming Ansible release'
 manifest = {'version': 'v2.4.6', 'capabilities': ['service-access-v1', 'provider-pool-quota-v1'],
@@ -65,7 +66,7 @@ class FakeModule:
             return (0 if self.spec_readable else 1), '', ''
         if args == ['dpkg', '--print-architecture']:
             return 0, 'amd64\n', ''
-        assert args[:11] == ['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', 'fixture', '-c'], args
+        assert args[:2] == ['psql', '-c'], args
         return self.schema_code, self.schema, ''
     def exit_json(self, **values):
         raise Done(values)

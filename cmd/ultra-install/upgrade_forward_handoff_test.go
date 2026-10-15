@@ -30,7 +30,7 @@ func forwardFixture(t *testing.T) (forwardUpgradeJournal, string, string) {
 			t.Fatal(err)
 		}
 	}
-	config := []byte(fmt.Sprintf("INSTALL_SCHEMA_VERSION=2\nBRIDGE=192.0.2.1\nEXIT=192.0.2.2\nBOT_DOMAIN=sync.example.com\nVPN_DOMAIN=edge.example.com\nACME_EMAIL=owner@example.com\nPUBLIC_XHTTP_PATH=/connect\nREUSE_BRIDGE_SPEC=true\nULTRA_AUTOMATION_VERSION=%s\nULTRA_AUTOMATION_RELEASE_DIR=%s\nULTRA_AUTOMATION_AGE_RECIPIENT=age1fixture\nULTRA_AUTOMATION_BRIDGE_PROVIDER=fixture\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/pins\nULTRA_AUTOMATION_STATIC_NODES=[{\"name\":\"NL\",\"address\":\"192.0.2.2\",\"provider\":\"fixture\"}]\nULTRA_AUTOMATION_ADMIN_TELEGRAM_ID=123\n", version, filepath.Join(input, "release")))
+	config := []byte(fmt.Sprintf("INSTALL_SCHEMA_VERSION=2\nBRIDGE_IP=192.0.2.1\nMAIN_EXIT_IP=192.0.2.2\nBOT_DOMAIN=sync.example.com\nVPN_DOMAIN=edge.example.com\nACME_EMAIL=owner@example.com\nPUBLIC_XHTTP_PATH=/connect\nREUSE_BRIDGE_SPEC=true\nULTRA_AUTOMATION_VERSION=%s\nULTRA_AUTOMATION_RELEASE_DIR=%s\nULTRA_AUTOMATION_AGE_RECIPIENT=age1fixture\nULTRA_AUTOMATION_BRIDGE_PROVIDER=fixture\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/pins\nULTRA_AUTOMATION_STATIC_NODES=[{\"name\":\"NL\",\"address\":\"192.0.2.2\",\"provider\":\"fixture\"}]\nULTRA_AUTOMATION_ADMIN_TELEGRAM_ID=123\n", version, filepath.Join(input, "release")))
 	write := func(path string, raw []byte) {
 		t.Helper()
 		if err := os.WriteFile(path, raw, 0600); err != nil {

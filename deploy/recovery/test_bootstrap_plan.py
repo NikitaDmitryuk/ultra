@@ -12,6 +12,7 @@ import subprocess
 import sys
 from unittest import mock
 import bootstrap_plan
+import db_connection
 import recovery_status
 
 
@@ -20,26 +21,28 @@ class BootstrapPlanTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.path = lambda value: self.root / str(value).lstrip('/') if str(value).startswith('/') and not str(value).startswith(str(self.root)) else Path(value)
-        for name, content in [('var/lib/ultra-relay/automation/id_ed25519', 'fixture-private'),
-                              ('var/lib/ultra-relay/automation/id_ed25519.pub', 'fixture-public'),
+        for name, content in [('etc/ultra-fleet/id_ed25519', 'fixture-private'),
+                              ('etc/ultra-fleet/id_ed25519.pub', 'fixture-public'),
                               ('etc/ultra-relay/bot.env', 'TELEGRAM_BOT_TOKEN=fixture-bot-token\n'),
                               ('etc/ultra-relay/environment', 'ULTRA_RELAY_ADMIN_TOKEN=fixture-admin-token\n'),
                               ('var/lib/ultra-relay/automation/vultr-api-key', 'fixture-cloud')]:
             path = self.root / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(content)
-        self.spec = self.root / 'spec.json'; self.spec.write_text('{}')
+        self.spec = self.root / 'spec.json'; self.spec.write_text(json.dumps({'database': {'dsn': 'postgres://app:fixture-pass@127.0.0.1:25432/fixture?sslmode=disable'}})); self.spec.chmod(0o600)
         self.pins = self.root / 'pins'; self.pins.write_text('fixture-pins')
-        self.config = {'database': 'fixture', 'known_hosts_file': str(self.pins), 'spec': str(self.spec),
+        self.config = {'database': 'fixture', 'database_host': '192.0.2.3', 'known_hosts_file': str(self.pins), 'spec': str(self.spec),
                        'static_nodes': [{'address': '192.0.2.2', 'name': 'Exit', 'provider': 'fixture', 'budget': {'monthly_bytes': 1024}}],
                        'age_recipient': 'fixture-age-recipient', 'bridge_provider': 'fixture', 'bridge_ipv4': '192.0.2.1',
                        'bridge_url': 'https://access.example.org/sub', 'version': 'v1.0.0', 'recovery_tool_members': [], 'tools': []}
         self.patch = mock.patch.multiple(bootstrap_plan, Path=self.path, CONFIG=self.root/'etc/ultra-recovery',
                                         ROOT=self.root/'opt/ultra-recovery', UNITS=self.root/'etc/systemd/system')
         self.patch.start()
-        self.discovery = mock.patch.object(bootstrap_plan, 'query', return_value=json.dumps([{'id':'11111111-2222-3333-4444-555555555555','address':'192.0.2.2'}]).encode())
+        self.db_spec_patch = mock.patch.object(db_connection, 'APP_SPEC', self.spec)
+        self.db_spec_patch.start()
+        self.discovery = mock.patch.object(bootstrap_plan, 'query_database', return_value=json.dumps([{'id':'11111111-2222-3333-4444-555555555555','address':'192.0.2.2'}]).encode())
         self.discovery.start()
 
     def tearDown(self):
-        self.discovery.stop(); self.patch.stop(); self.temp.cleanup()
+        self.db_spec_patch.stop(); self.discovery.stop(); self.patch.stop(); self.temp.cleanup()
 
     def test_planner_has_no_host_mutations_and_initial_independence_is_unconfirmed(self):
         before = sorted(str(p) for p in self.root.rglob('*'))
@@ -158,6 +161,8 @@ class BootstrapPlanTests(unittest.TestCase):
         result = bootstrap_plan.plan(self.config)
         backup = json.loads(next(item['content'] for item in result['files'] if item['destination'].endswith('/backup.json')))
         self.assertIn('/var/lib/ultra-ansible/retention', backup['state_paths'])
+        self.assertIn('/etc/ultra-db-tunnel', backup['state_paths'])
+        self.assertIn('/etc/systemd/system/ultra-db-tunnel.service', backup['state_paths'])
         self.assertEqual(backup['optional_state_paths'], ['/var/lib/ultra-ansible/lifecycle.json',
                                                          '/var/lib/ultra-ansible/lifecycle-retired.json'])
         self.assertIn(self.config['controller_directory'], backup['artifact_paths'])

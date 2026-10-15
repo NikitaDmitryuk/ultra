@@ -1,4 +1,4 @@
-.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay benchmark-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64 release-dist clean harness-check
+.PHONY: build build-install build-bot test vet lint format install bot-cert relay-logs verify-relay benchmark-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64 release-dist clean harness-check generate-db
 
 BINARY=ultra-relay
 INSTALL_BINARY=ultra-install
@@ -7,6 +7,7 @@ BOT_BINARY=ultra-bot
 # Pin tool versions (align with reproducible CI-style runs)
 GOIMPORTS_PKG=golang.org/x/tools/cmd/goimports@v0.50.0
 GOLANGCI_LINT_VERSION=v2.14.0
+SQLC_VERSION=v1.31.1
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BINARY) ./cmd/ultra-relay
@@ -19,6 +20,9 @@ build-bot:
 
 test:
 	CGO_ENABLED=0 go test ./...
+
+generate-db:
+	go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION) generate
 
 harness-check:
 	go run ./tools/harnesscheck
@@ -47,7 +51,7 @@ install: build-install
 	@bash "$(CURDIR)/scripts/install.sh"
 
 # Получить (или обновить) TLS-сертификат для ultra-bot локально через acme.sh и загрузить на bridge.
-# Требует DUCKDNS_TOKEN в .env и настроенного install.config (BOT_DOMAIN, BRIDGE, IDENTITY).
+# Требует DUCKDNS_TOKEN в .env и настроенного install.config (BOT_DOMAIN, BRIDGE_IP, BRIDGE_SSH_KEY).
 bot-cert:
 	@bash "$(CURDIR)/scripts/bot-cert.sh"
 
@@ -55,19 +59,17 @@ bot-cert:
 verify-miniapp:
 	@bash "$(CURDIR)/scripts/verify-miniapp.sh" $(if $(INSTALL_CONFIG),-c '$(INSTALL_CONFIG)',)
 
-# С journalctl: bridge + exit-ноды из install.config (EXIT, EXIT2).
+# С journalctl: bridge + exit-ноды из install.config (MAIN_EXIT_IP).
 # Недоступные exit пропускаются с WARNING; код выхода 1 только если недоступен bridge.
-# Опции: IDENTITY, SSH_USER, LINES, INSTALL_CONFIG, SINCE_RESTART=1 (-s).
+# Опции: SSH_USER, LINES, INSTALL_CONFIG, SINCE_RESTART=1 (-s).
 relay-logs:
 	@bash "$(CURDIR)/scripts/collect-relay-logs.sh" \
 		$(if $(INSTALL_CONFIG),-c '$(INSTALL_CONFIG)',) \
-		$(if $(IDENTITY),-i '$(IDENTITY)',) \
 		$(if $(SSH_USER),-u '$(SSH_USER)',) \
 		$(if $(LINES),-n '$(LINES)',) \
 		$(if $(filter 1 y Y yes true,$(SINCE_RESTART)),-s,) \
-		$(if $(BRIDGE),"$(BRIDGE)",) \
-		$(if $(EXIT),"$(EXIT)",) \
-		$(if $(EXIT2),"$(EXIT2)",)
+		$(if $(BRIDGE_IP),"$(BRIDGE_IP)",) \
+		$(if $(MAIN_EXIT_IP),"$(MAIN_EXIT_IP)",)
 
 # Интеграционная проверка (локальный xray + SOCKS). Нужен VERIFY_IP_URL. См. README.
 # Опции: VERIFY_USER_UUID, VERIFY_SOCKS_PORT, VERIFY_IP_URL (передайте make … VAR=…).
@@ -77,16 +79,14 @@ verify-relay:
 	export VERIFY_SPLIT_ROUTING="$(VERIFY_SPLIT_ROUTING)"; \
 	export VERIFY_PROBE_EXIT_URL="$(VERIFY_PROBE_EXIT_URL)"; \
 	export VERIFY_PROBE_EXIT_PLAIN_URL="$(VERIFY_PROBE_EXIT_PLAIN_URL)"; \
-	if [ -n "$(BRIDGE)" ] && [ -n "$(EXIT)" ]; then \
+	if [ -n "$(BRIDGE_IP)" ] && [ -n "$(MAIN_EXIT_IP)" ]; then \
 		bash "$(CURDIR)/scripts/verify-relay.sh" \
-			$(if $(IDENTITY),-i '$(IDENTITY)',) \
 			$(if $(SSH_USER),-u '$(SSH_USER)',) \
 			$(if $(VERIFY_SOCKS_PORT),-p '$(VERIFY_SOCKS_PORT)',) \
-			"$(BRIDGE)" "$(EXIT)"; \
+			"$(BRIDGE_IP)" "$(MAIN_EXIT_IP)"; \
 	else \
 		bash "$(CURDIR)/scripts/verify-relay.sh" \
 			$(if $(INSTALL_CONFIG),-c '$(INSTALL_CONFIG)',) \
-			$(if $(IDENTITY),-i '$(IDENTITY)',) \
 			$(if $(SSH_USER),-u '$(SSH_USER)',) \
 			$(if $(VERIFY_SOCKS_PORT),-p '$(VERIFY_SOCKS_PORT)',); \
 	fi
@@ -104,7 +104,6 @@ benchmark-relay:
 	export BENCH_SOCKS_PORT="$(BENCH_SOCKS_PORT)"; \
 	bash "$(CURDIR)/scripts/benchmark-relay.sh" \
 		$(if $(INSTALL_CONFIG),-c '$(INSTALL_CONFIG)',) \
-		$(if $(IDENTITY),-i '$(IDENTITY)',) \
 		$(if $(SSH_USER),-u '$(SSH_USER)',) \
 		$(if $(BENCH_SOCKS_PORT),-p '$(BENCH_SOCKS_PORT)',)
 
@@ -164,11 +163,9 @@ test-ui:
 	python3 scripts/test-ansible-release-contracts.py
 	python3 scripts/test-database-preservation.py
 	python3 scripts/test-ansible-upgrade-baseline.py
-	python3 scripts/test-ansible-migration-probe.py
 	python3 scripts/test-verify-miniapp.py
 	python3 scripts/test-ingress-ssh.py
 	python3 scripts/test-bridge-subscription.py
-	python3 scripts/test-migrate-bridge.py
 	python3 scripts/test-reality-reserve.py
 	node --test scripts/test-happ-import.cjs scripts/test-cabinet.cjs scripts/test-miniapp-preview.cjs
 
@@ -193,6 +190,7 @@ test-ansible:
 	python3 scripts/test-release-ci.py
 	python3 scripts/test-ansible-owned-file.py
 	python3 scripts/test-ansible-input-types.py
+	python3 scripts/test-relay-environment.py
 	python3 scripts/test-ansible-operation-mapping.py
 	python3 scripts/test-ansible-dns-migration.py
 	python3 scripts/test-ansible-upgrade-runtime.py
@@ -206,7 +204,6 @@ test-ansible:
 	python3 scripts/test-ansible-ingress-probe.py
 	python3 scripts/test-ansible-adopt-baseline.py
 	python3 scripts/test-ansible-adoption.py
-	python3 scripts/test-ansible-replica-adoption.py
 	python3 scripts/test-ansible-adoption-tls.py
 	python3 scripts/test-ansible-forward.py
 	ANSIBLE_CONFIG="$(CURDIR)/deploy/ansible/ansible.cfg" ansible-lint --offline deploy/ansible/playbooks deploy/ansible/roles

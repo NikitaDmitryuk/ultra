@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.parse
 from unittest import mock
 
 import recovery
@@ -44,6 +45,9 @@ class VersionedStateTests(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(mock.patch.object(recovery, 'VERSIONED_STATE_PATHS', self.patterns))
+        self.stack.enter_context(mock.patch.object(recovery.db_connection, 'dsn_from_runtime',
+            side_effect=lambda database: urllib.parse.urlsplit(
+                'postgres://app:fixture-pass@127.0.0.1:25432/' + database)))
         self.stack.enter_context(mock.patch.object(recovery, 'run', side_effect=self.dump))
         self.stack.enter_context(mock.patch.object(recovery, 'encrypt', side_effect=self.encrypt))
         self.stack.enter_context(mock.patch.object(recovery, 'verify_remote_artifact', side_effect=ValueError('missing')))

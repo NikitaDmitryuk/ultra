@@ -14,29 +14,44 @@ import grp
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
 import uuid
 from recovery import atomic_json, create, digest, private, read_config, ssh
+import db_connection
 
 QUERY = """BEGIN READ ONLY;
 SET LOCAL statement_timeout='5s';
 SELECT COALESCE(json_agg(json_build_object('id',c.id::text,'state',c.state,
  'phase',c.body->>'phase','instance_id',c.body->>'instance_id','firewall_id',c.body->>'firewall_id',
  'exit_id',c.body->>'exit_id','address',n.address,'enabled',COALESCE(n.enabled,false),
- 'country',n.country_code)), '[]'::json)
+ 'country',n.country_code,'tunnel_port',n.port)), '[]'::json)
 FROM cloud_operations c LEFT JOIN exit_nodes n ON n.id::text=c.body->>'exit_id'
 WHERE c.state IN ('ready','deleted','cancelled');
 COMMIT;"""
 
 
-def discover(config):
+EXIT_PORT_QUERY = """BEGIN READ ONLY;
+SET LOCAL statement_timeout='5s';
+SELECT COALESCE(json_agg(json_build_object('id',id::text,'address',address,'port',port)),'[]'::json) FROM exit_nodes WHERE enabled=true;
+COMMIT;"""
+
+
+def discover(config, query=QUERY):
     database = config['database']
     if not re.fullmatch(r'[A-Za-z0-9_-]+', database):
         raise ValueError('invalid database')
-    result = subprocess.run(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database, '-c', QUERY],
-                            capture_output=True, timeout=8)
+    try:
+        dsn = db_connection.dsn_from_runtime(database)
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ValueError('discovery unavailable') from None
+    with tempfile.TemporaryDirectory(prefix='ultra-db-discovery-') as directory:
+        with db_connection.pgpass(directory, dsn) as environment:
+            result = subprocess.run(db_connection.connection_args(dsn, database, 'psql') +
+                                    ['-XAtq', '-v', 'ON_ERROR_STOP=1', '-c', query],
+                                    capture_output=True, timeout=8, env=environment)
     if result.returncode or len(result.stdout) > 65536:
         raise ValueError('discovery unavailable')
     rows = json.loads(result.stdout)
@@ -225,7 +240,7 @@ def install(config, node, monitor=None, extra=None):
                     os.fsync(stream.fileno())
         files.append({'destination': destination, 'source': str(source.resolve()), 'mode': format(mode, '04o')})
 
-    for name in ['recovery.py', 'monitor.py', 'heartbeat.py']:
+    for name in ['recovery.py', 'db_connection.py', 'monitor.py', 'heartbeat.py']:
         project('/opt/ultra-recovery/' + name, source=base / name, mode=0o755)
     for name in ['ultra-recovery-prune.service', 'ultra-recovery-prune.timer', 'ultra-monitor.service', 'ultra-monitor.timer', 'ultra-monitor-probe.service']:
         project('/etc/systemd/system/' + name, source=base / name, mode=0o644)
@@ -348,6 +363,54 @@ def ensure_provider_peer_rule(config, primary, peer, port=22):
     if not any(all(rule.get(key) == value for key, value in required.items()) for rule in rules):
         api(config, 'POST', '/v2/firewalls/' + firewall + '/rules', required)
     return address
+
+
+def admit_restored_bridge(config, address):
+    """Restore bridge admission to pinned exits; never reseed PostgreSQL."""
+    address = str(ipaddress.IPv4Address(address))
+    rows = discover(config)
+    ready = any(row.get('state') == 'ready' and row.get('phase') == 'ready' and row.get('enabled') for row in rows)
+    if not ready and not config.get('static_nodes'):
+        return {'verified': True, 'managed_exits': 0, 'static_exits': 0}
+    nodes, _ = desired_nodes(config, rows)
+    exit_rows = discover(config, EXIT_PORT_QUERY)
+    enabled = {}
+    exit_ids = set()
+    for row in exit_rows:
+        host = str(ipaddress.IPv4Address(row['address']))
+        port = row.get('port')
+        if host in enabled or row['id'] in exit_ids or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ValueError('restored_exit_tunnel_port_unavailable')
+        enabled[host] = (row['id'], port)
+        exit_ids.add(row['id'])
+    ports = {}
+    # Validate all ports, identities and pins before the first mutation.
+    for node in nodes:
+        persisted = enabled.get(node['address'])
+        if persisted is None or persisted[0] != node['id'] or node['address'] == address:
+            raise ValueError('restored_exit_tunnel_port_unavailable')
+        port = persisted[1]
+        if node.get('managed'):
+            cloud = next(row for row in rows if row['id'] == node['id'])
+            if cloud.get('tunnel_port') != port:
+                raise ValueError('restored_exit_tunnel_port_unavailable')
+        ports[node['id']] = sorted({22, port})
+    cloud_private_file(config['ssh_identity_file'], config.get('ssh_identity_owner', 'ultra-relay'))
+    for node in nodes:
+        # Provider changes require proven resource ownership; static provider
+        # admission remains an explicit operator prerequisite.
+        if node.get('managed'):
+            for port in ports[node['id']]:
+                ensure_provider_peer_rule(config, node, {'address': address}, port)
+        try:
+            ansible_apply(config, node, {'ultra_recovery_peer_rules': [
+                {'address': address, 'port': port} for port in ports[node['id']]]})
+        except (OSError, ValueError, subprocess.SubprocessError):
+            if not node.get('managed'):
+                raise ValueError('static_exit_firewall_operator_admission_required') from None
+            raise
+    managed = sum(bool(node.get('managed')) for node in nodes)
+    return {'verified': True, 'managed_exits': managed, 'static_exits': len(nodes) - managed}
 
 
 def allow_peer(config, primary, peer, port=22):

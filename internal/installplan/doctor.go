@@ -32,7 +32,7 @@ func Doctor(ctx context.Context, p *InstallPlan, opts DoctorOptions) DoctorRepor
 	}
 	checkSSH := opts.CheckSSH
 	if checkSSH != nil {
-		if !checkSSH(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity) {
+		if !checkSSH(p.SSH.User, p.Bridge.SSHHost, p.BridgeSSHIdentity()) {
 			issues = append(
 				issues,
 				Issue{
@@ -44,7 +44,7 @@ func Doctor(ctx context.Context, p *InstallPlan, opts DoctorOptions) DoctorRepor
 			)
 		}
 		for _, ex := range p.Exits {
-			if !checkSSH(p.SSH.User, ex.SSHHost, p.SSH.Identity) {
+			if !checkSSH(p.SSH.User, ex.SSHHost, p.ExitSSHIdentity(ex)) {
 				issues = append(
 					issues,
 					Issue{

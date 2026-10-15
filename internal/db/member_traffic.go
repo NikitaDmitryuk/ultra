@@ -123,7 +123,9 @@ func (r *MemberRepo) Traffic(ctx context.Context, id int64, now time.Time) (Memb
 	result.QuotaPools = []PoolQuota{}
 	if id != 0 {
 		var account string
-		e = r.db.Pool.QueryRow(ctx, `SELECT account_id::text FROM users WHERE telegram_id=$1`, id).Scan(&account)
+		var row struct{ AccountID string }
+		e = cloudLookupError(r.db.orm.WithContext(ctx).Table("users").Select("account_id").Where("telegram_id = ?", id).Take(&row).Error)
+		account = row.AccountID
 		if e != nil {
 			return result, e
 		}
@@ -159,19 +161,25 @@ func (r *MemberRepo) Limits(ctx context.Context, id int64, now time.Time) ([]Mem
 	if id == 0 {
 		return out, nil
 	}
-	rows, e := r.db.Pool.Query(ctx, `SELECT b.exit_id::text,COALESCE(NULLIF(n.display_name,''),NULLIF(n.city,''),n.name),b.monthly_bytes,b.is_fallback,q.used_bytes,q.limit_bytes,q.day,q.blocked,q.applied,COALESCE(q.reason,'') FROM exit_traffic_budgets b JOIN exit_nodes n ON n.id=b.exit_id JOIN users u ON u.telegram_id=$1 LEFT JOIN user_exit_quotas q ON q.user_uuid=u.uuid AND q.exit_id=b.exit_id WHERE n.enabled AND b.source<>'vultr' ORDER BY n.priority,n.id`, id)
+	var rows []struct {
+		ExitID   string
+		Name     string
+		Monthly  int64
+		Fallback bool
+		Used     *int64
+		Limit    *int64
+		Day      *time.Time
+		Blocked  *bool
+		Applied  *bool
+		Reason   string
+	}
+	e := r.db.orm.WithContext(ctx).Table("exit_traffic_budgets AS b").Select("b.exit_id, COALESCE(NULLIF(n.display_name, ''), NULLIF(n.city, ''), n.name) AS name, b.monthly_bytes AS monthly, b.is_fallback AS fallback, q.used_bytes AS used, q.limit_bytes AS limit, q.day, q.blocked, q.applied, COALESCE(q.reason, '') AS reason").Joins("JOIN exit_nodes n ON n.id = b.exit_id").Joins("JOIN users u ON u.telegram_id = ?", id).Joins("LEFT JOIN user_exit_quotas q ON q.user_uuid = u.uuid AND q.exit_id = b.exit_id").Where("n.enabled AND b.source <> ?", "vultr").Order("n.priority, n.id").Find(&rows).Error
 	if e != nil {
 		return nil, e
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var l MemberLimit
-		var used, limit *int64
-		var day *time.Time
-		var blocked, applied *bool
-		if e = rows.Scan(&l.ExitID, &l.Name, &l.Monthly, &l.Fallback, &used, &limit, &day, &blocked, &applied, &l.Reason); e != nil {
-			return nil, e
-		}
+	for _, row := range rows {
+		l := MemberLimit{ExitID: row.ExitID, Name: row.Name, Monthly: row.Monthly, Fallback: row.Fallback, Reason: row.Reason}
+		used, limit, day, blocked, applied := row.Used, row.Limit, row.Day, row.Blocked, row.Applied
 		l.Period = "month"
 		if !l.Fallback {
 			l.PersonalLimit = quota.PersonalLimit(l.Monthly)
@@ -193,7 +201,7 @@ func (r *MemberRepo) Limits(ctx context.Context, id int64, now time.Time) ([]Mem
 		}
 		out = append(out, l)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (r *MemberRepo) Budgets(ctx context.Context) ([]ExitBudget, error) {

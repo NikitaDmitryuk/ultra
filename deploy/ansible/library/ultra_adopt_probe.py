@@ -2,9 +2,22 @@
 """Read-only comparison of managed configuration before adoption."""
 import hashlib
 import json
+import sys
+import subprocess
 import re
 from pathlib import Path
 from ansible.module_utils.basic import AnsibleModule
+
+
+def database_query(module, database, query):
+    # Credentials stay in a private temporary passfile on the bridge.
+    sys.path.insert(0, '/opt/ultra-recovery')
+    import db_connection
+    parsed = db_connection.dsn_from_runtime(database)
+    with db_connection.pgpass('/var/lib/ultra-recovery', parsed) as environment:
+        result = subprocess.run(db_connection.connection_args(parsed, database, 'psql') + ['-XAtq', '-v', 'ON_ERROR_STOP=1', '-c', query],
+                                env=environment, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=8)
+        return result.returncode, result.stdout, ''
 
 
 def environment(text):
@@ -68,8 +81,7 @@ def emergency_baseline(module, specification, architecture, binary):
     database = config['database']
     if not isinstance(database, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', database):
         raise ValueError('installed_artifact_drift')
-    code, schema, _ = module.run_command(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database,
-                                        '-c', "SELECT COALESCE(max(version),0)::text || ':' || count(*)::text FROM schema_migrations"])
+    code, schema, _ = database_query(module, database, "SELECT COALESCE(max(version),0)::text || ':' || count(*)::text FROM schema_migrations")
     current, count = map(int, schema.strip().split(':'))
     if code or count != current or not minimum <= current <= maximum:
         raise ValueError('installed_artifact_drift')

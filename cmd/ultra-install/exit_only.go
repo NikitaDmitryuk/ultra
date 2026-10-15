@@ -23,6 +23,7 @@ type exitOnlyOpts struct {
 	exitHost        string
 	sshUser         string
 	identity        string
+	bridgeIdentity  string
 	remoteDir       string
 	projectRoot     string
 	binaryPath      string
@@ -82,7 +83,11 @@ func runExitOnly(o exitOnlyOpts) {
 	directory, err := beginBootstrapAttempt(attemptRoot)
 	exitOnErr("exit-only attempt", err)
 	exitOnErr("exit-only private attempt", ensurePrivateBootstrapDirectory(directory))
-	plan := &installplan.InstallPlan{SSH: installplan.SSHConfig{User: o.sshUser, Identity: o.identity}, Bridge: installplan.BridgeConfig{SSHHost: o.bridgeHost, RemoteDir: o.remoteDir}}
+	bridgeIdentity := o.bridgeIdentity
+	if bridgeIdentity == "" {
+		bridgeIdentity = o.identity
+	}
+	plan := &installplan.InstallPlan{SSH: installplan.SSHConfig{User: o.sshUser, Identity: bridgeIdentity}, Bridge: installplan.BridgeConfig{SSHHost: o.bridgeHost, RemoteDir: o.remoteDir}}
 	executable := os.Getenv("ULTRA_ANSIBLE_EXECUTABLE")
 	if executable == "" {
 		executable = "/opt/ultra-ansible/current/venv/bin/ansible-playbook"

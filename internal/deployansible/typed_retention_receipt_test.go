@@ -67,26 +67,3 @@ func TestTypedExitPreparesBundleOwnership(t *testing.T) {
 		t.Fatal("claimed legacy exit bundle")
 	}
 }
-
-func TestTypedReplicaPreparesOwnershipAndPreservesLegacy(t *testing.T) {
-	request := replicaFixture(t)
-	inputs, err := openReplicaInputs(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeInputs(inputs)
-	directory := filepath.Join(t.TempDir(), "replica")
-	if err := prepareReplica(directory, "configure-replica", request, inputs); err != nil {
-		t.Fatal(err)
-	}
-	assertTypedRetentionReceipt(t, directory)
-	if err := os.Remove(filepath.Join(directory, "bundle.retention.json")); err != nil {
-		t.Fatal(err)
-	}
-	if err := prepareReplica(directory, "configure-replica", request, inputs); err != nil {
-		t.Fatal("legacy resume blocked", err)
-	}
-	if _, err := os.Lstat(filepath.Join(directory, "bundle.retention.json")); !os.IsNotExist(err) {
-		t.Fatal("claimed legacy replica bundle")
-	}
-}

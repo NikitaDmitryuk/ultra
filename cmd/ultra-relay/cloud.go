@@ -4,12 +4,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/adminapi"
 	"github.com/NikitaDmitryuk/ultra/internal/cloud"
@@ -18,8 +15,6 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/db"
 	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
-	"github.com/NikitaDmitryuk/ultra/internal/install"
-	"github.com/NikitaDmitryuk/ultra/internal/replication"
 )
 
 func readCloudKey(path string) (string, error) {
@@ -52,26 +47,6 @@ func configureCloud(ctx context.Context, wg *sync.WaitGroup, srv *adminapi.Serve
 		stateDir = "/var/lib/ultra-relay/vultr"
 	}
 	routes := db.NewRouteRepo(database)
-	srv.ReplicationStatus = routes.ReplicationStatuses
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			c, cancel := context.WithTimeout(ctx, 5*time.Second)
-			err := replication.RefreshHeartbeat(c, database.Pool)
-			cancel()
-			if err != nil && ctx.Err() == nil {
-				log.Warn("recovery heartbeat unavailable", "code", "heartbeat_failed")
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
 	store := db.NewCloudRepo(database)
 	binary, e := os.Executable()
 	if e != nil {
@@ -79,28 +54,6 @@ func configureCloud(ctx context.Context, wg *sync.WaitGroup, srv *adminapi.Serve
 	}
 	p := &cloudinstall.Provisioner{DB: database, Bridge: spec, Exits: exitMgr, Routes: routes, Identity: identity, BridgeIP: bridgeIP, StateDir: stateDir, Binary: binary, Apply: apply, Refresh: refresh}
 	p.Configurer = controller
-	replicaConfig, e := replication.Load(os.Getenv("ULTRA_REPLICATION_KEY_FILE"))
-	if e == nil {
-		replicas := replication.New(ctx, replicaConfig)
-		replicas.Configurer = deployansible.Client{Socket: socket}
-		replicas.DatabaseName = database.Pool.Config().ConnConfig.Database
-		replicas.Record = routes.ReplicationState
-		p.Replica = replicas.Ensure
-		p.CheckReady = replicas.Ready
-		p.RemoveReplica = replicas.RemoveSlot
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			runReplicaMonitor(ctx, database, exitMgr, store, replicas, identity, stateDir, log)
-		}()
-	} else {
-		log.Warn("Vultr provisioning requires replication configuration")
-		c, cancel := context.WithTimeout(ctx, 5*time.Second)
-		for _, node := range exitMgr.List() {
-			_ = routes.ReplicationState(c, node.ID, "error", 0, 0, "configuration_unavailable")
-		}
-		cancel()
-	}
 	var quotaAPI *cloud.Vultr
 	defer func() { wg.Add(1); go func() { defer wg.Done(); runQuotas(ctx, database, quotaAPI, apply, log) }() }()
 	path := os.Getenv("ULTRA_VULTR_KEY_FILE")
@@ -118,51 +71,4 @@ func configureCloud(ctx context.Context, wg *sync.WaitGroup, srv *adminapi.Serve
 	srv.Cloud = &cloud.Service{TopologyReady: controller.Ready, IngressInstanceID: os.Getenv("ULTRA_SUBSCRIPTION_INGRESS_INSTANCE_ID"), API: api, Store: store, Provisioner: p, Log: log}
 	wg.Add(1)
 	go func() { defer wg.Done(); srv.Cloud.Run(ctx) }()
-}
-func runReplicaMonitor(ctx context.Context, database *db.DB, exitMgr *exits.Manager, store *db.CloudRepo, manager *replication.Manager, identity, stateDir string, log *slog.Logger) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			ops, e := store.List(ctx)
-			if e != nil {
-				continue
-			}
-			cloudNodes := map[string]string{}
-			for _, op := range ops {
-				cloudNodes[op.ID] = op.State
-			}
-			for _, node := range exitMgr.List() {
-				if !node.Enabled || net.ParseIP(node.Address) == nil {
-					continue
-				}
-				if state, managed := cloudNodes[node.ID]; managed && state != "ready" {
-					continue
-				}
-				dir := filepath.Join(stateDir, node.ID)
-				if os.MkdirAll(dir, 0700) != nil {
-					continue
-				}
-				remote := install.Remote{Host: node.Address, Identity: identity, KnownHosts: filepath.Join(dir, "known_hosts")}
-				var state string
-				e = database.Pool.QueryRow(ctx, `SELECT state FROM node_replication WHERE node_id=$1`, node.ID).Scan(&state)
-				if e != nil || state == "not_configured" || state == "insufficient_space" {
-					c, cancel := context.WithTimeout(ctx, 10*time.Minute)
-					_, err := manager.Ensure(c, node.ID, remote)
-					cancel()
-					if err != nil {
-						_ = db.NewRouteRepo(database).ReplicationState(ctx, node.ID, "error", 0, 0, "bootstrap_failed")
-						log.Warn("replica setup requires attention", "node", node.ID)
-					}
-				} else if state != "unexpected_primary" && state != "incompatible" {
-					c, cancel := context.WithTimeout(ctx, 10*time.Second)
-					_ = manager.Check(c, node.ID, remote)
-					cancel()
-				}
-			}
-		}
-	}
 }

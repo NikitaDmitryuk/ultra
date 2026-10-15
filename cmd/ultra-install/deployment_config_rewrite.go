@@ -21,11 +21,15 @@ func runDeploymentConfigRewrite(args []string) {
 	ssh := flags.String("new-ssh-host", "", "current target operator endpoint")
 	public := flags.String("public-host", "", "restored client name")
 	subscription := flags.String("subscription-domain", "", "restored subscription name")
+	database := flags.String("database-ip", "", "selected dedicated database IPv4")
 	provider := flags.String("provider", "", "new primary provider")
 	_ = flags.Parse(args)
-	exitOnErr("deployment config rewrite", rewriteDeploymentConfig(*input, *output, *old, *bridge, *ssh, *public, *subscription, *provider))
+	exitOnErr("deployment config rewrite", rewriteDeploymentConfig(*input, *output, *old, *bridge, *ssh, *public, *subscription, *provider, *database))
 }
-func rewriteDeploymentConfig(input, output, old, bridge, ssh, public, subscription, provider string) error {
+func rewriteDeploymentConfig(input, output, old, bridge, ssh, public, subscription, provider, database string) error {
+	if net.ParseIP(database).To4() == nil || database == bridge || database == ssh {
+		return errors.New("deployment_rewrite_dedicated_database_invalid")
+	}
 	if net.ParseIP(old).To4() == nil || net.ParseIP(bridge).To4() == nil || !regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`).MatchString(ssh) || !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`).MatchString(provider) {
 		return errors.New("deployment_rewrite_identity_invalid")
 	}
@@ -50,6 +54,11 @@ func rewriteDeploymentConfig(input, output, old, bridge, ssh, public, subscripti
 			delete(values, key)
 		}
 	}
+	delete(values, "DATABASE_DUMP")
+	values["DATABASE_IP"] = database
+	if values["MAIN_EXIT_IP"] == database {
+		return errors.New("deployment_rewrite_dedicated_database_invalid")
+	}
 	p, err := installplan.CanonicalValuesToPlan(values)
 	if err != nil {
 		return err
@@ -57,17 +66,13 @@ func rewriteDeploymentConfig(input, output, old, bridge, ssh, public, subscripti
 	if len(p.SourceValues) == 0 {
 		return errors.New("deployment_rewrite_canonical_source_required")
 	}
-	values["BRIDGE"] = bridge
-	values["BRIDGE_SSH_HOST"] = ssh
-	if _, exists := values["FRONT"]; exists {
-		values["FRONT"] = bridge
-	}
-	if values["DB_HOST"] == old || values["DB_HOST"] == p.Bridge.SSHHost {
-		values["DB_HOST"] = bridge
+	values["BRIDGE_IP"] = bridge
+	if ssh != bridge {
+		return errors.New("canonical bridge SSH endpoint must equal BRIDGE_IP")
 	}
 	values["PUBLIC_HOST"] = public
 	values["SUBSCRIPTION_DOMAIN"] = subscription
-	values["ULTRA_AUTOMATION_BRIDGE_IPV4"] = bridge
+	delete(values, "ULTRA_AUTOMATION_BRIDGE_IPV4")
 	values["ULTRA_AUTOMATION_BRIDGE_PROVIDER"] = strings.ToLower(provider)
 	if previous, err := url.Parse(values["ULTRA_AUTOMATION_BRIDGE_URL"]); err == nil && previous.Scheme == "https" && previous.Hostname() != "" && previous.User == nil {
 		previous.Host = subscription
