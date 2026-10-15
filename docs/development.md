@@ -105,6 +105,12 @@ installer всё равно независимо проверяет конфиг
 plan, lifecycle и отсутствие activation. Допускаются сохранённый handoff с его
 drain evidence и частичные broker-bootstrap stages; все файлы проверяются на
 приватность, а installer сверяет содержимое bundle с подписанным Ansible archive.
+В сохранённом drain stage допускаются точные генерируемые controller артефакты:
+обычный приватный `execution.lock` и приватное дерево `.ansible` (Ansible HOME).
+Workspace проверяется рекурсивно по владельцу, типам, правам и лимитам размера;
+symlink и посторонние элементы stage блокируют продолжение. Наличие lock-файла
+не подтверждает quiescence: operator lease, lifecycle и свежий fleet census
+проверяются независимо.
 Историческое дерево предыдущего успешного upgrade может содержать inspect, host,
 runtime и Ansible job artifacts; безопасное дерево проверяется без предположения,
 что в нём ровно три элемента, а request/job/receipt activation сверяются отдельно.

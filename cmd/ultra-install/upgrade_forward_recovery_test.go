@@ -507,3 +507,78 @@ func TestForwardRecoveryReplaysSameCandidateAfterPreBootstrapCensus(t *testing.T
 		t.Fatal("retry did not atomically supersede", err)
 	}
 }
+
+func TestForwardRecoveryControllerArtifacts(t *testing.T) {
+	for _, artifact := range []string{".ansible", "execution.lock"} {
+		for _, kind := range []string{"valid", "wrong-type", "symlink", "mode", "owner", "nested-symlink", "nested-mode", "extra-file"} {
+			t.Run(artifact+"/"+kind, func(t *testing.T) {
+				if strings.HasPrefix(kind, "nested-") && artifact != ".ansible" {
+					t.Skip("workspace-only case")
+				}
+				proof, old, root, directory, prior := forwardPriorRecoveryFixture(t)
+				intent, err := loadForwardIntent(filepath.Join(prior.Directory, "forward-handoff.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				workspace := filepath.Join(intent.Stage, ".ansible")
+				if err := os.MkdirAll(filepath.Join(workspace, "tmp"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				cache := filepath.Join(workspace, "tmp", "cache")
+				if err := os.WriteFile(cache, []byte("generated"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				lock := filepath.Join(intent.Stage, "execution.lock")
+				if err := os.WriteFile(lock, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(intent.Stage, artifact)
+				switch kind {
+				case "wrong-type", "symlink":
+					if err := os.RemoveAll(path); err != nil {
+						t.Fatal(err)
+					}
+					if kind == "symlink" {
+						if err := os.Symlink(cache, path); err != nil {
+							t.Fatal(err)
+						}
+					} else if artifact == ".ansible" {
+						if err := os.WriteFile(path, nil, 0600); err != nil {
+							t.Fatal(err)
+						}
+					} else if err := os.Mkdir(path, 0700); err != nil {
+						t.Fatal(err)
+					}
+				case "mode":
+					if err := os.Chmod(path, 0755); err != nil {
+						t.Fatal(err)
+					}
+				case "owner":
+					if os.Geteuid() != 0 {
+						t.Skip("foreign ownership requires root")
+					}
+					if err := os.Chown(path, 1, -1); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = os.Chown(path, 0, -1) })
+				case "nested-symlink":
+					if err := os.Symlink(cache, filepath.Join(workspace, "tmp", "link")); err != nil {
+						t.Fatal(err)
+					}
+				case "nested-mode":
+					if err := os.Chmod(cache, 0644); err != nil {
+						t.Fatal(err)
+					}
+				case "extra-file":
+					if err := os.WriteFile(filepath.Join(intent.Stage, "arbitrary"), nil, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				err = verifyForwardPriorCandidate(proof, old, root, directory, prior)
+				if (kind == "valid") != (err == nil) {
+					t.Fatalf("%s/%s: %v", artifact, kind, err)
+				}
+			})
+		}
+	}
+}

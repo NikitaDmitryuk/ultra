@@ -185,10 +185,10 @@ func verifyForwardPriorCandidate(proof forwardUpgradeJournal, old forwardOldOper
 }
 
 // The prior release archive bounds every immutable exported source file; only
-// the fixed local-controller protocol files and empty temporary dirs may coexist.
+// the fixed controller protocol files, private workspace and empty temporary dirs may coexist.
 func verifyForwardDrainFiles(stage, archive string) error {
 	fail := errors.New("upgrade_forward_prior_drain_files_invalid")
-	allowed := map[string]bool{"request.json": true, "job.json": true, "receipt.json": true, "result.json": true, "inventory.json": true, "inventory.yml": true, "variables.json": true, "variables.yml": true, "bundle.retention.json": true, "diagnostic.json": true}
+	allowed := map[string]bool{"request.json": true, "job.json": true, "receipt.json": true, "result.json": true, "inventory.json": true, "inventory.yml": true, "variables.json": true, "variables.yml": true, "bundle.retention.json": true, "diagnostic.json": true, "execution.lock": true}
 	entries, err := os.ReadDir(stage)
 	if err != nil {
 		return fail
@@ -197,6 +197,12 @@ func verifyForwardDrainFiles(stage, archive string) error {
 		path := filepath.Join(stage, entry.Name())
 		if entry.Name() == "bundle" {
 			if operatorPrivate(path, true) != nil {
+				return fail
+			}
+			continue
+		}
+		if entry.Name() == ".ansible" {
+			if verifyForwardControllerWorkspace(path) != nil {
 				return fail
 			}
 			continue
@@ -273,6 +279,37 @@ func verifyForwardDrainFiles(stage, archive string) error {
 		return fail
 	}
 	return nil
+}
+
+// The workspace is generated under the controller's private HOME. It is not
+// signed source or quiescence evidence; keep the existing lease/census gates.
+func verifyForwardControllerWorkspace(directory string) error {
+	fail := errors.New("upgrade_forward_controller_workspace_invalid")
+	count := 0
+	var total int64
+	return filepath.WalkDir(directory, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return fail
+		}
+		info, err := entry.Info()
+		if err != nil || (path == directory && !info.IsDir()) || operatorPrivate(path, info.IsDir()) != nil {
+			return fail
+		}
+		count++
+		if count > 20000 {
+			return fail
+		}
+		if !info.IsDir() {
+			if info.Size() > 2147483648 {
+				return fail
+			}
+			total += info.Size()
+			if total > 4294967296 {
+				return fail
+			}
+		}
+		return nil
+	})
 }
 
 func bootstrapForwardBroker(ctx context.Context, proof forwardUpgradeJournal, plan *installplan.InstallPlan, old forwardOldOperation, root, directory, python, executable string) error {

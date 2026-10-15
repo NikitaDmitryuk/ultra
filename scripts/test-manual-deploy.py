@@ -1580,6 +1580,12 @@ class RemoteProgram(unittest.TestCase):
         D.atomic_write(drain/'variables.json',json.dumps({'ultra_lock_directory':str(self.parent.parent),
             'ultra_forward_old_id':old_id,'ultra_lifecycle_id':new_id}).encode())
         D.atomic_write(drain/'bundle/controller.py',b'# retained immutable bundle')
+        # Real controller output includes its lock and private HOME workspace.
+        workspace=drain/'.ansible'
+        (workspace/'tmp').mkdir(parents=True,mode=0o700)
+        workspace.chmod(0o700)
+        D.atomic_write(workspace/'tmp/cache',b'generated')
+        D.atomic_write(drain/'execution.lock',b'')
         intent={'schema':1,'proof_sha256':digest,'old_id':old_id,'new_id':new_id,'drain_directory':str(drain),
                 'request_sha256':reqsha,'job_sha256':D.sha(raws['job.json']),
                 'receipt_sha256':D.sha(raws['receipt.json']),'result_sha256':D.sha(raws['result.json'])}
@@ -1606,6 +1612,41 @@ class RemoteProgram(unittest.TestCase):
         valid=self.execute('continue',forward_sha=digest)
         self.assertEqual(valid.returncode,0,valid.stderr)
         self.assertEqual(json.loads(valid.stdout)['prior_candidate']['commit'],self.commit)
+        for artifact in ['.ansible','execution.lock']:
+            path=drain/artifact
+            for kind in ['wrong_type','symlink','mode','owner','nested_symlink','nested_mode']:
+                if kind.startswith('nested') and artifact!='.ansible':
+                    continue
+                with self.subTest(artifact=artifact,unsafe=kind):
+                    saved=drain/(artifact+'.saved')
+                    if kind in ['wrong_type','symlink']:
+                        path.rename(saved)
+                    try:
+                        if kind=='wrong_type':
+                            if artifact=='.ansible': D.atomic_write(path,b'file')
+                            else: path.mkdir(mode=0o700)
+                        elif kind=='symlink': path.symlink_to(saved)
+                        elif kind=='mode': path.chmod(0o755 if artifact=='.ansible' else 0o644)
+                        elif kind=='owner':
+                            if os.geteuid()!=0: self.skipTest('foreign ownership requires root')
+                            os.chown(path,1,-1)
+                        elif kind=='nested_symlink': (path/'tmp/link').symlink_to(path/'tmp/cache')
+                        elif kind=='nested_mode': (path/'tmp/cache').chmod(0o644)
+                        # Keep the renamed artifact outside the exact stage inventory.
+                        if saved.exists(): saved.rename(self.directory/'artifact-saved')
+                        rejected=self.execute('continue',forward_sha=digest)
+                        self.assertNotEqual(rejected.returncode,0)
+                    finally:
+                        outside=self.directory/'artifact-saved'
+                        if outside.exists(): outside.rename(saved)
+                        if kind in ['wrong_type','symlink']:
+                            if path.is_symlink() or path.is_file(): path.unlink()
+                            else: path.rmdir()
+                            saved.rename(path)
+                        elif kind=='mode': path.chmod(0o700 if artifact=='.ansible' else 0o600)
+                        elif kind=='owner' and os.geteuid()==0: os.chown(path,0,-1)
+                        elif kind=='nested_symlink': (path/'tmp/link').unlink()
+                        elif kind=='nested_mode': (path/'tmp/cache').chmod(0o600)
         mutations=[
             ('extra_operation',lambda: D.atomic_write(failed/'unexpected',b'new')),
             ('extra_drain',lambda: D.atomic_write(drain/'unexpected',b'new')),

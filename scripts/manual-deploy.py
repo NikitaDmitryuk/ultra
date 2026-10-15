@@ -582,6 +582,19 @@ def verify_private_tree(directory):
                      'manual_forward_continuation_evidence_invalid')
                 total+=info.st_size
                 need(total<=4294967296,'manual_forward_continuation_evidence_invalid')
+def verify_controller_artifacts(stage):
+    # Retained artifacts do not prove quiescence; keep the lease/census gates.
+    workspace=stage/'.ansible'
+    if workspace.exists() or workspace.is_symlink():
+        info=workspace.lstat()
+        need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and not info.st_mode&0o077,
+             'manual_forward_continuation_handoff_evidence_invalid')
+        verify_private_tree(workspace)
+    execution_lock=stage/'execution.lock'
+    if execution_lock.exists() or execution_lock.is_symlink():
+        info=execution_lock.lstat()
+        need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600 and
+             info.st_size<=1048576, 'manual_forward_continuation_handoff_evidence_invalid')
 def verify(directory):
     info=directory.lstat();need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700)
     info=(directory/'release').lstat();need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700)
@@ -672,10 +685,12 @@ def verify_continuation():
         bootstraps=[p for p in operation.iterdir() if p.name.startswith('broker-bootstrap-')]
         for stage in drains+bootstraps:
             verify_private_tree(stage)
+            verify_controller_artifacts(stage)
             names={p.name for p in stage.iterdir()}
             need({'request.json','job.json','receipt.json','result.json'}<=names and
                  names<={'request.json','job.json','receipt.json','result.json','inventory.json','inventory.yml',
-                         'variables.json','variables.yml','bundle','ansible-tmp','bundle.retention.json','diagnostic.json'},
+                         'variables.json','variables.yml','bundle','ansible-tmp','bundle.retention.json','diagnostic.json',
+                         '.ansible','execution.lock'},
                  'manual_forward_continuation_handoff_evidence_invalid')
             request_raw=read(stage/'request.json');job_raw=read(stage/'job.json')
             receipt_raw=read(stage/'receipt.json');result_raw=read(stage/'result.json')
@@ -716,10 +731,12 @@ def verify_continuation():
         intent=json.loads(read(operation/'forward-handoff.json'))
         for stage in drains+bootstraps:
             verify_private_tree(stage)
+            verify_controller_artifacts(stage)
             names={p.name for p in stage.iterdir()}
             need({'request.json','job.json','receipt.json','result.json'}<=names and
                  names<={'request.json','job.json','receipt.json','result.json','inventory.json','inventory.yml',
-                         'variables.json','variables.yml','bundle','ansible-tmp','bundle.retention.json','diagnostic.json'},
+                         'variables.json','variables.yml','bundle','ansible-tmp','bundle.retention.json','diagnostic.json',
+                         '.ansible','execution.lock'},
                  'manual_forward_continuation_handoff_evidence_invalid')
         stage=Path(intent.get('drain_directory',''))
         need(stage in drains and intent.get('schema')==1 and intent.get('proof_sha256')==forward_journal_sha,
