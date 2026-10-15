@@ -27,7 +27,7 @@ func runBackendDomainCommand(args []string) {
 	domain := fs.String("domain", "", "distinct owned backend TLS hostname")
 	zone := fs.String("zone", "", "existing managed DNS zone")
 	action := fs.String("action", "apply", "apply, accept, rollback or accept-rollback; only acceptance updates canonical BOT_DOMAIN")
-	previous := fs.String("previous-domain", "", "original backend name, required for rollback after acceptance")
+	previous := fs.String("previous-domain", "", "previous backend name; required when canonical config already has the target and for rollback after acceptance")
 	pins := fs.String("known-hosts", "", "verified absolute SSH known_hosts file")
 	email := fs.String("acme-email", "", "ACME email, defaults to canonical ACME_EMAIL")
 	_ = fs.Parse(args)

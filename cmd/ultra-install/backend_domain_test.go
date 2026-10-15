@@ -37,6 +37,20 @@ func TestBackendDomainPolicyPreservesPublicNames(t *testing.T) {
 	}
 }
 
+func TestBackendDomainPolicyUsesExplicitPreviousWhenTargetIsPredeclared(t *testing.T) {
+	p := backendTestPlan()
+	p.Bot.Domain = "core.example.com"
+	for _, action := range []string{"apply", "accept"} {
+		values, err := backendDomainPolicy(p, "core.example.com", "example.com", action, "old.example.com", "/tmp/pins", "ops@example.com")
+		if err != nil {
+			t.Fatalf("%s rejected predeclared target: %v", action, err)
+		}
+		if values["ultra_backend_old_domain"] != "old.example.com" {
+			t.Fatalf("%s did not retain explicit previous backend: %#v", action, values["ultra_backend_old_domain"])
+		}
+	}
+}
+
 func TestBackendDomainPolicyRejectsUnsafeInputs(t *testing.T) {
 	for _, domain := range []string{"sync.example.com", "edge.example.com", "old.example.com", "example.com", "core.other.net", "a.b.example.com", "core.example.com;bad", "CORE.example.com"} {
 		if _, err := backendDomainPolicy(backendTestPlan(), domain, "example.com", "apply", "", "/tmp/pins", "ops@example.com"); err == nil {

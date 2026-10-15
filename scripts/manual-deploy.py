@@ -2,6 +2,7 @@
 """Explicit operator deployment from clean, committed HEAD; never a scheduler."""
 import argparse
 import contextlib
+import errno
 import fcntl
 import hashlib
 import importlib.util
@@ -82,10 +83,23 @@ def private_input(path, modes=(0o600,)):
 
 def canonical_file(path):
     """Read the non-secret canonical deployment config in either supported mode."""
-    info = path.lstat()
-    require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
-            stat.S_IMODE(info.st_mode) in (0o600, 0o644), 'canonical_config_requires_owned_regular_readable_file')
-    return path.read_bytes()
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise DeployError('canonical_config_requires_owned_regular_readable_file') from None
+        raise
+    try:
+        info = os.fstat(descriptor)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
+                stat.S_IMODE(info.st_mode) in (0o600, 0o644),
+                'canonical_config_requires_owned_regular_readable_file')
+        with os.fdopen(descriptor, 'rb') as stream:
+            descriptor = None
+            return stream.read()
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def subscription_probe_input(path, limit=4096):

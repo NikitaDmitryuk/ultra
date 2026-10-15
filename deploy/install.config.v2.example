@@ -21,8 +21,10 @@ DB_ENABLE=true
 DB_NAME=ultra_db
 DB_USER=ultra
 BOT_ENABLE=true
+# Bootstrap provisions subscription and VPN DNS records; bot uses the subscription name.
 BOT_DOMAIN=sync.example.com
 BOT_PORT=8444
+SUBSCRIPTION_DOMAIN=sync.example.com
 VPN_DOMAIN=edge.example.com
 ACME_EMAIL=operator@example.com
 PUBLIC_XHTTP_PATH=/connect

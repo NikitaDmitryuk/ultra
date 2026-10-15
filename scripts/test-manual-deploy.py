@@ -414,6 +414,17 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
         self.rollout(config_path=self.config)
         self.assertEqual(self.config.stat().st_mode & 0o777, 0o644)
         self.assertIn(self.version.encode(), self.config.read_bytes())
+        self.assertEqual(next(self.root.glob('install.config.before-*')).stat().st_mode & 0o777, 0o600)
+
+    def test_readable_canonical_config_keeps_mode_when_preflight_fails(self):
+        self.config.chmod(0o644)
+
+        def failing_doctor(command, cwd, stage, capture=False, env=None):
+            raise D.DeployError('fixture_failure')
+        with self.assertRaises(D.DeployError):
+            self.rollout(config_path=self.config, runner=failing_doctor)
+        self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o644)
 
     def test_explicit_adoption_compares_then_applies_without_redundant_upgrade(self):
         self.rollout(adopt=True)
@@ -492,9 +503,15 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
         self.assertEqual(self.config.read_bytes(), desired)
 
     def test_private_config_and_symlink_requirements(self):
-        self.config.chmod(0o640)
-        with self.assertRaisesRegex(D.DeployError, 'readable_file'):
-            self.rollout()
+        for mode in (0o640, 0o664):
+            with self.subTest(mode=oct(mode)):
+                self.config.chmod(mode)
+                with self.assertRaisesRegex(D.DeployError, 'readable_file'):
+                    self.rollout()
+        fifo = self.repo / 'install.config.fifo'
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(D.DeployError, '^canonical_config_requires_owned_regular_readable_file$'):
+            D.canonical_file(fifo)
         self.config.unlink()
         self.config.symlink_to(self.root / 'missing')
         with self.assertRaisesRegex(D.DeployError, 'readable_file'):
