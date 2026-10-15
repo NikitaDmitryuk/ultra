@@ -97,7 +97,7 @@ func discoverForwardOldOperation(proof forwardUpgradeJournal, stateRoot string) 
 	}
 	plan, err := installplan.LoadConfig(config)
 	release := filepath.Join(input, "release")
-	if err != nil || plan.Automation == nil || plan.Automation.Version != journal.Version || plan.Automation.ReleaseDir != release || matchOperatorPlan(directory, plan, release) != nil {
+	if err != nil || installplan.ValidatePlan(plan) != nil || plan.Automation == nil || plan.Automation.Version != journal.Version || plan.Automation.ReleaseDir != release || matchOperatorPlan(directory, plan, release) != nil {
 		return result, fail
 	}
 	requestRaw, err := readForwardEvidence(filepath.Join(directory, "activate", "request.json"))

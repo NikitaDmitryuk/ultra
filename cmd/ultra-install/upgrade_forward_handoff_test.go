@@ -30,7 +30,7 @@ func forwardFixture(t *testing.T) (forwardUpgradeJournal, string, string) {
 			t.Fatal(err)
 		}
 	}
-	config := []byte(fmt.Sprintf("INSTALL_SCHEMA_VERSION=2\nBRIDGE=192.0.2.1\nULTRA_AUTOMATION_VERSION=%s\nULTRA_AUTOMATION_RELEASE_DIR=%s\nULTRA_AUTOMATION_STATIC_NODES=[]\nULTRA_AUTOMATION_ADMIN_TELEGRAM_ID=123\n", version, filepath.Join(input, "release")))
+	config := []byte(fmt.Sprintf("INSTALL_SCHEMA_VERSION=2\nBRIDGE=192.0.2.1\nEXIT=192.0.2.2\nBOT_DOMAIN=sync.example.com\nVPN_DOMAIN=edge.example.com\nACME_EMAIL=owner@example.com\nPUBLIC_XHTTP_PATH=/connect\nREUSE_BRIDGE_SPEC=true\nULTRA_AUTOMATION_VERSION=%s\nULTRA_AUTOMATION_RELEASE_DIR=%s\nULTRA_AUTOMATION_AGE_RECIPIENT=age1fixture\nULTRA_AUTOMATION_BRIDGE_PROVIDER=fixture\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/pins\nULTRA_AUTOMATION_STATIC_NODES=[{\"name\":\"NL\",\"address\":\"192.0.2.2\",\"provider\":\"fixture\"}]\nULTRA_AUTOMATION_ADMIN_TELEGRAM_ID=123\n", version, filepath.Join(input, "release")))
 	write := func(path string, raw []byte) {
 		t.Helper()
 		if err := os.WriteFile(path, raw, 0600); err != nil {
@@ -40,6 +40,9 @@ func forwardFixture(t *testing.T) (forwardUpgradeJournal, string, string) {
 	write(filepath.Join(input, "install.config"), config)
 	plan, err := installplan.LoadConfig(filepath.Join(input, "install.config"))
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err = installplan.ValidatePlan(plan); err != nil {
 		t.Fatal(err)
 	}
 	if err = freezeOperatorPlan(directory, plan, filepath.Join(input, "release")); err != nil {
@@ -75,9 +78,10 @@ func TestForwardOldOperationRejectsAmbiguousEvidence(t *testing.T) {
 	for _, kind := range []string{"digest", "version", "commit", "dispatch", "stage", "config", "plan", "request", "job", "receipt", "symlink", "public"} {
 		t.Run(kind, func(t *testing.T) {
 			proof, root, directory := forwardFixture(t)
-			if kind == "digest" {
+			switch kind {
+			case "digest":
 				proof.SHA256 = strings.Repeat("c", 64)
-			} else if kind == "config" || kind == "plan" || kind == "request" || kind == "job" || kind == "receipt" {
+			case "config", "plan", "request", "job", "receipt":
 				path := filepath.Join(directory, "activate", kind+".json")
 				if kind == "plan" {
 					path = filepath.Join(directory, "operator-plan.json")
@@ -89,17 +93,17 @@ func TestForwardOldOperationRejectsAmbiguousEvidence(t *testing.T) {
 				if err := os.WriteFile(path, []byte("{}"), 0600); err != nil {
 					t.Fatal(err)
 				}
-			} else if kind == "symlink" {
+			case "symlink":
 				path := proof.Path + ".link"
 				if err := os.Symlink(proof.Path, path); err != nil {
 					t.Fatal(err)
 				}
 				proof.Path = path
-			} else if kind == "public" {
+			case "public":
 				if err := os.Chmod(proof.Path, 0644); err != nil {
 					t.Fatal(err)
 				}
-			} else {
+			default:
 				raw, _ := os.ReadFile(proof.Path)
 				var journal map[string]any
 				_ = json.Unmarshal(raw, &journal)

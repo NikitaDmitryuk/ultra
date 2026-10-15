@@ -105,7 +105,9 @@ installer всё равно независимо проверяет конфиг
 `applying` и каталоге неудавшегося upgrade, содержащем только frozen
 `execution-mode.json` и `operator-plan.json`. Поэтому можно staged новый committed
 `HEAD`, но его upgrade независимо сверяет исходный журнал, frozen plan и текущий
-lifecycle под operator lock; `--retry-failed` для этого не используется. Если
+lifecycle под operator lock; при восстановлении плана из staged-конфига применяется
+та же `ValidatePlan` нормализация/defaults, что и перед записью digest. При
+несовпадении проверка блокирует handoff; digest нельзя обходить. `--retry-failed` для этого не используется. Если
 activation уже началась или удалённая аттестация расходится, продолжение блокируется
 и требуется отдельная reconciliation.
 
