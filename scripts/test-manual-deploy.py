@@ -49,7 +49,7 @@ class ManualDeploy(unittest.TestCase):
 
     def probe_env(self, value=b'https://old.example.com/sub/fixture-token'):
         path = self.repo / '.env'
-        path.write_bytes(b'IGNORED_SECRET="$(must-not-execute)\xff\nULTRA_SUBSCRIPTION_PROBE_URL=' + value + b'\n')
+        path.write_bytes(b'IGNORED_SETTING="$(must-not-execute)\xff\nULTRA_SUBSCRIPTION_PROBE_URL=' + value + b'\n')
         path.chmod(0o600)
         return path
 

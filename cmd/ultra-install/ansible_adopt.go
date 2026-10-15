@@ -19,15 +19,28 @@ func runAdoptCommand(arguments []string) {
 	file := flags.String("config", "install.config", "canonical deployment parameters")
 	releaseDirectory := flags.String("release-dir", "", "complete verified release for read-only comparison")
 	prepareConfig := flags.String("prepare-config", "", "write a private schema 2 candidate from managed recovery policy; no host changes")
-	bridgeSSHHost := flags.String("bridge-ssh-host", "", "explicit bridge SSH address for legacy preparation; pins and identity stay unchanged")
+	bridgeSSHHost := flags.String("bridge-ssh-host", "", "explicit bridge SSH address for preparation; pins and identity stay unchanged")
 	bridgeNative := flags.Bool("bridge-native", false, "run explicit adoption on the attested bridge with its existing SSH identity")
 	adoptRuntime := flags.Bool("adopt-runtime", false, "compare the reviewed installed runtime without applying feature defaults")
 	_ = flags.Bool("check", true, "read-only comparison; no configuration ownership is assumed")
 	_ = flags.Parse(arguments)
-	p, err := installplan.LoadConfig(*file)
+	preparation := *prepareConfig != ""
+	if *bridgeSSHHost != "" && !preparation {
+		exitOnErr("adopt SSH endpoint", errors.New("adoption_ssh_override_requires_preparation"))
+	}
+	var p *installplan.InstallPlan
+	var err error
+	if preparation {
+		var values map[string]string
+		values, err = installplan.ReadSecretsFile(*file)
+		if err == nil {
+			p, err = installplan.AdoptionPreparationValuesToPlan(values)
+		}
+	} else {
+		p, err = installplan.LoadConfig(*file)
+	}
 	exitOnErr("adopt config", err)
-	legacyPreparation := *prepareConfig != ""
-	if *adoptRuntime && legacyPreparation {
+	if *adoptRuntime && preparation {
 		exitOnErr("adopt runtime", errors.New("adoption_runtime_comparison_requires_candidate"))
 	}
 	p.AdoptRuntime = *adoptRuntime
@@ -37,29 +50,26 @@ func runAdoptCommand(arguments []string) {
 		exitOnErr("native adoption", err)
 	}
 	if *bridgeSSHHost != "" {
-		if !legacyPreparation {
-			exitOnErr("adopt SSH endpoint", errors.New("adoption_ssh_override_requires_preparation"))
-		}
 		p, err = adoptionSSHOverride(p, *bridgeSSHHost)
 		exitOnErr("adopt SSH endpoint", err)
 	}
-	if legacyPreparation && (p.Automation != nil || *releaseDirectory == "") {
-		exitOnErr("adopt preparation", errors.New("legacy config and explicit verified release required"))
+	if preparation && (p.Automation != nil || *releaseDirectory == "") {
+		exitOnErr("adopt preparation", errors.New("preparation inputs and explicit verified release required"))
 	}
 	if *releaseDirectory != "" {
 		manifest, releaseErr := verifyAutomationRelease(*releaseDirectory, "")
 		exitOnErr("adopt release", releaseErr)
-		if p.Automation == nil && !legacyPreparation {
+		if p.Automation == nil && !preparation {
 			exitOnErr("adopt policy", fmt.Errorf("explicit automation policy required"))
 		}
-		if !legacyPreparation {
+		if !preparation {
 			p.Automation.ReleaseDir, err = filepath.Abs(*releaseDirectory)
 			exitOnErr("adopt release path", err)
 			p.Automation.Version = manifest.Version
 		}
 	}
-	exitOnErr("adopt validation", installplan.ValidatePlan(p))
-	if !legacyPreparation {
+	if !preparation {
+		exitOnErr("adopt validation", installplan.ValidatePlan(p))
 		exitOnErr("adopt artifact preflight", preflightAutomation(p))
 	}
 	stateRoot, err := os.UserCacheDir()
@@ -77,7 +87,7 @@ func runAdoptCommand(arguments []string) {
 	defer cancel()
 	python := "/usr/bin/python3"
 	runtimePlan := p
-	if legacyPreparation {
+	if preparation {
 		manifest, manifestErr := verifyAutomationRelease(*releaseDirectory, "")
 		exitOnErr("adopt release", manifestErr)
 		absolute, absoluteErr := filepath.Abs(*releaseDirectory)
@@ -96,7 +106,7 @@ func runAdoptCommand(arguments []string) {
 	defer release()
 	inventory, inspection, err := inspectBootstrap(ctx, p, directory, python, executable, stateRoot)
 	exitOnErr("adopt inspection", err)
-	if legacyPreparation {
+	if preparation {
 		pinPath := os.Getenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS")
 		if pinPath == "" {
 			pinPath = filepath.Join(os.Getenv("HOME"), ".ssh", "known_hosts")

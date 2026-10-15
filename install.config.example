@@ -1,0 +1,101 @@
+# Скопируйте этот файл в install.config и замените все example-значения своими.
+# install.config исключён из Git и должен иметь права 0600.
+# Файл содержит только параметры установки. Токены, API-ключи и пароли храните в .env.
+# Все адреса и домены ниже зарезервированы для примеров и не относятся к реальным серверам.
+# Поддерживается только схема установки 2; отдельный INSTALL_SCHEMA_VERSION не нужен.
+
+# --- Серверы ---
+# Пользователь SSH (по умолчанию root).
+SSH_USER=root
+# IPv4 и приватный ключ каждого сервера. Здесь указаны документационные адреса.
+BRIDGE_IP=192.0.2.10
+BRIDGE_SSH_KEY=/secure/bridge_ed25519
+MAIN_EXIT_IP=192.0.2.20
+MAIN_EXIT_SSH_KEY=/secure/exit_ed25519
+DATABASE_IP=192.0.2.40
+DATABASE_SSH_KEY=/secure/database_ed25519
+# Необязательный локальный custom-format pg_dump для развёртывания чистой БД.
+# Оставьте строку закомментированной, если дамп не нужен.
+# DATABASE_DUMP=/secure/database.dump
+
+# Схема 2 всегда проверяет SSH host keys строго; отключить эту защиту нельзя.
+ULTRA_INSTALL_SSH_STRICT_HOST_KEY=true
+# Публичный адрес bridge; по умолчанию совпадает с BRIDGE_IP.
+PUBLIC_HOST=192.0.2.10
+
+# --- VLESS и туннель bridge → exit ---
+# MAIN_EXIT_DOMAIN — отдельное имя tunnel.example.com; DNS A должен указывать на MAIN_EXIT_IP.
+# Автоматизация создаёт эту запись через DNS API из .env и получает обычный TLS-сертификат.
+MAIN_EXIT_DOMAIN=tunnel.example.com
+# Внутренний порт туннеля (по умолчанию равен VLESS_PORT); порт 80 занят HTTP-01.
+TUNNEL_PORT=24443
+# Listener VLESS на bridge (по умолчанию 443).
+VLESS_PORT=443
+# Проверенная цель REALITY для клиентского fallback и её SNI. Укажите реальный допустимый host:443.
+REALITY_DEST=origin.example.net:443
+REALITY_SNI=origin.example.net
+# false — чистая установка без переноса runtime; true — сохранить конфигурацию существующего bridge.
+# По умолчанию парсер выбирает true, поэтому для новой установки значение указано явно.
+REUSE_BRIDGE_SPEC=false
+# Режим маршрутизации (например, ru_direct или blocklist); по умолчанию используется режим проекта.
+ROUTING_MODE=ru_direct
+# Уровень логирования (по умолчанию info).
+LOG_LEVEL=info
+# WARP не обязателен для безопасности; false отправляет трафик напрямую с exit.
+WARP_ENABLE=false
+
+# --- Bot, подписка и DNS ---
+# Включает Telegram bot и Mini App (по умолчанию false). Чистая установка требует bot;
+# задайте TELEGRAM_BOT_TOKEN в .env перед запуском.
+BOT_ENABLE=true
+# Имена должны быть вашими доменами; примеры используют example.com.
+# BOT_DOMAIN — адрес bot backend; его A-запись указывает на bridge.
+BOT_DOMAIN=bot.example.com
+# SUBSCRIPTION_DOMAIN — публичный адрес подписки; DNS A указывает на bridge.
+SUBSCRIPTION_DOMAIN=sync.example.com
+# VPN_DOMAIN — публичный XHTTP/TLS вход; DNS A указывает на bridge.
+VPN_DOMAIN=edge.example.com
+# Прямая публикация подписки (допустимы direct и forward; по умолчанию direct).
+SUBSCRIPTION_INGRESS_MODE=direct
+# Публичный HTTPS URL бота; необязателен, по умолчанию строится из настройки домена.
+BOT_PUBLIC_URL=https://sync.example.com
+# HTTP path публичного XHTTP/TLS ingress. Для чистой установки обязателен; в примере /connect.
+PUBLIC_XHTTP_PATH=/connect
+# Email для ACME/Let's Encrypt сертификатов.
+ACME_EMAIL=operator@example.com
+# DNS API. Провайдер и зона задаются здесь; API credentials храните в .env.
+DNS_PROVIDER=vultr
+DNS_ZONE=example.com
+# TTL записи DNS в секундах (по умолчанию 300).
+DNS_TTL=300
+
+# --- База данных ---
+# DATABASE_IP и DATABASE_SSH_KEY задают единственный отдельный PostgreSQL-хост.
+# Имя и пользователь по умолчанию ultra_db и ultra.
+DB_NAME=ultra_db
+DB_USER=ultra
+
+# --- Автоматизация и release ---
+# Путь к локальному файлу секретов (по умолчанию .env). Секреты не копируйте сюда.
+SECRETS_ENV_FILE=.env
+# Публичный ключ проверки release-подписей; замените placeholder доверенным ключом проекта.
+ULTRA_RELEASE_MINISIGN_PUBLIC_KEY=REPLACE_WITH_PROJECT_RELEASE_PUBLIC_KEY
+# Версия и путь должны указывать на один и тот же подготовленный release.
+ULTRA_AUTOMATION_VERSION=v1.0.0
+ULTRA_AUTOMATION_RELEASE_DIR=/srv/ultra-release-v1.0.0
+# Публичный age recipient для резервных копий; замените на собственный recipient.
+ULTRA_AUTOMATION_AGE_RECIPIENT=age1REPLACE_WITH_PUBLIC_RECIPIENT
+# Telegram numeric user ID администратора (примерное значение).
+ULTRA_AUTOMATION_ADMIN_TELEGRAM_ID=123456789
+# Название провайдера bridge и URL его HTTPS health endpoint.
+ULTRA_AUTOMATION_BRIDGE_PROVIDER=example-provider
+ULTRA_AUTOMATION_BRIDGE_URL=https://sync.example.com/healthz
+# Локальный путь known_hosts, используемый автоматизацией.
+ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/secure/ultra-known-hosts
+# JSON-массив статических exit-узлов. Адреса и budget ниже — только примеры.
+ULTRA_AUTOMATION_STATIC_NODES='[{"name":"primary","address":"192.0.2.20","provider":"example-provider","budget":{"monthly_bytes":1048576,"is_fallback":true}}]'
+# Дополнительные пути для резервирования на bridge; обычно оставить пустым/не задавать.
+# ULTRA_AUTOMATION_STATE_PATHS='["/etc/example-service/config"]'
+# ULTRA_AUTOMATION_ARTIFACT_PATHS='["/opt/example-service/restore.py"]'
+# Максимальное ожидание readiness в секундах (по умолчанию 900).
+# ULTRA_AUTOMATION_READINESS_TIMEOUT_SEC=900

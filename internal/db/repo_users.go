@@ -8,7 +8,6 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/db/sqlc"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/xtls/xray-core/common/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -21,39 +20,6 @@ type UserRepo struct {
 
 // NewUserRepo creates a UserRepo backed by db.
 func NewUserRepo(db *DB) *UserRepo { return &UserRepo{db: db} }
-
-func authUserFromFields(
-	uuid pgtype.UUID,
-	name, kind string,
-	isActive bool,
-	disabledAt pgtype.Timestamptz,
-	socksUsername, socksPassword pgtype.Text,
-	socksPort pgtype.Int4,
-	leakPolicy string,
-	leakMaxConcurrent, leakMaxUnique pgtype.Int4,
-	preferredExitID pgtype.UUID,
-	accountID pgtype.UUID,
-) auth.User {
-	u := auth.User{
-		UUID:            fromPGUUID(uuid),
-		AccountID:       fromPGUUID(accountID),
-		Name:            name,
-		Kind:            kind,
-		IsActive:        isActive,
-		DisabledAt:      ptrFromPGTime(disabledAt),
-		PreferredExitID: ptrFromPGUUID(preferredExitID),
-	}
-	u.SocksUsername = fromPGText(socksUsername)
-	u.SocksPassword = fromPGText(socksPassword)
-	u.SocksPort = ptrFromPGInt4(socksPort)
-	u.LeakPolicy = leakPolicy
-	u.LeakMaxConcurrentIPs = ptrFromPGInt4(leakMaxConcurrent)
-	u.LeakMaxUniqueIPs24h = ptrFromPGInt4(leakMaxUnique)
-	if u.Kind == "" {
-		u.Kind = "vless"
-	}
-	return u
-}
 
 func normalizeKind(kind string) string {
 	k := strings.TrimSpace(strings.ToLower(kind))

@@ -14,7 +14,7 @@ import (
 
 func adoptionPolicyFixture(t *testing.T) (*installplan.InstallPlan, bootstrapInspection) {
 	t.Helper()
-	p, err := installplan.CanonicalValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "BRIDGE_SSH_KEY": "/identity", "BOT_ENV_FILE": "/private/secrets.env", "EXIT_TUNNEL_UUID": "preserved-tunnel", "GENERATE_EXIT_TLS": "false", "EXIT_TLS_CERT_FILE": "/private/exit.crt", "EXIT_TLS_KEY_FILE": "/private/exit.key", "ULTRA_INSTALL_SSH_STRICT_HOST_KEY": "true", "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": "/pins", "PUBLIC_HOST": "192.0.2.1"})
+	p, err := installplan.AdoptionPreparationValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "BRIDGE_SSH_KEY": "/identity", "BOT_ENV_FILE": "/private/secrets.env", "EXIT_TUNNEL_UUID": "preserved-tunnel", "GENERATE_EXIT_TLS": "false", "EXIT_TLS_CERT_FILE": "/private/exit.crt", "EXIT_TLS_KEY_FILE": "/private/exit.key", "ULTRA_INSTALL_SSH_STRICT_HOST_KEY": "true", "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": "/pins", "PUBLIC_HOST": "192.0.2.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestAdoptionExplicitSSHOverridePreservesTrustAndSource(t *testing.T) {
 	p, _ := adoptionPolicyFixture(t)
 	p.SourceValues["BRIDGE_IP"] = "192.0.2.10"
 	p.SourceValues["DATABASE_IP"] = "192.0.2.40"
-	p, err := installplan.CanonicalValuesToPlan(p.SourceValues)
+	p, err := installplan.AdoptionPreparationValuesToPlan(p.SourceValues)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,10 +90,21 @@ func TestPrepareAdoptionPolicyPreservesCanonicalInputs(t *testing.T) {
 	if !reflect.DeepEqual(original, p.SourceValues) || p.Automation != nil {
 		t.Fatal("source mutated")
 	}
+	if candidate.SourceValues["INSTALL_SCHEMA_VERSION"] != "2" || installplan.ValidatePlan(p) == nil {
+		t.Fatal("preparation envelope escaped deployment validation or candidate lost schema 2")
+	}
 	for key, value := range original {
 		if candidate.SourceValues[key] != value {
 			t.Fatalf("lost canonical input %s", key)
 		}
+	}
+	encoded, err := json.Marshal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded installplan.InstallPlan
+	if err := json.Unmarshal(encoded, &decoded); err != nil || installplan.ValidatePlan(&decoded) != nil {
+		t.Fatal("prepared schema 2 plan cannot round-trip through JSON", err)
 	}
 	a := candidate.Automation
 	if a.StaticNodes[0].Budget.MonthlyBytes != 1000000 || !a.StaticNodes[0].Budget.IsFallback || candidate.SecretsEnvFile() != "/private/secrets.env" || a.Ingress.BackendPort != 19080 || a.Ingress.StagingPort != 19443 || a.DNS.APIKeyFile != "" || a.AdminTelegramID != 123 {
@@ -107,7 +118,7 @@ func TestPrepareAdoptionPolicyPreservesCanonicalInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := installplan.LoadConfig(path)
-	if err != nil || loaded.SchemaVersion != 2 || !reflect.DeepEqual(loaded.Automation.Ingress, a.Ingress) {
+	if err != nil || installplan.ValidatePlan(loaded) != nil || loaded.SchemaVersion != 2 || !reflect.DeepEqual(loaded.Automation.Ingress, a.Ingress) {
 		t.Fatal("canonical round trip lost ports")
 	}
 	for key, value := range original {

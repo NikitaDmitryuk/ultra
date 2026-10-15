@@ -21,7 +21,7 @@ func DatabaseDumpDigest(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("DATABASE_DUMP unavailable")
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil || !os.SameFile(before, info) {
 		return "", fmt.Errorf("DATABASE_DUMP changed")

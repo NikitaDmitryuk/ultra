@@ -57,8 +57,20 @@ class OperationMappingTests(unittest.TestCase):
         import yaml
         for name in ('bootstrap-postgres.yml', 'bootstrap.yml', 'bootstrap-automation.yml'):
             plays = yaml.safe_load((SOURCE / 'playbooks' / name).read_text())
-            bridge = next(play for play in plays if play.get('hosts') == 'bridge')
-            self.assertEqual(bridge['roles'][0], 'postgres_client')
+            bridge_plays = [play for play in plays if play.get('hosts') == 'bridge']
+            bridge_roles = [[role.get('role') if isinstance(role, dict) else role for role in play.get('roles', [])]
+                            for play in bridge_plays]
+            self.assertTrue(any('postgres_client' in roles for roles in bridge_roles), name)
+            if name in ('bootstrap-postgres.yml', 'bootstrap.yml'):
+                dns_play = next(index for index, roles in enumerate(bridge_roles) if 'dns' in roles)
+                database_play = next(index for index, roles in enumerate(bridge_roles) if 'postgres_client' in roles)
+                self.assertLess(dns_play, database_play, name)
+                if name == 'bootstrap.yml':
+                    exit_play = next(index for index, play in enumerate(plays)
+                                     if play.get('hosts') == 'exits'
+                                     and any((role.get('role') if isinstance(role, dict) else role) == 'tunnel_certificate'
+                                             for role in play.get('roles', [])))
+                    self.assertLess(dns_play, exit_play, name)
         tasks = yaml.safe_load((SOURCE / 'roles/postgres_client/tasks/main.yml').read_text())
         packages = [task['ansible.builtin.apt']['name'] for task in tasks if 'ansible.builtin.apt' in task]
         self.assertEqual(packages, ['postgresql-client-16'])

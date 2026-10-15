@@ -201,7 +201,7 @@ class Preservation(unittest.TestCase):
             pass
         operation = '11111111-2222-3333-4444-555555555555'
         transaction = operation + '-runtime-1'
-        native_spec = {'database': {'dsn': 'postgres://owner:fixture@127.0.0.1/fixture?sslmode=disable'}}
+        native_spec = {'database': {'dsn': 'postgres://owner:fixture@127.0.0.1:25432/fixture?sslmode=disable'}}
         selection = gate.database_selection(native_spec, 'fixture')
         original = dict(observation(), selection=selection, capture_after=100, previous_delivery={})
         image = {'Exists': True, 'Data': base64.b64encode(json.dumps(native_spec).encode()).decode()}
@@ -247,11 +247,11 @@ class Preservation(unittest.TestCase):
             self.assertTrue(invoke()['failed'])
 
     def test_only_explicit_local_database_selection_is_supported(self):
-        accepted = 'postgres://owner:fixture@127.0.0.1:5432/fixture?sslmode=disable'
+        accepted = 'postgres://owner:fixture@127.0.0.1:25432/fixture?sslmode=disable'
         gate.database_selection({'database': {'dsn': accepted}}, 'fixture')
         for dsn in ('postgres://owner:fixture@192.0.2.1/fixture', accepted.replace('/fixture?', '/other?'),
                     accepted + '&host=192.0.2.1', accepted + '&options=-csearch_path=other',
-                    'dbname=fixture', accepted.replace(':5432', ':5433')):
+                    'dbname=fixture', accepted.replace(':25432', ':5433')):
             with self.assertRaises(ValueError):
                 gate.database_selection({'database': {'dsn': dsn}}, 'fixture')
 
@@ -264,20 +264,26 @@ class Preservation(unittest.TestCase):
                 gate.stopped(types.SimpleNamespace(run_command=lambda argv: (0, bad, '')))
 
     def test_inspection_is_read_only_and_binds_the_queried_database(self):
+        from contextlib import nullcontext
         calls = []
-        def run(argv):
+        def run(argv, **_kwargs):
             calls.append(argv)
-            return 0, json.dumps(observation()), ''
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps(observation()))
         module = types.SimpleNamespace(run_command=run)
-        gate.observe(module, 'fixture')
+        dependency = types.SimpleNamespace(
+            dsn_from_runtime=lambda database: 'fixture-dsn',
+            pgpass=lambda directory, parsed: nullcontext({}),
+            connection_args=lambda parsed, database, executable: ['runuser', '-u', 'postgres', executable, '-d', database],
+        )
+        with patch.dict(sys.modules, {'db_connection': dependency}), patch.object(gate.subprocess, 'run', side_effect=run):
+            gate.observe(module, 'fixture')
+            with self.assertRaisesRegex(ValueError, 'identity_migration_required'):
+                gate.observe(module, 'other')
         self.assertEqual(calls[0][:3], ['runuser', '-u', 'postgres'])
         self.assertEqual(calls[0][calls[0].index('-d') + 1], 'fixture')
         self.assertIn('pg_control_system()', calls[0][-1])
         self.assertIn('public.schema_migrations', calls[0][-1])
         self.assertIn("backend_type='client backend'", calls[0][-1])
-        with self.assertRaisesRegex(ValueError, 'identity_migration_required'):
-            gate.observe(module, 'other')
-
     def test_fresh_verified_dump_must_be_delivered_to_the_independent_primary(self):
         baseline = {'capture_after': 100, 'previous_delivery': {}}
         config = {'bridge_provider': 'bridge-provider'}

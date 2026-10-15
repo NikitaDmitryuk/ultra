@@ -15,7 +15,7 @@ import (
 // This opt-in imports an explicit endpoint, never an ambient SSH alias or its
 // ProxyCommand. The inspection still requires the original identity and pins.
 func adoptionSSHOverride(p *installplan.InstallPlan, host string) (*installplan.InstallPlan, error) {
-	if p.Automation != nil || len(p.SourceValues) == 0 || net.ParseIP(host) == nil {
+	if p == nil || p.SchemaVersion != installplan.CurrentSchemaVersion || p.Automation != nil || len(p.SourceValues) == 0 || net.ParseIP(host) == nil {
 		return nil, errors.New("adoption_explicit_ssh_address_required")
 	}
 	values := make(map[string]string, len(p.SourceValues)+1)
@@ -23,7 +23,7 @@ func adoptionSSHOverride(p *installplan.InstallPlan, host string) (*installplan.
 		values[key] = value
 	}
 	values["BRIDGE_IP"] = host
-	return installplan.CanonicalValuesToPlan(values)
+	return installplan.AdoptionPreparationValuesToPlan(values)
 }
 
 // Recovery metadata supplies existing policy, never credentials or a second
@@ -37,7 +37,7 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 	fail := func() (*installplan.InstallPlan, []byte, error) {
 		return nil, nil, &adoptionPolicyError{stage: stage}
 	}
-	if p.Automation != nil || len(p.SourceValues) == 0 || !filepath.IsAbs(release) || !filepath.IsAbs(pins) {
+	if p == nil || p.SchemaVersion != installplan.CurrentSchemaVersion || p.Automation != nil || len(p.SourceValues) == 0 || !filepath.IsAbs(release) || !filepath.IsAbs(pins) {
 		return fail()
 	}
 	var deployment struct {
@@ -220,6 +220,7 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 		encoded, _ := json.Marshal(extras)
 		values[key] = string(encoded)
 	}
+	values["INSTALL_SCHEMA_VERSION"] = "2"
 	values["REUSE_BRIDGE_SPEC"] = "true"
 	values["ULTRA_AUTOMATION_VERSION"] = version
 	values["ULTRA_AUTOMATION_RELEASE_DIR"] = release

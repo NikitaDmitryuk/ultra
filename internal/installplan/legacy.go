@@ -212,15 +212,6 @@ func unquote(s string) string {
 	return s
 }
 
-func firstValue(v map[string]string, keys ...string) string {
-	for _, k := range keys {
-		if s := strings.TrimSpace(v[k]); s != "" {
-			return s
-		}
-	}
-	return ""
-}
-
 func valueDefault(v map[string]string, key, def string) string {
 	if s := strings.TrimSpace(v[key]); s != "" {
 		return s

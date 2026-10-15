@@ -32,7 +32,7 @@ func ReadDatabaseCredentials(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("database credentials file unavailable")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil || !os.SameFile(before, info) {
 		return "", fmt.Errorf("database credentials file changed")

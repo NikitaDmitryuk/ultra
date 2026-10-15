@@ -17,6 +17,36 @@ import (
 	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
+// completePlanFixture supplies deployment policy for renderer and doctor tests.
+// Clean installations require a bot, a dedicated database and ingress as well.
+func completePlanFixture(p *InstallPlan) *InstallPlan {
+	p.SchemaVersion = CurrentSchemaVersion
+	address := p.Bridge.Address
+	if address == "" {
+		address = p.Bridge.SSHHost
+	}
+	p.Automation = &AutomationConfig{Version: "v2.3.4", ReleaseDir: "/release", AgeRecipient: "age1fixture", BridgeProvider: "bridge-fixture", BridgeIPv4: address, BridgeURL: "https://sync.example.com/healthz", KnownHostsFile: "/pins"}
+	for i, e := range p.Exits {
+		name := e.Name
+		if name == "" {
+			name = "primary"
+		}
+		p.Automation.StaticNodes = append(p.Automation.StaticNodes, AutomationNode{Name: name, Address: e.SSHHost, Provider: "exit-fixture", Budget: &StaticBudget{MonthlyBytes: 1000000, IsFallback: i == 0}})
+	}
+	if !p.Bridge.ReuseSpec {
+		p.Bot.Enabled = true
+		if p.Bot.Domain == "" {
+			p.Bot.Domain = "sync.example.com"
+		}
+		p.Database.Enabled = true
+		if p.Database.PrimaryHost == "" {
+			p.Database.PrimaryHost = "192.0.2.40"
+		}
+		p.Automation.Ingress = &AutomationIngress{Domain: "edge.example.com", Email: "owner@example.com", Path: "/connect"}
+	}
+	return p
+}
+
 func TestLegacyValuesToPlanMapsExitPair(t *testing.T) {
 	p := LegacyValuesToPlan(map[string]string{
 		"BRIDGE_IP":      "203.0.113.10",
@@ -28,6 +58,7 @@ func TestLegacyValuesToPlanMapsExitPair(t *testing.T) {
 		"BOT_ENABLE":     "y",
 		"BOT_DOMAIN":     "admin.example.com",
 	})
+	completePlanFixture(p)
 	if err := ValidatePlan(p); err != nil {
 		t.Fatalf("ValidatePlan: %v", err)
 	}
@@ -57,6 +88,7 @@ func TestConfigSeparatesBridgeAddressFromSSHTarget(t *testing.T) {
 		"BOT_ENABLE":   "yes",
 		"BOT_DOMAIN":   "sync.example.com",
 	})
+	completePlanFixture(p)
 	if err := ValidatePlan(p); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +132,7 @@ func TestConfigSeparatesBridgeAddressFromSSHTarget(t *testing.T) {
 
 func TestRenderDesiredStateSupportsManyExits(t *testing.T) {
 	p := &InstallPlan{
-		SchemaVersion: 1,
+		SchemaVersion: CurrentSchemaVersion,
 		SSH:           SSHConfig{User: "root"},
 		Bridge: BridgeConfig{
 			SSHHost:     "203.0.113.10",
@@ -122,6 +154,7 @@ func TestRenderDesiredStateSupportsManyExits(t *testing.T) {
 			GenerateExitTLS: true,
 		},
 	}
+	completePlanFixture(p)
 	ds, err := RenderDesiredState(p)
 	if err != nil {
 		t.Fatalf("RenderDesiredState: %v", err)
@@ -145,7 +178,7 @@ func TestRenderDesiredStateSupportsManyExits(t *testing.T) {
 
 func TestRenderDesiredStateGeneratesDatabaseDSN(t *testing.T) {
 	p := &InstallPlan{
-		SchemaVersion: 1,
+		SchemaVersion: CurrentSchemaVersion,
 		SSH:           SSHConfig{User: "root"},
 		Bridge: BridgeConfig{
 			SSHHost:     "203.0.113.10",
@@ -164,6 +197,7 @@ func TestRenderDesiredStateGeneratesDatabaseDSN(t *testing.T) {
 		},
 		Database: DatabaseConfig{Enabled: true, PrimaryHost: "192.0.2.40", Name: "ultra_db", User: "ultra"},
 	}
+	completePlanFixture(p)
 	ds, err := RenderDesiredState(p)
 	if err != nil {
 		t.Fatalf("RenderDesiredState: %v", err)
@@ -181,7 +215,7 @@ func TestRenderDesiredStateGeneratesDatabaseDSN(t *testing.T) {
 
 func TestRenderDesiredStateReusePreservesBridgeMaterial(t *testing.T) {
 	p := &InstallPlan{
-		SchemaVersion: 1,
+		SchemaVersion: CurrentSchemaVersion,
 		SSH:           SSHConfig{User: "root"},
 		Bridge: BridgeConfig{
 			SSHHost:    "203.0.113.10",
@@ -241,6 +275,7 @@ func TestRenderDesiredStateReusePreservesBridgeMaterial(t *testing.T) {
 	p.Database.Enabled = true
 	p.Database.PrimaryHost = "192.0.2.40"
 	existing.Database = &config.DatabaseSpec{DSN: "postgres://ultra:retained-secret@127.0.0.1:25432/ultra_db?sslmode=disable"}
+	completePlanFixture(p)
 	ds, err := RenderDesiredStateWithOptions(p, RenderOptions{
 		ExistingBridge:     existing,
 		ExistingAdminToken: "admin-token",
@@ -320,7 +355,7 @@ func TestRenderDesiredStateReusePreservesBridgeMaterial(t *testing.T) {
 func TestDoctorReportsMissingBotTokenWithoutNetwork(t *testing.T) {
 	dir := t.TempDir()
 	p := &InstallPlan{
-		SchemaVersion: 1,
+		SchemaVersion: CurrentSchemaVersion,
 		SSH:           SSHConfig{User: "root"},
 		Bridge: BridgeConfig{
 			SSHHost:     "203.0.113.10",
@@ -336,6 +371,7 @@ func TestDoctorReportsMissingBotTokenWithoutNetwork(t *testing.T) {
 		Bot:     BotConfig{Enabled: true, Domain: "admin.example.com"},
 		Secrets: SecretsConfig{EnvFile: "ultra-secrets.env"},
 	}
+	completePlanFixture(p)
 	report := Doctor(context.Background(), p, DoctorOptions{EnvRoot: dir})
 	if report.OK {
 		t.Fatal("doctor should fail without bot token")
@@ -371,6 +407,7 @@ func TestDedicatedDatabaseRejectsVPNHostsAndReplicas(t *testing.T) {
 		values["BRIDGE_IP"] = "192.0.2.1"
 		values["MAIN_EXIT_IP"] = "192.0.2.2"
 		p := LegacyValuesToPlan(values)
+		completePlanFixture(p)
 		if ValidatePlan(p) == nil {
 			t.Fatal("accepted unsupported database topology")
 		}
@@ -379,6 +416,7 @@ func TestDedicatedDatabaseRejectsVPNHostsAndReplicas(t *testing.T) {
 
 func TestDedicatedDatabaseUsesTunnelAndExplicitSSHIdentity(t *testing.T) {
 	p := LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "DATABASE_IP": "192.0.2.40", "SSH_USER": "db-admin", "DATABASE_SSH_KEY": "/keys/db", "BRIDGE_SSH_KEY": "/keys/vpn", "REUSE_BRIDGE_SPEC": "false", "REALITY_DEST": "example.com:443"})
+	completePlanFixture(p)
 	ds, err := RenderDesiredState(p)
 	if err != nil {
 		t.Fatal(err)

@@ -117,3 +117,25 @@ func TestAdoptPreparesOfflineRuntimeOnCleanCache(t *testing.T) {
 		t.Fatalf("unexpected inspection job: %s (%v)", job, err)
 	}
 }
+
+func TestAdoptPreparationAcceptsIncompleteSchema2OnlyForPreparation(t *testing.T) {
+	if os.Getenv("ULTRA_TEST_ADOPT_PREPARATION_CHILD") == "1" {
+		runAdoptCommand([]string{"--config", os.Getenv("ULTRA_TEST_ADOPT_CONFIG"), "--prepare-config", os.Getenv("ULTRA_TEST_ADOPT_CANDIDATE")})
+		return
+	}
+	root := t.TempDir()
+	config := filepath.Join(root, "install.config")
+	candidate := filepath.Join(root, "candidate.config")
+	if err := os.WriteFile(config, []byte("INSTALL_SCHEMA_VERSION=2\nBRIDGE_IP=192.0.2.1\nMAIN_EXIT_IP=192.0.2.2\nBRIDGE_SSH_KEY=/fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestAdoptPreparationAcceptsIncompleteSchema2OnlyForPreparation$")
+	command.Env = []string{"ULTRA_TEST_ADOPT_PREPARATION_CHILD=1", "ULTRA_TEST_ADOPT_CONFIG=" + config, "ULTRA_TEST_ADOPT_CANDIDATE=" + candidate}
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "preparation inputs and explicit verified release required") {
+		t.Fatalf("incomplete policy failed outside preparation gate: %v: %s", err, output)
+	}
+	if _, err := os.Stat(candidate); !os.IsNotExist(err) {
+		t.Fatalf("preparation wrote an unvalidated candidate: %v", err)
+	}
+}

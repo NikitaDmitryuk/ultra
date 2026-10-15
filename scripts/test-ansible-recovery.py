@@ -42,7 +42,7 @@ def main():
                 'ansible_ssh_common_args':'-o StrictHostKeyChecking=yes -o UserKnownHostsFile='+str(pins),
             }}}}}}
             files=[]
-            for name in ['recovery.py','monitor.py','heartbeat.py']:
+            for name in ['recovery.py','db_connection.py','monitor.py','heartbeat.py']:
                 files.append({'source':str(ROOT/'deploy/recovery'/name),'destination':'/opt/ultra-recovery/'+name,'mode':'0755'})
             for name in ['ultra-recovery-prune.service','ultra-recovery-prune.timer']:
                 files.append({'source':str(ROOT/'deploy/recovery'/name),'destination':'/etc/systemd/system/'+name,'mode':'0644'})

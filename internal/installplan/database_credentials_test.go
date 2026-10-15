@@ -13,6 +13,7 @@ func TestFreshBridgeCanReusePreservedDedicatedDatabaseCredentials(t *testing.T) 
 		t.Fatal(err)
 	}
 	p := LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.10", "MAIN_EXIT_IP": "192.0.2.20", "DATABASE_IP": "192.0.2.40", "DB_CREDENTIALS_FILE": path, "REUSE_BRIDGE_SPEC": "false", "REALITY_DEST": "example.com:443"})
+	completePlanFixture(p)
 	first, err := RenderDesiredState(p)
 	if err != nil {
 		t.Fatal(err)
@@ -57,6 +58,7 @@ func TestDatabaseCredentialsRejectPublicSymlinkAndWrongIdentity(t *testing.T) {
 		t.Fatal("symlink credentials accepted")
 	}
 	p := LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.10", "MAIN_EXIT_IP": "192.0.2.20", "DATABASE_IP": "192.0.2.40", "DB_CREDENTIALS_FILE": path, "REUSE_BRIDGE_SPEC": "false", "REALITY_DEST": "example.com:443"})
+	completePlanFixture(p)
 	if _, err := RenderDesiredState(p); err == nil {
 		t.Fatal("wrong database identity accepted")
 	}

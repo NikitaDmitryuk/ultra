@@ -12,6 +12,17 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/install"
 )
 
+// Runtime projection still handles installed presets independently of the
+// external canonical parser, which rejects the retired PRESET deployment key.
+func runtimeProjectionPlanFixture(values map[string]string) (*InstallPlan, error) {
+	p := completePlanFixture(LegacyValuesToPlan(values))
+	p.SourceValues = make(map[string]string, len(values))
+	for key, value := range values {
+		p.SourceValues[key] = value
+	}
+	return p, nil
+}
+
 func projectionFixture(t *testing.T) (*InstallPlan, RenderOptions) {
 	t.Helper()
 	_, opts := adoptionRenderFixture()
@@ -21,7 +32,7 @@ func projectionFixture(t *testing.T) (*InstallPlan, RenderOptions) {
 		"SPLITHTTP_HOST": "example.com", "SPLITHTTP_PATH": "/installed", "REALITY_DEST": "example.com:443",
 		"PUBLIC_HOST": "vpn.example.com", "GENERATE_EXIT_TLS": "false",
 	}
-	p, err := CanonicalValuesToPlan(values)
+	p, err := runtimeProjectionPlanFixture(values)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +52,7 @@ func TestProjectDesiredRuntimeExplicitConfigWins(t *testing.T) {
 		p.SourceValues[k] = v
 	}
 	var err error
-	p, err = CanonicalValuesToPlan(p.SourceValues)
+	p, err = runtimeProjectionPlanFixture(p.SourceValues)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +114,7 @@ func TestProjectDesiredRuntimeRemovedOptionalsReset(t *testing.T) {
 		delete(p.SourceValues, k)
 	}
 	var err error
-	p, err = CanonicalValuesToPlan(p.SourceValues)
+	p, err = runtimeProjectionPlanFixture(p.SourceValues)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +143,7 @@ func TestProjectDesiredRuntimeRemovedOptionalsReset(t *testing.T) {
 func TestProjectDesiredRuntimeRequiresRealityDestinationWhenOmitted(t *testing.T) {
 	p, opts := projectionFixture(t)
 	delete(p.SourceValues, "REALITY_DEST")
-	p, err := CanonicalValuesToPlan(p.SourceValues)
+	p, err := runtimeProjectionPlanFixture(p.SourceValues)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +304,7 @@ func TestProjectLocalRuntimeResetsAbsentOptionalsAndPreservesSecrets(t *testing.
 	delete(p.SourceValues, "SPLITHTTP_HOST")
 	delete(p.SourceValues, "SPLITHTTP_PATH")
 	var err error
-	p, err = CanonicalValuesToPlan(p.SourceValues)
+	p, err = runtimeProjectionPlanFixture(p.SourceValues)
 	if err != nil {
 		t.Fatal(err)
 	}

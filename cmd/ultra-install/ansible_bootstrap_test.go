@@ -10,14 +10,44 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
+// completeDeploymentFixture supplies the policy required by schema 2 while
+// keeping the plan's role endpoints and runtime settings under test.
+func completeDeploymentFixture(p *installplan.InstallPlan, release, pins string) {
+	p.SchemaVersion = installplan.CurrentSchemaVersion
+	address := p.Bridge.Address
+	if address == "" {
+		address = p.Bridge.SSHHost
+	}
+	p.Automation = &installplan.AutomationConfig{Version: "v2.5.0", ReleaseDir: release, KnownHostsFile: pins, AgeRecipient: "age1fixture", BridgeProvider: "bridge-fixture", BridgeIPv4: address, BridgeURL: "https://sync.example.com/healthz"}
+	for i, e := range p.Exits {
+		name := e.Name
+		if name == "" {
+			name = "primary"
+		}
+		p.Automation.StaticNodes = append(p.Automation.StaticNodes, installplan.AutomationNode{Name: name, Address: e.SSHHost, Provider: "exit-fixture", Budget: &installplan.StaticBudget{MonthlyBytes: 1000000, IsFallback: i == 0}})
+	}
+	if !p.Bridge.ReuseSpec {
+		p.Bot.Enabled = true
+		p.Bot.Domain = "sync.example.com"
+		p.Automation.Ingress = &installplan.AutomationIngress{Domain: "edge.example.com", Email: "owner@example.com", Path: "/connect"}
+	}
+}
+
 func TestBootstrapRetryRetainsGeneratedIdentities(t *testing.T) {
 	directory := t.TempDir()
-	binary := filepath.Join(directory, "relay")
+	binary := filepath.Join(directory, "ultra-relay-linux-amd64")
 	if err := os.WriteFile(binary, []byte("pinned-test-artifact"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range []string{"ultra-bot-linux-amd64", "secrets.env"} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte("TELEGRAM_BOT_TOKEN=fixture\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	plan := func() *installplan.InstallPlan {
 		p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "REALITY_DEST": "example.com:443", "REUSE_BRIDGE_SPEC": "false", "DATABASE_IP": "192.0.2.40", "SKIP_GEO_DOWNLOAD": "true"})
+		completeDeploymentFixture(p, directory, "/pins")
+		p.Secrets.EnvFile = filepath.Join(directory, "secrets.env")
 		p.Artifacts.RelayBinary = binary
 		return p
 	}
@@ -115,6 +145,7 @@ func TestBootstrapDedicatedDatabaseInventory(t *testing.T) {
 	}
 	t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins)
 	p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "BRIDGE_SSH_KEY": "/keys/vpn", "MAIN_EXIT_SSH_KEY": "/keys/exit", "DATABASE_IP": "192.0.2.40", "SSH_USER": "db-admin", "DATABASE_SSH_KEY": "/keys/db"})
+	completeDeploymentFixture(p, "/release", pins)
 	inventory, err := bootstrapInventory(p, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +171,7 @@ func TestBootstrapSeparateRoleIdentitiesWithoutSharedKey(t *testing.T) {
 	}
 	t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins)
 	p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.10", "MAIN_EXIT_IP": "192.0.2.20", "DATABASE_IP": "192.0.2.40", "BRIDGE_SSH_KEY": "/keys/bridge", "MAIN_EXIT_SSH_KEY": "/keys/exit", "DATABASE_SSH_KEY": "/keys/database"})
+	completeDeploymentFixture(p, "/release", pins)
 	inventory, err := bootstrapInventory(p, t.TempDir())
 	if err != nil {
 		t.Fatal(err)

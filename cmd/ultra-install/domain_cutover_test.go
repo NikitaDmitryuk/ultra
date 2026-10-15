@@ -11,7 +11,7 @@ import (
 
 func TestCutoverCanonicalDeltaPreservesLegacyBackendAndIsRepeatable(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "install.config")
-	original := "# keep ownership policy\nBOT_DOMAIN=old.example.com\nBOT_INGRESS_IP=192.0.2.2\nPUBLIC_HOST=192.0.2.1\n"
+	original := "ULTRA_AUTOMATION_STATIC_NODES=[{\"name\":\"primary\",\"address\":\"192.0.2.2\",\"provider\":\"fixture\"}]\nULTRA_AUTOMATION_ADMIN_TELEGRAM_ID=123\n# keep ownership policy\nBOT_DOMAIN=old.example.com\nBOT_INGRESS_IP=192.0.2.2\nPUBLIC_HOST=192.0.2.1\n"
 	if err := os.WriteFile(file, []byte(original), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -42,8 +42,8 @@ func TestCutoverCanonicalDeltaPreservesLegacyBackendAndIsRepeatable(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.SchemaVersion != 1 || p.Bot.Domain != "old.example.com" || p.PublicSubscriptionDomain() != "sync.example.com" {
-		t.Fatal("legacy semantics or old TLS domain changed")
+	if p.SchemaVersion != installplan.CurrentSchemaVersion || p.Bot.Domain != "old.example.com" || p.PublicSubscriptionDomain() != "sync.example.com" {
+		t.Fatal("schema 2 mapping or old TLS domain changed")
 	}
 	if !strings.Contains(string(first), "BOT_INGRESS_IP=192.0.2.2") || !strings.Contains(string(first), "PUBLIC_HOST=dial.example.net") {
 		t.Fatal("missing compatibility policy")

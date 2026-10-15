@@ -1,13 +1,20 @@
 package installplan
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestAutomationVersionBoundary(t *testing.T) {
 	legacy := LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "REALITY_DEST": "example.com:443"})
-	if legacy.SchemaVersion != 1 || legacy.FullAutomation() {
-		t.Fatal("legacy install acquired new required behavior")
+	if legacy.SchemaVersion != CurrentSchemaVersion || !legacy.FullAutomation() {
+		t.Fatal("canonical role mapping must use schema 2")
 	}
-	legacy.SchemaVersion = 2
+	retired := *legacy
+	retired.SchemaVersion = 1
+	if err := ValidatePlan(&retired); err == nil || !strings.Contains(err.Error(), "only install plan schema_version 2 is supported") {
+		t.Fatalf("retired schema 1 rejection = %v", err)
+	}
 	legacy.Bridge.ReuseSpec = true
 	if err := validateAutomation(legacy); err == nil {
 		t.Fatal("v2 accepted without full automation")

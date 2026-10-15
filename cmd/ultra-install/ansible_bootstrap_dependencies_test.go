@@ -289,7 +289,7 @@ func TestBootstrapPreservedWARPRole(t *testing.T) {
 				t.Fatal(err)
 			}
 			output, runErr := run()
-			if (runErr == nil) != tc.valid {
+			if runErr == nil && !tc.valid || runErr != nil && tc.valid {
 				t.Fatalf("valid=%v, error=%v\n%s", tc.valid, runErr, output)
 			}
 			commands, err := os.ReadFile(logPath)

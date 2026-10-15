@@ -35,6 +35,12 @@ func validatePlan(p *InstallPlan, localProjection bool) error {
 	if err := validateAutomation(p); err != nil {
 		return err
 	}
+	return validatePlanRoles(p)
+}
+
+// validatePlanRoles is shared with read-only adoption preparation. Callers that
+// deploy a plan must first enforce its schema and complete automation policy.
+func validatePlanRoles(p *InstallPlan) error {
 	if strings.TrimSpace(p.SSH.User) == "" {
 		p.SSH.User = "root"
 	}

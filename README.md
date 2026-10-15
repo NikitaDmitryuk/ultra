@@ -171,7 +171,7 @@ relay сначала доставляет накопленный расход, �
 Начальная подготовка:
 
 ```sh
-cp deploy/install.config.v2.example install.config
+cp install.config.example install.config
 cp .env.sample .env
 make release-dist
 

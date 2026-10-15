@@ -49,14 +49,20 @@ func TestDatabaseDumpBindingAndPrivacy(t *testing.T) {
 func TestDatabaseDumpLocalListingBeforeDispatch(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "database.dump")
-	os.WriteFile(path, []byte("PGDMPsynthetic archive"), 0600)
+	if err := os.WriteFile(path, []byte("PGDMPsynthetic archive"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	sum, _ := DatabaseDumpDigest(path)
-	os.WriteFile(filepath.Join(root, "pg_restore"), []byte("#!/bin/sh\n[ \"$1\" = --list ] || exit 3\nexit 0\n"), 0700)
+	if err := os.WriteFile(filepath.Join(root, "pg_restore"), []byte("#!/bin/sh\n[ \"$1\" = --list ] || exit 3\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", root)
 	if err := VerifyDatabaseDump(path, sum); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(root, "pg_restore"), []byte("#!/bin/sh\nexit 1\n"), 0700)
+	if err := os.WriteFile(filepath.Join(root, "pg_restore"), []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := VerifyDatabaseDump(path, sum); err == nil {
 		t.Fatal("invalid listing accepted")
 	}

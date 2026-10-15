@@ -234,7 +234,8 @@ func TestCompletedUpgradeReplayRejectsReplacementSourceWithoutExecuting(t *testi
 	_ = os.Chmod(root, 0700)
 	directory := retentionOperationFixture(t, root, "v1.0.0")
 	release := filepath.Join(root, "release")
-	plan := &installplan.InstallPlan{SchemaVersion: 1, Bridge: installplan.BridgeConfig{SSHHost: "192.0.2.1", ReuseSpec: true}, Exits: []installplan.ExitNode{{SSHHost: "192.0.2.2"}}}
+	plan := &installplan.InstallPlan{SchemaVersion: installplan.CurrentSchemaVersion, Bridge: installplan.BridgeConfig{SSHHost: "192.0.2.1", ReuseSpec: true}, Exits: []installplan.ExitNode{{SSHHost: "192.0.2.2"}}}
+	completeDeploymentFixture(plan, release, "/pins")
 	if err := installplan.ValidatePlan(plan); err != nil {
 		t.Fatal(err)
 	}

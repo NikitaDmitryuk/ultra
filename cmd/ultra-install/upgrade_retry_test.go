@@ -246,6 +246,7 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 				}
 				t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins)
 				p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "REALITY_DEST": "example.com:443", "BRIDGE_SSH_KEY": filepath.Join(root, "identity")})
+				completeDeploymentFixture(p, release, pins)
 				p.SourceValues = map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2"}
 				local := false
 				p.ControllerLocal = &local

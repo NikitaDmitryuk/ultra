@@ -25,8 +25,12 @@ func TestCanonicalV2MappingAndLegacyBoundary(t *testing.T) {
 	}
 	delete(v, "INSTALL_SCHEMA_VERSION")
 	p, err = CanonicalValuesToPlan(v)
-	if err != nil || p.FullAutomation() {
-		t.Fatal("v1 acquired automation")
+	if err != nil || !p.FullAutomation() || p.SchemaVersion != CurrentSchemaVersion {
+		t.Fatal("omitted version must default to schema 2")
+	}
+	v["INSTALL_SCHEMA_VERSION"] = "1"
+	if _, err := CanonicalValuesToPlan(v); err == nil {
+		t.Fatal("retired schema 1 accepted")
 	}
 	for _, key := range []string{"ULTRA_VULTR_API_KEY", "ULTRA_VULTR_DNS_API_KEY", "ULTRA_SUBSCRIPTION_PROBE_URL", "TELEGRAM_BOT_TOKEN"} {
 		v := canonicalFixture()
@@ -53,7 +57,7 @@ func TestCanonicalRejectsRemovedAutomaticUpgradePolicy(t *testing.T) {
 }
 
 func TestCanonicalRetiredRoleInputsAreRejected(t *testing.T) {
-	for _, key := range []string{"BRIDGE", "EXIT", "DB_HOST", "IDENTITY", "BRIDGE_SSH_HOST", "BRIDGE_SSH_IDENTITY", "EXIT_SSH_IDENTITY", "DB_SSH_IDENTITY", "EXIT2", "DB_ENABLE", "DB_REPLICA", "DB_SSH_USER"} {
+	for _, key := range []string{"PRESET", "BRIDGE", "EXIT", "DB_HOST", "IDENTITY", "BRIDGE_SSH_HOST", "BRIDGE_SSH_IDENTITY", "EXIT_SSH_IDENTITY", "DB_SSH_IDENTITY", "EXIT2", "DB_ENABLE", "DB_REPLICA", "DB_SSH_USER"} {
 		v := canonicalFixture()
 		v[key] = "retired"
 		if _, err := CanonicalValuesToPlan(v); err == nil {
@@ -208,5 +212,40 @@ func TestCanonicalIngressPorts(t *testing.T) {
 	values["ULTRA_INGRESS_BACKEND_PORT"] = "private-invalid"
 	if _, err := CanonicalValuesToPlan(values); err == nil || strings.Contains(err.Error(), "private-invalid") {
 		t.Fatal("invalid port not safely rejected")
+	}
+}
+
+func TestAdoptionPreparationCannotAuthorizeDeployment(t *testing.T) {
+	values := map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "BRIDGE_SSH_KEY": "/identity", "SECRETS_ENV_FILE": "/private/secrets.env"}
+	p, err := AdoptionPreparationValuesToPlan(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.SchemaVersion != CurrentSchemaVersion || p.Automation != nil || p.BridgeSSHIdentity() != "/identity" || p.SecretsEnvFile() != "/private/secrets.env" {
+		t.Fatal("preparation changed the schema or access inputs")
+	}
+	if err := ValidatePlan(p); err == nil || !strings.Contains(err.Error(), "schema 2 requires automation configuration") {
+		t.Fatalf("incomplete preparation authorized deployment: %v", err)
+	}
+	if _, err := CanonicalValuesToPlan(values); err == nil {
+		t.Fatal("ordinary config parsing accepted incomplete policy")
+	}
+	for _, edit := range []map[string]string{
+		{"INSTALL_SCHEMA_VERSION": "1"},
+		{"REUSE_BRIDGE_SPEC": "false"},
+		{"MAIN_EXIT_IP": ""},
+		{"TELEGRAM_BOT_TOKEN": "private-fixture"},
+		{"PRESET": "steamlike"},
+	} {
+		candidate := make(map[string]string, len(values)+len(edit))
+		for key, value := range values {
+			candidate[key] = value
+		}
+		for key, value := range edit {
+			candidate[key] = value
+		}
+		if _, err := AdoptionPreparationValuesToPlan(candidate); err == nil || strings.Contains(err.Error(), "private-fixture") {
+			t.Fatalf("unsafe preparation input accepted or exposed: %v", err)
+		}
 	}
 }

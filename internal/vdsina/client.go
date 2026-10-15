@@ -188,7 +188,7 @@ func (c *Client) request(ctx context.Context, method, path string, body []byte) 
 	if err != nil {
 		return nil, errors.New("vdsina: request failed")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 	if err != nil {
 		return nil, errors.New("vdsina: could not read response")

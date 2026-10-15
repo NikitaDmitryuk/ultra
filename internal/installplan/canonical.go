@@ -9,37 +9,10 @@ import (
 
 // CanonicalValuesToPlan keeps deployment policy separate from secret file contents.
 func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
-	for key := range v {
-		switch key {
-		case "PRESET":
-			return nil, errors.New("PRESET is removed; configure MAIN_EXIT_DOMAIN for the managed XHTTP TLS tunnel")
-		case "BRIDGE", "EXIT", "DB_HOST", "IDENTITY", "FRONT", "BACK", "BRIDGE_SSH_HOST", "BRIDGE_SSH_IDENTITY", "EXIT_SSH_IDENTITY", "DB_SSH_IDENTITY", "DB_ENABLE", "DB_REPLICA", "DB_SSH_USER", "EXIT2", "EXIT2_SSH_IDENTITY", "EXIT2_NAME", "EXIT2_DIAL", "EXIT2_PRIORITY":
-			return nil, errors.New("removed deployment key " + key + "; use the canonical per-server IP and SSH_KEY fields")
-		}
-		if strings.HasPrefix(key, "ULTRA_AUTO_UPGRADE_") {
-			return nil, errors.New("automatic upgrade settings are no longer supported; use a manual release directory")
-		}
-		if DisallowedDeploymentSecret(key) {
-			return nil, errors.New("secret key " + key + " belongs outside install.config")
-		}
+	p, err := canonicalRoleValuesToPlan(v)
+	if err != nil {
+		return nil, err
 	}
-	if version := valueDefault(v, "INSTALL_SCHEMA_VERSION", "2"); version != "2" {
-		return nil, errors.New("only install schema 2 is supported")
-	}
-	p := LegacyValuesToPlan(v)
-	if p.Secrets.DatabaseDumpFile != "" {
-		sum, err := DatabaseDumpDigest(p.Secrets.DatabaseDumpFile)
-		if err != nil {
-			return nil, err
-		}
-		p.Secrets.DatabaseDumpSHA256 = sum
-	}
-	p.SourceValues = make(map[string]string, len(v))
-	for key, value := range v {
-		p.SourceValues[key] = value
-	}
-	p.SchemaVersion = CurrentSchemaVersion
-	p.Secrets.EnvFile = valueDefault(v, "SECRETS_ENV_FILE", p.SecretsEnvFile())
 	a := &AutomationConfig{Version: v["ULTRA_AUTOMATION_VERSION"], ReleaseDir: v["ULTRA_AUTOMATION_RELEASE_DIR"], AgeRecipient: v["ULTRA_AUTOMATION_AGE_RECIPIENT"], BridgeProvider: v["ULTRA_AUTOMATION_BRIDGE_PROVIDER"], BridgeIPv4: p.Bridge.Address, BridgeURL: valueDefault(v, "ULTRA_AUTOMATION_BRIDGE_URL", "https://"+p.PublicSubscriptionDomain()+"/healthz"), KnownHostsFile: v["ULTRA_AUTOMATION_KNOWN_HOSTS_FILE"]}
 	if err := json.Unmarshal([]byte(v["ULTRA_AUTOMATION_STATIC_NODES"]), &a.StaticNodes); err != nil {
 		return nil, errors.New("ULTRA_AUTOMATION_STATIC_NODES must be a JSON array of node policy")
@@ -64,7 +37,6 @@ func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 			*field.paths = paths
 		}
 	}
-	var err error
 	a.AdminTelegramID, err = strconv.ParseInt(v["ULTRA_AUTOMATION_ADMIN_TELEGRAM_ID"], 10, 64)
 	if err != nil {
 		return nil, errors.New("ULTRA_AUTOMATION_ADMIN_TELEGRAM_ID must be an integer")
@@ -113,6 +85,58 @@ func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 		}
 	}
 	p.Automation = a
+	return p, nil
+}
+
+// AdoptionPreparationValuesToPlan reads only the role inputs for read-only
+// adoption preparation. Its schema 2 envelope deliberately omits automation and
+// cannot pass ValidatePlan; server-derived policy must produce a complete plan.
+func AdoptionPreparationValuesToPlan(v map[string]string) (*InstallPlan, error) {
+	p, err := canonicalRoleValuesToPlan(v)
+	if err != nil {
+		return nil, err
+	}
+	if !p.Bridge.ReuseSpec {
+		return nil, errors.New("adoption preparation requires an existing bridge")
+	}
+	if err := validatePlanRoles(p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func canonicalRoleValuesToPlan(v map[string]string) (*InstallPlan, error) {
+	for key := range v {
+		switch key {
+		case "PRESET":
+			return nil, errors.New("PRESET is removed; configure MAIN_EXIT_DOMAIN for the managed XHTTP TLS tunnel")
+		case "BRIDGE", "EXIT", "DB_HOST", "IDENTITY", "FRONT", "BACK", "BRIDGE_SSH_HOST", "BRIDGE_SSH_IDENTITY", "EXIT_SSH_IDENTITY", "DB_SSH_IDENTITY", "DB_ENABLE", "DB_REPLICA", "DB_SSH_USER", "EXIT2", "EXIT2_SSH_IDENTITY", "EXIT2_NAME", "EXIT2_DIAL", "EXIT2_PRIORITY":
+			return nil, errors.New("removed deployment key " + key + "; use the canonical per-server IP and SSH_KEY fields")
+		}
+		if strings.HasPrefix(key, "ULTRA_AUTO_UPGRADE_") {
+			return nil, errors.New("automatic upgrade settings are no longer supported; use a manual release directory")
+		}
+		if DisallowedDeploymentSecret(key) {
+			return nil, errors.New("secret key " + key + " belongs outside install.config")
+		}
+	}
+	if version := valueDefault(v, "INSTALL_SCHEMA_VERSION", "2"); version != "2" {
+		return nil, errors.New("only install schema 2 is supported")
+	}
+	p := LegacyValuesToPlan(v)
+	if p.Secrets.DatabaseDumpFile != "" {
+		sum, err := DatabaseDumpDigest(p.Secrets.DatabaseDumpFile)
+		if err != nil {
+			return nil, err
+		}
+		p.Secrets.DatabaseDumpSHA256 = sum
+	}
+	p.SourceValues = make(map[string]string, len(v))
+	for key, value := range v {
+		p.SourceValues[key] = value
+	}
+	p.SchemaVersion = CurrentSchemaVersion
+	p.Secrets.EnvFile = valueDefault(v, "SECRETS_ENV_FILE", p.SecretsEnvFile())
 	return p, nil
 }
 
