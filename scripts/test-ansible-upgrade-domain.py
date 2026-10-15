@@ -339,7 +339,7 @@ class UpgradeDomainTests(unittest.TestCase):
         role = (ROOT / 'deploy/ansible/roles/upgrade_domain/tasks/main.yml').read_text()
         self.assertNotIn('ultra_backend_dns:', role)
         self.assertIn('preserve_recovery: true', role)
-        self.assertIn('ultra_ingress_defer_finalize: true', role)
+        self.assertIn('ingress_defer_finalize: true', role)
         self.assertLess(role.index('Reload old listeners'), role.index('Apply retained-alias cutover'))
 
 

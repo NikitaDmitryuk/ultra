@@ -8,7 +8,7 @@
   ansible.builtin.include_role:
     name: ingress
   vars:
-    ultra_ingress_action: prepare
+    ingress_action: prepare
   when: ultra_upgrade_domain_action == 'apply'
 - name: Prepare exact backend compensation on the host
   ultra_backend_domain:
@@ -78,8 +78,8 @@
   ansible.builtin.include_role:
     name: ingress
   vars:
-    ultra_ingress_action: cutover
-    ultra_ingress_defer_finalize: true
+    ingress_action: cutover
+    ingress_defer_finalize: true
   when: ultra_upgrade_domain_action == 'apply'
 - name: Bind applied ingress ownership hashes for exact compensation
   ultra_upgrade_domain:

@@ -4,24 +4,24 @@
     ingress_cutover_plan: >-
       {{ ultra_ingress |
          combine({'retain_aliases': true, 'subscription_domain': ultra_subscription_domain})
-         if ultra_ingress_action == 'cutover' else ultra_ingress }}
-  when: ultra_ingress_action in ['stage', 'activate', 'rollback', 'cutover']
+         if ingress_action == 'cutover' else ultra_ingress }}
+  when: ingress_action in ['stage', 'activate', 'rollback', 'cutover']
 - name: Validate ingress certificate contract
   ansible.builtin.assert:
     that:
       - ultra_ingress_domains | length > 0
       - ultra_ingress_domains | length <= 4
       - ultra_ingress_email | length > 0
-      - ultra_ingress_action in ['prepare', 'stage', 'activate', 'rollback', 'cutover']
+      - ingress_action in ['prepare', 'stage', 'activate', 'rollback', 'cutover']
 - name: Prepare durable specification transition before infrastructure changes
   ultra_ingress_state:
     directory: "{{ ultra_ingress_transaction }}"
     plan: "{{ ingress_cutover_plan }}"
-    action: "{{ ultra_ingress_action }}"
+    action: "{{ ingress_action }}"
     phase: prepare
   register: ingress_transition
   no_log: true
-  when: ultra_ingress_action in ['stage', 'activate', 'rollback', 'cutover']
+  when: ingress_action in ['stage', 'activate', 'rollback', 'cutover']
 - name: Ensure domain-publication application directory
   ansible.builtin.file:
     path: /opt/ultra-recovery
@@ -29,7 +29,7 @@
     owner: root
     group: root
     mode: "0755"
-  when: ultra_ingress_action == 'cutover'
+  when: ingress_action == 'cutover'
 - name: Install pure domain-publication probe contracts
   ansible.builtin.copy:
     content: "{{ ultra_cutover_contract_source }}"
@@ -37,7 +37,7 @@
     owner: root
     group: root
     mode: "0644"
-  when: ultra_ingress_action == 'cutover'
+  when: ingress_action == 'cutover'
 - name: Capture old subscription identity baseline before publication
   ultra_cutover_probe:
     phase: baseline
@@ -51,7 +51,7 @@
     domain: "{{ ultra_ingress.domain }}"
     public_host: "{{ ultra_ingress.public_host | default(ultra_ingress.domain) }}"
   no_log: true
-  when: ultra_ingress_action == 'cutover'
+  when: ingress_action == 'cutover'
 - name: Install ingress dependencies
   ansible.builtin.apt:
     name: [nginx, certbot]
@@ -196,10 +196,10 @@
     argv: [/usr/local/bin/ultra-relay, -spec, "{{ ingress_transition.candidate }}", -check]
   changed_when: false
   no_log: true
-  when: ultra_ingress_action in ['stage', 'activate', 'rollback', 'cutover']
+  when: ingress_action in ['stage', 'activate', 'rollback', 'cutover']
 - name: Select public listener port
   ansible.builtin.set_fact:
-    ingress_public_port: "{{ ultra_ingress.staging_port if ultra_ingress_action == 'stage' else 443 }}"
+    ingress_public_port: "{{ ultra_ingress.staging_port if ingress_action == 'stage' else 443 }}"
 - name: Assemble owned ingress configuration
   ansible.builtin.set_fact:
     ingress_owned_files:
@@ -209,14 +209,14 @@
       - path: /etc/letsencrypt/renewal-hooks/deploy/ultra-ansible
         content: "{{ lookup('template', 'renewal-hook.j2') }}"
         mode: "0755"
-  when: ultra_ingress_action in ['stage', 'activate', 'cutover']
+  when: ingress_action in ['stage', 'activate', 'cutover']
 - name: Append independent subscription frontend
   ansible.builtin.set_fact:
     ingress_owned_files: >-
       {{ ingress_owned_files + [{'path': '/etc/nginx/conf.d/ultra-subscription.conf',
          'content': lookup('template', 'subscription.conf.j2'), 'mode': '0644'}] }}
   when:
-    - ultra_ingress_action in ['activate', 'cutover']
+    - ingress_action in ['activate', 'cutover']
     - ultra_subscription_enabled | default(false) | bool
     - ultra_subscription_domain != ultra_ingress.domain
 - name: Read saved old primary listener for domain cutover
@@ -225,7 +225,7 @@
   register: ingress_legacy_site
   no_log: true
   when:
-    - ultra_ingress_action == 'cutover'
+    - ingress_action == 'cutover'
     - not ingress_transition.already_published
     - not (ingress_cutover_plan.retain_aliases | default(false) | bool)
 - name: Preserve old working domain in an owned alias listener
@@ -234,21 +234,21 @@
       {{ ingress_owned_files + [{'path': '/etc/nginx/conf.d/ultra-vpn-legacy.conf',
          'content': ingress_legacy_site.content | b64decode, 'mode': '0644'}] }}
   when:
-    - ultra_ingress_action == 'cutover'
+    - ingress_action == 'cutover'
     - not ingress_transition.already_published
     - not (ingress_cutover_plan.retain_aliases | default(false) | bool)
 - name: Preserve journalled old VPN and subscription listeners during operator cutover
   ansible.builtin.set_fact:
     ingress_owned_files: "{{ ingress_owned_files + ingress_transition.retained_aliases }}"
   when:
-    - ultra_ingress_action == 'cutover'
+    - ingress_action == 'cutover'
     - ingress_cutover_plan.retain_aliases | default(false) | bool
 - name: Ensure bot public-origin drop-in directory
   ansible.builtin.file:
     path: /etc/systemd/system/ultra-bot.service.d
     state: directory
     mode: "0755"
-  when: ultra_ingress_action == 'cutover'
+  when: ingress_action == 'cutover'
 - name: Append owned bot public-origin configuration
   ansible.builtin.set_fact:
     ingress_owned_files: >-
@@ -257,7 +257,7 @@
           'content': 'ULTRA_BOT_PUBLIC_URL=https://' + ultra_subscription_domain + '\n'},
          {'path': '/etc/systemd/system/ultra-bot.service.d/zz-domain-public-origin.conf', 'mode': '0644',
           'content': '[Service]\nEnvironmentFile=/etc/ultra-relay/domain-public.env\n'}] }}
-  when: ultra_ingress_action == 'cutover'
+  when: ingress_action == 'cutover'
 - name: Read before images of owned ingress files
   ansible.builtin.slurp:
     src: "{{ item.path }}"
@@ -266,7 +266,7 @@
   failed_when: false
   no_log: true
 - name: Apply validated ingress transaction
-  when: ultra_ingress_action in ['stage', 'activate', 'rollback', 'cutover']
+  when: ingress_action in ['stage', 'activate', 'rollback', 'cutover']
   block:
     - name: Install owned ingress configuration
       ultra_owned_file:
@@ -277,7 +277,7 @@
       loop: "{{ ingress_owned_files | default([]) }}"
       register: ingress_files
       no_log: true
-      notify: "{{ ['Reload ultra nginx', 'Restart ingress bot'] if ultra_ingress_action == 'cutover' else ['Reload ultra nginx'] }}"
+      notify: "{{ ['Reload ultra nginx', 'Restart ingress bot'] if ingress_action == 'cutover' else ['Reload ultra nginx'] }}"
     - name: Validate final ingress configuration
       ansible.builtin.command:
         argv: [nginx, -t]
@@ -286,7 +286,7 @@
       ultra_ingress_state:
         directory: "{{ ultra_ingress_transaction }}"
         plan: "{{ ingress_cutover_plan }}"
-        action: "{{ ultra_ingress_action }}"
+        action: "{{ ingress_action }}"
         phase: commit
       register: ingress_committed
       no_log: true
@@ -322,7 +322,7 @@
         public_host: "{{ ultra_ingress.public_host | default(ultra_ingress.domain) }}"
         path: "{{ ultra_ingress.path }}"
       no_log: true
-      when: ultra_ingress_action == 'cutover'
+      when: ingress_action == 'cutover'
   rescue:
     - name: Restore durable operator cutover before images
       ultra_owned_file:
@@ -348,7 +348,7 @@
       ultra_ingress_state:
         directory: "{{ ultra_ingress_transaction }}"
         plan: "{{ ingress_cutover_plan }}"
-        action: "{{ ultra_ingress_action }}"
+        action: "{{ ingress_action }}"
         phase: rollback
       no_log: true
     - name: Validate restored Nginx configuration
@@ -368,7 +368,7 @@
         name: ultra-bot.service
         state: restarted
         daemon_reload: true
-      when: ultra_ingress_action == 'cutover'
+      when: ingress_action == 'cutover'
     - name: Preserve failed deployment result after rollback
       ansible.builtin.fail:
         msg: ingress_activation_failed_previous_configuration_restored
@@ -384,13 +384,13 @@
     bridge_url: "{{ ultra_bridge_url | default('') }}"
   no_log: true
   when:
-    - ultra_ingress_action == 'cutover'
-    - not (ultra_ingress_defer_finalize | default(false) | bool)
+    - ingress_action == 'cutover'
+    - not (ingress_defer_finalize | default(false) | bool)
 - name: Capture confirmed domain-publication state
   ansible.builtin.command:
     argv: [python3, /opt/ultra-recovery/recovery.py, capture, --config, /etc/ultra-recovery/backup.json]
   changed_when: true
   no_log: true
   when:
-    - ultra_ingress_action == 'cutover'
-    - not (ultra_ingress_defer_finalize | default(false) | bool)
+    - ingress_action == 'cutover'
+    - not (ingress_defer_finalize | default(false) | bool)

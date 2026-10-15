@@ -157,6 +157,9 @@
     - name: Configure bridge ingress and certificates
       ansible.builtin.include_role:
         name: ingress
+      vars:
+        ingress_action: "{{ ultra_ingress_action }}"
+        ingress_defer_finalize: "{{ ultra_ingress_defer_finalize | default(false) }}"
       when: ultra_ingress_action in ['prepare', 'stage', 'activate', 'rollback', 'cutover']
     - name: Verify preserved published ingress
       ansible.builtin.include_role:
