@@ -4,7 +4,9 @@
   gather_facts: false
   any_errors_fatal: true
   vars:
-    ultra_recovery_capture_dependency: "{{ ultra_recovery_files | selectattr('destination', 'equalto', '/opt/ultra-recovery/db_connection.py') | list | first }}"
+    ultra_recovery_capture_dependency: >-
+      {{ ultra_recovery_files | selectattr('destination', 'equalto',
+      '/opt/ultra-recovery/db_connection.py') | list | first }}
     ultra_recovery_capture_tool: "{{ ultra_recovery_files | selectattr('destination', 'equalto', '/opt/ultra-recovery/recovery.py') | list | first }}"
   tasks:
     - name: Require unchanged frozen topology without waking producers
@@ -48,7 +50,12 @@
       when: legacy_retry_barrier.held | default(false) | bool
     - name: Capture fresh independent recovery while producers stay stopped
       ansible.builtin.command:
-        argv: [python3, "/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/capture/recovery.py", capture, --config, /etc/ultra-recovery/backup.json]
+        argv:
+          - python3
+          - "/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/capture/recovery.py"
+          - capture
+          - --config
+          - /etc/ultra-recovery/backup.json
       changed_when: false
       no_log: true
       when: legacy_retry_barrier.held | default(false) | bool

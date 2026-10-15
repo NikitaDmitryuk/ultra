@@ -11,7 +11,7 @@
     path: "{{ item }}"
     follow: false
   loop: [/etc, /etc/ultra-fleet]
-  register: fleet_identity_ancestry
+  register: fleet_access_identity_ancestry
 - name: Reject writable or linked fleet identity ancestry
   ansible.builtin.assert:
     that:
@@ -19,7 +19,7 @@
       - not item.stat.islnk | default(false)
       - not item.stat.exists or item.stat.uid == 0
       - not item.stat.exists or item.stat.mode in ['0755', '0750', '0700']
-  loop: "{{ fleet_identity_ancestry.results }}"
+  loop: "{{ fleet_access_identity_ancestry.results }}"
 - name: Create private runtime fleet identity directory
   ansible.builtin.file:
     path: /etc/ultra-fleet
@@ -32,27 +32,27 @@
     path: "/etc/ultra-fleet/{{ item }}"
     follow: false
   loop: [id_ed25519, id_ed25519.pub]
-  register: fleet_existing_identity
+  register: fleet_access_existing_identity
 - name: Reject non-regular fleet identity files
   ansible.builtin.assert:
     that:
       - not item.stat.exists or item.stat.isreg | default(false)
       - not item.stat.islnk | default(false)
-  loop: "{{ fleet_existing_identity.results }}"
+  loop: "{{ fleet_access_existing_identity.results }}"
 - name: Generate runtime fleet identity only when absent
   ansible.builtin.command:
-    argv: [ssh-keygen, -q, -t, ed25519, -N, '', -C, ultra-fleet-access, -f, /etc/ultra-fleet/id_ed25519]
+    argv: [ssh-keygen, -q, -t, ed25519, -N, "", -C, ultra-fleet-access, -f, /etc/ultra-fleet/id_ed25519]
     creates: /etc/ultra-fleet/id_ed25519
   no_log: true
 - name: Derive runtime public key from the retained private identity
   ansible.builtin.command:
     argv: [ssh-keygen, -y, -f, /etc/ultra-fleet/id_ed25519]
-  register: fleet_public_key
+  register: fleet_access_public_key
   changed_when: false
   no_log: true
 - name: Persist matching runtime fleet public identity
   ansible.builtin.copy:
-    content: "{{ fleet_public_key.stdout | trim }}\n"
+    content: "{{ fleet_access_public_key.stdout | trim }}\n"
     dest: /etc/ultra-fleet/id_ed25519.pub
     owner: root
     group: ultra-relay
@@ -68,5 +68,5 @@
   no_log: true
 - name: Publish runtime fleet public identity for exit authorization
   ansible.builtin.set_fact:
-    ultra_fleet_access_public_key: "{{ fleet_public_key.stdout | trim }}"
+    fleet_access_ultra_public_key: "{{ fleet_access_public_key.stdout | trim }}"
   no_log: true

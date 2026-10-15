@@ -13,7 +13,7 @@
   roles:
     - postgres_client
     - role: db_tunnel
-      ultra_db_tunnel_stage: generate
+      db_tunnel_ultra_stage: generate
       when: groups['databases'] | length > 0
 - name: Configure primary database
   hosts: databases
@@ -45,14 +45,14 @@
   any_errors_fatal: true
   roles:
     - role: db_tunnel
-      ultra_db_tunnel_stage: authorize
+      db_tunnel_ultra_stage: authorize
 - name: Activate application database tunnel
   hosts: bridge
   gather_facts: false
   any_errors_fatal: true
   roles:
     - role: db_tunnel
-      ultra_db_tunnel_stage: install
+      db_tunnel_ultra_stage: install
       when: groups['databases'] | length > 0
 - name: Confirm completed database component
   hosts: localhost

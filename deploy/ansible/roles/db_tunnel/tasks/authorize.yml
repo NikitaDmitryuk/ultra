@@ -5,8 +5,8 @@
   ansible.builtin.assert:
     that:
       - inventory_hostname != 'bridge'
-      - hostvars['bridge'].ultra_db_tunnel_public_key is defined
-      - hostvars['bridge'].ultra_db_tunnel_public_key is match('^ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: .*)?$')
+      - hostvars['bridge'].db_tunnel_ultra_public_key is defined
+      - hostvars['bridge'].db_tunnel_ultra_public_key is match('^ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: .*)?$')
   no_log: true
 - name: Create non-login database tunnel account
   ansible.builtin.user:
@@ -34,10 +34,9 @@
 - name: Install narrowly restricted bridge database tunnel key
   ansible.builtin.copy:
     content: |-
-      restrict,port-forwarding,permitopen="127.0.0.1:5432" {{ hostvars['bridge'].ultra_db_tunnel_public_key }}
+      restrict,port-forwarding,permitopen="127.0.0.1:5432" {{ hostvars['bridge'].db_tunnel_ultra_public_key }}
     dest: /var/lib/ultra-db-tunnel/.ssh/authorized_keys
     owner: ultra-db-tunnel
     group: ultra-db-tunnel
     mode: "0600"
   no_log: true
-

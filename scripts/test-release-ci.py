@@ -29,9 +29,13 @@ assert set(gate['needs']) == set(jobs) - {'lint-test-build'}
 assert all('needs' not in jobs[name] for name in gate['needs'])
 assert 'postgres' in jobs['go-tests']['services']
 assert 'DATABASE_URL' in jobs['go-tests']['env']
-commands = '\n'.join(step.get('run', '') for step in jobs['go-tests']['steps'])
-assert 'make test\n' in commands and 'make test-race' in commands
-assert 'test-load-pg-recovery.py' in commands
+test_commands = '\n'.join(step.get('run', '') for step in jobs['go-tests']['steps'])
+assert 'make test\n' in test_commands
+assert 'test-load-pg-recovery.py' in test_commands
+assert 'postgres' in jobs['go-race']['services']
+assert 'DATABASE_URL' in jobs['go-race']['env']
+race_commands = '\n'.join(step.get('run', '') for step in jobs['go-race']['steps'])
+assert 'make test-race' in race_commands
 command = gate['steps'][0]['run']
 for state in ('success', 'failure', 'cancelled', 'skipped'):
     needs = {name: {'result': 'success'} for name in gate['needs']}

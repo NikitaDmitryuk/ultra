@@ -6,8 +6,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shlex
+import stat
 import sys
 import subprocess
 import tempfile
@@ -23,6 +25,23 @@ def document(path):
     if path.is_symlink() or not path.is_file() or info.st_uid != 0 or info.st_mode & 0o022 or info.st_size > 1048576:
         raise ValueError('database_preservation_evidence_invalid')
     return json.loads(path.read_text())
+
+
+def runtime_file(path, allowed_uids):
+    """Read one managed runtime file without following links or trusting its parent owner."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid not in allowed_uids or info.st_mode & 0o022
+                or info.st_nlink != 1 or info.st_size > 1048576):
+            raise ValueError('database_preservation_runtime_file_invalid')
+        with os.fdopen(descriptor, 'rb', closefd=False) as source:
+            value = source.read(1048577)
+        if len(value) > 1048576:
+            raise ValueError('database_preservation_runtime_file_invalid')
+        return value
+    finally:
+        os.close(descriptor)
 
 
 def atomic(path, value):
@@ -370,17 +389,16 @@ def main():
             raise ValueError('database_preservation_database_invalid')
         if document(Path('/etc/ultra-recovery/backup.json'))['database'] != database:
             raise ValueError('database_identity_migration_required')
-        spec = document(Path('/etc/ultra-relay/spec.json'))
+        relay_uid = pwd.getpwnam('ultra-relay').pw_uid
+        spec = json.loads(runtime_file(Path('/etc/ultra-relay/spec.json'), {0, relay_uid}))
         selection = database_selection(spec, database)
         # An override can make the bot write to a different DB. Refuse rather
         # than parse shell/systemd expansion or consult inherited environment.
         for name in ('/etc/ultra-relay/environment', '/etc/ultra-relay/bot.env'):
             path = Path(name)
-            if path.exists():
-                info = path.lstat()
-                if path.is_symlink() or not path.is_file() or info.st_uid != 0 or info.st_mode & 0o022 or info.st_size > 1048576:
-                    raise ValueError('database_preservation_environment_invalid')
-                if re.search(r'(?m)^\s*(?:export\s+)?ULTRA_DB_DSN\s*=', path.read_text()):
+            if path.exists() or path.is_symlink():
+                allowed_uids = {0, relay_uid} if path.name == 'environment' else {0}
+                if re.search(r'(?m)^\s*(?:export\s+)?ULTRA_DB_DSN\s*=', runtime_file(path, allowed_uids).decode()):
                     raise ValueError('database_identity_override_migration_required')
         if module.params['phase'] == 'baseline':
             transaction = module.params['transaction']

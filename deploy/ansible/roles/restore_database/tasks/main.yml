@@ -60,7 +60,12 @@
   no_log: true
 - name: Verify authenticated generation and empty database target before mutation
   ansible.builtin.command:
-    argv: [python3, "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database/restore_database.py", --check, --directory, "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database"]
+    argv:
+      - python3
+      - "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database/restore_database.py"
+      - --check
+      - --directory
+      - "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database"
   register: restore_database_preflight
   changed_when: false
   no_log: true
@@ -75,10 +80,14 @@
   ansible.builtin.include_role:
     name: db_tunnel
   vars:
-    ultra_db_tunnel_stage: authorize
+    db_tunnel_ultra_stage: authorize
 - name: Apply dedicated database restore
   ansible.builtin.command:
-    argv: [python3, "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database/restore_database.py", --directory, "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database"]
+    argv:
+      - python3
+      - "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database/restore_database.py"
+      - --directory
+      - "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database"
     stdin: "{{ ultra_restore_database_plan | to_json(preprocess_unsafe=False) }}"
   register: restore_database_result
   changed_when: true

@@ -90,7 +90,7 @@
       when: ultra_runtime_action in ['apply', 'rollback']
     - name: Start a new payload verification watermark
       ansible.builtin.command:
-        argv: [date, '+%s%N']
+        argv: [date, "+%s%N"]
       register: runtime_payload_since
       changed_when: false
       when: ultra_runtime_action in ['apply', 'rollback'] and runtime_transaction_evidence.bound | bool
@@ -151,5 +151,5 @@
       ansible.builtin.copy:
         content: "{{ {'verified': true, 'phase': ultra_runtime_action, 'hosts': runtime_transaction_hosts} | to_json(preprocess_unsafe=False) }}\n"
         dest: "{{ ultra_result_file }}"
-        mode: '0600'
+        mode: "0600"
       no_log: true

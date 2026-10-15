@@ -18,6 +18,6 @@
               'untouched': legacy_compensation_barrier.untouched} |
              to_json(preprocess_unsafe=False) }}{{ '\n' }}
         dest: "{{ ultra_result_file }}"
-        mode: '0600'
+        mode: "0600"
       delegate_to: localhost
       become: false

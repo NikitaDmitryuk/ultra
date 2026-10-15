@@ -64,11 +64,12 @@ class RuntimeUpgradeContracts(unittest.TestCase):
 
     def test_upgrade_compensates_runtime_before_release_and_gate(self):
         source = (ROOT / 'cmd/ultra-install/ansible_upgrade.go').read_text()
-        rollback = source.split('if leaseErr := ansibleResumeFrozenLifecycle', 1)[1]
-        domain = rollback.index('domainTransaction.phase(cleanup, inventory, directory, python, executable, "rollback", generation)')
-        runtime = rollback.index('runUpgradeRuntimePhase(cleanup, p, inspection, inventory, variables, directory, python, executable, "rollback", generation)')
-        release = rollback.index('runUpgradeReleaseRollback(cleanup, p, inspection, inventory, variables, directory, python, executable, generation, false)')
-        gate = rollback.index('ansibleLifecycle(cleanup, p, inventory, directory, python, executable, "released", false)')
+        start = source.index('if err != nil {\n\t\tif forwardOnly {\n\t\t\t// The operator explicitly chose forward-only recovery.')
+        rollback = source[start:source.index('// Readiness checks release the fleet lock', start)]
+        domain = rollback.index('domainTransaction.phase(')
+        runtime = rollback.index('runUpgradeRuntimePhase(')
+        release = rollback.index('runUpgradeReleaseRollback(')
+        gate = rollback.index('ansibleLifecycle(')
         self.assertLess(domain, runtime)
         self.assertLess(runtime, release)
         self.assertLess(release, gate)

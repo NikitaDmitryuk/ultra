@@ -3,18 +3,18 @@
   ansible.builtin.assert:
     that:
       - inventory_hostname in groups['exits']
-      - hostvars['bridge'].ultra_fleet_access_public_key is match('^ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: .*)?$')
+      - hostvars['bridge'].fleet_access_ultra_public_key is match('^ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: .*)?$')
   no_log: true
 - name: Inspect root SSH authorization paths
   ansible.builtin.stat:
     path: "{{ item }}"
     follow: false
   loop: [/root/.ssh, /root/.ssh/authorized_keys]
-  register: fleet_authorization_paths
+  register: fleet_access_authorization_paths
 - name: Reject symlink fleet authorization paths
   ansible.builtin.assert:
     that: not item.stat.islnk | default(false)
-  loop: "{{ fleet_authorization_paths.results }}"
+  loop: "{{ fleet_access_authorization_paths.results }}"
 - name: Ensure private root authorization directory
   ansible.builtin.file:
     path: /root/.ssh
@@ -29,6 +29,6 @@
     owner: root
     group: root
     mode: "0600"
-    marker: '# {mark} ultra-managed-fleet-access'
-    block: "restrict {{ hostvars['bridge'].ultra_fleet_access_public_key }}"
+    marker: "# {mark} ultra-managed-fleet-access"
+    block: "restrict {{ hostvars['bridge'].fleet_access_ultra_public_key }}"
   no_log: true

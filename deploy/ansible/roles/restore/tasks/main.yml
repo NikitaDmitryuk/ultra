@@ -41,7 +41,16 @@
     owner: root
     group: root
     mode: "0600"
-  loop: [restore_host.py, restore_common.py, restore_peer.py, restore_firewall.py, reconcile.py, recovery.py, db_connection.py, dns.py, recovery_status.py]
+  loop:
+    - restore_host.py
+    - restore_common.py
+    - restore_peer.py
+    - restore_firewall.py
+    - reconcile.py
+    - recovery.py
+    - db_connection.py
+    - dns.py
+    - recovery_status.py
 - name: Recheck fencing before any host preparation
   ansible.builtin.command:
     argv: [python3, "{{ ultra_restore_directory }}/restore_host.py", --directory, "{{ ultra_restore_directory }}", --phase, fence-check]
@@ -54,7 +63,7 @@
   when: ultra_restore_phase == 'prepare'
 - name: Prepare target dependencies
   ansible.builtin.apt:
-    name: [ nginx, libnginx-mod-stream, certbot, dnsutils, age, openssh-client, curl, openssl, ca-certificates, iproute2]
+    name: [nginx, libnginx-mod-stream, certbot, dnsutils, age, openssh-client, curl, openssl, ca-certificates, iproute2]
     state: present
     update_cache: true
     cache_valid_time: 3600
@@ -165,7 +174,7 @@
     name: controller
     tasks_from: identity
   vars:
-    ultra_controller_bridge_address: "{{ ultra_restore_plan.new_bridge_address }}"  # noqa: var-naming[no-role-prefix]
+    ultra_controller_bridge_address: "{{ ultra_restore_plan.new_bridge_address }}" # noqa: var-naming[no-role-prefix]
   when: ultra_restore_phase == 'install'
 - name: Read restored automation identity
   ansible.builtin.slurp:

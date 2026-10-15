@@ -4,4 +4,3 @@
     name: ultra-db-tunnel.service
     state: restarted
     daemon_reload: true
-

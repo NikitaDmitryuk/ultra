@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -323,7 +324,7 @@ class UpgradeDomainTests(unittest.TestCase):
     def test_upgrade_hooks_keep_old_endpoints_until_acceptance_and_commit(self):
         source = (ROOT / 'cmd/ultra-install/ansible_upgrade.go').read_text()
         start = source.index('domainGeneration = generation')
-        flow = source[start:]
+        flow = re.sub(r'\s+', ' ', source[start:])
         stages = ['"prepare", generation)', '"prepare", generation, retryFailed)', '"upgrade", inventory', '"apply", generation)', '"publish-release"', '"verify-release"', '"accept", generation)', '"commit-release"', '[]string{"promote", "retire", "retire-dns", "finalize"}']
         positions = [flow.index(stage) for stage in stages]
         self.assertEqual(positions, sorted(positions))

@@ -17,12 +17,12 @@
     follow: false
   delegate_to: localhost
   become: false
-  register: ultra_db_tunnel_known_hosts_stat
+  register: db_tunnel_known_hosts_stat
 - name: Require regular pinned known_hosts file
   ansible.builtin.assert:
     that:
-      - ultra_db_tunnel_known_hosts_stat.stat.isreg | default(false)
-      - not (ultra_db_tunnel_known_hosts_stat.stat.islnk | default(true))
+      - db_tunnel_known_hosts_stat.stat.isreg | default(false)
+      - not (db_tunnel_known_hosts_stat.stat.islnk | default(true))
 - name: Create private database tunnel directory
   ansible.builtin.file:
     path: /etc/ultra-db-tunnel
@@ -65,7 +65,6 @@
 - name: Wait for local PostgreSQL tunnel listener
   ansible.builtin.wait_for:
     host: 127.0.0.1
-    port: "{{ ultra_db_tunnel_local_port }}"
+    port: "{{ db_tunnel_ultra_local_port }}"
     state: started
     timeout: 30
-

@@ -66,14 +66,14 @@
     group: root
     mode: "{{ item.mode }}"
   loop:
-    - {path: /var/lib/ultra-ingress, mode: '0700'}
-    - {path: /var/www/ultra-acme, mode: '0755'}
-    - {path: /var/www/ultra-site, mode: '0755'}
-    - {path: /etc/letsencrypt/renewal-hooks/deploy, mode: '0755'}
+    - { path: /var/lib/ultra-ingress, mode: "0700" }
+    - { path: /var/www/ultra-acme, mode: "0755" }
+    - { path: /var/www/ultra-site, mode: "0755" }
+    - { path: /etc/letsencrypt/renewal-hooks/deploy, mode: "0755" }
 - name: Install neutral ingress landing page
   ansible.builtin.copy:
-    content: '<!doctype html><meta charset="utf-8"><title>Service</title><p>Service available.</p>
-'
+    content: |
+      <!doctype html><meta charset="utf-8"><title>Service</title><p>Service available.</p>
     dest: /var/www/ultra-site/index.html
     owner: root
     group: root
@@ -177,7 +177,7 @@
 - name: Use permanent webroot for previously standalone certificates
   ansible.builtin.replace:
     path: "/etc/letsencrypt/renewal/{{ item.item }}.conf"
-    regexp: '^authenticator = standalone$'
+    regexp: "^authenticator = standalone$"
     replace: authenticator = webroot
   loop: "{{ ingress_renewal.results }}"
   when: "'authenticator = standalone' in (item.content | b64decode)"
@@ -185,8 +185,8 @@
 - name: Preserve permanent challenge location in migrated renewal settings
   ansible.builtin.lineinfile:
     path: "/etc/letsencrypt/renewal/{{ item.item }}.conf"
-    insertafter: '^authenticator = webroot$'
-    regexp: '^webroot_path ='
+    insertafter: "^authenticator = webroot$"
+    regexp: "^webroot_path ="
     line: webroot_path = /var/www/ultra-acme,
   loop: "{{ ingress_renewal.results }}"
   when: "'authenticator = standalone' in (item.content | b64decode)"

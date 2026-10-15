@@ -22,7 +22,7 @@
     state: directory
     owner: root
     group: root
-    mode: '0755'
+    mode: "0755"
   loop: [/var/www/ultra-tunnel-acme, /usr/local/libexec, /etc/letsencrypt/renewal-hooks/deploy]
 - name: Configure the dedicated HTTP-01 endpoint
   ansible.builtin.copy:
@@ -36,7 +36,7 @@
     dest: /etc/nginx/conf.d/ultra-tunnel-acme.conf
     owner: root
     group: root
-    mode: '0644'
+    mode: "0644"
 - name: Validate HTTP-01 routing
   ansible.builtin.command:
     argv: [nginx, -t]
@@ -49,26 +49,26 @@
 - name: Inspect guest firewall availability
   ansible.builtin.stat:
     path: /usr/sbin/ufw
-  register: tunnel_ufw
+  register: tunnel_certificate_ufw
 - name: Inspect guest firewall policy
   ansible.builtin.command:
     argv: [/usr/sbin/ufw, status]
-  register: tunnel_firewall
+  register: tunnel_certificate_firewall
   changed_when: false
-  when: tunnel_ufw.stat.exists
+  when: tunnel_certificate_ufw.stat.exists
 - name: Allow HTTP-01 on an enabled guest firewall
   ansible.builtin.command:
-    argv: [/usr/sbin/ufw, allow, '80/tcp', comment, ultra-tunnel-acme]
-  register: tunnel_firewall_rule
-  changed_when: "'Skipping' not in tunnel_firewall_rule.stdout"
-  when: "tunnel_ufw.stat.exists and 'Status: active' in tunnel_firewall.stdout"
+    argv: [/usr/sbin/ufw, allow, "80/tcp", comment, ultra-tunnel-acme]
+  register: tunnel_certificate_firewall_rule
+  changed_when: "'Skipping' not in tunnel_certificate_firewall_rule.stdout"
+  when: "tunnel_certificate_ufw.stat.exists and 'Status: active' in tunnel_certificate_firewall.stdout"
 - name: Install bounded certificate deployment hook
   ansible.builtin.template:
     src: deploy-certificate.sh.j2
     dest: /etc/letsencrypt/renewal-hooks/deploy/ultra-tunnel
     owner: root
     group: root
-    mode: '0700'
+    mode: "0700"
 - name: Obtain dedicated exit certificate
   ansible.builtin.command:
     argv:
@@ -87,13 +87,13 @@
       - "{{ ultra_tunnel_email }}"
     creates: "/etc/letsencrypt/live/{{ ultra_tunnel_domain }}/fullchain.pem"
   environment:
-    ULTRA_TUNNEL_BOOTSTRAP: '1'
+    ULTRA_TUNNEL_BOOTSTRAP: "1"
 - name: Validate and deploy the certificate before relay activation
   ansible.builtin.command:
     argv: [/etc/letsencrypt/renewal-hooks/deploy/ultra-tunnel]
   environment:
     RENEWED_LINEAGE: "/etc/letsencrypt/live/{{ ultra_tunnel_domain }}"
-    ULTRA_TUNNEL_BOOTSTRAP: '1'
+    ULTRA_TUNNEL_BOOTSTRAP: "1"
   changed_when: false
 - name: Enable automatic certificate renewal
   ansible.builtin.systemd_service:

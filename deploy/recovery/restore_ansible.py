@@ -137,7 +137,7 @@ def database(config, directory, plan, archive):
         'ansible_ssh_private_key_file': config['target']['identity'],
         'ansible_ssh_args': '-F /dev/null -o ControlMaster=no -o ControlPath=none',
         'ansible_ssh_common_args': '-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o UserKnownHostsFile=' + shlex.quote(config['target']['known_hosts']),
-        'ultra_db_tunnel_public_key': public_key_text,
+        'db_tunnel_ultra_public_key': public_key_text,
     }}, 'children': {'restore_databases': {'hosts': {'database': {
         'ansible_host': address, 'ansible_user': user, 'ansible_port': endpoint.get('port', 22),
         'ansible_ssh_private_key_file': endpoint['identity'],

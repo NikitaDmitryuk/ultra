@@ -20,16 +20,16 @@
   tasks:
     - name: Identify installed fixed app and automation units
       ansible.builtin.command:
-        argv: [systemctl, show, '--property=LoadState', '--value', '{{ item }}']
-      loop: '{{ containment_units }}'
+        argv: [systemctl, show, "--property=LoadState", "--value", "{{ item }}"]
+      loop: "{{ containment_units }}"
       register: containment_loaded
       changed_when: false
       failed_when: false
       become: true
     - name: Stop every present producer even if another unit fails
       ansible.builtin.command:
-        argv: [systemctl, stop, '{{ item.item }}']
-      loop: '{{ containment_loaded.results }}'
+        argv: [systemctl, stop, "{{ item.item }}"]
+      loop: "{{ containment_loaded.results }}"
       when: item.rc == 0 and item.stdout != 'not-found'
       register: containment_stopped
       changed_when: item.rc == 0 and item.stdout != 'not-found'
@@ -37,8 +37,8 @@
       become: true
     - name: Inspect shutdown after all stop attempts
       ansible.builtin.command:
-        argv: [systemctl, show, '--property=LoadState,ActiveState,MainPID,ControlPID', '{{ item }}']
-      loop: '{{ containment_units }}'
+        argv: [systemctl, show, "--property=LoadState,ActiveState,MainPID,ControlPID", "{{ item }}"]
+      loop: "{{ containment_units }}"
       register: containment_state
       changed_when: false
       failed_when: false
@@ -57,7 +57,7 @@
             ('ControlPID=0' in item.stdout_lines or
             (item.item.endswith('.timer') and item.stdout_lines |
             select('match', '^ControlPID=') | list | length == 0)))
-      loop: '{{ containment_state.results }}'
+      loop: "{{ containment_state.results }}"
     - name: Mark this frozen host contained only after shutdown is verified
       ansible.builtin.set_fact:
         ultra_candidate_contained: true
@@ -72,7 +72,7 @@
     - name: Record same-operation maintenance confirmation
       ansible.builtin.copy:
         content: "{{ {'verified': true, 'maintenance_id': ultra_lifecycle_id} | to_json(preprocess_unsafe=False) }}"
-        dest: '{{ ultra_result_file }}'
-        mode: '0600'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
       delegate_to: localhost
       become: false

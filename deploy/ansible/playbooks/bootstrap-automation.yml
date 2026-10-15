@@ -6,14 +6,14 @@
   roles:
     - postgres_client
     - role: fleet_access
-      ultra_fleet_access_stage: generate
+      fleet_access_ultra_stage: generate
 - name: Authorize internal runtime fleet identity using operator access
   hosts: exits
   gather_facts: false
   any_errors_fatal: true
   roles:
     - role: fleet_access
-      ultra_fleet_access_stage: authorize
+      fleet_access_ultra_stage: authorize
 - name: Install independent controller and guarded primary recovery automation
   hosts: bridge
   gather_facts: false

@@ -215,6 +215,33 @@ func TestBootstrapDedicatedDatabaseInventory(t *testing.T) {
 	}
 }
 
+func TestUpgradeInventoryExcludesDedicatedDatabaseHost(t *testing.T) {
+	pins := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(pins, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins)
+	p := installplan.LegacyValuesToPlan(map[string]string{
+		"BRIDGE_IP":         "192.0.2.1",
+		"MAIN_EXIT_IP":      "192.0.2.2",
+		"BRIDGE_SSH_KEY":    "/keys/vpn",
+		"MAIN_EXIT_SSH_KEY": "/keys/exit",
+		"DATABASE_IP":       "192.0.2.40",
+		"DATABASE_SSH_KEY":  "/keys/db",
+	})
+	completeDeploymentFixture(p, "/release", pins)
+
+	inventory, err := upgradeInventory(p, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	children := inventory["all"].(map[string]any)["children"].(map[string]any)
+	databases := children["databases"].(map[string]any)["hosts"].(map[string]any)
+	if len(databases) != 0 || !p.Database.Enabled {
+		t.Fatal("upgrade inventory must exclude the DB host without changing the frozen database plan")
+	}
+}
+
 func TestBootstrapSeparateRoleIdentitiesWithoutSharedKey(t *testing.T) {
 	pins := filepath.Join(t.TempDir(), "known_hosts")
 	if err := os.WriteFile(pins, []byte("fixture"), 0600); err != nil {

@@ -652,3 +652,6 @@ class DatabaseAdapterRetryTests(unittest.TestCase):
                 self.assertIn(plan['restore_id'], path.parent.name)
                 variables = json.loads((path.parent/'variables.json').read_text())
                 self.assertEqual(variables['ultra_restore_database_plan'], plan)
+                inventory = json.loads((path.parent/'inventory.json').read_text())
+                bridge = inventory['all']['hosts']['bridge']
+                self.assertEqual(bridge['db_tunnel_ultra_public_key'], 'ssh-ed25519 YWJj fixture')

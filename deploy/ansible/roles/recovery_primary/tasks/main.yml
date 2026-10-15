@@ -3,7 +3,7 @@
   ansible.builtin.meta: flush_handlers
 - name: Record current guarded configuration attempt time
   ansible.builtin.command:
-    argv: [date, '+%s']
+    argv: [date, "+%s"]
   register: recovery_primary_started
   changed_when: false
 - name: Create private bootstrap staging and recovery directories
@@ -250,7 +250,7 @@
   no_log: true
 - name: Preserve existing heartbeat identity
   ansible.builtin.command:
-    argv: [ssh-keygen, -q, -t, ed25519, -N, '', -f, /var/lib/ultra-recovery-reconcile/heartbeat_ed25519]
+    argv: [ssh-keygen, -q, -t, ed25519, -N, "", -f, /var/lib/ultra-recovery-reconcile/heartbeat_ed25519]
     creates: /var/lib/ultra-recovery-reconcile/heartbeat_ed25519
 - name: Derive heartbeat public key from actual private identity
   ansible.builtin.command:

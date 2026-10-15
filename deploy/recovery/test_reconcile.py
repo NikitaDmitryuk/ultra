@@ -238,7 +238,7 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(events[:2],[('provider',22),('provider',24443)])
         self.assertEqual(events[2],('ssh',{'ultra_recovery_peer_rules':[{'address':'192.0.2.99','port':22},{'address':'192.0.2.99','port':24443}]}))
         services=(Path(__file__).parents[1]/'ansible/roles/restore/tasks/services.yml').read_text()
-        self.assertLess(services.index('ultra_db_tunnel_stage: install'),services.index('restore_firewall.py'))
+        self.assertLess(services.index('db_tunnel_ultra_stage: install'),services.index('restore_firewall.py'))
         self.assertLess(services.index('restore_firewall.py'),services.index('Start restored relay first'))
 
     def test_restore_firewall_no_exits_noop_and_missing_or_mismatched_ports_fail_closed(self):

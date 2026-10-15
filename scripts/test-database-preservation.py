@@ -29,6 +29,26 @@ def observation():
 
 
 class Preservation(unittest.TestCase):
+    def test_runtime_files_allow_only_explicit_service_owner_without_following_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'spec.json'
+            path.write_text('{"database": "fixture"}')
+            path.chmod(0o600)
+            owner = path.stat().st_uid
+            self.assertEqual(gate.runtime_file(path, {owner}), b'{"database": "fixture"}')
+            with self.assertRaisesRegex(ValueError, 'runtime_file_invalid'):
+                gate.runtime_file(path, {owner + 1})
+
+            path.chmod(0o622)
+            with self.assertRaisesRegex(ValueError, 'runtime_file_invalid'):
+                gate.runtime_file(path, {owner})
+            path.chmod(0o600)
+
+            linked = Path(directory) / 'linked.json'
+            linked.symlink_to(path)
+            with self.assertRaises(OSError):
+                gate.runtime_file(linked, {owner})
+
     def allowed(self, processes, metadata, operation, phase, transaction):
         return gate.controller_allowances(processes, metadata, operation, phase, transaction, own_pid=32, verify_broker=lambda *args: True)
 
@@ -225,7 +245,9 @@ class Preservation(unittest.TestCase):
                 return result.args[0]
         with patch.object(gate, 'AnsibleModule', return_value=module), \
              patch.object(gate.os, 'geteuid', return_value=0), \
+             patch.object(gate.pwd, 'getpwnam', return_value=types.SimpleNamespace(pw_uid=1234)), \
              patch.object(gate, 'document', side_effect=lambda path: copy.deepcopy(values[path.name])), \
+             patch.object(gate, 'runtime_file', side_effect=lambda path, allowed: json.dumps(native_spec).encode() if path.name == 'spec.json' else b''), \
              patch.object(gate.Path, 'exists', side_effect=lambda: False), \
              patch.object(gate.Path, 'is_symlink', return_value=True), \
              patch.object(gate, 'stopped') as stopped, \

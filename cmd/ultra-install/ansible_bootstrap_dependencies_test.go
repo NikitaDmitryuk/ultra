@@ -455,7 +455,9 @@ func TestFleetIdentityUsesRootControlledParentAndPrivateRuntimeKey(t *testing.T)
 		t.Fatal("fleet identity not preserved")
 	}
 	automation := read("deploy/ansible/playbooks/bootstrap-automation.yml")
-	if strings.Index(automation, "ultra_fleet_access_stage: authorize") > strings.Index(automation, "- recovery_primary") {
+	stage := strings.Index(automation, "fleet_access_ultra_stage: authorize")
+	recovery := strings.Index(automation, "- recovery_primary")
+	if stage < 0 || recovery < 0 || stage > recovery {
 		t.Fatal("planner runs before authorization")
 	}
 }

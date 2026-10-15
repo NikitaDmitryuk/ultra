@@ -5,11 +5,10 @@
       - ultra_db_tunnel_host is defined
       - ultra_db_tunnel_host is string
       - ultra_db_tunnel_host is match('^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')
-      - ultra_db_tunnel_local_port is integer
-      - ultra_db_tunnel_local_port >= 1
-      - ultra_db_tunnel_local_port <= 65535
-      - ultra_db_tunnel_remote_port is integer
-      - ultra_db_tunnel_remote_port >= 1
-      - ultra_db_tunnel_remote_port <= 65535
+      - db_tunnel_ultra_local_port is integer
+      - db_tunnel_ultra_local_port >= 1
+      - db_tunnel_ultra_local_port <= 65535
+      - db_tunnel_ultra_remote_port is integer
+      - db_tunnel_ultra_remote_port >= 1
+      - db_tunnel_ultra_remote_port <= 65535
     fail_msg: Database tunnel requires a literal IPv4 host and valid TCP ports.
-

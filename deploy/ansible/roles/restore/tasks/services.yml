@@ -26,10 +26,16 @@
       ansible.builtin.include_role:
         name: db_tunnel
       vars:
-        ultra_db_tunnel_stage: install
+        db_tunnel_ultra_stage: install
     - name: Admit the recovered bridge to owned managed exits before relay activation
       ansible.builtin.command:
-        argv: [python3, "{{ ultra_restore_directory }}/restore_firewall.py", --config, /etc/ultra-recovery/reconcile.json, --new-bridge, "{{ ultra_restore_plan.new_bridge_address }}"]
+        argv:
+          - python3
+          - "{{ ultra_restore_directory }}/restore_firewall.py"
+          - --config
+          - /etc/ultra-recovery/reconcile.json
+          - --new-bridge
+          - "{{ ultra_restore_plan.new_bridge_address }}"
       register: restore_firewall_admission
       failed_when: false
       changed_when: true
@@ -38,9 +44,9 @@
       ansible.builtin.assert:
         that: restore_firewall_admission.rc == 0
         fail_msg: >-
-          {{ 'static_exit_firewall_operator_admission_required: verify the static exit provider firewall permits the new bridge and pinned SSH access, then retry restore'
+          {{ 'static_exit_firewall_operator_admission_required: allow bridge and pinned SSH on provider firewall, then retry restore'
              if 'static_exit_firewall_operator_admission_required' in restore_firewall_admission.stderr | default('')
-             else 'restored_exit_firewall_admission_failed: verify owned exit firewall and pinned SSH access, then retry restore' }}
+             else 'restored_exit_firewall_admission_failed: verify owned exit firewall and pinned SSH, then retry restore' }}
     - name: Start restored relay first
       ansible.builtin.systemd_service:
         name: ultra-relay.service
@@ -91,7 +97,7 @@
     - name: Find authenticated executor drop-ins
       ansible.builtin.find:
         paths: "{{ ultra_restore_directory }}/stage/state/etc/systemd/system/ultra-ansible-controller.service.d"
-        patterns: '*.conf'
+        patterns: "*.conf"
         file_type: file
       register: restore_migration_controller_dropins
     - name: Create executor drop-in directory when needed

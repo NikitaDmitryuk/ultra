@@ -194,9 +194,7 @@ func ansibleUpgrade(
 			releaseLock()
 		}
 	}()
-	clone := *p
-	clone.Exits = nil
-	inventory, err := bootstrapInventory(&clone, directory)
+	inventory, err := upgradeInventory(p, directory)
 	if err != nil {
 		return err
 	}
@@ -432,6 +430,9 @@ func ansibleUpgrade(
 	if err != nil {
 		return err
 	}
+	if err = requireUpgradeTool(tools, "db_connection.py"); err != nil {
+		return err
+	}
 	bridge["ultra_recovery_files"] = tools
 	baselineToolHashes := map[string]string{}
 	if baselineInput != nil {
@@ -453,8 +454,7 @@ func ansibleUpgrade(
 		selected := []map[string]any{}
 		for _, tool := range tools {
 			base := filepath.Base(tool["destination"].(string))
-			if base == "recovery.py" || base == "monitor.py" || base == "heartbeat.py" || strings.HasPrefix(base, "ultra-monitor") ||
-				strings.HasPrefix(base, "ultra-recovery-prune") {
+			if isExitUpgradeRecoveryTool(base) {
 				if baselineInput != nil {
 					copy := map[string]any{}
 					for key, value := range tool {
@@ -1003,6 +1003,16 @@ func ansibleUpgrade(
 	)
 	forwardReleaseComplete = err == nil
 	return err
+}
+
+// upgradeInventory excludes dedicated database hosts from the application
+// runtime fleet. The database remains part of the frozen plan and request
+// identity, but Ansible runtime probes and transitions target only VPN nodes.
+func upgradeInventory(p *installplan.InstallPlan, directory string) (map[string]any, error) {
+	clone := *p
+	clone.Exits = nil
+	clone.Database.Enabled = false
+	return bootstrapInventory(&clone, directory)
 }
 
 // Continuation bypasses the normal cached activation/commit calls. Verify their

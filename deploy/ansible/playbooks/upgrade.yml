@@ -4,7 +4,9 @@
   gather_facts: false
   any_errors_fatal: true
   vars:
-    ultra_recovery_capture_dependency: "{{ ultra_recovery_files | selectattr('destination', 'equalto', '/opt/ultra-recovery/db_connection.py') | list | first }}"
+    ultra_recovery_capture_dependency: >-
+      {{ ultra_recovery_files | selectattr('destination', 'equalto',
+      '/opt/ultra-recovery/db_connection.py') | list | first }}
     ultra_recovery_capture_tool: "{{ ultra_recovery_files | selectattr('destination', 'equalto', '/opt/ultra-recovery/recovery.py') | list | first }}"
   tasks:
     - name: Select the pinned readiness tool
@@ -112,7 +114,12 @@
         tasks_from: capture-tool
     - name: Create the independent control generation before activation
       ansible.builtin.command:
-        argv: [python3, "/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/capture/recovery.py", capture, --config, /etc/ultra-recovery/backup.json]
+        argv:
+          - python3
+          - "/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/capture/recovery.py"
+          - capture
+          - --config
+          - /etc/ultra-recovery/backup.json
       changed_when: false
       no_log: true
     - name: Require fresh delivery to the independently confirmed primary after capture
@@ -166,7 +173,7 @@
         release_component: ultra-relay
     - name: Open the new bridge payload verification window
       ansible.builtin.command:
-        argv: [date, '+%s%N']
+        argv: [date, "+%s%N"]
       changed_when: false
       register: legacy_payload_since
       when: ultra_legacy_bridge_maintenance | default(false) | bool
@@ -201,7 +208,7 @@
         tasks_from: controller
     - name: Read the completed activation time on the bridge
       ansible.builtin.command:
-        argv: [date, '+%s']
+        argv: [date, "+%s"]
       changed_when: false
       register: release_completed_at
     - name: Save the verified operation result

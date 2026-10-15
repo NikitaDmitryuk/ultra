@@ -13,6 +13,20 @@ import (
 	"strings"
 )
 
+func isExitUpgradeRecoveryTool(base string) bool {
+	return base == "recovery.py" || base == "db_connection.py" || base == "monitor.py" || base == "heartbeat.py" ||
+		strings.HasPrefix(base, "ultra-monitor") || strings.HasPrefix(base, "ultra-recovery-prune")
+}
+
+func requireUpgradeTool(tools []map[string]any, name string) error {
+	for _, tool := range tools {
+		if filepath.Base(tool["destination"].(string)) == name {
+			return nil
+		}
+	}
+	return errors.New("recovery_bundle_incomplete")
+}
+
 func extractUpgradeTools(archivePath, directory string, previous map[string]string) ([]map[string]any, error) {
 	file, err := os.Open(archivePath)
 	if err != nil {
@@ -81,7 +95,10 @@ func extractUpgradeTools(archivePath, directory string, previous map[string]stri
 			},
 		)
 	}
-	for _, name := range []string{"recovery.py", "monitor.py", "heartbeat.py", "reconcile.py", "ultra-recovery-backup.service", "ultra-recovery-backup.timer"} {
+	for _, name := range []string{
+		"recovery.py", "monitor.py", "heartbeat.py", "reconcile.py",
+		"ultra-recovery-backup.service", "ultra-recovery-backup.timer",
+	} {
 		if !seen[name] {
 			return nil, errors.New("recovery_bundle_incomplete")
 		}

@@ -43,7 +43,7 @@
         path: "{{ ultra_ingress.path }}"
         mode: stream-up
         fingerprint: "{{ ultra_ingress.experimental_fingerprint | default('firefox', true) }}"
-        xmux: {maxConnections: '2', hMaxRequestTimes: '600-900', hMaxReusableSecs: '1800-3000'}
+        xmux: { maxConnections: "2", hMaxRequestTimes: "600-900", hMaxReusableSecs: "1800-3000" }
       status_port: "{{ ultra_ingress.status_port | int }}"
 - name: Assemble private experimental transport
   ansible.builtin.set_fact:

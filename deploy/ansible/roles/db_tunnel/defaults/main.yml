@@ -1,5 +1,4 @@
 ---
 # Port 15432 belongs to the existing primary/replica reverse-tunnel topology.
-ultra_db_tunnel_local_port: 25432
-ultra_db_tunnel_remote_port: 5432
-
+db_tunnel_ultra_local_port: 25432
+db_tunnel_ultra_remote_port: 5432

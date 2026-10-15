@@ -131,7 +131,7 @@
         that: release_delivered_stat.stat.checksum == release_target.sha256
     - name: Check relay configuration without changing data
       ansible.builtin.command:
-        argv: [/usr/local/bin/ultra-relay, '-check', '-spec', "{{ ultra_spec_path | default('/etc/ultra-relay/spec.json') }}"]
+        argv: [/usr/local/bin/ultra-relay, "-check", "-spec", "{{ ultra_spec_path | default('/etc/ultra-relay/spec.json') }}"]
       changed_when: false
       no_log: true
       when: release_component == 'ultra-relay'
@@ -142,7 +142,7 @@
       when: not (release_preserve_stopped | default(false) | bool)
     - name: Read the start of the verification window
       ansible.builtin.command:
-        argv: [date, '+%s%N']
+        argv: [date, "+%s%N"]
       delegate_to: "{{ ultra_bridge_inventory_host }}"
       changed_when: false
       register: release_probe_since
