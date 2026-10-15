@@ -13,7 +13,10 @@
       register: legacy_compensation_barrier
     - name: Save the verified public compensation decision
       ansible.builtin.copy:
-        content: "{{ {'verified': legacy_compensation_barrier.verified, 'untouched': legacy_compensation_barrier.untouched} | to_json(preprocess_unsafe=False) }}\n"
+        content: >-
+          {{ {'verified': legacy_compensation_barrier.verified,
+              'untouched': legacy_compensation_barrier.untouched} |
+             to_json(preprocess_unsafe=False) }}{{ '\n' }}
         dest: "{{ ultra_result_file }}"
         mode: '0600'
       delegate_to: localhost

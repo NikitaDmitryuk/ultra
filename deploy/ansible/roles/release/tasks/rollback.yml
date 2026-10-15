@@ -23,10 +23,18 @@
       - "'service-access-v1' in release_previous_manifest.capabilities"
       - release_previous_manifest.database_schema_max | int >= ultra_release_manifest.database_schema_max | int
       - release_previous_manifest.database_schema_min | int <= ultra_release_manifest.database_schema_min | int
-      - (ultra_previous_relay_manifest.assets if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined else release_previous_manifest.assets) | selectattr('name', 'equalto', release_rollback_name) | list | length == 1
+      - >-
+        (ultra_previous_relay_manifest.assets
+        if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined
+        else release_previous_manifest.assets) |
+        selectattr('name', 'equalto', release_rollback_name) | list | length == 1
 - name: Read the expected compatible hash
   ansible.builtin.set_fact:
-    release_rollback_asset: "{{ (ultra_previous_relay_manifest.assets if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined else release_previous_manifest.assets) | selectattr('name', 'equalto', release_rollback_name) | first }}"
+    release_rollback_asset: >-
+      {{ (ultra_previous_relay_manifest.assets
+          if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined
+          else release_previous_manifest.assets) |
+         selectattr('name', 'equalto', release_rollback_name) | first }}
 - name: Inspect the active code during rollback
   ansible.builtin.stat:
     path: "/usr/local/bin/{{ release_component }}"

@@ -903,8 +903,12 @@ def verify(directory):
             need(stat.S_IMODE(info.st_mode)==0o600 and info.st_nlink==1 and 0<info.st_size<=4096)
             need(digest(read(directory/'subscription-probe-url'))==probe_sha)
     else: need('subscription-probe-url' not in top)
-    need(('forward-operation.json' in top)==bool(forward_journal_sha))
-    if forward_journal_sha:
+    has_forward_journal='forward-operation.json' in top
+    # Cleanup is deliberately idempotent: the remote unlink may have succeeded
+    # even when SSH lost its acknowledgement. No other action may omit proof.
+    need((has_forward_journal==bool(forward_journal_sha)) or
+         (mode=='cleanup' and bool(forward_journal_sha) and not has_forward_journal))
+    if forward_journal_sha and has_forward_journal:
         info=(directory/'forward-operation.json').lstat()
         need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600)
         need(digest(read(directory/'forward-operation.json'))==forward_journal_sha)
@@ -1333,7 +1337,7 @@ elif mode=='cleanup':
         (root/'subscription-probe-url').unlink(missing_ok=True)
         fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     if forward_journal_sha:
-        (root/'forward-operation.json').unlink()
+        (root/'forward-operation.json').unlink(missing_ok=True)
         fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
 else: raise ValueError('remote_action_invalid')
 '''

@@ -2270,6 +2270,10 @@ class RemoteProgram(unittest.TestCase):
         cleaned = self.execute('cleanup', forward_sha=journal_sha)
         self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
         self.assertFalse((self.root / 'forward-operation.json').exists())
+        # A lost SSH acknowledgement leaves the local operation journal intact;
+        # the remote cleanup must therefore accept an already absent proof.
+        cleaned_again = self.execute('cleanup', forward_sha=journal_sha)
+        self.assertEqual(cleaned_again.returncode, 0, cleaned_again.stderr)
         again = self.execute('stage', self.archive())
         self.assertEqual(again.returncode, 0, again.stderr)
 

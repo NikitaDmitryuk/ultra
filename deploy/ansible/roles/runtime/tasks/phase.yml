@@ -12,7 +12,11 @@
       - not runtime_transaction_tool.stat.islnk | default(false)
       - runtime_transaction_tool.stat.uid == 0
       - runtime_transaction_tool.stat.mode == '0700'
-      - runtime_transaction_tool.stat.checksum == (ultra_release_manifest.assets | selectattr('name', 'equalto', 'ultra-install-linux-' + ultra_architecture) | first).sha256
+      - >-
+        runtime_transaction_tool.stat.checksum ==
+        (ultra_release_manifest.assets |
+         selectattr('name', 'equalto', 'ultra-install-linux-' + ultra_architecture) |
+         first).sha256
       - ultra_runtime_action in ['prepare', 'apply', 'rollback', 'commit']
 - name: Require the relay active before recording the exact service baseline
   ansible.builtin.command:
@@ -77,7 +81,11 @@
 - name: Execute one fixed request-bound host transaction phase
   ansible.builtin.command:
     argv: [/var/lib/ultra-ansible/runtime-probe/ultra-install, runtime-probe]
-    stdin: "{{ ultra_runtime_probe_requests[inventory_hostname] | combine({'action': ultra_runtime_action, 'bot_active': (runtime_original_bot.rc | default(3)) == 0}) | to_json(preprocess_unsafe=False) }}"
+    stdin: >-
+      {{ ultra_runtime_probe_requests[inventory_hostname] |
+         combine({'action': ultra_runtime_action,
+                  'bot_active': (runtime_original_bot.rc | default(3)) == 0}) |
+         to_json(preprocess_unsafe=False) }}
   register: runtime_transaction_output
   changed_when: ultra_runtime_action != 'prepare'
   no_log: true
@@ -89,7 +97,10 @@
   ansible.builtin.assert:
     that:
       - runtime_transaction_evidence.verified | bool
-      - runtime_transaction_evidence.status in (['prepared', 'applied'] if ultra_runtime_action == 'prepare' else (['applied'] if ultra_runtime_action == 'apply' else ['rolled_back']))
+      - >-
+        runtime_transaction_evidence.status in
+        (['prepared', 'applied'] if ultra_runtime_action == 'prepare' else
+         (['applied'] if ultra_runtime_action == 'apply' else ['rolled_back']))
   no_log: true
 
 - name: Freeze physical database identity and complete migration history before activation

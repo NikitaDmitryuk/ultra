@@ -127,7 +127,7 @@ class Contracts(unittest.TestCase):
                     observed = {'exists': True, 'islnk': stat.S_ISLNK(info.st_mode)}
                 except FileNotFoundError:
                     observed = {'exists': False}
-                variables = {'controller_rollback_retirement': {'stat': observed}}
+                variables = {'release_controller_rollback_retirement': {'stat': observed}}
                 return all(environment.compile_expression(condition)(variables)
                            for condition in assertion['that'])
             self.assertTrue(allowed(), 'supported rollback without retirement obligations must remain available')
@@ -142,6 +142,22 @@ class Contracts(unittest.TestCase):
             self.assertFalse(allowed())
             ledger.unlink()
             self.assertTrue(allowed())
+
+    def test_ordinary_upgrade_floor_preflight_is_read_only_and_precedes_state_inspection(self):
+        plays = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/inspect-upgrade.yml').read_text())
+        tasks = plays[0]['tasks']
+        guard, receipt, inspect, save_inspection = tasks
+        enabled = 'ultra_controller_enforcement_preflight_only | default(false) | bool'
+        disabled = 'not (' + enabled + ')'
+        self.assertEqual(guard['ansible.builtin.import_tasks'],
+                         '../roles/release/tasks/controller-rollback-preflight.yml')
+        self.assertEqual(guard['when'], enabled)
+        self.assertTrue(guard['no_log'])
+        self.assertEqual(receipt['when'], enabled)
+        self.assertEqual(receipt['ansible.builtin.copy']['content'],
+                         '{"verified":true,"controller_enforcement_floor_absent":true}\n')
+        self.assertEqual(inspect['when'], disabled)
+        self.assertEqual(save_inspection['when'], disabled)
 
     def test_restore_checks_existing_target_floor_before_any_mutation(self):
         root = ROOT / 'deploy/ansible/roles/restore/tasks'
@@ -263,8 +279,8 @@ class Contracts(unittest.TestCase):
         for name in ('main.yml', 'rollback.yml', 'retention.yml'):
             tasks = yaml.safe_load((root / name).read_text())
             expected_previous = "{{ ultra_release_manifest if (ultra_forward_only | default(false) | bool) else (ultra_host_previous_manifest | default(ultra_previous_manifest)) }}" if name == 'main.yml' else '{{ ultra_host_previous_manifest | default(ultra_previous_manifest) }}'
-            self.assertEqual(tasks[0]['ansible.builtin.set_fact']['release_previous_manifest'],
-                         expected_previous)
+            actual_previous = tasks[0]['ansible.builtin.set_fact']['release_previous_manifest']
+            self.assertEqual(' '.join(actual_previous.split()), ' '.join(expected_previous.split()))
             self.assertIn('ultra_previous_relay_manifest', (root / name).read_text())
         rollback = yaml.safe_load((root / 'rollback.yml').read_text())
         verified = next(task for task in rollback if task['name'] == 'Verify exact restored bytes even when the fallback was already installed')
@@ -399,7 +415,8 @@ class Contracts(unittest.TestCase):
         self.assertEqual(commands, [['python3', '/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/capture/recovery.py', 'capture', '--config', '/etc/ultra-recovery/backup.json']])
         self.assertFalse(any('ansible.builtin.systemd_service' in t for t in tasks))
         freshness = next(t for t in tasks if t['name'] == 'Require fresh independent recovery and unchanged topology')
-        self.assertIn('not (legacy_retry_barrier.held', freshness['when'])
+        conditions = freshness['when'] if isinstance(freshness['when'], list) else [freshness['when']]
+        self.assertTrue(any('not (legacy_retry_barrier.held' in condition for condition in conditions))
 
     def test_no_checkpoint_compensation_and_retry_require_exact_live_legacy_owner(self):
         class Done(Exception):
@@ -477,13 +494,16 @@ class Contracts(unittest.TestCase):
         environment = Environment()
         environment.filters['bool'] = bool
         variables = {'ultra_legacy_bridge_maintenance': True,
+                     'ultra_runtime_effect_inputs': {'bridge': {'request': 'fixture'}},
+                     'release_runtime_effect_binding': {'skipped': True},
                      'hostvars': {'bridge': {'legacy_rollback_barrier': {'untouched': True}}}}
         for play in plays[1:]:
             for task in play['tasks']:
                 if task['name'] == 'Save the verified operation result':
                     continue
-                self.assertIn('legacy_rollback_barrier.untouched', task['when'], task['name'])
-                self.assertFalse(environment.compile_expression(task['when'])(**variables), task['name'])
+                conditions = task['when'] if isinstance(task['when'], list) else [task['when']]
+                self.assertTrue(any('legacy_rollback_barrier.untouched' in condition for condition in conditions), task['name'])
+                self.assertFalse(all(environment.compile_expression(condition)(**variables) for condition in conditions), task['name'])
 
     def test_first_and_retry_capture_use_signed_staged_collector(self):
         for name in ('upgrade.yml', 'preflight-retry.yml'):

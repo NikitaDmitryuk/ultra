@@ -20,7 +20,11 @@
   tasks:
     - name: Save phase and receipt digest
       ansible.builtin.copy:
-        content: "{{ {'phase': hostvars[groups['bridge'][0]].dns_migration_result.phase, 'active_receipt_sha256': hostvars[groups['bridge'][0]].dns_migration_result.active_receipt_sha256, 'verified': hostvars[groups['bridge'][0]].dns_migration_result.verified} | to_json }}\n"
+        content: >-
+          {{ {'phase': hostvars[groups['bridge'][0]].dns_migration_result.phase,
+              'active_receipt_sha256': hostvars[groups['bridge'][0]].dns_migration_result.active_receipt_sha256,
+              'verified': hostvars[groups['bridge'][0]].dns_migration_result.verified} |
+             to_json }}{{ '\n' }}
         dest: "{{ ultra_result_file }}"
         mode: "0600"
       no_log: true

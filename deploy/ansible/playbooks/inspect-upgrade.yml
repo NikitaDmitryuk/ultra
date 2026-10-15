@@ -4,6 +4,19 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    - name: Check the persistent controller enforcement floor before upgrade reservation
+      ansible.builtin.import_tasks: ../roles/release/tasks/controller-rollback-preflight.yml
+      when: ultra_controller_enforcement_preflight_only | default(false) | bool
+      no_log: true
+    - name: Save the private controller enforcement preflight result
+      ansible.builtin.copy:
+        content: "{\"verified\":true,\"controller_enforcement_floor_absent\":true}\n"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: ultra_controller_enforcement_preflight_only | default(false) | bool
+      no_log: true
     - name: Read protected release readiness and owned topology
       ansible.builtin.script:
         cmd: "{{ playbook_dir }}/../roles/release/files/state.py"
@@ -11,6 +24,7 @@
       changed_when: false
       no_log: true
       register: release_inspection
+      when: not (ultra_controller_enforcement_preflight_only | default(false) | bool)
     - name: Save the private frozen inspection result
       ansible.builtin.copy:
         content: "{{ release_inspection.stdout | from_json | to_json(preprocess_unsafe=False) }}\n"
@@ -18,4 +32,5 @@
         mode: "0600"
       delegate_to: localhost
       become: false
+      when: not (ultra_controller_enforcement_preflight_only | default(false) | bool)
       no_log: true

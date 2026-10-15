@@ -32,6 +32,7 @@
       loop: '{{ containment_loaded.results }}'
       when: item.rc == 0 and item.stdout != 'not-found'
       register: containment_stopped
+      changed_when: item.rc == 0 and item.stdout != 'not-found'
       failed_when: false
       become: true
     - name: Inspect shutdown after all stop attempts
@@ -46,7 +47,16 @@
       ansible.builtin.assert:
         that:
           - item.rc in [0, 1]
-          - "'LoadState=not-found' in item.stdout_lines or (('ActiveState=inactive' in item.stdout_lines or 'ActiveState=failed' in item.stdout_lines) and ('MainPID=0' in item.stdout_lines or (item.item.endswith('.timer') and item.stdout_lines | select('match', '^MainPID=') | list | length == 0)) and ('ControlPID=0' in item.stdout_lines or (item.item.endswith('.timer') and item.stdout_lines | select('match', '^ControlPID=') | list | length == 0)))"
+          - >-
+            'LoadState=not-found' in item.stdout_lines or
+            (('ActiveState=inactive' in item.stdout_lines or
+            'ActiveState=failed' in item.stdout_lines) and
+            ('MainPID=0' in item.stdout_lines or
+            (item.item.endswith('.timer') and item.stdout_lines |
+            select('match', '^MainPID=') | list | length == 0)) and
+            ('ControlPID=0' in item.stdout_lines or
+            (item.item.endswith('.timer') and item.stdout_lines |
+            select('match', '^ControlPID=') | list | length == 0)))
       loop: '{{ containment_state.results }}'
     - name: Mark this frozen host contained only after shutdown is verified
       ansible.builtin.set_fact:

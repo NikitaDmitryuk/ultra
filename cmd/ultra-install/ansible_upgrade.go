@@ -191,6 +191,29 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err != nil {
 		return err
 	}
+	if !forwardOnly {
+		// A retired lifecycle establishes a controller enforcement floor that
+		// ordinary upgrade/rollback cannot safely cross. Check it afresh before
+		// reserving maintenance or installing cleanup that could resume an
+		// already stopped fleet. Never reuse a previous successful observation.
+		preflightDirectory, err := os.MkdirTemp(directory, "controller-preflight-")
+		if err != nil {
+			return err
+		}
+		if err = os.Remove(preflightDirectory); err != nil {
+			return err
+		}
+		preflight, err := deployansible.RunLocal(ctx, "inspect-upgrade", inventory, map[string]any{
+			"ultra_lock_directory":                        lockDirectory,
+			"ultra_controller_enforcement_preflight_only": true,
+		}, preflightDirectory, python, executable)
+		if err != nil {
+			return err
+		}
+		if values := preflight.Result.Values; values["verified"] != true || values["controller_enforcement_floor_absent"] != true {
+			return errors.New("upgrade_controller_enforcement_preflight_unverified")
+		}
+	}
 	baselineInput, err := prepareUpgradeBaseline(p.SourceValues["ULTRA_UPGRADE_BASELINE_FILE"], directory)
 	if err != nil {
 		return err

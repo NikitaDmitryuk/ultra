@@ -1,7 +1,9 @@
 ---
 - name: Select the frozen host rollback manifest
   ansible.builtin.set_fact:
-    release_previous_manifest: "{{ ultra_release_manifest if (ultra_forward_only | default(false) | bool) else (ultra_host_previous_manifest | default(ultra_previous_manifest)) }}"
+    release_previous_manifest: >-
+      {{ ultra_release_manifest if (ultra_forward_only | default(false) | bool)
+         else (ultra_host_previous_manifest | default(ultra_previous_manifest)) }}
 - name: Require the emergency relay fallback to read the target schema
   ansible.builtin.assert:
     that:
@@ -31,11 +33,22 @@
   ansible.builtin.assert:
     that:
       - ultra_release_manifest.assets | selectattr('name', 'equalto', release_asset_name) | list | length == 1
-      - (ultra_previous_relay_manifest.assets if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined else release_previous_manifest.assets) | selectattr('name', 'equalto', release_asset_name) | list | length == 1
+      - >-
+        (ultra_previous_relay_manifest.assets
+        if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined
+        else release_previous_manifest.assets) |
+        selectattr('name', 'equalto', release_asset_name) | list | length == 1
 - name: Pin the target and fallback hashes
   ansible.builtin.set_fact:
     release_target: "{{ ultra_release_manifest.assets | selectattr('name', 'equalto', release_asset_name) | first }}"
-    release_previous: "{{ (ultra_release_manifest.assets | selectattr('name', 'equalto', release_asset_name) | first) if (ultra_forward_only | default(false) | bool) else ((ultra_previous_relay_manifest.assets if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined else release_previous_manifest.assets) | selectattr('name', 'equalto', release_asset_name) | first) }}"
+    release_previous: >-
+      {{ (ultra_release_manifest.assets |
+          selectattr('name', 'equalto', release_asset_name) | first)
+         if (ultra_forward_only | default(false) | bool)
+         else ((ultra_previous_relay_manifest.assets
+                if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined
+                else release_previous_manifest.assets) |
+               selectattr('name', 'equalto', release_asset_name) | first) }}
 - name: Validate exact asset metadata
   ansible.builtin.assert:
     that:

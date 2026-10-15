@@ -1,7 +1,10 @@
 ---
 - name: Build canonical cutover plan with retained old domain aliases
   ansible.builtin.set_fact:
-    ingress_cutover_plan: "{{ ultra_ingress | combine({'retain_aliases': true, 'subscription_domain': ultra_subscription_domain}) if ultra_ingress_action == 'cutover' else ultra_ingress }}"
+    ingress_cutover_plan: >-
+      {{ ultra_ingress |
+         combine({'retain_aliases': true, 'subscription_domain': ultra_subscription_domain})
+         if ultra_ingress_action == 'cutover' else ultra_ingress }}
   when: ultra_ingress_action in ['stage', 'activate', 'rollback', 'cutover']
 - name: Validate ingress certificate contract
   ansible.builtin.assert:

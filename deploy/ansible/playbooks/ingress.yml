@@ -90,7 +90,11 @@
       when: ultra_ingress_action == 'accept'
     - name: Record verified cutover acceptance for explicit later retirement
       ansible.builtin.copy:
-        content: "{{ {'verified': true, 'transaction_sha256': ingress_acceptance_specs.results[1].stat.checksum, 'domain': ingress_acceptance_candidate.profile.server_name, 'public_host': ingress_acceptance_candidate.profile.host} | to_json }}\n"
+        content: >-
+          {{ {'verified': true,
+              'transaction_sha256': ingress_acceptance_specs.results[1].stat.checksum,
+              'domain': ingress_acceptance_candidate.profile.server_name,
+              'public_host': ingress_acceptance_candidate.profile.host} | to_json }}{{ '\n' }}
         dest: "{{ ultra_ingress_transaction }}/acceptance.json"
         owner: root
         group: root

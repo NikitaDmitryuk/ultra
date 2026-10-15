@@ -403,3 +403,204 @@ func TestOperatorCompletionRetiresOnlyInterruptedSupersededObservers(t *testing.
 		t.Fatal("running mutator accepted")
 	}
 }
+
+func retentionPreflightFixture(t *testing.T, stage, state, code string, request map[string]any) {
+	t.Helper()
+	if err := os.MkdirAll(stage, 0700); err != nil {
+		t.Fatal(err)
+	}
+	retentionWriteJSON(t, stage, "request.json", request)
+	hash, err := sourceSHA(filepath.Join(stage, "request.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	retentionWriteJSON(t, stage, "job.json", map[string]any{"schema_version": 1, "operation": "inspect-upgrade", "request_sha256": hash})
+	retentionWriteJSON(t, stage, "receipt.json", map[string]any{"state": state, "code": code, "request_sha256": hash, "result": map[string]any{"verified": state == "succeeded", "controller_enforcement_floor_absent": true}})
+}
+
+func retentionWriteJSON(t *testing.T, stage, name string, value any) {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, name), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func retentionMutateJSON(t *testing.T, stage, name string, mutate func(map[string]any)) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(stage, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatal(err)
+	}
+	mutate(value)
+	retentionWriteJSON(t, stage, name, value)
+}
+
+func retentionPreflightRequest() map[string]any {
+	return map[string]any{"inventory": map[string]any{"all": map[string]any{}}, "variables": map[string]any{"ultra_lock_directory": "/private/lock", "ultra_controller_enforcement_preflight_only": true}}
+}
+
+func TestOperatorCompletionRetiresInterruptedControllerPreflight(t *testing.T) {
+	root := t.TempDir()
+	_ = os.Chmod(root, 0700)
+	directory := retentionOperationFixture(t, root, "v1.0.0")
+	original := filepath.Join(directory, "controller-preflight-interrupted")
+	winner := filepath.Join(directory, "controller-preflight-fresh")
+	retentionPreflightFixture(t, original, "running", "interrupted", retentionPreflightRequest())
+	manifest := &automationRelease{Version: "v1.0.0", SourceCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	manifestSHA := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if err := sealCompletedOperatorOperation(directory, "upgrade", manifest, manifestSHA); err == nil {
+		t.Fatal("interrupted preflight sealed without fresh success")
+	}
+	retentionPreflightFixture(t, winner, "succeeded", "", retentionPreflightRequest())
+	if err := sealCompletedOperatorOperation(directory, "upgrade", manifest, manifestSHA); err != nil {
+		t.Fatal(err)
+	}
+	if !retiredOperatorObservationValid(directory, original) {
+		t.Fatal("interrupted preflight not retired")
+	}
+	if cached, err := completedOperatorOperation(directory, "upgrade", manifest.Version); !cached || err != nil {
+		t.Fatal("successful upgrade not sealed", cached, err)
+	}
+	// The marker authenticates both stage paths, lifecycle and immutable files.
+	for _, fixture := range []struct{ stage, name string }{{original, "request.json"}, {original, "receipt.json"}, {winner, "request.json"}, {winner, "receipt.json"}} {
+		t.Run(filepath.Base(fixture.stage)+"/"+fixture.name, func(t *testing.T) {
+			path := filepath.Join(fixture.stage, fixture.name)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Whitespace preserves JSON meaning but changes the bound digest.
+			if err := os.WriteFile(path, append(raw, '\n'), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if retiredOperatorObservationValid(directory, original) {
+				t.Fatal("changed observation accepted")
+			}
+			if err := os.WriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	proofPath := filepath.Join(original, "observation.retired.json")
+	proof, err := os.ReadFile(proofPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"operation_id", "stage_directory", "winning_stage", "request_sha256", "receipt_sha256", "winning_request_sha256", "winning_receipt_sha256"} {
+		retentionMutateJSON(t, original, "observation.retired.json", func(value map[string]any) { value[key] = "changed" })
+		if retiredOperatorObservationValid(directory, original) {
+			t.Fatalf("changed marker %s accepted", key)
+		}
+		if err := os.WriteFile(proofPath, proof, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestOperatorControllerPreflightRetirementRejectsUnprovenStages(t *testing.T) {
+	for _, name := range []string{"different-inventory", "different-lock", "extra-request", "extra-variable", "ordinary-inspect", "missing-preflight-flag", "string-preflight-flag", "false-floor", "missing-floor", "unverified", "failed-winner", "failed-original", "running-original", "missing-receipt", "malformed-receipt", "changed-receipt-hash", "wrong-schema", "wrong-operation", "arbitrary-stage", "nested-stage", "public-stage", "bootstrap"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			_ = os.Chmod(root, 0700)
+			directory := retentionOperationFixture(t, root, "v1.0.0")
+			original := filepath.Join(directory, "controller-preflight-interrupted")
+			if name == "arbitrary-stage" {
+				original = filepath.Join(directory, "inspect-interrupted")
+			}
+			if name == "nested-stage" {
+				original = filepath.Join(directory, "nested", "controller-preflight-interrupted")
+			}
+			winner := filepath.Join(directory, "controller-preflight-winner")
+			request := retentionPreflightRequest()
+			variables := request["variables"].(map[string]any)
+			switch name {
+			case "different-inventory":
+				request["inventory"] = map[string]any{"different": true}
+			case "different-lock":
+				variables["ultra_lock_directory"] = "/private/other-lock"
+			case "extra-request":
+				request["extra"] = true
+			case "extra-variable":
+				variables["ultra_release_version"] = "v1.0.0"
+			case "ordinary-inspect":
+				variables["ultra_controller_enforcement_preflight_only"] = false
+			case "missing-preflight-flag":
+				delete(variables, "ultra_controller_enforcement_preflight_only")
+			case "string-preflight-flag":
+				variables["ultra_controller_enforcement_preflight_only"] = "true"
+			}
+			retentionPreflightFixture(t, original, "running", "interrupted", request)
+			// Invalid preflight shapes must fail even when the winner is identical.
+			winnerRequest := retentionPreflightRequest()
+			if name == "extra-request" || name == "extra-variable" || name == "ordinary-inspect" || name == "missing-preflight-flag" || name == "string-preflight-flag" {
+				winnerRequest = request
+			}
+			retentionPreflightFixture(t, winner, "succeeded", "", winnerRequest)
+			switch name {
+			case "false-floor", "missing-floor", "unverified":
+				retentionMutateJSON(t, winner, "receipt.json", func(value map[string]any) {
+					result := value["result"].(map[string]any)
+					switch name {
+					case "missing-floor":
+						delete(result, "controller_enforcement_floor_absent")
+					case "false-floor":
+						result["controller_enforcement_floor_absent"] = false
+					case "unverified":
+						result["verified"] = false
+					}
+				})
+			case "failed-winner":
+				retentionMutateJSON(t, winner, "receipt.json", func(value map[string]any) { value["state"] = "failed" })
+			case "failed-original":
+				retentionMutateJSON(t, original, "receipt.json", func(value map[string]any) { value["state"] = "failed" })
+			case "running-original":
+				retentionMutateJSON(t, original, "receipt.json", func(value map[string]any) { delete(value, "code") })
+			case "missing-receipt":
+				if err := os.Remove(filepath.Join(original, "receipt.json")); err != nil {
+					t.Fatal(err)
+				}
+			case "malformed-receipt":
+				if err := os.WriteFile(filepath.Join(original, "receipt.json"), []byte("{"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "changed-receipt-hash":
+				retentionMutateJSON(t, original, "receipt.json", func(value map[string]any) { value["request_sha256"] = "changed" })
+			case "wrong-schema":
+				retentionMutateJSON(t, original, "job.json", func(value map[string]any) { value["schema_version"] = 2 })
+			case "wrong-operation":
+				retentionMutateJSON(t, original, "job.json", func(value map[string]any) { value["operation"] = "upgrade" })
+			case "public-stage":
+				if err := os.Chmod(original, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			kind := "upgrade"
+			if name == "bootstrap" {
+				kind = "bootstrap"
+			}
+			manifest := &automationRelease{Version: "v1.0.0", SourceCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+			if err := retireInterruptedOperatorObservations(directory, kind, manifest, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(original, "observation.retired.json")); !os.IsNotExist(err) {
+				t.Fatal("unproven stage retired", err)
+			}
+			if retiredOperatorObservationValid(directory, original) {
+				t.Fatal("unproven stage accepted")
+			}
+			if name != "failed-original" {
+				if _, err := operatorMetadata(directory); err == nil {
+					t.Fatal("unretired incomplete stage accepted")
+				}
+			}
+		})
+	}
+}

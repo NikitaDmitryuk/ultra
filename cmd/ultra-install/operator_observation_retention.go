@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type retiredOperatorObservation struct {
@@ -23,6 +24,7 @@ type operatorObservation struct {
 	state          string
 	code           string
 	verified       bool
+	floorAbsent    bool
 	requestSHA     string
 	receiptSHA     string
 	version        string
@@ -57,7 +59,8 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 		Code   string `json:"code"`
 		Hash   string `json:"request_sha256"`
 		Result struct {
-			Verified bool `json:"verified"`
+			Verified    bool `json:"verified"`
+			FloorAbsent bool `json:"controller_enforcement_floor_absent"`
 		} `json:"result"`
 	}
 	var request struct {
@@ -66,7 +69,7 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 	if err := read("job.json", &job); err != nil {
 		return result, err
 	}
-	if job.Operation != "verify-release" && job.Operation != "verify-bootstrap-automation" {
+	if job.Operation != "verify-release" && job.Operation != "verify-bootstrap-automation" && job.Operation != "inspect-upgrade" {
 		return result, errors.New("operator_retention_observation_kind_invalid")
 	}
 	if err := read("receipt.json", &receipt); err != nil {
@@ -74,6 +77,23 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 	}
 	if err := read("request.json", &request); err != nil {
 		return result, err
+	}
+	if job.Operation == "inspect-upgrade" {
+		var exact map[string]json.RawMessage
+		if err := read("request.json", &exact); err != nil {
+			return result, err
+		}
+		lock, lockOK := request.Variables["ultra_lock_directory"].(string)
+		var inventory map[string]json.RawMessage
+		if operatorPrivate(stage, true) != nil || !strings.HasPrefix(filepath.Base(stage), "controller-preflight-") {
+			return result, errors.New("operator_retention_preflight_invalid")
+		}
+		if len(exact) != 2 || exact["inventory"] == nil || exact["variables"] == nil || json.Unmarshal(exact["inventory"], &inventory) != nil || inventory == nil {
+			return result, errors.New("operator_retention_preflight_invalid")
+		}
+		if len(request.Variables) != 2 || !lockOK || lock == "" || request.Variables["ultra_controller_enforcement_preflight_only"] != true {
+			return result, errors.New("operator_retention_preflight_invalid")
+		}
 	}
 	hash, err := sourceSHA(filepath.Join(stage, "request.json"))
 	if err != nil || job.Schema != 1 || job.Hash != hash || receipt.Hash != hash {
@@ -83,7 +103,7 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 	if err != nil {
 		return result, err
 	}
-	result = operatorObservation{operation: job.Operation, state: receipt.State, code: receipt.Code, verified: receipt.Result.Verified, requestSHA: hash, receiptSHA: receiptHash}
+	result = operatorObservation{operation: job.Operation, state: receipt.State, code: receipt.Code, verified: receipt.Result.Verified, floorAbsent: receipt.Result.FloorAbsent, requestSHA: hash, receiptSHA: receiptHash}
 	if job.Operation == "verify-release" {
 		result.version, _ = request.Variables["ultra_release_version"].(string)
 		result.manifestSHA, _ = request.Variables["ultra_release_manifest_sha256"].(string)
@@ -94,6 +114,9 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 	return result, nil
 }
 func sameOperatorObservationRelease(left, right operatorObservation) bool {
+	if left.operation == "inspect-upgrade" {
+		return right.operation == left.operation && left.requestSHA == right.requestSHA && right.floorAbsent
+	}
 	return left.operation == right.operation && left.version != "" && left.version == right.version && left.manifestSHA == right.manifestSHA && left.manifestSource == right.manifestSource
 }
 func retiredOperatorObservationValid(directory, stage string) bool {
@@ -117,13 +140,18 @@ func retiredOperatorObservationValid(directory, stage string) bool {
 	if err != nil || original.state != "running" || original.code != "interrupted" || original.requestSHA != proof.RequestSHA || original.receiptSHA != proof.ReceiptSHA {
 		return false
 	}
+	if original.operation == "inspect-upgrade" && (filepath.Dir(stage) != directory || filepath.Dir(proof.Winner) != directory || operatorPrivate(directory, true) != nil) {
+		return false
+	}
 	winner, err := readOperatorObservation(proof.Winner)
 	return err == nil && winner.state == "succeeded" && winner.verified && winner.requestSHA == proof.WinnerRequestSHA && winner.receiptSHA == proof.WinnerReceiptSHA && sameOperatorObservationRelease(original, winner)
 }
 
 // controller.py writes interrupted only after killing and waiting for the entire
 // child process group. A later successful same-release observation supersedes
-// that cancelled check; mutators and unauthenticated running jobs are never retired.
+// that cancelled check. Controller preflight additionally requires the exact
+// same inventory and lock request, with an explicit absent-floor acknowledgement.
+// Mutators and unauthenticated running jobs are never retired.
 func retireInterruptedOperatorObservations(directory, kind string, manifest *automationRelease, manifestSHA string) error {
 	expectedOperation := "verify-release"
 	if kind == "bootstrap" {
@@ -145,12 +173,14 @@ func retireInterruptedOperatorObservations(directory, kind string, manifest *aut
 			return nil
 		}
 		if observation.operation != expectedOperation || observation.version != manifest.Version {
+			if kind != "upgrade" || observation.operation != "inspect-upgrade" || filepath.Dir(filepath.Dir(path)) != directory || operatorPrivate(directory, true) != nil {
+				return nil
+			}
+		}
+		if observation.operation == "verify-release" && observation.manifestSHA != manifestSHA {
 			return nil
 		}
-		if expectedOperation == "verify-release" && observation.manifestSHA != manifestSHA {
-			return nil
-		}
-		if expectedOperation == "verify-bootstrap-automation" {
+		if observation.operation == "verify-bootstrap-automation" {
 			hash, err := sourceSHA(observation.manifestSource)
 			if err != nil || hash != manifestSHA {
 				return nil

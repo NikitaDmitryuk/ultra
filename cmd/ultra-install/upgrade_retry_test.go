@@ -196,7 +196,7 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 		t.Skip("python unavailable")
 	}
 	for _, retryFailed := range []bool{false, true} {
-		for _, operation := range []string{"inspect-upgrade", "inspect-release-hosts", "legacy-inspect-release-hosts", "lifecycle-applying", "lifecycle-foreign", "legacy-success", "legacy-precheckpoint-failure", "legacy-rollback-failure", "legacy-runtime-rollback-failure", "legacy-commit-rollback-failure", "legacy-effects-commit-failure", "runtime-rollback-failure", "commit-rollback-failure", "prepared-generation-retry", "release-rollback-failure"} {
+		for _, operation := range []string{"controller-floor", "controller-preflight-unverified", "controller-preflight-failure", "inspect-upgrade", "inspect-release-hosts", "legacy-inspect-release-hosts", "lifecycle-applying", "lifecycle-foreign", "legacy-success", "legacy-precheckpoint-failure", "legacy-rollback-failure", "legacy-runtime-rollback-failure", "legacy-commit-rollback-failure", "legacy-effects-commit-failure", "runtime-rollback-failure", "commit-rollback-failure", "prepared-generation-retry", "release-rollback-failure"} {
 			t.Run(fmt.Sprintf("%s/retry-failed=%t", operation, retryFailed), func(t *testing.T) {
 				root := t.TempDir()
 				if err := os.Chmod(root, 0700); err != nil {
@@ -261,6 +261,18 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 						}
 					}
 				}
+				if strings.HasPrefix(operation, "controller-") {
+					for _, name := range []string{"gate", "maintenance"} {
+						if err := os.WriteFile(filepath.Join(directory, name), []byte("pre-existing-maintenance"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if operation == "controller-floor" {
+						if err := os.WriteFile(filepath.Join(directory, "lifecycle-retired.json"), []byte("retired"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
 				if err := os.WriteFile(filepath.Join(directory, "fail-once"), []byte(operation), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -272,6 +284,8 @@ request=json.loads((job/'request.json').read_text())
 variables=request['variables']
 operation=json.loads((job/'job.json').read_text())['operation']
 key=operation
+if operation=='inspect-upgrade' and variables.get('ultra_controller_enforcement_preflight_only'):
+    key='controller-preflight'
 if operation=='lifecycle':
     key+='-'+variables['ultra_lifecycle_phase']
     if variables['ultra_lifecycle_phase']=='applying' and (root/'foreign-owner').exists():
@@ -282,6 +296,16 @@ if operation=='upgrade-runtime':
     key+='-'+variables['ultra_runtime_action']
 with (root/'calls').open('a') as log: log.write(key+'\n')
 fail=root/'fail-once'
+if key=='controller-preflight':
+    if (root/'lifecycle-retired.json').exists() or (fail.exists() and fail.read_text()=='controller-preflight-failure'):
+        sys.exit(1)
+    result={'verified':True,'controller_enforcement_floor_absent':True}
+    if fail.exists() and fail.read_text()=='controller-preflight-unverified':
+        result.pop('controller_enforcement_floor_absent')
+    output=job/'result.json'
+    output.write_text(json.dumps(result))
+    output.chmod(0o600)
+    sys.exit(0)
 if fail.exists() and (fail.read_text()==key or fail.read_text()=='legacy-'+key):
     fail.unlink()
     sys.exit(1)
@@ -348,6 +372,35 @@ output.chmod(0o600)
 					t.Fatal(err)
 				}
 				firstErr := ansibleUpgrade(context.Background(), p, release, directory, python, executable, false)
+				if strings.HasPrefix(operation, "controller-") {
+					if firstErr == nil {
+						t.Fatal("controller enforcement preflight accepted unsafe upgrade")
+					}
+					if operation == "controller-preflight-unverified" && firstErr.Error() != "upgrade_controller_enforcement_preflight_unverified" {
+						t.Fatalf("missing preflight attestation accepted: %v", firstErr)
+					}
+					// Retry and ordinary re-entry must both inspect the floor anew;
+					// neither may run reservation, resume, or release cleanup.
+					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, retryFailed); err == nil {
+						t.Fatal("re-entry bypassed controller enforcement preflight")
+					}
+					calls, err := os.ReadFile(filepath.Join(directory, "calls"))
+					if err != nil || string(calls) != "controller-preflight\ncontroller-preflight\n" {
+						t.Fatalf("preflight rejection dispatched mutation or cleanup: %q %v", calls, err)
+					}
+					for _, name := range []string{"gate", "maintenance"} {
+						state, err := os.ReadFile(filepath.Join(directory, name))
+						if err != nil || string(state) != "pre-existing-maintenance" {
+							t.Fatalf("preflight rejection changed %s: %q %v", name, state, err)
+						}
+					}
+					for _, name := range []string{"inspect", "hosts", "domain-inspect", "runtime-inspect", "domain-prepare", "activate"} {
+						if _, err := os.Lstat(filepath.Join(directory, name)); !os.IsNotExist(err) {
+							t.Fatalf("preflight rejection reached %s: %v", name, err)
+						}
+					}
+					return
+				}
 				if operation == "legacy-success" {
 					if firstErr != nil {
 						t.Fatalf("legacy upgrade failed: %v", firstErr)
@@ -517,7 +570,7 @@ output.chmod(0o600)
 				}
 				if strings.HasPrefix(operation, "lifecycle-") {
 					calls, err := os.ReadFile(filepath.Join(directory, "calls"))
-					if err != nil || string(calls) != "lifecycle-applying\n" {
+					if err != nil || string(calls) != "controller-preflight\nlifecycle-applying\n" {
 						t.Fatalf("unconfirmed acquisition ran cleanup or inspection: %q %v", calls, err)
 					}
 					if operation == "lifecycle-foreign" {
@@ -548,6 +601,28 @@ output.chmod(0o600)
 					}
 					if _, err := os.Stat(filepath.Join(directory, failedStage+"-attempt-2")); !os.IsNotExist(err) {
 						t.Fatal("rejected inspection created another job")
+					}
+				}
+				if operation == "inspect-upgrade" {
+					// A successful floor preflight on the first invocation must not
+					// authorize re-entry after a retirement ledger appears.
+					floor := filepath.Join(directory, "lifecycle-retired.json")
+					if err := os.WriteFile(floor, []byte("retired"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					before, err := os.ReadFile(filepath.Join(directory, "calls"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := ansibleUpgrade(context.Background(), p, release, directory, python, executable, retryFailed); err == nil {
+						t.Fatal("cached successful preflight bypassed new enforcement floor")
+					}
+					after, err := os.ReadFile(filepath.Join(directory, "calls"))
+					if err != nil || string(after) != string(before)+"controller-preflight\n" {
+						t.Fatalf("new floor rejection ran cleanup or reused inspection: %q %v", after, err)
+					}
+					if err := os.Remove(floor); err != nil {
+						t.Fatal(err)
 					}
 				}
 				// The next invocation passes the failed inspection and completes the

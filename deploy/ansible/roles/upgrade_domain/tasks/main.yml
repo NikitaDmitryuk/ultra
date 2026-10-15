@@ -48,8 +48,8 @@
 - name: Verify candidate backend TLS and application
   ultra_ingress_probe:
     kind: bot
-  register: upgrade_backend_ready
-  until: upgrade_backend_ready.ready | default(false)
+  register: upgrade_domain_backend_ready
+  until: upgrade_domain_backend_ready.ready | default(false)
   retries: 15
   delay: 2
   when: ultra_upgrade_domain_action in ['apply', 'accept']
@@ -97,7 +97,7 @@
   ansible.builtin.stat:
     path: "{{ ultra_ingress_transaction }}/state.json"
     follow: false
-  register: upgrade_ingress_journal
+  register: upgrade_domain_ingress_journal
   when: ultra_upgrade_domain_action == 'rollback'
 - name: Restore exact ingress specification and obtain owned before images
   ultra_ingress_state:
@@ -105,10 +105,10 @@
     plan: "{{ ultra_ingress }}"
     action: cutover
     phase: rollback
-  register: upgrade_ingress_restored
+  register: upgrade_domain_ingress_restored
   when:
     - ultra_upgrade_domain_action == 'rollback'
-    - upgrade_ingress_journal.stat.exists | default(false)
+    - upgrade_domain_ingress_journal.stat.exists | default(false)
   no_log: true
 - name: Restore only journalled ingress owned files
   ultra_owned_file:
@@ -117,7 +117,7 @@
     state: "{{ 'present' if item.present else 'absent' }}"
     content: "{{ item.content | b64decode }}"
     mode: "{{ item.mode }}"
-  loop: "{{ upgrade_ingress_restored.owned_before_images | default([]) }}"
+  loop: "{{ upgrade_domain_ingress_restored.owned_before_images | default([]) }}"
   when: ultra_upgrade_domain_action == 'rollback'
   no_log: true
 - name: Restore exact backend files after restoring ingress

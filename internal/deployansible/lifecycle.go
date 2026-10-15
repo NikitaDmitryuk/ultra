@@ -447,7 +447,7 @@ func (g *lifecycleGate) supersede(oldID, newID string, existing *os.File) Respon
 		return Response{Code: "invalid_operation_id"}
 	}
 	same := g.handoff != nil && g.handoff.OldID == oldID && g.handoff.NewID == newID
-	if g.current.Phase != "applying" || (g.current.ID != oldID && !(same && g.current.ID == newID)) {
+	if g.current.Phase != "applying" || (g.current.ID != oldID && (!same || g.current.ID != newID)) {
 		return Response{Code: "lifecycle_not_owned"}
 	}
 	if g.retired[newID] || (g.retired[oldID] && !same) {

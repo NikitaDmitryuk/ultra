@@ -27,7 +27,11 @@
         executable: /usr/bin/python3
       changed_when: false
       no_log: true
-      when: not (legacy_retry_barrier.continuation | default(false) | bool) and (not (ultra_legacy_bridge_maintenance | default(false) | bool) or not (legacy_retry_barrier.held | default(false) | bool))
+      when:
+        - not (legacy_retry_barrier.continuation | default(false) | bool)
+        - >-
+          not (ultra_legacy_bridge_maintenance | default(false) | bool) or
+          not (legacy_retry_barrier.held | default(false) | bool)
     - name: Verify the pinned recovery capture script immediately before execution
       ultra_upgrade_maintenance:
         id: "{{ ultra_lifecycle_id }}"

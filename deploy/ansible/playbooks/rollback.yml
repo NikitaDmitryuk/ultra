@@ -93,7 +93,9 @@
       ansible.builtin.systemd_service:
         name: ultra-bot.service
         state: started
-      when: (not (ultra_legacy_bridge_maintenance | default(false) | bool)) and (not (hostvars['bridge'].legacy_rollback_barrier.untouched | default(false) | bool))
+      when:
+        - not (ultra_legacy_bridge_maintenance | default(false) | bool)
+        - not (hostvars['bridge'].legacy_rollback_barrier.untouched | default(false) | bool)
     - name: Read the exact runtime effect rollback binding after executable restoration
       ultra_runtime_effects:
         action: status
@@ -107,14 +109,20 @@
         action: rollback
         request_json: "{{ ultra_runtime_effect_inputs[inventory_hostname] }}"
         warp_assets: "{{ ultra_runtime_warp_assets }}"
-      when: (ultra_runtime_effect_inputs is defined and release_runtime_effect_binding.bound | bool) and (not (hostvars['bridge'].legacy_rollback_barrier.untouched | default(false) | bool))
+      when:
+        - not (hostvars['bridge'].legacy_rollback_barrier.untouched | default(false) | bool)
+        - ultra_runtime_effect_inputs is defined
+        - release_runtime_effect_binding.bound | default(false) | bool
       no_log: true
     - name: Restore prior bot activity as the final release compensation
       ultra_runtime_effects:
         action: accept-rollback
         request_json: "{{ ultra_runtime_effect_inputs[inventory_hostname] }}"
         warp_assets: "{{ ultra_runtime_warp_assets }}"
-      when: (ultra_runtime_effect_inputs is defined and release_runtime_effect_binding.bound | bool) and (not (hostvars['bridge'].legacy_rollback_barrier.untouched | default(false) | bool))
+      when:
+        - not (hostvars['bridge'].legacy_rollback_barrier.untouched | default(false) | bool)
+        - ultra_runtime_effect_inputs is defined
+        - release_runtime_effect_binding.bound | default(false) | bool
       no_log: true
     - name: Save the verified operation result
       ansible.builtin.copy:

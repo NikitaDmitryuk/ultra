@@ -196,7 +196,7 @@ func verifyForwardPriorCandidate(proof forwardUpgradeJournal, old forwardOldOper
 
 // The prior release archive bounds every immutable exported source file; only
 // the fixed controller protocol files, private workspace and empty temporary dirs may coexist.
-func verifyForwardDrainFiles(stage, archive string) error {
+func verifyForwardDrainFiles(stage, archive string) (result error) {
 	fail := errors.New("upgrade_forward_prior_drain_files_invalid")
 	allowed := map[string]bool{"request.json": true, "job.json": true, "receipt.json": true, "result.json": true, "inventory.json": true, "inventory.yml": true, "variables.json": true, "variables.yml": true, "bundle.retention.json": true, "diagnostic.json": true, "execution.lock": true}
 	entries, err := os.ReadDir(stage)
@@ -235,12 +235,20 @@ func verifyForwardDrainFiles(stage, archive string) error {
 	if err != nil {
 		return fail
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil && result == nil {
+			result = fail
+		}
+	}()
 	gz, err := gzip.NewReader(file)
 	if err != nil {
 		return fail
 	}
-	defer gz.Close()
+	defer func() {
+		if err := gz.Close(); err != nil && result == nil {
+			result = fail
+		}
+	}()
 	tr := tar.NewReader(gz)
 	expected := map[string]bool{".": true}
 	for {

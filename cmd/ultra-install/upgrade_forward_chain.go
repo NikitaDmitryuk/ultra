@@ -242,7 +242,7 @@ func forwardDomainVariables(p *installplan.InstallPlan, root, directory string) 
 	}
 	return map[string]any{"ultra_lock_directory": root, "ultra_upgrade_domain_transaction": digestSHA256([]byte(lifecycleID(directory))), "ultra_upgrade_domain_desired": map[string]any{"subscription": p.PublicSubscriptionDomain(), "vpn": ingress.Domain, "backend": p.Bot.Domain, "public_host": p.Bridge.PublicHost}, "ultra_upgrade_domain_policy": map[string]any{"email": ingress.Email, "ingress_mode": mode, "forward_host": ingress.ForwardHost, "dns_ttl": dns.TTL, "backend_port": ingress.BackendPort, "gateway_port": ingress.GatewayPort, "staging_port": ingress.StagingPort, "status_port": ingress.StatusPort, "experimental_port": ingress.ExperimentalPort, "age_recipient": p.Automation.AgeRecipient, "bridge_provider": p.Automation.BridgeProvider, "static_nodes": p.Automation.StaticNodes, "admin_telegram_id": p.Automation.AdminTelegramID, "bridge_ipv4": p.Automation.BridgeIPv4, "state_paths": append([]string{}, p.Automation.StatePaths...), "artifact_paths": append([]string{}, p.Automation.ArtifactPaths...)}}
 }
-func verifyForwardRecoveryTools(directory, archive string) error {
+func verifyForwardRecoveryTools(directory, archive string) (result error) {
 	fail := errors.New("upgrade_forward_chain_tools_invalid")
 	if operatorPrivate(directory, true) != nil {
 		return fail
@@ -251,12 +251,20 @@ func verifyForwardRecoveryTools(directory, archive string) error {
 	if err != nil {
 		return fail
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil && result == nil {
+			result = fail
+		}
+	}()
 	gz, err := gzip.NewReader(f)
 	if err != nil {
 		return fail
 	}
-	defer gz.Close()
+	defer func() {
+		if err := gz.Close(); err != nil && result == nil {
+			result = fail
+		}
+	}()
 	tr := tar.NewReader(gz)
 	seen := map[string]bool{}
 	for {
@@ -653,84 +661,13 @@ func forwardUpgradeChainedHandoff(ctx context.Context, proof forwardUpgradeJourn
 	if err := verifyForwardChainDestination(proof, predecessor, root, directory, deps.archive); err != nil {
 		return ctx, nil, err
 	}
-	if state.ID == expected.NewID {
-		ledger, err := checkForwardChainLedger(currentRaw, expected.PriorID, expected.NewID)
-		if err != nil || readErr != nil {
-			return ctx, nil, fail
-		}
-		want := map[string]bool{expected.PriorID: true}
-		for _, id := range originalLedger.IDs {
-			want[id] = true
-		}
-		if len(want) != len(ledger.IDs) {
-			return ctx, nil, fail
-		}
-		for _, id := range ledger.IDs {
-			if !want[id] {
-				return ctx, nil, fail
-			}
-		}
-		if err := verifyForwardIntent(proof, predecessor, root, directory); err != nil {
-			return ctx, nil, err
-		}
-		return deps.attach(ctx, root, expected.NewID)
-	}
-	if state.ID != expected.PriorID || !bytes.Equal(currentRaw, []byte(expected.OriginalRetirementJSON)) {
-		return ctx, nil, fail
-	}
-	leased, release, err := deps.attach(ctx, root, expected.PriorID)
-	if err != nil {
-		return ctx, nil, err
-	}
-	success := false
-	defer func() {
-		if !success {
-			release()
-		}
-	}()
-	if err := verifyForwardApplying(root, expected.PriorID); err != nil {
-		return ctx, nil, err
-	}
-	intent, err := runForwardCensus(leased, proof, predecessor, root, directory, python, executable, deps.run)
-	if err != nil {
-		return ctx, nil, err
-	}
-	if deps.archive == "" || verifyForwardDrainFiles(intent.Stage, deps.archive) != nil {
-		return ctx, nil, fail
-	}
-	if err := verifyForwardPostHandoffCandidate(proof, old, root, directory, prior); err != nil {
-		return ctx, nil, err
-	}
-	originalAgain, err := forwardOriginalEvidence(proof, old)
-	if err != nil || originalAgain != originalEvidence {
-		return ctx, nil, fail
-	}
-	again, err := forwardCandidateFingerprint(prior.Directory)
-	if err != nil || again != fingerprint {
-		return ctx, nil, fail
-	}
-	now, err := readForwardEvidence(filepath.Join(root, "lifecycle-retired.json"))
-	if err != nil || !bytes.Equal(now, currentRaw) || verifyForwardApplying(root, expected.PriorID) != nil {
-		return ctx, nil, fail
-	}
-	raw, err := json.Marshal(expected)
-	if err != nil {
-		return ctx, nil, err
-	}
-	if len(raw) > 1048576 {
-		return ctx, nil, fail
-	}
-	if err := writeUpgradeInput(path, raw); err != nil {
-		return ctx, nil, err
-	}
-	if err := saveForwardIntent(directory, intent); err != nil {
-		return ctx, nil, err
-	}
-	if err := deps.supersede(leased, expected.PriorID, expected.NewID); err != nil {
-		return ctx, nil, err
-	}
-	success = true
-	return leased, release, nil
+	// A successful containment receipt proves shutdown only. It does not carry
+	// the original bot/timer states or physical database baseline required to
+	// inspect and prepare B while A remains stopped. Ordinary upgrade preflight
+	// requires active services, so superseding A here would retire its recovery
+	// authority before a deterministic failure. A dedicated stopped-service
+	// protocol must be implemented before this transition can be enabled.
+	return ctx, nil, errors.New("upgrade_forward_contained_continuation_unavailable")
 }
 
 func verifyForwardPostHandoffCandidate(proof forwardUpgradeJournal, old forwardOldOperation, root, directory string, prior forwardPriorCandidate) error {

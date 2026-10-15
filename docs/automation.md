@@ -244,6 +244,18 @@ DNS-подготовка компенсируется отдельно. Толь
 [maintenance barrier](../deploy/ansible/library/ultra_upgrade_maintenance.py),
 [rollback](../deploy/ansible/playbooks/rollback.yml).
 
+Перед lifecycle reservation и установкой cleanup обычный upgrade отдельным свежим
+read-only заданием проверяет на bridge отсутствие `lifecycle-retired.json`.
+Файл означает, что прежний controller мог не соблюдать выведенные из эксплуатации
+операции; текущий контракт не доказывает безопасный rollback через такой controller.
+При наличии файла upgrade прекращается до maintenance и активации, не запуская
+cleanup, который мог бы возобновить уже остановленные службы. Проверка выполняется
+заново при каждом запуске и повторе; результат прошлой попытки не кэшируется.
+Защита перед rollback остаётся отдельной проверкой.
+Источники: [upgrade preflight](../cmd/ultra-install/ansible_upgrade.go),
+[read-only playbook](../deploy/ansible/playbooks/inspect-upgrade.yml),
+[rollback floor](../deploy/ansible/roles/release/tasks/controller-rollback-preflight.yml).
+
 Служба `ultra-ansible-controller` работает на bridge независимо от relay и бота.
 Она принимает ограниченный набор заданий через Unix-сокет. Root-peer управляет
 резервированием lifecycle; relay может подавать только типизированные задания
@@ -381,17 +393,22 @@ SSH transport и lifecycle исходной операции в фазе `applyi
 самостоятельно сверяет подписанный release, frozen plan, предыдущее доказательство,
 stage receipts и отсутствие activation.
 
-Переход от неудачного кандидата A к следующему кандидату B хранит отдельный
-`forward-chain.json` с привязкой исходного handoff O→A и точного retirement ledger.
-Если процесс остановился после публикации этого файла, но до `forward-handoff.json`,
-повтор принимает только такой chain-only prefix при lifecycle A в `applying` и
-неизменном ledger O→A. Он заново выполняет полный fleet census под lease A до
-публикации handoff и supersede A→B; при ledger O→A→B разрешён только проверенный
-restart для B. Сохранённые failed, interrupted и аварийно незавершённые попытки census
-принимаются только как аутентифицированная история с точным inventory, request и
-bundle; receipt может отсутствовать только до старта controller либо оставаться в
-running без кода прерывания. Эти stages не разрешают handoff: перед ним всегда
-запускается новая успешная проверка всей исходной topology.
+После handoff O→A подтверждённый containment останавливает relay, bot и
+автоматические timers всей frozen fleet. Переход от такого кандидата A к B
+отклоняется с `upgrade_forward_contained_continuation_unavailable` до нового
+fleet census, получения lease A и supersede A→B. Сохранённые receipts и frozen
+inputs продолжают проходить проверку; lifecycle A остаётся в `applying`.
+Для восстановления требуется вмешательство оператора: автоматический протокол
+проверки и подготовки следующего кандидата при остановленных службах пока
+не реализован. Это ограничение действует и при наличии дополнительных полей
+baseline в inspection: они сами по себе не разрешают продолжение.
+
+Containment receipt подтверждает только остановку, а не исходное состояние
+bot, timers или физическую identity БД. В частности, containment останавливает
+`certbot.timer` и не восстанавливает его исходные active/enabled состояния.
+Их нельзя восстанавливать по догадке из уже остановленных служб. До появления
+версионированного протокола с проверенной исходной baseline автоматическое
+продолжение после containment не поддерживается.
 
 Если текущий broker не поддерживает atomic lifecycle supersede, upgrade сначала
 проверяет его работающую identity и выполняет broker-only bootstrap из подписанного
