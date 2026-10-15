@@ -35,8 +35,23 @@ func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) 
 	}
 	var request struct {
 		Variables map[string]json.RawMessage `json:"variables"`
+		Inventory struct {
+			All struct {
+				Children struct {
+					Bridge struct {
+						Hosts map[string]map[string]json.RawMessage `json:"hosts"`
+					} `json:"bridge"`
+				} `json:"children"`
+			} `json:"all"`
+		} `json:"inventory"`
 	}
 	if json.Unmarshal(raw, &request) != nil || request.Variables == nil {
+		return nil, fail
+	}
+	// ansibleUpgrade freezes controller identities as bridge host variables;
+	// lifecycle and release manifests remain operation-wide request variables.
+	bridge := request.Inventory.All.Children.Bridge.Hosts["bridge"]
+	if len(request.Inventory.All.Children.Bridge.Hosts) != 1 || bridge == nil {
 		return nil, fail
 	}
 	requestSHA := digestSHA256(raw)
@@ -53,14 +68,16 @@ func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) 
 			return nil, fail
 		}
 	}
-	readString := func(key string) (string, error) {
+	readField := func(fields map[string]json.RawMessage, key string) (string, error) {
 		var value string
-		err := json.Unmarshal(request.Variables[key], &value)
+		err := json.Unmarshal(fields[key], &value)
 		if err != nil || value == "" {
 			return "", fail
 		}
 		return value, nil
 	}
+	readString := func(key string) (string, error) { return readField(request.Variables, key) }
+	readBridgeString := func(key string) (string, error) { return readField(bridge, key) }
 	readManifest := func(key string) (*automationRelease, error) {
 		var manifest automationRelease
 		if err := json.Unmarshal(request.Variables[key], &manifest); err != nil || !validAutomationVersion(manifest.Version) {
@@ -68,7 +85,7 @@ func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) 
 		}
 		return &manifest, nil
 	}
-	architecture, err := readString("ultra_architecture")
+	architecture, err := readBridgeString("ultra_architecture")
 	if err != nil || (architecture != "amd64" && architecture != "arm64") {
 		return nil, fail
 	}
@@ -107,27 +124,27 @@ func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) 
 		!reflect.DeepEqual(sourceManifest, *oldTarget) {
 		return nil, fail
 	}
-	previousDirectory, err := readString("ultra_previous_controller_directory")
+	previousDirectory, err := readBridgeString("ultra_previous_controller_directory")
 	if err != nil || previousDirectory != managedControllerDirectory(previous.Version) {
 		return nil, fail
 	}
-	previousUnitSHA, err := readString("ultra_previous_controller_unit_sha256")
+	previousUnitSHA, err := readBridgeString("ultra_previous_controller_unit_sha256")
 	if err != nil || !sha256DigestPattern.MatchString(previousUnitSHA) {
 		return nil, fail
 	}
-	oldTargetDirectory, err := readString("ultra_controller_directory")
+	oldTargetDirectory, err := readBridgeString("ultra_controller_directory")
 	if err != nil || oldTargetDirectory != managedControllerDirectory(oldTarget.Version) {
 		return nil, fail
 	}
-	oldTargetUnitSHA, err := readString("ultra_target_controller_unit_sha256")
+	oldTargetUnitSHA, err := readBridgeString("ultra_target_controller_unit_sha256")
 	if err != nil || !sha256DigestPattern.MatchString(oldTargetUnitSHA) {
 		return nil, fail
 	}
-	oldTargetInstallerSHA, err := readString("ultra_install_sha256")
+	oldTargetInstallerSHA, err := readBridgeString("ultra_install_sha256")
 	if err != nil || !sha256DigestPattern.MatchString(oldTargetInstallerSHA) {
 		return nil, fail
 	}
-	oldTargetRuntimeSHA, err := readString("ultra_controller_runtime_sha256")
+	oldTargetRuntimeSHA, err := readBridgeString("ultra_controller_runtime_sha256")
 	if err != nil || !sha256DigestPattern.MatchString(oldTargetRuntimeSHA) {
 		return nil, fail
 	}

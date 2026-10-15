@@ -105,6 +105,9 @@ installer всё равно независимо проверяет конфиг
 plan, lifecycle и отсутствие activation. Допускаются сохранённый handoff с его
 drain evidence и частичные broker-bootstrap stages; все файлы проверяются на
 приватность, а installer сверяет содержимое bundle с подписанным Ansible archive.
+Broker recovery читает controller identity из host variables единственного `bridge`
+в frozen request inventory; lifecycle ID остаётся привязан к request variables.
+Фикстуры должны сохранять это production-размещение полей.
 В сохранённом drain stage допускаются точные генерируемые controller артефакты:
 обычный приватный `execution.lock` и приватное дерево `.ansible` (Ansible HOME).
 Workspace проверяется рекурсивно по владельцу, типам, правам и лимитам размера;

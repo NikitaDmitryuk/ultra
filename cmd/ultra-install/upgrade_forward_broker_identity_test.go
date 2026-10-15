@@ -8,7 +8,8 @@ import (
 	"testing"
 )
 
-func TestForwardBrokerVariablesBindPreviousAndCandidateIdentities(t *testing.T) {
+func forwardBrokerVariablesFixture(t *testing.T) (forwardOldOperation, *automationRelease, *automationRelease, *automationRelease) {
+	t.Helper()
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
@@ -21,8 +22,6 @@ func TestForwardBrokerVariablesBindPreviousAndCandidateIdentities(t *testing.T) 
 	previous := brokerTestManifest("v0.0.0", strings.Repeat("1", 40), "a")
 	oldTarget := brokerTestManifest("v0.0.1", strings.Repeat("2", 40), "b")
 	newTarget := brokerTestManifest("v0.0.2", strings.Repeat("3", 40), "c")
-	previousInstaller, _ := upgradeAsset(previous, "ultra-install-linux-amd64")
-	previousRuntime, _ := upgradeAsset(previous, "ultra-ansible-runtime-linux-amd64.tar.gz")
 	oldInstaller, _ := upgradeAsset(oldTarget, "ultra-install-linux-amd64")
 	oldRuntime, _ := upgradeAsset(oldTarget, "ultra-ansible-runtime-linux-amd64.tar.gz")
 	oldManifestRaw, err := json.Marshal(oldTarget)
@@ -51,7 +50,17 @@ func TestForwardBrokerVariablesBindPreviousAndCandidateIdentities(t *testing.T) 
 		"ultra_install_sha256":                  oldInstaller.SHA,
 		"ultra_controller_runtime_sha256":       oldRuntime.SHA,
 	}
-	request, err := json.Marshal(map[string]any{"variables": vars})
+	bridge := map[string]any{}
+	for _, key := range []string{"ultra_architecture", "ultra_previous_controller_directory", "ultra_previous_controller_unit_sha256", "ultra_controller_directory", "ultra_target_controller_unit_sha256", "ultra_install_sha256", "ultra_controller_runtime_sha256"} {
+		bridge[key] = vars[key]
+		delete(vars, key)
+	}
+	vars["ultra_bridge_inventory_host"] = "bridge"
+	inventory := map[string]any{"all": map[string]any{"children": map[string]any{
+		"bridge": map[string]any{"hosts": map[string]any{"bridge": bridge}},
+		"exits":  map[string]any{"hosts": map[string]any{"exit_test": map[string]any{"ultra_architecture": "arm64"}}},
+	}}}
+	request, err := json.Marshal(map[string]any{"inventory": inventory, "variables": vars})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +72,30 @@ func TestForwardBrokerVariablesBindPreviousAndCandidateIdentities(t *testing.T) 
 	for _, name := range []string{"job.json", "receipt.json"} {
 		writeForwardJSON(t, filepath.Join(activate, name), proof)
 	}
-	old := forwardOldOperation{Directory: oldDir, ID: lifecycleID(oldDir)}
+	return forwardOldOperation{Directory: oldDir, ID: lifecycleID(oldDir)}, newTarget, previous, oldTarget
+}
+
+func TestForwardBrokerVariablesBindPreviousAndCandidateIdentities(t *testing.T) {
+	old, newTarget, previous, oldTarget := forwardBrokerVariablesFixture(t)
+	requestRaw, err := os.ReadFile(filepath.Join(old.Directory, "activate", "request.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request map[string]any
+	if err := json.Unmarshal(requestRaw, &request); err != nil {
+		t.Fatal(err)
+	}
+	variablesInput := request["variables"].(map[string]any)
+	bridgeInput := request["inventory"].(map[string]any)["all"].(map[string]any)["children"].(map[string]any)["bridge"].(map[string]any)["hosts"].(map[string]any)["bridge"].(map[string]any)
+	for _, key := range []string{"ultra_architecture", "ultra_previous_controller_directory", "ultra_previous_controller_unit_sha256", "ultra_controller_directory", "ultra_target_controller_unit_sha256", "ultra_install_sha256", "ultra_controller_runtime_sha256"} {
+		if _, exists := variablesInput[key]; exists || bridgeInput[key] == nil {
+			t.Fatalf("fixture must match ansibleUpgrade bridge-host serialization for %s", key)
+		}
+	}
+	previousInstaller, _ := upgradeAsset(previous, "ultra-install-linux-amd64")
+	previousRuntime, _ := upgradeAsset(previous, "ultra-ansible-runtime-linux-amd64.tar.gz")
+	oldInstaller, _ := upgradeAsset(oldTarget, "ultra-install-linux-amd64")
+	oldRuntime, _ := upgradeAsset(oldTarget, "ultra-ansible-runtime-linux-amd64.tar.gz")
 	variables, err := forwardBrokerVariables(old, newTarget)
 	if err != nil {
 		t.Fatal(err)
@@ -93,4 +125,69 @@ func brokerTestManifest(version, commit, fill string) *automationRelease {
 		}{Name: name, SHA: strings.Repeat(fill, 64), Size: 1})
 	}
 	return manifest
+}
+
+func TestForwardBrokerVariablesRejectMalformedBridgeIdentity(t *testing.T) {
+	for _, name := range []string{"missing inventory", "missing bridge", "extra bridge", "null bridge", "wrong bridge alias", "missing architecture", "invalid architecture", "missing installer hash", "wrong installer hash", "missing unit hash", "global identity cannot override bridge", "lifecycle must remain in variables"} {
+		t.Run(name, func(t *testing.T) {
+			old, target, _, _ := forwardBrokerVariablesFixture(t)
+			path := filepath.Join(old.Directory, "activate", "request.json")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var request map[string]any
+			if err := json.Unmarshal(raw, &request); err != nil {
+				t.Fatal(err)
+			}
+			variables := request["variables"].(map[string]any)
+			children := request["inventory"].(map[string]any)["all"].(map[string]any)["children"].(map[string]any)
+			hosts := children["bridge"].(map[string]any)["hosts"].(map[string]any)
+			bridge := hosts["bridge"].(map[string]any)
+			switch name {
+			case "missing inventory":
+				delete(request, "inventory")
+			case "missing bridge":
+				delete(children, "bridge")
+			case "extra bridge":
+				hosts["other"] = bridge
+			case "null bridge":
+				hosts["bridge"] = nil
+			case "wrong bridge alias":
+				hosts["other"] = bridge
+				delete(hosts, "bridge")
+			case "missing architecture":
+				delete(bridge, "ultra_architecture")
+			case "invalid architecture":
+				bridge["ultra_architecture"] = "386"
+			case "missing installer hash":
+				delete(bridge, "ultra_install_sha256")
+			case "wrong installer hash":
+				bridge["ultra_install_sha256"] = strings.Repeat("f", 64)
+			case "missing unit hash":
+				delete(bridge, "ultra_previous_controller_unit_sha256")
+			case "global identity cannot override bridge":
+				variables["ultra_architecture"] = bridge["ultra_architecture"]
+				delete(bridge, "ultra_architecture")
+			case "lifecycle must remain in variables":
+				bridge["ultra_lifecycle_id"] = variables["ultra_lifecycle_id"]
+				delete(variables, "ultra_lifecycle_id")
+			}
+			requestRaw, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, requestRaw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			// Rebind valid evidence so rejection exercises identity parsing rather than a stale digest.
+			proof := map[string]any{"schema_version": 1, "operation": "upgrade", "request_sha256": digestSHA256(requestRaw), "binary_sha256": digestSHA256(requestRaw)}
+			for _, file := range []string{"job.json", "receipt.json"} {
+				writeForwardJSON(t, filepath.Join(old.Directory, "activate", file), proof)
+			}
+			if _, err := forwardBrokerVariables(old, target); err == nil || err.Error() != "upgrade_forward_broker_identity_unverified" {
+				t.Fatalf("invalid bridge identity accepted: %v", err)
+			}
+		})
+	}
 }
