@@ -13,7 +13,21 @@ def persisted_ingress(value):
                'gateway_port', 'status_port', 'experimental_port', 'staging_port')
     if not isinstance(value, dict):
         raise ValueError('invalid_ingress_metadata')
-    return {key: value[key] for key in allowed if key in value}
+    strings = ('domain', 'email', 'path', 'public_host')
+    if any(key not in value or not isinstance(value[key], str) or not value[key].strip()
+           for key in strings):
+        raise ValueError('invalid_ingress_metadata')
+    if 'forward_host' in value and not isinstance(value['forward_host'], str):
+        raise ValueError('invalid_ingress_metadata')
+    ports = ('backend_port', 'gateway_port', 'status_port', 'experimental_port', 'staging_port')
+    if any(key not in value or type(value[key]) is not int or not 1024 <= value[key] <= 65535
+           for key in ports):
+        raise ValueError('invalid_ingress_metadata')
+    if len({value[key] for key in ports}) != len(ports):
+        raise ValueError('invalid_ingress_metadata')
+    result = {key: value[key] for key in allowed if key in value}
+    result.setdefault('forward_host', '')
+    return result
 
 
 def merge_backup_paths(existing, requested):

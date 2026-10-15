@@ -47,6 +47,25 @@ def normalized_nodes(nodes):
     return sorted(normalized, key=lambda item: (item['name'], item['address']))
 
 
+def current_experiment_ports(root, specification, receipt):
+    """Recover active public port metadata only from the managed profile the app loads."""
+    path = '/etc/ultra-relay/experimental-profile.json'
+    if specification.get('experimental_profile_file') != path:
+        raise ValueError('domain_experiment_profile_unbound')
+    raw = trusted(root / path.lstrip('/'))
+    if receipt.get(path) != hashlib.sha256(raw).hexdigest():
+        raise ValueError('domain_experiment_profile_unmanaged')
+    profile = json.loads(raw)
+    endpoint = profile.get('endpoint') if isinstance(profile, dict) else None
+    status_port = profile.get('status_port') if isinstance(profile, dict) else None
+    experimental_port = endpoint.get('port') if isinstance(endpoint, dict) else None
+    if (type(status_port) is not int or not 1 <= status_port <= 65535 or
+            type(experimental_port) is not int or not 1 <= experimental_port <= 65535 or
+            status_port == experimental_port):
+        raise ValueError('domain_experiment_profile_invalid')
+    return {'status_port': status_port, 'experimental_port': experimental_port}
+
+
 def inspect(root=Path('/'), policy=None):
     spec = json.loads(trusted(root / 'etc/ultra-relay/spec.json', relay_spec=True))
     primary = spec.get('primary_xhttp')
@@ -81,11 +100,31 @@ def inspect(root=Path('/'), policy=None):
             not isinstance(ingress_mode, str) or not ingress_mode):
         raise ValueError('domain_policy_uncertain')
     policy_ports = {}
-    for key in ('staging_port', 'status_port', 'experimental_port'):
-        value = ingress.get(key)
+    staging_port_unrecorded = 'staging_port' not in ingress
+    if not staging_port_unrecorded:
+        value = ingress.get('staging_port')
         if type(value) is not int or not 1 <= value <= 65535:
             raise ValueError('domain_policy_uncertain')
-        policy_ports[key] = value
+        policy_ports['staging_port'] = value
+    missing_runtime_ports = {'status_port', 'experimental_port'} - set(ingress)
+    if missing_runtime_ports:
+        # Older cutovers replaced the recovery ingress object without these
+        # fields. They are recoverable only from the exact managed profile
+        # referenced by the live relay spec; desired values are never used as
+        # evidence for the prior runtime.
+        observed = current_experiment_ports(root, spec, receipt)
+        for key in ('status_port', 'experimental_port'):
+            if key in ingress:
+                value = ingress.get(key)
+                if type(value) is not int or not 1 <= value <= 65535 or value != observed[key]:
+                    raise ValueError('domain_experiment_profile_conflict')
+            policy_ports[key] = observed[key]
+    else:
+        for key in ('status_port', 'experimental_port'):
+            value = ingress.get(key)
+            if type(value) is not int or not 1 <= value <= 65535:
+                raise ValueError('domain_policy_uncertain')
+            policy_ports[key] = value
     backup = json.loads(trusted(root / 'etc/ultra-recovery/backup.json', True))
     backup_state = backup.get('state_paths', [])
     backup_artifacts = backup.get('artifact_paths', [])
@@ -117,7 +156,9 @@ def inspect(root=Path('/'), policy=None):
             'acme_email_matches': email == policy.get('email'),
             'forward_host_matches': forward_host == policy.get('forward_host'),
             'ingress_mode_matches': ingress_mode == policy.get('ingress_mode'),
-            'staging_port_matches': policy_ports['staging_port'] == policy.get('staging_port'),
+            'staging_port_matches': (not staging_port_unrecorded and
+                                     policy_ports['staging_port'] == policy.get('staging_port')),
+            'staging_port_unrecorded': staging_port_unrecorded,
             'status_port_matches': policy_ports['status_port'] == policy.get('status_port'),
             'experimental_port_matches': policy_ports['experimental_port'] == policy.get('experimental_port'),
             'age_recipient_matches': backup.get('recipient') == policy.get('age_recipient'),

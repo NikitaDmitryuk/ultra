@@ -13,7 +13,9 @@ m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 class CutoverTests(unittest.TestCase):
     def old(self):
         return {'reality':{'private_key':'unchanged-fixture'},'primary_xhttp':{'host':'192.0.2.1','server_name':'old.example.com','port':443,'path':'/connect','backend_port':18080,'fingerprint':'firefox'},'subscription_bridges':[{'id':'tls','security':'tls','host':'192.0.2.1','server_name':'old.example.com','port':443,'path':'/connect','fingerprint':'firefox'},{'id':'reserve','security':'reality','host':'192.0.2.1','public_key':'unchanged'}]}
-    def target(self):return {'domain':'edge.example.com','public_host':'edge.example.com','path':'/connect','backend_port':18080}
+    def target(self):return {'domain':'edge.example.com','email':'ops@example.com','forward_host':'',
+        'public_host':'edge.example.com','path':'/connect',
+        'backend_port':18080,'gateway_port':18081,'staging_port':18443,'status_port':18082,'experimental_port':18444}
 
     def test_candidate_changes_only_owned_publication(self):
         old=self.old();before=copy.deepcopy(old);new=m.candidate_spec(old,self.target())
@@ -24,6 +26,37 @@ class CutoverTests(unittest.TestCase):
         self.assertEqual(new['subscription_bridges'][0]['server_name'],'edge.example.com')
         new['subscription_bridges'][0]['host']='foreign.example.com'
         with self.assertRaisesRegex(ValueError,'unknown_tls'):m.candidate_spec(new,self.target())
+
+    def test_execute_rejects_incomplete_ingress_metadata_before_creating_operation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory=Path(tmp)/'operation'
+            ingress=self.target();ingress.pop('status_port')
+            with self.assertRaisesRegex(ValueError,'cutover_ingress_metadata_invalid'):
+                m.execute({'bridge_ipv4':'192.0.2.1','subscription_domain':'sync.example.com',
+                           'ingress':ingress,'desired':{}},directory)
+            self.assertFalse(directory.exists())
+
+    def test_existing_legacy_journal_resumes_without_changing_original_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory=Path(tmp)/'operation';directory.mkdir(mode=0o700)
+            ingress={'domain':'edge.example.com','email':'ops@example.com','public_host':'edge.example.com',
+                     'path':'/connect','backend_port':18080}
+            plan={'bridge_ipv4':'192.0.2.1','subscription_domain':'sync.example.com',
+                  'ingress':ingress,'desired':{}}
+            fingerprint=m.digest(json.dumps({key:plan[key] for key in
+                ('bridge_ipv4','subscription_domain','ingress','desired')},sort_keys=True).encode())
+            m.save(directory/'journal.json',{'version':1,'plan':fingerprint,'phase':'finalizing'})
+            events=[]
+            class Host:
+                def __init__(self,*args):pass
+                def validate(self,published):events.append(('validate',published))
+                def finalize(self):events.append(('finalize',))
+            result=m.execute(plan,directory,Host)
+            self.assertEqual(result['cutover'],'complete')
+            self.assertEqual(events,[('validate',True),('finalize',)])
+            changed=copy.deepcopy(plan);changed['ingress']['gateway_port']=18081
+            with self.assertRaisesRegex(ValueError,'cutover_plan_changed'):
+                m.execute(changed,directory,Host)
 
     def test_probe_is_only_new_edge_preserves_user_and_fingerprint(self):
         profile={'outbounds':[{'protocol':'vless','tag':'old','settings':{'vnext':[{'address':'192.0.2.1','port':443,'users':[{'id':'monitor-fixture'}]}]},'streamSettings':{'network':'xhttp','security':'tls','tlsSettings':{'serverName':'old.example.com','fingerprint':'firefox'},'xhttpSettings':{'path':'/connect'}}},{'protocol':'freedom'}]}
@@ -208,9 +241,15 @@ class CutoverTests(unittest.TestCase):
                 renewal=mapped('/etc/letsencrypt/renewal/'+domain+'.conf');renewal.parent.mkdir(parents=True,exist_ok=True);renewal.write_text('authenticator = webroot')
                 mapped('/etc/letsencrypt/live/'+domain).mkdir(parents=True)
             host=object.__new__(m.Host);host.plan={'subscription_domain':'sync.example.com','ingress':self.target()}
+            host.allow_legacy_ingress=False
             from types import SimpleNamespace
             host.ingress=SimpleNamespace(MANIFEST=manifest)
             with patch.object(m,'Path',side_effect=mapped),patch.object(m,'private',side_effect=mapped),patch.object(m,'run') as run:
+                host.finalize()
+                legacy_ingress={'domain':'edge.example.com','email':'ops@example.com',
+                    'public_host':'edge.example.com','path':'/connect','backend_port':18080}
+                host.plan['ingress']=legacy_ingress
+                host.allow_legacy_ingress=True
                 host.finalize()
             backup=json.loads(mapped('/etc/ultra-recovery/backup.json').read_text())
             self.assertIn('/old/certificate',backup['state_paths'])
@@ -219,7 +258,7 @@ class CutoverTests(unittest.TestCase):
             deployment=json.loads(mapped('/etc/ultra-recovery/deployment.json').read_text())
             self.assertEqual(deployment['ingress_mode'],'direct')
             self.assertEqual(deployment['bridge_url'],'https://sync.example.com/healthz')
-            self.assertNotIn('forward_host',deployment['ingress'])
+            self.assertEqual(deployment['ingress'],legacy_ingress)
             self.assertEqual(run.call_args.args[0][2],'capture')
 
 if __name__=='__main__':unittest.main()

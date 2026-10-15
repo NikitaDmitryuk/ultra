@@ -123,6 +123,16 @@ func TestUpgradeDomainPolicyRejectsUnsupportedConfigOnlyChanges(t *testing.T) {
 	if err := validateUpgradeDomainPolicy(base, ingress, dns, automation); err != nil {
 		t.Fatalf("unchanged policy rejected: %v", err)
 	}
+	legacy := base
+	legacy.StagingPortMatches = false
+	legacy.StagingPortUnrecorded = true
+	if err := validateUpgradeDomainPolicy(legacy, ingress, dns, automation); err != nil {
+		t.Fatalf("unrecorded ephemeral staging port rejected: %v", err)
+	}
+	legacy.StagingPortMatches = true
+	if err := validateUpgradeDomainPolicy(legacy, ingress, dns, automation); err == nil {
+		t.Fatal("contradictory staging-port evidence accepted")
+	}
 	cases := []struct {
 		name string
 		edit func(*upgradeDomainEvidence, *installplan.AutomationIngress, *installplan.AutomationDNS, *installplan.AutomationConfig)

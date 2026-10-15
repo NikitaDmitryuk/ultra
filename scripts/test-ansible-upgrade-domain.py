@@ -38,6 +38,43 @@ def encoded(value):
 
 
 class UpgradeDomainTests(unittest.TestCase):
+    def make_inspection_root(self, root, ingress):
+        spec = {'role': 'bridge', 'primary_xhttp': {'published': True, 'port': 443,
+                'server_name': 'edge.example.com', 'host': 'public.example.com',
+                'path': '/old', 'backend_port': 18443, 'fingerprint': 'firefox'},
+                'experimental_profile_file': '/etc/ultra-relay/experimental-profile.json'}
+        write(root / 'etc/ultra-relay/spec.json', json.dumps(spec).encode())
+        write(root / 'etc/ultra-relay/environment', b'ULTRA_BOT_PORT=8444\n')
+        files = {
+            '/etc/nginx/conf.d/ultra-subscription.conf': b'server_name sync.example.com;\nproxy_ssl_name bot.example.com;\n',
+            '/etc/nginx/conf.d/ultra-vpn.conf': b'server_name edge.example.com;\n',
+        }
+        hashes = {}
+        for name, data in files.items():
+            write(root / name.lstrip('/'), data, 0o644)
+            hashes[name] = hashlib.sha256(data).hexdigest()
+        status_port = 18082
+        experimental_port = 18444
+        profile = {'host': 'public.example.com', 'endpoint': {'port': experimental_port,
+                   'server_name': 'edge.example.com', 'path': '/connect', 'mode': 'stream-up',
+                   'fingerprint': 'firefox'}, 'status_port': status_port}
+        profile_raw = json.dumps(profile).encode()
+        write(root / 'etc/ultra-relay/experimental-profile.json', profile_raw, 0o644)
+        hashes['/etc/ultra-relay/experimental-profile.json'] = hashlib.sha256(profile_raw).hexdigest()
+        write(root / 'var/lib/ultra-ingress/managed.json', json.dumps(hashes).encode())
+        write(root / 'etc/ultra-recovery/dns.json', json.dumps({'config': {'zone': 'example.com'}}).encode())
+        nodes = [{'name': 'NL', 'address': '192.0.2.2', 'provider': 'fixture',
+                  'budget': {'monthly_bytes': 1024, 'is_fallback': False}}]
+        write(root / 'etc/ultra-recovery/deployment.json', json.dumps({
+            'bridge_url': 'https://sync.example.com/healthz', 'bridge_ipv4': '192.0.2.1',
+            'bridge_provider': 'fixture', 'static_nodes': nodes,
+            'ingress_mode': 'direct', 'ingress': ingress,
+        }).encode())
+        write(root / 'etc/ultra-recovery/backup.json', json.dumps({'recipient': 'age1fixture', 'state_paths': [], 'artifact_paths': []}).encode(), 0o600)
+        write(root / 'etc/ultra-recovery/reconcile.json', json.dumps({'bridge_provider': 'fixture', 'static_nodes': nodes}).encode(), 0o600)
+        write(root / 'etc/ultra-recovery/admin-chat-id', b'123\n', 0o600)
+        return nodes
+
     def test_private_probe_file_binds_exact_bytes_and_observed_hostname(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'subscription-probe-url'
@@ -75,35 +112,12 @@ class UpgradeDomainTests(unittest.TestCase):
     def test_inspection_binds_public_path_and_bot_port_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            spec = {'role': 'bridge', 'primary_xhttp': {'published': True, 'port': 443,
-                    'server_name': 'edge.example.com', 'host': 'public.example.com',
-                    'path': '/old', 'backend_port': 18443, 'fingerprint': 'firefox'}}
-            write(root / 'etc/ultra-relay/spec.json', json.dumps(spec).encode())
-            write(root / 'etc/ultra-relay/environment', b'ULTRA_BOT_PORT=8444\n')
-            files = {
-                '/etc/nginx/conf.d/ultra-subscription.conf': b'server_name sync.example.com;\nproxy_ssl_name bot.example.com;\n',
-                '/etc/nginx/conf.d/ultra-vpn.conf': b'server_name edge.example.com;\n',
-            }
-            hashes = {}
-            for name, data in files.items():
-                write(root / name.lstrip('/'), data, 0o644)
-                hashes[name] = hashlib.sha256(data).hexdigest()
-            write(root / 'var/lib/ultra-ingress/managed.json', json.dumps(hashes).encode())
-            write(root / 'etc/ultra-recovery/dns.json', json.dumps({'config': {'zone': 'example.com'}}).encode())
             nodes = [{'name': 'NL', 'address': '192.0.2.2', 'provider': 'fixture',
                       'budget': {'monthly_bytes': 1024, 'is_fallback': False}}]
-            write(root / 'etc/ultra-recovery/deployment.json', json.dumps({
-                'bridge_url': 'https://sync.example.com/healthz', 'bridge_ipv4': '192.0.2.1',
-                'bridge_provider': 'fixture', 'static_nodes': nodes,
-                'ingress_mode': 'direct', 'ingress': {
-                    'email': 'ops@example.com', 'forward_host': '',
-                    'staging_port': 18443, 'status_port': 18082,
-                    'experimental_port': 18444,
-                },
-            }).encode())
-            write(root / 'etc/ultra-recovery/backup.json', json.dumps({'recipient': 'age1fixture', 'state_paths': [], 'artifact_paths': []}).encode(), 0o600)
-            write(root / 'etc/ultra-recovery/reconcile.json', json.dumps({'bridge_provider': 'fixture', 'static_nodes': nodes}).encode(), 0o600)
-            write(root / 'etc/ultra-recovery/admin-chat-id', b'123\n', 0o600)
+            ingress = {'email': 'ops@example.com', 'forward_host': '',
+                       'staging_port': 18443, 'status_port': 18082,
+                       'experimental_port': 18444}
+            nodes = self.make_inspection_root(root, ingress)
             desired = {'email': 'ops@example.com', 'forward_host': '', 'ingress_mode': 'direct',
                        'staging_port': 18443, 'status_port': 18082, 'experimental_port': 18444,
                        'age_recipient': 'age1fixture', 'bridge_provider': 'fixture', 'static_nodes': nodes,
@@ -122,6 +136,42 @@ class UpgradeDomainTests(unittest.TestCase):
             self.assertEqual(evidence['bridge_ipv4'], '192.0.2.1')
             self.assertTrue(evidence['state_paths_match'])
             self.assertTrue(evidence['artifact_paths_match'])
+
+    def test_legacy_missing_runtime_ports_are_reconstructed_only_from_managed_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ingress = {'email': 'ops@example.com', 'forward_host': ''}
+            self.make_inspection_root(root, ingress)
+            desired = {'email': 'ops@example.com', 'forward_host': '', 'ingress_mode': 'direct',
+                       'staging_port': 18443, 'status_port': 18082, 'experimental_port': 18444,
+                       'age_recipient': 'age1fixture', 'bridge_provider': 'fixture',
+                       'static_nodes': [{'name': 'NL', 'address': '192.0.2.2', 'provider': 'fixture',
+                           'budget': {'monthly_bytes': 1024, 'is_fallback': False}}],
+                       'admin_telegram_id': 123, 'bridge_ipv4': '192.0.2.1',
+                       'state_paths': [], 'artifact_paths': []}
+            evidence = domain.inspect(root, desired)
+            self.assertTrue(evidence['status_port_matches'])
+            self.assertTrue(evidence['experimental_port_matches'])
+            self.assertFalse(evidence['staging_port_matches'])
+            self.assertTrue(evidence['staging_port_unrecorded'])
+
+    def test_legacy_runtime_port_reconstruction_rejects_unmanaged_or_conflicting_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ingress = {'email': 'ops@example.com', 'forward_host': '', 'status_port': 18083}
+            self.make_inspection_root(root, ingress)
+            deployment = root / 'etc/ultra-recovery/deployment.json'
+            with self.assertRaisesRegex(ValueError, 'domain_experiment_profile_conflict'):
+                domain.inspect(root, {})
+            receipt_path = root / 'var/lib/ultra-ingress/managed.json'
+            receipt = json.loads(receipt_path.read_text())
+            receipt['/etc/ultra-relay/experimental-profile.json'] = '0' * 64
+            write(receipt_path, json.dumps(receipt).encode())
+            data = json.loads(deployment.read_text())
+            data['ingress'].pop('status_port')
+            write(deployment, json.dumps(data).encode())
+            with self.assertRaisesRegex(ValueError, 'domain_experiment_profile_unmanaged'):
+                domain.inspect(root, {})
 
     def test_inspection_fails_closed_when_policy_evidence_is_malformed(self):
         with tempfile.TemporaryDirectory() as tmp:

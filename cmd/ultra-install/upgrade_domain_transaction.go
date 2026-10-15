@@ -78,6 +78,7 @@ type upgradeDomainEvidence struct {
 	IngressModeMatches    bool   `json:"ingress_mode_matches"`
 	ForwardHostMatches    bool   `json:"forward_host_matches"`
 	StagingPortMatches    bool   `json:"staging_port_matches"`
+	StagingPortUnrecorded bool   `json:"staging_port_unrecorded"`
 	StatusPortMatches     bool   `json:"status_port_matches"`
 	ExperimentalPortMatch bool   `json:"experimental_port_matches"`
 	AgeRecipientMatches   bool   `json:"age_recipient_matches"`
@@ -239,7 +240,7 @@ func validateUpgradeDomainPolicy(e upgradeDomainEvidence, ingress *installplan.A
 	if !e.IngressModeMatches || !e.ForwardHostMatches {
 		return errors.New("upgrade_domain_ingress_mode_migration_required")
 	}
-	if !e.StagingPortMatches || !e.StatusPortMatches || !e.ExperimentalPortMatch {
+	if (!e.StagingPortMatches && !e.StagingPortUnrecorded) || (e.StagingPortMatches && e.StagingPortUnrecorded) || !e.StatusPortMatches || !e.ExperimentalPortMatch {
 		return errors.New("upgrade_domain_ingress_ports_migration_required")
 	}
 	if !e.AgeRecipientMatches {

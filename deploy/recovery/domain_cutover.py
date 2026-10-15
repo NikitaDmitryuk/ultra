@@ -24,6 +24,25 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def validate_ingress_metadata(value, allow_legacy=False):
+    if not isinstance(value, dict):
+        raise ValueError('cutover_ingress_metadata_invalid')
+    strings = ('domain', 'email', 'path', 'public_host')
+    if any(key not in value or not isinstance(value[key], str) or not value[key].strip()
+           for key in strings):
+        raise ValueError('cutover_ingress_metadata_invalid')
+    if 'forward_host' in value and not isinstance(value['forward_host'], str):
+        raise ValueError('cutover_ingress_metadata_invalid')
+    ports = ('backend_port', 'gateway_port', 'staging_port', 'status_port', 'experimental_port')
+    if allow_legacy and all(key not in value for key in ports[1:]):
+        ports = ports[:1]
+    if any(key not in value or type(value[key]) is not int or not 1024 <= value[key] <= 65535
+           for key in ports):
+        raise ValueError('cutover_ingress_metadata_invalid')
+    if len(ports) > 1 and len({value[key] for key in ports}) != len(ports):
+        raise ValueError('cutover_ingress_metadata_invalid')
+
+
 def run(args, **kwargs):
     result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             timeout=kwargs.pop('timeout', 60), **kwargs)
@@ -53,6 +72,7 @@ class Host:
         self.public_dropin = Path('/etc/systemd/system/ultra-bot.service.d/zz-domain-public-origin.conf')
         self.public_env = Path('/etc/ultra-relay/domain-public.env')
         self.stage = 'initializing'
+        self.allow_legacy_ingress = False
 
     def mark(self, stage):
         self.stage = stage
@@ -262,6 +282,7 @@ class Host:
         self.restart()
 
     def finalize(self):
+        validate_ingress_metadata(self.plan.get('ingress'), allow_legacy=self.allow_legacy_ingress)
         self.mark('finalize_inventory')
         # Retain old inventory and ingress. New aliases must survive disaster recovery too.
         backup_path=Path('/etc/ultra-recovery/backup.json')
@@ -312,6 +333,10 @@ class Host:
 
 def execute(plan, directory, host_factory=Host):
     directory = Path(directory)
+    journal = directory/'journal.json'
+    has_journal = journal.exists()
+    if not has_journal:
+        validate_ingress_metadata(plan.get('ingress'))
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
     if directory.is_symlink():raise ValueError('cutover_work_symlink')
     os.chmod(directory,0o700)
@@ -319,10 +344,17 @@ def execute(plan, directory, host_factory=Host):
     with os.fdopen(fd,'a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         fingerprint = digest(json.dumps({key:plan[key] for key in ('bridge_ipv4','subscription_domain','ingress','desired')},sort_keys=True).encode())
-        journal = directory/'journal.json'
         state = json.loads(private(journal).read_text()) if journal.exists() else {'version':1,'plan':fingerprint,'phase':'new'}
         if state.get('plan') != fingerprint:raise ValueError('cutover_plan_changed')
+        ingress = plan.get('ingress')
+        legacy_resume = (has_journal and state.get('phase') != 'new' and isinstance(ingress, dict) and
+                         all(key not in ingress for key in ('gateway_port', 'staging_port', 'status_port', 'experimental_port')))
+        if legacy_resume:
+            validate_ingress_metadata(ingress, allow_legacy=True)
+        else:
+            validate_ingress_metadata(ingress)
         host = host_factory(plan,directory)
+        host.allow_legacy_ingress = legacy_resume
         error = directory/'last-error.json'
         try:
             if state['phase']=='new':

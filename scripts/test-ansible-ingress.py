@@ -9,8 +9,20 @@ source = Path(__file__).resolve().parents[1] / 'deploy/ansible/library/ultra_ing
 specification = importlib.util.spec_from_file_location('state', source)
 state = importlib.util.module_from_spec(specification)
 specification.loader.exec_module(state)
-plan = {'domain': 'edge.example.com', 'public_host': 'edge.example.com', 'path': '/connect',
-        'backend_port': 18080, 'gateway_port': 18081, 'staging_port': 18443}
+plan = {'domain': 'edge.example.com', 'email': 'ops@example.com', 'forward_host': '',
+        'public_host': 'edge.example.com', 'path': '/connect',
+        'backend_port': 18080, 'gateway_port': 18081, 'staging_port': 18443,
+        'status_port': 18082, 'experimental_port': 18444}
+incomplete_plan = dict(plan)
+del incomplete_plan['status_port']
+try:
+    state.validate(incomplete_plan)
+    raise AssertionError('incomplete ingress policy was accepted')
+except ValueError:
+    pass
+documented_plan = dict(plan)
+del documented_plan['forward_host']
+state.validate(documented_plan)
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
     specification = root / 'spec.json'
@@ -347,9 +359,27 @@ assert "target['ingress'] = persisted_ingress(module.params['ingress'])" in fina
 finalizer_spec = importlib.util.spec_from_file_location('finalizer', source.with_name('ultra_cutover_finalize.py'))
 finalizer = importlib.util.module_from_spec(finalizer_spec)
 finalizer_spec.loader.exec_module(finalizer)
-metadata_ingress = finalizer.persisted_ingress({'domain': 'edge.example.com', 'path': '/connect',
-    'subscription_domain': 'sync.example.com', 'fingerprint': 'firefox', 'retain_aliases': True})
-assert metadata_ingress == {'domain': 'edge.example.com', 'path': '/connect'}
+complete_ingress = {'domain': 'edge.example.com', 'email': 'ops@example.com', 'path': '/connect',
+    'forward_host': '', 'public_host': 'public.example.com', 'backend_port': 18080,
+    'gateway_port': 18081, 'staging_port': 18443, 'status_port': 18082, 'experimental_port': 18444}
+metadata_ingress = finalizer.persisted_ingress(dict(complete_ingress, subscription_domain='sync.example.com',
+    fingerprint='firefox', retain_aliases=True))
+assert metadata_ingress == complete_ingress
+without_forward_host = dict(complete_ingress)
+del without_forward_host['forward_host']
+assert finalizer.persisted_ingress(without_forward_host)['forward_host'] == ''
+for missing_or_invalid in (
+        {key: value for key, value in complete_ingress.items() if key != 'status_port'},
+        dict(complete_ingress, status_port='18082'),
+        dict(complete_ingress, experimental_port=True),
+        dict(complete_ingress, experimental_port=18082),
+):
+    try:
+        finalizer.persisted_ingress(missing_or_invalid)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('incomplete or invalid ingress recovery metadata was accepted')
 assert finalizer.merge_backup_paths(['/etc/ultra-relay', '/srv/old'], ['/srv/new']) == [
     '/etc/ultra-relay', '/srv/new', '/srv/old']
 backup_inventory = {'state_paths': ['/etc/ultra-relay', '/srv/old-state'],

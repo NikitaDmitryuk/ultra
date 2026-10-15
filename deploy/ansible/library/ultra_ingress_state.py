@@ -35,15 +35,19 @@ def atomic(path, content, mode=0o600):
 def validate(plan):
     if not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', plan['domain']) or '..' in plan['domain']:
         raise ValueError('invalid_domain')
+    for key in ('email', 'public_host'):
+        value = plan.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('invalid_ingress_policy')
+    if 'forward_host' in plan and not isinstance(plan['forward_host'], str):
+        raise ValueError('invalid_ingress_policy')
     if not re.fullmatch(r'/[a-zA-Z0-9_-]+', plan['path']):
         raise ValueError('invalid_http_path')
     if plan.get('fingerprint', 'firefox') not in ('chrome', 'firefox'):
         raise ValueError('invalid_fingerprint')
     ports = []
     for key in ('backend_port', 'gateway_port', 'staging_port', 'status_port', 'experimental_port'):
-        if key not in plan and key in ('status_port', 'experimental_port'):
-            continue
-        value = plan[key]
+        value = plan.get(key)
         if type(value) is not int or not 1024 <= value <= 65535:
             raise ValueError('invalid_port')
         ports.append(value)
