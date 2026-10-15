@@ -11,6 +11,7 @@
         candidate_id: "{{ ultra_forward_candidate_id }}"
         expected_brokers: "{{ ultra_forward_expected_brokers }}"
         target_broker: "{{ ultra_forward_target_broker }}"
+        previous_broker: "{{ ultra_forward_previous_broker | default({}) }}"
     - name: Install only immutable broker runtime and service
       ansible.builtin.include_role:
         name: controller
@@ -29,6 +30,7 @@
         candidate_id: "{{ ultra_forward_candidate_id }}"
         expected_brokers: "{{ ultra_forward_expected_brokers }}"
         target_broker: "{{ ultra_forward_target_broker }}"
+        previous_broker: "{{ ultra_forward_previous_broker | default({}) }}"
     - name: Record the broker-only installation acknowledgement
       ansible.builtin.copy:
         content: "{{ {'verified': true, 'old_id': ultra_forward_old_id, 'controller_directory': ultra_controller_directory} | to_json }}"

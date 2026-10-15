@@ -20,6 +20,15 @@ type forwardBrokerIdentity struct {
 	UnitSHA      string `json:"unit_sha256"`
 }
 
+// forwardBrokerPredecessor identifies the independently managed controller
+// that inspection found before the predecessor upgrade. Its release assets
+// are verified on the bridge against retained operator input before recovery
+// accepts it; this record deliberately does not assert binary hashes itself.
+type forwardBrokerPredecessor struct {
+	Directory string `json:"directory"`
+	UnitSHA   string `json:"unit_sha256"`
+}
+
 // forwardBrokerVariables derives the only controller identities that may be
 // running before broker recovery: the predecessor request's fully verifiable
 // previous controller or its target controller. It also returns the exact identity for
@@ -201,10 +210,21 @@ func forwardBrokerVariables(old forwardOldOperation, target *automationRelease) 
 	if !containsForwardBrokerIdentity(allowed, targetIdentity) {
 		allowed = append(allowed, targetIdentity)
 	}
-	return map[string]any{
+	variables := map[string]any{
 		"ultra_forward_expected_brokers": allowed,
 		"ultra_forward_target_broker":    targetIdentity,
-	}, nil
+	}
+	previousDirectory, directoryErr = readBridgeString("ultra_previous_controller_directory")
+	previousUnitSHA, unitErr = readBridgeString("ultra_previous_controller_unit_sha256")
+	if directoryErr == nil && unitErr == nil &&
+		regexp.MustCompile(`^/opt/ultra-ansible/releases/managed-v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$`).MatchString(previousDirectory) &&
+		sha256DigestPattern.MatchString(previousUnitSHA) {
+		variables["ultra_forward_previous_broker"] = forwardBrokerPredecessor{
+			Directory: previousDirectory,
+			UnitSHA:   previousUnitSHA,
+		}
+	}
+	return variables, nil
 }
 
 func containsForwardBrokerIdentity(values []forwardBrokerIdentity, target forwardBrokerIdentity) bool {

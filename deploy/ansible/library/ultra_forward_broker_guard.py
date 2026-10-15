@@ -4,9 +4,11 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import platform
 import re
 import stat
 import subprocess
+import tarfile
 
 ROOT = Path('/var/lib/ultra-ansible')
 UNIT = '/etc/systemd/system/ultra-ansible-controller.service'
@@ -113,6 +115,95 @@ def validate_identity(identity):
         raise ValueError('forward_broker_identity_invalid')
 
 
+def retained_private(path, directory=False):
+    """Reject links and untrusted ownership at every retained path component."""
+    source = Path(path)
+    metadata = source.lstat()
+    valid_type = stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode)
+    if (not valid_type or metadata.st_uid != 0 or metadata.st_mode & 0o077
+            or (not directory and metadata.st_nlink != 1)):
+        raise ValueError('forward_broker_retained_evidence_invalid')
+    return metadata
+
+
+def retained_asset(release, manifest, name):
+    assets = manifest.get('assets')
+    if not isinstance(assets, list) or any(not isinstance(item, dict) for item in assets):
+        raise ValueError('forward_broker_retained_evidence_invalid')
+    matches = [item for item in assets if item.get('name') == name]
+    if len(matches) != 1:
+        raise ValueError('forward_broker_retained_evidence_invalid')
+    asset = matches[0]
+    digest, size = asset.get('sha256'), asset.get('size')
+    if (not isinstance(digest, str) or not SHA256.fullmatch(digest)
+            or type(size) is not int or not 0 < size <= 2147483648):
+        raise ValueError('forward_broker_retained_evidence_invalid')
+    path = release / name
+    metadata = retained_private(path)
+    if metadata.st_size != size or regular_digest(path) != digest:
+        raise ValueError('forward_broker_retained_evidence_invalid')
+    return digest
+
+
+def retained_previous_identity(previous):
+    # This is historical root-owned build provenance, not signature validation.
+    # Only the predecessor-frozen directory and unit digest select the release.
+    if not isinstance(previous, dict) or set(previous) != {'directory', 'unit_sha256'}:
+        raise ValueError('forward_broker_identity_invalid')
+    directory, unit_sha = previous['directory'], previous['unit_sha256']
+    match = re.fullmatch(r'/opt/ultra-ansible/releases/managed-(v0[.]0[.]([0-9]+))', directory) if isinstance(directory, str) else None
+    if (not match or not isinstance(unit_sha, str) or not SHA256.fullmatch(unit_sha)
+            or len(match[2]) > 49):
+        raise ValueError('forward_broker_identity_invalid')
+    version = match[1]
+    commit = format(int(match[2]), '040x')
+    if len(commit) != 40 or version != 'v0.0.' + str(int(commit, 16)):
+        raise ValueError('forward_broker_identity_invalid')
+    architecture = {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(platform.machine())
+    if architecture is None:
+        raise ValueError('forward_broker_retained_evidence_invalid')
+    inputs = ROOT / 'operator-inputs'
+    retained_private(ROOT, True)
+    retained_private(inputs, True)
+    entries = list(inputs.iterdir())
+    if len(entries) > 4096:
+        raise ValueError('forward_broker_retained_evidence_invalid')
+    candidates = [entry for entry in entries
+                  if re.fullmatch('manual-' + commit + r'-[a-f0-9]{64}', entry.name)]
+    if len(candidates) != 1:
+        raise ValueError('forward_broker_retained_evidence_invalid')
+    retained_private(candidates[0], True)
+    release = candidates[0] / 'release'
+    retained_private(release, True)
+    manifest_path = release / 'release-manifest.json'
+    retained_private(manifest_path)
+    manifest = private_json(manifest_path, 1048576)
+    if (not isinstance(manifest, dict) or type(manifest.get('schema_version')) is not int
+            or manifest['schema_version'] != 1 or manifest.get('version') != version
+            or manifest.get('source_commit') != commit):
+        raise ValueError('forward_broker_retained_evidence_invalid')
+    installer = retained_asset(release, manifest, 'ultra-install-linux-' + architecture)
+    runtime = retained_asset(release, manifest, 'ultra-ansible-runtime-linux-' + architecture + '.tar.gz')
+    retained_asset(release, manifest, 'ultra-ansible.tar.gz')
+    template_name = 'roles/controller/templates/ultra-ansible-controller.service.j2'
+    templates = []
+    with tarfile.open(release / 'ultra-ansible.tar.gz', 'r:gz') as archive:
+        for count, member in enumerate(archive):
+            if count >= 10000:
+                raise ValueError('forward_broker_retained_evidence_invalid')
+            if member.name == template_name:
+                if not member.isfile() or not 0 < member.size <= 65536:
+                    raise ValueError('forward_broker_retained_evidence_invalid')
+                templates.append(archive.extractfile(member).read().decode('utf-8', errors='strict'))
+    if len(templates) != 1:
+        raise ValueError('forward_broker_retained_evidence_invalid')
+    unit = templates[0].replace('{{ ultra_controller_directory }}', directory)
+    if hashlib.sha256(unit.encode()).hexdigest() != unit_sha:
+        raise ValueError('forward_broker_retained_evidence_invalid')
+    return {'directory': directory, 'unit_sha256': unit_sha,
+            'installer_sha256': installer, 'runtime_sha256': runtime}
+
+
 def verify(params):
     if os.geteuid() != 0:
         raise ValueError('forward_broker_root_required')
@@ -131,7 +222,9 @@ def verify(params):
     matches = [broker_matches(item) for item in expected]
     target_matches = broker_matches(target)
     if action == 'before' and not any(matches):
-        raise ValueError('forward_broker_predecessor_mismatch')
+        previous = params.get('previous_broker', {})
+        if not previous or not broker_matches(retained_previous_identity(previous)):
+            raise ValueError('forward_broker_predecessor_mismatch')
     if action == 'after' and not target_matches:
         raise ValueError('forward_broker_target_mismatch')
     return {'verified': True, 'old_id': old_id, 'candidate_id': candidate_id,
@@ -146,11 +239,12 @@ def main():
         'candidate_id': {'type': 'str', 'required': True},
         'expected_brokers': {'type': 'list', 'elements': 'dict', 'required': True},
         'target_broker': {'type': 'dict', 'required': True},
+        'previous_broker': {'type': 'dict', 'default': {}},
     }, supports_check_mode=True)
     try:
         result = verify(module.params)
     except (OSError, ValueError, KeyError, TypeError, UnicodeError, json.JSONDecodeError,
-            subprocess.TimeoutExpired):
+            subprocess.TimeoutExpired, tarfile.TarError, EOFError):
         module.fail_json(msg='forward_broker_identity_unverified')
     module.exit_json(changed=False, **result)
 

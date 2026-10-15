@@ -371,12 +371,18 @@ stage receipts и отсутствие activation.
 
 Если текущий broker не поддерживает atomic lifecycle supersede, upgrade сначала
 проверяет его работающую identity и выполняет broker-only bootstrap из подписанного
-кандидата, удерживая predecessor lock. После restart тот же lock принимается новым
-broker; затем выполняются свежий fleet census, сохранение handoff intent и
-supersede. Повтор разрешён только для того же кандидата; неполный bootstrap stage,
-неизвестные файлы, изменение входов, activation, другой lifecycle или несовпадение
-broker identity блокируют продолжение. При ошибке lifecycle остаётся закрытым в
-`applying`; этот путь не восстанавливает неизвестный relay и не меняет БД.
+кандидата, удерживая predecessor lock. Для независимо обновлённого Ansible
+controller frozen inventory может дополнительно закрепить его managed directory и
+SHA-256 unit-файла. Fallback допускается только при отсутствии обычного совпадения и
+только если единственный сохранённый root-owned private operator input подтверждает
+тот же source commit, installer/runtime assets и отрендеренный unit; проверяются
+хеши и происхождение сохранённой сборки, но не Minisign-подпись этого старого input.
+После restart тот же lock принимается новым broker; затем выполняются свежий fleet
+census, сохранение handoff intent и supersede. Повтор разрешён только для того же
+кандидата; неполный bootstrap stage, неизвестные файлы, изменение входов, activation,
+другой lifecycle или несовпадение broker identity блокируют продолжение. При
+отсутствующих, неоднозначных или повреждённых доказательствах lifecycle остаётся
+закрытым в `applying`; этот путь не восстанавливает неизвестный relay и не меняет БД.
 `RETRY_FAILED=1` не разрешает использовать failed candidate как predecessor.
 Для принятия уже работающего runtime используйте
 явный запуск:

@@ -116,6 +116,44 @@ func TestForwardBrokerVariablesBindPreviousAndCandidateIdentities(t *testing.T) 
 	}
 }
 
+func TestForwardBrokerVariablesRetainIndependentControllerProvenance(t *testing.T) {
+	old, target, _, _ := forwardBrokerVariablesFixture(t)
+	path := filepath.Join(old.Directory, "activate", "request.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request map[string]any
+	if err := json.Unmarshal(raw, &request); err != nil {
+		t.Fatal(err)
+	}
+	bridge := request["inventory"].(map[string]any)["all"].(map[string]any)["children"].(map[string]any)["bridge"].(map[string]any)["hosts"].(map[string]any)["bridge"].(map[string]any)
+	independentDirectory := managedControllerDirectory("v0.0.9")
+	independentUnitSHA := strings.Repeat("9", 64)
+	bridge["ultra_previous_controller_directory"] = independentDirectory
+	bridge["ultra_previous_controller_unit_sha256"] = independentUnitSHA
+	requestRaw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, requestRaw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	proof := map[string]any{"schema_version": 1, "operation": "upgrade", "request_sha256": digestSHA256(requestRaw), "binary_sha256": digestSHA256(requestRaw)}
+	for _, name := range []string{"job.json", "receipt.json"} {
+		writeForwardJSON(t, filepath.Join(old.Directory, "activate", name), proof)
+	}
+
+	variables, err := forwardBrokerVariables(old, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := variables["ultra_forward_previous_broker"].(forwardBrokerPredecessor)
+	if !ok || got != (forwardBrokerPredecessor{Directory: independentDirectory, UnitSHA: independentUnitSHA}) {
+		t.Fatalf("independent controller provenance not retained: %#v", variables)
+	}
+}
+
 func brokerTestManifest(version, commit, fill string) *automationRelease {
 	manifest := &automationRelease{Version: version, SourceCommit: commit}
 	for _, name := range []string{"ultra-install-linux-amd64", "ultra-ansible-runtime-linux-amd64.tar.gz"} {
