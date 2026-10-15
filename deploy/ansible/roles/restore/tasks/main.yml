@@ -1,4 +1,8 @@
 ---
+- name: Preserve the target controller enforcement floor before restore mutation
+  ansible.builtin.include_role:
+    name: release
+    tasks_from: controller-rollback-preflight
 - name: Validate fixed restore phase and private target
   ansible.builtin.assert:
     that:

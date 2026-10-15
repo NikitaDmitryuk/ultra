@@ -75,6 +75,23 @@
         executable: /usr/bin/python3
       changed_when: false
       no_log: true
+    - name: Stop the identified legacy bridge before changing exits
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: stopped
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
+    - name: Prove all legacy producers are stopped and original configuration is unchanged
+      ultra_upgrade_maintenance:
+        id: "{{ ultra_lifecycle_id }}"
+        legacy_sha256: "{{ ultra_legacy_bridge_sha256 }}"
+        phase: stopped
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
+    - name: Require unchanged database identity and drained writers before the final dump
+      ultra_database_preservation:
+        id: "{{ ultra_lifecycle_id }}"
+        phase: stopped
+      no_log: true
+      when: ultra_forward_only | default(false) | bool
     - name: Freeze recovery provenance and a new capture watermark with producers stopped
       ultra_upgrade_maintenance:
         id: "{{ ultra_lifecycle_id }}"
@@ -103,17 +120,12 @@
         legacy_sha256: "{{ ultra_legacy_bridge_sha256 }}"
         phase: recovery-ready
       when: ultra_legacy_bridge_maintenance | default(false) | bool
-    - name: Stop the identified legacy bridge before changing exits
-      ansible.builtin.systemd_service:
-        name: ultra-relay.service
-        state: stopped
-      when: ultra_legacy_bridge_maintenance | default(false) | bool
-    - name: Prove all legacy producers are stopped and original configuration is unchanged
-      ultra_upgrade_maintenance:
+    - name: Require a validated fresh independently delivered dump before activating any binary
+      ultra_database_preservation:
         id: "{{ ultra_lifecycle_id }}"
-        legacy_sha256: "{{ ultra_legacy_bridge_sha256 }}"
-        phase: stopped
-      when: ultra_legacy_bridge_maintenance | default(false) | bool
+        phase: capture-ready
+      no_log: true
+      when: ultra_forward_only | default(false) | bool
     - name: Reinspect frozen topology after the legacy process has stopped
       ansible.builtin.script:
         cmd: "{{ playbook_dir }}/../roles/release/files/state.py --expected {{ ultra_topology_sha256 }}"

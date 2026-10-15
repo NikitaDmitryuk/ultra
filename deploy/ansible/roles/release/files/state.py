@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -39,6 +40,30 @@ def runtime_node_proofs(database, nodes):
             raise ValueError('runtime_identity_unavailable')
         node['tunnel_identity_digest'] = hashlib.sha256(tunnel.encode()).hexdigest()
         node['certificate_pin'] = pin
+
+
+def active_relay_sha256():
+    """Bind maintenance to the exact bridge process observed during preflight."""
+    result = subprocess.run(['systemctl', 'show', 'ultra-relay.service',
+                             '--property=ActiveState', '--property=MainPID', '--property=ControlPID'],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            check=True, timeout=8).stdout.decode().splitlines()
+    fields = dict(line.split('=', 1) for line in result if '=' in line)
+    pid = fields.get('MainPID', '')
+    binary = Path('/usr/local/bin/ultra-relay')
+    executable = Path('/proc') / pid / 'exe'
+    metadata = binary.lstat() if binary.exists() else None
+    if (fields.get('ActiveState') != 'active' or not pid.isdigit() or pid == '0'
+            or fields.get('ControlPID') != '0' or metadata is None
+            or stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != 0 or metadata.st_mode & 0o022
+            or executable.resolve() != binary):
+        raise ValueError('active_relay_identity_unavailable')
+    binary_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
+    process_hash = hashlib.sha256(executable.read_bytes()).hexdigest()
+    if binary_hash != process_hash:
+        raise ValueError('active_relay_identity_changed')
+    return process_hash
 
 
 def main():
@@ -118,7 +143,7 @@ def main():
         raise ValueError('controller_unit_invalid')
     controller_unit_hash = hashlib.sha256(controller_unit.read_bytes()).hexdigest()
     auto_policy = read('/etc/ultra-ansible/auto-upgrade.json') if Path('/etc/ultra-ansible/auto-upgrade.json').exists() else {'enabled': False}
-    print(json.dumps({'nodes': nodes, 'runtime_nodes': {n['id']: {k: n.get(k) for k in ('name', 'managed', 'tunnel_identity_digest', 'certificate_pin')} for n in nodes}, 'topology_sha256': digest, 'architecture': architecture, 'observed_at': int(now), 'database_schema': schema_max,
+    print(json.dumps({'nodes': nodes, 'runtime_nodes': {n['id']: {k: n.get(k) for k in ('name', 'managed', 'tunnel_identity_digest', 'certificate_pin')} for n in nodes}, 'topology_sha256': digest, 'architecture': architecture, 'observed_at': int(now), 'database_schema': schema_max, 'active_relay_sha256': active_relay_sha256(),
                       'identity': identity.read_text(), 'previous_manifest': previous, 'previous_manifest_sha256': hashlib.sha256(Path('/opt/ultra-recovery/release-manifest.json').read_bytes()).hexdigest(), 'tool_hashes': tool_hashes, 'auto_policy': auto_policy, 'controller_directory': controller_directory, 'controller_unit_sha256': controller_unit_hash}))
 
 

@@ -169,6 +169,8 @@ def stage_manifests(stage):
                 if not name.startswith('state/'):
                     raise ValueError('invalid_state_inventory')
                 destination(name.removeprefix('state/'))
+    restore_controller_floor(state)
+    restore_controller_floor(artifacts)
     files = artifacts['files']
     for name in ('usr/local/bin/ultra-relay', 'usr/local/bin/ultra-bot'):
         if name not in files:
@@ -186,6 +188,16 @@ def stage_manifests(stage):
     if not isinstance(release.get('database_schema_min'), int) or not isinstance(release.get('database_schema_max'), int):
         raise ValueError('release_schema_bounds_required')
     return state, artifacts
+
+
+def restore_controller_floor(state):
+    # The old restore format carries no proof that its selected immutable
+    # controller enforces retirement. An authenticated generation is not a
+    # capability proof; refuse activation until an enforcing migration exists.
+    floor = state.get('controller_enforcement_floor', 0)
+    ledger = 'state/var/lib/ultra-ansible/lifecycle-retired.json'
+    if type(floor) is not int or floor != 0 or ledger in state.get('files', {}):
+        raise ValueError('controller_enforcement_migration_required')
 
 
 def read_private(path):
@@ -256,6 +268,7 @@ SAFE_ERROR_CODES = frozenset((
     'bridge_manifests_required',
     'checksum',
     'configuration_too_large',
+    'controller_enforcement_migration_required',
     'database_intent_changed',
     'database_not_created_by_this_restore',
     'database_restore_requires_inactive_apps',

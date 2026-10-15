@@ -117,7 +117,7 @@ func runUpgradeRuntimePhase(ctx context.Context, p *installplan.InstallPlan, ins
 		return err
 	}
 	variables := map[string]any{}
-	for _, key := range []string{"ultra_lock_directory", "ultra_release_manifest", "ultra_release_source", "ultra_release_version"} {
+	for _, key := range []string{"ultra_lock_directory", "ultra_release_manifest", "ultra_release_source", "ultra_release_version", "ultra_lifecycle_id", "ultra_forward_only"} {
 		variables[key] = releaseVariables[key]
 	}
 	authorizeUpgradeDomainRequest(requests, releaseVariables)

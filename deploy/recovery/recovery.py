@@ -312,6 +312,60 @@ def diagnostic_status(config, successful, snapshot, completed):
                 group=grp.getgrnam('ultra-relay').gr_gid)
 
 
+CONTROLLER_RETIREMENT_PATH = '/var/lib/ultra-ansible/lifecycle-retired.json'
+LIFECYCLE_PATH = '/var/lib/ultra-ansible/lifecycle.json'
+DATABASE_PRESERVATION_ROOT = Path('/var/lib/ultra-ansible/upgrade')
+
+
+def capture_state_paths(config):
+    paths = list(config['state_paths'])
+    for raw in config.get('optional_state_paths', []):
+        path = Path(raw)
+        if path.is_symlink():
+            raise ValueError('controller_enforcement_migration_required')
+        if path.exists():
+            if not path.is_file():
+                raise ValueError('controller_enforcement_migration_required')
+            paths.append(raw)
+    # Retirement state is an enforcement floor, even when the installed backup
+    # policy predates this file. Reselect it around every dump like other state.
+    retirement = Path(CONTROLLER_RETIREMENT_PATH)
+    if retirement.is_symlink():
+        raise ValueError('controller_enforcement_migration_required')
+    if retirement.exists():
+        if not retirement.is_file():
+            raise ValueError('controller_enforcement_migration_required')
+        paths.append(str(private(retirement)))
+    # Existing policies predate DB preservation. Carry the current operation's
+    # anchor even before policy publication, and reselect around every dump.
+    lifecycle_path = Path(LIFECYCLE_PATH)
+    if lifecycle_path.is_symlink():
+        raise ValueError('database_preservation_capture_invalid')
+    if lifecycle_path.exists():
+        lifecycle = read_config(lifecycle_path)
+        operation = lifecycle.get('id', '')
+        if not isinstance(operation, str) or not re.fullmatch(r'[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}', operation):
+            raise ValueError('database_preservation_capture_invalid')
+        paths.append(str(lifecycle_path))
+        directory = DATABASE_PRESERVATION_ROOT / operation
+        anchor = directory / 'database-preservation.json'
+        if DATABASE_PRESERVATION_ROOT.is_symlink() or directory.is_symlink() or anchor.is_symlink():
+            raise ValueError('database_preservation_capture_invalid')
+        if anchor.exists():
+            paths.append(str(private(anchor)))
+    return sorted(set(paths))
+
+
+def validate_database_dump(path):
+    if not path.is_file() or path.stat().st_size == 0:
+        raise ValueError('database dump validation failed')
+    # A root-only capture directory is not traversable by postgres, so validate
+    # the archive under the same root identity that owns the capture.
+    result = run(['pg_restore', '--list', str(path)], stdout=subprocess.PIPE)
+    if not any(line.strip() and not line.lstrip().startswith(b';') for line in result.stdout.splitlines()):
+        raise ValueError('database dump validation failed')
+
+
 def create(config):
     source = config['source']
     repo = repository(config['repository'], source)
@@ -325,7 +379,7 @@ def create(config):
         with tempfile.TemporaryDirectory(prefix='.capture-', dir=repo) as work:
             work = Path(work)
             artifact_paths = capture_artifact_paths(config)
-            before = collect(config['state_paths'], artifact_paths)
+            before = collect(capture_state_paths(config), artifact_paths)
             artifacts = collect(artifact_paths)
             artifact_manifest = json.dumps(artifacts, sort_keys=True).encode()
             artifact_id = hashlib.sha256(artifact_manifest).hexdigest()
@@ -344,15 +398,19 @@ def create(config):
             dump = work / 'database.dump'
             with dump.open('wb') as stream:
                 run(['runuser', '-u', 'postgres', '--', 'pg_dump', '-Fc', '--no-owner', '--no-acl', config['database']], stdout=stream)
-            if collect(config['state_paths'], artifact_paths) != before:
+            if collect(capture_state_paths(config), artifact_paths) != before:
                 raise ValueError('configuration changed during capture; retry next interval')
+            # Parse the entire custom-archive TOC before encrypting or delivering.
+            # This verifies archive readability; it is not a restore rehearsal.
+            validate_database_dump(dump)
             bundle = work / 'backup.tar.gz'
             files = {'state/' + name: Path('/') / name for name in before}
             files['database.dump'] = dump
             pack(bundle, {'kind': 'backup', 'source': source, 'snapshot_at': snapshot,
-                          'artifact': artifact.name, 'database': config['database']}, files)
+                          'artifact': artifact.name, 'database': config['database'],
+                          'controller_enforcement_floor': int(CONTROLLER_RETIREMENT_PATH.lstrip('/') in before)}, files)
             # Hash again after archive reads to avoid pairing a dump with changed keys.
-            if collect(config['state_paths'], artifact_paths) != before:
+            if collect(capture_state_paths(config), artifact_paths) != before:
                 raise ValueError('configuration changed during archive')
             if capture_artifact_paths(config) != artifact_paths or collect(artifact_paths) != artifacts:
                 raise ValueError('binary artifacts changed during capture')
@@ -379,7 +437,7 @@ def create(config):
                 raise ValueError('backup exceeded freshness budget')
             completed = int(time.time())
             atomic_json(repo / 'last-success.json', {'source': source, 'snapshot_at': snapshot,
-                         'completed_at': completed, 'destinations': successful,
+                         'completed_at': completed, 'destinations': successful, 'dump_verified': True,
                          'backup_name': encrypted.name, 'backup_sha256': digest(encrypted),
                          'artifact_name': artifact.name, 'artifact_sha256': digest(artifact),
                          'delivered_target_ids': [item.get('id', item.get('name', item['host'])) for item in destinations if item['host'] in successful]})

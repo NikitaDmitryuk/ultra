@@ -27,6 +27,7 @@ type upgradeInspection struct {
 	ToolHashes          map[string]string                     `json:"tool_hashes"`
 	AutoPolicy          map[string]any                        `json:"auto_policy"`
 	ObservedAt          int64                                 `json:"observed_at"`
+	ActiveRelaySHA256   string                                `json:"active_relay_sha256"`
 	Architecture        string                                `json:"architecture"`
 	TopologySHA         string                                `json:"topology_sha256"`
 	Identity            string                                `json:"identity"`
@@ -42,7 +43,11 @@ type upgradeInspection struct {
 
 // Upgrade retains a frozen private job directory across process/SSH failures.
 // It never falls back to the former SSH installer after an Ansible error.
-func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir, directory, python, executable string, retryFailed bool) (returnErr error) {
+func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir, directory, python, executable string, retryFailed bool, forwardOnlyOption ...bool) (returnErr error) {
+	forwardOnly := len(forwardOnlyOption) == 1 && forwardOnlyOption[0]
+	if len(forwardOnlyOption) > 1 || (forwardOnly && retryFailed) {
+		return errors.New("upgrade_forward_only_arguments_invalid")
+	}
 	if err := installplan.ValidatePlan(p); err != nil {
 		return err
 	}
@@ -133,11 +138,48 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		return err
 	}
 	defer runtimeRelease()
-	ctx, releaseLock, err := withFrozenLifecycleLock(operatorCtx, p, lockDirectory, directory)
+	var releaseLock func()
+	if forwardOnly {
+		ctx, releaseLock, err = withForwardUpgradeHandoff(operatorCtx, p, lockDirectory, directory, python, executable)
+	} else {
+		ctx, releaseLock, err = withFrozenLifecycleLock(operatorCtx, p, lockDirectory, directory)
+	}
 	if err != nil {
 		return err
 	}
 	lockHeld := true
+	forwardReleaseComplete := false
+	if forwardOnly {
+		defer func() {
+			if returnErr == nil || forwardReleaseComplete {
+				return
+			}
+			returnErr = errors.Join(returnErr, containForwardUpgradeFailure(operatorCtx, forwardMaintenanceDeps{
+				attach: func(cleanup context.Context) (context.Context, func(), error) {
+					cleanup, release, leaseErr := withFrozenLifecycleLock(cleanup, p, lockDirectory, directory)
+					if leaseErr != nil {
+						return cleanup, nil, leaseErr
+					}
+					if leaseErr = (deployansible.Client{Socket: lifecycleSocket()}).ResumeLifecycleWithOperationLock(cleanup, lifecycleID(directory)); leaseErr != nil {
+						release()
+						return cleanup, nil, leaseErr
+					}
+					return cleanup, release, nil
+				},
+				stop: func(cleanup context.Context) error {
+					proof, ok := operatorCtx.Value(forwardUpgradeJournalKey{}).(forwardUpgradeJournal)
+					if !ok {
+						return errors.New("upgrade_forward_maintenance_fleet_unverified")
+					}
+					old, proofErr := discoverForwardOldOperation(proof, lockDirectory)
+					if proofErr != nil {
+						return proofErr
+					}
+					return stopForwardUpgradeFleet(cleanup, old.Inventory, lockDirectory, directory, python, executable)
+				},
+			}))
+		}()
+	}
 	defer func() {
 		if lockHeld {
 			releaseLock()
@@ -190,6 +232,9 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if activationStateErr != nil && !os.IsNotExist(activationStateErr) {
 		return activationStateErr
 	}
+	if forwardOnly && activationStateErr == nil {
+		return errors.New("upgrade_forward_only_requires_fresh_operation")
+	}
 	// Reserve first, then install same-ID recovery before inspection or drain can
 	// fail. A failed or ambiguous reservation response never authorizes cleanup.
 	reservation, reserveErr := ansibleLifecycleReserve(ctx, p, inventory, directory, python, executable, "applying")
@@ -200,7 +245,7 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		return errors.New("upgrade_lifecycle_reservation_unverified")
 	}
 	defer func() {
-		if !preActivation || returnErr == nil || !os.IsNotExist(activationStateErr) {
+		if forwardOnly || !preActivation || returnErr == nil || !os.IsNotExist(activationStateErr) {
 			return
 		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
@@ -231,7 +276,11 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err = json.Unmarshal(raw, &inspection); err != nil {
 		return errors.New("upgrade_inspection_invalid")
 	}
-	if err = compatibleAnsibleRelease(&inspection.Previous, manifest); err != nil {
+	if forwardOnly {
+		// The active bridge bytes are explicitly known to differ from the last
+		// signed release. Validate the signed target and its DB schema below,
+		// without representing unknown active bytes as a rollback candidate.
+	} else if err = compatibleAnsibleRelease(&inspection.Previous, manifest); err != nil {
 		return err
 	}
 	if inspection.DatabaseSchema < manifest.DatabaseSchemaMin || inspection.DatabaseSchema > manifest.DatabaseSchemaMax {
@@ -284,13 +333,23 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 			nodes[alias].(map[string]any)["ultra_host_previous_manifest"] = baseline.Exits[node.ID]
 		}
 	}
+	previousRelayAsset, previousRelayErr := upgradeAsset(relayPrevious, "ultra-relay-linux-"+inspection.Architecture)
 	legacyBridgeMaintenance = !hasAutomationCapability(relayPrevious, "lifecycle-gate-v1")
+	if forwardOnly && (previousRelayErr != nil || inspection.ActiveRelaySHA256 != previousRelayAsset.SHA) {
+		legacyBridgeMaintenance = true
+	}
 	if legacyBridgeMaintenance {
-		asset, assetErr := upgradeAsset(relayPrevious, "ultra-relay-linux-"+inspection.Architecture)
-		if assetErr != nil {
-			return errors.New("upgrade_legacy_bridge_identity_unavailable")
+		if forwardOnly {
+			if !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(inspection.ActiveRelaySHA256) {
+				return errors.New("upgrade_legacy_bridge_identity_unavailable")
+			}
+			legacyBridgeSHA = inspection.ActiveRelaySHA256
+		} else {
+			if previousRelayErr != nil {
+				return errors.New("upgrade_legacy_bridge_identity_unavailable")
+			}
+			legacyBridgeSHA = previousRelayAsset.SHA
 		}
-		legacyBridgeSHA = asset.SHA
 	} else if err = ansibleLifecycle(ctx, p, inventory, directory, python, executable, "applying", true); err != nil {
 		return err
 	}
@@ -393,7 +452,7 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 	if err != nil {
 		return err
 	}
-	variables := map[string]any{"ultra_lock_directory": lockDirectory, "ultra_upgrade_observed_at": inspection.ObservedAt, "ultra_release_manifest": manifest, "ultra_release_manifest_sha256": manifestSHA, "ultra_previous_manifest_sha256": inspection.PreviousManifestSHA, "ultra_previous_manifest": inspection.Previous, "ultra_release_source": releaseDir, "ultra_release_version": manifest.Version, "ultra_topology_sha256": inspection.TopologySHA, "ultra_bridge_inventory_host": "bridge", "ultra_release_probe_executable": "/var/lib/ultra-ansible/releases/" + manifest.Version + "/ultra-install", "ultra_legacy_bridge_maintenance": legacyBridgeMaintenance, "ultra_legacy_bridge_sha256": legacyBridgeSHA, "ultra_lifecycle_id": lifecycleID(directory)}
+	variables := map[string]any{"ultra_lock_directory": lockDirectory, "ultra_upgrade_observed_at": inspection.ObservedAt, "ultra_release_manifest": manifest, "ultra_release_manifest_sha256": manifestSHA, "ultra_previous_manifest_sha256": inspection.PreviousManifestSHA, "ultra_previous_manifest": inspection.Previous, "ultra_release_source": releaseDir, "ultra_release_version": manifest.Version, "ultra_topology_sha256": inspection.TopologySHA, "ultra_bridge_inventory_host": "bridge", "ultra_release_probe_executable": "/var/lib/ultra-ansible/releases/" + manifest.Version + "/ultra-install", "ultra_legacy_bridge_maintenance": legacyBridgeMaintenance, "ultra_legacy_bridge_sha256": legacyBridgeSHA, "ultra_lifecycle_id": lifecycleID(directory), "ultra_forward_only": forwardOnly}
 	frozenInventory, err := json.Marshal(inventory)
 	if err != nil {
 		return err
@@ -533,6 +592,9 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		}
 	}
 	defer func() {
+		if forwardOnly && returnErr != nil {
+			return
+		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
 		if !resumeCompleted {
@@ -671,6 +733,11 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		}
 	}
 	if err != nil {
+		if forwardOnly {
+			// The operator explicitly chose forward-only recovery. Preserve the
+			// DB and maintenance barrier; never restore unknown pre-upgrade code.
+			return fmt.Errorf("upgrade_forward_only_activation_failed: %w", err)
+		}
 		cleanupParent := operatorCtx
 		if lockHeld {
 			cleanupParent = ctx
@@ -731,6 +798,9 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		_, err = deployansible.RunLocal(ctx, "commit-release", inventory, variables, upgradeDependentStageDirectory(directory, "commit", generation), python, executable)
 	}
 	if err != nil {
+		if forwardOnly {
+			return fmt.Errorf("upgrade_forward_only_commit_failed: %w", err)
+		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Minute)
 		defer cancel()
 		if rollbackErr := domainTransaction.phase(cleanup, inventory, directory, python, executable, "rollback", generation); rollbackErr != nil {
@@ -750,7 +820,9 @@ func ansibleUpgrade(ctx context.Context, p *installplan.InstallPlan, releaseDir,
 		}
 		return err
 	}
-	return finishUpgradeCommit(ctx, p, inspection, inventory, variables, directory, python, executable, domainTransaction, generation, retryFailed, manifest.Version)
+	err = finishUpgradeCommit(ctx, p, inspection, inventory, variables, directory, python, executable, domainTransaction, generation, retryFailed, manifest.Version)
+	forwardReleaseComplete = err == nil
+	return err
 }
 
 // Continuation bypasses the normal cached activation/commit calls. Verify their

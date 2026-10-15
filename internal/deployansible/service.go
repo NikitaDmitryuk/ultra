@@ -24,6 +24,7 @@ type Message struct {
 	leaseInputs []*os.File
 	Action      string          `json:"action"`
 	ID          string          `json:"id"`
+	NextID      string          `json:"next_id,omitempty"`
 	Binary      string          `json:"binary,omitempty"`
 	Request     *ExitRequest    `json:"request,omitempty"`
 	Replica     *ReplicaRequest `json:"replica,omitempty"`
@@ -304,7 +305,7 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 	if err = decoder.Decode(&message); err != nil {
 		return Response{Code: "invalid_request"}
 	}
-	if message.Action != "submit" && message.Action != "submit-replica" && message.Action != "lease-applying" && message.Action != "lease-resume" && len(inputs) != 0 {
+	if message.Action != "submit" && message.Action != "submit-replica" && message.Action != "lease-applying" && message.Action != "lease-resume" && message.Action != "lease-supersede" && len(inputs) != 0 {
 		return Response{Code: "unexpected_submitted_inputs"}
 	}
 	if message.Action == "lifecycle-status" {
@@ -317,6 +318,19 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 		return Response{State: "ready"}
 	}
 	switch message.Action {
+	case "lease-supersede":
+		if uid != 0 {
+			return Response{Code: "controller_access_denied"}
+		}
+		if len(inputs) != 1 {
+			return Response{Code: "unexpected_submitted_inputs"}
+		}
+		return gate.supersede(message.ID, message.NextID, inputs[0])
+	case "lease-retire":
+		if uid != 0 {
+			return Response{Code: "controller_access_denied"}
+		}
+		return gate.retire(message.ID)
 	case "lease-attach":
 		if uid != 0 {
 			return Response{Code: "controller_access_denied"}

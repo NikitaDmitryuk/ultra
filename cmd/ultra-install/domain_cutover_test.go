@@ -71,7 +71,6 @@ func TestDomainCutoverUsesSharedSubscriptionProbeURL(t *testing.T) {
 	if err != nil || gotURL != url || gotKey != key {
 		t.Fatalf("shared probe inputs = (%q, %q, %v)", gotURL, gotKey, err)
 	}
-
 	if _, _, err = domainCutoverProbeInputs(map[string]string{
 		"ULTRA_CUTOVER_SUBSCRIPTION_URL": url,
 		"ULTRA_VULTR_DNS_API_KEY":        key,

@@ -4,6 +4,10 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    - name: Verify controller rollback enforcement before fleet mutation
+      ansible.builtin.include_role:
+        name: release
+        tasks_from: controller-rollback-preflight
     - name: Verify the owned legacy checkpoint or unchanged running legacy topology
       ultra_upgrade_maintenance:
         id: "{{ ultra_lifecycle_id }}"

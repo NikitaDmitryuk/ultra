@@ -1,11 +1,14 @@
 package deployansible
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 )
 
@@ -18,6 +21,8 @@ type lifecycleGate struct {
 	directory string
 	current   lifecycleState
 	lock      *os.File
+	retired   map[string]bool
+	handoff   *lifecycleHandoff
 }
 type lifecycleState struct {
 	ID    string `json:"id"`
@@ -25,10 +30,20 @@ type lifecycleState struct {
 }
 
 func openLifecycleGate(directory string) (*lifecycleGate, error) {
-	g := &lifecycleGate{directory: directory}
+	info, err := os.Lstat(directory)
+	if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 || !ownedByProcess(info) {
+		return nil, errors.New("private lifecycle directory required")
+	}
+	g := &lifecycleGate{directory: directory, retired: make(map[string]bool)}
+	if err := g.loadRetired(); err != nil {
+		return nil, err
+	}
 	path := filepath.Join(directory, "lifecycle.json")
-	info, err := os.Lstat(path)
+	info, err = os.Lstat(path)
 	if os.IsNotExist(err) {
+		if len(g.retired) != 0 || g.handoff != nil {
+			return nil, errors.New("missing lifecycle retirement reservation")
+		}
 		return g, nil
 	}
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || !ownedByProcess(info) {
@@ -37,6 +52,19 @@ func openLifecycleGate(directory string) (*lifecycleGate, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil || json.Unmarshal(raw, &g.current) != nil || !jobID.MatchString(g.current.ID) || (g.current.Phase != "applying" && g.current.Phase != "checking" && g.current.Phase != "released") {
 		return nil, errors.New("invalid lifecycle journal")
+	}
+	if g.retired[g.current.ID] && g.current.Phase == "checking" {
+		return nil, errors.New("invalid retired lifecycle phase")
+	}
+	if h := g.handoff; h != nil && g.current.ID == h.OldID {
+		if g.current.Phase != "applying" || g.retired[h.NewID] {
+			return nil, errors.New("invalid pending lifecycle handoff")
+		}
+		// The durable intent fences the old ID even if the broker died before
+		// replacing lifecycle.json. Complete the handoff before serving peers.
+		if err := g.save(lifecycleState{ID: h.NewID, Phase: "applying"}); err != nil {
+			return nil, err
+		}
 	}
 	if g.current.Phase == "applying" {
 		g.lock, err = controllerLock(filepath.Join(directory, "infrastructure.lock"))
@@ -67,9 +95,19 @@ func (g *lifecycleGate) save(next lifecycleState) error {
 	if err != nil {
 		return err
 	}
+	renamed, err := g.savePrivateJSON("lifecycle.json", raw)
+	if renamed {
+		g.current = next
+	}
+	return err
+}
+
+// savePrivateJSON only returns success after both the file and its directory
+// entry are durable. The controller holds the private state directory lock.
+func (g *lifecycleGate) savePrivateJSON(base string, raw []byte) (bool, error) {
 	f, err := os.CreateTemp(g.directory, ".lifecycle-")
 	if err != nil {
-		return err
+		return false, err
 	}
 	name := f.Name()
 	defer os.Remove(name) //nolint:errcheck
@@ -84,17 +122,117 @@ func (g *lifecycleGate) save(next lifecycleState) error {
 		err = closeErr
 	}
 	if err != nil {
+		return false, err
+	}
+	if err = os.Rename(name, filepath.Join(g.directory, base)); err != nil {
+		return false, err
+	}
+	return true, syncDirectory(g.directory)
+}
+
+type lifecycleRetirements struct {
+	Version int               `json:"version"`
+	IDs     []string          `json:"ids"`
+	Handoff *lifecycleHandoff `json:"handoff,omitempty"`
+}
+type lifecycleHandoff struct {
+	OldID string `json:"old_id"`
+	NewID string `json:"new_id"`
+}
+
+func (g *lifecycleGate) loadRetired() error {
+	path := filepath.Join(g.directory, "lifecycle-retired.json")
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || !ownedByProcess(info) {
+		return errors.New("invalid lifecycle retirement journal")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
 		return err
 	}
-	if err = os.Rename(name, filepath.Join(g.directory, "lifecycle.json")); err != nil {
-		return err
+	var journal lifecycleRetirements
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&journal) != nil || journal.Version != 1 || journal.IDs == nil {
+		return errors.New("invalid lifecycle retirement journal")
 	}
-	g.current = next
-	if err = syncDirectory(g.directory); err != nil {
-		return err
+	if decoder.Decode(new(any)) != io.EOF {
+		return errors.New("invalid lifecycle retirement journal")
+	}
+	for _, id := range journal.IDs {
+		if !jobID.MatchString(id) || g.retired[id] {
+			return errors.New("invalid lifecycle retirement journal")
+		}
+		g.retired[id] = true
+	}
+	if h := journal.Handoff; h != nil {
+		if !jobID.MatchString(h.OldID) || !jobID.MatchString(h.NewID) || h.OldID == h.NewID || !g.retired[h.OldID] {
+			return errors.New("invalid lifecycle handoff journal")
+		}
+		g.handoff = h
 	}
 	return nil
 }
+
+func (g *lifecycleGate) saveRetired() error {
+	ids := make([]string, 0, len(g.retired))
+	for id := range g.retired {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	raw, err := json.Marshal(lifecycleRetirements{Version: 1, IDs: ids, Handoff: g.handoff})
+	if err != nil {
+		return err
+	}
+	_, err = g.savePrivateJSON("lifecycle-retired.json", raw)
+	return err
+}
+
+// retire permanently fences an exact applying operation before releasing its
+// reservation. There is no expiry or pruning. Older broker binaries do not
+// enforce this journal: downgrade/rollback must preserve an enforcing broker.
+func (g *lifecycleGate) retire(id string) Response {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !jobID.MatchString(id) {
+		return Response{Code: "invalid_operation_id"}
+	}
+	if g.retired[id] && (g.current.ID != id || g.current.Phase == "released") {
+		return Response{State: "released"}
+	}
+	if g.current.ID != id || g.current.Phase != "applying" || (g.handoff != nil && g.handoff.OldID == id) {
+		return Response{Code: "lifecycle_not_owned"}
+	}
+	// Fence in memory even on persistence failure: a rename or directory sync
+	// failure has an uncertain disk outcome and must never reopen attachment.
+	g.retired[id] = true
+	if err := g.saveRetired(); err != nil {
+		return Response{Code: "lifecycle_persistence_failed"}
+	}
+	// Drop our own OFD, then prove all external holders have also closed. A
+	// surviving old operator keeps the durable applying gate closed until retry.
+	if g.lock != nil {
+		_ = g.lock.Close()
+		g.lock = nil
+	}
+	lock, err := controllerLock(filepath.Join(g.directory, "infrastructure.lock"))
+	if err != nil {
+		return Response{Code: "infrastructure_busy"}
+	}
+	g.lock = lock
+	previous := g.current
+	if err := g.save(lifecycleState{ID: id, Phase: "released"}); err != nil {
+		g.current = previous
+		return Response{Code: "lifecycle_persistence_failed"}
+	}
+	_ = g.lock.Close()
+	g.lock = nil
+	return Response{State: "released"}
+}
+
 func (g *lifecycleGate) transition(id, phase string) Response {
 	return g.transitionWithLock(id, phase, nil)
 }
@@ -103,6 +241,9 @@ func (g *lifecycleGate) transitionWithLock(id, phase string, existing *os.File, 
 	defer g.mu.Unlock()
 	if !jobID.MatchString(id) {
 		return Response{Code: "invalid_operation_id"}
+	}
+	if g.retired[id] {
+		return Response{Code: "lifecycle_retired"}
 	}
 	active := g.current.Phase == "applying" || g.current.Phase == "checking"
 	if len(resume) > 0 && resume[0] && (!active || g.current.ID != id) {
@@ -165,6 +306,9 @@ func (g *lifecycleGate) jobLock(operation string) (*os.File, error) {
 func (g *lifecycleGate) attach(id string) Response {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.retired[id] {
+		return Response{Code: "lifecycle_retired"}
+	}
 	if !jobID.MatchString(id) || g.current.ID != id || (g.current.Phase != "applying" && g.current.Phase != "checking") {
 		return Response{Code: "lifecycle_not_owned"}
 	}
@@ -284,5 +428,66 @@ func (c Client) ResumeLifecycleWithOperationLock(ctx context.Context, id string)
 		message.leaseInputs = []*os.File{lease.file}
 	}
 	_, err := c.exchange(ctx, message)
+	return err
+}
+
+// RetireLifecycle permanently fences an exact applying UUID. It requires a root
+// peer and may need retry after an old operator closes its infrastructure lock.
+func (c Client) RetireLifecycle(ctx context.Context, id string) error {
+	_, err := c.exchange(ctx, Message{Action: "lease-retire", ID: id})
+	return err
+}
+
+// supersede preserves the verified locked OFD throughout the handoff. The
+// retirement ledger is also its write-ahead intent, reconciled on broker start.
+func (g *lifecycleGate) supersede(oldID, newID string, existing *os.File) Response {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !jobID.MatchString(oldID) || !jobID.MatchString(newID) || oldID == newID {
+		return Response{Code: "invalid_operation_id"}
+	}
+	same := g.handoff != nil && g.handoff.OldID == oldID && g.handoff.NewID == newID
+	if g.current.Phase != "applying" || (g.current.ID != oldID && !(same && g.current.ID == newID)) {
+		return Response{Code: "lifecycle_not_owned"}
+	}
+	if g.retired[newID] || (g.retired[oldID] && !same) {
+		return Response{Code: "lifecycle_retired"}
+	}
+	if existing == nil {
+		return Response{Code: "lifecycle_attachment_failed"}
+	}
+	retained, err := retainInfrastructureLock(existing, filepath.Join(g.directory, "infrastructure.lock"))
+	if err != nil {
+		return Response{Code: "lifecycle_attachment_failed"}
+	}
+	if g.lock == nil {
+		g.lock = retained
+	} else {
+		_ = retained.Close()
+	}
+	g.retired[oldID] = true
+	g.handoff = &lifecycleHandoff{OldID: oldID, NewID: newID}
+	if err := g.saveRetired(); err != nil {
+		return Response{Code: "lifecycle_persistence_failed"}
+	}
+	if err := g.save(lifecycleState{ID: newID, Phase: "applying"}); err != nil {
+		return Response{Code: "lifecycle_persistence_failed"}
+	}
+	return Response{State: "applying"}
+}
+
+// SupersedeLifecycle atomically retires oldID and reserves newID under the
+// caller's existing operation lease. Only a root peer may perform the handoff.
+func (c Client) SupersedeLifecycle(ctx context.Context, oldID, newID string) error {
+	lease, ok := ctx.Value(operationLeaseKey{}).(*operationLease)
+	if !ok {
+		return errors.New("operation lease required")
+	}
+	lease.run.Lock()
+	defer lease.run.Unlock()
+	if !lease.active.Load() {
+		return errors.New("operation lease inactive")
+	}
+	_, err := c.exchange(ctx, Message{Action: "lease-supersede", ID: oldID, NextID: newID, leaseInputs: []*os.File{lease.file}})
 	return err
 }

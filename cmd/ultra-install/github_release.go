@@ -64,8 +64,7 @@ func (release VerifiedGitHubRelease) Close() error {
 // AcquireVerifiedGitHubRelease leases a cache entry for child handoff. It does
 // not authenticate contents: reverify signatures while holding the lease.
 // Independent shared leases coexist across processes.
-func AcquireVerifiedGitHubRelease(directory, tag string) (VerifiedGitHubRelease, error) {
-	var result VerifiedGitHubRelease
+func AcquireVerifiedGitHubRelease(directory, tag string) (result VerifiedGitHubRelease, retErr error) {
 	absolute, err := filepath.Abs(directory)
 	if err != nil {
 		return result, err
@@ -77,7 +76,11 @@ func AcquireVerifiedGitHubRelease(directory, tag string) (VerifiedGitHubRelease,
 	if err != nil {
 		return result, err
 	}
-	defer gate.Close()
+	defer func() {
+		if closeErr := gate.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, closeErr)
+		}
+	}()
 	file, err := lockReleaseDirectory(absolute, syscall.LOCK_SH|syscall.LOCK_NB)
 	if err != nil {
 		return result, err
@@ -124,14 +127,17 @@ func lockReleaseDirectory(path string, operation int) (*os.File, error) {
 }
 
 // Gate rename and lease acquisition, including collision verification.
-func publishLeasedRelease(candidate, published, tag string) (VerifiedGitHubRelease, bool, error) {
-	var result VerifiedGitHubRelease
+func publishLeasedRelease(candidate, published, tag string) (result VerifiedGitHubRelease, renamed bool, retErr error) {
 	gate, err := lockReleaseCacheGate(filepath.Dir(published))
 	if err != nil {
 		return result, false, err
 	}
-	defer gate.Close()
-	renamed := false
+	defer func() {
+		if closeErr := gate.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, closeErr)
+		}
+	}()
+	renamed = false
 	if _, statErr := os.Lstat(published); os.IsNotExist(statErr) {
 		if err := os.Rename(candidate, published); err != nil {
 			return result, false, err

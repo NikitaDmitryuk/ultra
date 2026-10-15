@@ -28,7 +28,7 @@ func TestCanonicalV2MappingAndLegacyBoundary(t *testing.T) {
 	if err != nil || p.FullAutomation() {
 		t.Fatal("v1 acquired automation")
 	}
-	for _, key := range []string{"ULTRA_VULTR_API_KEY", "ULTRA_VULTR_DNS_API_KEY", "ULTRA_CUTOVER_SUBSCRIPTION_URL", "ULTRA_SUBSCRIPTION_PROBE_URL", "TELEGRAM_BOT_TOKEN"} {
+	for _, key := range []string{"ULTRA_VULTR_API_KEY", "ULTRA_VULTR_DNS_API_KEY", "ULTRA_SUBSCRIPTION_PROBE_URL", "TELEGRAM_BOT_TOKEN"} {
 		v := canonicalFixture()
 		v[key] = "private-fixture"
 		_, err := CanonicalValuesToPlan(v)
@@ -103,11 +103,10 @@ func TestBotEnvironmentExcludesProvidersAndUnknownKeys(t *testing.T) {
 }
 
 func TestSubscriptionProbeURLsAreDisallowedDeploymentSecrets(t *testing.T) {
-	if !DisallowedDeploymentSecret("ULTRA_SUBSCRIPTION_PROBE_URL") {
-		t.Fatal("subscription probe URL is not protected by shared deployment-secret rule")
-	}
-	if !DisallowedDeploymentSecret("ULTRA_CUTOVER_SUBSCRIPTION_URL") {
-		t.Fatal("retired cutover URL is not protected from entering install.config")
+	for _, key := range []string{"ULTRA_SUBSCRIPTION_PROBE_URL", "ULTRA_CUTOVER_SUBSCRIPTION_URL"} {
+		if !DisallowedDeploymentSecret(key) {
+			t.Fatalf("subscription probe URL key %q is not protected by shared deployment-secret rule", key)
+		}
 	}
 }
 

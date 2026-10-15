@@ -15,7 +15,8 @@ from ansible.module_utils.basic import AnsibleModule
 
 SERVICES = ('ultra-bot.service', 'ultra-recovery-backup.timer', 'ultra-recovery-reconcile.timer')
 FILES = ('/etc/ultra-relay/spec.json', '/etc/ultra-relay/environment', '/etc/systemd/system/ultra-relay.service')
-PROPERTIES = ('LoadState', 'ActiveState', 'MainPID', 'ControlPID')
+SERVICE_PROPERTIES = ('LoadState', 'ActiveState', 'MainPID', 'ControlPID')
+TIMER_PROPERTIES = ('LoadState', 'ActiveState')
 
 
 def private(path, evidence=False):
@@ -26,16 +27,24 @@ def private(path, evidence=False):
 
 
 def service(module, unit):
-    code, output, _ = module.run_command(['systemctl', 'show'] + ['--property=' + key for key in PROPERTIES] + [unit])
+    if unit.endswith('.service'):
+        properties = SERVICE_PROPERTIES
+    elif unit.endswith('.timer'):
+        properties = TIMER_PROPERTIES
+    else:
+        raise ValueError('maintenance_service_unavailable')
+    code, output, _ = module.run_command(['systemctl', 'show'] + ['--property=' + key for key in properties] + [unit])
     values = {}
     for line in output.splitlines():
         key, sep, value = line.partition('=')
-        if not sep or key not in PROPERTIES or key in values:
+        if not sep or key not in properties or key in values:
             raise ValueError('maintenance_service_unavailable')
         values[key] = value
-    if code or set(values) != set(PROPERTIES) or values['LoadState'] != 'loaded':
+    if code or set(values) != set(properties) or values['LoadState'] != 'loaded':
         raise ValueError('maintenance_service_unavailable')
-    if values['ActiveState'] not in ('active', 'inactive') or any(not re.fullmatch('[0-9]+', values[key]) for key in ('MainPID', 'ControlPID')):
+    if values['ActiveState'] not in ('active', 'inactive'):
+        raise ValueError('maintenance_service_ambiguous')
+    if unit.endswith('.service') and any(not re.fullmatch('[0-9]+', values[key]) for key in ('MainPID', 'ControlPID')):
         raise ValueError('maintenance_service_ambiguous')
     return values
 
@@ -335,7 +344,8 @@ def recovery_provenance():
 def idle(module, units):
     for unit in units:
         values = service(module, unit)
-        if values['ActiveState'] != 'inactive' or values['MainPID'] != '0' or values['ControlPID'] != '0':
+        if (values['ActiveState'] != 'inactive'
+                or (unit.endswith('.service') and (values['MainPID'] != '0' or values['ControlPID'] != '0'))):
             raise ValueError('maintenance_worker_not_stopped')
 
 
@@ -393,8 +403,10 @@ def main():
                     or runtime['ActiveState'] != 'active' or pid == '0' or runtime['ControlPID'] != '0'
                     or binary.is_symlink() or os.readlink(executable) != str(binary)
                     or hashlib.sha256(executable.read_bytes()).hexdigest() != sha
-                    or any(service(module, unit)['ActiveState'] != 'active' or service(module, unit)['ControlPID'] != '0' for unit in SERVICES[1:])
-                    or json.loads(Path('/etc/ultra-relay/spec.json').read_text()).get('role') != 'bridge'):
+                    or any(service(module, unit)['ActiveState'] != 'active' for unit in SERVICES[1:])):
+                raise ValueError('maintenance_initial_retry_unverified')
+            idle(module, ('ultra-recovery-backup.service', 'ultra-recovery-reconcile.service'))
+            if json.loads(Path('/etc/ultra-relay/spec.json').read_text()).get('role') != 'bridge':
                 raise ValueError('maintenance_initial_retry_unverified')
             initial_request = module.params.get('initial_runtime_request_json') or module.params.get('retry', {}).get('runtime_request_json')
             if initial_request:
@@ -515,10 +527,7 @@ def main():
                 if values['ActiveState'] != 'inactive' or values['MainPID'] != '0' or values['ControlPID'] != '0':
                     raise ValueError('maintenance_recovery_not_idle')
         if module.params['phase'] == 'stopped':
-            for unit in SERVICES + ('ultra-relay.service',):
-                values = service(module, unit)
-                if values['ActiveState'] != 'inactive' or values['MainPID'] != '0' or values['ControlPID'] != '0':
-                    raise ValueError('maintenance_worker_not_stopped')
+            idle(module, SERVICES + ('ultra-relay.service', 'ultra-recovery-backup.service', 'ultra-recovery-reconcile.service'))
         if module.params['phase'] in ('restore-bot', 'restore-services', 'restore-accepted') and not module.check_mode:
             units = SERVICES if module.params['phase'] in ('restore-services', 'restore-accepted', 'rollback-check') else ('ultra-bot.service',)
             for unit in units:

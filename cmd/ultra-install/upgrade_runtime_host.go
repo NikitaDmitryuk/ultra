@@ -263,7 +263,7 @@ func (s runtimeHostStore) journalPath(id string) (string, error) {
 		return "", runtimeHostError("request_invalid")
 	}
 	for _, ch := range id {
-		if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-') {
+		if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' {
 			return "", runtimeHostError("request_invalid")
 		}
 	}
@@ -580,7 +580,7 @@ func runtimeHostDynamicProofValid(proof *runtimeHostExitProof) bool {
 			}
 			continue
 		}
-		if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
 			return false
 		}
 	}
@@ -604,7 +604,7 @@ func (s runtimeHostStore) liveExitAttestation(r runtimeHostRequest) (runtimeHost
 			found = true
 		}
 	}
-	if !found && !(r.Node == "" && runtimeHostDynamicProofValid(proof)) {
+	if !found && (r.Node != "" || !runtimeHostDynamicProofValid(proof)) {
 		return fail()
 	}
 	img, err := s.image(s.path(runtimeHostFiles[0]))

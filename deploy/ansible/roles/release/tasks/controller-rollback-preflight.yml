@@ -1,0 +1,19 @@
+---
+# Older immutable brokers ignore the retirement ledger. Its presence establishes
+# a monotonic enforcement floor; restoring a signed old unit is not a capability
+# proof. Keep the current broker until an enforcing-runtime migration exists.
+- name: Inspect the persistent controller enforcement floor
+  ansible.builtin.stat:
+    path: /var/lib/ultra-ansible/lifecycle-retired.json
+    follow: false
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  register: controller_rollback_retirement
+- name: Refuse controller rollback across the persistent enforcement floor
+  ansible.builtin.assert:
+    that:
+      - controller_rollback_retirement.stat.exists is defined
+      - controller_rollback_retirement.stat.exists is sameas false
+      - not (controller_rollback_retirement.stat.islnk | default(false))
+    fail_msg: controller_rollback_enforcement_migration_required

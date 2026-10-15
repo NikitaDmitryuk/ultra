@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import tempfile
@@ -32,6 +33,124 @@ with patch.dict(sys.modules, {'ansible': types.ModuleType('ansible'), 'ansible.m
 
 
 class Contracts(unittest.TestCase):
+    def test_forward_release_hash_does_not_read_a_fact_from_same_set_fact(self):
+        tasks = yaml.safe_load((ROOT / 'deploy/ansible/roles/release/tasks/main.yml').read_text())
+        pin = next(task for task in tasks if task.get('name') == 'Pin the target and fallback hashes')
+        facts = pin['ansible.builtin.set_fact']
+        self.assertIn('release_target', facts)
+        self.assertNotIn('release_target', facts['release_previous'])
+        self.assertIn('ultra_release_manifest.assets', facts['release_previous'])
+        target = {'name': 'ultra-relay-linux-amd64', 'sha256': 'a' * 64}
+        previous = {'name': 'ultra-relay-linux-amd64', 'sha256': 'b' * 64}
+        context = {'release_component': 'ultra-relay', 'ultra_architecture': 'amd64',
+                   'release_asset_name': 'ultra-relay-linux-amd64',
+                   'ultra_release_manifest': {'assets': [target]},
+                   'release_previous_manifest': {'assets': [previous]},
+                   'ultra_previous_manifest': {'assets': [previous]},
+                   'ultra_forward_only': True}
+        environment = Environment()
+        environment.filters['bool'] = lambda value: value is True
+        rendered = environment.from_string(facts['release_previous']).render(context)
+        self.assertEqual(yaml.safe_load(rendered), target)
+        context['ultra_forward_only'] = False
+        rendered = environment.from_string(facts['release_previous']).render(context)
+        self.assertEqual(yaml.safe_load(rendered), previous)
+
+    def test_forward_failure_containment_confirms_every_fixed_unit_and_host(self):
+        plays = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/contain-upgrade.yml').read_text())
+        self.assertEqual([play['hosts'] for play in plays], ['all', 'bridge'])
+        self.assertEqual(plays[0]['strategy'], 'linear')
+        first = plays[0]['tasks']
+        units = plays[0]['vars']['containment_units']
+        self.assertIn('ultra-bot.service', units)
+        self.assertIn('ultra-relay.service', units)
+        self.assertIn('ultra-recovery-backup.timer', units)
+        self.assertIn('ultra-auto-upgrade.timer', units)
+        self.assertTrue(next(task for task in first if 'Stop every present producer' in task['name'])['failed_when'] is False)
+        assertion = next(task for task in first if 'Require each unit' in task['name'])
+        expressions = assertion['ansible.builtin.assert']['that']
+        environment = Environment()
+        environment.tests['match'] = lambda value, pattern: re.match(pattern, value) is not None
+        verify = [environment.compile_expression(expression) for expression in expressions]
+
+        def accepted(name, lines, rc=0):
+            item = {'item': name, 'stdout_lines': lines, 'rc': rc}
+            return all(bool(check(item=item)) for check in verify)
+
+        stopped = ['LoadState=loaded', 'ActiveState=inactive', 'MainPID=0', 'ControlPID=0']
+        self.assertTrue(accepted('ultra-relay.service', stopped))
+        self.assertTrue(accepted('ultra-bot.service', ['LoadState=not-found'], rc=1))
+        self.assertTrue(accepted('ultra-recovery-backup.timer', ['LoadState=loaded', 'ActiveState=inactive']))
+        self.assertFalse(accepted('ultra-relay.service', ['LoadState=loaded', 'ActiveState=active', 'MainPID=0', 'ControlPID=0']))
+        self.assertFalse(accepted('ultra-bot.service', stopped[:-2]))
+        self.assertFalse(accepted('ultra-recovery-backup.timer', ['LoadState=loaded', 'ActiveState=active']))
+        self.assertFalse(accepted('ultra-relay.service', stopped, rc=2))
+        fleet_check = next(task for task in plays[1]['tasks'] if 'whole fleet' in task['name'])
+        self.assertEqual(fleet_check['ansible.builtin.assert']['that'],
+                         'hostvars[item].ultra_candidate_contained | default(false) | bool')
+
+    def test_controller_rollback_floor_is_checked_before_every_mutation(self):
+        root = ROOT / 'deploy/ansible'
+        plays = yaml.safe_load((root / 'playbooks/rollback.yml').read_text())
+        first = plays[0]
+        self.assertEqual(first['hosts'], 'bridge')
+        self.assertFalse(first['gather_facts'])
+        self.assertTrue(first['any_errors_fatal'])
+        self.assertFalse(first.get('pre_tasks'))
+        self.assertFalse(first.get('roles'))
+        guard = first['tasks'][0]
+        self.assertEqual(guard['ansible.builtin.include_role'],
+                         {'name': 'release', 'tasks_from': 'controller-rollback-preflight'})
+        self.assertNotIn('when', guard)
+        direct = yaml.safe_load((root / 'roles/release/tasks/rollback-controller.yml').read_text())
+        self.assertEqual(direct[0]['ansible.builtin.import_tasks'], 'controller-rollback-preflight.yml')
+        self.assertNotIn('when', direct[0])
+        self.assertIn('ansible.builtin.copy', direct[2]['block'][1])
+        self.assertIn('ansible.builtin.systemd_service', direct[2]['block'][3])
+
+    def test_controller_rollback_rejects_retirement_state_and_preserves_absent_state(self):
+        path = ROOT / 'deploy/ansible/roles/release/tasks/controller-rollback-preflight.yml'
+        inspect, guard = yaml.safe_load(path.read_text())
+        self.assertEqual(inspect['ansible.builtin.stat']['path'], '/var/lib/ultra-ansible/lifecycle-retired.json')
+        self.assertFalse(inspect['ansible.builtin.stat']['follow'])
+        self.assertFalse(inspect['ansible.builtin.stat']['get_checksum'])
+        assertion = guard['ansible.builtin.assert']
+        self.assertEqual(assertion['fail_msg'], 'controller_rollback_enforcement_migration_required')
+        environment = Environment()
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / 'lifecycle-retired.json'
+            def allowed():
+                # The stat module uses lstat with follow=false. Exercise real
+                # absent, regular, directory and dangling-symlink filesystem states.
+                try:
+                    info = ledger.lstat()
+                    observed = {'exists': True, 'islnk': stat.S_ISLNK(info.st_mode)}
+                except FileNotFoundError:
+                    observed = {'exists': False}
+                variables = {'controller_rollback_retirement': {'stat': observed}}
+                return all(environment.compile_expression(condition)(variables)
+                           for condition in assertion['that'])
+            self.assertTrue(allowed(), 'supported rollback without retirement obligations must remain available')
+            for contents in ('{"version":1,"ids":["retired"]}', '{"version":1,"ids":[]}', 'invalid'):
+                ledger.write_text(contents)
+                self.assertFalse(allowed())
+            ledger.unlink()
+            ledger.mkdir()
+            self.assertFalse(allowed())
+            ledger.rmdir()
+            ledger.symlink_to(Path(directory) / 'missing')
+            self.assertFalse(allowed())
+            ledger.unlink()
+            self.assertTrue(allowed())
+
+    def test_restore_checks_existing_target_floor_before_any_mutation(self):
+        root = ROOT / 'deploy/ansible/roles/restore/tasks'
+        for name in ('main.yml', 'services.yml'):
+            tasks = yaml.safe_load((root / name).read_text())
+            self.assertEqual(tasks[0]['ansible.builtin.include_role'],
+                             {'name': 'release', 'tasks_from': 'controller-rollback-preflight'})
+            self.assertNotIn('when', tasks[0])
+
     def test_atomic_receipt_syncs_data_then_rename_then_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'receipt.json'
@@ -81,10 +200,10 @@ class Contracts(unittest.TestCase):
                    'Stop legacy topology producers before freezing recovery',
                    'Stop new recovery cycles without interrupting running copies',
                    'Wait for current copies and reconcile to finish naturally',
-                   'Create the independent control generation before activation',
-                   'Require fresh delivery to the independently confirmed primary after capture',
                    'Stop the identified legacy bridge before changing exits',
                    'Prove all legacy producers are stopped and original configuration is unchanged',
+                   'Create the independent control generation before activation',
+                   'Require fresh delivery to the independently confirmed primary after capture',
                    'Reinspect frozen topology after the legacy process has stopped']
         self.assertEqual(sorted(names.index(name) for name in ordered), [names.index(name) for name in ordered])
         tasks = plays[2]['tasks']
@@ -118,16 +237,17 @@ class Contracts(unittest.TestCase):
                 conditions = [conditions]
             return all(environment.compile_expression(condition)(**variables) for condition in conditions)
 
-        for host, component, legacy, preserve, expected in [
-                ('bridge', 'ultra-relay', True, False, ['stopped']),
-                ('bridge', 'ultra-relay', False, False, ['restarted']),
-                ('exit', 'ultra-relay', True, False, ['restarted']),
-                ('bridge', 'ultra-bot', True, False, ['restarted']),
-                ('bridge', 'ultra-bot', True, True, [])]:
+        for host, component, legacy, preserve, forward_only, expected in [
+                ('bridge', 'ultra-relay', True, False, False, ['stopped']),
+                ('bridge', 'ultra-relay', False, False, False, ['restarted']),
+                ('exit', 'ultra-relay', True, False, False, ['restarted']),
+                ('bridge', 'ultra-bot', True, False, False, ['restarted']),
+                ('bridge', 'ultra-bot', True, True, False, []),
+                ('exit', 'ultra-relay', True, False, True, ['stopped'])]:
             with self.subTest(host=host, component=component, legacy=legacy, preserve=preserve):
                 variables = {'inventory_hostname': host, 'groups': {'bridge': ['bridge'], 'exits': ['exit']},
                              'release_component': component, 'ultra_legacy_bridge_maintenance': legacy,
-                             'release_preserve_stopped': preserve}
+                             'release_preserve_stopped': preserve, 'ultra_forward_only': forward_only}
                 service_states = [task['ansible.builtin.systemd_service']['state'] for task in rescue
                                   if 'ansible.builtin.systemd_service' in task and enabled(task, variables)]
                 self.assertEqual(service_states, expected)
@@ -136,13 +256,15 @@ class Contracts(unittest.TestCase):
         restore = next(index for index, task in enumerate(rescue) if 'ansible.builtin.copy' in task)
         self.assertLess(stop, restore, 'stop the failed new relay before replacing its executable')
         self.assertIn('ansible.builtin.fail', rescue[-1], 'local rescue must still trigger fleet rollback')
+        self.assertEqual(rescue[-1]['ansible.builtin.fail']['msg'], "{{ 'release_forward_only_activation_failed' if (ultra_forward_only | default(false) | bool) else 'release_activation_failed' }}")
 
     def test_mixed_baseline_roles_use_frozen_per_host_and_relay_only_emergency(self):
         root = ROOT / 'deploy/ansible/roles/release/tasks'
         for name in ('main.yml', 'rollback.yml', 'retention.yml'):
             tasks = yaml.safe_load((root / name).read_text())
+            expected_previous = "{{ ultra_release_manifest if (ultra_forward_only | default(false) | bool) else (ultra_host_previous_manifest | default(ultra_previous_manifest)) }}" if name == 'main.yml' else '{{ ultra_host_previous_manifest | default(ultra_previous_manifest) }}'
             self.assertEqual(tasks[0]['ansible.builtin.set_fact']['release_previous_manifest'],
-                             '{{ ultra_host_previous_manifest | default(ultra_previous_manifest) }}')
+                         expected_previous)
             self.assertIn('ultra_previous_relay_manifest', (root / name).read_text())
         rollback = yaml.safe_load((root / 'rollback.yml').read_text())
         verified = next(task for task in rollback if task['name'] == 'Verify exact restored bytes even when the fallback was already installed')
@@ -160,6 +282,28 @@ class Contracts(unittest.TestCase):
                 maintenance.service(runner(output), 'ultra-relay.service')
         with self.assertRaises(ValueError):
             maintenance.service(runner(ready, 1), 'ultra-relay.service')
+
+    def test_maintenance_timer_predicate_uses_only_timer_properties(self):
+        calls = []
+        def run(argv):
+            calls.append(argv)
+            return 0, 'LoadState=loaded\nActiveState=active\n', ''
+        runner = types.SimpleNamespace(run_command=run)
+        self.assertEqual(maintenance.service(runner, 'ultra-recovery-backup.timer'),
+                         {'LoadState': 'loaded', 'ActiveState': 'active'})
+        self.assertEqual(calls, [[
+            'systemctl', 'show', '--property=LoadState', '--property=ActiveState',
+            'ultra-recovery-backup.timer',
+        ]])
+        for output in ('LoadState=loaded\nActiveState=activating\n',
+                       'LoadState=loaded\nActiveState=active\nMainPID=0\n',
+                       'LoadState=not-found\nActiveState=inactive\n',
+                       'LoadState=loaded\nActiveState=active\nActiveState=inactive\n'):
+            with self.assertRaises(ValueError):
+                maintenance.service(types.SimpleNamespace(run_command=lambda argv, output=output: (0, output, '')),
+                                    'ultra-recovery-backup.timer')
+        with self.assertRaises(ValueError):
+            maintenance.service(runner, 'ultra-recovery-backup.socket')
 
     def test_maintenance_stopped_requires_owned_checkpoint_and_all_pids_zero(self):
         class Done(Exception):
@@ -184,6 +328,9 @@ class Contracts(unittest.TestCase):
                 stopped[key] = '123'
                 self.assertTrue(invoke()['failed'])
                 stopped[key] = '0'
+            worker = dict(stopped, ActiveState='active', MainPID='7')
+            with patch.object(maintenance, 'service', side_effect=lambda _, unit: worker if unit == 'ultra-recovery-backup.service' else stopped):
+                self.assertTrue(invoke()['failed'])
             gate['id'] = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
             self.assertTrue(invoke()['failed'])
             gate['id'] = operation
@@ -261,6 +408,13 @@ class Contracts(unittest.TestCase):
         sha = hashlib.sha256(b'legacy').hexdigest()
         gate = {'id': operation, 'phase': 'applying'}
         active = {'ActiveState': 'active', 'MainPID': '7', 'ControlPID': '0'}
+        stopped = {'LoadState': 'loaded', 'ActiveState': 'inactive', 'MainPID': '0', 'ControlPID': '0'}
+        def observed_service(_, unit):
+            if unit.endswith('.timer'):
+                return {'LoadState': 'loaded', 'ActiveState': 'active'}
+            if unit in ('ultra-recovery-backup.service', 'ultra-recovery-reconcile.service'):
+                return stopped
+            return active
         module = types.SimpleNamespace(params={'id': operation, 'legacy_sha256': sha, 'initial_runtime_request_json': '{}'}, check_mode=False)
         module.exit_json = lambda **value: (_ for _ in ()).throw(Done(value))
         module.fail_json = lambda **value: (_ for _ in ()).throw(Done(dict(value, failed=True)))
@@ -268,7 +422,7 @@ class Contracts(unittest.TestCase):
             with self.assertRaises(Done) as result:
                 maintenance.main()
             return result.exception.args[0]
-        with patch.object(maintenance, 'AnsibleModule', return_value=module), patch.object(maintenance.os, 'geteuid', return_value=0), patch.object(maintenance, 'private', return_value=gate), patch.object(maintenance.Path, 'exists', return_value=False), patch.object(maintenance.Path, 'is_symlink', return_value=False), patch.object(maintenance.Path, 'read_bytes', return_value=b'legacy'), patch.object(maintenance.Path, 'is_file', return_value=True), patch.object(maintenance.Path, 'lstat', return_value=types.SimpleNamespace(st_uid=0, st_mode=0o100755)), patch.object(maintenance.Path, 'read_text', return_value='{"role":"bridge"}'), patch.object(maintenance.os, 'readlink', return_value='/usr/local/bin/ultra-relay'), patch.object(maintenance, 'service', return_value=active), patch.object(maintenance, 'hashes', return_value={}), patch.object(maintenance, 'atomic') as save, patch.object(maintenance, 'untouched_runtime', return_value='active') as initial:
+        with patch.object(maintenance, 'AnsibleModule', return_value=module), patch.object(maintenance.os, 'geteuid', return_value=0), patch.object(maintenance, 'private', return_value=gate), patch.object(maintenance.Path, 'exists', return_value=False), patch.object(maintenance.Path, 'is_symlink', return_value=False), patch.object(maintenance.Path, 'read_bytes', return_value=b'legacy'), patch.object(maintenance.Path, 'is_file', return_value=True), patch.object(maintenance.Path, 'lstat', return_value=types.SimpleNamespace(st_uid=0, st_mode=0o100755)), patch.object(maintenance.Path, 'read_text', return_value='{"role":"bridge"}'), patch.object(maintenance.os, 'readlink', return_value='/usr/local/bin/ultra-relay'), patch.object(maintenance, 'service', side_effect=observed_service), patch.object(maintenance, 'hashes', return_value={}), patch.object(maintenance, 'atomic') as save, patch.object(maintenance, 'untouched_runtime', return_value='active') as initial:
             for phase in ('rollback-check', 'retry-checkpoint'):
                 module.params['phase'] = phase
                 self.assertEqual(invoke(), {'changed': False, 'verified': True, 'held': False, 'untouched': True})
@@ -280,7 +434,7 @@ class Contracts(unittest.TestCase):
                 gate['phase'] = 'applying'
                 with patch.object(maintenance, 'service', return_value=dict(active, ControlPID='9')):
                     self.assertTrue(invoke()['failed'])
-                with patch.object(maintenance, 'service', side_effect=lambda mod, unit: dict(active, ActiveState='inactive') if unit in maintenance.SERVICES[1:] else active):
+                with patch.object(maintenance, 'service', side_effect=lambda mod, unit: {'LoadState': 'loaded', 'ActiveState': 'inactive'} if unit in maintenance.SERVICES[1:] else observed_service(mod, unit)):
                     self.assertTrue(invoke()['failed'])
                 with patch.object(maintenance.Path, 'read_bytes', return_value=b'other'):
                     self.assertTrue(invoke()['failed'])
@@ -317,7 +471,8 @@ class Contracts(unittest.TestCase):
 
     def test_no_checkpoint_rollback_skips_every_mutation_and_probe(self):
         plays = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/rollback.yml').read_text())
-        self.assertEqual(plays[0]['tasks'][0]['ultra_upgrade_maintenance']['phase'], 'rollback-check')
+        checkpoint = next(task for task in plays[0]['tasks'] if 'ultra_upgrade_maintenance' in task)
+        self.assertEqual(checkpoint['ultra_upgrade_maintenance']['phase'], 'rollback-check')
         self.assertTrue(plays[0]['any_errors_fatal'])
         environment = Environment()
         environment.filters['bool'] = bool

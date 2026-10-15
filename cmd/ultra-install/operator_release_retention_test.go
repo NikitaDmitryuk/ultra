@@ -411,7 +411,11 @@ func TestReleaseCacheLeaseRefusesExclusivePruningLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer exclusive.Close()
+	t.Cleanup(func() {
+		if err := exclusive.Close(); err != nil {
+			t.Errorf("close exclusive release lock: %v", err)
+		}
+	})
 	if lease, err := AcquireVerifiedGitHubRelease(path, "v1.0.0"); err == nil {
 		_ = lease.Close()
 		t.Fatal("leased an entry undergoing pruning")

@@ -162,6 +162,7 @@ build-bench:
 test-ui:
 	python3 scripts/test-mobile-bootstrap.py
 	python3 scripts/test-ansible-release-contracts.py
+	python3 scripts/test-database-preservation.py
 	python3 scripts/test-ansible-upgrade-baseline.py
 	python3 scripts/test-ansible-migration-probe.py
 	python3 scripts/test-verify-miniapp.py

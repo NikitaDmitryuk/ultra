@@ -18,6 +18,32 @@ import restore_peer as peer
 
 
 class RestoreContracts(unittest.TestCase):
+    def test_retirement_floor_requires_enforcing_recovery_migration(self):
+        ledger='state/var/lib/ultra-ansible/lifecycle-retired.json'
+        common.restore_controller_floor({'files':{}})
+        common.restore_controller_floor({'controller_enforcement_floor':0,'files':{}})
+        for value in (1, 2, -1, True, None, '0'):
+            with self.subTest(floor=value),self.assertRaisesRegex(ValueError,'^controller_enforcement_migration_required$'):
+                common.restore_controller_floor({'controller_enforcement_floor':value,'files':{}})
+        with self.assertRaisesRegex(ValueError,'^controller_enforcement_migration_required$'):
+            common.restore_controller_floor({'controller_enforcement_floor':0,'files':{ledger:{}}})
+        self.assertEqual(common.safe_error_code(ValueError('controller_enforcement_migration_required')),
+                         'controller_enforcement_migration_required')
+
+    def test_stage_rejects_declared_enforcement_floor_before_activation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stage=Path(directory);(stage/'artifacts').mkdir()
+            (stage/'manifest.json').write_text(json.dumps({'kind':'backup','source':'bridge','files':{},
+                                                         'controller_enforcement_floor':1}))
+            (stage/'artifacts/manifest.json').write_text(json.dumps({'kind':'artifact','source':'bridge','files':{}}))
+            with self.assertRaisesRegex(ValueError,'^controller_enforcement_migration_required$'):
+                common.stage_manifests(stage)
+            (stage/'manifest.json').write_text(json.dumps({'kind':'backup','source':'bridge','files':{}}))
+            (stage/'artifacts/manifest.json').write_text(json.dumps({'kind':'artifact','source':'bridge','files':{},
+                                                                   'controller_enforcement_floor':1}))
+            with self.assertRaisesRegex(ValueError,'^controller_enforcement_migration_required$'):
+                common.stage_manifests(stage)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)

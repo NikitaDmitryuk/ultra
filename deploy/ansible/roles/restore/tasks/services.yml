@@ -1,4 +1,8 @@
 ---
+- name: Preserve the target controller enforcement floor before service mutation
+  ansible.builtin.include_role:
+    name: release
+    tasks_from: controller-rollback-preflight
 - name: Keep application and automation masked during data installation
   ansible.builtin.systemd_service:
     name: "{{ item }}"

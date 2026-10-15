@@ -22,6 +22,10 @@ class RecoveryTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.repo = recovery.repository(self.root / 'repo', 'bridge', True)
+        self.retirement_path = self.root / 'lifecycle-retired.json'
+        retirement_patch = mock.patch.object(recovery, 'CONTROLLER_RETIREMENT_PATH', str(self.retirement_path))
+        retirement_patch.start()
+        self.addCleanup(retirement_patch.stop)
     def tearDown(self):
         self.tmp.cleanup()
     def args(self, name, data, stamp):
@@ -72,22 +76,142 @@ class RecoveryTests(unittest.TestCase):
     def test_capture_receipt_matches_delivered_cipher_and_artifact(self):
         state=self.root/'spec.json';state.write_text('{}')
         binary=self.root/'binary';binary.write_bytes(b'fixture-binary')
+        ledger=self.root/'lifecycle-retired.json';ledger.write_text('{"version":1,"ids":["retired"]}')
+        ledger.chmod(0o600)
         config={'source':'bridge','repository':str(self.repo),'database':'ultra_test','state_paths':[str(state)],
+                'optional_state_paths':[str(ledger)],
                 'artifact_paths':[str(binary)],'recipient':'fixture-public','diagnostic_status':False,
                 'destinations':[{'id':'owned-node','host':'owned-address','required':True}]}
         delivered={}
         def run(args,**kwargs):
+            if args[0] == 'pg_restore':
+                return argparse.Namespace(returncode=0, stdout=b'1; 2615 2200 SCHEMA - public owner\n')
             kwargs['stdout'].write(b'fixture-pg-dump')
             return argparse.Namespace(returncode=0)
         def encrypt(source,target,recipient):target.write_bytes(source.read_bytes())
         def deliver(config,destination,source,encrypted,snapshot):delivered[encrypted.name]=encrypted.read_bytes()
-        with mock.patch.object(recovery,'run',side_effect=run),mock.patch.object(recovery,'encrypt',side_effect=encrypt),mock.patch.object(recovery,'verify_remote_artifact',side_effect=ValueError('missing')),mock.patch.object(recovery,'deliver',side_effect=deliver):
+        with mock.patch.object(recovery,'CONTROLLER_RETIREMENT_PATH',str(ledger)),mock.patch.object(recovery,'run',side_effect=run),mock.patch.object(recovery,'encrypt',side_effect=encrypt),mock.patch.object(recovery,'verify_remote_artifact',side_effect=ValueError('missing')),mock.patch.object(recovery,'deliver',side_effect=deliver):
             recovery.create(config)
         receipt=json.loads((self.repo/'last-success.json').read_text())
         self.assertEqual(receipt['source'],'bridge')
+        self.assertTrue(receipt['dump_verified'])
         self.assertEqual(receipt['delivered_target_ids'],['owned-node'])
         self.assertEqual(receipt['backup_sha256'],hashlib.sha256(delivered[receipt['backup_name']]).hexdigest())
         self.assertEqual(receipt['artifact_sha256'],hashlib.sha256(delivered[receipt['artifact_name']]).hexdigest())
+        import tarfile
+        with tarfile.open(fileobj=io.BytesIO(delivered[receipt['backup_name']])) as archive:
+            manifest=json.load(archive.extractfile('manifest.json'))
+            self.assertEqual(manifest['controller_enforcement_floor'],1)
+            self.assertIn('state/'+str(ledger).lstrip('/'),manifest['files'])
+            self.assertEqual(archive.extractfile('state/'+str(ledger).lstrip('/')).read(),ledger.read_bytes())
+
+    def test_dump_validation_rejects_corrupt_empty_and_missing_archives(self):
+        dump = self.root / 'database.dump'
+        with self.assertRaisesRegex(ValueError, 'database dump validation failed'):
+            recovery.validate_database_dump(dump)
+        dump.write_bytes(b'')
+        with self.assertRaisesRegex(ValueError, 'database dump validation failed'):
+            recovery.validate_database_dump(dump)
+        dump.write_bytes(b'custom-archive')
+        with mock.patch.object(recovery, 'run', side_effect=ValueError('recovery command failed')):
+            with self.assertRaisesRegex(ValueError, 'recovery command failed'):
+                recovery.validate_database_dump(dump)
+        with mock.patch.object(recovery, 'run', return_value=argparse.Namespace(stdout=b'; header only\n')):
+            with self.assertRaisesRegex(ValueError, 'database dump validation failed'):
+                recovery.validate_database_dump(dump)
+        with mock.patch.object(recovery, 'run', return_value=argparse.Namespace(stdout=b'1; 2615 2200 SCHEMA - public owner\n')) as run:
+            recovery.validate_database_dump(dump)
+            run.assert_called_once_with(['pg_restore', '--list', str(dump)], stdout=recovery.subprocess.PIPE)
+
+    def test_invalid_dump_never_delivers_or_confirms_a_generation(self):
+        state = self.root / 'spec.json'
+        state.write_text('{}')
+        binary = self.root / 'binary'
+        binary.write_bytes(b'fixture-binary')
+        config = {'source': 'bridge', 'repository': str(self.repo), 'database': 'fixture',
+                  'state_paths': [str(state)], 'artifact_paths': [str(binary)],
+                  'recipient': 'fixture', 'destinations': [{'host': '192.0.2.2', 'required': True}]}
+        def run(args, **kwargs):
+            kwargs['stdout'].write(b'corrupt-dump')
+        def encrypt(source, target, recipient):
+            target.write_bytes(source.read_bytes())
+        with mock.patch.object(recovery, 'run', side_effect=run), \
+             mock.patch.object(recovery, 'encrypt', side_effect=encrypt), \
+             mock.patch.object(recovery, 'validate_database_dump', side_effect=ValueError('invalid dump')), \
+             mock.patch.object(recovery, 'deliver') as deliver:
+            with self.assertRaisesRegex(ValueError, 'invalid dump'):
+                recovery.create(config)
+        deliver.assert_not_called()
+        self.assertFalse((self.repo / 'last-success.json').exists())
+
+    def test_optional_lifecycle_state_is_reselected_and_rejects_symlinks(self):
+        ledger=self.root/'lifecycle-retired.json'
+        config={'state_paths':[], 'optional_state_paths':[str(ledger)]}
+        self.assertEqual(recovery.capture_state_paths(config),[])
+        ledger.write_text('{}')
+        ledger.chmod(0o600)
+        self.assertEqual(recovery.capture_state_paths(config),[str(ledger)])
+        ledger.unlink();ledger.symlink_to(self.root/'missing')
+        with self.assertRaisesRegex(ValueError,'controller_enforcement_migration_required'):
+            recovery.capture_state_paths(config)
+        ledger.unlink();ledger.mkdir()
+        with self.assertRaisesRegex(ValueError,'controller_enforcement_migration_required'):
+            recovery.capture_state_paths(config)
+
+    def test_retirement_floor_is_captured_even_when_policy_is_old(self):
+        ledger = self.root / 'lifecycle-retired.json'
+        config = {'state_paths': [], 'optional_state_paths': []}
+        with mock.patch.object(recovery, 'CONTROLLER_RETIREMENT_PATH', str(ledger)):
+            self.assertEqual(recovery.capture_state_paths(config), [])
+            ledger.write_text('{"version":1,"ids":["fixture"]}')
+            ledger.chmod(0o600)
+            self.assertEqual(recovery.capture_state_paths(config), [str(ledger)])
+            ledger.unlink()
+            ledger.symlink_to(self.root / 'missing')
+            with self.assertRaisesRegex(ValueError, 'controller_enforcement_migration_required'):
+                recovery.capture_state_paths(config)
+
+    def test_current_database_anchor_is_preserved_even_with_an_old_backup_policy(self):
+        operation = '11111111-2222-3333-4444-555555555555'
+        lifecycle = self.root / 'lifecycle.json'
+        lifecycle.write_text(json.dumps({'id': operation, 'phase': 'applying'}))
+        lifecycle.chmod(0o600)
+        root = self.root / 'upgrade'
+        directory = root / operation
+        directory.mkdir(parents=True)
+        anchor = directory / 'database-preservation.json'
+        config = {'state_paths': []}
+        with mock.patch.object(recovery, 'LIFECYCLE_PATH', str(lifecycle)), \
+             mock.patch.object(recovery, 'DATABASE_PRESERVATION_ROOT', root):
+            self.assertEqual(recovery.capture_state_paths(config), [str(lifecycle)])
+            anchor.write_text('{"cluster":"fixture-cluster","oid":16384}')
+            anchor.chmod(0o600)
+            self.assertEqual(set(recovery.capture_state_paths(config)), {str(lifecycle), str(anchor)})
+            anchor.unlink()
+            anchor.symlink_to(self.root / 'missing')
+            with self.assertRaisesRegex(ValueError, 'database_preservation_capture_invalid'):
+                recovery.capture_state_paths(config)
+    def test_first_retirement_publication_during_dump_invalidates_generation(self):
+        state=self.root/'spec.json';state.write_text('{}')
+        binary=self.root/'binary';binary.write_bytes(b'fixture-binary')
+        ledger=self.root/'lifecycle-retired.json'
+        config={'source':'bridge','repository':str(self.repo),'database':'fixture_db',
+                'state_paths':[str(state)],'optional_state_paths':[str(ledger)],
+                'artifact_paths':[str(binary)],'recipient':'fixture-public',
+                'destinations':[{'host':'fixture-target','required':True}]}
+        def dump(*args,**kwargs):
+            kwargs['stdout'].write(b'fixture-dump')
+            ledger.write_text('{"version":1,"ids":["retired"]}')
+            ledger.chmod(0o600)
+        def encrypt(source,target,recipient):target.write_bytes(source.read_bytes())
+        with mock.patch.object(recovery,'run',side_effect=dump), \
+             mock.patch.object(recovery,'encrypt',side_effect=encrypt), \
+             mock.patch.object(recovery,'deliver') as deliver:
+            with self.assertRaisesRegex(ValueError,'configuration changed during capture'):
+                recovery.create(config)
+        deliver.assert_not_called()
+        self.assertFalse((self.repo/'last-success.json').exists())
+        self.assertFalse(list(self.repo.glob('backup-*.age')))
 
     def test_destination_specific_pins_override_defaults(self):
         config={'identity_file':'global-key','known_hosts':'global-pins'}

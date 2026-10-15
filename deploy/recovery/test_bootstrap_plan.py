@@ -158,6 +158,8 @@ class BootstrapPlanTests(unittest.TestCase):
         result = bootstrap_plan.plan(self.config)
         backup = json.loads(next(item['content'] for item in result['files'] if item['destination'].endswith('/backup.json')))
         self.assertIn('/var/lib/ultra-ansible/retention', backup['state_paths'])
+        self.assertEqual(backup['optional_state_paths'], ['/var/lib/ultra-ansible/lifecycle.json',
+                                                         '/var/lib/ultra-ansible/lifecycle-retired.json'])
         self.assertIn(self.config['controller_directory'], backup['artifact_paths'])
 
     def test_pin_and_age_rotation_refused(self):

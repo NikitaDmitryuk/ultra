@@ -51,8 +51,10 @@ class VersionedStateTests(unittest.TestCase):
 
     @staticmethod
     def dump(args, **kwargs):
+        if args[:2] == ['pg_restore', '--list']:
+            return argparse.Namespace(returncode=0, stdout=b'; archive listing\nTABLE public.fixture\n')
         kwargs['stdout'].write(b'fixture-database')
-        return argparse.Namespace(returncode=0)
+        return argparse.Namespace(returncode=0, stdout=b'')
 
     def encrypt(self, source, target, recipient):
         self.encryptions.append(target.name)

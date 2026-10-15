@@ -78,6 +78,34 @@ environment и точные rollback images не передаются в receipt
 Источники: [transport](../cmd/ultra-install/upgrade_runtime_probe.go),
 [caller](../cmd/ultra-install/upgrade_runtime_integration.go).
 
+Незавершённый manual journal с `mutator_dispatched=true` блокирует обычный повтор,
+`--retry-failed` и использование release как baseline. Одноразовый `--forward-only`
+принимает только exact journal прерванного upgrade: удерживает broker lease,
+проверяет свежим playbook единственное дерево прежнего worker на bridge и каждом
+узле замороженного inventory, записывает write-ahead handoff и затем меняет lifecycle ID.
+Свободный flock, `status` и локальные поля `drained`/`quiescent` сами по себе не
+доказывают остановку workers. Перед мутацией создаётся свежий DB snapshot, проверяется
+читаемость custom archive через `pg_restore --list` и независимая доставка. Это не
+репетиция восстановления: успешный список TOC не доказывает, что данные можно восстановить.
+При ошибке forward-only не возвращает старый бинарник и не откатывает БД; он повторно
+закрепляет тот же lifecycle gate, останавливает bot/relay и принадлежащие upgrade
+таймеры/службы на замороженном inventory и подтверждает их состояние. Если gate или
+остановку подтвердить не удалось, команда завершается ошибкой; считать production
+безопасно переведённым в maintenance нельзя.
+
+Retirement ledger устанавливает сохраняемый floor контроллера. Rollback и restore
+на узел с ledger блокируются до первой мутации; backup включает оба lifecycle journal
+и аутентифицирует `controller_enforcement_floor`. Collector всегда перечитывает
+фиксированный retirement ledger даже при старой backup policy.
+Restore поколения с таким floor выдаёт `controller_enforcement_migration_required`:
+текущий формат не доказывает совместимость восстановленного контроллера.
+Более старый snapshot на новом узле не содержит актуального floor: для его безопасной
+миграции нужен независимый от snapshot монотонный checkpoint enforcement/retirement.
+Эти ограничения не доказывают quiescence ранее прерванной попытки.
+Источники: [manual gate](../scripts/manual-deploy.py),
+[rollback preflight](../deploy/ansible/roles/release/tasks/controller-rollback-preflight.yml),
+[проверка restore](../deploy/recovery/restore_common.py).
+
 Роли и systemd-шаблоны Ansible встраиваются в `ultra-install` из
 [deploy/ansible](../deploy/ansible/assets.go). Изменение установленного YAML отдельно
 от бинарника не меняет уже зафиксированное задание: оно использует собственный

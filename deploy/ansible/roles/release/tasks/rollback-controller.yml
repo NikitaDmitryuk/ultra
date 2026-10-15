@@ -1,4 +1,6 @@
 ---
+- name: Preserve lifecycle enforcement before restoring any controller
+  ansible.builtin.import_tasks: controller-rollback-preflight.yml
 - name: Inspect the recorded controller service fallback
   ansible.builtin.stat:
     path: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/controller.service.previous"

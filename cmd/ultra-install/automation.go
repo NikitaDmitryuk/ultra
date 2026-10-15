@@ -74,7 +74,7 @@ func runAutomationCommand(action string, args []string) {
 			})
 			exitOnErr("GitHub release download", err)
 			selectedReleaseDir = verified.Directory
-			defer verified.Close()
+			defer func() { exitOnErr("GitHub release close", verified.Close()) }()
 		} else if *releaseSelector != "latest" {
 			exitOnErr("upgrade arguments", errors.New("--release and --release-dir cannot be used together"))
 			return
@@ -82,7 +82,7 @@ func runAutomationCommand(action string, args []string) {
 			verified, err := snapshotSignedAutomationRelease(selectedReleaseDir, publicKey, stagingBase, minisignPath)
 			exitOnErr("local release snapshot", err)
 			selectedReleaseDir = verified.Directory
-			defer verified.Close()
+			defer func() { exitOnErr("local release snapshot close", verified.Close()) }()
 		}
 		_, err = verifySignedAutomationRelease(selectedReleaseDir, publicKey, minisignPath)
 		exitOnErr("GitHub release verification", err)
@@ -116,6 +116,9 @@ func runOperatorUpgradeCommand(args []string) {
 	manifestSHA := fs.String("manifest-sha256", "", "expected release manifest SHA-256")
 	configSHA := fs.String("config-sha256", "", "expected canonical config SHA-256")
 	retryFailed := fs.Bool("retry-failed", false, "explicitly retry the same failed frozen Ansible job after recovery preflight")
+	forwardOnly := fs.Bool("forward-only", false, "continue without restoring an unknown previous relay binary")
+	forwardJournalFile := fs.String("forward-journal-file", "", "private archived dispatched-operation journal for forward-only recovery")
+	forwardJournalSHA := fs.String("forward-journal-sha256", "", "SHA-256 of the archived forward-only journal")
 	probeFile := fs.String("subscription-probe-url-file", "", "private 0600 HTTPS subscription URL file for domain acceptance")
 	jobDirectory := fs.String("job-dir", "", "persistent private Ansible upgrade directory")
 	python := fs.String("python", "/usr/bin/python3", "controller Python")
@@ -124,7 +127,10 @@ func runOperatorUpgradeCommand(args []string) {
 	if fs.NArg() > 0 || *configPath == "" || *releaseDir == "" || *version == "" ||
 		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(*sourceCommit) ||
 		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(*manifestSHA) ||
-		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(*configSHA) {
+		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(*configSHA) || (*forwardOnly && *retryFailed) ||
+		(*forwardOnly && (*forwardJournalFile == "" || *forwardJournalSHA == "")) ||
+		(!*forwardOnly && (*forwardJournalFile != "" || *forwardJournalSHA != "")) ||
+		(*forwardJournalSHA != "" && !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(*forwardJournalSHA)) {
 		exitOnErr("operator upgrade arguments", errors.New("complete operator candidate identity required"))
 		return
 	}
@@ -155,7 +161,19 @@ func runOperatorUpgradeCommand(args []string) {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	exitOnErr("Ansible operator upgrade", ansibleUpgrade(withUpgradeDomainProbeFile(ctx, *probeFile), p, selectedRelease, *jobDirectory, *python, *ansible, *retryFailed))
+	if *forwardJournalFile != "" {
+		if !filepath.IsAbs(*forwardJournalFile) {
+			exitOnErr("operator upgrade forward journal", errors.New("forward journal must be an absolute private file"))
+			return
+		}
+		raw, readErr := readForwardEvidence(*forwardJournalFile)
+		if readErr != nil || digestSHA256(raw) != *forwardJournalSHA {
+			exitOnErr("operator upgrade forward journal", errors.New("forward journal verification failed"))
+			return
+		}
+		ctx = withForwardUpgradeJournal(ctx, *forwardJournalFile, *forwardJournalSHA)
+	}
+	exitOnErr("Ansible operator upgrade", ansibleUpgrade(withUpgradeDomainProbeFile(ctx, *probeFile), p, selectedRelease, *jobDirectory, *python, *ansible, *retryFailed, *forwardOnly))
 }
 
 func verifyOperatorUpgradeRelease(releaseDir, sourceCommit, version, manifestSHA, executable string) (*automationRelease, error) {

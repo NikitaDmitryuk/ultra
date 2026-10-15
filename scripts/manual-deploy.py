@@ -32,6 +32,20 @@ def require(condition, code):
         raise DeployError(code)
 
 
+def require_manual_quiescence(record):
+    """Legacy dispatch has no authoritative worker-drain receipt.
+
+    A flock, terminal CLI status, signed release baseline, or operator-supplied
+    JSON field cannot prove that an old SSH module stopped mutating. There is
+    deliberately no bypass until a migration command can fence every dispatch
+    origin and obtain host-bound drain evidence from the frozen target set.
+    """
+    require(isinstance(record, dict), 'manual_operation_journal_invalid')
+    require(record.get('mutator_dispatched', False) is False and
+            record.get('stage') not in ('adoption_apply', 'upgrade', 'status', 'completed'),
+            'manual_operation_quiescence_migration_required')
+
+
 def run(command, cwd, stage, capture=False, env=None):
     # Installer and build tools may include private input values in their errors.
     # Expose only this wrapper's fixed stage and exit code, never their output.
@@ -261,6 +275,7 @@ def stage_upgrade_baseline(config, version, remote_root):
             re.fullmatch('[a-f0-9]{16,64}', journal.get('remote_attempt', '')) and
             journal.get('manifest_sha256') == descriptor.get('manifest_sha256'),
             'upgrade_baseline_journal_invalid')
+    require_manual_quiescence(journal)
     try:
         manifest = json.loads(manifest_raw)
     except (ValueError, UnicodeDecodeError):
@@ -518,12 +533,15 @@ def operator_requested():
 REMOTE_PROGRAM = r'''
 import fcntl,hashlib,json,os,platform,re,shutil,stat,sys,tarfile,tempfile
 from pathlib import Path
-def need(ok):
-    if not ok: raise ValueError('remote_input_invalid')
+def need(ok, code='remote_input_invalid'):
+    if not ok: raise ValueError(code)
 def digest(data): return hashlib.sha256(data).hexdigest()
 mode,commit,version,manifest_sha,config_sha,attempt=sys.argv[1:7]
-probe_sha=(sys.argv[10] if len(sys.argv)>10 else '') if mode=='run' else (sys.argv[7] if len(sys.argv)>7 else '')
+probe_sha=(sys.argv[11] if len(sys.argv)>11 else '') if mode=='run' else (sys.argv[7] if len(sys.argv)>7 else '')
+forward_journal_sha=(sys.argv[12] if mode=='run' and len(sys.argv)>12 else
+                     (sys.argv[8] if mode in ['stage','cleanup'] and len(sys.argv)>8 else ''))
 need(probe_sha=='' or re.fullmatch('[a-f0-9]{64}',probe_sha))
+need(forward_journal_sha=='' or re.fullmatch('[a-f0-9]{64}',forward_journal_sha))
 need(re.fullmatch('[a-f0-9]{40}',commit) and version=='v0.0.'+str(int(commit,16)))
 need(all(re.fullmatch('[a-f0-9]{64}',x) for x in [manifest_sha,config_sha,attempt]))
 need(os.geteuid()==0)
@@ -552,7 +570,7 @@ def verify(directory):
         need(len(data)==row['size'] and digest(data)==row['sha256'])
     need({x.name for x in (directory/'release').iterdir()}==names|{'release-manifest.json'})
     top={x.name for x in directory.iterdir()}
-    need(top - {'baseline','subscription-probe-url','subscription-probe.sha256'} == {'release','install.config'})
+    need(top - {'baseline','subscription-probe-url','subscription-probe.sha256','forward-operation.json'} == {'release','install.config'})
     need(('subscription-probe.sha256' in top)==bool(probe_sha))
     if probe_sha:
         need(read(directory/'subscription-probe.sha256')==probe_sha.encode())
@@ -561,6 +579,11 @@ def verify(directory):
             need(stat.S_IMODE(info.st_mode)==0o600 and info.st_nlink==1 and 0<info.st_size<=4096)
             need(digest(read(directory/'subscription-probe-url'))==probe_sha)
     else: need('subscription-probe-url' not in top)
+    need(('forward-operation.json' in top)==bool(forward_journal_sha))
+    if forward_journal_sha:
+        info=(directory/'forward-operation.json').lstat()
+        need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600)
+        need(digest(read(directory/'forward-operation.json'))==forward_journal_sha)
     if 'baseline' in top:
         baseline=directory/'baseline';info=baseline.lstat()
         need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700)
@@ -570,6 +593,8 @@ def verify(directory):
             need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600)
         descriptor_raw=read(baseline/'descriptor.json');journal_raw=read(baseline/'operator-journal.json')
         descriptor=json.loads(descriptor_raw);journal=json.loads(journal_raw)
+        need(journal.get('mutator_dispatched') is not True,
+             'manual_operation_quiescence_migration_required')
         need(descriptor.get('schema')==1 and digest(journal_raw)==descriptor.get('journal_sha256'))
         need(descriptor.get('journal')==str(root/'baseline/operator-journal.json'))
         old_release=Path('/var/lib/ultra-ansible/operator-inputs')/('manual-'+journal.get('commit','')+'-'+journal.get('remote_attempt',''))/'release'
@@ -600,6 +625,9 @@ if mode=='stage':
                 elif name in ('subscription-probe-url','subscription-probe.sha256'):
                     need(bool(probe_sha) and member.size<=4096)
                     raw=None
+                elif name=='forward-operation.json':
+                    need(bool(forward_journal_sha) and member.size<=1048576)
+                    raw=None
                 elif name in ('baseline/descriptor.json','baseline/operator-journal.json'):
                     need(name not in seen and member.size<=4194304)
                     if not (pending/'baseline').exists():
@@ -627,12 +655,21 @@ if mode=='stage':
             need({'baseline/descriptor.json','baseline/operator-journal.json'} <= seen)
             expected |= {'baseline/descriptor.json','baseline/operator-journal.json'}
         if probe_sha: expected |= {'subscription-probe-url','subscription-probe.sha256'}
+        if forward_journal_sha: expected.add('forward-operation.json')
         need(rows is not None and seen==expected)
         verify(pending)
         for directory in [pending/'release',pending]:
             fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
         if root.exists() or root.is_symlink():
-            verify(root)
+            requested_forward_sha=forward_journal_sha
+            if requested_forward_sha and not (root/'forward-operation.json').exists():
+                forward_journal_sha=''
+                verify(root)
+                forward_journal_sha=requested_forward_sha
+                os.rename(pending/'forward-operation.json',root/'forward-operation.json')
+                fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+            else:
+                verify(root)
             if probe_sha and not (root/'subscription-probe-url').exists():
                 os.rename(pending/'subscription-probe-url',root/'subscription-probe-url')
                 fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
@@ -648,7 +685,12 @@ elif mode=='run':
     architecture=sys.argv[7];need(architecture in ['amd64','arm64'])
     need(architecture=={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine()))
     action=sys.argv[8];need(action in ['doctor','adoption_check','adoption_apply','upgrade','operator-upgrade','status'])
-    retry_failed=len(sys.argv)>9 and sys.argv[9]=='1';need(len(sys.argv)<=11 and (len(sys.argv)<=9 or sys.argv[9] in ['0','1']))
+    retry_failed=len(sys.argv)>9 and sys.argv[9]=='1'
+    forward_only=len(sys.argv)>10 and sys.argv[10]=='1'
+    need(len(sys.argv)<=13 and (len(sys.argv)<=9 or sys.argv[9] in ['0','1']) and
+         (len(sys.argv)<=10 or sys.argv[10] in ['0','1']) and
+         (not forward_only or (action=='upgrade' and not retry_failed and bool(forward_journal_sha))),
+         'manual_forward_only_invalid')
     binary=root/'release'/('ultra-install-linux-'+architecture)
     binary.chmod(0o700)
     args={'doctor':['doctor'],'adoption_check':['adopt','--adopt-runtime','--bridge-native','--check','--release-dir',str(root/'release')],
@@ -657,6 +699,10 @@ elif mode=='run':
               '--source-commit',commit,'--version',version,'--manifest-sha256',manifest_sha,
               '--config-sha256',config_sha] + (['--retry-failed'] if retry_failed else []),
           'status':['status']}[action]
+    if action=='upgrade' and forward_only:
+        args += ['--job-dir', '/var/lib/ultra-ansible/upgrade-'+version,
+                 '--forward-only', '--forward-journal-file', str(root/'forward-operation.json'),
+                 '--forward-journal-sha256', forward_journal_sha]
     if action=='upgrade' and probe_sha:
         need((root/'subscription-probe-url').exists())
         args += ['--subscription-probe-url-file',str(root/'subscription-probe-url')]
@@ -669,6 +715,9 @@ elif mode=='cleanup':
     verify(root)
     if probe_sha:
         (root/'subscription-probe-url').unlink(missing_ok=True)
+        fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+    if forward_journal_sha:
+        (root/'forward-operation.json').unlink()
         fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
 else: raise ValueError('remote_action_invalid')
 '''
@@ -692,14 +741,15 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
             entry.size = len(config)
             archive.addfile(entry, io.BytesIO(config))
             for name, data in sorted((extra_files or {}).items()):
-                require(name in ('baseline/descriptor.json', 'baseline/operator-journal.json', 'subscription-probe-url', 'subscription-probe.sha256'), 'private_archive_path_invalid')
+                require(name in ('baseline/descriptor.json', 'baseline/operator-journal.json', 'subscription-probe-url', 'subscription-probe.sha256', 'forward-operation.json'), 'private_archive_path_invalid')
                 entry = tarfile.TarInfo(name)
                 entry.size = len(data)
                 archive.addfile(entry, io.BytesIO(data))
         stream.seek(0)
         attempt = remote_attempt(config, version)
         result = subprocess.run(remote_command(transport, commit, version, manifest_sha, sha(config), attempt, 'stage',
-                                              (extra_files or {}).get('subscription-probe.sha256', b'').decode()),
+                                              (extra_files or {}).get('subscription-probe.sha256', b'').decode(),
+                                              sha((extra_files or {}).get('forward-operation.json', b'')) if (extra_files or {}).get('forward-operation.json') else ''),
                                 cwd=repo, stdin=stream, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
     require(result.returncode == 0, 'bridge_staging_failed')
     receipt = json.loads(result.stdout)
@@ -708,9 +758,64 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
     return receipt
 
 
-def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_failed=False, probe_env_file=None):
+def validate_dispatched_manual_operation(record):
+    require(isinstance(record, dict) and record.get('schema') == 1 and
+            record.get('mutator_dispatched') is True and record.get('stage') == 'upgrade' and
+            re.fullmatch('[a-f0-9]{40}', record.get('commit', '')) and
+            re.fullmatch(r'v0\.0\.(0|[1-9][0-9]*)', record.get('version', '')) and
+            record.get('version') == 'v0.0.' + str(int(record['commit'], 16)) and
+            all(re.fullmatch('[a-f0-9]{64}', record.get(key, '')) for key in
+                ('remote_attempt', 'manifest_sha256', 'staged_config_sha256')),
+            'manual_forward_only_requires_dispatched_upgrade')
+
+
+def valid_completed_remote_cleanup(record, commit, version, adopt):
+    """Recognize a completed remote deployment journal that only needs cleanup."""
+    if not (isinstance(record, dict) and record.get('schema') == 1 and
+            record.get('stage') == 'completed' and record.get('mutator_dispatched') is True and
+            record.get('commit') == commit and record.get('version') == version and
+            record.get('adopt') is adopt):
+        return False
+    digests = ('remote_attempt', 'manifest_sha256', 'staged_config_sha256',
+               'config_sha256', 'previous_sha256', 'final_config_sha256')
+    if not all(isinstance(record.get(key), str) and
+               re.fullmatch('[a-f0-9]{64}', record[key]) for key in digests):
+        return False
+    probe_sha = record.get('probe_sha256', '')
+    return isinstance(probe_sha, str) and (probe_sha == '' or re.fullmatch('[a-f0-9]{64}', probe_sha) is not None)
+
+
+def abandon_dispatched_manual_operation(root, journal, record):
+    """Retain one explicitly abandoned failed upgrade without resuming it."""
+    validate_dispatched_manual_operation(record)
+    archived = root / ('operation.forward-only-abandoned-' + str(time.time_ns()) + '.json')
+    atomic_write(archived, json.dumps(record, sort_keys=True).encode())
+    journal.unlink()
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return archived
+
+
+def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_failed=False, probe_env_file=None, forward_only=False):
     architecture = {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(platform.machine())
     require(platform.system() == 'Linux' and architecture, 'operator_requires_linux_amd64_or_arm64')
+    journal = root / 'operation.json'
+    existing_record = json.loads(private_file(journal)) if journal.exists() or journal.is_symlink() else {}
+    abandoned_record = None
+    if forward_only:
+        require(not adopt and not retry_failed, 'manual_forward_only_upgrade_only')
+        validate_dispatched_manual_operation(existing_record)
+        abandoned_record = existing_record
+        existing_record = {}
+    else:
+        # Completed journals are recovery metadata, not a request to redispatch
+        # the old mutator. Validate and clean them in the recovery block below
+        # before applying the active-operation quiescence gate.
+        if not valid_completed_remote_cleanup(existing_record, commit, version, adopt):
+            require_manual_quiescence(existing_record)
     config = Path(config_path) if config_path else repo / 'install.config'
     current = canonical_file(config)
     validate_config_policy(current)
@@ -721,30 +826,38 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         # secrets file. Suppress its output because the plan contains inputs.
         run([str(bundle / ('ultra-install-linux-' + architecture)), 'plan', '--config', str(config), '--format', 'json'],
             repo, 'canonical_policy')
-    replay = completed_baseline_replay(root, current, version, commit) if transport else None
-    attempt = (replay[0] if replay else remote_attempt(current, version)) if transport else None
+    replay = completed_baseline_replay(root, current, version, commit) if transport and not forward_only else None
+    if transport:
+        if replay:
+            attempt = replay[0]
+        elif forward_only:
+            attempt = remote_attempt(config_candidate(current, version, '/manual-release'), version)
+        else:
+            attempt = remote_attempt(current, version)
+    else:
+        attempt = None
     remote_release = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + commit + '-' + (attempt or '')) / 'release'
     manifest_sha = sha((bundle / 'release-manifest.json').read_bytes()) if transport else None
-    journal = root / 'operation.json'
     backup = root / ('install.config.before-' + version + '-' + str(time.time_ns()))
     new = config_candidate(current, version, remote_release if transport else bundle)
     staged_config = new
     baseline_files = {}
     if transport and replay:
         staged_config, baseline_files = replay[1], replay[2]
-    elif transport:
+    elif transport and not forward_only:
         staged_config, baseline_files = stage_upgrade_baseline(current, version, remote_release.parent)
     probe_snapshot = root / 'subscription-probe-url'
     binding = root / ('probe-binding-' + commit + '-' + (attempt or sha(new)))
-    existing_record = json.loads(private_file(journal)) if journal.exists() else {}
 
     def cleanup_probe(record):
-        if transport and record.get('probe_sha256'):
+        forward_sha = record.get('forward_journal_sha256', '')
+        if transport and (record.get('probe_sha256') or forward_sha):
             run(remote_command(transport, commit, version, manifest_sha, record['staged_config_sha256'],
-                               record['remote_attempt'], 'cleanup', record['probe_sha256']), repo, 'probe_cleanup')
+                               record['remote_attempt'], 'cleanup', record.get('probe_sha256', ''),
+                               forward_sha), repo, 'probe_cleanup')
         probe_snapshot.unlink(missing_ok=True)
 
-    if journal.exists():
+    if journal.exists() and not forward_only:
         record = existing_record
         if record.get('stage') == 'completed':
             require(record.get('schema') == 1 and record.get('commit') == commit and
@@ -779,7 +892,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     if existing_record:
         require(existing_record.get('probe_sha256', '') == probe_sha, 'manual_operation_probe_changed')
 
-    if journal.exists():
+    if journal.exists() and not forward_only:
         record = existing_record
         backup_name = record.get('backup', '')
         require(re.fullmatch(r'install\.config\.before-' + re.escape(version) + r'-[0-9]+', backup_name), 'manual_backup_identity_invalid')
@@ -794,11 +907,18 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         else:
             require(sha(current) == record.get('config_sha256'), 'canonical_config_changed_during_operation')
     else:
+        forward_journal_sha = ''
+        if forward_only:
+            archived_journal = abandon_dispatched_manual_operation(root, journal, abandoned_record)
+            forward_journal_raw = private_file(archived_journal)
+            forward_journal_sha = sha(forward_journal_raw)
+            baseline_files['forward-operation.json'] = forward_journal_raw
         atomic_write(backup, current)
         record = {'schema': 1, 'commit': commit, 'version': version, 'adopt': adopt,
                   'backup': backup.name, 'previous_sha256': sha(current), 'config_sha256': sha(new), 'stage': 'prepared', 'mutator_dispatched': False,
                   'transport_binding': transport_binding, 'manifest_sha256': manifest_sha, 'remote_attempt': attempt,
-                  'probe_sha256': probe_sha}
+                  'probe_sha256': probe_sha, 'forward_only': bool(forward_only),
+                  'forward_journal_sha256': forward_journal_sha}
         if probe_raw is not None:
             atomic_write(probe_snapshot, probe_raw)
         atomic_write(journal, json.dumps(record).encode())
@@ -818,6 +938,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
                                   '--source-commit', commit, '--version', version,
                                   '--manifest-sha256', manifest_sha or sha((bundle / 'release-manifest.json').read_bytes()),
                                   '--config-sha256', sha(new)])]
+        if forward_only:
+            commands[-1][1].append('--forward-only')
         if probe_sha:
             commands[-1][1].extend(['--subscription-probe-url-file', str(probe_snapshot)])
         if retry_failed:
@@ -843,8 +965,11 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             atomic_write(journal, json.dumps(record).encode())
             print('manual-deploy: ' + stage, flush=True)
             if transport:
+                stage_forward_only = forward_only and stage == 'upgrade'
                 command = remote_command(transport, commit, version, manifest_sha, record.get('staged_config_sha256', record['config_sha256']), attempt,
-                                         'run', record['remote_architecture'], stage, '1' if retry_failed else '0', probe_sha)
+                                         'run', record['remote_architecture'], stage, '1' if retry_failed else '0',
+                                         '1' if stage_forward_only else '0', probe_sha,
+                                         record.get('forward_journal_sha256', '') if forward_only else '')
             run(command, repo, stage)
     except BaseException:
         # Read-only adoption comparison cannot have dispatched a mutating job.
@@ -880,6 +1005,7 @@ def main():
     parser.add_argument('--build-only', action='store_true', help='verify/build candidate without changing canonical config or remote hosts')
     parser.add_argument('--config', help='canonical install.config path; defaults to install.config in this checkout')
     parser.add_argument('--retry-failed', action='store_true', help='explicitly retry the same failed upgrade after recovery preflight')
+    parser.add_argument('--forward-only', action='store_true', help='abandon one dispatched failed upgrade without restoring its unknown relay')
     parser.add_argument('--subscription-probe-env-file', help='private local env file; read only ULTRA_SUBSCRIPTION_PROBE_URL (default: .env beside canonical config)')
     arguments = parser.parse_args()
     require(not arguments.subscription_probe_env_file or (not arguments.build_only and os.environ.get('ADOPT') != '1'),
@@ -894,6 +1020,8 @@ def main():
     require(re.fullmatch('[0-9a-f]{40}', commit), 'source_commit_invalid')
     require(os.environ.get('ADOPT', '0') in ('0', '1'), 'ADOPT_must_be_0_or_1')
     require(not arguments.retry_failed or os.environ.get('ADOPT') != '1', 'retry_failed_requires_upgrade')
+    require(not arguments.forward_only or (not arguments.retry_failed and os.environ.get('ADOPT') != '1' and not arguments.build_only),
+            'manual_forward_only_upgrade_only')
     version = 'v0.0.' + str(int(commit, 16))
     root = repo / 'dist' / 'manual'
     require(not (repo / 'dist').is_symlink(), 'dist_must_not_be_symlink')
@@ -914,7 +1042,7 @@ def main():
                         require(shutil.which(executable), 'missing_prerequisite_' + executable)
                     operator_transport(os.environ.get('ULTRA_OPERATOR_INVENTORY'), current)
                 rollout(repo, root, bundle, commit, version, os.environ.get('ADOPT') == '1', config, arguments.retry_failed,
-                        arguments.subscription_probe_env_file)
+                        arguments.subscription_probe_env_file, arguments.forward_only)
     print('manual-deploy: complete', flush=True)
 
 

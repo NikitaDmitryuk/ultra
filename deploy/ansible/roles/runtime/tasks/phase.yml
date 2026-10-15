@@ -92,6 +92,14 @@
       - runtime_transaction_evidence.status in (['prepared', 'applied'] if ultra_runtime_action == 'prepare' else (['applied'] if ultra_runtime_action == 'apply' else ['rolled_back']))
   no_log: true
 
+- name: Freeze physical database identity and complete migration history before activation
+  ultra_database_preservation:
+    id: "{{ ultra_lifecycle_id }}"
+    phase: baseline
+    transaction: "{{ ultra_runtime_probe_requests[inventory_hostname].request.transaction }}"
+  when: inventory_hostname == 'bridge' and ultra_runtime_action == 'prepare' and ultra_forward_only | default(false) | bool
+  no_log: true
+
 - name: Restore dependencies after restoring the exact runtime image
   ultra_runtime_effects:
     action: rollback

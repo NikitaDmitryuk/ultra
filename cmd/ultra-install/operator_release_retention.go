@@ -48,7 +48,7 @@ func operatorReleasePinPath(cache, operation, release string) (string, operatorR
 
 // Persist references centrally so a failed frozen operation protects its
 // signed release even when --job-dir is outside the default operator tree.
-func pinOperatorRelease(cache, operation, release string) error {
+func pinOperatorRelease(cache, operation, release string) (retErr error) {
 	cacheAbs, err := filepath.Abs(cache)
 	if err != nil {
 		return err
@@ -72,7 +72,11 @@ func pinOperatorRelease(cache, operation, release string) error {
 	if err != nil {
 		return err
 	}
-	defer gate.Close()
+	defer func() {
+		if closeErr := gate.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, closeErr)
+		}
+	}()
 	if existing, err := readOperatorReleasePin(path); err == nil {
 		if existing != expected {
 			return errors.New("operator_release_pin_conflict")
@@ -90,7 +94,11 @@ func pinOperatorRelease(cache, operation, release string) error {
 		return err
 	}
 	tempPath := file.Name()
-	defer os.Remove(tempPath)
+	defer func() {
+		if removeErr := os.Remove(tempPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			retErr = errors.Join(retErr, removeErr)
+		}
+	}()
 	if err := file.Chmod(0600); err != nil {
 		_ = file.Close()
 		return err
@@ -116,7 +124,7 @@ func pinOperatorRelease(cache, operation, release string) error {
 	return nil
 }
 
-func unpinOperatorReleaseReferences(cache, operation string) error {
+func unpinOperatorReleaseReferences(cache, operation string) (retErr error) {
 	cache, err := filepath.Abs(cache)
 	if err != nil {
 		return err
@@ -132,7 +140,11 @@ func unpinOperatorReleaseReferences(cache, operation string) error {
 	if err != nil {
 		return err
 	}
-	defer gate.Close()
+	defer func() {
+		if closeErr := gate.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, closeErr)
+		}
+	}()
 	pins, err := operatorReleasePinsLocked(cache)
 	if err != nil {
 		return err
@@ -296,7 +308,7 @@ func pruneVerifiedOperatorReleaseCache(cacheDirectory, operatorRoot, publicKey, 
 		if operatorReleasePathReferenced(path, refs) {
 			continue
 		}
-		err := func() error {
+		err := func() (retErr error) {
 			gate, err := lockReleaseCacheGate(cache)
 			if err != nil {
 				return err
@@ -306,7 +318,11 @@ func pruneVerifiedOperatorReleaseCache(cacheDirectory, operatorRoot, publicKey, 
 			if lockErr != nil {
 				return nil
 			} // In-use, vanished, or unsafe entry: preserve.
-			defer locked.Close()
+			defer func() {
+				if closeErr := locked.Close(); closeErr != nil {
+					retErr = errors.Join(retErr, closeErr)
+				}
+			}()
 			lockedInfo, err := locked.Stat()
 			if err != nil {
 				return err
@@ -334,7 +350,11 @@ func pruneVerifiedOperatorReleaseCache(cacheDirectory, operatorRoot, publicKey, 
 			if err != nil {
 				return err
 			}
-			defer gate.Close()
+			defer func() {
+				if closeErr := gate.Close(); closeErr != nil {
+					retErr = errors.Join(retErr, closeErr)
+				}
+			}()
 			pinRefs, err := operatorReleasePinReferencesLocked(cache)
 			if err != nil {
 				return err

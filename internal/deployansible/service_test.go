@@ -124,3 +124,60 @@ path.chmod(0o600)
 		t.Fatal("different topology accepted on retry")
 	}
 }
+
+func TestLifecycleRetirementDispatchAuthorization(t *testing.T) {
+	for _, action := range []string{"lease-retire", "lease-supersede"} {
+		t.Run(action, func(t *testing.T) {
+			root := lifecycleTestDirectory(t)
+			gate, err := openLifecycleGate(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer gate.close()
+			id := "11111111-2222-3333-4444-555555555555"
+			if result := gate.transition(id, "applying"); result.Code != "" {
+				t.Fatal(result)
+			}
+			socket := filepath.Join(root, "controller.sock")
+			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close() //nolint:errcheck
+			done := make(chan Response, 1)
+			go func() {
+				conn, err := listener.AcceptUnix()
+				if err != nil {
+					done <- Response{Code: "accept_failed"}
+					return
+				}
+				defer conn.Close() //nolint:errcheck
+				done <- handleConnection(conn, root, uint32(os.Geteuid()), gate)
+			}()
+			conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socket, Net: "unix"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close() //nolint:errcheck
+			var inputs []*os.File
+			if action == "lease-supersede" {
+				inputs = []*os.File{gate.lock}
+			}
+			if err := sendRequest(conn, []byte(`{"action":"`+action+`","id":"`+id+`","next_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}`+"\n"), inputs); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case result := <-done:
+				if os.Geteuid() == 0 {
+					if result.Code != "" || (action == "lease-retire" && (result.State != "released" || gate.blocked())) || (action == "lease-supersede" && (result.State != "applying" || !gate.blocked())) {
+						t.Fatal("root retirement dispatch failed", result)
+					}
+				} else if result.Code != "controller_access_denied" || !gate.blocked() || gate.retired[id] {
+					t.Fatal("non-root retired root lifecycle", result)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("retirement dispatch timed out")
+			}
+		})
+	}
+}
