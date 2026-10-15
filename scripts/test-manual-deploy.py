@@ -43,9 +43,9 @@ class ManualDeploy(unittest.TestCase):
     def run_fixture(self, command, cwd, stage, capture=False, env=None):
         self.calls.append((stage, command))
 
-    def rollout(self, adopt=False, runner=None, config_path=None, retry_failed=False, probe_env_file=None, forward_only=False):
+    def rollout(self, adopt=False, runner=None, config_path=None, retry_failed=False, probe_env_file=None, forward_only=False, continue_forward_only=False):
         with patch.object(D, 'run', runner or self.run_fixture), patch.object(D.platform, 'system', return_value='Linux'), patch.object(D.platform, 'machine', return_value='x86_64'), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            D.rollout(self.repo, self.root, self.bundle, self.commit, self.version, adopt, config_path, retry_failed, probe_env_file, forward_only)
+            D.rollout(self.repo, self.root, self.bundle, self.commit, self.version, adopt, config_path, retry_failed, probe_env_file, forward_only, continue_forward_only)
 
     def probe_env(self, value=b'https://old.example.com/sub/fixture-token'):
         path = self.repo / '.env'
@@ -674,6 +674,336 @@ class NativeDeploy(unittest.TestCase):
         self.assertEqual(calls['status'][13], '0')
         self.assertEqual(calls['status'][15], forward_sha)
 
+    def failed_forward_fixture(self):
+        old_commit = 'b' * 40
+        old = {'schema': 1, 'commit': old_commit, 'version': 'v0.0.' + str(int(old_commit, 16)),
+               'stage': 'upgrade', 'mutator_dispatched': True, 'remote_attempt': 'c' * 64,
+               'manifest_sha256': 'd' * 64, 'staged_config_sha256': 'e' * 64}
+        D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
+        def fail(command, cwd, stage, **kwargs):
+            if stage == 'upgrade':
+                raise D.DeployError('fixture_failed')
+        with self.assertRaisesRegex(D.DeployError, 'fixture_failed'):
+            self.rollout(forward_only=True, runner=fail)
+        self.calls.clear()
+        self.stage_mock.reset_mock()
+        return old
+
+    def continuation_runner(self, old, change=None):
+        record = json.loads((self.root / 'operation.json').read_bytes())
+        def runner(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'forward_continuation_attestation':
+                state = Path('/var/lib/ultra-ansible') / ('upgrade-' + old['version'])
+                receipt = {'architecture': 'arm64', 'manifest_sha256': record['manifest_sha256'],
+                    'config_sha256': record['staged_config_sha256'], 'attempt': record['remote_attempt'],
+                    'forward_journal_sha256': record['forward_journal_sha256'],
+                    'lifecycle_id': str(D.uuid.UUID(bytes=hashlib.sha256(str(state).encode()).digest()[:16], version=4))}
+                receipt.update(change or {})
+                return json.dumps(receipt)
+        return runner
+
+    def test_continue_forward_only_retains_original_proof_and_exact_candidate(self):
+        old = self.failed_forward_fixture()
+        original_proof = next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes()
+        config = self.config.read_bytes()
+        with patch.object(D, 'subscription_probe_from_env', side_effect=AssertionError('must not read env')):
+            self.rollout(continue_forward_only=True, runner=self.continuation_runner(old))
+        self.assertFalse(self.stage_mock.called)
+        self.assertEqual(self.config.read_bytes(), config)
+        self.assertEqual([p.read_bytes() for p in self.root.glob('operation.forward-only-abandoned-*.json')], [original_proof])
+        upgrade = D.shlex.split(next(command for stage, command in self.calls if stage == 'upgrade')[-1])
+        self.assertEqual(upgrade[13], '1')
+        self.assertEqual(upgrade[15], D.sha(original_proof))
+        self.assertEqual(upgrade[16], '1')
+        self.assertNotIn('--retry-failed', upgrade)
+
+    def new_candidate_fixture(self):
+        self.commit = 'c' * 40
+        self.version = 'v0.0.' + str(int(self.commit, 16))
+        self.bundle = self.root / self.version
+        self.bundle.mkdir()
+        self.manifest = json.dumps({'source_commit': self.commit, 'version': self.version, 'assets': []}).encode()
+        (self.bundle / 'release-manifest.json').write_bytes(self.manifest)
+
+    def test_continue_new_head_archives_failed_candidate_as_history_preserving_production_proof(self):
+        old = self.failed_forward_fixture()
+        failed_raw = (self.root / 'operation.json').read_bytes()
+        failed = json.loads(failed_raw)
+        proof = next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes()
+        attest = self.continuation_runner(old)
+        self.new_candidate_fixture()
+        def runner(command, cwd, stage, **kwargs):
+            response = attest(command, cwd, stage, **kwargs)
+            if stage == 'upgrade':
+                record = json.loads((self.root / 'operation.json').read_bytes())
+                self.assertEqual(record['commit'], self.commit)
+                self.assertNotEqual(record['commit'], failed['commit'])
+                self.assertNotEqual(record['version'], failed['version'])
+                self.assertEqual(record['forward_journal_sha256'], D.sha(proof))
+                self.assertNotEqual(record['forward_journal_sha256'], D.sha(failed_raw))
+                history = self.root / record['forward_retry_history']
+                self.assertEqual(history.read_bytes(), failed_raw)
+                self.assertEqual(history.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(record['forward_retry_history_sha256'], D.sha(failed_raw))
+                raise D.DeployError('new_failure')
+            return response
+        canonical = self.repo / 'canonical.config'
+        self.config.rename(canonical)
+        canonical.chmod(0o644)
+        with patch.object(D, 'subscription_probe_from_env', side_effect=AssertionError('must not read env')):
+            with self.assertRaisesRegex(D.DeployError, 'new_failure'):
+                self.rollout(config_path=canonical, continue_forward_only=True, runner=runner)
+        self.assertEqual(canonical.stat().st_mode & 0o777, 0o644)
+        self.assertFalse(self.config.exists())
+        self.assertEqual(self.stage_mock.call_args.args[8]['forward-operation.json'], proof)
+        self.assertEqual([p.read_bytes() for p in self.root.glob('operation.forward-only-abandoned-*.json')], [proof])
+        self.assertEqual(len(list(self.root.glob('operation.forward-only-retry-*.json'))), 1)
+        self.assertEqual([s for s, _ in self.calls].count('forward_continuation_attestation'), 2)
+
+    def test_continue_new_head_doctor_failure_restores_failed_operation_and_frozen_probe(self):
+        self.probe_env()
+        old = self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        config = self.config.read_bytes()
+        probe = (self.root / 'subscription-probe-url').read_bytes()
+        attest = self.continuation_runner(old)
+        self.new_candidate_fixture()
+        def runner(command, cwd, stage, **kwargs):
+            if stage == 'doctor':
+                raise D.DeployError('doctor_failed_exit_1')
+            return attest(command, cwd, stage, **kwargs)
+        with self.assertRaisesRegex(D.DeployError, 'doctor_failed_exit_1'):
+            self.rollout(continue_forward_only=True, runner=runner)
+        self.assertEqual((self.root / 'operation.json').read_bytes(), before)
+        self.assertEqual(self.config.read_bytes(), config)
+        self.assertEqual((self.root / 'subscription-probe-url').read_bytes(), probe)
+
+    def test_continue_new_head_second_attestation_failure_restores_original_recovery_state(self):
+        self.probe_env()
+        old = self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        config = self.config.read_bytes()
+        probe = (self.root / 'subscription-probe-url').read_bytes()
+        attest = self.continuation_runner(old)
+        self.new_candidate_fixture()
+        attestations = 0
+        def runner(command, cwd, stage, **kwargs):
+            nonlocal attestations
+            if stage == 'forward_continuation_attestation':
+                attestations += 1
+                if attestations == 2:
+                    pending = json.loads((self.root / 'operation.json').read_bytes())
+                    self.assertEqual(pending['stage'], 'forward_continuation_preflight')
+                    self.assertIs(pending['mutator_dispatched'], False)
+                    raise D.DeployError('second_attestation_failed')
+            return attest(command, cwd, stage, **kwargs)
+        with self.assertRaisesRegex(D.DeployError, 'second_attestation_failed'):
+            self.rollout(continue_forward_only=True, runner=runner)
+        self.assertEqual((self.root / 'operation.json').read_bytes(), before)
+        self.assertEqual(self.config.read_bytes(), config)
+        self.assertEqual((self.root / 'subscription-probe-url').read_bytes(), probe)
+        self.assertEqual([p.read_bytes() for p in self.root.glob('operation.forward-only-retry-*.json')], [before])
+        self.assertFalse(any(stage == 'upgrade' for stage, _ in self.calls))
+        self.rollout(continue_forward_only=True, runner=attest)
+
+    def test_continue_new_head_write_failures_restore_or_recover_at_every_local_boundary(self):
+        # Exercise both errors before replacement and death after a durable
+        # replacement, including recovery interrupted while restoring config.
+        for boundary in ['history', 'backup', 'probe', 'journal', 'config', 'binding', 'bridge_staging', 'doctor', 'forward_continuation_preflight']:
+            for after in [False, True]:
+                with self.subTest(boundary=boundary, after=after):
+                    fixture = NativeDeploy(methodName='runTest')
+                    fixture.setUp()
+                    try:
+                        fixture.probe_env()
+                        old = fixture.failed_forward_fixture()
+                        before = (fixture.root / 'operation.json').read_bytes()
+                        config = fixture.config.read_bytes()
+                        probe = (fixture.root / 'subscription-probe-url').read_bytes()
+                        attest = fixture.continuation_runner(old)
+                        fixture.new_candidate_fixture()
+                        real_write = D.atomic_write
+                        injected = False
+                        def write(path, raw, **kwargs):
+                            nonlocal injected
+                            selected = ((boundary == 'history' and path.name.startswith('operation.forward-only-retry-')) or
+                                (boundary == 'backup' and path.name.startswith('install.config.before-' + fixture.version)) or
+                                (boundary == 'probe' and path.name == 'subscription-probe-url') or
+                                (boundary == 'journal' and path.name == 'operation.json' and json.loads(raw).get('stage') == 'prepared') or
+                                (boundary == 'config' and path == fixture.config) or
+                                (boundary == 'binding' and path.name.startswith('probe-binding-' + fixture.commit)) or
+                                (boundary in ['bridge_staging', 'doctor', 'forward_continuation_preflight'] and
+                                 path.name == 'operation.json' and json.loads(raw).get('stage') == boundary))
+                            if selected and not injected:
+                                injected = True
+                                if after:
+                                    real_write(path, raw, **kwargs)
+                                raise OSError('injected_write_failure')
+                            return real_write(path, raw, **kwargs)
+                        with patch.object(D, 'atomic_write', side_effect=write):
+                            # Simulate process death preventing in-process
+                            # restoration; the next invocation must recover.
+                            with patch.object(D, 'restore_forward_preflight', side_effect=OSError('interrupted_recovery')):
+                                with self.assertRaises(OSError):
+                                    fixture.rollout(continue_forward_only=True, runner=attest)
+                        self.assertTrue(injected)
+                        self.assertFalse(any(stage == 'upgrade' for stage, _ in fixture.calls))
+                        recovered = False
+                        def check_recovered(command, cwd, stage, **kwargs):
+                            nonlocal recovered
+                            if stage == 'canonical_policy':
+                                self.assertEqual((fixture.root / 'operation.json').read_bytes(), before)
+                                self.assertEqual(fixture.config.read_bytes(), config)
+                                self.assertEqual((fixture.root / 'subscription-probe-url').read_bytes(), probe)
+                                recovered = True
+                            return attest(command, cwd, stage, **kwargs)
+                        fixture.rollout(continue_forward_only=True, runner=check_recovered)
+                        self.assertTrue(recovered)
+                    finally:
+                        fixture.doCleanups()
+
+    def test_continue_recovers_when_config_restored_but_old_journal_restore_was_interrupted(self):
+        old = self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        config = self.config.read_bytes()
+        attest = self.continuation_runner(old)
+        self.new_candidate_fixture()
+        real_write = D.atomic_write
+        def fail_restore(command, cwd, stage, **kwargs):
+            if stage == 'doctor':
+                raise D.DeployError('doctor_failure')
+            return attest(command, cwd, stage, **kwargs)
+        def write(path, raw, **kwargs):
+            if path == self.root / 'operation.json' and raw == before:
+                self.assertEqual(self.config.read_bytes(), config)
+                raise OSError('journal_restore_interrupted')
+            return real_write(path, raw, **kwargs)
+        with patch.object(D, 'atomic_write', side_effect=write):
+            with self.assertRaisesRegex(OSError, 'journal_restore_interrupted'):
+                self.rollout(continue_forward_only=True, runner=fail_restore)
+        self.assertIs(json.loads((self.root / 'operation.json').read_bytes())['mutator_dispatched'], False)
+        self.assertEqual(self.config.read_bytes(), config)
+        pending = (self.root / 'operation.json').read_bytes()
+        for arguments in [{'forward_only': True}, {'retry_failed': True}, {'adopt': True},
+                          {'probe_env_file': self.repo / 'unused-private-input'}]:
+            with self.subTest(arguments=arguments):
+                with self.assertRaisesRegex(D.DeployError, 'manual_forward_continuation_arguments_invalid'):
+                    self.rollout(continue_forward_only=True, **arguments)
+                self.assertEqual((self.root / 'operation.json').read_bytes(), pending)
+                self.assertEqual(self.config.read_bytes(), config)
+        self.rollout(continue_forward_only=True, runner=attest)
+
+    def test_ordinary_retry_rejects_all_unfinished_forward_journals_without_touching_recovery_state(self):
+        self.probe_env()
+        self.failed_forward_fixture()
+        journal = self.root / 'operation.json'
+        original = json.loads(journal.read_bytes())
+        config = self.config.read_bytes()
+        probe = (self.root / 'subscription-probe-url').read_bytes()
+        proof = next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes()
+        for stage, dispatched in [('prepared', False), ('bridge_staging', False), ('doctor', False),
+                                  ('forward_continuation_preflight', False), ('upgrade', True), ('status', True)]:
+            for retry in [False, True]:
+                with self.subTest(stage=stage, retry=retry):
+                    pending = json.dumps(dict(original, stage=stage, mutator_dispatched=dispatched)).encode()
+                    D.atomic_write(journal, pending)
+                    self.calls.clear()
+                    self.stage_mock.reset_mock()
+                    with patch.object(D, 'atomic_write', side_effect=AssertionError('must not write')):
+                        with self.assertRaisesRegex(D.DeployError, 'manual_forward_operation_requires_explicit_continuation'):
+                            self.rollout(retry_failed=retry)
+                    self.assertEqual(journal.read_bytes(), pending)
+                    self.assertEqual(self.config.read_bytes(), config)
+                    self.assertEqual((self.root / 'subscription-probe-url').read_bytes(), probe)
+                    self.assertEqual(next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes(), proof)
+                    self.assertEqual(self.calls, [])
+                    self.assertFalse(self.stage_mock.called)
+
+    def test_continue_preflight_recovery_rejects_unrelated_or_changed_journals(self):
+        old = self.failed_forward_fixture()
+        journal = self.root / 'operation.json'
+        before = journal.read_bytes()
+        config = self.config.read_bytes()
+        original = json.loads(before)
+        for change in [{'stage': 'prepared', 'mutator_dispatched': False},
+                       {'stage': 'prepared', 'mutator_dispatched': False, 'forward_retry_history': '../operation.json'},
+                       {'stage': 'upgrade', 'mutator_dispatched': False}]:
+            raw = json.dumps(dict(original, **change)).encode()
+            D.atomic_write(journal, raw)
+            with self.assertRaises(D.DeployError):
+                self.rollout(continue_forward_only=True)
+            self.assertEqual(journal.read_bytes(), raw)
+            self.assertEqual(self.config.read_bytes(), config)
+        D.atomic_write(journal, before)
+
+    def test_continue_new_head_attestation_failure_leaves_config_journal_and_archives_unchanged(self):
+        old = self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        config = self.config.read_bytes()
+        attest = self.continuation_runner(old, {'lifecycle_id': 'foreign'})
+        self.new_candidate_fixture()
+        with self.assertRaisesRegex(D.DeployError, 'manual_forward_continuation_receipt_invalid'):
+            self.rollout(continue_forward_only=True, runner=attest)
+        self.assertEqual((self.root / 'operation.json').read_bytes(), before)
+        self.assertEqual(self.config.read_bytes(), config)
+        self.assertFalse(self.stage_mock.called)
+        self.assertFalse(list(self.root.glob('operation.forward-only-retry-*.json')))
+
+    def test_forward_only_cannot_archive_failed_forward_candidate_as_predecessor(self):
+        self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        with self.assertRaisesRegex(D.DeployError, 'manual_forward_operation_requires_explicit_continuation'):
+            self.rollout(forward_only=True)
+        self.assertEqual((self.root / 'operation.json').read_bytes(), before)
+        self.assertEqual(len(list(self.root.glob('operation.forward-only-abandoned-*.json'))), 1)
+        self.assertFalse(self.stage_mock.called)
+
+    def test_continue_forward_only_doctor_failure_retains_retryable_original_journal(self):
+        old = self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        attest = self.continuation_runner(old)
+        def runner(command, cwd, stage, **kwargs):
+            if stage == 'doctor':
+                raise D.DeployError('doctor_failed_exit_1')
+            return attest(command, cwd, stage, **kwargs)
+        with self.assertRaisesRegex(D.DeployError, 'doctor_failed_exit_1'):
+            self.rollout(continue_forward_only=True, runner=runner)
+        self.assertEqual(json.loads((self.root / 'operation.json').read_bytes()), json.loads(before))
+        self.assertFalse(self.stage_mock.called)
+
+    def test_continue_forward_only_rejects_changed_receipt_without_replacing_journal(self):
+        old = self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        for change in ({'forward_journal_sha256': 'f' * 64}, {'lifecycle_id': 'foreign'},
+                       {'config_sha256': 'f' * 64}, {'attempt': 'f' * 64}, {'architecture': 'amd64'}):
+            with self.subTest(change=change):
+                with self.assertRaises(D.DeployError):
+                    self.rollout(continue_forward_only=True, runner=self.continuation_runner(old, change))
+                self.assertEqual((self.root / 'operation.json').read_bytes(), before)
+        self.assertFalse(self.stage_mock.called)
+
+    def test_continue_forward_only_rejects_changed_local_bindings(self):
+        self.failed_forward_fixture()
+        journal = self.root / 'operation.json'
+        before = journal.read_bytes()
+        base = json.loads(before)
+        for key, value in [('commit', 'f' * 40), ('manifest_sha256', 'f' * 64),
+                           ('remote_attempt', 'f' * 64), ('staged_config_sha256', 'f' * 64),
+                           ('transport_binding', {}), ('forward_journal_sha256', 'f' * 64),
+                           ('forward_only', False)]:
+            with self.subTest(key=key):
+                D.atomic_write(journal, json.dumps(dict(base, **{key: value})).encode())
+                with self.assertRaises(D.DeployError):
+                    self.rollout(continue_forward_only=True)
+        D.atomic_write(journal, before)
+        proof = next(self.root.glob('operation.forward-only-abandoned-*.json'))
+        proof.write_bytes(b'{}')
+        with self.assertRaisesRegex(D.DeployError, 'manual_forward_continuation_proof_changed'):
+            self.rollout(continue_forward_only=True)
+        self.assertFalse(self.stage_mock.called)
+        self.assertEqual(self.calls, [])
+
     def legacy_record(self):
         attempt = D.remote_attempt(self.original, self.version)
         release = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + self.commit + '-' + attempt) / 'release'
@@ -1055,6 +1385,51 @@ class RemoteProgram(unittest.TestCase):
                 args = (*args, probe_sha)
         return subprocess.run([D.sys.executable, '-I', '-c', self.program, mode, self.commit, self.version,
             D.sha(self.manifest), D.sha(self.config), D.remote_attempt(self.config, self.version), *args], input=data, capture_output=True)
+
+    def test_continuation_attests_existing_inputs_and_pre_handoff_lifecycle(self):
+        old_commit = 'b' * 40
+        old_version = 'v0.0.' + str(int(old_commit, 16))
+        proof = json.dumps({'commit': old_commit, 'version': old_version}).encode()
+        digest = D.sha(proof)
+        staged = self.execute('stage', self.archive(forward_journal=proof), forward_sha=digest)
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        operation = self.parent.parent / ('upgrade-' + self.version)
+        operation.mkdir(mode=0o700)
+        for name in ['operator-plan.json', 'execution-mode.json']:
+            D.atomic_write(operation / name, b'{}')
+        old_directory = self.parent.parent / ('upgrade-' + old_version)
+        old_id = str(D.uuid.UUID(bytes=hashlib.sha256(str(old_directory).encode()).digest()[:16], version=4))
+        lifecycle = self.parent.parent / 'lifecycle.json'
+        D.atomic_write(lifecycle, json.dumps({'id': old_id, 'phase': 'applying'}).encode())
+        receipt = self.execute('continue', forward_sha=digest)
+        self.assertEqual(receipt.returncode, 0, receipt.stderr)
+        self.assertEqual(json.loads(receipt.stdout)['lifecycle_id'], old_id)
+        self.assertFalse(self.result.exists())
+        dispatched = self.execute('run', None, self.architecture, 'upgrade', '0', '1', '', digest, '1', forward_only=True)
+        self.assertEqual(dispatched.returncode, 0, dispatched.stderr)
+        self.assertIn('--forward-only', json.loads(self.result.read_bytes()))
+        self.result.unlink()
+        for mutation in ['activate', 'lifecycle', 'proof', 'asset']:
+            with self.subTest(mutation=mutation):
+                if mutation == 'activate':
+                    (operation / 'activate').mkdir()
+                elif mutation == 'lifecycle':
+                    D.atomic_write(lifecycle, b'{"id":"foreign","phase":"applying"}')
+                elif mutation == 'proof':
+                    D.atomic_write(self.root / 'forward-operation.json', b'{}')
+                else:
+                    D.atomic_write(self.root / 'release' / 'fixture-0', b'changed')
+                rejected = self.execute('continue', forward_sha=digest)
+                self.assertNotEqual(rejected.returncode, 0)
+                dispatched = self.execute('run', None, self.architecture, 'upgrade', '0', '1', '', digest, '1', forward_only=True)
+                self.assertNotEqual(dispatched.returncode, 0)
+                self.assertFalse(self.result.exists())
+                if mutation == 'activate':
+                    (operation / 'activate').rmdir()
+                elif mutation == 'lifecycle':
+                    D.atomic_write(lifecycle, json.dumps({'id': old_id, 'phase': 'applying'}).encode())
+                elif mutation == 'proof':
+                    D.atomic_write(self.root / 'forward-operation.json', proof)
 
     def test_remote_probe_exact_archive_private_argv_cleanup_and_replay(self):
         secret = b'https://old.example.com/sub/fixture-token'

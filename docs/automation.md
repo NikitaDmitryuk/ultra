@@ -359,7 +359,19 @@ manifest и config, все хеши assets и совпадение собств�
 sidecar-lock рядом с canonical config сериализует выкладки из разных worktree,
 передающих один и тот же `INSTALL_CONFIG`. После неудачного upgrade повтор той же
 задачи с recovery preflight запускается явно через `RETRY_FAILED=1 make deploy`;
-значение по умолчанию выключено. Для принятия уже работающего runtime используйте
+значение по умолчанию выключено. Для неудачной `--forward-only` операции есть
+отдельный явный `scripts/manual-deploy.py --continue-forward-only --config
+/absolute/path/to/install.config`. Он сохраняет digest исходного production-журнала
+из `forward_journal_sha256`, а журнал неудавшегося кандидата хранит отдельно как
+историю повтора. Команда разрешена только до handoff/activation: pinned SSH
+аттестация требует неизменный staged input и lifecycle исходной операции в фазе
+`applying`, а каталог кандидата должен содержать только `execution-mode.json` и
+`operator-plan.json`. Новый committed `HEAD` может быть собран и staged поверх
+этого состояния, но upgrade-команда повторно проверяет исходное доказательство и
+живой lifecycle под broker lock. При изменении входов, появлении activation
+артефактов или смене lifecycle продолжение блокируется; это не эквивалент
+`RETRY_FAILED=1` и не разрешает использовать failed candidate как predecessor.
+Для принятия уже работающего runtime используйте
 явный запуск:
 
 ```sh

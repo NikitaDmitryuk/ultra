@@ -97,6 +97,18 @@ installer всё равно независимо проверяет конфиг
 остановку подтвердить не удалось, команда завершается ошибкой; считать production
 безопасно переведённым в maintenance нельзя.
 
+Для сбоя `--forward-only` до handoff предусмотрен отдельный операторский путь
+`scripts/manual-deploy.py --continue-forward-only --config <canonical-config>`.
+Он сохраняет исходный production-журнал как единственное доказательство predecessor,
+а неудавшийся candidate journal фиксирует отдельно как историю. Продолжение разрешено
+только при неизменных staged input и SSH transport, исходном lifecycle в фазе
+`applying` и каталоге неудавшегося upgrade, содержащем только frozen
+`execution-mode.json` и `operator-plan.json`. Поэтому можно staged новый committed
+`HEAD`, но его upgrade независимо сверяет исходный журнал, frozen plan и текущий
+lifecycle под operator lock; `--retry-failed` для этого не используется. Если
+activation уже началась или удалённая аттестация расходится, продолжение блокируется
+и требуется отдельная reconciliation.
+
 Retirement ledger устанавливает сохраняемый floor контроллера. Rollback и restore
 на узел с ledger блокируются до первой мутации; backup включает оба lifecycle journal
 и аутентифицирует `controller_enforcement_floor`. Collector всегда перечитывает
