@@ -132,11 +132,7 @@ if [[ -z "${BRIDGE// }" || -z "${EXIT// }" ]]; then
 	usage
 fi
 
-IP_URL="${VERIFY_IP_URL:-}"
-if [[ -z "${IP_URL// }" ]]; then
-	echo "relay-check: задайте VERIFY_IP_URL (HTTPS URL для тестового GET через SOCKS)." >&2
-	exit 1
-fi
+IP_URL="${VERIFY_IP_URL:-https://api.ipify.org}"
 
 if [[ -n "${BRIDGE_SSH_IDENTITY:-}" && ${#SSH_EXTRA[@]} -eq 0 ]]; then
 	id="$BRIDGE_SSH_IDENTITY"

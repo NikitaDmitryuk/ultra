@@ -339,9 +339,10 @@ make verify-miniapp
 make relay-logs SINCE_RESTART=1
 ```
 
-`make verify-relay` запускается явно после установки: задайте в `install.config`
-`VERIFY_IP_URL` — HTTPS-адрес для проверки через клиентский SOCKS. Локальный SOCKS
-по умолчанию слушает порт 10808. Чтобы изменить порт, передайте значение при вызове,
+`make verify-relay` запускается явно после установки и по умолчанию проверяет внешний
+IP через `https://api.ipify.org`. При необходимости задайте другой HTTPS-адрес через
+`VERIFY_IP_URL` в окружении команды. Локальный SOCKS по умолчанию слушает порт 10808.
+Чтобы изменить порт, передайте значение при вызове,
 например `make verify-relay VERIFY_SOCKS_PORT=10809`; одноимённое поле в
 `install.config` не используется этим скриптом.
 `VERIFY_AFTER_INSTALL` и `VERIFY_FAIL_LOG_LINES` не запускают проверки в текущем
