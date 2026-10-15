@@ -247,6 +247,10 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 				t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins)
 				p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "REALITY_DEST": "example.com:443", "BRIDGE_SSH_KEY": filepath.Join(root, "identity")})
 				completeDeploymentFixture(p, release, pins)
+				p.Bot.Enabled = true
+				p.Bot.Domain = "sync.example.com"
+				p.Automation.Ingress = &installplan.AutomationIngress{Domain: "edge.example.com", Email: "owner@example.com", Path: "/connect"}
+				p.Automation.DNS = &installplan.AutomationDNS{Provider: "vultr", Zone: "example.com", TTL: 300, SubscriptionName: "sync", VPNName: "edge"}
 				p.SourceValues = map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2"}
 				local := false
 				p.ControllerLocal = &local
@@ -347,6 +351,14 @@ if operation=='inspect-upgrade':
     result['runtime_nodes']={'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa': {'name':'primary','managed':False,'tunnel_identity_digest':'b'*64,'certificate_pin':''}}
 if operation=='inspect-upgrade-runtime':
     result={'verified':True,'hosts':{host:{'verified':True,'runtime_changed':False,'domain_changed':False,'transitions':[]} for host in variables['ultra_runtime_probe_requests']}}
+if operation=='inspect-upgrade-domains':
+    desired=variables['ultra_upgrade_domain_desired']
+    result={'verified':True,'subscription':desired['subscription'],'backend':desired['backend'],'vpn':desired['vpn'],'public_host':desired['public_host'],
+            'zone':'example.com','dns_ttl':300,'acme_email_matches':True,'ingress_mode_matches':True,'forward_host_matches':True,
+            'staging_port_matches':True,'staging_port_unrecorded':False,'status_port_matches':True,'experimental_port_matches':True,
+            'age_recipient_matches':True,'bridge_provider_matches':True,'static_nodes_match':True,'bridge_ipv4':'192.0.2.1',
+            'admin_id_matches':True,'backend_port':18080,'gateway_port':18081,'fingerprint':'firefox','path':'/connect','bot_port':8444,
+            'bridge_url':'https://sync.example.com/healthz'}
 if operation=='preflight-retry' and variables.get('ultra_legacy_bridge_maintenance') and (root/'activate'/'receipt.json').exists():
     contract=variables.get('ultra_legacy_retry_configuration')
     assert contract and contract['generation']==1, 'legacy candidate retry lacked bound generation'

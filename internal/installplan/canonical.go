@@ -106,19 +106,8 @@ func AdoptionPreparationValuesToPlan(v map[string]string) (*InstallPlan, error) 
 }
 
 func canonicalRoleValuesToPlan(v map[string]string) (*InstallPlan, error) {
-	for key := range v {
-		switch key {
-		case "PRESET":
-			return nil, errors.New("PRESET is removed; configure MAIN_EXIT_DOMAIN for the managed XHTTP TLS tunnel")
-		case "BRIDGE", "EXIT", "DB_HOST", "IDENTITY", "FRONT", "BACK", "BRIDGE_SSH_HOST", "BRIDGE_SSH_IDENTITY", "EXIT_SSH_IDENTITY", "DB_SSH_IDENTITY", "DB_ENABLE", "DB_REPLICA", "DB_SSH_USER", "EXIT2", "EXIT2_SSH_IDENTITY", "EXIT2_NAME", "EXIT2_DIAL", "EXIT2_PRIORITY":
-			return nil, errors.New("removed deployment key " + key + "; use the canonical per-server IP and SSH_KEY fields")
-		}
-		if strings.HasPrefix(key, "ULTRA_AUTO_UPGRADE_") {
-			return nil, errors.New("automatic upgrade settings are no longer supported; use a manual release directory")
-		}
-		if DisallowedDeploymentSecret(key) {
-			return nil, errors.New("secret key " + key + " belongs outside install.config")
-		}
+	if err := validateCanonicalDeploymentKeys(v); err != nil {
+		return nil, err
 	}
 	if version := valueDefault(v, "INSTALL_SCHEMA_VERSION", "2"); version != "2" {
 		return nil, errors.New("only install schema 2 is supported")
@@ -138,6 +127,24 @@ func canonicalRoleValuesToPlan(v map[string]string) (*InstallPlan, error) {
 	p.SchemaVersion = CurrentSchemaVersion
 	p.Secrets.EnvFile = valueDefault(v, "SECRETS_ENV_FILE", p.SecretsEnvFile())
 	return p, nil
+}
+
+func validateCanonicalDeploymentKeys(v map[string]string) error {
+	for key := range v {
+		switch key {
+		case "PRESET":
+			return errors.New("PRESET is removed; configure MAIN_EXIT_DOMAIN for the managed XHTTP TLS tunnel")
+		case "BRIDGE", "EXIT", "DB_HOST", "IDENTITY", "FRONT", "BACK", "BRIDGE_SSH_HOST", "BRIDGE_SSH_IDENTITY", "EXIT_SSH_IDENTITY", "DB_SSH_IDENTITY", "DB_ENABLE", "DB_REPLICA", "DB_SSH_USER", "EXIT2", "EXIT2_SSH_IDENTITY", "EXIT2_NAME", "EXIT2_DIAL", "EXIT2_PRIORITY":
+			return errors.New("removed deployment key " + key + "; use the canonical per-server IP and SSH_KEY fields")
+		}
+		if strings.HasPrefix(key, "ULTRA_AUTO_UPGRADE_") {
+			return errors.New("automatic upgrade settings are no longer supported; use a manual release directory")
+		}
+		if DisallowedDeploymentSecret(key) {
+			return errors.New("secret key " + key + " belongs outside install.config")
+		}
+	}
+	return nil
 }
 
 // ReadSecretsFile does not merge process environment or execute shell expressions.

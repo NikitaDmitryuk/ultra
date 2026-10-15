@@ -19,7 +19,7 @@ class RuntimeUpgradeContracts(unittest.TestCase):
         tunnel = '11111111-1111-1111-1111-111111111111'
         node = {'id': '22222222-2222-2222-2222-222222222222', 'address': '192.0.2.2'}
         rows = [{'id': node['id'], 'address': node['address'], 'tunnel_uuid': tunnel, 'pin': 'a' * 64}]
-        with patch.object(state.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps(rows).encode())):
+        with patch.object(state, 'database_query', return_value=SimpleNamespace(stdout=json.dumps(rows).encode())):
             state.runtime_node_proofs('fixture', [node])
         self.assertEqual(node['tunnel_identity_digest'], hashlib.sha256(tunnel.encode()).hexdigest())
         self.assertEqual(node['certificate_pin'], 'a' * 64)
@@ -30,7 +30,7 @@ class RuntimeUpgradeContracts(unittest.TestCase):
         node = {'id': '22222222-2222-2222-2222-222222222222', 'address': '192.0.2.2'}
         row = {'id': node['id'], 'address': '192.0.2.9', 'tunnel_uuid': '11111111-1111-1111-1111-111111111111', 'pin': ''}
         for rows in ([row], [row, row], []):
-            with patch.object(state.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps(rows).encode())):
+            with patch.object(state, 'database_query', return_value=SimpleNamespace(stdout=json.dumps(rows).encode())):
                 with self.assertRaises(ValueError):
                     state.runtime_node_proofs('fixture', [dict(node)])
 

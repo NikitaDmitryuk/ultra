@@ -410,7 +410,7 @@ func TestBootstrapDumpPreflightPrecedesDatabaseMutation(t *testing.T) {
 			t.Fatal(err)
 		}
 		s := string(b)
-		if strings.Index(s, "tasks_from: preflight") < 0 || strings.Index(s, "tasks_from: preflight") > strings.Index(s, "- role: postgres\n") {
+		if !strings.Contains(s, "tasks_from: preflight") || strings.Index(s, "tasks_from: preflight") > strings.Index(s, "- role: postgres\n") {
 			t.Fatal("archive must be checked before provisioning")
 		}
 		if !strings.Contains(s, "ansible_host == ultra_db_tunnel_host") {

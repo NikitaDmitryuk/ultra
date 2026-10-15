@@ -47,15 +47,15 @@ class ManualDeploy(unittest.TestCase):
         with patch.object(D, 'run', runner or self.run_fixture), patch.object(D.platform, 'system', return_value='Linux'), patch.object(D.platform, 'machine', return_value='x86_64'), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             D.rollout(self.repo, self.root, self.bundle, self.commit, self.version, adopt, config_path, retry_failed, probe_env_file, forward_only, continue_forward_only)
 
-    def probe_env(self, value=b'https://old.example.com/sub/fixture-token'):
+    def probe_env(self, value=b'https://old.example.com/sub/probe-value'):
         path = self.repo / '.env'
         path.write_bytes(b'IGNORED_SETTING="$(must-not-execute)\xff\nULTRA_SUBSCRIPTION_PROBE_URL=' + value + b'\n')
         path.chmod(0o600)
         return path
 
     def test_probe_env_allowlist_literals_and_invalid_inputs(self):
-        path = self.probe_env(b'"https://old.example.com/sub/fixture-token" # comment')
-        self.assertEqual(D.subscription_probe_from_env(path), b'https://old.example.com/sub/fixture-token')
+        path = self.probe_env(b'"https://old.example.com/sub/probe-value" # comment')
+        self.assertEqual(D.subscription_probe_from_env(path), b'https://old.example.com/sub/probe-value')
         for value in (b'', b'http://old.example.com/sub/token', b'https://old.example.com/sub/token?secret=1',
                       b'https://old.example.com/sub/token#fragment', b'https://user@old.example.com/sub/token',
                       b'https://old.example.com:443/sub/token', b'"$(secret)"', b'"unterminated', b'\xff',

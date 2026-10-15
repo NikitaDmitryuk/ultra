@@ -175,6 +175,13 @@ func validatedRuntimePlan(p *InstallPlan, local bool) (*InstallPlan, error) {
 	return &desired, nil
 }
 
+// ValidateLocalRuntimePlan validates the private, host-local schema 1 request
+// envelope. It cannot be used as a deployment plan or bypass schema 2 policy.
+func ValidateLocalRuntimePlan(p *InstallPlan) error {
+	_, err := validatedRuntimePlan(p, true)
+	return err
+}
+
 // LocalRuntimeProjection is an in-process host-local candidate. SpecJSON retains
 // credentials and must never be emitted into logs, receipts or remote results.
 // Only Transitions is suitable for reporting outside the target host.

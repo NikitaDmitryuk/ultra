@@ -43,9 +43,7 @@
   "secrets": {
     "env_file": "/secure/.env"
   },
-  "features": {
-    "main_exit_domain": "tunnel.example.com"
-  },
+  "features": {},
   "automation": {
     "version": "v1.0.0",
     "release_dir": "/srv/ultra-release-v1.0.0",

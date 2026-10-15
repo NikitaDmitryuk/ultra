@@ -370,7 +370,7 @@ func (s runtimeHostStore) prepare(r runtimeHostRequest) (runtimeHostResult, erro
 		for _, ex := range r.Exits {
 			p.Exits = append(p.Exits, installplan.ExitNode{Name: ex.Name, SSHHost: ex.SSHHost, DialAddr: ex.DialAddr, Port: ex.Port})
 		}
-		if installplan.ValidatePlan(p) != nil {
+		if installplan.ValidateLocalRuntimePlan(p) != nil {
 			return runtimeHostResult{}, runtimeHostError("request_invalid")
 		}
 		projected, err := installplan.ProjectLocalRuntime(p, j.Before[0].Data, r.Role, r.Node)

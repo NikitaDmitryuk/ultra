@@ -145,6 +145,11 @@ func TestRenderAdoptionOptInRetainsNormalRenderSemantics(t *testing.T) {
 	}
 	p.Bridge.ReuseSpec = false
 	p.Bridge.RealityDest = "example.com:443"
+	p.Bot.Enabled = true
+	p.Bot.Domain = "sync.example.com"
+	p.Database.Enabled = true
+	p.Database.PrimaryHost = "192.0.2.40"
+	p.Automation.Ingress = &AutomationIngress{Domain: "edge.example.com", Email: "owner@example.com", Path: "/connect"}
 	ds, err = RenderDesiredStateWithOptions(p, RenderOptions{})
 	if err != nil {
 		t.Fatal(err)

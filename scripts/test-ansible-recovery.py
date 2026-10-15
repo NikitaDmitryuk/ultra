@@ -57,7 +57,8 @@ def main():
                 result=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=300)
                 receipt=json.loads((job/'receipt.json').read_text())
                 if expect_success and result.returncode:
-                    raise ValueError(str(receipt.get('diagnostic',{})))
+                    stderr=result.stderr.decode('utf-8','replace').strip()[-2000:]
+                    raise ValueError(f"recovery receiver failed (exit {result.returncode}): {receipt.get('code', 'unknown')} {receipt.get('diagnostic', {})}; {stderr}")
                 assert (receipt['state']=='succeeded')==expect_success
             apply()
             before=run(['docker','exec',container,'stat','-c','%Y','/opt/ultra-recovery/recovery.py'])
