@@ -13,6 +13,55 @@ import (
 	"time"
 )
 
+func TestClientFailureIncludesSavedDiagnosticCode(t *testing.T) {
+	for _, code := range []string{"ssh_pin_mismatch", "ingress_tls_hostname_mismatch", "task_failed", ""} {
+		t.Run("code="+code, func(t *testing.T) {
+			socket := filepath.Join(t.TempDir(), "worker.sock")
+			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close() //nolint:errcheck
+			response := Response{Code: "ansible_failed", Diagnostic: Diagnostic{
+				Node: "bridge", Stage: "Verify service readiness", Code: code,
+			}}
+			done := make(chan error, 1)
+			go func() {
+				conn, err := listener.AcceptUnix()
+				if err != nil {
+					done <- err
+					return
+				}
+				defer conn.Close() //nolint:errcheck
+				_, inputs, err := receiveRequest(conn)
+				closeInputs(inputs)
+				if err == nil {
+					var raw []byte
+					raw, err = json.Marshal(response)
+					if err == nil {
+						err = sendRequest(conn, append(raw, '\n'), nil)
+					}
+				}
+				done <- err
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			saved, err := (Client{Socket: socket}).exchange(ctx, Message{Action: "status"})
+			want := "ansible_failed (bridge: Verify service readiness"
+			if code != "" {
+				want += "; " + code
+			}
+			want += ")"
+			if err == nil || err.Error() != want || saved.Diagnostic != response.Diagnostic {
+				t.Fatalf("failure = %v, diagnostic = %+v; want %s, %+v", err, saved.Diagnostic, want, response.Diagnostic)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestWorkerContinuesAfterClientDisconnectAndRestart(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {

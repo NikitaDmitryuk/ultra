@@ -90,6 +90,10 @@ func (c Client) exchange(ctx context.Context, message Message) (Response, error)
 	}
 	if response.Code != "" {
 		closeInputs(outputs)
+		if response.Diagnostic.Code != "" {
+			return response, fmt.Errorf("%s (%s: %s; %s)", response.Code,
+				response.Diagnostic.Node, response.Diagnostic.Stage, response.Diagnostic.Code)
+		}
 		return response, fmt.Errorf("%s (%s: %s)", response.Code, response.Diagnostic.Node, response.Diagnostic.Stage)
 	}
 	if (message.Action == "lease-attach" && len(outputs) != 1) || (message.Action != "lease-attach" && len(outputs) != 0) {
