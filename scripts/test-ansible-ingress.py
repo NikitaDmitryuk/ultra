@@ -168,6 +168,21 @@ with tempfile.TemporaryDirectory() as temporary:
         assert tls_check['register'] == 'ingress_adopt_tls_ready'
         assert tls_check['retries'] == 30 and tls_check['delay'] == 2
         assert 'ingress_adopt_tls_ready.ready' in tls_check['until']
+        # A graceful Nginx reload returns before replacement workers have
+        # necessarily loaded the new certificate. Activation must wait for the
+        # authenticated target, just as adoption does, before rolling back.
+        main_tasks = yaml.safe_load((role / 'tasks/main.yml').read_text())
+        transaction = next(task for task in main_tasks if task['name'] ==
+                           'Apply validated ingress transaction')['block']
+        activation_tls = next(task for task in transaction if task['name'] ==
+                              'Verify primary HTTPS handshake with authenticated SNI')
+        assert activation_tls['register'] == 'ingress_tls_ready'
+        assert activation_tls['retries'] == 30 and activation_tls['delay'] == 2
+        assert 'ingress_tls_ready.ready' in activation_tls['until']
+        assert activation_tls['ultra_ingress_probe'] == {
+            'kind': 'tls', 'address': '{{ ultra_bridge_ipv4 }}',
+            'hostname': '{{ ingress_transition.profile.server_name }}',
+            'port': '{{ ingress_transition.profile.port }}'}
         initial = next(task for task in tasks if task['name'] == 'Assemble publication ownership checks')
         values['ingress_adopt_files'] = [
             {'path': item['path'], 'content': environment.from_string(item['content']).render(values)}
