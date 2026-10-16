@@ -81,11 +81,14 @@ class OperationMappingTests(unittest.TestCase):
         provisioning = yaml.safe_load((SOURCE / 'roles/postgres/tasks/main.yml').read_text())
         server_packages = [task['ansible.builtin.apt']['name'] for task in provisioning if 'ansible.builtin.apt' in task]
         self.assertEqual(server_packages, ['postgresql-16'])
-        auth = provisioning[-1]
+        auth = next(
+            task for task in provisioning if task.get('name') == 'Verify application login before bridge activation'
+        )
         self.assertIn('--no-password', auth['ansible.builtin.command']['argv'])
         self.assertIn('PGPASSWORD', auth['environment'])
         self.assertTrue(auth['no_log'])
-        self.assertEqual(provisioning[-2]['ansible.builtin.meta'], 'flush_handlers')
+        settings = next(task for task in provisioning if task.get('name') == 'Apply PostgreSQL settings')
+        self.assertEqual(settings['ansible.builtin.meta'], 'flush_handlers')
         provision = next(task for task in provisioning if task['name'].startswith('Provision missing'))
         self.assertIn("SET password_encryption = 'scram-sha-256'", provision['ansible.builtin.command']['stdin'])
         self.assertNotIn('ALTER ROLE', provision['ansible.builtin.command']['stdin'])

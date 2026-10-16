@@ -19,6 +19,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 type bootstrapGeoAsset struct {
@@ -582,12 +583,12 @@ func prepareBootstrapVariables(
 }
 
 // postgresReplicationPassword is stable across bootstrap retries while remaining
-// separate from the application login. The bridge already holds DBPassword to
-// write to the primary, so deriving a second high-entropy credential avoids
-// persisting another secret in the install plan or local operation journal.
+// separate from the application login. PBKDF2 makes the derivation expensive if
+// the source credential has lower entropy, without persisting another secret.
 func postgresReplicationPassword(databasePassword string) string {
-	digest := sha256.Sum256([]byte("ultra-postgres-replication-v1:" + databasePassword))
-	return hex.EncodeToString(digest[:])
+	const salt = "ultra-postgres-replication-v2"
+	derived := pbkdf2.Key([]byte(databasePassword), []byte(salt), 600_000, 32, sha256.New)
+	return hex.EncodeToString(derived)
 }
 
 // Freeze the installed geo generation rather than resolving a newer release during adoption.

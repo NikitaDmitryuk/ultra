@@ -469,13 +469,21 @@ func TestBootstrapUsesStableSeparatedPostgresReplicationCredential(t *testing.T)
 	inv["all"].(map[string]any)["children"].(map[string]any)["databases"] = map[string]any{
 		"hosts": map[string]any{"database": map[string]any{}},
 	}
-	ds.PostgresConfig = &install.PostgresConfig{DBName: "app", DBUser: "app", DBPassword: "fixture-app-password", RepairExistingCredential: true}
+	ds.PostgresConfig = &install.PostgresConfig{
+		DBName:                   "app",
+		DBUser:                   "app",
+		DBPassword:               "fixture-app-password",
+		RepairExistingCredential: true,
+	}
 	if err := prepareBootstrapVariables(p, ds, inv, inspection, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 	primary := dependencyVars(inv, "databases", "database")["ultra_postgres"].(map[string]any)
 	bridge := dependencyVars(inv, "bridge", "bridge")["ultra_postgres_replica"].(map[string]any)
 	credential := postgresReplicationPassword("fixture-app-password")
+	if len(credential) != 64 {
+		t.Fatal("replication credential must remain a 32-byte hexadecimal password")
+	}
 	if primary["replication_password"] != credential || bridge["password"] != credential {
 		t.Fatal("primary and bridge must receive the same stable replication credential")
 	}

@@ -233,7 +233,13 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 			if !ok || password == "" {
 				return nil, fmt.Errorf("existing database credentials required")
 			}
-			pgCfg = &install.PostgresConfig{DBName: p.Database.Name, DBUser: p.Database.User, DBPassword: password, RepairExistingCredential: true, Port: 25432}
+			pgCfg = &install.PostgresConfig{
+				DBName:                   p.Database.Name,
+				DBUser:                   p.Database.User,
+				DBPassword:               password,
+				RepairExistingCredential: true,
+				Port:                     25432,
+			}
 		}
 	} else if p.Database.Enabled {
 		pc := &install.PostgresConfig{DBName: p.Database.Name, DBUser: p.Database.User, Port: 25432}
