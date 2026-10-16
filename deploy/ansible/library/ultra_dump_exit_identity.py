@@ -96,9 +96,11 @@ DECLARE
  target_identity text := (p->'receipt'->>'system_identifier') || ':' || (p->'receipt'->>'database_oid');
  route jsonb;
  matched uuid;
-active boolean;
+ active boolean;
  amount integer;
- matches jsonb := '[]'::jsonb;
+ matched_routes jsonb := '[]'::jsonb;
+ saved_membership jsonb;
+ current_membership jsonb;
  saved public.ultra_dump_exit_identity%ROWTYPE;
 BEGIN
  IF (SELECT system_identifier::text FROM pg_control_system()) <> p->'receipt'->>'system_identifier'
@@ -107,9 +109,6 @@ BEGIN
    RAISE EXCEPTION 'database_import_identity_mismatch';
  END IF;
  SELECT * INTO saved FROM public.ultra_dump_exit_identity WHERE target=target_identity;
- IF FOUND AND saved.binding <> p->>'binding' THEN
-   RAISE EXCEPTION 'dump_exit_identity_binding_mismatch';
- END IF;
  FOR route IN SELECT * FROM jsonb_array_elements(p->'routes') LOOP
    SELECT count(*) INTO amount FROM public.exit_nodes
     WHERE address=route->>'address' AND port=(route->>'port')::integer;
@@ -121,25 +120,43 @@ BEGIN
    IF active IS DISTINCT FROM true THEN
      RAISE EXCEPTION 'dump_exit_identity_route_disabled';
    END IF;
-   matches := matches || jsonb_build_array(jsonb_build_object('id',matched,'route',route));
+   matched_routes := matched_routes || jsonb_build_array(jsonb_build_object('id',matched,'route',route));
  END LOOP;
  IF saved.binding IS NOT NULL THEN
-   IF saved.matches <> matches THEN
+   SELECT coalesce(jsonb_agg(jsonb_build_object(
+       'id', item->>'id', 'address', item->'route'->>'address', 'port', item->'route'->>'port')
+       ORDER BY item->'route'->>'address', (item->'route'->>'port')::integer), '[]'::jsonb)
+     INTO saved_membership FROM jsonb_array_elements(saved.matches) AS rows(item);
+   SELECT coalesce(jsonb_agg(jsonb_build_object(
+       'id', item->>'id', 'address', item->'route'->>'address', 'port', item->'route'->>'port')
+       ORDER BY item->'route'->>'address', (item->'route'->>'port')::integer), '[]'::jsonb)
+     INTO current_membership FROM jsonb_array_elements(matched_routes) AS rows(item);
+   IF saved_membership IS DISTINCT FROM current_membership THEN
      RAISE EXCEPTION 'dump_exit_identity_membership_changed';
    END IF;
-   FOR route IN SELECT * FROM jsonb_array_elements(matches) LOOP
-     IF NOT EXISTS (SELECT 1 FROM public.exit_nodes WHERE id=(route->>'id')::uuid
-        AND tunnel_uuid=route->'route'->>'tunnel_uuid'
-        AND pinned_peer_cert_sha256=route->'route'->>'pin') THEN
-       RAISE EXCEPTION 'dump_exit_identity_changed';
-     END IF;
-   END LOOP;
+   IF saved.binding = p->>'binding' THEN
+     FOR route IN SELECT * FROM jsonb_array_elements(matched_routes) LOOP
+       IF NOT EXISTS (SELECT 1 FROM public.exit_nodes WHERE id=(route->>'id')::uuid
+          AND tunnel_uuid=route->'route'->>'tunnel_uuid'
+          AND pinned_peer_cert_sha256=route->'route'->>'pin') THEN
+         RAISE EXCEPTION 'dump_exit_identity_changed';
+       END IF;
+     END LOOP;
+   ELSE
+     FOR route IN SELECT * FROM jsonb_array_elements(matched_routes) LOOP
+       UPDATE public.exit_nodes SET tunnel_uuid=route->'route'->>'tunnel_uuid',
+         pinned_peer_cert_sha256=route->'route'->>'pin' WHERE id=(route->>'id')::uuid;
+     END LOOP;
+     UPDATE public.ultra_dump_exit_identity AS identity
+       SET binding=p->>'binding', matches=matched_routes WHERE identity.target=target_identity;
+     PERFORM set_config('ultra.dump_exit_changed','true',true);
+   END IF;
  ELSE
-   FOR route IN SELECT * FROM jsonb_array_elements(matches) LOOP
+   FOR route IN SELECT * FROM jsonb_array_elements(matched_routes) LOOP
      UPDATE public.exit_nodes SET tunnel_uuid=route->'route'->>'tunnel_uuid',
        pinned_peer_cert_sha256=route->'route'->>'pin' WHERE id=(route->>'id')::uuid;
    END LOOP;
-   INSERT INTO public.ultra_dump_exit_identity VALUES (target_identity,p->>'binding',matches);
+   INSERT INTO public.ultra_dump_exit_identity VALUES (target_identity,p->>'binding',matched_routes);
    PERFORM set_config('ultra.dump_exit_changed','true',true);
  END IF;
 END $identity$;
