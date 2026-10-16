@@ -4,6 +4,9 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import ansible.module_utils.basic as ansible_basic
+from ansible.module_utils.common.arg_spec import ModuleArgumentSpecValidator
+import yaml
 
 source = Path(__file__).resolve().parents[1] / 'deploy/ansible/library/ultra_ingress_state.py'
 specification = importlib.util.spec_from_file_location('state', source)
@@ -13,6 +16,48 @@ plan = {'domain': 'edge.example.com', 'email': 'ops@example.com', 'forward_host'
         'public_host': 'edge.example.com', 'path': '/connect',
         'backend_port': 18080, 'gateway_port': 18081, 'staging_port': 18443,
         'status_port': 18082, 'experimental_port': 18444}
+captured_spec = {}
+class ArgumentSpecCaptured(Exception):
+    pass
+ansible_module = state.AnsibleModule
+def capture_argument_spec(argument_spec, **kwargs):
+    captured_spec.update(argument_spec)
+    raise ArgumentSpecCaptured
+state.AnsibleModule = capture_argument_spec
+try:
+    state.main()
+except ArgumentSpecCaptured:
+    pass
+finally:
+    state.AnsibleModule = ansible_module
+plan_argument = captured_spec['plan']
+assert plan_argument.get('no_log') is not True
+def serialized_profile(argument):
+    if hasattr(ansible_basic, '_PARSED_MODULE_ARGS'):
+        ansible_basic._PARSED_MODULE_ARGS = {}
+    module = object.__new__(state.AnsibleModule)
+    module.params = {'plan': plan}
+    module.no_log_values = set()
+    validation = ModuleArgumentSpecValidator({'plan': argument}).validate(module.params)
+    module.no_log_values.update(validation._no_log_values)
+    output = {}
+    module.add_path_info = lambda result: None
+    module._record_module_result = lambda result: output.update(result)
+    module._return_formatted({'profile': {'server_name': plan['domain']}})
+    return output['profile']['server_name']
+assert serialized_profile(plan_argument) == plan['domain']
+assert serialized_profile({**plan_argument, 'no_log': True}) == 'VALUE_SPECIFIED_IN_NO_LOG_PARAMETER'
+main_tasks = yaml.safe_load((source.parents[1] / 'roles/ingress/tasks/main.yml').read_text())
+def flatten_tasks(tasks):
+    for task in tasks:
+        yield task
+        for section in ('block', 'rescue', 'always'):
+            yield from flatten_tasks(task.get(section, []))
+all_tasks = list(flatten_tasks(main_tasks))
+for task_name in ('Prepare durable specification transition before infrastructure changes',
+                  'Commit checked relay specification', 'Restore relay specification before image'):
+    task = next(task for task in all_tasks if task.get('name') == task_name)
+    assert task.get('no_log') is True, f'{task_name} must suppress plan output at task level'
 incomplete_plan = dict(plan)
 del incomplete_plan['status_port']
 try:

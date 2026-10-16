@@ -315,7 +315,10 @@ def main():
     module = AnsibleModule(argument_spec={
         'specification': {'type': 'path', 'default': '/etc/ultra-relay/spec.json'},
         'directory': {'type': 'path', 'required': True},
-        'plan': {'type': 'dict', 'required': True, 'no_log': True},
+        # This result is consumed by later tasks (for example the TLS probe's
+        # authenticated SNI). Keep secrets hidden at the task level instead:
+        # Ansible redacts values from results when an argument is marked no_log.
+        'plan': {'type': 'dict', 'required': True},
         'action': {'type': 'str', 'choices': ['stage', 'activate', 'rollback', 'cutover', 'adopt'], 'required': True},
         'phase': {'type': 'str', 'choices': ['prepare', 'commit', 'rollback', 'retire'], 'default': 'prepare'},
     }, supports_check_mode=True)
