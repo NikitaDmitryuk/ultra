@@ -27,15 +27,17 @@ type runtimeProbeInput struct {
 	BotDomain          string             `json:"bot_domain,omitempty"`
 }
 type runtimeProbeResult struct {
-	Bound          bool                                `json:"bound"`
-	Status         string                              `json:"status,omitempty"`
-	BotActive      bool                                `json:"bot_active,omitempty"`
-	Verified       bool                                `json:"verified"`
-	RuntimeChanged bool                                `json:"runtime_changed"`
-	DomainChanged  bool                                `json:"domain_changed"`
-	EffectsReady   bool                                `json:"effects_ready"`
-	EffectsPlan    *runtimeTransitionPlan              `json:"effects_plan,omitempty"`
-	Transitions    []installplan.RuntimeTransitionKind `json:"transitions"`
+	Bound                bool                                `json:"bound"`
+	Status               string                              `json:"status,omitempty"`
+	BotActive            bool                                `json:"bot_active,omitempty"`
+	Verified             bool                                `json:"verified"`
+	RuntimeChanged       bool                                `json:"runtime_changed"`
+	DomainChanged        bool                                `json:"domain_changed"`
+	EffectsReady         bool                                `json:"effects_ready"`
+	ManagedTLSReady      bool                                `json:"managed_tls_ready,omitempty"`
+	ManagedTLSRestorable bool                                `json:"managed_tls_restorable,omitempty"`
+	EffectsPlan          *runtimeTransitionPlan              `json:"effects_plan,omitempty"`
+	Transitions          []installplan.RuntimeTransitionKind `json:"transitions"`
 }
 
 func runRuntimeProbeCommand(args []string) {
@@ -88,6 +90,16 @@ func inspectRuntimeHost(s runtimeHostStore, in runtimeProbeInput) (runtimeProbeR
 // Bind the secret-free request before prepare. A surviving host journal can only
 // be resumed by this exact request. The private journal itself never leaves host.
 func runtimeHostTransport(s runtimeHostStore, in runtimeProbeInput) (runtimeProbeResult, error) {
+	result, err := s.withManagedTunnelRuntime(in.Request, in.Action == "status", func() (runtimeProbeResult, error) {
+		return runtimeHostTransportFenced(s, in)
+	})
+	if err == nil && !result.ManagedTLSRestorable && in.Request.Features.MainExitDomain != "" && in.Request.Role == config.RoleExit {
+		result.ManagedTLSReady = true
+	}
+	return result, err
+}
+
+func runtimeHostTransportFenced(s runtimeHostStore, in runtimeProbeInput) (runtimeProbeResult, error) {
 	lockPath := s.path("etc/ultra-recovery/runtime-transport.lock")
 	if s.trustedParent(lockPath) != nil {
 		return runtimeProbeResult{}, runtimeHostError("file_untrusted")
@@ -291,7 +303,11 @@ func inspectRuntimeHostLocked(s runtimeHostStore, in runtimeProbeInput) (runtime
 	for _, ex := range r.Exits {
 		p.Exits = append(p.Exits, installplan.ExitNode{Name: ex.Name, SSHHost: ex.SSHHost, DialAddr: ex.DialAddr, Port: ex.Port})
 	}
-	projection, err := installplan.ProjectLocalRuntime(p, specImage.Data, r.Role, r.Node)
+	project := installplan.ProjectLocalRuntime
+	if r.Features.MainExitDomain != "" {
+		project = installplan.ProjectLocalManagedTunnelRuntime
+	}
+	projection, err := project(p, specImage.Data, r.Role, r.Node)
 	if err != nil {
 		return runtimeProbeResult{}, runtimeHostError("projection_failed")
 	}

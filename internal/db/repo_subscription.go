@@ -34,6 +34,66 @@ func (r *SubscriptionRepo) GetOrCreate(ctx context.Context, id string) (string, 
 func (r *SubscriptionRepo) Rotate(ctx context.Context, id string) (string, error) {
 	return r.issue(ctx, id, true)
 }
+
+// GetOrReissue recovers a stable subscription link, replacing only credentials
+// that cannot be recovered with the configured key ring. The user row lock
+// serializes concurrent recovery requests so they all receive the same token.
+func (r *SubscriptionRepo) GetOrReissue(ctx context.Context, id string) (string, bool, error) {
+	if !r.Ready() {
+		return "", false, subscriptionkey.ErrUnavailable
+	}
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck
+	var active bool
+	if err = tx.QueryRow(ctx, `SELECT is_active AND kind='vless' AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=users.account_id) FROM users WHERE uuid=$1 FOR UPDATE`, id).Scan(&active); err != nil {
+		return "", false, err
+	}
+	if !active {
+		return "", false, pgx.ErrNoRows
+	}
+	var encrypted []byte
+	var version *string
+	err = tx.QueryRow(ctx, `SELECT encrypted_token,key_version FROM subscription_tokens WHERE user_uuid=$1`, id).Scan(&encrypted, &version)
+	rotated := false
+	if err == nil {
+		if version == nil || len(encrypted) == 0 {
+			err = ErrLegacySubscription
+		} else {
+			var token string
+			token, err = r.keys.Open(id, encrypted, *version)
+			if err == nil {
+				return token, false, tx.Commit(ctx)
+			}
+		}
+	} else if errors.Is(err, pgx.ErrNoRows) {
+		err = nil
+	} else {
+		return "", false, err
+	}
+	if err != nil && !errors.Is(err, ErrLegacySubscription) && !errors.Is(err, subscriptionkey.ErrUnavailable) {
+		return "", false, err
+	}
+	rotated = err != nil
+	token, err := NewOpaqueToken()
+	if err != nil {
+		return "", false, err
+	}
+	sealed, keyVersion, err := r.keys.Seal(id, token)
+	if err != nil {
+		return "", false, err
+	}
+	digest := sha256.Sum256([]byte(token))
+	_, err = tx.Exec(ctx, `INSERT INTO subscription_tokens(user_uuid,token_hash,encrypted_token,key_version) VALUES($1,$2,$3,$4)
+ ON CONFLICT(user_uuid) DO UPDATE SET token_hash=EXCLUDED.token_hash,encrypted_token=EXCLUDED.encrypted_token,key_version=EXCLUDED.key_version`, id, digest[:], sealed, keyVersion)
+	if err != nil {
+		return "", false, err
+	}
+	return token, rotated, tx.Commit(ctx)
+}
+
 func (r *SubscriptionRepo) issue(ctx context.Context, id string, rotate bool) (string, error) {
 	if !r.Ready() {
 		return "", subscriptionkey.ErrUnavailable

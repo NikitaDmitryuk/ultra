@@ -249,7 +249,8 @@ func (b *Bot) selfSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var result struct {
-		Token string `json:"token"`
+		Token   string `json:"token"`
+		Rotated bool   `json:"rotated"`
 	}
 	status, e := b.relayJSON(r.Context(), "POST", fmt.Sprintf("/v1/members/%d/subscription", u.ID), nil, &result)
 	if e != nil {
@@ -268,7 +269,7 @@ func (b *Bot) selfSubscription(w http.ResponseWriter, r *http.Request) {
 	subscription := base.String()
 	base.Path = "/happ"
 	base.Fragment = result.Token
-	jsonOK(w, map[string]string{"url": subscription, "import_url": base.String()})
+	jsonOK(w, map[string]any{"url": subscription, "import_url": base.String(), "rotated": result.Rotated})
 }
 func (b *Bot) selfExits(w http.ResponseWriter, r *http.Request) {
 	u, ok := b.selfAuth(w, r)

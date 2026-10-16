@@ -86,6 +86,11 @@ func localRetryOperation(operation string, variables map[string]any) bool {
 		switch variables["ultra_runtime_action"] {
 		case "prepare", "commit", "rollback":
 			return true
+		case "tls-release":
+			requests, ok := variables["ultra_managed_tunnel_requests"].(map[string]string)
+			hook, hookOK := variables["ultra_managed_tunnel_hook_sha256"].(string)
+			decoded, err := hex.DecodeString(hook)
+			return ok && len(requests) == 1 && hookOK && err == nil && len(decoded) == sha256.Size
 		}
 	case "upgrade-domain":
 		switch variables["ultra_upgrade_domain_action"] {

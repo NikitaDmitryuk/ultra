@@ -19,6 +19,7 @@ let currentPerson = null,
   currentTab = "overview",
   memberCache = [],
   subscription = null,
+  subscriptionRequest = null,
   subscriptionOwner = null,
   noticeTimer,
   refreshTimer;
@@ -170,6 +171,7 @@ async function self() {
   const m = data.member;
   if (subscriptionOwner !== m.uuid) {
     subscription = null;
+    subscriptionRequest = null;
     subscriptionOwner = m.uuid;
   }
   const ready = m.active && !m.pending;
@@ -181,14 +183,33 @@ async function self() {
     ),
   );
   async function getSubscription() {
-    if (!subscription)
-      subscription = await api("/api/self/subscription", "POST", {});
+    if (!subscription) {
+      if (!subscriptionRequest) {
+        subscriptionRequest = api("/api/self/subscription", "POST", {}).then(
+          (result) => {
+            subscription = result;
+            return result;
+          },
+        ).finally(() => {
+          subscriptionRequest = null;
+        });
+      }
+      await subscriptionRequest;
+    }
     return subscription;
   }
-  button("connect", async () =>
-    openExternal((await getSubscription()).import_url),
-  );
-  button("copy-sub", async () => copy((await getSubscription()).url));
+  button("connect", async () => {
+    const result = await getSubscription();
+    openExternal(result.import_url);
+    if (result.rotated)
+      notice("Старая ссылка подписки отозвана. Подключена новая ссылка.");
+  });
+  button("copy-sub", async () => {
+    const result = await getSubscription();
+    await copy(result.url);
+    if (result.rotated)
+      notice("Старая ссылка подписки отозвана. Скопирована новая ссылка.");
+  });
   await Promise.all([
     loadSelfTraffic(),
     ready

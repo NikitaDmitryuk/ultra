@@ -32,7 +32,8 @@ python3 /opt/ultra-recovery/recovery.py init --repository /var/lib/ultra-recover
 ```
 
 По `backup.example.json` создайте `/etc/ultra-recovery/backup.json` **на bridge**.
-`database_host` должен совпадать с IP выделенного PostgreSQL-сервера. Укажите существующие прикладные файлы и каталоги, включая keyring подписок,
+`database_host` должен совпадать с IP выделенного PostgreSQL-сервера. В `optional_state_paths` укажите точный файл keyring подписок `/var/lib/ultra-relay/automation/subscription-keys.json`: он будет включён в зашифрованную age-копию после установки; не добавляйте весь каталог `automation`, содержащий также ключи провайдера.
+Укажите существующие обязательные прикладные файлы и каталоги,
 SSH-ключи backup-доставки и соответствующий `.pub`, известные host keys, spec, systemd environment/drop-ins,
 Nginx, Certbot renewal, выбранный каталог `live/<domain>` и конкретный
 каталог настроенного camouflage-сайта Nginx и каталог ACME-аккаунта, указанный в сохранённом renewal config. Один renewal config

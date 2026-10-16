@@ -50,10 +50,12 @@ func ansibleUpgrade(
 	retryFailed bool,
 	forwardOnlyOption ...bool,
 ) (returnErr error) {
-	if p != nil && p.Features.MainExitDomain != "" {
-		return errors.New(
-			"managed tunnel TLS upgrade is not supported yet; preserve the existing installation and do not bypass this guard with bootstrap",
-		)
+	if p != nil && p.Features.MainExitDomain != "" &&
+		(p.SchemaVersion != 2 || p.SourceValues == nil || p.AdoptRuntime || p.Bridge.ReuseSpec ||
+			p.Automation == nil || p.Automation.DNS == nil || p.Automation.Ingress == nil ||
+			p.Automation.Ingress.ForwardHost != "" || len(p.Exits) != 1 ||
+			(len(forwardOnlyOption) > 0 && forwardOnlyOption[0])) {
+		return errors.New("upgrade_managed_tunnel_preservation_envelope_required")
 	}
 	forwardOnly := len(forwardOnlyOption) == 1 && forwardOnlyOption[0]
 	if len(forwardOnlyOption) > 1 || (forwardOnly && retryFailed) {
@@ -233,6 +235,7 @@ func ansibleUpgrade(
 	preActivation := true
 	var domainTransaction *upgradeDomainTransaction
 	domainPrepareAttempted := false
+	managedTunnelPrepareAttempted := false
 	domainGeneration := 0
 	var acceptedResume map[string]any
 	// A separate attempt always resumes timers, including after UNREACHABLE.
@@ -279,6 +282,13 @@ func ansibleUpgrade(
 	}
 	defer func() {
 		if forwardOnly || !preActivation || returnErr == nil || !os.IsNotExist(activationStateErr) {
+			return
+		}
+		if managedTunnelPrepareAttempted {
+			// A failed preparation can retain private native/effect images. Keep
+			// renewal and the fleet reservation excluded for the exact retry;
+			// no candidate executable has been activated yet.
+			returnErr = errors.Join(returnErr, errors.New("upgrade_managed_tunnel_preparation_requires_retry"))
 			return
 		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
@@ -553,10 +563,21 @@ func ansibleUpgrade(
 	if domainTransaction.Changed {
 		variables["ultra_upgrade_domain_binding"] = domainTransaction.Binding
 	}
-	if err = inspectUpgradeDesiredRuntime(ctx, p, inspection, inventory, variables, directory, python, executable); err != nil {
+	committedContinuation := retryFailed && upgradeDomainReleaseCommitted(directory)
+	compensationGeneration := 0
+	if retryFailed && p.Features.MainExitDomain != "" && !committedContinuation {
+		if _, receiptErr := os.Lstat(filepath.Join(directory, "activate", "receipt.json")); receiptErr == nil {
+			compensationGeneration, err = upgradeActivationGeneration(directory, true)
+			if err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(receiptErr) {
+			return receiptErr
+		}
+	}
+	if err = inspectUpgradeRuntimeForPurpose(ctx, p, inspection, inventory, variables, directory, python, executable, compensationGeneration); err != nil {
 		return err
 	}
-	committedContinuation := retryFailed && upgradeDomainReleaseCommitted(directory)
 	if committedContinuation {
 		if err = verifyCommittedUpgradeContinuation(directory, inventory, variables); err != nil {
 			return err
@@ -693,8 +714,18 @@ func ansibleUpgrade(
 			}
 		}
 	}
+	if compensationGeneration != 0 {
+		// Recovery evidence cannot authorize the next generation. Reinspect the
+		// actual restored pair after complete rollback/release and generation reset.
+		if err = inspectUpgradeDesiredRuntime(ctx, p, inspection, inventory, variables, directory, python, executable); err != nil {
+			return err
+		}
+	}
 	defer func() {
 		if forwardOnly && returnErr != nil {
+			return
+		}
+		if managedTunnelPrepareAttempted && preActivation && returnErr != nil {
 			return
 		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
@@ -780,6 +811,7 @@ func ansibleUpgrade(
 			return err
 		}
 	}
+	managedTunnelPrepareAttempted = p.Features.MainExitDomain != ""
 	if err = runUpgradeRuntimePhase(ctx, p, inspection, inventory, variables, directory, python, executable, "prepare", generation, retryFailed); err != nil {
 		return err
 	}

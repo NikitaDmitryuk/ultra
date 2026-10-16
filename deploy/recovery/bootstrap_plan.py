@@ -123,7 +123,7 @@ def plan(config):
         desired_records = {role: {'name': policy[field], 'data': config['bridge_ipv4']}
                            for role, field in [('subscription', 'subscription_name'), ('vpn', 'vpn_name')]}
         document('dns.json', {'config': policy, 'desired': desired_records})
-    state_paths = ['/etc/ultra-fleet', '/etc/ultra-relay', str(CONFIG), '/var/lib/ultra-relay/automation',
+    state_paths = ['/etc/ultra-fleet', '/etc/ultra-relay', str(CONFIG), '/var/lib/ultra-relay/automation/vultr-api-key',
                    '/etc/systemd/system/ultra-relay.service', '/etc/systemd/system/ultra-relay.service.d',
                    '/etc/ultra-db-tunnel', '/etc/systemd/system/ultra-db-tunnel.service',
                    '/etc/systemd/system/ultra-bot.service', '/var/lib/ultra-recovery-reconcile/heartbeat_ed25519',
@@ -180,11 +180,14 @@ def plan(config):
               'recipient': config['age_recipient'], 'identity_file': identity, 'known_hosts': str(CONFIG / 'known_hosts'),
               'destinations': [{'id': n['id'], 'name': n['name'], 'host': 'root@' + n['address'], 'required': True} for n in nodes],
               'independent': False, 'state_paths': sorted(set(state_paths)), 'artifact_paths': sorted(set(artifact_paths)), 'diagnostic_status': True}
+    # The subscription keyring is installed by a later runtime upgrade.
+    # Capture it once present without making pre-upgrade backups fail.
+    backup['optional_state_paths'] = ['/var/lib/ultra-relay/automation/subscription-keys.json']
     if config.get('controller_directory'):
         # These journals may not exist before the first reservation/retirement.
         # Capture must reselect them around pg_dump to detect first publication.
-        backup['optional_state_paths'] = ['/var/lib/ultra-ansible/lifecycle.json',
-                                          '/var/lib/ultra-ansible/lifecycle-retired.json']
+        backup['optional_state_paths'] += ['/var/lib/ultra-ansible/lifecycle.json',
+                                           '/var/lib/ultra-ansible/lifecycle-retired.json']
     existing_backup = CONFIG / 'backup.json'
     if existing_backup.exists():
         existing = json.loads(existing_backup.read_text())

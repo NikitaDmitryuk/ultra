@@ -75,6 +75,9 @@ class BootstrapPlanTests(unittest.TestCase):
         self.assertEqual(before, sorted(str(p) for p in self.root.rglob('*')))
         backup = json.loads(next(item['content'] for item in result['files'] if item['destination'].endswith('/backup.json')))
         self.assertFalse(backup['independent'])
+        self.assertIn('/var/lib/ultra-relay/automation/vultr-api-key', backup['state_paths'])
+        self.assertNotIn('/var/lib/ultra-relay/automation', backup['state_paths'])
+        self.assertIn('/var/lib/ultra-relay/automation/subscription-keys.json', backup['optional_state_paths'])
         self.assertTrue(result['verified'])
         self.assertTrue(all(item['mode']=='0600' for item in result['files']))
         self.assertEqual(result['nodes'][0]['id'],'11111111-2222-3333-4444-555555555555')
@@ -193,7 +196,10 @@ class BootstrapPlanTests(unittest.TestCase):
         self.assertIn('/var/lib/ultra-ansible/retention', backup['state_paths'])
         self.assertIn('/etc/ultra-db-tunnel', backup['state_paths'])
         self.assertIn('/etc/systemd/system/ultra-db-tunnel.service', backup['state_paths'])
-        self.assertEqual(backup['optional_state_paths'], ['/var/lib/ultra-ansible/lifecycle.json',
+        self.assertIn('/var/lib/ultra-relay/automation/vultr-api-key', backup['state_paths'])
+        self.assertNotIn('/var/lib/ultra-relay/automation', backup['state_paths'])
+        self.assertEqual(backup['optional_state_paths'], ['/var/lib/ultra-relay/automation/subscription-keys.json',
+                                                         '/var/lib/ultra-ansible/lifecycle.json',
                                                          '/var/lib/ultra-ansible/lifecycle-retired.json'])
         self.assertIn(self.config['controller_directory'], backup['artifact_paths'])
 

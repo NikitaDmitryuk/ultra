@@ -3,6 +3,14 @@ set -eu
 lineage=/etc/letsencrypt/live/{{ ultra_tunnel_domain }}
 # Certbot invokes global hooks for every lineage. Ignore unrelated certificates.
 [ "${RENEWED_LINEAGE:-}" = "$lineage" ] || exit 0
+# The root-only lock is provisioned with the hook. Hold it through both moves
+# and service restart; an installer snapshot must observe one complete pair.
+exec 9<>/var/lib/ultra-tunnel-tls/pair.lock
+flock -x 9
+# A durable fence survives controller failure and reboot. A blocked renewal
+# must fail visibly so certbot does not report a successful relay deployment.
+[ ! -e /var/lib/ultra-tunnel-tls/blocked ]
+[ ! -L /var/lib/ultra-tunnel-tls/blocked ]
 openssl x509 -in "$lineage/fullchain.pem" -noout -checkhost {{ ultra_tunnel_domain }}
 openssl x509 -in "$lineage/fullchain.pem" -noout -checkend 86400
 openssl verify -purpose sslserver -verify_hostname {{ ultra_tunnel_domain }} -CApath /etc/ssl/certs -untrusted "$lineage/fullchain.pem" "$lineage/cert.pem"

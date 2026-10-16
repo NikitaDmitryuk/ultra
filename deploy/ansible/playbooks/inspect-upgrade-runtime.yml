@@ -81,6 +81,23 @@
       ansible.builtin.set_fact:
         runtime_probe_evidence: "{{ runtime_probe_evidence | combine({'effects_ready': runtime_effect_inspection.verified}) }}"
       no_log: true
+    - name: Verify the unchanged managed tunnel and complete local renewal closure
+      ultra_tunnel_tls_fence:
+        action: "{{ 'inspect-compensation' if (ultra_managed_tunnel_compensation_generation | default(0) | int) > 0 else 'inspect' }}"
+        request_json: "{{ ultra_managed_tunnel_requests[inventory_hostname] }}"
+        hook_sha256: "{{ ultra_managed_tunnel_hook_sha256 }}"
+      when: inventory_hostname in (ultra_managed_tunnel_requests | default({}))
+      register: runtime_managed_tunnel_inspection
+      no_log: true
+    - name: Bind the managed tunnel prerequisite to the exact host summary
+      ansible.builtin.set_fact:
+        runtime_probe_evidence: >-
+          {{ runtime_probe_evidence | combine({
+             'managed_tls_ready': runtime_managed_tunnel_inspection.verified and
+                                  not (runtime_managed_tunnel_inspection.needs_restore | default(false)),
+             'managed_tls_restorable': runtime_managed_tunnel_inspection.needs_restore | default(false)}) }}
+      when: inventory_hostname in (ultra_managed_tunnel_requests | default({}))
+      no_log: true
 - name: Collect exact fleet evidence
   hosts: localhost
   gather_facts: false

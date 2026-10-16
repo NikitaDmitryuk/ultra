@@ -208,7 +208,7 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 		t.Skip("python unavailable")
 	}
 	for _, retryFailed := range []bool{false, true} {
-		for _, operation := range []string{"controller-floor", "controller-preflight-unverified", "controller-preflight-failure", "inspect-upgrade", "inspect-release-hosts", "legacy-inspect-release-hosts", "lifecycle-applying", "lifecycle-foreign", "legacy-success", "legacy-precheckpoint-failure", "legacy-rollback-failure", "legacy-runtime-rollback-failure", "legacy-commit-rollback-failure", "legacy-effects-commit-failure", "runtime-rollback-failure", "commit-rollback-failure", "prepared-generation-retry", "release-rollback-failure"} {
+		for _, operation := range []string{"managed-reset-interrupted", "managed-missing-pair-rollback-failure", "managed-success", "managed-prepare-failure", "managed-runtime-rollback-failure", "managed-effects-commit-failure", "controller-floor", "controller-preflight-unverified", "controller-preflight-failure", "inspect-upgrade", "inspect-release-hosts", "legacy-inspect-release-hosts", "lifecycle-applying", "lifecycle-foreign", "legacy-success", "legacy-precheckpoint-failure", "legacy-rollback-failure", "legacy-runtime-rollback-failure", "legacy-commit-rollback-failure", "legacy-effects-commit-failure", "runtime-rollback-failure", "commit-rollback-failure", "prepared-generation-retry", "release-rollback-failure"} {
 			t.Run(fmt.Sprintf("%s/retry-failed=%t", operation, retryFailed), func(t *testing.T) {
 				root := t.TempDir()
 				if err := os.Chmod(root, 0700); err != nil {
@@ -317,6 +317,23 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 					VPNName:          "edge",
 				}
 				p.SourceValues = map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2"}
+				if strings.HasPrefix(operation, "managed-") {
+					p.Features.MainExitDomain = "tunnel.example.com"
+					p.Bridge.ReuseSpec = false
+					p.Database.Enabled = true
+					p.Database.PrimaryHost = "192.0.2.3"
+					p.Features.Preset, p.Features.Transport = "standard", "splithttp"
+					p.Features.SplitHTTPHost, p.Features.SplitHTTPPath = p.Features.MainExitDomain, "/ultra-xhttp"
+					p.Features.GenerateExitTLS = false
+					p.Exits[0].DialAddr = p.Exits[0].SSHHost
+					ringSource := filepath.Join(root, "subscription-source.json")
+					writeTestSubscriptionKeyring(
+						t,
+						ringSource,
+						`{"active":"v2","keys":{"v1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","v2":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}}`,
+					)
+					p.SourceValues["ULTRA_SUBSCRIPTION_ENCRYPTION_KEY_FILE"] = ringSource
+				}
 				local := false
 				p.ControllerLocal = &local
 				p.ControllerLocalTarget = p.Bridge.SSHHost + "|" + p.Bridge.Address
@@ -364,6 +381,8 @@ if operation=='lifecycle':
     (root/'gate').write_text(variables['ultra_lifecycle_phase'])
 if operation=='upgrade-runtime':
     key+='-'+variables['ultra_runtime_action']
+if operation=='inspect-upgrade-runtime' and variables.get('ultra_managed_tunnel_compensation_generation'):
+    key+='-compensation'
 with (root/'calls').open('a') as log: log.write(key+'\n')
 fail=root/'fail-once'
 if key=='controller-preflight':
@@ -400,6 +419,28 @@ if fail.exists() and fail.read_text()=='legacy-precheckpoint-failure' and operat
     fail.unlink()
     (root/'no-maintenance-checkpoint').touch()
     sys.exit(1)
+if fail.exists() and fail.read_text()=='managed-reset-interrupted' and operation=='upgrade':
+    fail.unlink()
+    sys.exit(1)
+if fail.exists() and fail.read_text()=='managed-prepare-failure' and key=='upgrade-runtime-prepare':
+    (root/'managed-frozen').write_text(variables['ultra_managed_tunnel_requests'][next(iter(variables['ultra_managed_tunnel_requests']))])
+    fail.unlink()
+    sys.exit(1)
+if fail.exists() and fail.read_text()=='managed-missing-pair-rollback-failure':
+    if operation=='upgrade':
+        (root/'managed-pair-missing').touch()
+        sys.exit(1)
+    if key=='upgrade-runtime-rollback':
+        fail.unlink()
+        sys.exit(1)
+if fail.exists() and fail.read_text()=='managed-runtime-rollback-failure':
+    if operation=='upgrade': sys.exit(1)
+    if key=='upgrade-runtime-rollback':
+        fail.unlink()
+        sys.exit(1)
+if fail.exists() and fail.read_text()=='managed-effects-commit-failure' and key=='upgrade-runtime-commit':
+    fail.unlink()
+    sys.exit(1)
 result={'verified':True}
 if operation=='inspect-upgrade-maintenance':
     result['untouched']=(root/'no-maintenance-checkpoint').exists()
@@ -415,7 +456,19 @@ if operation=='inspect-upgrade':
     result={'database_schema':24,'architecture':'amd64','observed_at':1,'topology_sha256':'a'*64,'identity':'fixture','nodes':[{'id':'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','address':'192.0.2.2','pins':'fixture'}],'previous_manifest':previous}
     result['runtime_nodes']={'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa': {'name':'primary','managed':False,'tunnel_identity_digest':'b'*64,'certificate_pin':''}}
 if operation=='inspect-upgrade-runtime':
-    result={'verified':True,'hosts':{host:{'verified':True,'runtime_changed':False,'domain_changed':False,'transitions':[]} for host in variables['ultra_runtime_probe_requests']}}
+    if variables.get('ultra_managed_tunnel_compensation_generation') and (root/'managed-released').exists():
+        fences=variables['ultra_managed_tunnel_requests']
+        assert next(iter(fences.values()))==(root/'managed-released').read_text(), 'released fence generation mismatch'
+        assert variables['ultra_managed_tunnel_compensation_generation']==1
+        assert job.name=='runtime-compensation-inspect', 'compensation staged under job instead of receipt generation'
+    if (root/'managed-pair-missing').exists():
+        assert variables.get('ultra_managed_tunnel_compensation_generation')==1, 'strict inspection admitted missing pair'
+        fences=variables['ultra_managed_tunnel_requests']
+        assert json.loads(next(iter(fences.values())))['transaction'].endswith('-runtime-1')
+    result={'verified':True,'hosts':{host:{'verified':True,'runtime_changed':False,'domain_changed':False,'managed_tls_ready':True,'transitions':[]} for host in variables['ultra_runtime_probe_requests']}}
+    if (root/'managed-pair-missing').exists():
+        for host,evidence in result['hosts'].items():
+            if host!='bridge':evidence.update(managed_tls_ready=False,managed_tls_restorable=True)
 if operation=='inspect-upgrade-domains':
     desired=variables['ultra_upgrade_domain_desired']
     result={'verified':True,'subscription':desired['subscription'],'backend':desired['backend'],'vpn':desired['vpn'],'public_host':desired['public_host'],
@@ -434,7 +487,30 @@ if operation=='preflight-retry' and variables.get('ultra_legacy_bridge_maintenan
     assert contract['mode']==('committed' if committed else 'compensation')
 if operation=='upgrade-runtime':
     action=variables['ultra_runtime_action']
-    result={'verified':True,'phase':action,'hosts':{host:{'verified':True,'status':{'prepare':'prepared','apply':'applied','rollback':'rolled_back','commit':'committed'}[action]} for host in variables['ultra_runtime_probe_requests']}}
+    if action in ('prepare','apply') and variables.get('ultra_managed_tunnel_requests'):
+        stage=pathlib.Path(variables['ultra_upgrade_subscription_key_source'])
+        assert stage.is_file() and stage.stat().st_mode & 0o777 == 0o600
+        assert json.loads(stage.read_text())['active']=='v2'
+        assert 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=' not in json.dumps(request)
+    if action=='rollback' and (root/'managed-pair-missing').exists():
+        (root/'managed-pair-missing').unlink()
+    if variables.get('ultra_managed_tunnel_requests'):
+        fences=variables['ultra_managed_tunnel_requests']
+        assert len(fences)==1
+        alias=next(iter(fences))
+        parsed=json.loads(fences[alias])
+        assert parsed['transaction']==variables['ultra_runtime_probe_requests'][alias]['request']['transaction']
+        assert len(parsed['runtime_request_sha256'])==64 and len(parsed['release_sha256'])==64
+        active=root/'managed-frozen'
+        if action=='prepare':
+            if active.exists(): assert active.read_text()==fences[alias], 'fence generation changed before release'
+            active.write_text(fences[alias])
+        else:
+            assert active.exists() and active.read_text()==fences[alias], 'unowned fence transition'
+        if action in ('commit','tls-release'):
+            (root/'managed-released').write_text(fences[alias])
+            active.unlink()
+    result={'verified':True,'phase':action,'hosts':{host:{'verified':True,'managed_tls_ready':True,'status':{'prepare':'prepared','apply':'applied','rollback':'rolled_back','commit':'committed','tls-release':'tls_released'}[action]} for host in variables['ultra_runtime_probe_requests']}}
 if operation=='resume-automation' and not (root/'activate').exists() and variables.get('ultra_legacy_bridge_maintenance'):
     sys.exit(1)
 if operation=='upgrade': result['activated_at']=2
@@ -452,6 +528,88 @@ output.chmod(0o600)
 					t.Fatal(err)
 				}
 				firstErr := ansibleUpgrade(ctx, p, release, directory, python, executable, false)
+				if strings.HasPrefix(operation, "managed-") {
+					if operation == "managed-success" {
+						if firstErr != nil {
+							t.Fatalf("managed success: %v", firstErr)
+						}
+					} else {
+						if firstErr == nil {
+							t.Fatal("managed injected failure missing")
+						}
+						if operation == "managed-prepare-failure" {
+							gate, _ := os.ReadFile(filepath.Join(directory, "gate"))
+							if string(gate) != "applying" || !strings.Contains(firstErr.Error(), "preparation_requires_retry") {
+								t.Fatalf("preparation did not retain ownership: %s %v", gate, firstErr)
+							}
+						}
+						if operation == "managed-reset-interrupted" {
+							// Model reset's supported crash window: next job is
+							// durable, but the old failed receipt still owns compensation.
+							jobPath := filepath.Join(directory, "activate", "job.json")
+							raw, err := os.ReadFile(jobPath)
+							var job map[string]any
+							if err != nil || json.Unmarshal(raw, &job) != nil {
+								t.Fatal("activation job unavailable", err)
+							}
+							job["attempt"] = 2
+							raw, err = json.Marshal(job)
+							if err != nil {
+								t.Fatal(err)
+							}
+							if err = os.WriteFile(jobPath, raw, 0600); err != nil {
+								t.Fatal(err)
+							}
+							old, err := upgradeActivationGeneration(directory, true)
+							next, nextErr := upgradeActivationGeneration(directory, false)
+							if err != nil || nextErr != nil || old != 1 || next != 2 {
+								t.Fatalf("interrupted reset generations: %d %d %v %v", old, next, err, nextErr)
+							}
+							if _, err = os.Stat(filepath.Join(directory, "managed-released")); err != nil {
+								t.Fatal("first rollback did not release fence", err)
+							}
+						}
+						if err := ansibleUpgrade(ctx, p, release, directory, python, executable, true); err != nil {
+							t.Fatalf("managed recovery retry: %v", err)
+						}
+					}
+					calls, _ := os.ReadFile(filepath.Join(directory, "calls"))
+					if operation == "managed-runtime-rollback-failure" || operation == "managed-missing-pair-rollback-failure" {
+						releaseIndex := strings.Index(string(calls), "upgrade-runtime-tls-release\n")
+						rollbackIndex := strings.Index(string(calls), "\nrollback\n")
+						if rollbackIndex < 0 || releaseIndex < rollbackIndex {
+							t.Fatalf("renewal released before binary rollback: %s", calls)
+						}
+					}
+					if operation == "managed-missing-pair-rollback-failure" {
+						callText := string(calls)
+						compensation := strings.Index(callText, "inspect-upgrade-runtime-compensation\n")
+						restored := strings.LastIndex(callText, "upgrade-runtime-rollback\n")
+						strict := strings.LastIndex(callText, "inspect-upgrade-runtime\n")
+						nextActivation := strings.LastIndex(callText, "\nupgrade\n")
+						if compensation < 0 || restored < compensation || strict < restored || nextActivation < strict {
+							t.Fatalf("missing-pair retry bypassed compensation/strict gate: %s", calls)
+						}
+					}
+					stages, _ := filepath.Glob(filepath.Join(directory, "subscription-keys*", "keyring.json"))
+					// Failed, rolled-back generations can retain a private copy
+					// for forensics; the accepted generation must be cleaned.
+					generation, _ := upgradeActivationGeneration(directory, false)
+					accepted := filepath.Join(upgradeDependentStageDirectory(directory, "subscription-keys", generation), "keyring.json")
+					for _, stage := range stages {
+						if stage == accepted {
+							t.Fatal("accepted subscription stage was not cleaned")
+						}
+					}
+					if _, err := os.Stat(filepath.Join(directory, "managed-frozen")); !os.IsNotExist(err) {
+						t.Fatal("accepted managed upgrade retained fence")
+					}
+					gate, _ := os.ReadFile(filepath.Join(directory, "gate"))
+					if string(gate) != "released" {
+						t.Fatalf("accepted managed gate: %s", gate)
+					}
+					return
+				}
 				if strings.HasPrefix(operation, "controller-") {
 					if firstErr == nil {
 						t.Fatal("controller enforcement preflight accepted unsafe upgrade")

@@ -16,6 +16,14 @@
   become: true
   any_errors_fatal: true
   tasks:
+    - name: Verify the frozen managed tunnel before coordinated disruption
+      ultra_tunnel_tls_fence:
+        action: "{{ 'check-restore' if ultra_runtime_action == 'rollback' else 'verify' }}"
+        request_json: "{{ ultra_managed_tunnel_requests[inventory_hostname] }}"
+        hook_sha256: "{{ ultra_managed_tunnel_hook_sha256 }}"
+      when: ultra_runtime_action in ['apply', 'rollback'] and inventory_hostname in (ultra_managed_tunnel_requests | default({}))
+      register: runtime_managed_tunnel_recovery
+      no_log: true
     - name: Read each exact native transaction binding before coordination
       ansible.builtin.command:
         argv: [/var/lib/ultra-ansible/runtime-probe/ultra-install, runtime-probe]
@@ -67,6 +75,18 @@
   any_errors_fatal: true
   serial: 1
   tasks:
+    - name: Stop the exit only after its missing certificate pair has a verified local recovery image
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: stopped
+      when: ultra_runtime_action == 'rollback' and runtime_managed_tunnel_recovery.needs_restore | default(false) | bool
+    - name: Restore only missing owned certificate files before the native runtime rollback
+      ultra_tunnel_tls_fence:
+        action: restore
+        request_json: "{{ ultra_managed_tunnel_requests[inventory_hostname] }}"
+        hook_sha256: "{{ ultra_managed_tunnel_hook_sha256 }}"
+      when: ultra_runtime_action == 'rollback' and runtime_managed_tunnel_recovery.needs_restore | default(false) | bool
+      no_log: true
     - name: Apply or restore the request-bound exit image
       ansible.builtin.include_role:
         name: runtime
@@ -88,6 +108,14 @@
         name: runtime
         tasks_from: phase
       when: ultra_runtime_action in ['apply', 'rollback']
+    - name: Install the staged Vultr compute credential before restarting the bridge relay
+      ansible.builtin.include_role:
+        name: upgrade_provider
+      when: ultra_runtime_action == 'apply' and ultra_upgrade_provider_key_source | default('') | length > 0
+    - name: Install the staged subscription keyring before restarting the bridge relay
+      ansible.builtin.include_role:
+        name: upgrade_subscription
+      when: ultra_runtime_action == 'apply' and ultra_upgrade_subscription_key_source | default('') | length > 0
     - name: Start a new payload verification watermark
       ansible.builtin.command:
         argv: [date, "+%s%N"]
@@ -137,6 +165,25 @@
       ansible.builtin.set_fact:
         runtime_transaction_evidence: "{{ {'verified': runtime_committed_effects.verified, 'status': 'committed', 'bound': runtime_committed_effects.bound} }}"
       when: ultra_runtime_action == 'commit'
+      no_log: true
+- name: Restore managed renewal only after release acceptance or complete binary rollback
+  hosts: all
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Release the exact checkpoint after the caller verified complete fleet acceptance
+      ultra_tunnel_tls_fence:
+        action: release
+        request_json: "{{ ultra_managed_tunnel_requests[inventory_hostname] }}"
+        hook_sha256: "{{ ultra_managed_tunnel_hook_sha256 }}"
+        require_checkpoint: true
+      when: ultra_runtime_action in ['commit', 'tls-release'] and inventory_hostname in (ultra_managed_tunnel_requests | default({}))
+      no_log: true
+    - name: Return the exact completed managed rollback release phase
+      ansible.builtin.set_fact:
+        runtime_transaction_evidence: {verified: true, status: tls_released, bound: false}
+      when: ultra_runtime_action == 'tls-release'
       no_log: true
 - name: Return only exact fleet phase acknowledgements
   hosts: localhost

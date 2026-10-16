@@ -62,6 +62,30 @@ class RuntimeUpgradeContracts(unittest.TestCase):
         effects = (ROOT / 'deploy/ansible/library/ultra_runtime_effects.py').read_text()
         self.assertIn("state['bot']['active'] == 'active'", effects)
 
+    def test_managed_fence_restore_and_release_choreography(self):
+        phase = (ROOT / 'deploy/ansible/roles/runtime/tasks/phase.yml').read_text()
+        play = (ROOT / 'deploy/ansible/playbooks/upgrade-runtime.yml').read_text()
+        self.assertLess(phase.index('Exclude managed certificate renewal'), phase.index('Freeze the private certificate'))
+        self.assertLess(phase.index('Freeze the private certificate'), phase.index('Prepare exact host-only external'))
+        self.assertLess(play.index('Verify the frozen managed tunnel'), play.index('Quiesce bridge traffic'))
+        self.assertIn("'check-restore' if ultra_runtime_action == 'rollback'", play)
+        self.assertLess(play.index('Stop the exit only after'), play.index('Restore only missing owned certificate'))
+        self.assertLess(play.index('Restore only missing owned certificate'), play.index('Apply or restore the request-bound exit'))
+        self.assertLess(play.index('Promote candidate firewall'), play.index('Release the exact checkpoint'))
+        self.assertIn('require_checkpoint: true', play)
+
+    def test_subscription_delivery_uses_paths_and_private_copy(self):
+        role = (ROOT / 'deploy/ansible/roles/upgrade_subscription/tasks/main.yml').read_text()
+        dropin = (ROOT / 'deploy/ansible/roles/upgrade_subscription/templates/subscription.conf.j2').read_text()
+        copy = role.split('- name: Stage subscription keyring', 1)[1].split('- name:', 1)[0]
+        self.assertIn('src: "{{ ultra_upgrade_subscription_key_source }}"', copy)
+        self.assertIn('mode: "0600"', copy)
+        self.assertIn('diff: false', copy)
+        self.assertIn('no_log: true', copy)
+        self.assertIn('ULTRA_SUBSCRIPTION_ENCRYPTION_KEY_FILE=/var/lib/ultra-relay/automation/subscription-keys.json', dropin)
+        self.assertNotIn('lookup(', role)
+        self.assertNotIn('slurp', role)
+
     def test_upgrade_compensates_runtime_before_release_and_gate(self):
         source = (ROOT / 'cmd/ultra-install/ansible_upgrade.go').read_text()
         start = source.index('if err != nil {\n\t\tif forwardOnly {\n\t\t\t// The operator explicitly chose forward-only recovery.')

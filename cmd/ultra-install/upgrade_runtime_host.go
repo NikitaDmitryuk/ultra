@@ -125,6 +125,11 @@ func runtimeHostDesiredIdentity(r runtimeHostRequest) (string, error) {
 		Members                        []member
 		DB                             installplan.DatabaseConfig
 	}{r.Role, r.Node, r.Bridge.Address, r.Bridge.SSHHost, members, r.Database})
+	if r.Features.MainExitDomain != "" {
+		// A managed hostname is immutable identity, not mutable tuning. Keep the
+		// historical digest shape for installations without managed tunnel TLS.
+		identity = runtimeHostDigest(struct{ Identity, ManagedTunnelDomain string }{identity, r.Features.MainExitDomain})
+	}
 	if dynamic {
 		return runtimeHostDigest(struct{ Identity, NodeID, SSHHost string }{identity, r.Proof.NodeID, r.Proof.SSHHost}), nil
 	}
@@ -154,6 +159,15 @@ func runtimeHostInstalledIdentity(raw []byte) (string, error) {
 	}
 	delete(exit, "port")
 	identity["exit"], _ = json.Marshal(exit)
+	var provision config.TunnelTLSProvision
+	if json.Unmarshal(doc["tunnel_tls_provision"], &provision) == nil && provision == config.TunnelTLSACME {
+		// Bind the complete raw TLS object so future policy fields cannot drift
+		// behind a previously accepted attestation. Certificate bytes and renewal
+		// state require a separate host-local frozen preservation checkpoint.
+		for _, key := range []string{"tunnel_tls_provision", "mimic_preset", "tunnel_transport", "splithttp_host", "splithttp_path", "splithttp_tls", "exit_cert"} {
+			identity[key] = doc[key]
+		}
+	}
 	return runtimeHostDigest(identity), nil
 }
 func (s runtimeHostStore) trustedParent(path string) error {
@@ -187,7 +201,7 @@ func (s runtimeHostStore) image(path string) (runtimeHostImage, error) {
 	if err := s.trustedParent(path); err != nil {
 		return runtimeHostImage{}, err
 	}
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return runtimeHostImage{}, nil
 	}
@@ -298,6 +312,9 @@ func (s runtimeHostStore) locked(fn func() (runtimeHostResult, error)) (runtimeH
 	return fn()
 }
 func (s runtimeHostStore) prepare(r runtimeHostRequest) (runtimeHostResult, error) {
+	if err := s.managedTunnelAuthority(r); err != nil {
+		return runtimeHostResult{}, err
+	}
 	return s.locked(func() (runtimeHostResult, error) {
 		path, err := s.journalPath(r.Transaction)
 		if err != nil {
@@ -381,10 +398,14 @@ func (s runtimeHostStore) prepare(r runtimeHostRequest) (runtimeHostResult, erro
 		for _, ex := range r.Exits {
 			p.Exits = append(p.Exits, installplan.ExitNode{Name: ex.Name, SSHHost: ex.SSHHost, DialAddr: ex.DialAddr, Port: ex.Port})
 		}
-		if installplan.ValidateLocalRuntimePlan(p) != nil {
+		if r.Features.MainExitDomain == "" && installplan.ValidateLocalRuntimePlan(p) != nil {
 			return runtimeHostResult{}, runtimeHostError("request_invalid")
 		}
-		projected, err := installplan.ProjectLocalRuntime(p, j.Before[0].Data, r.Role, r.Node)
+		project := installplan.ProjectLocalRuntime
+		if r.Features.MainExitDomain != "" {
+			project = installplan.ProjectLocalManagedTunnelRuntime
+		}
+		projected, err := project(p, j.Before[0].Data, r.Role, r.Node)
 		if err != nil {
 			return runtimeHostResult{}, runtimeHostError("projection_failed")
 		}

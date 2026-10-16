@@ -128,6 +128,14 @@ func TestStableSubscriptionAndLegacyRecovery(t *testing.T) {
 		string(hash) != string(digest[:]) {
 		t.Fatal("legacy hash changed", e)
 	}
+	reissued, rotated, e := r.GetOrReissue(ctx, u.UUID)
+	if e != nil || !rotated || reissued == first {
+		t.Fatal("legacy subscription was not explicitly reissued", rotated, e)
+	}
+	again, rotated, e := r.GetOrReissue(ctx, u.UUID)
+	if e != nil || rotated || again != reissued {
+		t.Fatal("reissued subscription was not stable", rotated, e)
+	}
 }
 
 func TestInviteExpiryRevocationAndDisabledIdentity(t *testing.T) {

@@ -155,6 +155,25 @@ test("personal cabinet reuses subscription and opens HTTPS import without admin 
   assert.ok(p.calls.every((c) => c.path.startsWith("/api/self")));
   assert.ok(p.calls.every((c) => c.options.cache === "no-store"));
 });
+
+test("subscription recovery tells the user the previous URL was invalidated", async () => {
+  const p = page(true, {
+    "/api/self": {
+      registered: true,
+      member: { uuid: "owner", active: true, pending: false },
+    },
+    "/api/self/exits": { exits: [], profiles: [] },
+    "/api/self/subscription": {
+      url: "https://vpn.example/sub/new",
+      import_url: "https://vpn.example/happ#new",
+      rotated: true,
+    },
+  });
+  await flush();
+  await p.el("#copy-sub").onclick();
+  assert.deepEqual(p.copied, ["https://vpn.example/sub/new"]);
+  assert.match(p.el("#notice").textContent, /Старая ссылка подписки отозвана/);
+});
 test("disabled access cannot issue a subscription", async () => {
   const p = page(true, {
     "/api/self": {

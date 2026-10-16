@@ -244,8 +244,8 @@ func (s *Server) memberSubscription(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "access unavailable", http.StatusConflict)
 		return
 	}
-	token, e := s.Members.Subscriptions.GetOrCreate(r.Context(), m.UUID)
-	memberJSON(w, map[string]string{"token": token}, e)
+	token, rotated, e := s.Members.Subscriptions.GetOrReissue(r.Context(), m.UUID)
+	memberJSON(w, map[string]any{"token": token, "rotated": rotated}, e)
 }
 
 func (s *Server) memberTraffic(w http.ResponseWriter, r *http.Request) {

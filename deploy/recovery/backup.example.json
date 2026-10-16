@@ -17,5 +17,6 @@
     "/etc/systemd/system/ultra-bot.service", "/etc/nginx/sites-available/ultra-bot",
     "/etc/letsencrypt/live/REPLACE_DOMAIN", "/etc/letsencrypt/renewal/REPLACE_DOMAIN.conf"
   ],
+  "optional_state_paths": ["/var/lib/ultra-relay/automation/subscription-keys.json"],
   "artifact_paths": ["/usr/local/bin/ultra-relay", "/usr/local/bin/ultra-bot", "/usr/local/bin/ultra-client"]
 }

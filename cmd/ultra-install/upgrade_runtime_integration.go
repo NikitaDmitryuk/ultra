@@ -30,6 +30,9 @@ func upgradeRuntimeRequests(
 	if p == nil || p.SourceValues == nil {
 		return nil, errors.New("upgrade_canonical_runtime_required")
 	}
+	if p.Features.MainExitDomain != "" && (len(p.Exits) != 1 || len(inspection.Nodes) != 1) {
+		return nil, errors.New("upgrade_managed_tunnel_single_static_exit_required")
+	}
 	r := runtimeHostRequest{
 		Transaction: transaction,
 		Role:        config.RoleBridge,
@@ -68,6 +71,9 @@ func upgradeRuntimeRequests(
 		evidence, evidenceFound := inspection.RuntimeNodes[node.ID]
 		if !evidenceFound {
 			return nil, errors.New("upgrade_runtime_exit_proof_unavailable")
+		}
+		if p.Features.MainExitDomain != "" && (evidence.Managed || evidence.CertificatePin != "") {
+			return nil, errors.New("upgrade_managed_tunnel_ca_policy_unverified")
 		}
 		host, ok := hosts[alias].(map[string]any)
 		if !ok || host["ansible_host"] != node.Address || host["ultra_exit_id"] != node.ID || host["ansible_user"] != "root" ||
@@ -153,6 +159,9 @@ func runUpgradeRuntimePhase(
 		variables[key] = releaseVariables[key]
 	}
 	authorizeUpgradeDomainRequest(requests, releaseVariables)
+	if err = attachManagedTunnelVariables(p, requests, variables, releaseVariables, directory, generation); err != nil {
+		return err
+	}
 	variables["ultra_runtime_effect_inputs"] = runtimeEffectInputs(requests)
 	assets, assetErr := runtimeWarpAssets()
 	if assetErr != nil {
@@ -160,6 +169,31 @@ func runUpgradeRuntimePhase(
 	}
 	variables["ultra_runtime_warp_assets"] = assets
 	variables["ultra_runtime_probe_requests"], variables["ultra_runtime_action"] = requests, action
+	var cleanupProviderStage func() error
+	var cleanupSubscriptionStage func() error
+	if action == "apply" && p.Automation != nil {
+		keySource, bridgeIPv4, cleanup, stageErr := prepareUpgradeProviderStage(p, directory, generation)
+		if stageErr != nil {
+			return stageErr
+		}
+		if keySource != "" {
+			variables["ultra_upgrade_provider_key_source"] = keySource
+			variables["ultra_upgrade_provider_bridge_ipv4"] = bridgeIPv4
+			cleanupProviderStage = cleanup
+		}
+	}
+	if action == "prepare" || action == "apply" {
+		source, cleanup, stageErr := prepareUpgradeSubscriptionStage(p, directory, generation)
+		if stageErr != nil {
+			return stageErr
+		}
+		if source != "" {
+			variables["ultra_upgrade_subscription_key_source"] = source
+			if action == "apply" {
+				cleanupSubscriptionStage = cleanup
+			}
+		}
+	}
 	run := deployansible.RunLocal
 	if (action == "prepare" || action == "rollback") && len(retryFailed) > 0 && retryFailed[0] {
 		run = deployansible.RunLocalRetryFailed
@@ -191,6 +225,21 @@ func runUpgradeRuntimePhase(
 			(action == "rollback" && result.Status != "rolled_back") {
 			return errors.New("upgrade_runtime_phase_unverified")
 		}
+		if request, ok := requests[host].(runtimeProbeInput); ok && request.Request.Features.MainExitDomain != "" &&
+			request.Request.Role == config.RoleExit &&
+			!result.ManagedTLSReady {
+			return errors.New("upgrade_managed_tunnel_phase_unverified")
+		}
+	}
+	if cleanupProviderStage != nil {
+		if err := cleanupProviderStage(); err != nil {
+			return errors.New("upgrade_provider_stage_cleanup_failed")
+		}
+	}
+	if cleanupSubscriptionStage != nil {
+		if err := cleanupSubscriptionStage(); err != nil {
+			return errors.New("upgrade_subscription_stage_cleanup_failed")
+		}
 	}
 	return nil
 }
@@ -202,6 +251,26 @@ func inspectUpgradeDesiredRuntime(
 	inventory, releaseVariables map[string]any,
 	directory, python, executable string,
 ) error {
+	return inspectUpgradeRuntimeForPurpose(ctx, p, inspection, inventory, releaseVariables, directory, python, executable, 0)
+}
+
+// A nonzero compensationGeneration authorizes checkpoint-only inspection for
+// rollback of that failed activation, never preparation or a new activation.
+func inspectUpgradeRuntimeForPurpose(ctx context.Context, p *installplan.InstallPlan, inspection upgradeInspection,
+	inventory, releaseVariables map[string]any, directory, python, executable string, compensationGeneration int,
+) error {
+	if compensationGeneration != 0 {
+		generation, err := upgradeActivationGeneration(directory, true)
+		if err != nil || generation != compensationGeneration || compensationGeneration < 1 || p.Features.MainExitDomain == "" {
+			return errors.New("upgrade_managed_tunnel_compensation_unbound")
+		}
+		if _, err = readBootstrapGenerationInput(filepath.Join(directory, "activate", "receipt.json")); err != nil {
+			return errors.New("upgrade_managed_tunnel_compensation_unbound")
+		}
+		if err = requireFailedUpgradeAttempt(directory, generation); err != nil {
+			return err
+		}
+	}
 	requests, err := upgradeRuntimeRequests(p, inspection, inventory, lifecycleID(directory))
 	if err != nil {
 		return err
@@ -211,6 +280,18 @@ func inspectUpgradeDesiredRuntime(
 		variables[key] = releaseVariables[key]
 	}
 	authorizeUpgradeDomainRequest(requests, releaseVariables)
+	generation, err := upgradeActivationGeneration(directory, false)
+	if err != nil {
+		return err
+	}
+	if compensationGeneration != 0 {
+		// An interrupted reset may already have advanced the job. The surviving
+		// failed receipt still owns the fence and compensation inspection stage.
+		generation = compensationGeneration
+	}
+	if err = attachManagedTunnelVariables(p, requests, variables, releaseVariables, directory, generation); err != nil {
+		return err
+	}
 	variables["ultra_runtime_effect_inputs"] = runtimeEffectInputs(requests)
 	assets, assetErr := runtimeWarpAssets()
 	if assetErr != nil {
@@ -218,22 +299,27 @@ func inspectUpgradeDesiredRuntime(
 	}
 	variables["ultra_runtime_warp_assets"] = assets
 	variables["ultra_runtime_probe_requests"] = requests
+	stage := "runtime-inspect"
+	if compensationGeneration != 0 {
+		variables["ultra_managed_tunnel_compensation_generation"] = compensationGeneration
+		stage = "runtime-compensation-inspect"
+	}
 	receipt, err := runUpgradeInspection(
 		ctx,
 		"inspect-upgrade-runtime",
 		inventory,
 		variables,
-		filepath.Join(directory, "runtime-inspect"),
+		upgradeDependentStageDirectory(directory, stage, generation),
 		python,
 		executable,
 	)
 	if err != nil {
 		return err
 	}
-	return validateUpgradeRuntimeEvidence(receipt.Result.Values, requests)
+	return validateUpgradeRuntimeEvidence(receipt.Result.Values, requests, compensationGeneration != 0)
 }
 
-func validateUpgradeRuntimeEvidence(values map[string]any, requests map[string]any) error {
+func validateUpgradeRuntimeEvidence(values map[string]any, requests map[string]any, compensation ...bool) error {
 	raw, err := json.Marshal(values)
 	if err != nil {
 		return errors.New("upgrade_runtime_evidence_invalid")
@@ -251,6 +337,10 @@ func validateUpgradeRuntimeEvidence(values map[string]any, requests map[string]a
 			return errors.New("upgrade_runtime_evidence_invalid")
 		}
 		request, _ := requests[host].(runtimeProbeInput)
+		if request.Request.Features.MainExitDomain != "" && request.Request.Role == config.RoleExit && !evidence.ManagedTLSReady &&
+			(len(compensation) != 1 || !compensation[0] || !evidence.ManagedTLSRestorable) {
+			return errors.New("upgrade_managed_tunnel_preflight_unverified")
+		}
 		if evidence.DomainChanged && (host != "bridge" || !runtimeHostValidDigest(request.DomainTransaction)) {
 			return errors.New("upgrade_domain_acceptance_transaction_required")
 		}
@@ -324,6 +414,9 @@ func runUpgradeRuntimeEffectsCommit(
 		"ultra_runtime_warp_assets":    assets,
 		"ultra_runtime_action":         "commit",
 	}
+	if err = attachManagedTunnelVariables(p, requests, variables, releaseVariables, directory, generation); err != nil {
+		return err
+	}
 	receipt, err := deployansible.RunLocalRetryFailed(
 		ctx,
 		"upgrade-runtime",
@@ -369,6 +462,9 @@ func runUpgradeReleaseRollback(
 	variables["ultra_runtime_effect_inputs"] = runtimeEffectInputs(requests)
 	variables["ultra_legacy_initial_runtime_request_json"] = runtimeEffectInputs(requests)["bridge"]
 	variables["ultra_runtime_warp_assets"] = assets
+	if err = attachManagedTunnelVariables(p, requests, variables, releaseVariables, directory, generation); err != nil {
+		return err
+	}
 	run := deployansible.RunLocal
 	if retryFailed {
 		run = deployansible.RunLocalRetryFailed
@@ -388,5 +484,5 @@ func runUpgradeReleaseRollback(
 	if receipt.Result.Values["verified"] != true {
 		return errors.New("upgrade_release_rollback_unverified")
 	}
-	return nil
+	return releaseManagedUpgradeTunnel(ctx, p, inspection, inventory, releaseVariables, directory, python, executable, generation)
 }

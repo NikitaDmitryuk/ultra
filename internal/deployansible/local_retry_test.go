@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -291,7 +292,7 @@ func TestUpgradeCompensationRetryExactRequestAndReceipt(t *testing.T) {
 		t.Skip("python unavailable")
 	}
 	for _, test := range []struct{ operation, action string }{
-		{"upgrade-runtime", "prepare"}, {"upgrade-runtime", "commit"}, {"upgrade-runtime", "rollback"},
+		{"upgrade-runtime", "prepare"}, {"upgrade-runtime", "commit"}, {"upgrade-runtime", "rollback"}, {"upgrade-runtime", "tls-release"},
 		{"rollback", "rollback"},
 		{"upgrade-domain", "apply"}, {"upgrade-domain", "accept"}, {"upgrade-domain", "rollback"}, {"upgrade-domain", "retire"}, {"upgrade-domain", "finalize"},
 		{"upgrade-dns-migration", "prepare"}, {"upgrade-dns-migration", "promote"}, {"upgrade-dns-migration", "retire"}, {"upgrade-dns-migration", "rollback"},
@@ -327,6 +328,10 @@ result.chmod(0o600)
 				"ultra_runtime_effect_inputs": map[string]string{"bridge": "exact"},
 				"ultra_upgrade_domain_action": "rollback",
 				"ultra_dns_migration_action":  "rollback",
+			}
+			if test.action == "tls-release" {
+				variables["ultra_managed_tunnel_requests"] = map[string]string{"exit_fixture": "exact"}
+				variables["ultra_managed_tunnel_hook_sha256"] = strings.Repeat("a", 64)
 			}
 			variables["ultra_runtime_action"] = test.action
 			variables["ultra_upgrade_domain_action"] = test.action

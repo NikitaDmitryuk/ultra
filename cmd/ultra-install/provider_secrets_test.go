@@ -44,3 +44,40 @@ func TestProviderSecretsCanonicalProjection(t *testing.T) {
 		t.Fatal("lost file compatibility")
 	}
 }
+
+func TestUpgradeProviderStageFreezesRetryCredentialAndCleansSuccess(t *testing.T) {
+	root := t.TempDir()
+	env := filepath.Join(root, ".env")
+	if err := os.WriteFile(env, []byte("ULTRA_VULTR_API_KEY=compute-fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := &installplan.InstallPlan{
+		Bridge:     installplan.BridgeConfig{Address: "192.0.2.10"},
+		Secrets:    installplan.SecretsConfig{EnvFile: env},
+		Automation: &installplan.AutomationConfig{},
+	}
+	operation := filepath.Join(root, "upgrade")
+	source, bridge, cleanup, err := prepareUpgradeProviderStage(p, operation, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bridge != p.Bridge.Address || source != filepath.Join(operation, "provider-secrets", "compute-key") {
+		t.Fatal("provider stage did not bind the plan and stable operation path")
+	}
+	if err = os.WriteFile(env, []byte("ULTRA_VULTR_API_KEY=changed-fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err = prepareUpgradeProviderStage(p, operation, 1); err == nil {
+		t.Fatal("changed credential accepted for a frozen upgrade retry")
+	}
+	staged, err := os.ReadFile(source)
+	if err != nil || string(staged) != "compute-fixture" {
+		t.Fatal("frozen provider credential was modified")
+	}
+	if err = cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Lstat(source); !os.IsNotExist(err) {
+		t.Fatal("successful provider stage was not cleaned")
+	}
+}

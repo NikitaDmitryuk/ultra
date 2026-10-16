@@ -62,6 +62,34 @@
   register: tunnel_certificate_firewall_rule
   changed_when: "'Skipping' not in tunnel_certificate_firewall_rule.stdout"
   when: "tunnel_certificate_ufw.stat.exists and 'Status: active' in tunnel_certificate_firewall.stdout"
+- name: Prepare the private certificate transaction directory
+  ansible.builtin.file:
+    path: /var/lib/ultra-tunnel-tls
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Prepare the shared certificate deployment lock
+  ansible.builtin.copy:
+    content: ""
+    dest: /var/lib/ultra-tunnel-tls/pair.lock
+    force: false
+    owner: root
+    group: root
+    mode: "0600"
+- name: Inspect the shared certificate deployment lock
+  ansible.builtin.stat:
+    path: /var/lib/ultra-tunnel-tls/pair.lock
+    follow: false
+  register: tunnel_certificate_pair_lock
+- name: Require a private root owned regular certificate lock
+  ansible.builtin.assert:
+    that:
+      - tunnel_certificate_pair_lock.stat.isreg | default(false)
+      - not (tunnel_certificate_pair_lock.stat.islnk | default(false))
+      - tunnel_certificate_pair_lock.stat.uid == 0
+      - tunnel_certificate_pair_lock.stat.mode == '0600'
+      - tunnel_certificate_pair_lock.stat.nlink == 1
 - name: Install bounded certificate deployment hook
   ansible.builtin.template:
     src: deploy-certificate.sh.j2

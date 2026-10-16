@@ -36,7 +36,7 @@ func TestManagedTLSUpgradeRejectsBeforeOperationIO(t *testing.T) {
 				filepath.Join(root, "absent-release"), directory,
 				filepath.Join(root, "absent-python"), filepath.Join(root, "absent-ansible"),
 				mode.retryFailed, mode.forwardOnly)
-			const want = "managed tunnel TLS upgrade is not supported yet; preserve the existing installation and do not bypass this guard with bootstrap"
+			const want = "upgrade_managed_tunnel_preservation_envelope_required"
 			if err == nil || err.Error() != want {
 				t.Fatalf("upgrade error = %v, want %q", err, want)
 			}
@@ -49,5 +49,48 @@ func TestManagedTLSUpgradeRejectsBeforeOperationIO(t *testing.T) {
 				t.Fatalf("rejected upgrade created operation inputs: %v, %v", entries, err)
 			}
 		})
+	}
+}
+
+func TestManagedTLSCompensationEvidenceNeverAuthorizesOrdinaryInspection(t *testing.T) {
+	requests := map[string]any{
+		"exit_fixture": runtimeProbeInput{
+			Request: runtimeHostRequest{Role: "exit", Features: installplan.FeatureConfig{MainExitDomain: "tunnel.example.com"}},
+		},
+	}
+	values := map[string]any{
+		"verified": true,
+		"hosts":    map[string]any{"exit_fixture": runtimeProbeResult{Verified: true, ManagedTLSRestorable: true}},
+	}
+	if err := validateUpgradeRuntimeEvidence(values, requests); err == nil {
+		t.Fatal("ordinary inspection accepted checkpoint-only evidence")
+	}
+	if err := validateUpgradeRuntimeEvidence(values, requests, true); err != nil {
+		t.Fatalf("compensation evidence: %v", err)
+	}
+}
+
+func TestManagedTLSCompensationRequiresFailedActivationGeneration(t *testing.T) {
+	for _, generation := range []int{1, 2, -1} {
+		directory := t.TempDir()
+		plan := &installplan.InstallPlan{Features: installplan.FeatureConfig{MainExitDomain: "tunnel.example.com"}}
+		err := inspectUpgradeRuntimeForPurpose(
+			context.Background(),
+			plan,
+			upgradeInspection{},
+			nil,
+			nil,
+			directory,
+			"/absent/python",
+			"/absent/ansible",
+			generation,
+		)
+		if err == nil {
+			t.Fatal("compensation accepted without failed activation")
+		}
+		entries, readErr := os.ReadDir(directory)
+		if readErr != nil || len(entries) != 0 {
+			t.Fatalf("unbound compensation performed operation IO: %v", readErr)
+		}
 	}
 }

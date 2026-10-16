@@ -218,6 +218,10 @@ func ProjectLocalRuntime(p *InstallPlan, raw []byte, role config.Role, nodeName 
 	if err != nil {
 		return nil, err
 	}
+	return projectLocalRuntime(p, raw, role, nodeName)
+}
+
+func projectLocalRuntime(p *InstallPlan, raw []byte, role config.Role, nodeName string) (*LocalRuntimeProjection, error) {
 	if role != config.RoleBridge && role != config.RoleExit {
 		return nil, fmt.Errorf("local runtime projection requires bridge or exit role")
 	}
@@ -280,6 +284,12 @@ func projectRuntimeSpec(
 	exit bool,
 	exitPort, bridgeExitPort int,
 ) ([]byte, *config.Spec, []RuntimeTransition, error) {
+	managed := previous.TunnelTLSProvision == config.TunnelTLSACME || p.Features.MainExitDomain != ""
+	if managed {
+		if err := validateManagedTunnelProjection(p, previous, node); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	var transitions []RuntimeTransition
 	strat, err := mimic.New(p.Features.Preset)
 	if err != nil {
@@ -307,6 +317,12 @@ func projectRuntimeSpec(
 		provision = config.TunnelTLSSelfSigned
 	}
 	owned["tunnel_tls_provision"] = provision
+	if managed {
+		// Preserve the complete raw TLS object, including fields unknown to this
+		// installer. Same-domain maintenance must not reset the trust policy.
+		delete(owned, "splithttp_tls")
+		delete(owned, "tunnel_tls_provision")
+	}
 	anti := runtimeObject(doc, "anti_censor")
 	for key, value := range map[string]any{
 		"profile": p.Features.AntiCensorProfile, "disable_doh": p.Features.DisableDOH,

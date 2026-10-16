@@ -18,6 +18,27 @@
          selectattr('name', 'equalto', 'ultra-install-linux-' + ultra_architecture) |
          first).sha256
       - ultra_runtime_action in ['prepare', 'apply', 'rollback', 'commit']
+- name: Exclude managed certificate renewal before taking runtime images
+  ultra_tunnel_tls_fence:
+    action: acquire
+    request_json: "{{ ultra_managed_tunnel_requests[inventory_hostname] }}"
+    hook_sha256: "{{ ultra_managed_tunnel_hook_sha256 }}"
+  when: ultra_runtime_action == 'prepare' and inventory_hostname in (ultra_managed_tunnel_requests | default({}))
+  no_log: true
+- name: Freeze the private certificate and renewal closure for this generation
+  ultra_tunnel_tls_fence:
+    action: capture
+    request_json: "{{ ultra_managed_tunnel_requests[inventory_hostname] }}"
+    hook_sha256: "{{ ultra_managed_tunnel_hook_sha256 }}"
+  when: ultra_runtime_action == 'prepare' and inventory_hostname in (ultra_managed_tunnel_requests | default({}))
+  no_log: true
+- name: Reject managed certificate drift before any runtime dependency mutation
+  ultra_tunnel_tls_fence:
+    action: verify
+    request_json: "{{ ultra_managed_tunnel_requests[inventory_hostname] }}"
+    hook_sha256: "{{ ultra_managed_tunnel_hook_sha256 }}"
+  when: ultra_runtime_action in ['apply', 'rollback'] and inventory_hostname in (ultra_managed_tunnel_requests | default({}))
+  no_log: true
 - name: Require the relay active before recording the exact service baseline
   ansible.builtin.command:
     argv: [systemctl, is-active, --quiet, ultra-relay.service]
