@@ -2,6 +2,7 @@
 """Explicit operator deployment from clean, committed HEAD; never a scheduler."""
 import argparse
 import contextlib
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -249,10 +250,10 @@ def remove_config_key(raw, key):
     return ''.join(lines).encode()
 
 
-def remote_attempt(config, version):
+def remote_attempt(config, version, allow_legacy_keys=False):
     # Normalize derived release fields to avoid hashing a path that contains
     # this very hash. Corrections to any other canonical input get a new kit.
-    value = config_values(config).get('ULTRA_UPGRADE_BASELINE_FILE')
+    value = config_values(config, allow_legacy_keys=allow_legacy_keys).get('ULTRA_UPGRADE_BASELINE_FILE')
     normalized_baseline = '/operator-baseline' if value else None
     return sha(config_candidate(config, version, '/manual-release', normalized_baseline))
 
@@ -449,7 +450,7 @@ def build_candidate(repo, root, commit, version):
     return bundle
 
 
-def config_values(raw):
+def config_values(raw, allow_legacy_keys=False):
     # Parse literals only; never source the deployment file or interpolate it.
     values = {}
     legacy_keys = {'BRIDGE', 'BRIDGE_SSH_HOST', 'BRIDGE_SSH_IDENTITY', 'EXIT',
@@ -461,7 +462,7 @@ def config_values(raw):
             continue
         key, value = line.split('=', 1)
         key = key.strip()
-        require(key not in legacy_keys, 'operator_legacy_config_key_forbidden')
+        require(allow_legacy_keys or key not in legacy_keys, 'operator_legacy_config_key_forbidden')
         tokens = shlex.split(value, comments=True)
         require(len(tokens) <= 1 and key not in values, 'operator_config_literal_required')
         values[key] = tokens[0] if tokens else ''
@@ -1533,6 +1534,167 @@ def abandon_dispatched_manual_operation(root, journal, record):
     return archived
 
 
+def archive_reimaged_adoption(root, config, journal_sha, backup_sha, config_sha, reason, acknowledged):
+    """Archive one obsolete adoption dispatch after explicit fleet reimage attestation.
+
+    No remote proof is inferred. The operator attests that every former target
+    was destroyed/reimaged. Current config is only read, never restored.
+    Callers hold both the deployment lock and canonical config lock.
+    """
+    require(acknowledged is True and isinstance(reason, str) and
+            1 <= len(reason.strip()) <= 1024 and not any(ord(c) < 32 for c in reason),
+            'manual_archive_reimage_acknowledgment_required')
+    require(all(isinstance(value, str) and re.fullmatch('[a-f0-9]{64}', value)
+                for value in (journal_sha, backup_sha, config_sha)), 'manual_archive_digest_required')
+    root, config = Path(root), Path(config)
+    for path in (root, config):
+        require(path.is_absolute() and str(path) == os.path.normpath(str(path)), 'manual_archive_path_invalid')
+        for parent in path.parents:
+            require(not parent.is_symlink(), 'manual_archive_symlink_forbidden')
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    root_fd = os.open(root, flags | os.O_DIRECTORY)
+    try:
+        config_fd = os.open(config, flags)
+    except BaseException:
+        os.close(root_fd)
+        raise
+    try:
+        def signature(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink,
+                    info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+        def read_file(name, directory=None):
+            descriptor = os.open(name, flags, dir_fd=directory)
+            try:
+                before = os.fstat(descriptor)
+                require(stat.S_ISREG(before.st_mode) and before.st_uid == os.geteuid() and
+                        stat.S_IMODE(before.st_mode) == 0o600 and before.st_nlink == 1 and
+                        before.st_size <= 4 * 1024 * 1024, 'manual_archive_input_not_private')
+                with os.fdopen(descriptor, 'rb', closefd=False) as stream:
+                    raw = stream.read(4 * 1024 * 1024 + 1)
+                require(signature(before) == signature(os.fstat(descriptor)) and
+                        signature(before) == signature(os.stat(name, dir_fd=directory, follow_symlinks=False)),
+                        'manual_archive_input_changed')
+                return raw, signature(before)
+            finally:
+                os.close(descriptor)
+
+        root_info = os.fstat(root_fd)
+        require(root_info.st_uid == os.geteuid() and stat.S_IMODE(root_info.st_mode) == 0o700,
+                'manual_state_requires_owned_0700')
+        current, config_identity = read_file(config)
+        require(sha(current) == config_sha and signature(os.fstat(config_fd)) == config_identity,
+                'manual_archive_config_changed')
+
+        def unchanged():
+            raw, identity = read_file(config)
+            require(raw == current and identity == config_identity and
+                    signature(os.fstat(config_fd)) == config_identity,
+                    'manual_archive_config_changed')
+            require(os.stat(root, follow_symlinks=False).st_ino == root_info.st_ino and
+                    os.stat(root, follow_symlinks=False).st_dev == root_info.st_dev,
+                    'manual_archive_state_changed')
+
+        def rename_exclusive(source, source_fd, target, target_fd):
+            # Linux renameat2 makes both publications atomic and non-overwriting.
+            libc = ctypes.CDLL(None, use_errno=True)
+            rename = getattr(libc, 'renameat2', None)
+            require(rename is not None, 'manual_archive_atomic_rename_unavailable')
+            rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+            rename.restype = ctypes.c_int
+            if rename(source_fd, os.fsencode(source), target_fd, os.fsencode(target), 1) != 0:
+                raise OSError(ctypes.get_errno(), 'manual_archive_atomic_rename_failed')
+
+        archive_name = 'operation.reimaged-adoption-' + journal_sha
+        archive = root / archive_name
+        exists = os.path.lexists(archive)
+        archive_fd = None
+        try:
+            if exists:
+                archive_fd = os.open(archive_name, flags | os.O_DIRECTORY, dir_fd=root_fd)
+                info = os.fstat(archive_fd)
+                require(info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700,
+                        'manual_archive_collision')
+                require(set(os.listdir(archive_fd)) in ({'metadata.json'}, {'metadata.json', 'operation.json'}),
+                        'manual_archive_collision')
+                metadata_raw, _ = read_file('metadata.json', archive_fd)
+                metadata = json.loads(metadata_raw)
+                require(isinstance(metadata, dict) and set(metadata) == {
+                        'schema', 'acknowledgment', 'reason', 'archived_at_unix_ns', 'config_path',
+                        'config_sha256', 'journal_sha256', 'backup', 'backup_sha256'} and
+                        metadata_raw == json.dumps(metadata, sort_keys=True).encode(), 'manual_archive_metadata_mismatch')
+                require(metadata.get('schema') == 1 and metadata.get('acknowledgment') == 'all-former-targets-wiped-or-reimaged' and
+                        metadata.get('journal_sha256') == journal_sha and metadata.get('backup_sha256') == backup_sha and
+                        metadata.get('config_sha256') == config_sha and metadata.get('config_path') == str(config) and
+                        metadata.get('reason') == reason and isinstance(metadata.get('archived_at_unix_ns'), int) and
+                        metadata['archived_at_unix_ns'] > 0, 'manual_archive_metadata_mismatch')
+            journal_present = os.path.lexists(root / 'operation.json')
+            archived_present = archive_fd is not None and 'operation.json' in os.listdir(archive_fd)
+            require(journal_present != archived_present, 'manual_archive_journal_collision_or_missing')
+            raw, journal_identity = read_file('operation.json', archive_fd if archived_present else root_fd)
+            require(sha(raw) == journal_sha, 'manual_archive_journal_changed')
+            record = json.loads(raw)
+            require(isinstance(record, dict), 'manual_archive_requires_dispatched_legacy_adoption')
+            required_keys = {'schema', 'commit', 'version', 'adopt', 'backup', 'previous_sha256',
+                             'config_sha256', 'stage', 'mutator_dispatched', 'transport_binding',
+                             'manifest_sha256', 'remote_attempt'}
+            optional_keys = {'probe_sha256', 'remote_architecture'}
+            probe_sha = record.get('probe_sha256', '')
+            require(type(record.get('schema')) is int and record['schema'] == 1 and
+                    required_keys <= set(record) and set(record) <= required_keys | optional_keys and
+                    record.get('adopt') is True and record.get('stage') == 'adoption_apply' and
+                    record.get('mutator_dispatched') is True and 'forward_only' not in record and
+                    isinstance(probe_sha, str) and (not probe_sha or re.fullmatch('[a-f0-9]{64}', probe_sha)) and
+                    ('remote_architecture' not in record or record['remote_architecture'] in ('amd64', 'arm64')) and
+                    isinstance(record.get('commit'), str) and re.fullmatch('[a-f0-9]{40}', record['commit']) and
+                    record.get('version') == 'v0.0.' + str(int(record['commit'], 16)) and
+                    all(isinstance(record.get(key), str) and re.fullmatch('[a-f0-9]{64}', record[key])
+                        for key in ('previous_sha256', 'config_sha256', 'manifest_sha256', 'remote_attempt', 'transport_binding')),
+                    'manual_archive_requires_dispatched_legacy_adoption')
+            backup_name = record.get('backup')
+            require(isinstance(backup_name, str) and re.fullmatch(
+                    r'install\.config\.before-' + re.escape(record['version']) + r'-[0-9]+', backup_name),
+                    'manual_backup_identity_invalid')
+            backup, backup_identity = read_file(backup_name, root_fd)
+            require(sha(backup) == backup_sha == record['previous_sha256'] and
+                    remote_attempt(backup, record['version'], allow_legacy_keys=True) == record['remote_attempt'],
+                    'manual_archive_backup_changed')
+            release = Path('/var/lib/ultra-ansible/operator-inputs') / (
+                'manual-' + record['commit'] + '-' + record['remote_attempt']) / 'release'
+            require(sha(config_candidate(backup, record['version'], release)) == record['config_sha256'],
+                    'manual_archive_legacy_config_mismatch')
+            if exists:
+                require(metadata.get('backup') == backup_name, 'manual_archive_metadata_mismatch')
+            else:
+                metadata = {'schema': 1, 'acknowledgment': 'all-former-targets-wiped-or-reimaged',
+                            'reason': reason, 'archived_at_unix_ns': time.time_ns(), 'config_path': str(config),
+                            'config_sha256': config_sha, 'journal_sha256': journal_sha,
+                            'backup': backup_name, 'backup_sha256': backup_sha}
+                staging = Path(tempfile.mkdtemp(prefix='.reimaged-adoption-', dir=root))
+                # A failed publication leaves private evidence; never remove it silently.
+                atomic_write(staging / 'metadata.json', json.dumps(metadata, sort_keys=True).encode())
+                unchanged()
+                rename_exclusive(staging.name, root_fd, archive_name, root_fd)
+                os.fsync(root_fd)
+                archive_fd = os.open(archive_name, flags | os.O_DIRECTORY, dir_fd=root_fd)
+            unchanged()
+            require(read_file(backup_name, root_fd) == (backup, backup_identity), 'manual_archive_backup_changed')
+            require(read_file('operation.json', archive_fd if archived_present else root_fd) == (raw, journal_identity),
+                    'manual_archive_journal_changed')
+            if not archived_present:
+                rename_exclusive('operation.json', root_fd, 'operation.json', archive_fd)
+            os.fsync(archive_fd)
+            os.fsync(root_fd)
+            unchanged()
+            return archive
+        finally:
+            if archive_fd is not None:
+                os.close(archive_fd)
+    finally:
+        os.close(config_fd)
+        os.close(root_fd)
+
+
 def restore_forward_preflight(root, journal, record, config):
     """Recover a local continuation transition that never dispatched a mutator.
 
@@ -1982,7 +2144,32 @@ def main():
     parser.add_argument('--forward-only', action='store_true', help='abandon one dispatched failed upgrade without restoring its unknown relay')
     parser.add_argument('--continue-forward-only', action='store_true', help='continue a failed forward-only deployment before handoff, retaining its original predecessor proof')
     parser.add_argument('--subscription-probe-env-file', help='private local env file; read only ULTRA_SUBSCRIPTION_PROBE_URL (default: .env beside canonical config)')
+    parser.add_argument('--archive-reimaged-adoption', action='store_true', help='archive obsolete adoption journal locally after every former target was wiped/reimaged')
+    parser.add_argument('--acknowledge-former-hosts-reimaged', action='store_true')
+    parser.add_argument('--archive-reason')
+    parser.add_argument('--journal-sha256')
+    parser.add_argument('--backup-sha256')
+    parser.add_argument('--config-sha256')
     arguments = parser.parse_args()
+    archive_fields = (arguments.acknowledge_former_hosts_reimaged, arguments.archive_reason,
+                      arguments.journal_sha256, arguments.backup_sha256, arguments.config_sha256)
+    require(arguments.archive_reimaged_adoption or not any(archive_fields), 'manual_archive_arguments_invalid')
+    if arguments.archive_reimaged_adoption:
+        require(not any((arguments.build_only, arguments.retry_failed, arguments.forward_only,
+                         arguments.continue_forward_only, arguments.subscription_probe_env_file)) and
+                os.environ.get('ADOPT', '0') == '0', 'manual_archive_arguments_invalid')
+        repo = Path(__file__).resolve().parents[1]
+        config = Path(os.path.abspath(arguments.config)) if arguments.config else repo / 'install.config'
+        root = repo / 'dist' / 'manual'
+        for path in (root, config):
+            require(not path.is_symlink() and all(not parent.is_symlink() for parent in path.parents),
+                    'manual_archive_symlink_forbidden')
+        with lock(root / 'deploy.lock'), lock(canonical_config_lock(config)):
+            archive_reimaged_adoption(root, config, arguments.journal_sha256, arguments.backup_sha256,
+                                      arguments.config_sha256, arguments.archive_reason,
+                                      arguments.acknowledge_former_hosts_reimaged)
+        print('manual-deploy: obsolete adoption journal archived locally; canonical config preserved', flush=True)
+        return
     require(not arguments.subscription_probe_env_file or (not arguments.build_only and os.environ.get('ADOPT') != '1'),
             'subscription_probe_requires_upgrade')
     require(not arguments.continue_forward_only or (not arguments.forward_only and not arguments.retry_failed and

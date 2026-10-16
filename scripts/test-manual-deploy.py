@@ -23,6 +23,218 @@ SPEC.loader.exec_module(D)
 SUBSCRIPTION_PROBE_INPUT = D.subscription_probe_input
 
 
+
+class ReimagedAdoptionArchive(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.repo = Path(self.temp.name)
+        self.root = self.repo / 'dist/manual'
+        self.root.mkdir(parents=True, mode=0o700)
+        self.config = self.repo / 'install.config'
+        self.current = b'# new fleet: preserve byte for byte\nINSTALL_SCHEMA_VERSION=2\n'
+        D.atomic_write(self.config, self.current)
+        self.previous = b'INSTALL_SCHEMA_VERSION=2\nBRIDGE=192.0.2.10\nBRIDGE_SSH_HOST=192.0.2.10\nULTRA_AUTOMATION_VERSION=v2.4.2\n'
+        commit = 'a' * 40
+        version = 'v0.0.' + str(int(commit, 16))
+        attempt = D.remote_attempt(self.previous, version, allow_legacy_keys=True)
+        release = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + commit + '-' + attempt) / 'release'
+        self.backup = self.root / ('install.config.before-' + version + '-123')
+        D.atomic_write(self.backup, self.previous)
+        self.record = {'schema': 1, 'adopt': True, 'stage': 'adoption_apply', 'mutator_dispatched': True,
+                       'commit': commit, 'version': version, 'remote_attempt': attempt, 'manifest_sha256': 'd' * 64,
+                       'transport_binding': 'c' * 64,
+                       'previous_sha256': D.sha(self.previous), 'backup': self.backup.name,
+                       'config_sha256': D.sha(D.config_candidate(self.previous, version, release))}
+        self.journal = self.root / 'operation.json'
+        self.save_record()
+        self.reason = 'All former fleet targets wiped and reimaged by operator'
+
+    def save_record(self):
+        self.raw = json.dumps(self.record, sort_keys=True).encode()
+        D.atomic_write(self.journal, self.raw)
+
+    def archive(self, **changes):
+        arguments = dict(root=self.root, config=self.config, journal_sha=D.sha(self.raw),
+                         backup_sha=D.sha(self.previous), config_sha=D.sha(self.current),
+                         reason=self.reason, acknowledged=True)
+        arguments.update(changes)
+        with patch.object(D, 'run', side_effect=AssertionError('remote/build command forbidden')), patch.object(
+                D, 'rollout', side_effect=AssertionError('deployment forbidden')):
+            return D.archive_reimaged_adoption(**arguments)
+
+    def test_archive_preserves_current_config_backup_and_original_journal_and_is_idempotent(self):
+        identity = self.config.stat()
+        archive = self.archive()
+        self.assertFalse(self.journal.exists())
+        self.assertEqual((archive / 'operation.json').read_bytes(), self.raw)
+        self.assertEqual(self.backup.read_bytes(), self.previous)
+        self.assertEqual(self.config.read_bytes(), self.current)
+        self.assertEqual(self.config.stat(), identity)
+        self.assertEqual(archive.stat().st_mode & 0o777, 0o700)
+        for path in archive.iterdir():
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        metadata = json.loads((archive / 'metadata.json').read_bytes())
+        self.assertEqual(metadata['journal_sha256'], D.sha(self.raw))
+        self.assertEqual(metadata['backup_sha256'], D.sha(self.previous))
+        self.assertEqual(metadata['config_sha256'], D.sha(self.current))
+        self.assertEqual(metadata['reason'], self.reason)
+        before = (archive / 'metadata.json').read_bytes()
+        self.assertEqual(self.archive(), archive)
+        self.assertEqual((archive / 'metadata.json').read_bytes(), before)
+
+    def test_legacy_fields_are_allowed_only_for_historical_attempt_validation(self):
+        with self.assertRaisesRegex(D.DeployError, '^operator_legacy_config_key_forbidden$'):
+            D.remote_attempt(self.previous, self.record['version'])
+        self.assertEqual(D.remote_attempt(self.previous, self.record['version'], allow_legacy_keys=True),
+                         self.record['remote_attempt'])
+        self.assertTrue(self.journal.exists())
+
+    def test_requires_exact_adoption_class_and_metadata(self):
+        original = dict(self.record)
+        for key, value in [('schema', True), ('schema', 2), ('adopt', False), ('stage', 'upgrade'),
+                           ('mutator_dispatched', False), ('remote_attempt', 'f' * 64),
+                           ('manifest_sha256', None), ('transport_binding', None), ('transport_binding', 'C' * 64),
+                           ('previous_sha256', 'f' * 64),
+                           ('config_sha256', 'f' * 64), ('backup', '../install.config'), ('forward_only', True),
+                           ('forward_only', False), ('forward_only', None), ('unknown_marker', True),
+                           ('staged_config_sha256', 'e' * 64), ('forward_journal_sha256', 'e' * 64),
+                           ('forward_prior_journal_sha256', 'e' * 64)]:
+            with self.subTest(key=key, value=value):
+                self.record = dict(original, **{key: value})
+                self.save_record()
+                with self.assertRaises(D.DeployError):
+                    self.archive()
+                self.assertEqual(self.journal.read_bytes(), self.raw)
+                self.assertEqual(self.config.read_bytes(), self.current)
+        self.assertFalse(list(self.root.glob('operation.reimaged-adoption-*')))
+
+    def test_explicit_acknowledgment_digests_and_reason_required(self):
+        for change in [{'acknowledged': False}, {'reason': ''}, {'reason': 'line\nbreak'},
+                       {'journal_sha': 'f' * 64}, {'backup_sha': 'f' * 64}, {'config_sha': 'f' * 64}]:
+            with self.subTest(change=change), self.assertRaises(D.DeployError):
+                self.archive(**change)
+        self.assertEqual(self.journal.read_bytes(), self.raw)
+        self.assertFalse(list(self.root.glob('operation.reimaged-adoption-*')))
+
+    def test_symlinks_and_nonprivate_or_hardlinked_inputs_rejected(self):
+        for path in [self.config, self.backup, self.journal]:
+            with self.subTest(path=path.name):
+                path.chmod(0o644)
+                with self.assertRaises(D.DeployError):
+                    self.archive()
+                path.chmod(0o600)
+                moved = path.with_name(path.name + '.saved')
+                path.rename(moved)
+                path.symlink_to(moved)
+                with self.assertRaises((D.DeployError, OSError)):
+                    self.archive()
+                path.unlink()
+                os.link(moved, path)
+                with self.assertRaises(D.DeployError):
+                    self.archive()
+                path.unlink()
+                moved.rename(path)
+        self.assertEqual(self.journal.read_bytes(), self.raw)
+
+    def test_existing_archive_collision_never_overwritten(self):
+        archive = self.root / ('operation.reimaged-adoption-' + D.sha(self.raw))
+        archive.mkdir(mode=0o700)
+        D.atomic_write(archive / 'unrelated-proof', b'retain')
+        with self.assertRaises(D.DeployError):
+            self.archive()
+        self.assertEqual((archive / 'unrelated-proof').read_bytes(), b'retain')
+        self.assertEqual(self.journal.read_bytes(), self.raw)
+
+    def test_interrupted_before_and_after_journal_rename_can_resume(self):
+        real_cdll = D.ctypes.CDLL
+        for after in (False, True):
+            with self.subTest(after=after):
+                def interrupted(*args, **kwargs):
+                    libc = real_cdll(*args, **kwargs)
+                    real_rename = libc.renameat2
+                    def rename(source_fd, source, target_fd, target, flag):
+                        if source == b'operation.json':
+                            if after:
+                                self.assertEqual(real_rename(source_fd, source, target_fd, target, flag), 0)
+                            raise OSError('simulated_crash')
+                        return real_rename(source_fd, source, target_fd, target, flag)
+                    libc.renameat2 = rename
+                    return libc
+                with patch.object(D.ctypes, 'CDLL', side_effect=interrupted), self.assertRaisesRegex(OSError, 'simulated_crash'):
+                    self.archive()
+                archive = self.archive()
+                self.assertEqual((archive / 'operation.json').read_bytes(), self.raw)
+                self.assertEqual(self.config.read_bytes(), self.current)
+                if not after:
+                    # Reset only this fixture for the second crash boundary.
+                    (archive / 'operation.json').rename(self.journal)
+                    (archive / 'metadata.json').unlink()
+                    archive.rmdir()
+
+    def test_atomic_publication_collision_keeps_original_journal_and_foreign_proof(self):
+        real_cdll = D.ctypes.CDLL
+        archive = self.root / ('operation.reimaged-adoption-' + D.sha(self.raw))
+        def collide(*args, **kwargs):
+            archive.mkdir(mode=0o700)
+            D.atomic_write(archive / 'foreign-proof', b'retain')
+            return real_cdll(*args, **kwargs)
+        with patch.object(D.ctypes, 'CDLL', side_effect=collide), self.assertRaises(OSError):
+            self.archive()
+        self.assertEqual(self.journal.read_bytes(), self.raw)
+        self.assertEqual((archive / 'foreign-proof').read_bytes(), b'retain')
+
+    def test_fsync_failure_after_move_retains_evidence_and_retry_succeeds(self):
+        real_fsync = D.os.fsync
+        def fail_after_move(descriptor):
+            if not self.journal.exists():
+                raise OSError('fsync_interrupted')
+            real_fsync(descriptor)
+        with patch.object(D.os, 'fsync', side_effect=fail_after_move), self.assertRaisesRegex(OSError, 'fsync_interrupted'):
+            self.archive()
+        archive = self.archive()
+        self.assertEqual((archive / 'operation.json').read_bytes(), self.raw)
+        self.assertEqual(self.config.read_bytes(), self.current)
+
+    def test_config_mutation_before_rename_keeps_active_journal(self):
+        original_write = D.atomic_write
+        def mutate(path, raw, **kwargs):
+            original_write(path, raw, **kwargs)
+            if path.name == 'metadata.json':
+                self.config.write_bytes(self.current + b'changed')
+        with patch.object(D, 'atomic_write', side_effect=mutate), self.assertRaises(D.DeployError):
+            self.archive()
+        self.assertEqual(self.journal.read_bytes(), self.raw)
+        self.assertFalse(list(self.root.glob('operation.reimaged-adoption-*')))
+        self.assertTrue(list(self.root.glob('.reimaged-adoption-*')))
+
+    def test_retry_rejects_changed_evidence_config_backup_or_acknowledgment(self):
+        archive = self.archive()
+        for change in [{'reason': 'different'}, {'acknowledged': False}]:
+            with self.subTest(change=change), self.assertRaises(D.DeployError):
+                self.archive(**change)
+        for path in [self.config, self.backup, archive / 'operation.json', archive / 'metadata.json']:
+            raw = path.read_bytes()
+            path.write_bytes(raw + b' ')
+            with self.subTest(path=path.name), self.assertRaises(D.DeployError):
+                self.archive()
+            path.write_bytes(raw)
+        self.assertEqual((archive / 'operation.json').read_bytes(), self.raw)
+
+    def test_cli_is_local_even_with_dirty_checkout_and_has_no_prerequisites(self):
+        argv = ['manual-deploy.py', '--archive-reimaged-adoption', '--acknowledge-former-hosts-reimaged',
+                '--archive-reason', self.reason, '--journal-sha256', D.sha(self.raw),
+                '--backup-sha256', D.sha(self.previous), '--config-sha256', D.sha(self.current)]
+        with patch.object(D, '__file__', str(self.repo / 'scripts/manual-deploy.py')), patch.object(
+                D.sys, 'argv', argv), patch.dict(D.os.environ, {'ADOPT': '0'}), patch.object(
+                D.shutil, 'which', side_effect=AssertionError('no tools')), patch.object(
+                D, 'run', side_effect=AssertionError('no subprocess')), patch.object(
+                D, 'build_candidate', side_effect=AssertionError('no build')), contextlib.redirect_stdout(io.StringIO()):
+            D.main()
+        self.assertFalse(self.journal.exists())
+        self.assertEqual(self.config.read_bytes(), self.current)
+
+
 class ManualDeploy(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

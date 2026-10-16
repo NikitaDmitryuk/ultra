@@ -440,6 +440,51 @@ SSH transport и lifecycle исходной операции в фазе `applyi
 самостоятельно сверяет подписанный release, frozen plan, предыдущее доказательство,
 stage receipts и отсутствие activation.
 
+Для устаревшего локального журнала legacy adoption, когда оператор подтвердил,
+что **все прежние целевые серверы уничтожены или переустановлены**, предусмотрено
+отдельное локальное архивирование. Сохранённый SSH host key не доказывает
+сохранение старого сервера или завершение старого mutator. Команда принимает только
+schema 1, `adopt: true`, `stage: adoption_apply`, `mutator_dispatched: true`,
+commit-derived `v0.0.*`, корректные remote attempt/hash metadata, legacy `transport_binding` как lowercase
+SHA-256 и точный приватный
+backup, указанный журналом. Remote attempt и исходный candidate config digest
+пересчитываются по backup. Журналы с `staged_config_sha256` или forward-proof
+полями, а также журнал upgrade этим способом снять нельзя.
+
+Оператор заранее фиксирует SHA-256 текущего canonical config, исходного
+`dist/manual/operation.json` и его `install.config.before-*` backup и выполняет:
+
+```sh
+python3 scripts/manual-deploy.py --archive-reimaged-adoption \
+  --config /absolute/path/to/install.config \
+  --acknowledge-former-hosts-reimaged \
+  --archive-reason 'All former deployment targets wiped or reimaged; operator acknowledgment' \
+  --journal-sha256 <original-journal-sha256> \
+  --backup-sha256 <original-backup-sha256> \
+  --config-sha256 <current-canonical-config-sha256>
+```
+
+Это самостоятельная операция; `ADOPT` должен отсутствовать или равняться `0`,
+deployment/retry/build/probe-флаги вместе с ней запрещены. Она не требует clean
+Git tree или сборки, не открывает SSH, не проверяет рабочие узлы и не запускает
+выкладку. Канонический config остаётся байт-в-байт прежним с режимом 0600;
+backup также сохраняется. Все входы должны быть обычными принадлежащими оператору
+файлами 0600 без hard links и symlinks; state directory требует 0700.
+
+Доказательства сохраняются в приватном каталоге
+`dist/manual/operation.reimaged-adoption-<original-journal-sha256>/`:
+исходные байты `operation.json` и `metadata.json` с временем, явным acknowledgment,
+причиной, путём canonical config и тремя digest. Сначала metadata фиксируется через
+fsync и атомарную публикацию каталога, затем исходный журнал атомарно переносится
+без перезаписи назначения (`renameat2(RENAME_NOREPLACE)` на Linux); оба каталога
+синхронизируются. Команда держит deployment lock и canonical config lock.
+Повтор с теми же digest, config path и причиной проверяет архив и завершает
+прерванный перенос либо подтверждает уже сохранённый архив. Любое несовпадение,
+collision или изменение config блокирует операцию. Прерванная публикация может
+оставить приватный `.reimaged-adoption-*` каталог; он сохраняется как доказательство
+и не удаляется автоматически. Архивирование само по себе не подтверждает состояние
+новой fleet: следующая выкладка проходит обычные build и operator gates отдельно.
+
 После handoff O→A подтверждённый containment останавливает relay, bot и
 автоматические timers всей frozen fleet. Переход от такого кандидата A к B
 отклоняется с `upgrade_forward_contained_continuation_unavailable` до нового
