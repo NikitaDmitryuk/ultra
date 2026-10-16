@@ -108,4 +108,44 @@ with tempfile.TemporaryDirectory(prefix='ultra-ansible-redacted-args-') as direc
                      'detail': 'dump_exit_identity_route_disabled'}, saved
     assert 'secret-probe-value' not in output and 'uuid-probe-value' not in output, output
 
+with tempfile.TemporaryDirectory(prefix='ultra-ansible-ingress-diagnostic-') as directory:
+    root = Path(directory)
+    library = root / 'library'
+    library.mkdir()
+    (library / 'safe_failure_probe.py').write_text(
+        'from ansible.module_utils.basic import AnsibleModule\n'
+        'AnsibleModule(argument_spec={"address":{"type":"str","required":True,"no_log":True},'
+        '"hostname":{"type":"str","required":True,"no_log":True}}).fail_json('
+        'msg="ingress_probe_failed", ultra_safe_failure_code="ingress_tls_hostname_mismatch")\n'
+    )
+    (root / 'play.yml').write_text(
+        '- hosts: localhost\n'
+        '  connection: local\n'
+        '  gather_facts: false\n'
+        '  tasks:\n'
+        '    - name: verify ingress TLS\n'
+        '      safe_failure_probe:\n'
+        '        address: 192.0.2.10\n'
+        '        hostname: private-name.example.com\n'
+    )
+    target = root / 'diagnostic.json'
+    env = os.environ.copy()
+    env.update({
+        'ANSIBLE_LOCAL_TEMP': directory,
+        'ANSIBLE_LIBRARY': str(library),
+        'ANSIBLE_CALLBACK_PLUGINS': str(ROOT / 'deploy/ansible/callback_plugins'),
+        'ANSIBLE_CALLBACKS_ENABLED': 'safe_result',
+        'ANSIBLE_STDOUT_CALLBACK': 'default',
+        'ULTRA_ANSIBLE_DIAGNOSTIC_FILE': str(target),
+    })
+    result = subprocess.run([ansible_playbook, '-vvv', '-i', 'localhost,', str(root / 'play.yml')],
+                            env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    saved = json.loads(target.read_text())
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, result.stdout
+    assert saved == {'stage': 'verify ingress TLS', 'node': 'localhost',
+                     'code': 'ingress_tls_hostname_mismatch'}, saved
+    assert 'private-name.example.com' not in output and '192.0.2.10' not in output, output
+    assert 'private-name.example.com' not in target.read_text() and '192.0.2.10' not in target.read_text()
+
 print('Safe Ansible failure diagnostics preserve the first failure and redact module arguments')

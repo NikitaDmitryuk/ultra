@@ -4,12 +4,24 @@ import json
 from pathlib import Path
 import tempfile
 import ssl
+import ast
 from unittest.mock import patch
 
 source = Path(__file__).resolve().parents[1] / 'deploy/ansible/library/ultra_ingress_probe.py'
 spec = importlib.util.spec_from_file_location('probe', source)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+tree = ast.parse(source.read_text())
+module_call = next(node for node in ast.walk(tree)
+                   if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                   and node.func.id == 'AnsibleModule')
+argument_spec = ast.literal_eval(next(keyword.value for keyword in module_call.keywords
+                                      if keyword.arg == 'argument_spec'))
+assert argument_spec['address']['no_log'] is True
+assert argument_spec['hostname']['no_log'] is True
+assert module.tls_failure_code(ssl.SSLCertVerificationError(62, 'sanitized fixture')) == 'ingress_tls_hostname_mismatch'
+assert module.tls_failure_code(ConnectionRefusedError()) == 'ingress_tls_listener_unavailable'
+assert module.tls_failure_code(TimeoutError()) == 'ingress_tls_timeout'
 with tempfile.TemporaryDirectory() as folder:
     file = Path(folder) / 'spec.json'
     with patch.object(module, 'Path', return_value=file):

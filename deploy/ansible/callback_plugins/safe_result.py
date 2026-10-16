@@ -4,6 +4,16 @@ import os
 from pathlib import Path
 from ansible.plugins.callback import CallbackBase
 
+INGRESS_FAILURE_CODES = {
+    'ingress_tls_hostname_mismatch',
+    'ingress_tls_certificate_verification_failed',
+    'ingress_tls_listener_unavailable',
+    'ingress_tls_timeout',
+    'ingress_tls_handshake_failed',
+    'ingress_tls_probe_failed',
+    'ingress_probe_failed',
+}
+
 
 class CallbackModule(CallbackBase):
     CALLBACK_VERSION = 2.0
@@ -21,6 +31,8 @@ class CallbackModule(CallbackBase):
         value = {'stage': name, 'node': result._host.name, 'code': code}
         result_data = getattr(result, '_result', {})
         safe_failure = result_data.get('ultra_safe_failure_code') if isinstance(result_data, dict) else None
+        if isinstance(safe_failure, str) and safe_failure in INGRESS_FAILURE_CODES:
+            value['code'] = safe_failure
         if isinstance(safe_failure, str) and safe_failure in {
             'invalid_dump_exit_identity_input',
             'database_import_receipt_mismatch',

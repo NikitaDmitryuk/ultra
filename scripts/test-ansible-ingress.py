@@ -174,8 +174,26 @@ with tempfile.TemporaryDirectory() as temporary:
         main_tasks = yaml.safe_load((role / 'tasks/main.yml').read_text())
         transaction = next(task for task in main_tasks if task['name'] ==
                            'Apply validated ingress transaction')['block']
+        install_owned = next(task for task in transaction if task['name'] == 'Install owned ingress configuration')
+        commit_spec = next(task for task in transaction if task['name'] == 'Commit checked relay specification')
+        assert 'notify' not in install_owned and 'notify' not in commit_spec
+        relay_restart = next(index for index, task in enumerate(transaction)
+                             if task.get('name') == 'Restart relay for checked ingress specification')
+        bot_restart = next(task for task in transaction
+                           if task.get('name') == 'Restart bot after public-origin cutover')
+        nginx_reload = next(index for index, task in enumerate(transaction)
+                            if task.get('name') == 'Reload Nginx for checked ingress configuration')
+        relay_readiness = next(index for index, task in enumerate(transaction)
+                               if task.get('name') == 'Verify restarted relay application readiness')
         activation_tls = next(task for task in transaction if task['name'] ==
                               'Verify primary HTTPS handshake with authenticated SNI')
+        tls_index = transaction.index(activation_tls)
+        assert relay_restart < relay_readiness < transaction.index(bot_restart) < nginx_reload < tls_index
+        assert transaction[relay_restart]['ansible.builtin.systemd_service'] == {
+            'name': 'ultra-relay.service', 'state': 'restarted'}
+        assert bot_restart['when'] == "ingress_action == 'cutover'"
+        assert transaction[nginx_reload]['ansible.builtin.systemd_service'] == {
+            'name': 'nginx.service', 'enabled': True, 'state': 'reloaded'}
         assert activation_tls['register'] == 'ingress_tls_ready'
         assert activation_tls['retries'] == 30 and activation_tls['delay'] == 2
         assert 'ingress_tls_ready.ready' in activation_tls['until']
@@ -183,6 +201,15 @@ with tempfile.TemporaryDirectory() as temporary:
             'kind': 'tls', 'address': '{{ ultra_bridge_ipv4 }}',
             'hostname': '{{ ingress_transition.profile.server_name }}',
             'port': '{{ ingress_transition.profile.port }}'}
+        probe_spec = importlib.util.spec_from_file_location('probe', source.with_name('ultra_ingress_probe.py'))
+        probe = importlib.util.module_from_spec(probe_spec)
+        probe_spec.loader.exec_module(probe)
+        mismatch = __import__('ssl').SSLCertVerificationError(62, 'sanitized fixture')
+        assert probe.tls_failure_code(mismatch) == 'ingress_tls_hostname_mismatch'
+        assert probe.tls_failure_code(ConnectionRefusedError()) == 'ingress_tls_listener_unavailable'
+        assert probe.tls_failure_code(TimeoutError()) == 'ingress_tls_timeout'
+        callback = (source.parents[1] / 'callback_plugins/safe_result.py').read_text()
+        assert "'ingress_tls_hostname_mismatch'" in callback
         initial = next(task for task in tasks if task['name'] == 'Assemble publication ownership checks')
         values['ingress_adopt_files'] = [
             {'path': item['path'], 'content': environment.from_string(item['content']).render(values)}

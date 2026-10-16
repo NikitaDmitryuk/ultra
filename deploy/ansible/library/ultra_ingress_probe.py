@@ -73,11 +73,29 @@ def tls_ready(address, hostname, port):
             return True
 
 
+def tls_failure_code(error):
+    """Map TLS probe failures to fixed diagnostics without exposing host data."""
+    if isinstance(error, ssl.SSLCertVerificationError):
+        verify_code = getattr(error, 'verify_code', None)
+        if verify_code is None and error.args and isinstance(error.args[0], int):
+            verify_code = error.args[0]
+        if verify_code == 62:
+            return 'ingress_tls_hostname_mismatch'
+        return 'ingress_tls_certificate_verification_failed'
+    if isinstance(error, ConnectionRefusedError):
+        return 'ingress_tls_listener_unavailable'
+    if isinstance(error, (socket.timeout, TimeoutError)):
+        return 'ingress_tls_timeout'
+    if isinstance(error, ssl.SSLError):
+        return 'ingress_tls_handshake_failed'
+    return 'ingress_tls_probe_failed'
+
+
 def main():
     module = AnsibleModule(argument_spec={
         'kind': {'type': 'str', 'choices': ['relay', 'bot', 'tls'], 'required': True},
-        'address': {'type': 'str', 'default': '127.0.0.1'},
-        'hostname': {'type': 'str'},
+        'address': {'type': 'str', 'default': '127.0.0.1', 'no_log': True},
+        'hostname': {'type': 'str', 'no_log': True},
         'port': {'type': 'int', 'default': 443},
     }, supports_check_mode=True)
     try:
@@ -86,8 +104,9 @@ def main():
         if not ready:
             raise ValueError('not_ready')
         module.exit_json(changed=False, ready=True)
-    except (OSError, ValueError, KeyError):
-        module.fail_json(msg='ingress_probe_failed', ready=False)
+    except (OSError, ValueError, KeyError) as error:
+        code = tls_failure_code(error) if module.params['kind'] == 'tls' else 'ingress_probe_failed'
+        module.fail_json(msg='ingress_probe_failed', ready=False, ultra_safe_failure_code=code)
 
 
 if __name__ == '__main__':

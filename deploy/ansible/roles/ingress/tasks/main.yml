@@ -277,7 +277,6 @@
       loop: "{{ ingress_owned_files | default([]) }}"
       register: ingress_files
       no_log: true
-      notify: "{{ ['Reload ultra nginx', 'Restart ingress bot'] if ingress_action == 'cutover' else ['Reload ultra nginx'] }}"
     - name: Validate final ingress configuration
       ansible.builtin.command:
         argv: [nginx, -t]
@@ -290,9 +289,13 @@
         phase: commit
       register: ingress_committed
       no_log: true
-      notify: Restart ingress relay
-    - name: Activate checked ingress services
-      ansible.builtin.meta: flush_handlers
+    # Reconcile processes on every activation, even if a previous interrupted
+    # run already committed these files. File-change handlers alone can leave
+    # the old relay or Nginx configuration active on a retry.
+    - name: Restart relay for checked ingress specification
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: restarted
     - name: Verify restarted relay application readiness
       ultra_ingress_probe:
         kind: relay
@@ -301,6 +304,17 @@
       retries: 30
       delay: 2
       no_log: true
+    - name: Restart bot after public-origin cutover
+      ansible.builtin.systemd_service:
+        name: ultra-bot.service
+        state: restarted
+        daemon_reload: true
+      when: ingress_action == 'cutover'
+    - name: Reload Nginx for checked ingress configuration
+      ansible.builtin.systemd_service:
+        name: nginx.service
+        enabled: true
+        state: reloaded
     - name: Verify primary HTTPS handshake with authenticated SNI
       ultra_ingress_probe:
         kind: tls
@@ -311,7 +325,6 @@
       until: ingress_tls_ready.ready | default(false)
       retries: 30
       delay: 2
-      no_log: true
     - name: Verify published subscription identities and full tunnel payload
       ultra_cutover_probe:
         phase: verify
