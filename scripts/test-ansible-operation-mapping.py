@@ -93,6 +93,9 @@ class OperationMappingTests(unittest.TestCase):
         self.assertEqual(key_read['ansible.builtin.slurp']['src'], '/etc/ultra-db-tunnel/id_ed25519.pub')
         self.assertEqual(key_read['delegate_to'], 'bridge')
         self.assertTrue(key_read['no_log'])
+        key_guard = tunnel_auth[2]['ansible.builtin.assert']
+        self.assertEqual(key_guard['fail_msg'], 'Bridge database tunnel authorization requires a valid SSH public key read from bridge.')
+        self.assertNotIn('no_log', tunnel_auth[2])
         self.assertIn('db_tunnel_bridge_public_key_slurp.content | b64decode | trim', tunnel_auth[-1]['ansible.builtin.copy']['content'])
         self.assertNotIn("hostvars['bridge'].db_tunnel_ultra_public_key", str(tunnel_auth))
 
