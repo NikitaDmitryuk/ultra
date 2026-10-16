@@ -167,53 +167,34 @@ class PostgresTests(unittest.TestCase):
         changed['address'] = '203.0.113.11'
         changed['tunnel_uuid'] = '44444444-4444-4444-8444-444444444444'
         before = self.snapshot()
-        self.apply(self.value([changm���-�G����ƭyприкладную роль и БД, затем импортирует одной транзакцией. Действующую
-непустую БД импорт не перезаписывает; повтор принимает только квитанцию,
-связанную с архивом, идентификатором кластера и OID БД. Временный upload удаляется.
-Поле предназначено для свежего bootstrap с `REUSE_BRIDGE_SPEC=false`; без него
-создаётся чистая БД. Relay применяет миграции перед обслуживанием запросов.
+        self.apply(self.value([changed]), success=False)
+        self.assertEqual(self.snapshot(), before)
 
-Если дамп задан, имеющийся в нём месячный бюджет статического выхода остаётся
-источником истины и расход не обнуляется. Конфигурация может не дублировать
-бюджет. Если в восстановленной БД для настроенного выхода бюджета нет, настройка
-статических бюджетов завершится ошибкой; для установки без дампа бюджет нужно
-задать явно в `ULTRA_AUTOMATION_STATIC_NODES`.
+    def test_disabled_exact_match_is_not_silently_activated(self):
+        self.sql("UPDATE %s.exit_nodes SET enabled=false WHERE address='203.0.113.10'" % self.schema)
+        before = self.snapshot()
+        self.apply(success=False)
+        self.assertEqual(self.snapshot(), before)
+        self.sql("UPDATE %s.exit_nodes SET tunnel_uuid='tampered' WHERE address='203.0.113.10'" % self.schema)
+        before = self.snapshot()
+        self.apply(success=False)
+        self.assertEqual(self.snapshot(), before)
 
-Для установки всех узлов с нуля используйте `ultra-install apply --config
-install.config`, а не `make deploy`: последний выполняет ручной upgrade/adoption.
-До `apply` локально подготовьте все входы из конфигурации:
+    def test_imported_prior_target_marker_does_not_block_new_target(self):
+        self.sql("CREATE TABLE %s.ultra_dump_exit_identity(target text PRIMARY KEY, binding text NOT NULL, matches jsonb NOT NULL); INSERT INTO %s.ultra_dump_exit_identity VALUES('old-cluster:old-oid','old-binding','[]')" % (self.schema, self.schema))
+        self.apply()
+        self.assertEqual(self.sql('SELECT count(*) FROM %s.ultra_dump_exit_identity' % self.schema), '2')
 
-1. Соберите release-комплект (`make release-dist`) и укажите абсолютный путь к
-   его каталогу и точную версию из `release-manifest.json` в канонической паре
-   `ULTRA_AUTOMATION_RELEASE_DIR` / `ULTRA_AUTOMATION_VERSION`.
-2. Создайте файл `known_hosts` с ключами всех трёх чистых серверов, проверенными
-   через доверенный интерфейс провайдера. `ssh-keyscan` сам по себе не доказывает
-   подлинность ключей. Укажите существующий локальный путь в
-   `ULTRA_AUTOMATION_KNOWN_HOSTS_FILE`.
-3. Установите локальный `pg_restore`; файл дампа должен быть приватным, в формате
-   custom и проходить `pg_restore --list`.
-   Подготовка offline Ansible runtime использует операторский `TMPDIR`; при
-   ограниченной квоте системного `/tmp` задайте доступный каталог с достаточным
-   свободным местом.
-4. Проверьте DNS-записи и наличие нужных секретов в `.env`, затем выполните
-   `ultra-install doctor --config install.config`. `doctor` безопасен и не
-   подключается к серверам без сетевого режима.
+    def test_ca_policy_clears_pin_and_database_identity_is_bound(self):
+        value = self.value(policy='ca')
+        changed = copy.deepcopy(value)
+        changed['receipt']['database_oid'] = '0'
+        before = self.snapshot()
+        self.apply(changed, success=False)
+        self.assertEqual(self.snapshot(), before)
+        self.apply(value)
+        self.assertEqual(json.loads(self.snapshot().splitlines()[0])['pinned_peer_cert_sha256'], '')
 
-`doctor` и локальная валидация не проверяют готовность внешнего backup target,
-DNS propagation, выпуск сертификата или реальный VPN-трафик. Полная bootstrap
-приёмка требует доставленной свежей копии на узел другого provider. Provider в
-статической политике должен отличать реальные независимые домены отказа, а не
-быть произвольной меткой.
 
-При восстановлении непустого `exit_nodes` из дампа identity маршрута должна быть
-согласована с новыми exit до активации bridge. Bootstrap разрешает привязать новые
-tunnel UUID и TLS pins только к тем же включённым строкам, однозначно найденным
-по IP и порту. Если endpoint-набор или соответствие строк изменились, активация
-останавливается. Сама таблица, членство, пользователи и прочие поля при этом не
-перезаписываются. Сохранение и согласование БД не подтверждают работоспособность
-VPN после переустановки узлов: всё равно требуется проверить реальный трафик.
-
-Служебный ключ bridge → exit хранится отдельно от операторских ключей:
-`/etc/ultra-fleet` принадлежит root, имеет группу ultra-relay и права 0750;
-сам ключ принадлежит ultra-relay с правами 0600. Резервная копия сохраняет
-ключ и публичную часть, а восстановление возвращает права родительского каталога.
+if __name__ == '__main__':
+    unittest.main()
