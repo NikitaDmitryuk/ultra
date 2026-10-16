@@ -60,13 +60,14 @@ type ExitNode struct {
 }
 
 type DatabaseConfig struct {
-	Enabled     bool   `json:"enabled,omitempty"`
-	PrimaryHost string `json:"primary_host,omitempty"`
-	ReplicaHost string `json:"replica_host,omitempty"`
-	SSHUser     string `json:"ssh_user,omitempty"`
-	SSHIdentity string `json:"ssh_identity,omitempty"`
-	Name        string `json:"name,omitempty"`
-	User        string `json:"user,omitempty"`
+	Enabled              bool   `json:"enabled,omitempty"`
+	PrimaryHost          string `json:"primary_host,omitempty"`
+	ReplicaHost          string `json:"replica_host,omitempty"`
+	SSHUser              string `json:"ssh_user,omitempty"`
+	SSHIdentity          string `json:"ssh_identity,omitempty"`
+	Name                 string `json:"name,omitempty"`
+	User                 string `json:"user,omitempty"`
+	RepairAppCredentials bool   `json:"repair_app_credentials,omitempty"`
 }
 
 type BotConfig struct {

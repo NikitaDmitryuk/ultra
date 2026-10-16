@@ -10,10 +10,11 @@ import (
 
 // PostgresConfig holds parameters for a managed PostgreSQL installation.
 type PostgresConfig struct {
-	DBName     string // database name (default: ultra_db)
-	DBUser     string // application role name (default: ultra)
-	DBPassword string // generated if empty (hex, no special chars)
-	Port       int    // PostgreSQL port (default: 5432)
+	DBName                   string // database name (default: ultra_db)
+	DBUser                   string // application role name (default: ultra)
+	DBPassword               string // generated if empty (hex, no special chars)
+	RepairExistingCredential bool   // reconcile an existing role to an explicitly trusted credential
+	Port                     int    // PostgreSQL port (default: 5432)
 }
 
 // Defaults fills zero fields with sensible values and generates random hex passwords.

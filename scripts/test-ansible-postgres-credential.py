@@ -17,6 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 loader = DataLoader()
 tasks = loader.load_from_file(str(ROOT / 'deploy/ansible/roles/postgres/tasks/main.yml'))
 provision = next(t for t in tasks if t['name'].startswith('Provision missing'))
+repair = next(t for t in tasks if t['name'].startswith('Reconcile the existing application credential'))
+repair_when = repair['when'] if isinstance(repair['when'], list) else [repair['when']]
+assert any('ultra_postgres.reconcile_app_password' in condition for condition in repair_when)
+assert any('postgres_application_login.rc != 0' in condition for condition in repair_when)
 spec = importlib.util.spec_from_file_location('controller', ROOT / 'deploy/ansible/controller.py')
 controller = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(controller)
@@ -57,13 +61,23 @@ try:
     sql("SET password_encryption='scram-sha-256'; CREATE ROLE ultra_fixture LOGIN PASSWORD 'prior-attempt'; CREATE DATABASE ultra_fixture OWNER ultra_fixture;")
     sql("ALTER SYSTEM SET password_encryption='md5'; SELECT pg_reload_conf();")
     assert sql('SHOW password_encryption') == 'md5', 'fixture did not switch its default to MD5'
+    sql("SET password_encryption='md5'; ALTER ROLE ultra_fixture PASSWORD 'prior-attempt';")
     password = "saved'credential\\with-special-characters"
     values = {'ultra_postgres': {'name': 'ultra_fixture', 'user': 'ultra_fixture', 'password': password}}
     old_verifier = sql("SELECT rolpassword FROM pg_authid WHERE rolname='ultra_fixture'")
+    assert old_verifier.startswith('md5'), 'fixture did not create a legacy MD5 verifier'
     sql(render(provision, values))
     assert not login(password), 'provisioning unexpectedly changed an existing credential'
     assert login('prior-attempt'), 'existing database credential was not preserved'
     assert sql("SELECT rolpassword FROM pg_authid WHERE rolname='ultra_fixture'") == old_verifier
+    sql(render(repair, values))
+    assert login(password), 'explicit credential reconciliation did not repair the role'
+    assert not login('prior-attempt'), 'reconciliation kept the previous password'
+    repaired_verifier = sql("SELECT rolpassword FROM pg_authid WHERE rolname='ultra_fixture'")
+    assert repaired_verifier.startswith('SCRAM-SHA-256$'), 'reconciled role is not SCRAM'
+    assert sql('SHOW password_encryption') == 'md5', 'repair depended on the cluster default instead of setting SCRAM'
+    assert login(password), 'repeated verification failed after reconciliation'
+    assert sql("SELECT rolpassword FROM pg_authid WHERE rolname='ultra_fixture'") == repaired_verifier, 'verification changed the repaired verifier'
     # A fresh role is created as SCRAM despite the cluster-wide MD5 default.
     sql('DROP DATABASE ultra_fixture; DROP ROLE ultra_fixture;')
     sql(render(provision, values))

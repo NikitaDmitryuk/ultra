@@ -79,8 +79,9 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 			SplitHTTPPath:          v["SPLITHTTP_PATH"],
 		},
 		Database: DatabaseConfig{
-			Enabled:     v["DATABASE_IP"] != "",
-			PrimaryHost: v["DATABASE_IP"],
+			Enabled:              v["DATABASE_IP"] != "",
+			PrimaryHost:          v["DATABASE_IP"],
+			RepairAppCredentials: boolValue(v, "DB_REPAIR_APP_CREDENTIALS", false),
 
 			SSHUser:     sshUser,
 			SSHIdentity: v["DATABASE_SSH_KEY"],

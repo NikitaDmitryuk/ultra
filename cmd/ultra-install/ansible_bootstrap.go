@@ -495,10 +495,11 @@ func prepareBootstrapVariables(
 		c := ds.PostgresConfig
 		replicationPassword := postgresReplicationPassword(c.DBPassword)
 		children["databases"].(map[string]any)["hosts"].(map[string]any)["database"].(map[string]any)["ultra_postgres"] = map[string]any{
-			"name":                 c.DBName,
-			"user":                 c.DBUser,
-			"password":             c.DBPassword,
-			"replication_password": replicationPassword,
+			"name":                   c.DBName,
+			"user":                   c.DBUser,
+			"password":               c.DBPassword,
+			"reconcile_app_password": c.RepairExistingCredential,
+			"replication_password":   replicationPassword,
 		}
 		bridge["ultra_postgres_replica"] = map[string]any{
 			"primary_host": p.Database.PrimaryHost,

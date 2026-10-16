@@ -204,6 +204,9 @@ func validatePlanRoles(p *InstallPlan) error {
 	if p.Database.ReplicaHost != "" {
 		return errors.New("database replicas are no longer supported; use a dedicated DB_HOST")
 	}
+	if p.Database.RepairAppCredentials && !p.Database.Enabled {
+		return errors.New("DB_REPAIR_APP_CREDENTIALS requires DATABASE_IP")
+	}
 	if p.Database.Enabled {
 		if net.ParseIP(p.Database.PrimaryHost).To4() == nil || p.Database.PrimaryHost == p.Bridge.Address ||
 			p.Database.PrimaryHost == p.Bridge.SSHHost {

@@ -34,6 +34,9 @@ func TestFreshBridgeCanReusePreservedDedicatedDatabaseCredentials(t *testing.T) 
 	if first.PostgresConfig.DBPassword != "preserved-fixture-p@ss/?#" || first.DBDSN != second.DBDSN {
 		t.Fatal("reinstallation rotated existing database credentials")
 	}
+	if !first.PostgresConfig.RepairExistingCredential {
+		t.Fatal("saved database credential was not marked authoritative for reconciliation")
+	}
 	u, err := url.Parse(first.DBDSN)
 	if err != nil || u.User == nil {
 		t.Fatal("invalid preserved connection URI")
@@ -79,5 +82,34 @@ func TestDatabaseCredentialsRejectPublicSymlinkAndWrongIdentity(t *testing.T) {
 	completePlanFixture(p)
 	if _, err := RenderDesiredState(p); err == nil {
 		t.Fatal("wrong database identity accepted")
+	}
+}
+
+func TestExplicitDatabaseCredentialRepairPolicyRequiresDatabase(t *testing.T) {
+	p := LegacyValuesToPlan(map[string]string{
+		"BRIDGE_IP":                 "192.0.2.10",
+		"MAIN_EXIT_IP":              "192.0.2.20",
+		"DATABASE_IP":               "192.0.2.40",
+		"DB_REPAIR_APP_CREDENTIALS": "true",
+	})
+	p.Bridge.ReuseSpec = false
+	completePlanFixture(p)
+	p.Bridge.RealityDest = "origin.example.net:443"
+	if err := validatePlanRoles(p); err != nil {
+		t.Fatal(err)
+	}
+	if !p.Database.RepairAppCredentials {
+		t.Fatal("explicit repair policy was not parsed")
+	}
+	desired, err := RenderDesiredState(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !desired.PostgresConfig.RepairExistingCredential {
+		t.Fatal("explicit repair policy was not carried into the frozen database configuration")
+	}
+	p.Database.Enabled = false
+	if err := validatePlanRoles(p); err == nil {
+		t.Fatal("repair policy accepted without a dedicated database")
 	}
 }

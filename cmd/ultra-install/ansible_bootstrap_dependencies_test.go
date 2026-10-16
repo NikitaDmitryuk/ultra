@@ -469,7 +469,7 @@ func TestBootstrapUsesStableSeparatedPostgresReplicationCredential(t *testing.T)
 	inv["all"].(map[string]any)["children"].(map[string]any)["databases"] = map[string]any{
 		"hosts": map[string]any{"database": map[string]any{}},
 	}
-	ds.PostgresConfig = &install.PostgresConfig{DBName: "app", DBUser: "app", DBPassword: "fixture-app-password"}
+	ds.PostgresConfig = &install.PostgresConfig{DBName: "app", DBUser: "app", DBPassword: "fixture-app-password", RepairExistingCredential: true}
 	if err := prepareBootstrapVariables(p, ds, inv, inspection, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
@@ -481,6 +481,9 @@ func TestBootstrapUsesStableSeparatedPostgresReplicationCredential(t *testing.T)
 	}
 	if primary["password"] == credential || primary["password"] != "fixture-app-password" {
 		t.Fatal("replication credential must be distinct from the application password")
+	}
+	if primary["reconcile_app_password"] != true {
+		t.Fatal("trusted application credential repair policy was not frozen into the database inventory")
 	}
 	if postgresReplicationPassword("fixture-app-password") != credential || postgresReplicationPassword("another-password") == credential {
 		t.Fatal("replication credential derivation must be stable and input-bound")

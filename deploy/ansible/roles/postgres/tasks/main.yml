@@ -64,7 +64,18 @@
   when: ultra_postgres.replication_password is defined
 - name: Apply PostgreSQL settings
   ansible.builtin.meta: flush_handlers
-- name: Verify application login before bridge activation; use DB_CREDENTIALS_FILE for an existing database
+- name: Check PostgreSQL loopback readiness before verifying application credentials
+  ansible.builtin.command:
+    argv: [pg_isready, -h, 127.0.0.1, -p, "5432"]
+  register: postgres_application_server_ready
+  changed_when: false
+  no_log: true
+- name: Require PostgreSQL loopback readiness
+  ansible.builtin.assert:
+    that:
+      - postgres_application_server_ready.rc == 0
+    fail_msg: PostgreSQL is unavailable on the configured database host.
+- name: Verify application login before bridge activation
   ansible.builtin.command:
     argv:
       - /usr/lib/postgresql/16/bin/psql
@@ -83,4 +94,53 @@
     PGPASSWORD: "{{ ultra_postgres.password }}"
     PGCONNECT_TIMEOUT: "5"
   changed_when: false
+  failed_when: false
+  register: postgres_application_login
   no_log: true
+- name: Reconcile the existing application credential when explicitly trusted
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only]
+    stdin: |
+      SET password_encryption = 'scram-sha-256';
+      SELECT format('ALTER ROLE %I LOGIN PASSWORD %L',
+        '{{ ultra_postgres.user }}', '{{ ultra_postgres.password | replace("'", "''") }}')
+        WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ ultra_postgres.user }}') \gexec
+  register: postgres_application_credential_repair
+  changed_when: true
+  when:
+    - postgres_application_login.rc != 0
+    - ultra_postgres.reconcile_app_password | default(false) | bool
+  no_log: true
+- name: Verify reconciled application login before bridge activation
+  ansible.builtin.command:
+    argv:
+      - /usr/lib/postgresql/16/bin/psql
+      - --no-psqlrc
+      - --no-password
+      - --host
+      - 127.0.0.1
+      - --username
+      - "{{ ultra_postgres.user }}"
+      - --dbname
+      - "{{ ultra_postgres.name }}"
+      - --tuples-only
+      - --command
+      - SELECT 1
+  environment:
+    PGPASSWORD: "{{ ultra_postgres.password }}"
+    PGCONNECT_TIMEOUT: "5"
+  register: postgres_application_login_repaired
+  changed_when: false
+  failed_when: false
+  when:
+    - postgres_application_login.rc != 0
+    - ultra_postgres.reconcile_app_password | default(false) | bool
+  no_log: true
+- name: Require verified application database login
+  ansible.builtin.assert:
+    that:
+      - postgres_application_login.rc == 0 or (ultra_postgres.reconcile_app_password | default(false) | bool and postgres_application_login_repaired.rc | default(1) == 0)
+    fail_msg: >-
+      Application login to the existing database failed. Supply DB_CREDENTIALS_FILE
+      with the saved bridge spec, or explicitly set DB_REPAIR_APP_CREDENTIALS=true
+      to reconcile this application's role.

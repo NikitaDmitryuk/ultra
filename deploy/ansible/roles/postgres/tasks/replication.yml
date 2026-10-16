@@ -29,3 +29,12 @@
   register: postgres_replication_role
   changed_when: "'CREATE ROLE' in postgres_replication_role.stdout"
   no_log: true
+- name: Reconcile the derived replication credential when the app credential is trusted
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only]
+    stdin: |
+      SET password_encryption = 'scram-sha-256';
+      ALTER ROLE ultra_replication PASSWORD '{{ ultra_postgres.replication_password }}';
+  changed_when: true
+  when: ultra_postgres.reconcile_app_password | default(false) | bool
+  no_log: true

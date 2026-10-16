@@ -233,7 +233,7 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 			if !ok || password == "" {
 				return nil, fmt.Errorf("existing database credentials required")
 			}
-			pgCfg = &install.PostgresConfig{DBName: p.Database.Name, DBUser: p.Database.User, DBPassword: password, Port: 25432}
+			pgCfg = &install.PostgresConfig{DBName: p.Database.Name, DBUser: p.Database.User, DBPassword: password, RepairExistingCredential: true, Port: 25432}
 		}
 	} else if p.Database.Enabled {
 		pc := &install.PostgresConfig{DBName: p.Database.Name, DBUser: p.Database.User, Port: 25432}
@@ -247,6 +247,10 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 				return nil, fmt.Errorf("database credentials file requires existing password")
 			}
 			pc.DBPassword = password
+			pc.RepairExistingCredential = true
+		}
+		if p.Database.RepairAppCredentials {
+			pc.RepairExistingCredential = true
 		}
 		if err := pc.Defaults(); err != nil {
 			return nil, err
