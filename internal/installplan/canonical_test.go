@@ -8,7 +8,7 @@ import (
 
 func canonicalFixture() map[string]string {
 	return map[string]string{
-		"INSTALL_SCHEMA_VERSION": "2", "BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "BOT_DOMAIN": "sync.example.com", "VPN_DOMAIN": "edge.example.com", "ACME_EMAIL": "owner@example.com", "PUBLIC_XHTTP_PATH": "/connect", "DNS_PROVIDER": "vultr", "DNS_ZONE": "example.com", "ULTRA_AUTOMATION_VERSION": "v2.1", "ULTRA_AUTOMATION_RELEASE_DIR": "/release", "ULTRA_AUTOMATION_AGE_RECIPIENT": "age1fixture", "ULTRA_AUTOMATION_BRIDGE_PROVIDER": "a", "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": "/pins", "ULTRA_AUTOMATION_ADMIN_TELEGRAM_ID": "123", "ULTRA_AUTOMATION_STATIC_NODES": `[{"name":"NL","address":"192.0.2.2","provider":"a"}]`,
+		"INSTALL_SCHEMA_VERSION": "2", "BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "BOT_DOMAIN": "sync.example.com", "VPN_DOMAIN": "edge.example.com", "VLESS_PORT": "24443", "ACME_EMAIL": "owner@example.com", "PUBLIC_XHTTP_PATH": "/connect", "DNS_PROVIDER": "vultr", "DNS_ZONE": "example.com", "ULTRA_AUTOMATION_VERSION": "v2.1", "ULTRA_AUTOMATION_RELEASE_DIR": "/release", "ULTRA_AUTOMATION_AGE_RECIPIENT": "age1fixture", "ULTRA_AUTOMATION_BRIDGE_PROVIDER": "a", "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": "/pins", "ULTRA_AUTOMATION_ADMIN_TELEGRAM_ID": "123", "ULTRA_AUTOMATION_STATIC_NODES": `[{"name":"NL","address":"192.0.2.2","provider":"a"}]`,
 	}
 }
 func TestCanonicalV2MappingAndLegacyBoundary(t *testing.T) {
@@ -223,6 +223,18 @@ func TestCanonicalIngressPorts(t *testing.T) {
 	values["ULTRA_INGRESS_BACKEND_PORT"] = "private-invalid"
 	if _, err := CanonicalValuesToPlan(values); err == nil || strings.Contains(err.Error(), "private-invalid") {
 		t.Fatal("invalid port not safely rejected")
+	}
+}
+
+func TestCanonicalVPNIngressDoesNotShareHTTPSPortWithVLESS(t *testing.T) {
+	values := canonicalFixture()
+	values["VLESS_PORT"] = "443"
+	if _, err := CanonicalValuesToPlan(values); err == nil || !strings.Contains(err.Error(), "managed HTTPS ingress on port 443") {
+		t.Fatalf("VLESS and managed HTTPS ingress must not share port 443: %v", err)
+	}
+	values["VLESS_PORT"] = "24443"
+	if _, err := CanonicalValuesToPlan(values); err != nil {
+		t.Fatalf("separate VLESS and HTTPS ports should be accepted: %v", err)
 	}
 }
 

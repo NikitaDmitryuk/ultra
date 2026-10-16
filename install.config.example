@@ -29,8 +29,8 @@ PUBLIC_HOST=192.0.2.10
 MAIN_EXIT_DOMAIN=tunnel.example.com
 # Внутренний порт туннеля (по умолчанию равен VLESS_PORT); порт 80 занят HTTP-01.
 TUNNEL_PORT=24443
-# Listener VLESS на bridge (по умолчанию 443).
-VLESS_PORT=443
+# Listener VLESS на bridge. При управляемом HTTPS ingress порт 443 занят Nginx.
+VLESS_PORT=24443
 # Проверенная цель REALITY для клиентского fallback и её SNI. Укажите реальный допустимый host:443.
 REALITY_DEST=origin.example.net:443
 REALITY_SNI=origin.example.net

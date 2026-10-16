@@ -56,6 +56,9 @@ func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 		}
 	}
 	if domain := v["VPN_DOMAIN"]; domain != "" {
+		if p.Bridge.VLESSPort == 443 {
+			return nil, errors.New("VLESS_PORT conflicts with the managed HTTPS ingress on port 443; choose another VLESS_PORT")
+		}
 		a.Ingress = &AutomationIngress{
 			Domain:      domain,
 			Email:       v["ACME_EMAIL"],
