@@ -96,6 +96,22 @@ class BootstrapPlanTests(unittest.TestCase):
         self.assertEqual(token['content'], 'fixture-bot-token')
         self.assertEqual(token['mode'], '0600')
 
+    def test_bootstrap_creates_provider_key_directory_before_copy(self):
+        import yaml
+        role = Path(__file__).resolve().parents[1] / 'ansible/roles/recovery_primary/tasks/main.yml'
+        tasks = yaml.safe_load(role.read_text())
+        directory = next(index for index, task in enumerate(tasks)
+                         if task.get('name') == 'Ensure relay automation credential directory exists')
+        provider_key = next(index for index, task in enumerate(tasks)
+                            if task.get('name') == 'Install provider key in relay-private canonical location')
+        directory_task = tasks[directory]['ansible.builtin.file']
+        self.assertEqual(directory_task['path'], '/var/lib/ultra-relay/automation')
+        self.assertEqual(directory_task['state'], 'directory')
+        self.assertEqual(directory_task['owner'], 'ultra-relay')
+        self.assertEqual(directory_task['group'], 'ultra-relay')
+        self.assertEqual(directory_task['mode'], '0700')
+        self.assertLess(directory, provider_key)
+
     def test_cli_transports_secrets_only_in_private_file(self):
         output = self.root / 'recovery-plan.json'
         stdout, stderr = io.StringIO(), io.StringIO()

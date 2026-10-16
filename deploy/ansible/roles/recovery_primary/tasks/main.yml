@@ -193,6 +193,13 @@
     src: "{{ ultra_install_source }}"
     dest: /usr/local/bin/ultra-install
     mode: "0755"
+- name: Ensure relay automation credential directory exists
+  ansible.builtin.file:
+    path: /var/lib/ultra-relay/automation
+    state: directory
+    owner: ultra-relay
+    group: ultra-relay
+    mode: "0700"
 - name: Install provider key in relay-private canonical location
   ansible.builtin.copy:
     src: "{{ ultra_automation_cloud_source }}"
