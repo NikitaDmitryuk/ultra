@@ -147,7 +147,9 @@ func TestActiveLifecycleAttachmentDoesNotFallbackWithoutBroker(t *testing.T) {
 	if _, release, err := client.WithActiveLifecycleOperationLock(context.Background(), root, id); err == nil || release != nil {
 		t.Fatal("missing broker accepted", err)
 	}
-	if _, release, err := client.WithActiveLifecycleOperationLock(context.Background(), root, "invalid"); err == nil || err.Error() != "invalid operation id" || release != nil {
+	if _, release, err := client.WithActiveLifecycleOperationLock(context.Background(), root, "invalid"); err == nil ||
+		err.Error() != "invalid operation id" ||
+		release != nil {
 		t.Fatal("invalid UUID error lost", err)
 	}
 	_, release, err := client.WithLifecycleOperationLock(context.Background(), root, id)
@@ -207,7 +209,11 @@ func TestActiveLifecycleAttachmentRejectsUnconfirmedResponses(t *testing.T) {
 				}
 				done <- err
 			}()
-			_, release, err := (Client{Socket: socket}).WithActiveLifecycleOperationLock(context.Background(), root, "11111111-2222-3333-4444-555555555555")
+			_, release, err := (Client{Socket: socket}).WithActiveLifecycleOperationLock(
+				context.Background(),
+				root,
+				"11111111-2222-3333-4444-555555555555",
+			)
 			if err == nil || release != nil {
 				t.Fatal("unconfirmed attachment accepted", err)
 			}

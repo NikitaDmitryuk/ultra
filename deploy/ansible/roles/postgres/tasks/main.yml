@@ -139,7 +139,10 @@
 - name: Require verified application database login
   ansible.builtin.assert:
     that:
-      - postgres_application_login.rc == 0 or (ultra_postgres.reconcile_app_password | default(false) | bool and postgres_application_login_repaired.rc | default(1) == 0)
+      - >-
+        postgres_application_login.rc == 0 or
+        (ultra_postgres.reconcile_app_password | default(false) | bool and
+        postgres_application_login_repaired.rc | default(1) == 0)
     fail_msg: >-
       Application login to the existing database failed. Supply DB_CREDENTIALS_FILE
       with the saved bridge spec, or explicitly set DB_REPAIR_APP_CREDENTIALS=true

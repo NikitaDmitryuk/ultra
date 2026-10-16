@@ -123,7 +123,11 @@ func TestNativeStageRetryChecksMachineBeforeAnyLeaseOrAction(t *testing.T) {
 					if fault != "none" && fault != "action-failed" {
 						return ctx, nil, errors.New(fault)
 					}
-					return context.WithValue(ctx, retryAttachmentTestKey{}, "broker-context-must-not-replace-state"), func() { brokerReleased = true }, nil
+					return context.WithValue(
+						ctx,
+						retryAttachmentTestKey{},
+						"broker-context-must-not-replace-state",
+					), func() { brokerReleased = true }, nil
 				},
 			}
 			_, err := withFrozenBootstrapStageLeaseWith(
@@ -150,7 +154,8 @@ func TestNativeStageRetryChecksMachineBeforeAnyLeaseOrAction(t *testing.T) {
 			if fault == "machine" && (err == nil || locked || attached || acted) {
 				t.Fatal("different machine acquired lease or replayed")
 			}
-			if fault != "none" && fault != "machine" && fault != "action-failed" && (err == nil || !attached || acted || !operatorReleased || !stateReleased) {
+			if fault != "none" && fault != "machine" && fault != "action-failed" &&
+				(err == nil || !attached || acted || !operatorReleased || !stateReleased) {
 				t.Fatalf("invalid lifecycle reached action or leaked locks: %v", err)
 			}
 		})
