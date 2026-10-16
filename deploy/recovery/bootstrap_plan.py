@@ -15,7 +15,9 @@ import uuid
 CONFIG = Path('/etc/ultra-recovery')
 ROOT = Path('/opt/ultra-recovery')
 UNITS = Path('/etc/systemd/system')
-sys.path.insert(0, str(ROOT))
+# Use the helper staged and verified beside this planner, never an older copy
+# under ROOT that an earlier release may have left behind.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import db_connection
 
 

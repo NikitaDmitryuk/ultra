@@ -2,7 +2,9 @@ import hashlib
 import contextlib
 import io
 import copy
+import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import time
@@ -43,6 +45,29 @@ class BootstrapPlanTests(unittest.TestCase):
 
     def tearDown(self):
         self.db_spec_patch.stop(); self.discovery.stop(); self.patch.stop(); self.temp.cleanup()
+
+    def test_planner_imports_verified_sibling_helper_before_old_release_copy(self):
+        staged = self.root / 'staged'
+        old_release = self.root / 'old-release'
+        staged.mkdir()
+        old_release.mkdir()
+        shutil.copyfile(Path(bootstrap_plan.__file__), staged / 'bootstrap_plan.py')
+        (staged / 'db_connection.py').write_text("MARKER = 'verified-sibling'\n")
+        (old_release / 'db_connection.py').write_text("MARKER = 'stale-release'\n")
+
+        previous_module = sys.modules.pop('db_connection', None)
+        previous_path = sys.path[:]
+        try:
+            sys.path.insert(0, str(old_release))
+            spec = importlib.util.spec_from_file_location('staged_bootstrap_plan', staged / 'bootstrap_plan.py')
+            planner = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(planner)
+            self.assertEqual(planner.db_connection.MARKER, 'verified-sibling')
+        finally:
+            sys.path[:] = previous_path
+            sys.modules.pop('db_connection', None)
+            if previous_module is not None:
+                sys.modules['db_connection'] = previous_module
 
     def test_planner_has_no_host_mutations_and_initial_independence_is_unconfirmed(self):
         before = sorted(str(p) for p in self.root.rglob('*'))
@@ -138,9 +163,14 @@ class BootstrapPlanTests(unittest.TestCase):
                 playbook = self.root / ('failure-' + failure + '.yml')
                 playbook.write_text(yaml.safe_dump([{'hosts': 'localhost', 'gather_facts': False,
                     'tasks': [transport, {'ansible.builtin.fail': {'msg': 'fixture consumer failed'}}]}]))
+                local_tmp = self.root / ('ansible-local-' + failure)
+                local_tmp.mkdir()
+                env = os.environ.copy()
+                env['ANSIBLE_LOCAL_TEMP'] = str(local_tmp)
                 result = subprocess.run([executable, '-i', 'localhost,', '-c', 'local', str(playbook)],
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-                self.assertEqual(result.returncode, 2, result.stdout.decode(errors='replace'))
+                                        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+                self.assertEqual(result.returncode, 2,
+                                 (result.stdout + result.stderr).decode(errors='replace'))
                 self.assertFalse(output.exists())
                 self.assertNotIn(b'fixture-private-payload', result.stdout + result.stderr)
 
