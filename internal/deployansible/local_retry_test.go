@@ -75,12 +75,69 @@ func TestRetryArchivesBeforeAdvancingAndResumesCrashes(t *testing.T) {
 	}
 }
 
+func TestRetryArchivesDiagnosticAndClearsItForEachAttempt(t *testing.T) {
+	root, _ := retryFixture(t)
+	first := []byte(`{"stage":"first failure"}`)
+	diagnosticPath := filepath.Join(root, "diagnostic.json")
+	if err := os.WriteFile(diagnosticPath, first, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := retryFailedLocalAttempt(root); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(filepath.Join(root, "history", "diagnostic-attempt-1.json"))
+	if err != nil || !bytes.Equal(saved, first) {
+		t.Fatal("first attempt diagnostic was not preserved")
+	}
+	if _, err = os.Lstat(diagnosticPath); !os.IsNotExist(err) {
+		t.Fatal("stale diagnostic survived retry")
+	}
+
+	jobPath := filepath.Join(root, "job.json")
+	jobRaw, err := os.ReadFile(jobPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job map[string]any
+	if err = json.Unmarshal(jobRaw, &job); err != nil {
+		t.Fatal(err)
+	}
+	job["attempt"] = float64(2)
+	jobRaw, _ = json.Marshal(job)
+	if err = os.WriteFile(jobPath, jobRaw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	job["attempt"] = float64(2)
+	job["state"] = "failed"
+	job["code"] = "playbook_failed"
+	receiptRaw, _ := json.Marshal(job)
+	if err = os.WriteFile(filepath.Join(root, "receipt.json"), receiptRaw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	second := []byte(`{"stage":"second failure"}`)
+	if err = os.WriteFile(diagnosticPath, second, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = retryFailedLocalAttempt(root); err != nil {
+		t.Fatal(err)
+	}
+	saved, err = os.ReadFile(filepath.Join(root, "history", "diagnostic-attempt-2.json"))
+	if err != nil || !bytes.Equal(saved, second) {
+		t.Fatal("second attempt diagnostic was not preserved")
+	}
+}
+
 func TestRetryRejectsConflictWithoutErasingFailure(t *testing.T) {
 	cases := map[string]func(string){
 		"changed request": func(root string) { _ = os.WriteFile(filepath.Join(root, "request.json"), []byte("{}"), 0600) },
 		"history collision": func(root string) {
 			_ = os.Mkdir(filepath.Join(root, "history"), 0700)
 			_ = os.WriteFile(filepath.Join(root, "history", "attempt-1.json"), []byte("{}"), 0600)
+		},
+		"diagnostic history collision": func(root string) {
+			_ = os.Mkdir(filepath.Join(root, "history"), 0700)
+			_ = os.WriteFile(filepath.Join(root, "history", "diagnostic-attempt-1.json"), []byte("{}"), 0600)
+			_ = os.WriteFile(filepath.Join(root, "diagnostic.json"), []byte(`{"stage":"failure"}`), 0600)
 		},
 		"job advanced without archive": func(root string) {
 			data, _ := os.ReadFile(filepath.Join(root, "job.json"))

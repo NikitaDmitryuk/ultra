@@ -222,6 +222,45 @@ func retryFailedLocalAttemptWith(directory string, syncDir func(string) error) e
 			return err
 		}
 	}
+	// The controller writes its diagnostic with O_EXCL. Archive the previous
+	// attempt's result and remove it before retry so a later failure cannot
+	// inherit a stale task name in its receipt.
+	diagnosticPath := filepath.Join(directory, "diagnostic.json")
+	diagnostic, diagnosticErr := readRetryPrivate(diagnosticPath)
+	if diagnosticErr != nil && !os.IsNotExist(diagnosticErr) {
+		return diagnosticErr
+	}
+	if diagnosticErr == nil {
+		diagnosticArchive := filepath.Join(history, fmt.Sprintf("diagnostic-attempt-%d.json", old))
+		savedDiagnostic, archiveErr := readRetryPrivate(diagnosticArchive)
+		if archiveErr == nil {
+			if !bytes.Equal(savedDiagnostic, diagnostic) {
+				return errors.New("retry_diagnostic_history_conflict")
+			}
+		} else if !os.IsNotExist(archiveErr) {
+			return archiveErr
+		} else {
+			file, createErr := os.CreateTemp(history, ".diagnostic-")
+			if createErr != nil {
+				return createErr
+			}
+			name := file.Name()
+			defer os.Remove(name) //nolint:errcheck
+			if _, err = file.Write(diagnostic); err == nil {
+				err = file.Sync()
+			}
+			closeErr := file.Close()
+			if err != nil {
+				return err
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			if err = os.Link(name, diagnosticArchive); err != nil {
+				return err
+			}
+		}
+	}
 	if err = syncDir(history); err != nil {
 		return err
 	}
@@ -257,6 +296,11 @@ func retryFailedLocalAttemptWith(directory string, syncDir func(string) error) e
 	// Also sync a job rename completed before a previous fsync failure.
 	if err = syncDir(directory); err != nil {
 		return err
+	}
+	if diagnosticErr == nil {
+		if err = os.Remove(diagnosticPath); err != nil {
+			return err
+		}
 	}
 	if err = os.Remove(receiptPath); err != nil {
 		return err
