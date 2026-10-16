@@ -9,7 +9,7 @@
   ansible.builtin.import_tasks: repository.yml
 - name: Install PostgreSQL 16
   ansible.builtin.apt:
-    name: [postgresql-16, postgresql-contrib-16]
+    name: postgresql-16
     state: present
     update_cache: true
     cache_valid_time: 3600

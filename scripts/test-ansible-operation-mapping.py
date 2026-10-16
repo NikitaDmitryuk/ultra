@@ -79,6 +79,8 @@ class OperationMappingTests(unittest.TestCase):
         self.assertTrue(any(task.get('ansible.builtin.include_role') == {'name': 'postgres', 'tasks_from': 'repository'} for task in tasks))
         self.assertTrue(any(task.get('loop') == ['psql', 'pg_dump'] and 'failed_when' in task for task in tasks))
         provisioning = yaml.safe_load((SOURCE / 'roles/postgres/tasks/main.yml').read_text())
+        server_packages = [task['ansible.builtin.apt']['name'] for task in provisioning if 'ansible.builtin.apt' in task]
+        self.assertEqual(server_packages, ['postgresql-16'])
         auth = provisioning[-1]
         self.assertIn('--no-password', auth['ansible.builtin.command']['argv'])
         self.assertIn('PGPASSWORD', auth['environment'])
