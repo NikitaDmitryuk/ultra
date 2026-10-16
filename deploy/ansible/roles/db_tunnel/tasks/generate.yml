@@ -30,12 +30,3 @@
     group: root
     mode: "0600"
   no_log: true
-- name: Read bridge database tunnel public key
-  ansible.builtin.slurp:
-    src: /etc/ultra-db-tunnel/id_ed25519.pub
-  register: db_tunnel_public_key_slurp
-  no_log: true
-- name: Publish bridge database tunnel public key as host fact
-  ansible.builtin.set_fact:
-    db_tunnel_ultra_public_key: "{{ db_tunnel_public_key_slurp.content | b64decode | trim }}"
-  no_log: true

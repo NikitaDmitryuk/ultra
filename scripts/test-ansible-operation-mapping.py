@@ -86,6 +86,15 @@ class OperationMappingTests(unittest.TestCase):
         self.assertIn('PGPASSWORD', auth['environment'])
         self.assertTrue(auth['no_log'])
         self.assertEqual(provisioning[-2]['ansible.builtin.meta'], 'flush_handlers')
+        tunnel_generate = (SOURCE / 'roles/db_tunnel/tasks/generate.yml').read_text()
+        self.assertNotIn('db_tunnel_ultra_public_key', tunnel_generate)
+        tunnel_auth = yaml.safe_load((SOURCE / 'roles/db_tunnel/tasks/authorize.yml').read_text())
+        key_read = tunnel_auth[1]
+        self.assertEqual(key_read['ansible.builtin.slurp']['src'], '/etc/ultra-db-tunnel/id_ed25519.pub')
+        self.assertEqual(key_read['delegate_to'], 'bridge')
+        self.assertTrue(key_read['no_log'])
+        self.assertIn('db_tunnel_bridge_public_key_slurp.content | b64decode | trim', tunnel_auth[-1]['ansible.builtin.copy']['content'])
+        self.assertNotIn("hostvars['bridge'].db_tunnel_ultra_public_key", str(tunnel_auth))
 
     def test_no_removed_operation_or_caller_chosen_path(self):
         for operation in ['verify', '../ingress', '/tmp/ingress', 'ingress.yml', 'arbitrary']:

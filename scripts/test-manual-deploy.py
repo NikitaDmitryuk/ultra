@@ -673,9 +673,8 @@ class NativeDeploy(unittest.TestCase):
         self.assertEqual(self.calls[0][1][1:3], ['plan', '--config'])
         for stage, command in self.calls[1:]:
             self.assertEqual(command[:3], ['ssh', '-F', '/dev/null'])
-            proxy = command[command.index('-o', command.index('22') + 1) + 1]
-            self.assertIn('ProxyCommand=ssh -F /dev/null', proxy)
-            self.assertIn('-W %h:%p root@192.0.2.20', proxy)
+            self.assertEqual(command[-2], 'root@192.0.2.10')
+            self.assertFalse(any('ProxyCommand=' in token for token in command))
             remote = D.shlex.split(command[-1])
             self.assertEqual(remote[:3], ['python3', '-I', '-c'])
             self.assertEqual(remote[4:11], ['run', self.commit, self.version, D.sha(self.manifest), D.sha(self.stage_mock.call_args.args[3]), D.remote_attempt(self.original, self.version), 'arm64'])
@@ -1126,6 +1125,160 @@ class NativeDeploy(unittest.TestCase):
                 'mutator_dispatched': True, 'remote_attempt': D.remote_attempt(self.original, self.version), 'manifest_sha256': 'd' * 64,
                 'config_sha256': D.sha(self.original), 'transport_binding': binding}
 
+    def pre_direct_transport_binding(self):
+        # Reproduce the released fingerprint independently of the compatibility
+        # implementation, including the old common identity for exit_0.
+        info = self.identity.lstat()
+        target = {'host': '192.0.2.10',
+                  'identity_file': [str(self.identity), info.st_ino, info.st_size, info.st_mtime_ns],
+                  'pins_file': str(self.pins), 'pins_sha256': D.sha(self.pins.read_bytes())}
+        jump_identity = Path(self.inventory['all']['children']['exits']['hosts']['exit_0'].get(
+            'ansible_ssh_private_key_file', str(self.identity)))
+        jump_info = jump_identity.lstat()
+        jump = dict(target, host='192.0.2.20', identity_file=[str(jump_identity), jump_info.st_ino,
+                    jump_info.st_size, jump_info.st_mtime_ns])
+        return D.sha(json.dumps({'source_sha256': D.sha((self.operator / 'inventory.json').read_bytes()),
+                                 'target': target, 'jump': jump}, sort_keys=True).encode())
+
+    def assert_direct_recovery_calls(self):
+        for stage, command in self.calls:
+            if command[0] == 'ssh':
+                self.assertEqual(command[-2], 'root@192.0.2.10')
+                self.assertIn('ProxyJump=none', command)
+                self.assertFalse(any('ProxyCommand=' in token for token in command))
+
+    def test_pre_direct_legacy_forward_only_requires_exact_binding_and_attestation(self):
+        old = dict(self.legacy_record(), transport_binding=self.pre_direct_transport_binding())
+        D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
+        def runner(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'legacy_operation_attestation':
+                return json.dumps(dict(old, staged_config_sha256=old['config_sha256']))
+            if stage == 'upgrade':
+                raise D.DeployError('fixture_failed')
+        with self.assertRaisesRegex(D.DeployError, 'fixture_failed'):
+            self.rollout(forward_only=True, runner=runner)
+        archived = next(self.root.glob('operation.forward-only-abandoned-*.json'))
+        self.assertEqual(json.loads(archived.read_bytes()), dict(old, staged_config_sha256=old['config_sha256']))
+        self.assertEqual(self.calls[0][0], 'legacy_operation_attestation')
+        self.assert_direct_recovery_calls()
+        _, direct_binding = D.operator_transport(str(self.operator / 'inventory.json'), self.config.read_bytes())
+        self.assertEqual(json.loads((self.root / 'operation.json').read_bytes())['transport_binding'], direct_binding)
+        self.assertNotEqual(direct_binding, old['transport_binding'])
+
+    def test_pre_direct_forward_only_existing_staged_digest_requires_attestation(self):
+        old = dict(self.legacy_record(), transport_binding=self.pre_direct_transport_binding())
+        old['staged_config_sha256'] = old['config_sha256']
+        raw = json.dumps(old).encode()
+        journal = self.root / 'operation.json'
+        D.atomic_write(journal, raw)
+        def reject(command, cwd, stage, **kwargs):
+            self.assertEqual(stage, 'legacy_operation_attestation')
+            raise D.DeployError('fixture_attestation_failed')
+        with self.assertRaisesRegex(D.DeployError, 'fixture_attestation_failed'):
+            self.rollout(forward_only=True, runner=reject)
+        self.assertEqual(journal.read_bytes(), raw)
+        self.assertEqual(self.config.read_bytes(), self.original)
+        bad = dict(old, staged_config_sha256='f' * 64)
+        D.atomic_write(journal, json.dumps(bad).encode())
+        with self.assertRaisesRegex(D.DeployError, 'manual_legacy_operation_binding_changed'):
+            self.rollout(forward_only=True)
+        self.assertFalse(self.calls)
+        self.assertFalse(self.stage_mock.called)
+        D.atomic_write(journal, raw)
+        def runner(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'legacy_operation_attestation':
+                return json.dumps(old)
+        self.rollout(forward_only=True, runner=runner)
+        self.assertEqual(json.loads(next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes()), old)
+        self.assertEqual(self.calls[0][0], 'legacy_operation_attestation')
+        self.assert_direct_recovery_calls()
+
+    def test_pre_direct_continuation_preserves_history_and_restores_preflight(self):
+        old = self.failed_forward_fixture()
+        journal = self.root / 'operation.json'
+        record = json.loads(journal.read_bytes())
+        record['transport_binding'] = self.pre_direct_transport_binding()
+        D.atomic_write(journal, json.dumps(record).encode())
+        before = journal.read_bytes()
+        config = self.config.read_bytes()
+        attest = self.continuation_runner(old)
+        self.new_candidate_fixture()
+        def fail_doctor(command, cwd, stage, **kwargs):
+            if stage == 'doctor':
+                raise D.DeployError('fixture_doctor_failure')
+            return attest(command, cwd, stage, **kwargs)
+        with self.assertRaisesRegex(D.DeployError, 'fixture_doctor_failure'):
+            self.rollout(continue_forward_only=True, runner=fail_doctor)
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(self.config.read_bytes(), config)
+        self.rollout(continue_forward_only=True, runner=attest)
+        self.assert_direct_recovery_calls()
+        self.assertEqual([p.read_bytes() for p in self.root.glob('operation.forward-only-retry-*.json')], [before, before])
+
+    def test_pre_direct_same_candidate_continuation_is_attested_before_dispatch(self):
+        old = self.failed_forward_fixture()
+        journal = self.root / 'operation.json'
+        record = json.loads(journal.read_bytes())
+        record['transport_binding'] = self.pre_direct_transport_binding()
+        D.atomic_write(journal, json.dumps(record).encode())
+        before = journal.read_bytes()
+        with self.assertRaisesRegex(D.DeployError, 'manual_forward_continuation_receipt_invalid'):
+            self.rollout(continue_forward_only=True, runner=self.continuation_runner(old, {'attempt': 'f' * 64}))
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertFalse(self.stage_mock.called)
+        self.assertNotIn('upgrade', [stage for stage, _ in self.calls])
+        self.rollout(continue_forward_only=True, runner=self.continuation_runner(old))
+        self.assert_direct_recovery_calls()
+
+    def test_pre_direct_adoption_journal_is_not_supported_recovery(self):
+        old = dict(self.legacy_record(), transport_binding=self.pre_direct_transport_binding(),
+                   stage='adoption_apply', adopt=True)
+        raw = json.dumps(old).encode()
+        journal = self.root / 'operation.json'
+        D.atomic_write(journal, raw)
+        for arguments in ({}, {'retry_failed': True}, {'forward_only': True}, {'continue_forward_only': True}):
+            with self.subTest(arguments=arguments), self.assertRaises(D.DeployError):
+                self.rollout(**arguments)
+            self.assertEqual(journal.read_bytes(), raw)
+            self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertFalse(self.calls)
+        self.assertFalse(self.stage_mock.called)
+
+    def test_pre_direct_recovery_rejects_changed_legacy_identity_or_pins(self):
+        for change in ('identity', 'pins', 'missing_pin', 'source', 'jump_identity'):
+            with self.subTest(change=change):
+                jump_identity = self.repo / 'exit-operator-key'
+                jump_identity.write_bytes(b'fixture exit key metadata only')
+                jump_identity.chmod(0o600)
+                self.inventory['all']['children']['exits']['hosts']['exit_0']['ansible_ssh_private_key_file'] = str(jump_identity)
+                self.write_inventory()
+                old = self.legacy_record()
+                old['transport_binding'] = self.pre_direct_transport_binding()
+                raw = json.dumps(old).encode()
+                D.atomic_write(self.root / 'operation.json', raw)
+                if change == 'identity':
+                    info = self.identity.stat()
+                    os.utime(self.identity, ns=(info.st_atime_ns, info.st_mtime_ns + 1))
+                elif change == 'pins':
+                    self.pins.write_bytes(b'changed pins')
+                elif change == 'source':
+                    self.inventory['all']['vars']['fixture_changed'] = True
+                    self.write_inventory()
+                elif change == 'jump_identity':
+                    info = jump_identity.stat()
+                    os.utime(jump_identity, ns=(info.st_atime_ns, info.st_mtime_ns + 1))
+                else:
+                    D.subprocess.run.return_value = subprocess.CompletedProcess([], 1)
+                with self.assertRaises(D.DeployError):
+                    self.rollout(forward_only=True)
+                self.assertEqual((self.root / 'operation.json').read_bytes(), raw)
+                self.assertEqual(self.config.read_bytes(), self.original)
+                self.assertFalse(self.calls)
+                self.assertFalse(self.stage_mock.called)
+                D.subprocess.run.return_value = subprocess.CompletedProcess([], 0)
+
     def test_legacy_forward_only_archives_attested_hash_and_preserves_original_fields(self):
         old = self.legacy_record()
         D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
@@ -1416,7 +1569,7 @@ class NativeDeploy(unittest.TestCase):
         self.assertEqual([s for s, _ in self.calls], ['canonical_policy', 'doctor', 'adoption_check', 'adoption_apply', 'status'])
         transport = self.stage_mock.call_args.args[4]
         self.assertEqual(transport[-1], 'root@192.0.2.10')
-        self.assertTrue(any('ProxyCommand=ssh -F /dev/null' in token and '-W %h:%p root@192.0.2.20' in token for token in transport))
+        self.assertFalse(any('ProxyCommand=' in token for token in transport))
 
     def test_native_canonical_route_requires_both_local_references(self):
         with patch.dict(os.environ, {'ULTRA_OPERATOR_INVENTORY': '', 'ULTRA_OPERATOR_IDENTITY': str(self.identity),
@@ -2607,21 +2760,21 @@ class LegacyForwardAttestation(unittest.TestCase):
 
 
 class PerRoleOperatorIdentity(unittest.TestCase):
-    def test_canonical_bridge_and_exit_keys_drive_their_ssh_endpoints(self):
+    def test_manual_transport_connects_directly_to_bridge(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)
             bridge=root/'bridge-key';exit=root/'exit-key';pins=root/'known_hosts'
             for path in (bridge,exit,pins):
                 path.write_bytes(b'synthetic fixture only');path.chmod(0o600)
             config=("BRIDGE_IP=192.0.2.10\nMAIN_EXIT_IP=192.0.2.20\nDATABASE_IP=192.0.2.30\nBRIDGE_SSH_KEY="+str(bridge)+
-                    "\nMAIN_EXIT_SSH_KEY="+str(exit)+"\nDATABASE_SSH_KEY=/tmp/database-key\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE="+str(pins)+
+                    "\nDATABASE_SSH_KEY=/tmp/database-key\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE="+str(pins)+
                     "\nULTRA_AUTOMATION_STATIC_NODES='[{\"name\":\"primary\",\"address\":\"192.0.2.20\"}]'\n").encode()
             with patch.dict(os.environ,{'ULTRA_OPERATOR_IDENTITY':'','ULTRA_OPERATOR_KNOWN_HOSTS':''}), \
                     patch.object(D.subprocess,'run',return_value=subprocess.CompletedProcess([],0)):
                 argv,_=D.operator_transport(None,config)
             self.assertEqual(argv[-1],'root@192.0.2.10')
             self.assertEqual(argv[argv.index('-i')+1],str(bridge))
-            self.assertTrue(any('ProxyCommand=' in token and str(exit) in token for token in argv))
+            self.assertFalse(any('ProxyCommand=' in token or str(exit) in token for token in argv))
 
     def test_retired_key_contract_matches_go_parser(self):
         import ast

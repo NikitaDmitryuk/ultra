@@ -468,7 +468,7 @@ def config_values(raw):
     return values
 
 
-def operator_transport(path, config):
+def operator_transport(path, config, legacy_binding=False):
     values = config_values(config)
     bridge_address = values.get('BRIDGE_IP')
     main_exit_address = values.get('MAIN_EXIT_IP')
@@ -493,17 +493,20 @@ def operator_transport(path, config):
         source_binding = sha(raw)
     else:
         bridge_identity = local_identity or values.get('BRIDGE_SSH_KEY')
-        exit_identity = local_identity or values.get('MAIN_EXIT_SSH_KEY')
         local_pins = local_pins or values.get('ULTRA_AUTOMATION_KNOWN_HOSTS_FILE')
-        require(bridge_identity and exit_identity and local_pins, 'operator_identity_and_pins_required')
-        require(static, 'operator_static_jump_required')
+        require(bridge_identity and local_pins, 'operator_identity_and_pins_required')
         # Local credential references supplement the single canonical topology;
         # they are never written to install.config or sent to the bridge.
         common = {'ansible_user': 'root', 'ansible_ssh_private_key_file': bridge_identity,
                   'ansible_ssh_common_args': shlex.join(['-o', 'StrictHostKeyChecking=yes', '-o', 'IdentitiesOnly=yes',
                                                        '-o', 'UserKnownHostsFile=' + local_pins])}
         bridge = {'ansible_host': bridge_address}
-        exits = {'exit_' + str(index): {'ansible_host': node['address'], 'ansible_ssh_private_key_file': exit_identity} for index, node in enumerate(static)}
+        exits = {'exit_' + str(index): {'ansible_host': node['address']} for index, node in enumerate(static)}
+        if legacy_binding:
+            exit_identity = local_identity or values.get('MAIN_EXIT_SSH_KEY')
+            require(exit_identity, 'operator_identity_and_pins_required')
+            for host in exits.values():
+                host['ansible_ssh_private_key_file'] = exit_identity
         source_binding = sha(json.dumps({'bridge': bridge_address, 'static': [n['address'] for n in static]}, sort_keys=True).encode())
     require(bridge.get('ansible_host') == bridge_address and main_exit_address
             and bridge_address and bridge_address != main_exit_address
@@ -543,10 +546,14 @@ def operator_transport(path, config):
                                        'pins_file': str(pin_path), 'pins_sha256': pins_sha}
 
     target, destination, target_identity = endpoint(bridge)
-    jump, jump_destination, jump_identity = endpoint(exits['exit_0'])
-    target += ['-o', 'ProxyCommand=' + shlex.join(jump + ['-W', '%h:%p', jump_destination]), destination]
-    binding = sha(json.dumps({'source_sha256': source_binding, 'target': target_identity,
-                             'jump': jump_identity}, sort_keys=True).encode())
+    target.append(destination)
+    material = {'source_sha256': source_binding, 'target': target_identity}
+    if legacy_binding:
+        # Compatibility evidence only: validate the exact old fingerprint, but
+        # never add the former exit hop to the direct bridge command. Normal
+        # operations do not inspect or require an exit identity or pin.
+        _, _, material['jump'] = endpoint(exits['exit_0'])
+    binding = sha(json.dumps(material, sort_keys=True).encode())
     return target, binding
 
 
@@ -1464,6 +1471,8 @@ def attest_legacy_manual_operation(repo, record, transport, binding, current):
     # baseline descriptor/journal or inventing a claim about the old workers.
     baseline = old_root / 'baseline/descriptor.json' if values.get('ULTRA_UPGRADE_BASELINE_FILE') else None
     expected_sha = sha(config_candidate(current, record['version'], old_root / 'release', baseline))
+    require('staged_config_sha256' not in record or record['staged_config_sha256'] == expected_sha,
+            'manual_legacy_operation_binding_changed')
     command = transport + [shlex.join(['python3', '-I', '-c', REMOTE_LEGACY_ATTEST,
         record['commit'], record['version'], record['remote_attempt'], record['manifest_sha256'], expected_sha])]
     raw = run(command, repo, 'legacy_operation_attestation', capture=True)
@@ -1597,8 +1606,24 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     validate_config_policy(current)
     operator_inventory = os.environ.get('ULTRA_OPERATOR_INVENTORY')
     transport, transport_binding = operator_transport(operator_inventory, current) if operator_requested() else (None, None)
-    if abandoned_record is not None and 'staged_config_sha256' not in abandoned_record:
-        abandoned_record = attest_legacy_manual_operation(repo, abandoned_record, transport, transport_binding, current)
+    recovery_binding = transport_binding
+    recovery_record = existing_record if continue_forward_only else abandoned_record
+    needs_legacy_attestation = abandoned_record is not None and 'staged_config_sha256' not in abandoned_record
+    has_old_transport = (abandoned_record is not None and 'transport_binding' in abandoned_record and
+                         abandoned_record.get('transport_binding') != transport_binding)
+    if (transport and recovery_record and (continue_forward_only or needs_legacy_attestation or has_old_transport)
+            and recovery_record.get('transport_binding') != transport_binding):
+        _, legacy_binding = operator_transport(operator_inventory, current, legacy_binding=True)
+        require(recovery_record.get('transport_binding') == legacy_binding,
+                'manual_legacy_operation_binding_changed')
+        recovery_binding = legacy_binding
+    if needs_legacy_attestation or has_old_transport:
+        abandoned_record = attest_legacy_manual_operation(repo, abandoned_record, transport, recovery_binding, current)
+    if continue_forward_only:
+        # Preserve the frozen journal binding through continuation, including
+        # write-ahead history restoration. The validated direct transport is
+        # used for the read-only attestation below and every subsequent call.
+        transport_binding = recovery_binding
     continuation_proof = None
     continuation_prior_history = None
     continuation_record = dict(existing_record) if continue_forward_only else None

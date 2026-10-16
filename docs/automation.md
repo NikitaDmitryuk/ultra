@@ -336,14 +336,25 @@ base-этапа; исходная failed receipt не подменяется у�
 ### Ручная выкладка через bridge
 
 `make deploy` запускает `scripts/manual-deploy.py` для точного committed `HEAD`;
-tracked-дерево должно быть чистым. Канонический `install.config` задаёт bridge и
-статические узлы; скрипт подключается к bridge через первый static exit как SSH
-jump host. Для этого оператор передаёт локальные пути к ключу и файлу pins:
+tracked-дерево должно быть чистым. Главный сервер установки всегда `bridge`:
+на нём работают VPN-вход и управляющий исполнитель. Статические `exit` — отдельные
+узлы выхода трафика. Канонический `install.config` задаёт bridge и статические узлы.
+Операторский SSH подключается напрямую к bridge, а bridge-контроллер открывает Ansible
+SSH-соединения к exit. Exit не используется как jump host для входа оператора на
+bridge. Для helper передайте локальные пути к bridge-ключу и файлу pins:
 
 ```sh
 ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \
 ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 ```
+
+Для незавершённого upgrade-журнала, созданного до перехода на прямое SSH к bridge,
+явное восстановление сначала сверяет прежнюю transport-привязку и выполняет новую
+read-only аттестацию bridge по его текущему pin. Если в прежней привязке использовались
+exit-identity (`ULTRA_OPERATOR_IDENTITY` или `MAIN_EXIT_SSH_KEY`) и его host-key pin,
+их локальные метаданные и pin должны оставаться доступными и неизменными до завершения
+recovery; соединение через exit при этом не открывается. Новые журналы привязываются
+только к прямому SSH на bridge.
 
 При запуске из отдельного worktree путь к каноническому файлу можно передать через
 `INSTALL_CONFIG=/absolute/path/to/install.config make deploy`. Для конфигурации

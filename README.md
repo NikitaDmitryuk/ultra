@@ -201,11 +201,11 @@ ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \
 ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 ```
 
-`install.config` задаёт bridge и статические узлы; скрипт берёт первый static exit
-как SSH jump host. `ULTRA_OPERATOR_IDENTITY` и `ULTRA_OPERATOR_KNOWN_HOSTS` — пути
-к локальным файлам оператора: выделенному SSH-ключу с правами 0600 и файлу с
-проверенными host-key pins. Соединение использует строгую проверку ключей и не
-читает пользовательский `~/.ssh/config`. Эти файлы остаются локальными.
+`install.config` задаёт bridge и статические узлы; операторский SSH подключается
+напрямую к главному серверу `bridge`. `ULTRA_OPERATOR_IDENTITY` и
+`ULTRA_OPERATOR_KNOWN_HOSTS` — пути к локальным файлам оператора: выделенному SSH-ключу
+с правами 0600 и файлу с проверенными host-key pins. Соединение использует строгую
+проверку ключей и не читает пользовательский `~/.ssh/config`. Эти файлы остаются локальными.
 Для запуска из отдельного worktree передайте канонический файл параметром
 `INSTALL_CONFIG=/absolute/path/to/install.config`; канонический файл храните с
 правами 0600.

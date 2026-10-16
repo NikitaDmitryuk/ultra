@@ -12,6 +12,17 @@
 
 ## Компоненты и потоки
 
+В каждой установке главный сервер — `bridge`: на нём находятся публичный VPN-вход,
+управление маршрутизацией и независимый исполнитель установки. `exit` всегда
+остаётся отдельным узлом выхода трафика; он не становится главным сервером из-за
+порядка подключения, SSH-маршрута или своего положения в конфигурации. Разделение
+ролей задаётся планом установки и проверяется по коду [плана](../internal/installplan/render.go)
+и [исполнителя](../cmd/ultra-install/plan_apply.go).
+Оператор подключается к `bridge`; при управляемых операциях сам bridge-контроллер
+открывает Ansible SSH-соединения к exit. Exit не служит промежуточным SSH-хостом
+для входа оператора на bridge. Источник: [контроллер Ansible](../deploy/ansible/roles/controller)
+и [исполнитель заданий](../internal/deployansible/service.go).
+
 Подписка по умолчанию выдаёт VLESS URI. Явный `format=happ` включает экспериментальные
 JSON-профили с клиентским выбором входа;
 текущая публикация задаётся статическим `subscription_bridges` в spec: REALITY либо XHTTP/TLS. Синхронизация
@@ -36,6 +47,8 @@ JSON-профили с клиентским выбором входа;
 flowchart LR
     Client[Клиент] --> Bridge[ultra-relay: bridge / Xray]
     Bridge --> Exit[ultra-relay: exit / Xray]
+    Operator[Оператор] -->|SSH| Bridge
+    Bridge -.->|Ansible SSH для управления| Exit
     Bridge --> Direct[Прямой выход]
     Telegram[Telegram / Mini App] --> Bot[ultra-bot]
     Bot --> API[Admin API bridge]
