@@ -12,7 +12,7 @@
     that:
       - inventory_hostname != 'bridge'
       - db_tunnel_bridge_public_key_slurp.content is defined
-      - (db_tunnel_bridge_public_key_slurp.content | b64decode | trim) is match('^ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: .*)?$')
+      - "(db_tunnel_bridge_public_key_slurp.content | b64decode | trim) is match('^ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: .*)?$')"
     fail_msg: Bridge database tunnel authorization requires a valid SSH public key read from bridge.
 - name: Create non-login database tunnel account
   ansible.builtin.user:

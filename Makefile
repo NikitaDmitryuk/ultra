@@ -188,6 +188,7 @@ ansible-dist:
 
 test-ansible:
 	python3 scripts/test-ansible-controller-process.py
+	python3 scripts/test-ansible-db-tunnel-authorization.py
 	python3 scripts/test-release-ci.py
 	python3 scripts/test-ansible-owned-file.py
 	python3 scripts/test-ansible-input-types.py
