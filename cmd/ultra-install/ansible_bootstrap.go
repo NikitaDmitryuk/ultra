@@ -268,6 +268,11 @@ func bootstrapRenderOptions(p *installplan.InstallPlan, inspection map[string]bo
 		}
 		return opts, nil
 	}
+	if !p.Bridge.ReuseSpec {
+		// An explicit fresh bootstrap replaces any partial application state left
+		// by an earlier failed attempt. Only frozen retries may reuse its spec.
+		return opts, nil
+	}
 	p.Bridge.ReuseSpec = true
 	var prior config.Spec
 	if err = json.Unmarshal(raw, &prior); err != nil {

@@ -125,6 +125,50 @@ func TestBootstrapRetryRetainsGeneratedIdentities(t *testing.T) {
 	}
 }
 
+func TestFreshBootstrapDoesNotReusePartialBridgeSpec(t *testing.T) {
+	p := installplan.LegacyValuesToPlan(map[string]string{
+		"INSTALL_SCHEMA_VERSION": "2",
+		"BRIDGE_IP":              "192.0.2.1",
+		"MAIN_EXIT_IP":           "192.0.2.2",
+		"REALITY_DEST":           "example.com:443",
+		"REUSE_BRIDGE_SPEC":      "false",
+		"DATABASE_IP":            "192.0.2.40",
+		"SKIP_GEO_DOWNLOAD":      "true",
+		"MAIN_EXIT_DOMAIN":       "gateway.example.com",
+		"DNS_PROVIDER":           "vultr",
+		"DNS_ZONE":               "example.com",
+		"BOT_DOMAIN":             "sync.example.com",
+		"VPN_DOMAIN":             "edge.example.com",
+		"ACME_EMAIL":             "owner@example.com",
+	})
+	completeDeploymentFixture(p, "/release", "/pins")
+	p.Automation.DNS = &installplan.AutomationDNS{
+		Provider: "vultr", Zone: "example.com", TTL: 300,
+		SubscriptionName: "sync", VPNName: "edge",
+	}
+	inspection := bootstrapInspection{}
+	raw, err := json.Marshal(map[string]any{"files": []map[string]string{{
+		"source":  "/etc/ultra-relay/spec.json",
+		"content": base64.StdEncoding.EncodeToString([]byte(`{"role":"bridge"}`)),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(raw, &inspection); err != nil {
+		t.Fatal(err)
+	}
+	options, err := bootstrapRenderOptions(p, map[string]bootstrapInspection{"bridge": inspection})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Bridge.ReuseSpec || options.ExistingBridge != nil {
+		t.Fatal("explicit fresh bootstrap reused a partial bridge specification")
+	}
+	if _, err = installplan.RenderDesiredStateWithOptions(p, options); err != nil {
+		t.Fatalf("managed TLS fresh bootstrap rejected partial bridge state: %v", err)
+	}
+}
+
 func TestBootstrapStateRejectsForeignOrPublicDirectory(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "public")
 	if err := os.Mkdir(directory, 0755); err != nil {
