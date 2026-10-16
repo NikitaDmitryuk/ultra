@@ -27,6 +27,10 @@
     - { key: timezone, value: "'UTC'" }
     - { key: log_timezone, value: "'UTC'" }
     - { key: listen_addresses, value: "'127.0.0.1'" }
+    - { key: wal_level, value: replica }
+    - { key: max_wal_senders, value: '4' }
+    - { key: max_replication_slots, value: '2' }
+    - { key: max_slot_wal_keep_size, value: "'1GB'" }
   notify: Restart PostgreSQL
 - name: Install authenticated application application access
   ansible.builtin.blockinfile:
@@ -54,6 +58,9 @@
       SELECT format('GRANT EXECUTE ON FUNCTION pg_control_system() TO %I', '{{ ultra_postgres.user }}') \gexec
   changed_when: false
   no_log: true
+- name: Configure bridge physical replication
+  ansible.builtin.import_tasks: replication.yml
+  when: ultra_postgres.replication_password is defined
 - name: Apply PostgreSQL settings
   ansible.builtin.meta: flush_handlers
 - name: Verify application login before bridge activation; use DB_CREDENTIALS_FILE for an existing database

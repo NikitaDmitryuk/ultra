@@ -462,6 +462,31 @@ func TestFleetIdentityUsesRootControlledParentAndPrivateRuntimeKey(t *testing.T)
 	}
 }
 
+func TestBootstrapUsesStableSeparatedPostgresReplicationCredential(t *testing.T) {
+	p, ds, inv, inspection := dependencyFixture(t)
+	p.Database.Enabled = true
+	p.Database.PrimaryHost = "192.0.2.40"
+	inv["all"].(map[string]any)["children"].(map[string]any)["databases"] = map[string]any{
+		"hosts": map[string]any{"database": map[string]any{}},
+	}
+	ds.PostgresConfig = &install.PostgresConfig{DBName: "app", DBUser: "app", DBPassword: "fixture-app-password"}
+	if err := prepareBootstrapVariables(p, ds, inv, inspection, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	primary := dependencyVars(inv, "databases", "database")["ultra_postgres"].(map[string]any)
+	bridge := dependencyVars(inv, "bridge", "bridge")["ultra_postgres_replica"].(map[string]any)
+	credential := postgresReplicationPassword("fixture-app-password")
+	if primary["replication_password"] != credential || bridge["password"] != credential {
+		t.Fatal("primary and bridge must receive the same stable replication credential")
+	}
+	if primary["password"] == credential || primary["password"] != "fixture-app-password" {
+		t.Fatal("replication credential must be distinct from the application password")
+	}
+	if postgresReplicationPassword("fixture-app-password") != credential || postgresReplicationPassword("another-password") == credential {
+		t.Fatal("replication credential derivation must be stable and input-bound")
+	}
+}
+
 func TestBootstrapDumpPreflightPrecedesDatabaseMutation(t *testing.T) {
 	for _, name := range []string{"bootstrap.yml", "bootstrap-postgres.yml"} {
 		b, err := os.ReadFile(filepath.Join("..", "..", "deploy", "ansible", "playbooks", name))

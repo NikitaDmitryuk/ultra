@@ -1,0 +1,15 @@
+---
+- name: Observe physical standby cluster identity
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, /usr/lib/postgresql/16/bin/pg_controldata, /var/lib/postgresql/16/ultra-replica]
+  environment:
+    LC_ALL: C
+  register: postgres_replica_control
+  changed_when: false
+- name: Require physical system identifier to match primary
+  ansible.builtin.assert:
+    that:
+      - >-
+        (postgres_replica_control.stdout | regex_findall('Database system identifier:\s+([0-9]+)'))
+        == [hostvars['database'].postgres_replica_primary_identity.stdout | trim]
+    fail_msg: Bridge replica system identifier differs from database primary; automatic reseed is forbidden.

@@ -43,4 +43,5 @@ ADR фиксирует долгосрочный выбор границ комп
 | [0018 — Автономный relay и предпочтительная страна](0018-autonomous-relay-and-preferred-country.md) | accepted |
 | [0019 — Общая квота провайдера и личный потолок](0019-provider-pool-quotas.md) | accepted |
 | [0020 — Общий исполнитель инфраструктуры Ansible](0020-ansible-infrastructure.md) | accepted |
-| [0021 — PostgreSQL на отдельном сервере](0021-dedicated-database.md) | accepted |
+| [0021 — PostgreSQL на отдельном сервере](0021-dedicated-database.md) | superseded |
+| [0022 — Реплика PostgreSQL на bridge](0022-bridge-postgres-replica.md) | accepted |

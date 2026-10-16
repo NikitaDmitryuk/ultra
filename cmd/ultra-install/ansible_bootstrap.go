@@ -493,10 +493,16 @@ func prepareBootstrapVariables(
 	}
 	if ds.PostgresConfig != nil {
 		c := ds.PostgresConfig
+		replicationPassword := postgresReplicationPassword(c.DBPassword)
 		children["databases"].(map[string]any)["hosts"].(map[string]any)["database"].(map[string]any)["ultra_postgres"] = map[string]any{
-			"name":     c.DBName,
-			"user":     c.DBUser,
-			"password": c.DBPassword,
+			"name":                 c.DBName,
+			"user":                 c.DBUser,
+			"password":             c.DBPassword,
+			"replication_password": replicationPassword,
+		}
+		bridge["ultra_postgres_replica"] = map[string]any{
+			"primary_host": p.Database.PrimaryHost,
+			"password":     replicationPassword,
 		}
 		if p.Secrets.DatabaseDumpFile != "" {
 			dbvars := children["databases"].(map[string]any)["hosts"].(map[string]any)["database"].(map[string]any)
@@ -572,6 +578,15 @@ func prepareBootstrapVariables(
 		}
 	}
 	return nil
+}
+
+// postgresReplicationPassword is stable across bootstrap retries while remaining
+// separate from the application login. The bridge already holds DBPassword to
+// write to the primary, so deriving a second high-entropy credential avoids
+// persisting another secret in the install plan or local operation journal.
+func postgresReplicationPassword(databasePassword string) string {
+	digest := sha256.Sum256([]byte("ultra-postgres-replication-v1:" + databasePassword))
+	return hex.EncodeToString(digest[:])
 }
 
 // Freeze the installed geo generation rather than resolving a newer release during adoption.

@@ -55,7 +55,7 @@ class OperationMappingTests(unittest.TestCase):
             self.assertNotIn('ansible.builtin.shell', stage)
             self.assertIn('verified', stage)
 
-    def test_bridge_installs_only_pg16_clients_before_planner_and_backup(self):
+    def test_bridge_installs_pg16_clients_before_planner_and_replica(self):
         import yaml
         for name in ('bootstrap-postgres.yml', 'bootstrap.yml', 'bootstrap-automation.yml'):
             plays = yaml.safe_load((SOURCE / 'playbooks' / name).read_text())
@@ -98,6 +98,41 @@ class OperationMappingTests(unittest.TestCase):
         self.assertNotIn('no_log', tunnel_auth[2])
         self.assertIn('db_tunnel_bridge_public_key_slurp.content | b64decode | trim', tunnel_auth[-1]['ansible.builtin.copy']['content'])
         self.assertNotIn("hostvars['bridge'].db_tunnel_ultra_public_key", str(tunnel_auth))
+
+    def test_dedicated_primary_has_owned_bridge_standby_with_live_wal_verification(self):
+        import yaml
+        for name in ('bootstrap-postgres.yml', 'bootstrap.yml'):
+            plays = yaml.safe_load((SOURCE / 'playbooks' / name).read_text())
+            tunnel = next(i for i, play in enumerate(plays) if play['name'] == 'Activate application database tunnel')
+            slot = next(i for i, play in enumerate(plays) if play['name'] == 'Prepare primary replication slot and identity')
+            replica = next(i for i, play in enumerate(plays) if play['name'] == 'Configure bridge physical standby')
+            self.assertLess(tunnel, slot, name)
+            self.assertLess(slot, replica, name)
+            self.assertEqual(plays[replica]['hosts'], 'bridge')
+            if name == 'bootstrap-postgres.yml':
+                result = next(i for i, play in enumerate(plays) if play['name'] == 'Confirm completed database component')
+                self.assertLess(replica, result)
+        root = SOURCE / 'roles/postgres_replica'
+        inspect = (root / 'tasks/inspect.yml').read_text()
+        self.assertIn('standby.signal', inspect)
+        self.assertIn('system_identifier', inspect)
+        seed = (root / 'tasks/seed.yml').read_text()
+        self.assertIn('--write-recovery-conf', seed)
+        self.assertIn('--slot=ultra_bridge', seed)
+        self.assertIn('renameat2', seed)
+        self.assertIn('postgres_replica_staging.path', seed)
+        self.assertNotIn('pg_resetwal', seed)
+        verify = yaml.safe_load((root / 'tasks/verify.yml').read_text())
+        self.assertEqual(verify[0]['retries'], 30)
+        self.assertEqual(verify[-1]['retries'], 30)
+        self.assertIn('pg_last_wal_replay_lsn()', str(verify[-1]))
+        self.assertIn("status = 'streaming'", str(verify[-1]))
+        service = (root / 'templates/ultra-postgres-replica.service.j2').read_text()
+        self.assertIn('Requires=ultra-db-tunnel.service', service)
+        self.assertNotIn('promote', service)
+        primary = (SOURCE / 'roles/postgres/tasks/replication.yml').read_text()
+        self.assertIn('host replication ultra_replication 127.0.0.1/32 scram-sha-256', primary)
+        self.assertIn('NOSUPERUSER NOCREATEDB NOCREATEROLE', primary)
 
     def test_no_removed_operation_or_caller_chosen_path(self):
         for operation in ['verify', '../ingress', '/tmp/ingress', 'ingress.yml', 'arbitrary']:

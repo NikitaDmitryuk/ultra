@@ -54,10 +54,16 @@ flowchart LR
     Bot --> API[Admin API bridge]
     API --> Managers[Менеджеры пользователей и exit]
     Managers --> DB[(PostgreSQL)]
+    DB -.->|async physical replication| BridgeReplica[(PostgreSQL standby)]
     Managers --> Config[Сборка конфигурации]
     Config --> Bridge
     Bot --> DB
 ```
+
+PostgreSQL primary работает на отдельном `database`; ограниченный async standby
+работает на `bridge` в отдельном кластере. Relay и bot продолжают использовать
+primary через bridge SSH-туннель, потому что запуск relay применяет миграции.
+Реплика не продвигается автоматически и не заменяет зашифрованные backups.
 
 Схема показывает основные отношения, а не все вызовы. API Mini App обращается к Admin API
 для управления пользователями и exit, а состояние администраторов и уведомлений бот
@@ -161,9 +167,10 @@ Mini App проверяет Telegram initData и права администра
 номер изменения защищает подтверждение от конкурентной записи.
 [Worker Vultr](vultr.md) работает на bridge; новые локации публикуются после проверки.
 PostgreSQL размещается на отдельном DB-сервере. Bridge подключается через
-закреплённый SSH-туннель с loopback-портом 25432; PostgreSQL на VPN-хостах и
-физические реплики не поддерживаются. Bootstrap создаёт БД, миграции применяет
-relay. См. [контракт развёртывания](automation.md).
+закреплённый SSH-туннель с loopback-портом 25432; отдельный standby-кластер
+PostgreSQL на bridge принимает физическую репликацию. Bootstrap создаёт БД и
+проверяет поток primary → standby, миграции применяет relay на primary. См.
+[контракт развёртывания](automation.md).
 
 ## Управляемый HTTPS VPN-вход
 

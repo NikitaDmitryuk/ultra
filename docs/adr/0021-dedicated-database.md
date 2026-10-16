@@ -2,7 +2,11 @@
 
 ## Статус
 
-accepted
+superseded (2026-10-16): отдельный primary с async standby на bridge.
+
+## Заменено
+
+[0022 — Реплика PostgreSQL на bridge](0022-bridge-postgres-replica.md).
 
 ## Дата
 

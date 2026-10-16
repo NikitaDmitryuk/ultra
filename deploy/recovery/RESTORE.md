@@ -72,7 +72,9 @@ identity не передаётся ни новой VM, ни exits.
 endpoint-записях; UUID, токены, SNI и адреса exits сохраняются. Bridge подключается
 к выделенной БД через `ultra-db-tunnel.service`; Ansible применяет туннель к
 `database_host` до запуска relay. Backup хранит `/etc/ultra-db-tunnel` и unit туннеля.
-Физическая PostgreSQL-репликация не используется. Для управляемого Vultr exit проверяются
+Текущий restore не создаёт физическую standby-копию PostgreSQL на bridge и не
+проверяет её поток; успешный restore сам по себе не подтверждает полную штатную
+топологию базы. Для управляемого Vultr exit проверяются
 instance, IP и собственная firewall group, затем добавляются правила нового
 bridge для SSH и фактического tunnel-порта. Старые правила не удаляются.
 
