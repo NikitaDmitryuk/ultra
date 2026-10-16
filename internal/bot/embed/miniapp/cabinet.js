@@ -447,53 +447,19 @@ async function service() {
     .filter((o) => o.state !== "deleted" && o.state !== "cancelled")
     .map(
       (o) =>
-        `<div class="card"><div class="row"><h2>${esc(o.offer.region.city)}</h2><span class="badge ${o.state === "ready" ? "good" : o.state === "failed" || o.state === "unknown" ? "bad" : "wait"}">${esc(serverStateLabel(o, capacity))}</span></div><p>${esc(o.offer.plan.id)} · $${o.offer.price.monthly_cost}/месяц</p><p class="muted">${esc(serverBillingLabel(o))}</p>${o.error ? `<p class="bad">${esc(o.error_message || o.error)}</p>` : ""}${o.state === "ready" && !o.serves_subscription_ingress ? `<button class="btn secondary" data-replace="${esc(o.id)}">Сменить регион</button>` : ""}${o.state === "failed" || o.state === "unknown" ? `<button class="btn secondary" data-action="retry" data-op="${esc(o.id)}">Повторить проверку / продолжить</button>` : ""}<button class="btn secondary" data-events="${esc(o.id)}">Журнал операции</button>${o.serves_subscription_ingress ? "<p>Обслуживает подписки · перед удалением или заменой перенесите HTTPS-вход</p>" : o.instance_id ? `<button class="btn danger" data-action="delete" data-op="${esc(o.id)}">Удалить сервер</button>` : o.phase === "prepare" ? `<button class="btn secondary" data-action="cancel" data-op="${esc(o.id)}">Отменить создание</button>` : ""}</div>`,
+        `<div class="card" data-op-card="${esc(o.id)}"><div class="row"><h2>${esc(o.offer.region.city)}</h2><span class="badge ${o.state === "ready" ? "good" : o.state === "failed" || o.state === "unknown" ? "bad" : "wait"}" data-op-status>${esc(serverStateLabel(o, capacity))}</span></div><p>${esc(o.offer.plan.id)} · $${o.offer.price.monthly_cost}/месяц</p><div data-op-details>${cloudOperationDetailsHTML(o)}</div><button class="btn secondary" data-events="${esc(o.id)}">Журнал операции</button></div>`,
     )
     .join(
       "",
     )}${capacity ? serverCapacityHTML(capacity) : "<p>Состояние выходов временно недоступно</p>"}<h2>Копии базы данных</h2><p class="muted">Основная БД на bridge. Восстановление — вручную.</p>${replicas.map((r) => `<div class="card"><strong>${esc(r.name)}</strong><p>${esc({ streaming: "Копия обновляется", syncing: "Первичная синхронизация", insufficient_space: "Недостаточно места", lagging: "Копия отстаёт", disconnected: "Нет потока репликации", unexpected_primary: "БД переведена в основную — требуется ручная проверка", error: "Копия БД недоступна: требуется проверка SSH/PostgreSQL", not_configured: "Ещё не настроена" }[r.state] || r.state)}</p><small>${r.free_bytes > 0 ? `Свободно: ${(r.free_bytes / 1073741824).toFixed(1)} ГБ` : "Свободное место: нет данных"}${r.required_bytes > 0 ? ` · нужно для копии: ${(r.required_bytes / 1073741824).toFixed(1)} ГБ` : ""}</small></div>`).join("") || '<p class="muted">Состояние копий пока недоступно</p>'}<p class="muted">Узлы, настроенные вручную, обслуживаются через локальный установщик. Они продолжают участвовать в маршрутах.</p><button class="btn secondary" id="refresh-service">Обновить</button>`;
   button("diagnostics-view", diagnostics);
   loadCloudAccount();
-  document
-    .querySelectorAll("[data-events]")
-    .forEach(
-      (el) =>
-        (el.onclick = () =>
-          operationEvents(el.dataset.events).catch((e) => notice(e.message))),
-    );
+  bindCloudOperationControls();
   button("create-server", () => serverOffer(""));
   button("refresh-service", service);
-  document
-    .querySelectorAll("[data-replace]")
-    .forEach(
-      (el) =>
-        (el.onclick = () =>
-          serverOffer(el.dataset.replace).catch((e) => notice(e.message))),
-    );
-  document.querySelectorAll("[data-op]").forEach(
-    (el) =>
-      (el.onclick = () => {
-        const action = el.dataset.action;
-        confirm(
-          action === "delete"
-            ? "Удалить платный сервер?"
-            : "Продолжить операцию?",
-          action === "delete"
-            ? "Сначала отключим маршрут. Удаление VPS необратимо; настройки локации сохранятся для резервного маршрута."
-            : "Повтор продолжит сохранённую операцию. При неизвестном результате покупка не повторяется.",
-          action === "delete" ? "Удалить" : "Продолжить",
-          async () => {
-            await api(`/api/cloud/operations/${el.dataset.op}/action`, "POST", {
-              action,
-            });
-            await service();
-          },
-        );
-      }),
-  );
   if (ops.some((o) => o.state === "pending" || o.state === "unknown"))
     refreshTimer = setTimeout(() => {
-      if (currentTab === "service") service().catch((e) => notice(e.message));
+      refreshOperationCards(version);
     }, 5000);
 }
 async function serverOffer(replace) {
@@ -869,4 +835,82 @@ function serverStateLabel(o, capacity) {
         : "Сервер создан · туннель недоступен";
   }
   return phases[o.phase] || "Создание сервера";
+}
+function cloudOperationDetailsHTML(o) {
+  return `<p class="muted">${esc(serverBillingLabel(o))}</p>${o.error ? `<p class="bad">${esc(o.error_message || o.error)}</p>` : ""}${o.state === "ready" && !o.serves_subscription_ingress ? `<button class="btn secondary" data-replace="${esc(o.id)}">Сменить регион</button>` : ""}${o.state === "failed" || o.state === "unknown" ? `<button class="btn secondary" data-action="retry" data-op="${esc(o.id)}">Повторить проверку / продолжить</button>` : ""}${o.serves_subscription_ingress ? "<p>Обслуживает подписки · перед удалением или заменой перенесите HTTPS-вход</p>" : o.instance_id ? `<button class="btn danger" data-action="delete" data-op="${esc(o.id)}">Удалить сервер</button>` : o.phase === "prepare" ? `<button class="btn secondary" data-action="cancel" data-op="${esc(o.id)}">Отменить создание</button>` : ""}`;
+}
+
+function bindCloudOperationControls() {
+  document
+    .querySelectorAll("[data-events]")
+    .forEach(
+      (el) =>
+        (el.onclick = () =>
+          operationEvents(el.dataset.events).catch((e) => notice(e.message))),
+    );
+  document.querySelectorAll("[data-replace]").forEach(
+    (el) =>
+      (el.onclick = () =>
+        serverOffer(el.dataset.replace).catch((e) => notice(e.message))),
+  );
+  document.querySelectorAll("[data-op]").forEach(
+    (el) =>
+      (el.onclick = () => {
+        const action = el.dataset.action;
+        confirm(
+          action === "delete"
+            ? "Удалить платный сервер?"
+            : "Продолжить операцию?",
+          action === "delete"
+            ? "Сначала отключим маршрут. Удаление VPS необратимо; настройки локации сохранятся для резервного маршрута."
+            : "Повтор продолжит сохранённую операцию. При неизвестном результате покупка не повторяется.",
+          action === "delete" ? "Удалить" : "Продолжить",
+          async () => {
+            await api(`/api/cloud/operations/${el.dataset.op}/action`, "POST", {
+              action,
+            });
+            await service();
+          },
+        );
+      }),
+  );
+}
+
+async function refreshOperationCards(version) {
+  if (version !== viewVersion || currentTab !== "service") return;
+  try {
+    const [ops, capacity] = await Promise.all([
+      api("/api/cloud/operations"),
+      api("/api/cloud/quotas").catch(() => null),
+    ]);
+    if (version !== viewVersion || currentTab !== "service") return;
+    const cards = new Map(
+      [...app.querySelectorAll("[data-op-card]")].map((card) => [
+        card.dataset.opCard,
+        card,
+      ]),
+    );
+    for (const op of ops) {
+      const card = cards.get(op.id);
+      if (!card) continue;
+      if (op.state === "deleted" || op.state === "cancelled") {
+        card.hidden = true;
+        continue;
+      }
+      card.hidden = false;
+      const status = card.querySelector("[data-op-status]");
+      if (status) {
+        status.className = `badge ${op.state === "ready" ? "good" : op.state === "failed" || op.state === "unknown" ? "bad" : "wait"}`;
+        status.textContent = serverStateLabel(op, capacity);
+      }
+      const details = card.querySelector("[data-op-details]");
+      if (details) details.innerHTML = cloudOperationDetailsHTML(op);
+    }
+    bindCloudOperationControls();
+    if (ops.some((o) => o.state === "pending" || o.state === "unknown"))
+      refreshTimer = setTimeout(() => refreshOperationCards(version), 5000);
+  } catch {
+    if (version === viewVersion && currentTab === "service")
+      refreshTimer = setTimeout(() => refreshOperationCards(version), 5000);
+  }
 }

@@ -116,7 +116,7 @@ function page(self, responses) {
     },
   });
   vm.runInContext(source, context);
-  return { context, el, calls, copied, opened };
+  return { context, el, calls, copied, opened, responses };
 }
 test("personal cabinet reuses subscription and opens HTTPS import without admin APIs", async () => {
   const p = page(true, {
@@ -222,6 +222,55 @@ test("Vultr displays server DTO price and replica state", async () => {
   assert.ok(!p.el("#app").innerHTML.includes("$undefined"));
   assert.ok(p.el("#app").innerHTML.includes("Копия обновляется"));
   assert.ok(!p.el("#app").innerHTML.includes("Добавить узел вручную"));
+});
+
+test("Vultr status polling updates the existing card without replacing its price", async () => {
+  const op = {
+    id: "op",
+    offer: {
+      region: { city: "Frankfurt" },
+      plan: { id: "vc2-1c-1gb" },
+      price: { monthly_cost: 5, hourly_cost: 0.007 },
+    },
+    state: "pending",
+    phase: "create",
+    charged: false,
+  };
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/cloud/operations": [op],
+    "/api/cloud/quotas": { nodes: [], budgets: [] },
+    "/api/cloud/replicas": [],
+  });
+  await flush();
+  vm.runInContext('currentTab = "service"', p.context);
+  await vm.runInContext("service()", p.context);
+  const html = p.el("#app").innerHTML;
+  const status = { className: "", textContent: "" };
+  const details = { innerHTML: "" };
+  const card = {
+    dataset: { opCard: "op" },
+    hidden: false,
+    querySelector(selector) {
+      return selector === "[data-op-status]" ? status : details;
+    },
+  };
+  p.el("#app").querySelectorAll = (selector) =>
+    selector === "[data-op-card]" ? [card] : [];
+  p.responses["/api/cloud/operations"] = [
+    { ...op, state: "unknown", phase: "verify", charged: true },
+  ];
+
+  await vm.runInContext(
+    "refreshOperationCards(viewVersion)",
+    p.context,
+  );
+
+  assert.equal(p.el("#app").innerHTML, html);
+  assert.ok(html.includes("$5/месяц"));
+  assert.equal(status.textContent, "Результат создания проверяется");
+  assert.match(details.innerHTML, /Оплата продолжается/);
 });
 
 test("traffic activity is separate from permission and does not imply online", async () => {
