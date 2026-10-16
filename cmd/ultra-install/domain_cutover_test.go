@@ -11,7 +11,7 @@ import (
 
 func TestCutoverCanonicalDeltaPreservesLegacyBackendAndIsRepeatable(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "install.config")
-	original := "ULTRA_AUTOMATION_STATIC_NODES=[{\"name\":\"primary\",\"address\":\"192.0.2.2\",\"provider\":\"fixture\"}]\nULTRA_AUTOMATION_ADMIN_TELEGRAM_ID=123\n# keep ownership policy\nBOT_DOMAIN=old.example.com\nBOT_INGRESS_IP=192.0.2.2\nPUBLIC_HOST=192.0.2.1\n"
+	original := "ULTRA_AUTOMATION_STATIC_NODES=[{\"name\":\"primary\",\"address\":\"192.0.2.2\",\"provider\":\"fixture\"}]\nULTRA_AUTOMATION_ADMIN_TELEGRAM_ID=123\n# keep ownership policy\nBOT_DOMAIN=old.example.com\nBOT_INGRESS_IP=192.0.2.2\nPUBLIC_HOST=192.0.2.1\nVLESS_PORT=24443\n"
 	if err := os.WriteFile(file, []byte(original), 0644); err != nil {
 		t.Fatal(err)
 	}

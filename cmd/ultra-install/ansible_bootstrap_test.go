@@ -130,6 +130,7 @@ func TestFreshBootstrapDoesNotReusePartialBridgeSpec(t *testing.T) {
 		"INSTALL_SCHEMA_VERSION": "2",
 		"BRIDGE_IP":              "192.0.2.1",
 		"MAIN_EXIT_IP":           "192.0.2.2",
+		"VLESS_PORT":             "24443",
 		"REALITY_DEST":           "example.com:443",
 		"REUSE_BRIDGE_SPEC":      "false",
 		"DATABASE_IP":            "192.0.2.40",

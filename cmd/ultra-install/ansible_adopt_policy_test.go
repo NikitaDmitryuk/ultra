@@ -18,6 +18,7 @@ func adoptionPolicyFixture(t *testing.T) (*installplan.InstallPlan, bootstrapIns
 		map[string]string{
 			"BRIDGE_IP":                         "192.0.2.1",
 			"MAIN_EXIT_IP":                      "192.0.2.2",
+			"VLESS_PORT":                        "24443",
 			"BRIDGE_SSH_KEY":                    "/identity",
 			"BOT_ENV_FILE":                      "/private/secrets.env",
 			"EXIT_TUNNEL_UUID":                  "preserved-tunnel",
