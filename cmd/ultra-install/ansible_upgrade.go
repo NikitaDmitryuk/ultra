@@ -51,7 +51,9 @@ func ansibleUpgrade(
 	forwardOnlyOption ...bool,
 ) (returnErr error) {
 	if p != nil && p.Features.MainExitDomain != "" {
-		return errors.New("managed tunnel TLS upgrade is not supported yet; use fresh bootstrap only")
+		return errors.New(
+			"managed tunnel TLS upgrade is not supported yet; preserve the existing installation and do not bypass this guard with bootstrap",
+		)
 	}
 	forwardOnly := len(forwardOnlyOption) == 1 && forwardOnlyOption[0]
 	if len(forwardOnlyOption) > 1 || (forwardOnly && retryFailed) {
