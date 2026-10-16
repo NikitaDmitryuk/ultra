@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,8 +64,8 @@ func TestNativeAdoptionFreezesInitialExecutorAcrossBrokerInstallation(t *testing
 }
 
 func TestNativeStageRetryChecksMachineBeforeAnyLeaseOrAction(t *testing.T) {
-	for _, valid := range []bool{true, false} {
-		t.Run(fmt.Sprintf("machine_%v", valid), func(t *testing.T) {
+	for _, fault := range []string{"none", "machine", "broker-unavailable", "lifecycle_retired", "lifecycle_not_owned", "lifecycle_released", "lifecycle_mismatch", "malformed-attachment", "action-failed"} {
+		t.Run(fault, func(t *testing.T) {
 			const state = "/tmp/native-operator"
 			attempt := state + "/bootstrap-fixture/attempt"
 			directory := attempt + "/bootstrap-exit"
@@ -92,7 +92,7 @@ func TestNativeStageRetryChecksMachineBeforeAnyLeaseOrAction(t *testing.T) {
 				directory + "/job.json":          job,
 				attempt + "/execution-mode.json": mode,
 			}
-			locked, acted := false, false
+			locked, acted, attached, brokerReleased, operatorReleased, stateReleased := false, false, false, false, false, false
 			deps := frozenBootstrapRetryDependencies{
 				readPrivate: func(path string) ([]byte, error) {
 					raw, ok := files[path]
@@ -105,31 +105,53 @@ func TestNativeStageRetryChecksMachineBeforeAnyLeaseOrAction(t *testing.T) {
 					if sha != strings.Repeat("a", 64) {
 						t.Fatal("machine binding lost")
 					}
-					return valid
+					return fault != "machine"
 				},
 				operator: func(ctx context.Context, path string) (context.Context, func(), error) {
 					locked = true
-					return ctx, func() {}, nil
+					return ctx, func() { operatorReleased = true }, nil
 				},
 				remoteLock: func(ctx context.Context, path string) (context.Context, func(), error) {
 					locked = true
-					return ctx, func() {}, nil
+					return context.WithValue(ctx, retryAttachmentTestKey{}, state), func() { stateReleased = true }, nil
+				},
+				attach: func(ctx context.Context, lock, id string) (context.Context, func(), error) {
+					attached = true
+					if lock != bootstrapBrokerLockDirectory || id != lifecycleID(attempt) || ctx.Value(retryAttachmentTestKey{}) != state {
+						t.Fatal("native retry lost canonical lifecycle or stateRoot context")
+					}
+					if fault != "none" && fault != "action-failed" {
+						return ctx, nil, errors.New(fault)
+					}
+					return context.WithValue(ctx, retryAttachmentTestKey{}, "broker-context-must-not-replace-state"), func() { brokerReleased = true }, nil
 				},
 			}
 			_, err := withFrozenBootstrapStageLeaseWith(
 				context.Background(),
 				directory,
 				deps,
-				func(context.Context) (deployansible.Receipt, error) {
+				func(ctx context.Context) (deployansible.Receipt, error) {
 					acted = true
+					if !attached || brokerReleased || operatorReleased || stateReleased || ctx.Value(retryAttachmentTestKey{}) != state {
+						t.Fatal("native callback lost original execution context or held leases")
+					}
+					if fault == "action-failed" {
+						return deployansible.Receipt{}, errors.New("action failed")
+					}
 					return deployansible.Receipt{State: "succeeded"}, nil
 				},
 			)
-			if valid && (err != nil || !locked || !acted) {
+			if fault == "action-failed" && (err == nil || !acted || !brokerReleased || !operatorReleased || !stateReleased) {
+				t.Fatalf("failed action leaked native leases: %v", err)
+			}
+			if fault == "none" && (err != nil || !locked || !acted || !brokerReleased || !operatorReleased || !stateReleased) {
 				t.Fatal("valid native retry failed", err)
 			}
-			if !valid && (err == nil || locked || acted) {
+			if fault == "machine" && (err == nil || locked || attached || acted) {
 				t.Fatal("different machine acquired lease or replayed")
+			}
+			if fault != "none" && fault != "machine" && fault != "action-failed" && (err == nil || !attached || acted || !operatorReleased || !stateReleased) {
+				t.Fatalf("invalid lifecycle reached action or leaked locks: %v", err)
 			}
 		})
 	}

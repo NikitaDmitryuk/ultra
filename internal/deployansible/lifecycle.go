@@ -345,11 +345,24 @@ func (c Client) WithLifecycleOperationLock(ctx context.Context, directory, id st
 	if !controllerLockBusy(err) {
 		return ctx, nil, err
 	}
+	return c.WithActiveLifecycleOperationLock(ctx, directory, id)
+}
+
+// WithActiveLifecycleOperationLock requires the broker to authorize the exact
+// active lifecycle, even when the local flock is free. Frozen-stage retries use
+// this path so a released or retired attempt cannot replay infrastructure work.
+func (c Client) WithActiveLifecycleOperationLock(ctx context.Context, directory, id string) (context.Context, func(), error) {
+	if !jobID.MatchString(id) {
+		return ctx, nil, errors.New("invalid operation id")
+	}
 	response, err := c.exchange(ctx, Message{Action: "lease-attach", ID: id})
 	if err != nil {
 		return ctx, nil, err
 	}
 	defer closeInputs(response.leaseOutputs)
+	if response.State != "applying" || len(response.leaseOutputs) != 1 {
+		return ctx, nil, errors.New("invalid lifecycle attachment state")
+	}
 	file, err := retainInfrastructureLock(response.leaseOutputs[0], filepath.Join(directory, "infrastructure.lock"))
 	if err != nil {
 		return ctx, nil, errors.New("untrusted lifecycle descriptor")
@@ -435,8 +448,14 @@ func (c Client) ResumeLifecycleWithOperationLock(ctx context.Context, id string)
 // RetireLifecycle permanently fences an exact applying UUID. It requires a root
 // peer and may need retry after an old operator closes its infrastructure lock.
 func (c Client) RetireLifecycle(ctx context.Context, id string) error {
-	_, err := c.exchange(ctx, Message{Action: "lease-retire", ID: id})
-	return err
+	response, err := c.exchange(ctx, Message{Action: "lease-retire", ID: id})
+	if err != nil {
+		return err
+	}
+	if response.State != "released" {
+		return errors.New("invalid lifecycle retirement state")
+	}
+	return nil
 }
 
 // supersede preserves the verified locked OFD throughout the handoff. The

@@ -17,7 +17,7 @@ import (
 type retryAttachmentTestKey struct{}
 
 func TestFrozenLocalBootstrapRetryAttachesSameBrokerLease(t *testing.T) {
-	for _, fault := range []string{"none", "machine", "inventory", "execution-lock", "root-private", "operator-missing", "operator-path", "operator-layout", "operator-busy", "broker"} {
+	for _, fault := range []string{"none", "machine", "inventory", "execution-lock", "root-private", "operator-missing", "operator-path", "operator-layout", "operator-busy", "broker", "lifecycle_retired", "lifecycle_not_owned"} {
 		t.Run(fault, func(t *testing.T) {
 			attempt := "/tmp/original-state/bootstrap-plan/attempt-frozen"
 			directory := filepath.Join(attempt, "apply")
@@ -99,6 +99,9 @@ func TestFrozenLocalBootstrapRetryAttachesSameBrokerLease(t *testing.T) {
 					if lock != bootstrapBrokerLockDirectory || id != lifecycleID(attempt) {
 						t.Fatal("wrong lock or UUID")
 					}
+					if fault == "lifecycle_retired" || fault == "lifecycle_not_owned" {
+						return ctx, nil, errors.New(fault)
+					}
 					if fault == "broker" {
 						return ctx, nil, errors.New("broker retained lock unavailable")
 					}
@@ -130,68 +133,60 @@ func TestFrozenLocalBootstrapRetryAttachesSameBrokerLease(t *testing.T) {
 			} else if err == nil || replayed {
 				t.Fatal("invalid local retry accepted", fault)
 			}
+			if (fault == "lifecycle_retired" || fault == "lifecycle_not_owned") && (err == nil || err.Error() != fault || !attached || released) {
+				t.Fatal("broker rejection was not preserved before replay", err)
+			}
 			if remote {
 				t.Fatal("local retry fell back to independent lock")
 			}
-			if fault != "none" && fault != "broker" && attached {
+			if fault != "none" && fault != "broker" && fault != "lifecycle_retired" && fault != "lifecycle_not_owned" && attached {
 				t.Fatal("invalid local identity attached broker")
 			}
 		})
 	}
 }
 
-func TestFrozenRemoteBootstrapRetryKeepsOriginalLockRoute(t *testing.T) {
-	directory := "/tmp/legacy-fixture/apply"
-	request, _ := json.Marshal(
-		map[string]any{
-			"inventory": map[string]any{},
-			"variables": map[string]any{"ultra_lock_directory": "/root/.cache/original-operation"},
-		},
-	)
-	digest := sha256.Sum256(request)
-	job, _ := json.Marshal(
-		map[string]any{
-			"schema_version": 1,
-			"operation":      "bootstrap",
-			"request_sha256": hex.EncodeToString(digest[:]),
-			"binary_sha256":  hex.EncodeToString(digest[:]),
-		},
-	)
-	remote := false
-	deps := frozenBootstrapRetryDependencies{
-		readPrivate: func(path string) ([]byte, error) {
-			switch filepath.Base(path) {
-			case "request.json":
-				return request, nil
-			case "job.json":
-				return job, nil
-			default:
-				return nil, os.ErrNotExist
+func TestFrozenRemoteBootstrapRetryRejectsBeforeLocksOrAction(t *testing.T) {
+	for _, kind := range []string{"remote", "legacy-no-mode"} {
+		t.Run(kind, func(t *testing.T) {
+			const lock = "/tmp/original-private-lock"
+			request, _ := json.Marshal(map[string]any{"inventory": map[string]any{}, "variables": map[string]any{"ultra_lock_directory": lock}})
+			digest := sha256.Sum256(request)
+			job, _ := json.Marshal(map[string]any{"schema_version": 1, "operation": "bootstrap", "request_sha256": hex.EncodeToString(digest[:]), "binary_sha256": hex.EncodeToString(digest[:])})
+			mode, _ := json.Marshal(frozenExecution{Schema: 1, LockDirectory: lock, OperatorDirectory: lock + "/operator"})
+			unexpectedLock := func(ctx context.Context, _ string) (context.Context, func(), error) {
+				t.Fatal("unsupported remote retry acquired a lock")
+				return ctx, func() {}, nil
 			}
-		},
-		operator: func(ctx context.Context, path string) (context.Context, func(), error) {
-			if path != "/root/.cache/original-operation/operator" {
-				t.Fatal("legacy original operator path changed")
+			deps := frozenBootstrapRetryDependencies{
+				readPrivate: func(path string) ([]byte, error) {
+					switch filepath.Base(path) {
+					case "request.json":
+						return request, nil
+					case "job.json":
+						return job, nil
+					case "execution-mode.json":
+						if kind == "remote" {
+							return mode, nil
+						}
+					}
+					return nil, os.ErrNotExist
+				},
+				operator: unexpectedLock, remoteLock: unexpectedLock,
+				attach: func(ctx context.Context, _, _ string) (context.Context, func(), error) {
+					t.Fatal("unsupported remote retry attached a broker lease")
+					return ctx, func() {}, nil
+				},
+				replay: func(context.Context, string, string, string) (deployansible.Receipt, error) {
+					t.Fatal("unsupported remote retry reached action")
+					return deployansible.Receipt{}, nil
+				},
 			}
-			return ctx, func() {}, nil
-		},
-		remoteLock: func(ctx context.Context, lock string) (context.Context, func(), error) {
-			remote = true
-			if lock != "/root/.cache/original-operation" {
-				t.Fatal("legacy lock changed")
+			_, err := retryFrozenBootstrapOperatorWith(context.Background(), "/tmp/legacy-fixture/apply", "python", "ansible", deps)
+			if err == nil || err.Error() != "retry_remote_lifecycle_attachment_unsupported" {
+				t.Fatalf("unexpected rejection: %v", err)
 			}
-			return ctx, func() {}, nil
-		},
-		replay: func(_ context.Context, path, python, exe string) (deployansible.Receipt, error) {
-			if path != directory {
-				t.Fatal("legacy stage changed")
-			}
-			return deployansible.Receipt{State: "succeeded"}, nil
-		},
-	}
-	if _, err := retryFrozenBootstrapOperatorWith(context.Background(), directory, "/usr/bin/python3", "/usr/bin/ansible-playbook", deps); err != nil ||
-		!remote {
-		t.Fatal("remote legacy route changed", err)
+		})
 	}
 }
 
@@ -336,7 +331,7 @@ func syntheticLocalBootstrapRetryInventory(t *testing.T) map[string]any {
 func TestFrozenStageLeaseRevalidatesOriginalInputsBeforeInternalCallback(t *testing.T) {
 	for _, fault := range []string{"none", "request-changed", "job-changed", "receipt-changed"} {
 		t.Run(fault, func(t *testing.T) {
-			directory := "/tmp/frozen-remote/apply"
+			directory := "/tmp/frozen-native/apply"
 			request, _ := json.Marshal(
 				map[string]any{
 					"inventory": map[string]any{},
@@ -352,11 +347,14 @@ func TestFrozenStageLeaseRevalidatesOriginalInputsBeforeInternalCallback(t *test
 					"binary_sha256":  hex.EncodeToString(digest[:]),
 				},
 			)
+			mode, _ := json.Marshal(frozenExecution{Schema: 1, Native: true, LockDirectory: "/tmp/original-private-lock", OperatorDirectory: "/tmp/original-private-lock/operator"})
 			var receipt []byte
 			locked, called, released := false, false, false
 			deps := frozenBootstrapRetryDependencies{
 				readPrivate: func(path string) ([]byte, error) {
 					switch filepath.Base(path) {
+					case "execution-mode.json":
+						return mode, nil
 					case "request.json":
 						return request, nil
 					case "job.json":
@@ -370,6 +368,8 @@ func TestFrozenStageLeaseRevalidatesOriginalInputsBeforeInternalCallback(t *test
 						return nil, os.ErrNotExist
 					}
 				},
+				nativeMachine: func(string) bool { return true },
+				attach:        func(ctx context.Context, _, _ string) (context.Context, func(), error) { return ctx, func() {}, nil },
 				operator: func(ctx context.Context, path string) (context.Context, func(), error) {
 					if path != "/tmp/original-private-lock/operator" {
 						t.Fatal("callback changed original operator")
@@ -419,7 +419,7 @@ func TestFrozenStageLeaseRevalidatesOriginalInputsBeforeInternalCallback(t *test
 	}
 }
 
-func TestRemoteCompatibilityCannotRunWhileCanonicalOperatorChecksWithFleetFree(t *testing.T) {
+func TestRemoteCompatibilityRejectsEvenWhenOriginalLocksBecomeFree(t *testing.T) {
 	for _, modeKind := range []string{"recorded-operator", "legacy-no-mode"} {
 		t.Run(modeKind, func(t *testing.T) {
 			root := t.TempDir()
@@ -482,8 +482,8 @@ func TestRemoteCompatibilityCannotRunWhileCanonicalOperatorChecksWithFleetFree(t
 				t.Fatal("remote callback overlapped canonical checking")
 			}
 			operatorRelease()
-			if _, err = withFrozenBootstrapStageLease(context.Background(), directory, action); err != nil || !called {
-				t.Fatal("original remote operator+fleet locks did not resume", err)
+			if _, err = withFrozenBootstrapStageLease(context.Background(), directory, action); err == nil || called || err.Error() != "retry_remote_lifecycle_attachment_unsupported" {
+				t.Fatal("remote retry resumed without bridge lease", err)
 			}
 			_, release, err := withBootstrapOperatorLock(context.Background(), root)
 			if err != nil {

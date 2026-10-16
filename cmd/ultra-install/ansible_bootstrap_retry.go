@@ -41,7 +41,7 @@ func frozenBootstrapStageLeaseDependencies() frozenBootstrapRetryDependencies {
 			return deployansible.WithOperationLock(ctx, path)
 		},
 		attach: func(ctx context.Context, lock, id string) (context.Context, func(), error) {
-			return (deployansible.Client{Socket: bootstrapBrokerSocket}).WithLifecycleOperationLock(ctx, lock, id)
+			return (deployansible.Client{Socket: bootstrapBrokerSocket}).WithActiveLifecycleOperationLock(ctx, lock, id)
 		},
 		remoteLock: deployansible.WithOperationLock,
 	}
@@ -167,7 +167,7 @@ func withFrozenBootstrapStageLeaseWith(
 		}
 		return nil
 	}
-	remote := func(operatorDirectory string, modePath string, originalMode []byte) (deployansible.Receipt, error) {
+	native := func(operatorDirectory string, modePath string, originalMode []byte) (deployansible.Receipt, error) {
 		if filepath.Clean(lock) == bootstrapBrokerLockDirectory {
 			return deployansible.Receipt{}, errors.New("retry_local_broker_attachment_required")
 		}
@@ -190,14 +190,10 @@ func withFrozenBootstrapStageLeaseWith(
 			return deployansible.Receipt{}, err
 		}
 		rawMode, modeReadErr := deps.readPrivate(modePath)
-		if originalMode != nil {
-			if modeReadErr != nil {
-				return deployansible.Receipt{}, modeReadErr
-			}
-			if !bytes.Equal(rawMode, originalMode) {
-				return deployansible.Receipt{}, errors.New("retry_frozen_inputs_changed")
-			}
-		} else if !os.IsNotExist(modeReadErr) {
+		if modeReadErr != nil {
+			return deployansible.Receipt{}, modeReadErr
+		}
+		if !bytes.Equal(rawMode, originalMode) {
 			return deployansible.Receipt{}, errors.New("retry_frozen_inputs_changed")
 		}
 		locked, release, err := deps.remoteLock(operator, lock)
@@ -208,12 +204,23 @@ func withFrozenBootstrapStageLeaseWith(
 		if err = validateLockedStage(); err != nil {
 			return deployansible.Receipt{}, err
 		}
+		// Native execution keeps the frozen stateRoot lease in its context.
+		// Retain the bridge broker's active descriptor separately through action;
+		// replacing locked would make RunLocalRetryFailed use the wrong lease.
+		_, brokerRelease, err := deps.attach(locked, bootstrapBrokerLockDirectory, lifecycleID(attempt))
+		if err != nil {
+			return deployansible.Receipt{}, err
+		}
+		defer brokerRelease()
+		if err = validateLockedStage(); err != nil {
+			return deployansible.Receipt{}, err
+		}
 		return action(locked)
 	}
 	modePath := filepath.Join(attempt, "execution-mode.json")
 	modeRaw, modeErr := deps.readPrivate(modePath)
-	if os.IsNotExist(modeErr) && lock != bootstrapBrokerLockDirectory {
-		return remote("", modePath, nil)
+	if os.IsNotExist(modeErr) {
+		return deployansible.Receipt{}, errors.New("retry_remote_lifecycle_attachment_unsupported")
 	}
 	if modeErr != nil {
 		return deployansible.Receipt{}, modeErr
@@ -228,10 +235,13 @@ func withFrozenBootstrapStageLeaseWith(
 		}
 	}
 	if !mode.Local {
+		if !mode.Native {
+			return deployansible.Receipt{}, errors.New("retry_remote_lifecycle_attachment_unsupported")
+		}
 		if lock == bootstrapBrokerLockDirectory {
 			return deployansible.Receipt{}, errors.New("retry_frozen_execution_invalid")
 		}
-		return remote(mode.OperatorDirectory, modePath, modeRaw)
+		return native(mode.OperatorDirectory, modePath, modeRaw)
 	}
 	if lock != bootstrapBrokerLockDirectory {
 		return deployansible.Receipt{}, errors.New("retry_frozen_execution_invalid")
