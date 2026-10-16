@@ -122,6 +122,17 @@ func TestInstalledRuntimeMustMatchTargetDependencyHash(t *testing.T) {
 	}
 }
 
+func TestOfflineRuntimeSubprocessUsesConfiguredTempDirectory(t *testing.T) {
+	t.Setenv("TMPDIR", "/private/operator-tmp")
+	env := offlineRuntimeEnvironment("/private/runtime")
+	for _, entry := range env {
+		if entry == "TMPDIR=/private/operator-tmp" {
+			return
+		}
+	}
+	t.Fatalf("offline runtime environment does not preserve TMPDIR: %v", env)
+}
+
 func TestRecoveryRuntimeRejectsChecksumBeforePreparingPrivateState(t *testing.T) {
 	root := t.TempDir()
 	archive := filepath.Join(root, "runtime.tar.gz")

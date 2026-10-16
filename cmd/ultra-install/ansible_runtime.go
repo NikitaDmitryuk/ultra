@@ -105,9 +105,9 @@ func preparePinnedAnsibleRuntime(ctx context.Context, stateRoot, archive, expect
 	}
 	run := func(program string, args ...string) error {
 		command := exec.CommandContext(ctx, program, args...)
-		command.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=" + directory}
-		if command.Run() != nil {
-			return errors.New("offline Ansible runtime preparation failed")
+		command.Env = offlineRuntimeEnvironment(directory)
+		if err := command.Run(); err != nil {
+			return fmt.Errorf("offline Ansible runtime preparation failed: %w", err)
 		}
 		return nil
 	}
@@ -145,6 +145,14 @@ func installedRuntimeMatches(executable, marker, sha string) bool {
 	}
 	data, err := os.ReadFile(marker)
 	return err == nil && strings.TrimSpace(string(data)) == sha
+}
+
+func offlineRuntimeEnvironment(home string) []string {
+	return []string{
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"HOME=" + home,
+		"TMPDIR=" + os.TempDir(),
+	}
 }
 
 func extractRuntime(source, directory string) error {
