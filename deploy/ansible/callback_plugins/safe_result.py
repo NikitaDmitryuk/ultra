@@ -19,6 +19,24 @@ class CallbackModule(CallbackBase):
         if '{{' in name or '{%' in name:
             name = result._task.action
         value = {'stage': name, 'node': result._host.name, 'code': code}
+        result_data = getattr(result, '_result', {})
+        safe_failure = result_data.get('ultra_safe_failure_code') if isinstance(result_data, dict) else None
+        if isinstance(safe_failure, str) and safe_failure in {
+            'invalid_dump_exit_identity_input',
+            'database_import_receipt_mismatch',
+            'invalid_dump_exit_identity_route',
+            'invalid_dump_exit_identity_pin',
+            'duplicate_dump_exit_identity_route',
+            'database_import_identity_mismatch',
+            'dump_exit_identity_binding_mismatch',
+            'dump_exit_identity_mapping_not_unique',
+            'dump_exit_identity_route_disabled',
+            'dump_exit_identity_membership_changed',
+            'dump_exit_identity_changed',
+            'database_reconciliation_timeout',
+            'database_reconciliation_failed',
+        }:
+            value['detail'] = safe_failure
         path = Path(target)
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)

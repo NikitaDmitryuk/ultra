@@ -9,6 +9,38 @@ import subprocess
 import uuid
 
 RECEIPT = Path('/var/lib/ultra-db-import-state/receipt.json')
+SQL_FAILURE_CODES = (
+    'database_import_identity_mismatch',
+    'dump_exit_identity_binding_mismatch',
+    'dump_exit_identity_mapping_not_unique',
+    'dump_exit_identity_route_disabled',
+    'dump_exit_identity_membership_changed',
+    'dump_exit_identity_changed',
+)
+SAFE_FAILURE_CODES = {
+    'invalid_dump_exit_identity_input',
+    'database_import_receipt_mismatch',
+    'invalid_dump_exit_identity_route',
+    'invalid_dump_exit_identity_pin',
+    'duplicate_dump_exit_identity_route',
+    *SQL_FAILURE_CODES,
+    'database_reconciliation_timeout',
+    'database_reconciliation_failed',
+}
+
+
+def safe_failure_code(error):
+    """Return a fixed, non-sensitive category; never expose SQL or subprocess output."""
+    if isinstance(error, ValueError) and str(error) in SAFE_FAILURE_CODES:
+        return str(error)
+    if isinstance(error, subprocess.TimeoutExpired):
+        return 'database_reconciliation_timeout'
+    if isinstance(error, subprocess.CalledProcessError):
+        stderr = error.stderr if isinstance(error.stderr, str) else ''
+        for code in SQL_FAILURE_CODES:
+            if code in stderr:
+                return code
+    return 'database_reconciliation_failed'
 
 
 def payload(database, user, archive_sha256, entries, tls_policy, receipt):
@@ -123,7 +155,7 @@ def reconcile(database, user, password, archive_sha256, entries, tls_policy,
     result = call(['psql', '--no-psqlrc', '--no-password', '--host', '127.0.0.1',
                    '--username', user, '--dbname', database, '--quiet', '--tuples-only', '--no-align', '--set', 'ON_ERROR_STOP=1'],
                   input=statement(value), text=True, stdout=subprocess.PIPE,
-                  stderr=subprocess.DEVNULL, check=True, timeout=30,
+                  stderr=subprocess.PIPE, check=True, timeout=30,
                   env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'PGCONNECT_TIMEOUT': '5', 'PGPASSWORD': password})
     return result.stdout.strip().splitlines()[-1] == 'true'
 
@@ -131,17 +163,19 @@ def reconcile(database, user, password, archive_sha256, entries, tls_policy,
 def main():
     from ansible.module_utils.basic import AnsibleModule
     module = AnsibleModule(argument_spec={
-        'database': {'type': 'str', 'required': True}, 'user': {'type': 'str', 'required': True},
+        'database': {'type': 'str', 'required': True, 'no_log': True},
+        'user': {'type': 'str', 'required': True, 'no_log': True},
         'password': {'type': 'str', 'required': True, 'no_log': True},
-        'archive_sha256': {'type': 'str', 'required': True},
+        'archive_sha256': {'type': 'str', 'required': True, 'no_log': True},
         'entries': {'type': 'list', 'elements': 'dict', 'required': True, 'no_log': True},
-        'tls_policy': {'type': 'str', 'choices': ['pin', 'ca'], 'required': True},
+        'tls_policy': {'type': 'str', 'choices': ['pin', 'ca'], 'required': True, 'no_log': True},
     }, supports_check_mode=False)
     try:
         changed = reconcile(**module.params)
         module.exit_json(changed=changed, verified=True)
-    except Exception:
-        module.fail_json(msg='dump_exit_identity_reconciliation_failed')
+    except Exception as error:
+        module.fail_json(msg='dump_exit_identity_reconciliation_failed',
+                         ultra_safe_failure_code=safe_failure_code(error))
 
 
 if __name__ == '__main__':

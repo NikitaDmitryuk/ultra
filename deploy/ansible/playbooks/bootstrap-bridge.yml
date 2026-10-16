@@ -70,7 +70,6 @@
         - "'database' in hostvars"
         - hostvars['database'].ultra_database_import_sha256 | default('') | length > 0
         - not (ultra_preserve_runtime | default(false) | bool)
-      no_log: true
   roles:
     - host
     - role: geo
