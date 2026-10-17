@@ -712,11 +712,30 @@ func (p *Provisioner) Publish(ctx context.Context, op *cloud.Operation) error {
 	if _, e := repo.Update(ctx, op.ExitID, exits.UpdatePatch{Enabled: &enabled}); e != nil {
 		return e
 	}
-	if e := p.Routes.Publish(ctx, op.Offer.Region.ID, op.Offer.Region.City+", "+op.Offer.Region.Country, op.ExitID); e != nil {
+	published, e := p.Routes.IsPublished(ctx, op.Offer.Region.ID, op.ExitID)
+	if e != nil {
 		return e
+	}
+	if !published {
+		if e := p.Routes.Publish(ctx, op.Offer.Region.ID, op.Offer.Region.City+", "+op.Offer.Region.Country, op.ExitID); e != nil {
+			return e
+		}
 	}
 	if e := p.Exits.Refresh(ctx); e != nil {
 		return e
+	}
+	return nil
+}
+
+// ApplyRoute is a separate durable stage from route publication. Publishing a
+// location marks it unapplied; the marker is only set after the bridge has
+// accepted the resulting runtime. A retry can therefore skip an apply whose
+// receipt was committed before the caller lost its response.
+func (p *Provisioner) ApplyRoute(ctx context.Context, op *cloud.Operation) error {
+	if applied, err := p.Routes.IsApplied(ctx, op.ExitID); err != nil {
+		return err
+	} else if applied {
+		return p.Refresh(ctx)
 	}
 	if e := p.Apply(ctx); e != nil {
 		return e

@@ -19,3 +19,14 @@ func TestIngressErrorContract(t *testing.T) {
 		t.Fatalf("unexpected response: %d %v", w.Code, v)
 	}
 }
+
+func TestDeletedCloudExitsAreFilteredByIdentity(t *testing.T) {
+	deleted := deletedCloudExitIDs([]cloud.Operation{
+		{ExitID: "atlanta-old", State: "deleted"},
+		{ExitID: "atlanta-current", State: "ready"},
+		{ExitID: "frankfurt-pending", State: "pending"},
+	})
+	if !deleted["atlanta-old"] || deleted["atlanta-current"] || deleted["frankfurt-pending"] {
+		t.Fatalf("unexpected deleted exit set: %v", deleted)
+	}
+}

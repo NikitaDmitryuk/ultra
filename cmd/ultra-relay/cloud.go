@@ -58,6 +58,7 @@ func configureCloud(
 	}
 	routes := db.NewRouteRepo(database)
 	store := db.NewCloudRepo(database)
+	srv.CloudOperationHistory = store
 	binary, e := os.Executable()
 	if e != nil {
 		return

@@ -76,6 +76,35 @@ func TestCloudConcurrentReservations(t *testing.T) {
 	}
 }
 
+func TestCloudCapacityLockDoesNotWaitForWorker(t *testing.T) {
+	d := openTestDB(t)
+	repo := NewCloudRepo(d)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	unlockWorker, err := repo.Lock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlockWorker()
+	unlockCapacity, err := repo.LockCapacity(ctx)
+	if err != nil {
+		t.Fatal("capacity lock waited behind cloud worker:", err)
+	}
+	defer unlockCapacity()
+	tx, err := d.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	var routeLockAvailable bool
+	if err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(817365007)`).Scan(&routeLockAvailable); err != nil {
+		t.Fatal(err)
+	}
+	if !routeLockAvailable {
+		t.Fatal("capacity lock blocks the shared route/user/traffic advisory lock")
+	}
+}
+
 func TestRouteCredentialsLifecycle(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
@@ -97,6 +126,12 @@ func TestRouteCredentialsLifecycle(t *testing.T) {
 	}
 	if err = routes.Publish(ctx, "fra", "Frankfurt", exitID); err != nil {
 		t.Fatal(err)
+	}
+	if published, err := routes.IsPublished(ctx, "fra", exitID); err != nil || !published {
+		t.Fatalf("published route not visible: published=%t err=%v", published, err)
+	}
+	if applied, err := routes.IsApplied(ctx, exitID); err != nil || applied {
+		t.Fatalf("new route reported applied: applied=%t err=%v", applied, err)
 	}
 	loaded, err := users.ListAll(ctx)
 	if err != nil {
@@ -121,6 +156,9 @@ func TestRouteCredentialsLifecycle(t *testing.T) {
 	if err = routes.Publish(ctx, "fra", "Frankfurt", exitID); err != nil {
 		t.Fatal(err)
 	}
+	if applied, err := routes.IsApplied(ctx, exitID); err != nil || !applied {
+		t.Fatalf("same-target republish reset applied marker: applied=%t err=%v", applied, err)
+	}
 	var savedAlias, savedLoc string
 	if err = d.Pool.QueryRow(ctx, `SELECT uuid::text,location_id::text FROM vpn_route_credentials WHERE user_uuid=$1`, u.UUID).Scan(&savedAlias, &savedLoc); err != nil ||
 		savedAlias != alias ||
@@ -140,6 +178,18 @@ func TestRouteCredentialsLifecycle(t *testing.T) {
 		savedAlias == alias ||
 		savedLoc != loc {
 		t.Fatal("reset lost location", err)
+	}
+	replacementID := uuid.NewString()
+	if _, err = d.Pool.Exec(ctx,
+		`INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid,enabled) VALUES($1,'replacement','192.0.2.2',443,$2,false)`,
+		replacementID, uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
+	if err = routes.Publish(ctx, "fra", "Frankfurt", replacementID); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := routes.IsApplied(ctx, replacementID); err != nil || applied {
+		t.Fatalf("replacement inherited old route applied marker: applied=%t err=%v", applied, err)
 	}
 }
 

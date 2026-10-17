@@ -394,6 +394,21 @@ test("reinstall is offered only for a failed staged cloud identity", async () =>
   }
 });
 
+test("route continuation exposes only failed stages", async () => {
+  const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
+  await flush();
+  const failed = { id: "op", state: "failed", phase: "apply", error: "route_application_timeout" };
+  p.context.failed = failed;
+  const failedHTML = vm.runInContext("cloudOperationDetailsHTML(failed)", p.context);
+  assert.match(failedHTML, /data-action="retry"/);
+  assert.match(failedHTML, /Продолжить этап/);
+  assert.equal(vm.runInContext("phases.apply", p.context), "Применение маршрута на bridge");
+  const unknown = { id: "op", state: "unknown", phase: "creating" };
+  p.context.unknown = unknown;
+  const unknownHTML = vm.runInContext("cloudOperationDetailsHTML(unknown)", p.context);
+  assert.ok(!unknownHTML.includes('data-action="retry"'));
+});
+
 test("traffic activity is separate from permission and does not imply online", async () => {
   const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
   await flush();
@@ -660,16 +675,16 @@ test("ready server separates operation, tunnel health and billing", async () => 
   };
   p.context.capacity = {
     nodes: [{ id: "atl", name: "Атланта", enabled: true, ready: true }],
-    budgets: [],
+    budgets: [{ exit_id: "atl", source: "vultr", monthly_bytes: 3000000000000 }],
   };
   assert.equal(
     vm.runInContext("serverStateLabel(o,capacity)", p.context),
     "Серверная проверка HTTPS прошла",
   );
-  assert.match(
-    vm.runInContext("serverCapacityHTML(capacity)", p.context),
-    /Серверная проверка HTTPS прошла/,
-  );
+  const capacityHTML = vm.runInContext("serverCapacityHTML(capacity)", p.context);
+  assert.match(capacityHTML, /Серверная проверка HTTPS прошла/);
+  assert.match(capacityHTML, /Начисленный пул Vultr \(справочно\)/);
+  assert.match(capacityHTML, /общие для всех выходов Vultr/);
   assert.equal(
     vm.runInContext("serverBillingLabel(o)", p.context),
     "Оплата продолжается",
@@ -948,8 +963,8 @@ test("shared quota stays whole across route and period filters beside separate r
     vm.runInContext(`renderTrafficChart(document.querySelector("#person-traffic"),chart,${expression})`, p.context);
     const html = p.el("#person-traffic").innerHTML;
 	assert.equal((html.match(/data-quota-kind="shared"/g) || []).length, 1);
-	for (const text of ["900 Б", "200 Б", "700 Б", "99 Б", "Резерв &lt;тест&gt;", "Последние подтверждённые данные", "Общая квота", "UTC", "Ручной резерв"]) assert.ok(html.includes(text), text);
-	assert.ok(!html.includes("Vultr"));
+	for (const text of ["900 Б", "200 Б", "700 Б", "99 Б", "Резерв &lt;тест&gt;", "Последние подтверждённые данные", "Общая квота", "Личный предел — 25% от безопасного общего пула Vultr после 20% резерва", "UTC", "Ручной резерв"]) assert.ok(html.includes(text), text);
+	assert.ok(html.includes("безопасного общего пула Vultr"));
     assert.ok(!html.includes("Invalid Date"));
   }
 });

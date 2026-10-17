@@ -101,7 +101,7 @@ func TestRetryCreatesAttemptOnlyForFailedInstallation(t *testing.T) {
 	}{
 		{"failed", "install", 0, 1, false},
 		{"failed", "install", 1, 2, false},
-		{"unknown", "creating", 2, 2, false},
+		{"unknown", "creating", 2, 2, true},
 		{"failed", "prepare", 2, 2, false},
 		{"failed", "verify", 2, 2, false},
 		{"failed", "publish", 2, 2, false},

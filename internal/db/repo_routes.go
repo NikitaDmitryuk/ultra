@@ -107,7 +107,8 @@ func (r *RouteRepo) Publish(ctx context.Context, region, name, exitID string) er
 		id = *location
 	}
 	_, e = tx.Exec(ctx, `INSERT INTO vpn_locations(id,provider_region,name,exit_id,published) VALUES($1,$2,$3,$4,true)
- ON CONFLICT(provider_region) DO UPDATE SET name=EXCLUDED.name,exit_id=EXCLUDED.exit_id,published=true,applied=false`, id, region, name, exitID)
+ ON CONFLICT(provider_region) DO UPDATE SET name=EXCLUDED.name,exit_id=EXCLUDED.exit_id,published=true,
+ applied=CASE WHEN vpn_locations.exit_id IS NOT DISTINCT FROM EXCLUDED.exit_id AND vpn_locations.published THEN vpn_locations.applied ELSE false END`, id, region, name, exitID)
 	if e != nil {
 		return e
 	}
@@ -126,6 +127,16 @@ func (r *RouteRepo) Publish(ctx context.Context, region, name, exitID string) er
 	}
 	return tx.Commit(ctx)
 }
+
+func (r *RouteRepo) IsPublished(ctx context.Context, region, exitID string) (bool, error) {
+	var published bool
+	err := r.db.Pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM vpn_locations WHERE provider_region=$1 AND exit_id=$2 AND published)`,
+		region, exitID,
+	).Scan(&published)
+	return published, err
+}
+
 func (r *RouteRepo) Unpublish(ctx context.Context, exitID string) error {
 	return r.db.orm.WithContext(ctx).
 		Table("vpn_locations").
@@ -139,6 +150,14 @@ func (r *RouteRepo) SetPin(ctx context.Context, exitID, pin string) error {
 
 func (r *RouteRepo) Applied(ctx context.Context, exitID string) error {
 	return r.db.orm.WithContext(ctx).Table("vpn_locations").Where("exit_id = ?", exitID).Update("applied", true).Error
+}
+
+func (r *RouteRepo) IsApplied(ctx context.Context, exitID string) (bool, error) {
+	var applied bool
+	err := r.db.Pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM vpn_locations WHERE exit_id=$1 AND published AND applied)`, exitID,
+	).Scan(&applied)
+	return applied, err
 }
 
 func (r *RouteRepo) ReplicationState(ctx context.Context, id, state string, free, required int64, detail string) error {

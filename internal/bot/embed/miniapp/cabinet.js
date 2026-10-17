@@ -416,7 +416,8 @@ const phases = {
   creating: "Проверяем создание VPS",
   install: "Установка Ultra",
   verify: "Проверка туннеля",
-  publish: "Применение маршрутов",
+  publish: "Публикация локации",
+  apply: "Применение маршрута на bridge",
   replace_old: "Удаление прежнего VPS",
   ready: "Готов",
   unpublish: "Отключение маршрута",
@@ -700,7 +701,7 @@ function serverCapacityHTML(c) {
           `<div class="card"><h3>${esc(n.name)}${n.primary ? " · основной" : ""}</h3><p>${!n.enabled ? "Выключен" : n.ready ? "Серверная проверка HTTPS прошла" : "Серверная проверка HTTPS не прошла или выполняется"}</p>${(() => {
             const b = c.budgets.find((b) => b.exit_id === n.id);
             return b
-              ? `<p>${b.source === "vultr" ? "Сохранённый объём тарифа (справочно)" : "Бюджет хостинга"}: ${bytes(b.monthly_bytes)}/мес.</p>${b.source === "vultr" ? "<p class=\"muted\">Начисленный трафик и остаток общие для всех выходов Vultr; это не отдельный лимит узла.</p>" : ""}<small>Защитный запас 20%. ${b.source === "vultr" ? (b.error ? "Не удалось обновить данные Vultr" : b.observed_at ? "Данные Vultr: " + esc(new Date(b.observed_at).toLocaleString("ru")) : "Ожидаем данные Vultr") : "Бюджет задан администратором."}</small>`
+              ? `<p>${b.source === "vultr" ? "Начисленный пул Vultr (справочно)" : "Бюджет хостинга"}: ${bytes(b.monthly_bytes)}/мес.</p>${b.source === "vultr" ? "<p class=\"muted\">Начисленный пул и остаток общие для всех выходов Vultr; это не отдельный лимит узла.</p>" : ""}<small>Защитный запас 20%. ${b.source === "vultr" ? (b.error ? "Не удалось обновить данные Vultr" : b.observed_at ? "Данные Vultr: " + esc(new Date(b.observed_at).toLocaleString("ru")) : "Ожидаем данные Vultr") : "Бюджет задан администратором."}</small>`
               : "<small>Бюджет трафика не настроен</small>";
           })()}</div>`,
       )
@@ -758,7 +759,7 @@ function trafficQuotasHTML(t) {
     (p) => p.quota_kind === "shared" || p.scope === "vultr",
   );
   const poolHTML = pool
-    ? `<div class="card compact-limits" data-quota-kind="shared"><div class="row"><h2>Общая квота выходов</h2><span class="badge">Общая квота</span></div><small>${esc(pool.period)} · UTC</small><p class="muted">Один личный лимит для отмеченных стран. Смена страны не обновляет остаток.</p><div class="route-row"><span>Личный лимит</span><strong>${bytes(pool.personal_limit_bytes)}</strong></div><div class="route-row"><span>Использовано за месяц</span><strong>${bytes(pool.used_bytes)}</strong></div><div class="route-row"><span>Осталось</span><strong>${pool.state === "unknown" ? "Уточняется" : bytes(pool.remaining_bytes)}</strong></div><p class="${pool.state === "exhausted" ? "bad" : "muted"}">${({ available: "Трафик доступен", exhausted: "Общая квота исчерпана", unknown: "Нет подтверждённого остатка", emergency: "Используется аварийный запас: данные провайдера временно недоступны" })[pool.state] || "Доступность уточняется"}</p><small>${pool.observed_at ? "Последние подтверждённые данные: " + quotaDate(pool.observed_at) : "Ожидаем подтверждённые данные"}<br>Сброс: ${quotaDate(pool.resets_at)}</small></div>`
+    ? `<div class="card compact-limits" data-quota-kind="shared"><div class="row"><h2>Общая квота выходов</h2><span class="badge">Общая квота</span></div><small>${esc(pool.period)} · UTC</small><p class="muted">Один личный лимит для отмеченных стран. Личный предел — 25% от безопасного общего пула Vultr после 20% резерва. Смена страны не обновляет остаток.</p><div class="route-row"><span>Личный лимит</span><strong>${bytes(pool.personal_limit_bytes)}</strong></div><div class="route-row"><span>Использовано за месяц</span><strong>${bytes(pool.used_bytes)}</strong></div><div class="route-row"><span>Осталось</span><strong>${pool.state === "unknown" ? "Уточняется" : bytes(pool.remaining_bytes)}</strong></div><p class="${pool.state === "exhausted" ? "bad" : "muted"}">${({ available: "Трафик доступен", exhausted: "Общая квота исчерпана", unknown: "Нет подтверждённого остатка", emergency: "Используется аварийный запас: данные провайдера временно недоступны" })[pool.state] || "Доступность уточняется"}</p><small>${pool.observed_at ? "Последние подтверждённые данные: " + quotaDate(pool.observed_at) : "Ожидаем подтверждённые данные"}<br>Сброс: ${quotaDate(pool.resets_at)}</small></div>`
     : "";
   const limitsHTML = (t.limits || []).map((l) => `<div class="card compact-limits"><h2>${esc(l.name)}</h2><div class="route-row"><span>${l.is_fallback ? "Ручной резерв · общий остаток узла" : "Доступный трафик"}</span><strong>${l.state === "unknown" ? "Уточняется" : bytes(l.remaining_bytes)}</strong></div>${!l.is_fallback && l.period === "month" ? `<p class="muted">Использовано за месяц: ${bytes(l.used_bytes)} · Личный лимит: ${bytes(l.personal_limit_bytes)}<br>Сброс: ${quotaDate(l.resets_at)}. Доступность также ограничена общим остатком узла.</p>` : ""}${l.pending ? '<p class="wait">Применяется переключение</p>' : l.state === "exhausted" ? `<p class="bad">${l.is_fallback ? "Бюджет исчерпан" : "Лимит исчерпан"}</p>` : ""}</div>`).join("");
   return poolHTML + limitsHTML;
@@ -906,7 +907,7 @@ function serverStateLabel(o, capacity) {
   return phases[o.phase] || "Создание сервера";
 }
 function cloudOperationDetailsHTML(o) {
-  return `<p class="muted">${esc(serverBillingLabel(o))}</p>${o.error ? `<p class="bad">${esc(o.error_message || o.error)}</p>` : ""}${o.state === "ready" && !o.serves_subscription_ingress ? `<button class="btn secondary" data-replace="${esc(o.id)}">Сменить регион</button>` : ""}${o.state === "failed" && o.phase === "verify" && o.exit_id === o.id && !o.serves_subscription_ingress ? `<button class="btn secondary" data-action="reinstall" data-op="${esc(o.id)}">Переустановить на этом VPS</button>` : ""}${o.state === "failed" || o.state === "unknown" ? `<button class="btn secondary" data-action="retry" data-op="${esc(o.id)}">Повторить проверку / продолжить</button>` : ""}${o.serves_subscription_ingress ? "<p>Обслуживает подписки · перед удалением или заменой перенесите HTTPS-вход</p>" : o.instance_id ? `<button class="btn danger" data-action="delete" data-op="${esc(o.id)}">Удалить сервер</button>` : o.phase === "prepare" ? `<button class="btn secondary" data-action="cancel" data-op="${esc(o.id)}">Отменить создание</button>` : ""}`;
+  return `<p class="muted">${esc(serverBillingLabel(o))}</p>${o.error ? `<p class="bad">${esc(o.error_message || o.error)}</p>` : ""}${o.state === "ready" && !o.serves_subscription_ingress ? `<button class="btn secondary" data-replace="${esc(o.id)}">Сменить регион</button>` : ""}${o.state === "failed" && o.phase === "verify" && o.exit_id === o.id && !o.serves_subscription_ingress ? `<button class="btn secondary" data-action="reinstall" data-op="${esc(o.id)}">Переустановить на этом VPS</button>` : ""}${o.state === "failed" ? `<button class="btn secondary" data-action="retry" data-op="${esc(o.id)}">Продолжить этап</button>` : ""}${o.serves_subscription_ingress ? "<p>Обслуживает подписки · перед удалением или заменой перенесите HTTPS-вход</p>" : o.instance_id ? `<button class="btn danger" data-action="delete" data-op="${esc(o.id)}">Удалить сервер</button>` : o.phase === "prepare" ? `<button class="btn secondary" data-action="cancel" data-op="${esc(o.id)}">Отменить создание</button>` : ""}`;
 }
 
 function bindCloudOperationControls() {

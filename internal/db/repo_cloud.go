@@ -193,6 +193,31 @@ func (r *CloudRepo) Lock(ctx context.Context) (func(), error) {
 	}, nil
 }
 
+// LockCapacity serializes the provider inventory check with a reservation
+// without waiting behind the long-running cloud worker stages.
+func (r *CloudRepo) LockCapacity(ctx context.Context) (func(), error) {
+	conn, err := r.db.Pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	q := sqlc.New(conn)
+	if err = q.LockCloudCapacity(ctx); err != nil {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = conn.Conn().Close(cleanup)
+		cancel()
+		conn.Release()
+		return nil, err
+	}
+	return func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := q.UnlockCloudCapacity(cleanup); err != nil {
+			_ = conn.Conn().Close(cleanup)
+		}
+		conn.Release()
+	}, nil
+}
+
 func (r *CloudRepo) Audit(ctx context.Context, actor int64, id, action string) error {
 	return r.db.orm.WithContext(ctx).Create(&cloudAuditRow{Actor: actor, OperationID: id, Action: action}).Error
 }

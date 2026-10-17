@@ -91,6 +91,16 @@ func (q *Queries) InsertReservedCloudOperation(ctx context.Context, arg InsertRe
 	return err
 }
 
+const lockCloudCapacity = `-- name: LockCloudCapacity :exec
+SELECT pg_advisory_lock(817365011)
+`
+
+// Keep separate from route/user/traffic locks (817365007).
+func (q *Queries) LockCloudCapacity(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockCloudCapacity)
+	return err
+}
+
 const lockCloudReservation = `-- name: LockCloudReservation :exec
 SELECT pg_advisory_xact_lock(817365005)
 `
@@ -106,6 +116,15 @@ SELECT pg_advisory_lock(817365006)
 
 func (q *Queries) LockCloudWorker(ctx context.Context) error {
 	_, err := q.db.Exec(ctx, lockCloudWorker)
+	return err
+}
+
+const unlockCloudCapacity = `-- name: UnlockCloudCapacity :exec
+SELECT pg_advisory_unlock(817365011)
+`
+
+func (q *Queries) UnlockCloudCapacity(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, unlockCloudCapacity)
 	return err
 }
 

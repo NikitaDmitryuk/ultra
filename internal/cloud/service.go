@@ -70,6 +70,7 @@ type Provisioner interface {
 	Install(context.Context, *Operation, Instance) error
 	Verify(context.Context, *Operation, Instance) error
 	Publish(context.Context, *Operation) error
+	ApplyRoute(context.Context, *Operation) error
 	Unpublish(context.Context, *Operation) error
 	Cleanup(context.Context, *Operation) error
 }
@@ -81,6 +82,19 @@ type Service struct {
 	Store             Store
 	Provisioner       Provisioner
 	Now               func() time.Time
+}
+
+// capacityLocker separates the short reservation gate from the worker lock.
+// Stores that do not provide it retain the old locking behavior for compatibility.
+type capacityLocker interface {
+	LockCapacity(context.Context) (func(), error)
+}
+
+func (s *Service) lockCapacity(ctx context.Context) (func(), error) {
+	if locker, ok := s.Store.(capacityLocker); ok {
+		return locker.LockCapacity(ctx)
+	}
+	return s.Store.Lock(ctx)
 }
 
 func (s *Service) now() time.Time {
@@ -185,12 +199,7 @@ func (s *Service) Confirm(ctx context.Context, actor int64, id string) (Operatio
 		return op, nil
 	}
 	if s.TopologyReady != nil {
-		unlock, err := s.Store.Lock(ctx)
-		if err != nil {
-			return Operation{}, err
-		}
-		defer unlock()
-		if err = s.TopologyReady(ctx); err != nil {
+		if err := s.TopologyReady(ctx); err != nil {
 			return Operation{}, err
 		}
 	}
@@ -204,6 +213,11 @@ func (s *Service) Confirm(ctx context.Context, actor int64, id string) (Operatio
 	if e = s.checkOffer(ctx, offer); e != nil {
 		return Operation{}, e
 	}
+	unlock, e := s.lockCapacity(ctx)
+	if e != nil {
+		return Operation{}, e
+	}
+	defer unlock()
 	if occupied, e := s.capacity(ctx); e != nil {
 		return Operation{}, e
 	} else if occupied >= MaxServers {
@@ -243,7 +257,7 @@ func (s *Service) Action(ctx context.Context, actor int64, id, action string) er
 		op.State = "pending"
 		op.Error, op.ErrorMessage, op.HTTPStatus = "", "", 0
 	case "retry":
-		if op.State != "failed" && op.State != "unknown" {
+		if op.State != "failed" {
 			return ErrConflict
 		}
 		// An outstanding target reservation retains its attempt on retry, even
@@ -339,7 +353,16 @@ func (s *Service) Step(ctx context.Context) error {
 func (s *Service) fail(ctx context.Context, op Operation, code string, e error) error {
 	op.State = "failed"
 	op.Error = code
-	if provider := ErrorCode(e); provider != "operation_unavailable" {
+	if errors.Is(e, context.DeadlineExceeded) {
+		switch op.Phase {
+		case "publish":
+			op.Error = "route_publication_timeout"
+		case "apply":
+			op.Error = "route_application_timeout"
+		default:
+			op.Error = "operation_timeout"
+		}
+	} else if provider := ErrorCode(e); provider != "operation_unavailable" && provider != "operation_timeout" {
 		op.Error = provider
 	}
 	op.ErrorMessage = ErrorMessage(op.Error)
@@ -350,7 +373,9 @@ func (s *Service) fail(ctx context.Context, op Operation, code string, e error) 
 	if errors.Is(e, ErrUnknownCreation) {
 		op.State = "unknown"
 	}
-	if save := s.Store.Save(ctx, op); save != nil {
+	checkpoint, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if save := s.Store.Save(checkpoint, op); save != nil {
 		return save
 	}
 	return e
@@ -453,7 +478,12 @@ func (s *Service) advance(ctx context.Context, op Operation) error {
 		}
 	case "publish":
 		if e := s.Provisioner.Publish(ctx, &op); e != nil {
-			return s.fail(ctx, op, "configuration_not_applied", e)
+			return s.fail(ctx, op, "route_publication_failed", e)
+		}
+		op.Phase = "apply"
+	case "apply":
+		if e := s.Provisioner.ApplyRoute(ctx, &op); e != nil {
+			return s.fail(ctx, op, "route_application_failed", e)
 		}
 		if op.Offer.ReplaceID != "" {
 			op.Phase = "replace_old"

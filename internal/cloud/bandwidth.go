@@ -4,7 +4,6 @@ import (
 	"context"
 	"math"
 	"net/url"
-
 	"time"
 )
 
@@ -15,14 +14,33 @@ type AccountBandwidth struct {
 	Remaining int64
 }
 
+const (
+	// Vultr's account egress allowance is decimal: 2 TB plus 1 TB for each
+	// instance that still exists in the account. Stopped instances remain in
+	// /instances and therefore remain billable; deleted instances disappear.
+	VultrBaseBandwidthBytes    int64 = 2_000_000_000_000
+	VultrPerInstanceBytes      int64 = 1_000_000_000_000
+	VultrSafeBudgetNumerator         = 4
+	VultrSafeBudgetDenominator       = 5
+)
+
+func vultrBandwidthCapacity(instances int) (int64, error) {
+	if instances < 0 || int64(instances) > (math.MaxInt64-VultrBaseBandwidthBytes)/VultrPerInstanceBytes {
+		return 0, ErrUnavailable
+	}
+	return VultrBaseBandwidthBytes + int64(instances)*VultrPerInstanceBytes, nil
+}
+
+func vultrSafeBandwidthBudget(capacity int64) int64 {
+	return capacity/VultrSafeBudgetDenominator*VultrSafeBudgetNumerator +
+		capacity%VultrSafeBudgetDenominator*VultrSafeBudgetNumerator/VultrSafeBudgetDenominator
+}
+
 func (v *Vultr) AccountBandwidth(ctx context.Context) (AccountBandwidth, error) {
 	var response struct {
 		Bandwidth struct {
 			Current *struct {
-				Out       *float64 `json:"gb_out"`
-				Instance  *float64 `json:"instance_bandwidth_credits"`
-				Free      *float64 `json:"free_bandwidth_credits"`
-				Purchased *float64 `json:"purchased_bandwidth_credits"`
+				Out *float64 `json:"gb_out"`
 			} `json:"current_month_to_date"`
 		} `json:"bandwidth"`
 	}
@@ -30,19 +48,23 @@ func (v *Vultr) AccountBandwidth(ctx context.Context) (AccountBandwidth, error) 
 		return AccountBandwidth{}, e
 	}
 	c := response.Bandwidth.Current
-	if c == nil || c.Out == nil || c.Instance == nil || c.Free == nil || c.Purchased == nil || *c.Out < 0 || *c.Instance < 0 ||
-		*c.Free < 0 ||
-		*c.Purchased < 0 {
+	if c == nil || c.Out == nil || *c.Out < 0 {
 		return AccountBandwidth{}, ErrUnavailable
 	}
-	credits := (*c.Instance + *c.Free + *c.Purchased) * 1e9
 	used := *c.Out * 1e9
-	amount := credits*0.8 - used
-	if math.IsNaN(credits) || math.IsInf(credits, 0) || credits >= float64(math.MaxInt64) || math.IsNaN(used) || math.IsInf(used, 0) ||
-		used >= float64(math.MaxInt64) {
+	if math.IsNaN(used) || math.IsInf(used, 0) || used >= float64(math.MaxInt64) {
 		return AccountBandwidth{}, ErrUnavailable
 	}
-	return AccountBandwidth{Accrued: int64(credits), Used: int64(used), Remaining: max(0, int64(amount))}, nil
+	instances, err := v.Instances(ctx)
+	if err != nil {
+		return AccountBandwidth{}, err
+	}
+	capacity, err := vultrBandwidthCapacity(len(instances))
+	if err != nil {
+		return AccountBandwidth{}, err
+	}
+	safe := vultrSafeBandwidthBudget(capacity)
+	return AccountBandwidth{Accrued: capacity, Used: int64(used), Remaining: max(0, safe-int64(used))}, nil
 }
 
 // AccountRemaining retains the read-only API used by account diagnostics.

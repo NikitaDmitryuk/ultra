@@ -37,6 +37,28 @@ func (s *Server) cloudRoutes() {
 			memberJSON(w, nil, e)
 			return
 		}
+		operations := s.CloudOperationHistory
+		if operations == nil && s.Cloud != nil {
+			operations = s.Cloud.Store
+		}
+		deleted := map[string]bool{}
+		if operations != nil {
+			ops, err := operations.List(r.Context())
+			if err != nil {
+				memberJSON(w, nil, err)
+				return
+			}
+			deleted = deletedCloudExitIDs(ops)
+			if len(deleted) > 0 {
+				activeBudgets := budgets[:0]
+				for _, budget := range budgets {
+					if !deleted[budget.ID] {
+						activeBudgets = append(activeBudgets, budget)
+					}
+				}
+				budgets = activeBudgets
+			}
+		}
 		type node struct {
 			ID      string `json:"id"`
 			Name    string `json:"name"`
@@ -47,6 +69,9 @@ func (s *Server) cloudRoutes() {
 		nodes := []node{}
 		if s.exits != nil {
 			for _, n := range s.exits.List() {
+				if deleted[n.ID] {
+					continue
+				}
 				name := n.DisplayName
 				if name == "" {
 					name = n.City
@@ -92,6 +117,17 @@ func (s *Server) cloudRoutes() {
 	s.mux.HandleFunc("POST /v1/cloud/offers/{id}/confirm", s.cloudConfirm)
 	s.mux.HandleFunc("POST /v1/cloud/operations/{id}/action", s.cloudAction)
 }
+
+func deletedCloudExitIDs(operations []cloud.Operation) map[string]bool {
+	deleted := map[string]bool{}
+	for _, operation := range operations {
+		if operation.State == "deleted" && operation.ExitID != "" {
+			deleted[operation.ExitID] = true
+		}
+	}
+	return deleted
+}
+
 func (s *Server) requireCloud(w http.ResponseWriter) bool {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.Cloud == nil {

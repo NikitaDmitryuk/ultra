@@ -51,7 +51,7 @@ func TestBootstrapSubscriptionStageFrozenPathAndRetry(t *testing.T) {
 	if err = cleanup(); err != nil {
 		t.Fatal(err)
 	}
-	writeTestSubscriptionKeyring(t, source, strings.Replace(raw, "v1", "v2", -1))
+	writeTestSubscriptionKeyring(t, source, strings.ReplaceAll(raw, "v1", "v2"))
 	if _, err = prepareFrozenBootstrapSubscription(p, inv, directory); err == nil {
 		t.Fatal("retry accepted changed ring")
 	}

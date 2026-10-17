@@ -26,3 +26,10 @@ SELECT pg_advisory_lock(817365006);
 
 -- name: UnlockCloudWorker :exec
 SELECT pg_advisory_unlock(817365006);
+
+-- name: LockCloudCapacity :exec
+-- Keep separate from route/user/traffic locks (817365007).
+SELECT pg_advisory_lock(817365011);
+
+-- name: UnlockCloudCapacity :exec
+SELECT pg_advisory_unlock(817365011);

@@ -42,13 +42,16 @@ type TrafficQuerier interface {
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
 type Server struct {
-	TopologyReady     func(context.Context) error
-	TopologyFrozen    func(context.Context) (bool, error)
-	topologyMu        sync.Mutex
-	RuntimeStatus     func() any
-	RouteStatus       func(string) auth.RouteApplication
-	ReplicationStatus func(context.Context) (any, error)
-	Cloud             *cloud.Service
+	TopologyReady         func(context.Context) error
+	TopologyFrozen        func(context.Context) (bool, error)
+	topologyMu            sync.Mutex
+	RuntimeStatus         func() any
+	RouteStatus           func(string) auth.RouteApplication
+	ReplicationStatus     func(context.Context) (any, error)
+	Cloud                 *cloud.Service
+	CloudOperationHistory interface {
+		List(context.Context) ([]cloud.Operation, error)
+	}
 	Members           *MemberService
 	ReloadStatus      func() proxy.ReloadStatus
 	Subscriptions     SubscriptionStore
