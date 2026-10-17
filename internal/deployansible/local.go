@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type operationLeaseKey struct{}
+type readinessProbeKey struct{}
 type operationLease struct {
 	directory string
 	file      *os.File
@@ -57,6 +59,53 @@ func RunLocal(
 	directory, python, executable string,
 ) (Receipt, error) {
 	return runLocal(ctx, operation, inventory, variables, directory, python, executable, false, "")
+}
+
+// WaitUpgradeReadiness is the sole unlocked operation. Its fixed playbook reads
+// recovery evidence and the protected lifecycle journal only. The caller must
+// still inspect under its lease.
+// Temporary observations are never reused as upgrade authorization or receipts.
+func WaitUpgradeReadiness(
+	ctx context.Context,
+	inventory map[string]any,
+	lockDirectory, python, executable, lifecycleID string,
+	pending bool,
+) error {
+	if !jobID.MatchString(lifecycleID) {
+		return errors.New("invalid_readiness_lifecycle_id")
+	}
+	if _, leased := ctx.Value(operationLeaseKey{}).(*operationLease); leased {
+		return errors.New("readiness_probe_requires_unleased_context")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 780*time.Second)
+	defer cancel()
+	temporary, err := os.MkdirTemp("", "ultra-readiness-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(temporary) //nolint:errcheck
+	ctx = context.WithValue(ctx, readinessProbeKey{}, true)
+	receipt, err := RunLocal(
+		ctx,
+		"wait-upgrade-readiness",
+		inventory,
+		map[string]any{
+			"ultra_lock_directory":                lockDirectory,
+			"ultra_readiness_lifecycle_id":        lifecycleID,
+			"ultra_readiness_reservation_pending": pending,
+		},
+		filepath.Join(temporary, "probe"),
+		python,
+		executable,
+	)
+	if err != nil {
+		return err
+	}
+	if receipt.Result.Values["verified"] != true || ((pending || receipt.Result.Values["ready"] != true) &&
+		(receipt.Result.Values["reservation_id"] != lifecycleID || receipt.Result.Values["reservation_phase"] != "applying")) {
+		return errors.New("upgrade_readiness_probe_unverified")
+	}
+	return nil
 }
 
 // RunLocalRetryFailed is an explicit operator retry. Successful cached stages stay
@@ -118,6 +167,7 @@ func runLocal(
 	source string,
 ) (Receipt, error) {
 	allowed := map[string]bool{
+		"wait-upgrade-readiness":       true,
 		"bootstrap-forward-broker":     true,
 		"contain-upgrade":              true,
 		"drain-upgrade-workers":        true,
@@ -184,7 +234,18 @@ func runLocal(
 	if err != nil || !lockInfo.IsDir() || !ownedByProcess(lockInfo) || lockInfo.Mode().Perm()&0077 != 0 {
 		return Receipt{}, errors.New("private operation lock directory required")
 	}
-	if lease, ok := ctx.Value(operationLeaseKey{}).(*operationLease); ok {
+	unlocked, _ := ctx.Value(readinessProbeKey{}).(bool)
+	if operation == "wait-upgrade-readiness" && !unlocked {
+		return Receipt{}, errors.New("readiness_probe_requires_dedicated_entrypoint")
+	}
+	if unlocked && (operation != "wait-upgrade-readiness" || retry || source != "") {
+		return Receipt{}, errors.New("invalid_unlocked_readiness_probe")
+	}
+	if unlocked {
+		if _, leased := ctx.Value(operationLeaseKey{}).(*operationLease); leased {
+			return Receipt{}, errors.New("readiness_probe_requires_unleased_context")
+		}
+	} else if lease, ok := ctx.Value(operationLeaseKey{}).(*operationLease); ok {
 		lease.run.Lock()
 		defer lease.run.Unlock()
 		if !lease.active.Load() || lease.directory != lockDirectory {

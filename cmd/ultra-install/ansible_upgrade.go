@@ -151,6 +151,34 @@ func ansibleUpgrade(
 		return err
 	}
 	defer runtimeRelease()
+	inventory, err := upgradeInventory(p, directory)
+	if err != nil {
+		return err
+	}
+	// Resumed/forward attempts may own a durable applying reservation already.
+	// Their recovery protocol must run before reconcile can refresh readiness.
+	if !forwardOnly && !retryFailed {
+		_, activationErr := os.Lstat(filepath.Join(directory, "activate", "job.json"))
+		if os.IsNotExist(activationErr) {
+			reserved, reservationErr := upgradeHasApplyingReservation(
+				p,
+				directory,
+				lockDirectory,
+				inventory,
+			)
+			if reservationErr != nil {
+				return reservationErr
+			}
+			if !reserved || !localLifecycleBridge(p) {
+				pending := upgradeApplyingReservationPending(directory)
+				if err = deployansible.WaitUpgradeReadiness(originalCtx, inventory, lockDirectory, python, executable, lifecycleID(directory), pending); err != nil {
+					return err
+				}
+			}
+		} else if activationErr != nil {
+			return activationErr
+		}
+	}
 	var releaseLock func()
 	if forwardOnly {
 		ctx, releaseLock, err = withForwardUpgradeHandoff(operatorCtx, p, lockDirectory, directory, python, executable)
@@ -198,10 +226,6 @@ func ansibleUpgrade(
 			releaseLock()
 		}
 	}()
-	inventory, err := upgradeInventory(p, directory)
-	if err != nil {
-		return err
-	}
 	var enforcement map[string]any
 	if !forwardOnly {
 		enforcement, err = upgradeEnforcementSpec(directory, releaseDir, manifest, inventory)
@@ -1070,6 +1094,181 @@ func ansibleUpgrade(
 	)
 	forwardReleaseComplete = err == nil
 	return err
+}
+
+// Only exact durable reservation evidence suppresses the optional unlocked wait.
+// Recovery still acquires its normal lease and repeats strict inspection.
+func upgradeHasApplyingReservation(
+	p *installplan.InstallPlan,
+	directory, lockDirectory string,
+	inventory map[string]any,
+) (bool, error) {
+	if localLifecycleBridge(p) {
+		return verifyForwardApplying(lockDirectory, lifecycleID(directory)) == nil, nil
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return false, err
+	}
+	variables := map[string]any{
+		"ultra_lifecycle_id": lifecycleID(directory), "ultra_lifecycle_phase": "applying",
+		"ultra_lifecycle_drain": false, "ultra_lifecycle_reserve_only": true,
+	}
+	reserved := false
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "lifecycle-applying-") {
+			continue
+		}
+		stage := filepath.Join(directory, entry.Name())
+		if err := operatorPrivate(stage, true); err != nil {
+			return false, errors.New("upgrade_readiness_reservation_unverified")
+		}
+		raw, readErr := readBootstrapGenerationInput(filepath.Join(stage, "receipt.json"))
+		var receipt deployansible.Receipt
+		if readErr != nil || json.Unmarshal(raw, &receipt) != nil || receipt.State != "succeeded" {
+			continue
+		}
+		// Drain and reserve-only transitions share the directory prefix. Verify
+		// each successful receipt against its own exact request purpose.
+		request, readErr := readBootstrapGenerationInput(filepath.Join(stage, "request.json"))
+		var input struct {
+			Inventory map[string]any `json:"inventory"`
+			Variables map[string]any `json:"variables"`
+		}
+		if readErr != nil || json.Unmarshal(request, &input) != nil {
+			return false, errors.New("upgrade_readiness_reservation_unverified")
+		}
+		purpose := variables
+		stageInventory := inventory
+		if input.Variables["ultra_lifecycle_drain"] == true &&
+			input.Variables["ultra_lifecycle_reserve_only"] == false {
+			if !upgradeLifecycleDrainInventoryMatches(input.Inventory, inventory, directory) {
+				return false, errors.New("upgrade_readiness_reservation_unverified")
+			}
+			stageInventory = input.Inventory
+			purpose = map[string]any{
+				"ultra_lifecycle_id":           lifecycleID(directory),
+				"ultra_lifecycle_phase":        "applying",
+				"ultra_lifecycle_drain":        true,
+				"ultra_lifecycle_reserve_only": false,
+			}
+		}
+		if err := verifyBootstrapComponentReceipt(stage, "lifecycle", stageInventory, purpose); err != nil {
+			return false, errors.New("upgrade_readiness_reservation_unverified")
+		}
+		if purpose["ultra_lifecycle_reserve_only"] == false {
+			continue
+		}
+		if receipt.Result.Values["reservation_id"] != lifecycleID(directory) ||
+			receipt.Result.Values["reservation_phase"] != "applying" {
+			return false, errors.New("upgrade_readiness_reservation_unverified")
+		}
+		reserved = true
+	}
+	return reserved, nil
+}
+
+// Drain runs after discovered exits (including optional baseline manifests) are
+// added, but before bridge variables change. Its fixed playbook targets bridge
+// only. Permit isolated exit hosts, preserving every bridge/common/group value;
+// a bridge alias or exit group vars/children could alter that target's execution.
+func upgradeLifecycleDrainInventoryMatches(
+	recorded, expected map[string]any,
+	directory string,
+) bool {
+	raw, err := json.Marshal(recorded)
+	if err != nil {
+		return false
+	}
+	var normalized map[string]any
+	if json.Unmarshal(raw, &normalized) != nil {
+		return false
+	}
+	all, _ := normalized["all"].(map[string]any)
+	children, _ := all["children"].(map[string]any)
+	exits, _ := children["exits"].(map[string]any)
+	hosts, ok := exits["hosts"].(map[string]any)
+	if !ok || len(exits) != 1 {
+		return false
+	}
+	for alias, value := range hosts {
+		host, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		id, _ := host["ultra_exit_id"].(string)
+		address, _ := host["ansible_host"].(string)
+		if !regexp.MustCompile(`^[a-f0-9-]{36}$`).MatchString(id) || net.ParseIP(address) == nil ||
+			alias != "exit_"+strings.ReplaceAll(
+				id,
+				"-",
+				"",
+			) || !regexp.MustCompile(`^exit_[a-f0-9]{32}$`).MatchString(alias) {
+			return false
+		}
+		// Match freezeUpgradeExits exactly. These are isolated host variables,
+		// including the baseline manifest optionally appended before drain.
+		wanted := map[string]any{
+			"ansible_host": address, "ansible_user": "root",
+			"ansible_ssh_private_key_file": filepath.Join(directory, "identity"),
+			"ansible_ssh_args":             "-F /dev/null -o ControlMaster=no -o ControlPath=none",
+			"ansible_ssh_common_args": "-o BatchMode=yes -o UpdateHostKeys=no -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=" + shellQuote(
+				filepath.Join(directory, alias+".pins"),
+			),
+			"ultra_exit_id": id,
+		}
+		if baseline, exists := host["ultra_host_previous_manifest"]; exists {
+			if _, ok := baseline.(map[string]any); !ok {
+				return false
+			}
+			wanted["ultra_host_previous_manifest"] = baseline
+		}
+		hostRaw, err := json.Marshal(host)
+		if err != nil {
+			return false
+		}
+		wantedRaw, err := json.Marshal(wanted)
+		if err != nil || string(hostRaw) != string(wantedRaw) {
+			return false
+		}
+	}
+	expectedAll, _ := expected["all"].(map[string]any)
+	expectedChildren, _ := expectedAll["children"].(map[string]any)
+	initialExits, ok := expectedChildren["exits"]
+	if !ok {
+		return false
+	}
+	children["exits"] = initialExits
+	normalizedRaw, err := json.Marshal(normalized)
+	if err != nil {
+		return false
+	}
+	expectedRaw, err := json.Marshal(expected)
+	return err == nil && string(normalizedRaw) == string(expectedRaw)
+}
+
+// Any submitted applying stage without a success receipt may still be running
+// remotely. Absence of current same-ID evidence must not enter the readiness wait.
+func upgradeApplyingReservationPending(directory string) bool {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return true
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "lifecycle-applying-") {
+			continue
+		}
+		stage := filepath.Join(directory, entry.Name())
+		if _, err := os.Lstat(filepath.Join(stage, "job.json")); os.IsNotExist(err) {
+			continue
+		}
+		raw, err := readBootstrapGenerationInput(filepath.Join(stage, "receipt.json"))
+		var receipt deployansible.Receipt
+		if err != nil || json.Unmarshal(raw, &receipt) != nil || receipt.State != "succeeded" {
+			return true
+		}
+	}
+	return false
 }
 
 // upgradeInventory excludes dedicated database hosts from the application

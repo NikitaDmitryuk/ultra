@@ -208,7 +208,7 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 		t.Skip("python unavailable")
 	}
 	for _, retryFailed := range []bool{false, true} {
-		for _, operation := range []string{"managed-reset-interrupted", "managed-missing-pair-rollback-failure", "managed-success", "managed-prepare-failure", "managed-runtime-rollback-failure", "managed-effects-commit-failure", "controller-floor", "controller-preflight-unverified", "controller-preflight-failure", "inspect-upgrade", "inspect-release-hosts", "legacy-inspect-release-hosts", "lifecycle-applying", "lifecycle-foreign", "legacy-success", "legacy-precheckpoint-failure", "legacy-rollback-failure", "legacy-runtime-rollback-failure", "legacy-commit-rollback-failure", "legacy-effects-commit-failure", "runtime-rollback-failure", "commit-rollback-failure", "prepared-generation-retry", "release-rollback-failure"} {
+		for _, operation := range []string{"before-reservation-interrupted", "after-reservation-interrupted", "after-reservation-ack-lost", "after-reservation-ambiguous", "managed-reset-interrupted", "managed-missing-pair-rollback-failure", "managed-success", "managed-prepare-failure", "managed-runtime-rollback-failure", "managed-effects-commit-failure", "controller-floor", "controller-preflight-unverified", "controller-preflight-failure", "inspect-upgrade", "inspect-release-hosts", "legacy-inspect-release-hosts", "lifecycle-applying", "lifecycle-foreign", "legacy-success", "legacy-precheckpoint-failure", "legacy-rollback-failure", "legacy-runtime-rollback-failure", "legacy-commit-rollback-failure", "legacy-effects-commit-failure", "runtime-rollback-failure", "commit-rollback-failure", "prepared-generation-retry", "release-rollback-failure"} {
 			t.Run(fmt.Sprintf("%s/retry-failed=%t", operation, retryFailed), func(t *testing.T) {
 				root := t.TempDir()
 				if err := os.Chmod(root, 0700); err != nil {
@@ -341,6 +341,53 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 				if err := os.Mkdir(directory, 0700); err != nil {
 					t.Fatal(err)
 				}
+				if operation == "before-reservation-interrupted" || operation == "after-reservation-interrupted" ||
+					operation == "after-reservation-ack-lost" ||
+					operation == "after-reservation-ambiguous" {
+					if err := os.WriteFile(filepath.Join(root, "readiness-stale"), nil, 0600); err != nil {
+						t.Fatal(err)
+					}
+					if operation == "before-reservation-interrupted" {
+						if err := os.Mkdir(filepath.Join(directory, "controller-preflight-interrupted"), 0700); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						inv, err := upgradeInventory(p, directory)
+						if err != nil {
+							t.Fatal(err)
+						}
+						vars := map[string]any{"ultra_lifecycle_id": lifecycleID(directory), "ultra_lifecycle_phase": "applying", "ultra_lifecycle_drain": false, "ultra_lifecycle_reserve_only": true}
+						request, err := json.Marshal(map[string]any{"inventory": inv, "variables": vars})
+						if err != nil {
+							t.Fatal(err)
+						}
+						hash := digestSHA256(request)
+						stage := filepath.Join(directory, "lifecycle-applying-interrupted")
+						if err := os.Mkdir(stage, 0700); err != nil {
+							t.Fatal(err)
+						}
+						job := map[string]any{"schema_version": 1, "operation": "lifecycle", "request_sha256": hash, "binary_sha256": hash}
+						receipt := map[string]any{"schema_version": 1, "operation": "lifecycle", "request_sha256": hash, "binary_sha256": hash, "state": "succeeded", "result": map[string]any{"verified": true, "reservation_id": lifecycleID(directory), "reservation_phase": "applying"}}
+						if operation == "after-reservation-ack-lost" || operation == "after-reservation-ambiguous" {
+							receipt["state"] = "running"
+						}
+						for name, value := range map[string]any{"job.json": job, "receipt.json": receipt} {
+							raw, err := json.Marshal(value)
+							if err != nil {
+								t.Fatal(err)
+							}
+							if err := os.WriteFile(filepath.Join(stage, name), raw, 0600); err != nil {
+								t.Fatal(err)
+							}
+						}
+						if err := os.WriteFile(filepath.Join(stage, "request.json"), request, 0600); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(filepath.Join(directory, "gate"), []byte("applying"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
 				if operation == "lifecycle-foreign" {
 					for _, name := range []string{"gate", "foreign-owner"} {
 						if err := os.WriteFile(filepath.Join(directory, name), []byte("foreign-owner"), 0600); err != nil {
@@ -371,6 +418,33 @@ request=json.loads((job/'request.json').read_text())
 variables=request['variables']
 operation=json.loads((job/'job.json').read_text())['operation']
 key=operation
+if operation=='wait-upgrade-readiness':
+    state=pathlib.Path(variables['ultra_lock_directory'])
+    fail=state/'upgrade'/'fail-once'
+    mode=fail.read_text() if fail.exists() else ''
+    if mode=='after-reservation-ambiguous':
+        assert variables['ultra_readiness_reservation_pending'] is True
+        sys.exit(1)
+    if mode in ('after-reservation-interrupted','after-reservation-ack-lost'):
+        assert variables['ultra_readiness_lifecycle_id']
+        if mode=='after-reservation-ack-lost': assert variables['ultra_readiness_reservation_pending'] is True
+        output=job/'result.json'
+        output.write_text(json.dumps({'verified':True,'reservation_id':variables['ultra_readiness_lifecycle_id'],'reservation_phase':'applying'}))
+        output.chmod(0o600)
+        sys.exit(0)
+    state=pathlib.Path(variables['ultra_lock_directory'])
+    if (state/'readiness-stale').exists():
+        (state/'readiness-wait-ran').touch()
+        sys.exit(1)
+    import fcntl,os
+    # The actual caller must perform the wait before taking its shared lease.
+    fd=os.open(pathlib.Path(variables['ultra_lock_directory'])/'infrastructure.lock',os.O_RDWR|os.O_CREAT,0o600)
+    fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    os.close(fd)
+    output=job/'result.json'
+    output.write_text(json.dumps({'verified':True,'ready':True}))
+    output.chmod(0o600)
+    sys.exit(0)
 if operation=='inspect-upgrade' and variables.get('ultra_controller_enforcement_preflight_only'):
     key='controller-preflight'
 if operation=='lifecycle':
@@ -385,6 +459,7 @@ if operation=='inspect-upgrade-runtime' and variables.get('ultra_managed_tunnel_
     key+='-compensation'
 with (root/'calls').open('a') as log: log.write(key+'\n')
 fail=root/'fail-once'
+if operation=='inspect-upgrade' and not variables.get('ultra_controller_enforcement_preflight_only') and fail.exists() and fail.read_text() in ('after-reservation-interrupted','after-reservation-ack-lost'): sys.exit(1)
 if key=='controller-preflight':
     if (root/'lifecycle-retired.json').exists() or (fail.exists() and fail.read_text()=='controller-preflight-failure'):
         sys.exit(1)
@@ -528,6 +603,34 @@ output.chmod(0o600)
 					t.Fatal(err)
 				}
 				firstErr := ansibleUpgrade(ctx, p, release, directory, python, executable, false)
+				if operation == "before-reservation-interrupted" || operation == "after-reservation-interrupted" ||
+					operation == "after-reservation-ack-lost" ||
+					operation == "after-reservation-ambiguous" {
+					if firstErr == nil || !strings.Contains(firstErr.Error(), "ansible operation failed") {
+						t.Fatalf("expected synthetic stale/strict failure: %v", firstErr)
+					}
+					_, waitErr := os.Stat(filepath.Join(root, "readiness-wait-ran"))
+					calls, _ := os.ReadFile(filepath.Join(directory, "calls"))
+					switch operation {
+					case "after-reservation-ambiguous":
+						if !os.IsNotExist(waitErr) || len(calls) != 0 {
+							t.Fatalf("ambiguous reservation waited or entered strict phase: %v %s", waitErr, calls)
+						}
+					case "before-reservation-interrupted":
+						if waitErr != nil || len(calls) != 0 {
+							t.Fatalf("pre-reservation interruption bypassed wait: %v %s", waitErr, calls)
+						}
+					default:
+						if !os.IsNotExist(waitErr) || !strings.Contains(string(calls), "lifecycle-applying\n") ||
+							strings.Index(string(calls), "inspect-upgrade\n") < strings.Index(string(calls), "lifecycle-applying\n") {
+							t.Fatalf("reserved resume waited or skipped strict inspection: %v %s", waitErr, calls)
+						}
+					}
+					if _, err := os.Stat(filepath.Join(directory, "activate", "job.json")); !os.IsNotExist(err) {
+						t.Fatal("pre-activation resume reached activation")
+					}
+					return
+				}
 				if strings.HasPrefix(operation, "managed-") {
 					if operation == "managed-success" {
 						if firstErr != nil {
@@ -987,5 +1090,38 @@ func TestReleaseRollbackFinalizesExactBotStateAfterBinaryRestore(t *testing.T) {
 	}
 	if !strings.Contains(source[activity:result], "action: accept-rollback") {
 		t.Fatal("final compensation does not restore captured activity")
+	}
+}
+
+func TestUpgradeReadinessLocalReservationRequiresExactApplyingOwner(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(root, "upgrade")
+	if err := os.Mkdir(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	local := true
+	p := &installplan.InstallPlan{ControllerLocal: &local, ControllerLocalTarget: "|"}
+	for _, item := range []struct {
+		id, phase string
+		reserved  bool
+	}{
+		{lifecycleID(directory), "released", false},
+		{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "applying", false},
+		{lifecycleID(directory), "applying", true},
+	} {
+		raw, err := json.Marshal(map[string]any{"id": item.id, "phase": item.phase})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "lifecycle.json"), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		reserved, err := upgradeHasApplyingReservation(p, directory, root, nil)
+		if err != nil || reserved != item.reserved {
+			t.Fatalf("%+v: %t %v", item, reserved, err)
+		}
 	}
 }

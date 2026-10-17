@@ -481,6 +481,29 @@ preflight для поддерживаемого retry, но не снимает 
 540-секундный предел `ultra-recovery-reconcile.service` с минутным запасом.
 Один уже выполняющийся обмен с controller может завершиться ещё до 10 секунд
 после этого окна.
+Перед новой обычной upgrade-операцией `wait-upgrade-readiness` ожидает свежих
+публичных recovery-наблюдений без lifecycle reservation и infrastructure lock,
+чтобы reconcile мог обновить их. Проверка читает два JSON-файла readiness и
+защищённый root-owned lifecycle journal,
+без DB discovery, топологии и ключей. Повторяется только точный
+`fresh_independent_backup_required`; остальные ошибки завершаются сразу. Общее
+дедлайн повторов по монотонным часам — 600 секунд с учётом времени проверок;
+controller ограничивает всё Ansible-задание с transport до 700 секунд, вызывающий
+процесс — до 780 секунд плюс до 5 секунд на остановку дочернего процесса. Задание сохраняет `no_log`, временный результат удаляется
+и не становится разрешением на upgrade. После захвата reservation выполняется
+обычный строгий однократный `inspect-upgrade`: ожидание внутри него блокировало бы
+reconcile, которому нужна та же lock. При возобновлении до activation ожидание также пропускается по проверенному
+same-ID `applying` journal локального broker либо текущему защищённому journal
+удалённого broker, который read-only probe проверяет перед каждым ожиданием.
+Remote receipt проверяется с точным inventory/request digest и назначением
+запроса (reservation или drain), но не заменяет текущий journal. Если локальное
+applying-задание отправлено и не имеет успешной квитанции, а remote journal не
+подтверждает тот же ID и фазу `applying`, операция завершается сразу: прерванный
+controller job может продолжать работу. Чужой active lifecycle и неоднозначное
+состояние также отклоняются без ожидания; один controller preflight владения не
+доказывает. Retry и forward-only операции, способные
+уже удерживать reservation, сохраняют отдельный recovery-протокол и это ожидание
+не выполняют.
 Для неудачной `--forward-only` операции есть
 отдельный явный `scripts/manual-deploy.py --continue-forward-only --config
 /absolute/path/to/install.config`. Он сохраняет digest исходного production-журнала

@@ -33,6 +33,111 @@ with patch.dict(sys.modules, {'ansible': types.ModuleType('ansible'), 'ansible.m
 
 
 class Contracts(unittest.TestCase):
+    def test_readiness_wait_exact_errors_and_deadline_include_attempt_time(self):
+        for failure in (ValueError('fresh_independent_backup_required: private'),
+                        ValueError('state_unavailable'), OSError('fresh_independent_backup_required')):
+            with self.subTest(failure=repr(failure)), patch.object(state, 'readiness', side_effect=failure) as probe:
+                with self.assertRaises(type(failure)):
+                    state.wait_readiness(sleep=lambda _: self.fail('terminal failure slept'))
+                self.assertEqual(probe.call_count, 1)
+        now, sleeps = [0], []
+        def probe():
+            now[0] += 8  # Count probe execution in the same deadline as sleeps.
+            raise ValueError('fresh_independent_backup_required')
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+        with patch.object(state, 'readiness', side_effect=probe) as check:
+            with self.assertRaisesRegex(ValueError, '^fresh_independent_backup_required$'):
+                state.wait_readiness(timeout=25, monotonic=lambda: now[0], sleep=sleep)
+            self.assertEqual(sleeps, [10])
+            self.assertEqual(check.call_count, 2)
+        with patch.object(state, 'readiness', side_effect=[ValueError('fresh_independent_backup_required'), None]) as check:
+            state.wait_readiness(monotonic=lambda: 0, sleep=lambda _: None)
+            self.assertEqual(check.call_count, 2)
+
+    def test_readiness_probe_never_discovers_or_reads_private_inputs(self):
+        records = {'recovery-reconcile-status.json': {'state': 'ready', 'independent': True, 'updated_at': 100},
+                   'last-success.json': {'snapshot_at': 100}}
+        with patch.object(state, 'read', side_effect=lambda path: records[Path(path).name]) as reads, \
+                patch.object(state.time, 'time', return_value=110), \
+                patch.object(state, 'database_query', side_effect=AssertionError('database queried')), \
+                patch.object(state, 'applying_reservation', return_value=False), \
+                patch.object(sys, 'argv', ['state.py', '--wait-readiness', '--lifecycle-id', '11111111-2222-3333-4444-555555555555']), patch('builtins.print') as output:
+            state.main()
+            self.assertEqual(reads.call_count, 2)
+            self.assertEqual(json.loads(output.call_args.args[0]), {'verified': True, 'ready': True})
+        tasks = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/wait-upgrade-readiness.yml').read_text())[0]['tasks']
+        self.assertTrue(all(task['no_log'] for task in tasks))
+        self.assertIn('--wait-readiness', tasks[0]['ansible.builtin.script']['cmd'])
+        self.assertNotIn('until', tasks[0])
+
+    def test_readiness_current_reservation_is_exact_and_fail_closed(self):
+        operation = '11111111-2222-3333-4444-555555555555'
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / 'lifecycle.json'
+            metadata = types.SimpleNamespace(st_mode=0o100600, st_uid=0, st_size=100)
+            def observe(pending=False):
+                with patch.object(state.os, 'fstat', return_value=metadata):
+                    return state.applying_reservation(operation, pending, journal)
+            self.assertFalse(observe())
+            with self.assertRaisesRegex(ValueError, 'ambiguous'):
+                observe(True)
+            for owner, phase, expected in ((operation, 'applying', True),
+                                           (operation, 'released', False),
+                                           (operation, 'checking', None),
+                                           ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'applying', None)):
+                journal.write_text(json.dumps({'id': owner, 'phase': phase}))
+                if expected is None:
+                    with self.assertRaisesRegex(ValueError, 'ambiguous'):
+                        observe()
+                else:
+                    self.assertEqual(observe(), expected)
+                if phase == 'released':
+                    with self.assertRaisesRegex(ValueError, 'ambiguous'):
+                        observe(True)
+            journal.write_text('{}')
+            with self.assertRaisesRegex(ValueError, 'unverified'):
+                observe()
+            for mode, uid in ((0o100644, 0), (0o100600, 1)):
+                metadata.st_mode, metadata.st_uid = mode, uid
+                with self.assertRaisesRegex(ValueError, 'unverified'):
+                    observe()
+        with patch.object(state, 'applying_reservation', return_value=True), \
+                patch.object(state, 'readiness', side_effect=AssertionError('waited behind own lease')):
+            result = state.wait_readiness(operation=operation, pending=True,
+                                          sleep=lambda _: self.fail('own reservation slept'))
+            self.assertEqual(result, {'verified': True, 'reservation_id': operation, 'reservation_phase': 'applying'})
+        with patch.object(state, 'applying_reservation', side_effect=ValueError('upgrade_readiness_reservation_ambiguous')), \
+                patch.object(state, 'readiness', side_effect=AssertionError('ambiguous reservation waited')):
+            with self.assertRaisesRegex(ValueError, 'ambiguous'):
+                state.wait_readiness(operation=operation, pending=True)
+
+    def test_locked_inspection_is_strict_private_and_does_not_wait_for_reconcile(self):
+        tasks = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/inspect-upgrade.yml').read_text())[0]['tasks']
+        inspect = next(task for task in tasks if task.get('register') == 'release_inspection')
+        self.assertTrue(inspect['no_log'])
+        self.assertFalse(inspect['changed_when'])
+        self.assertEqual(inspect['ansible.builtin.script']['cmd'],
+                         '{{ playbook_dir }}/../roles/release/files/state.py')
+        # Reconcile needs the shared lock held across this strict inspection.
+        # Retrying stale readiness here prevents the producer from refreshing it.
+        for key in ('retries', 'delay', 'until', 'failed_when', 'ignore_errors', 'async'):
+            self.assertNotIn(key, inspect)
+
+    def test_upgrade_keeps_strict_inspection_after_reservation_and_before_activation(self):
+        source = (ROOT / 'cmd/ultra-install/ansible_upgrade.go').read_text()
+        lease = source.index('ctx, releaseLock, err = withFrozenLifecycleLock(')
+        reservation = source.index('reservation, reserveErr := ansibleLifecycleReserve(')
+        inspection = source.index('inspectionReceipt, err := runUpgradeInspection(')
+        activation = source.index('"upgrade",', inspection)
+        wait = source.index('deployansible.WaitUpgradeReadiness(')
+        self.assertIn('deployansible.WaitUpgradeReadiness(originalCtx,', source)
+        self.assertLess(wait, lease)
+        self.assertLess(lease, reservation)
+        self.assertLess(reservation, inspection)
+        self.assertLess(inspection, activation)
+
     def test_forward_release_hash_does_not_read_a_fact_from_same_set_fact(self):
         tasks = yaml.safe_load((ROOT / 'deploy/ansible/roles/release/tasks/main.yml').read_text())
         pin = next(task for task in tasks if task.get('name') == 'Pin the target and fallback hashes')

@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import stat
@@ -74,12 +75,82 @@ def active_relay_sha256():
     return process_hash
 
 
+def readiness(now=None):
+    """Read only public recovery evidence; no discovery, DB, or credentials."""
+    now = time.time() if now is None else now
+    controller = read('/var/lib/ultra-relay/recovery-reconcile-status.json')
+    backup = read('/var/lib/ultra-recovery/last-success.json')
+    if not (controller.get('state') == 'ready' and controller.get('independent') is True
+            and 0 <= now - controller['updated_at'] <= 180 and 0 <= now - backup['snapshot_at'] <= 300):
+        raise ValueError('fresh_independent_backup_required')
+    return controller, backup
+
+
+def applying_reservation(operation, pending=False, journal=Path('/var/lib/ultra-ansible/lifecycle.json')):
+    """Observe only the broker's protected journal; never reserve or attach a lease."""
+    if not re.fullmatch(r'[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}', operation):
+        raise ValueError('invalid_readiness_lifecycle_id')
+    try:
+        # O_NOFOLLOW and fstat bind permissions and contents to the same file.
+        descriptor = os.open(journal, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        if pending:
+            raise ValueError('upgrade_readiness_reservation_ambiguous')
+        return False
+    with os.fdopen(descriptor) as source:
+        metadata = os.fstat(source.fileno())
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+                or metadata.st_mode & 0o077 or metadata.st_size > 4096):
+            raise ValueError('upgrade_readiness_reservation_unverified')
+        value = json.loads(source.read(4097))
+    if (not isinstance(value, dict) or set(value) != {'id', 'phase'}
+            or not isinstance(value['id'], str)
+            or not re.fullmatch(r'[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}', value['id'])
+            or value['phase'] not in ('applying', 'checking', 'released')):
+        raise ValueError('upgrade_readiness_reservation_unverified')
+    if value == {'id': operation, 'phase': 'applying'}:
+        return True
+    if pending or value['phase'] != 'released':
+        raise ValueError('upgrade_readiness_reservation_ambiguous')
+    return False
+
+
+def wait_readiness(timeout=600, interval=10, monotonic=time.monotonic, sleep=time.sleep,
+                   operation=None, pending=False):
+    deadline = monotonic() + timeout
+    while True:
+        if operation and applying_reservation(operation, pending):
+            return {'verified': True, 'reservation_id': operation, 'reservation_phase': 'applying'}
+        try:
+            readiness()
+            return {'verified': True, 'ready': True}
+        except ValueError as failure:
+            if str(failure) != 'fresh_independent_backup_required':
+                raise
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise ValueError('fresh_independent_backup_required')
+        sleep(min(interval, remaining))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--status', action='store_true')
+    parser.add_argument('--wait-readiness', action='store_true')
+    parser.add_argument('--lifecycle-id')
+    parser.add_argument('--reservation-pending', action='store_true')
     parser.add_argument('--expected')
     parser.add_argument('--not-before', type=int)
     args = parser.parse_args()
+    if args.wait_readiness:
+        if args.status or args.expected or args.not_before is not None:
+            raise ValueError('invalid_readiness_probe_arguments')
+        if not args.lifecycle_id:
+            raise ValueError('invalid_readiness_lifecycle_id')
+        print(json.dumps(wait_readiness(operation=args.lifecycle_id, pending=args.reservation_pending)))
+        return
+    if args.lifecycle_id or args.reservation_pending:
+        raise ValueError('invalid_readiness_probe_arguments')
     sys.path.insert(0, '/opt/ultra-recovery')
     import reconcile
     config = read('/etc/ultra-recovery/reconcile.json')
@@ -93,11 +164,7 @@ def main():
             print('{}')
             return
     now = time.time()
-    controller = read('/var/lib/ultra-relay/recovery-reconcile-status.json')
-    backup = read('/var/lib/ultra-recovery/last-success.json')
-    if not (controller.get('state') == 'ready' and controller.get('independent') is True
-            and 0 <= now - controller['updated_at'] <= 180 and 0 <= now - backup['snapshot_at'] <= 300):
-        raise ValueError('fresh_independent_backup_required')
+    controller, backup = readiness(now)
     if args.not_before is not None and (controller['updated_at'] <= args.not_before or backup['snapshot_at'] <= args.not_before):
         raise ValueError('post_activation_evidence_required')
     database = config['database']
