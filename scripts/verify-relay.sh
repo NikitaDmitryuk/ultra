@@ -112,15 +112,15 @@ elif [[ -n "$CONFIG_FILE" ]]; then
 		exit 1
 	fi
 	load_install_config "$CONFIG_FILE"
-	BRIDGE="${BRIDGE:-${FRONT:-}}"
-	EXIT="${EXIT:-${BACK:-}}"
+	BRIDGE="${BRIDGE:-}"
+	EXIT="${EXIT:-}"
 	SSH_USER=${SSH_USER:-root}
 elif [[ $# -eq 0 ]]; then
 	def="$(install_config_default_path)"
 	if [[ -f "$def" ]]; then
 		load_install_config "$def"
-		BRIDGE="${BRIDGE:-${FRONT:-}}"
-		EXIT="${EXIT:-${BACK:-}}"
+		BRIDGE="${BRIDGE:-}"
+		EXIT="${EXIT:-}"
 		SSH_USER=${SSH_USER:-root}
 	fi
 else
@@ -132,14 +132,10 @@ if [[ -z "${BRIDGE// }" || -z "${EXIT// }" ]]; then
 	usage
 fi
 
-IP_URL="${VERIFY_IP_URL:-}"
-if [[ -z "${IP_URL// }" ]]; then
-	echo "relay-check: задайте VERIFY_IP_URL (HTTPS URL для тестового GET через SOCKS)." >&2
-	exit 1
-fi
+IP_URL="${VERIFY_IP_URL:-https://api.ipify.org}"
 
-if [[ -n "${IDENTITY:-}" && ${#SSH_EXTRA[@]} -eq 0 ]]; then
-	id="$IDENTITY"
+if [[ -n "${BRIDGE_SSH_IDENTITY:-}" && ${#SSH_EXTRA[@]} -eq 0 ]]; then
+	id="$BRIDGE_SSH_IDENTITY"
 	if [[ "$id" == ~/* ]]; then
 		id="$HOME/${id#~/}"
 	fi
@@ -178,7 +174,7 @@ remote_curl_api() {
 	fi
 	{
 		printf '%s\n' 'set -euo pipefail' "settings=\$(python3 - env <<'ULTRA_VERIFY_HELPER'"
-		cat "$SCRIPT_DIR/../deploy/ansible/roles/bridge_migration/files/state.py"
+		cat "$SCRIPT_DIR/relay-environment.py"
 		# Evaluated only by remote root/sudo shell.
 # shellcheck disable=SC2016
 		printf '\n%s\n' 'ULTRA_VERIFY_HELPER' ')' 'eval "$settings"'

@@ -30,13 +30,16 @@ func (v *Vultr) AccountBandwidth(ctx context.Context) (AccountBandwidth, error) 
 		return AccountBandwidth{}, e
 	}
 	c := response.Bandwidth.Current
-	if c == nil || c.Out == nil || c.Instance == nil || c.Free == nil || c.Purchased == nil || *c.Out < 0 || *c.Instance < 0 || *c.Free < 0 || *c.Purchased < 0 {
+	if c == nil || c.Out == nil || c.Instance == nil || c.Free == nil || c.Purchased == nil || *c.Out < 0 || *c.Instance < 0 ||
+		*c.Free < 0 ||
+		*c.Purchased < 0 {
 		return AccountBandwidth{}, ErrUnavailable
 	}
 	credits := (*c.Instance + *c.Free + *c.Purchased) * 1e9
 	used := *c.Out * 1e9
 	amount := credits*0.8 - used
-	if math.IsNaN(credits) || math.IsInf(credits, 0) || credits >= float64(math.MaxInt64) || math.IsNaN(used) || math.IsInf(used, 0) || used >= float64(math.MaxInt64) {
+	if math.IsNaN(credits) || math.IsInf(credits, 0) || credits >= float64(math.MaxInt64) || math.IsNaN(used) || math.IsInf(used, 0) ||
+		used >= float64(math.MaxInt64) {
 		return AccountBandwidth{}, ErrUnavailable
 	}
 	return AccountBandwidth{Accrued: int64(credits), Used: int64(used), Remaining: max(0, int64(amount))}, nil

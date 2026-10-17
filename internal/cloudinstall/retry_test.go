@@ -117,8 +117,32 @@ path.chmod(0o600)
 			t.Fatal(err)
 		}
 	}
-	request := deployansible.ExitRequest{Host: "192.0.2.2", User: "root", Identity: identity, KnownHosts: pins, BridgeIPv4: "192.0.2.1", Spec: config.Spec{Role: config.RoleExit, MimicPreset: "steamlike", ListenAddress: "0.0.0.0", VLESSPort: 8443, Exit: config.ExitTunnelSpec{TunnelUUID: "11111111-2222-3333-4444-555555555555"}, ExitCertPaths: config.CertPaths{CertFile: "/etc/ultra-relay/fullchain.pem", KeyFile: "/etc/ultra-relay/privkey.pem"}, SplithttpHost: "example.com", SplithttpPath: "/fixture"}}
-	op := cloud.Operation{ID: "11111111-2222-3333-4444-555555555555", State: "pending", Phase: "install", InstanceID: "purchased", ExitID: "staged", FirewallID: "firewall", Charged: true}
+	request := deployansible.ExitRequest{
+		Host:       "192.0.2.2",
+		User:       "root",
+		Identity:   identity,
+		KnownHosts: pins,
+		BridgeIPv4: "192.0.2.1",
+		Spec: config.Spec{
+			Role:          config.RoleExit,
+			MimicPreset:   "steamlike",
+			ListenAddress: "0.0.0.0",
+			VLESSPort:     8443,
+			Exit:          config.ExitTunnelSpec{TunnelUUID: "11111111-2222-3333-4444-555555555555"},
+			ExitCertPaths: config.CertPaths{CertFile: "/etc/ultra-relay/fullchain.pem", KeyFile: "/etc/ultra-relay/privkey.pem"},
+			SplithttpHost: "example.com",
+			SplithttpPath: "/fixture",
+		},
+	}
+	op := cloud.Operation{
+		ID:         "11111111-2222-3333-4444-555555555555",
+		State:      "pending",
+		Phase:      "install",
+		InstanceID: "purchased",
+		ExitID:     "staged",
+		FirewallID: "firewall",
+		Charged:    true,
+	}
 	p := &Provisioner{Configurer: deployansible.Client{Socket: socket}}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -158,7 +182,9 @@ path.chmod(0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if op.State != "pending" || op.Phase != "install" || op.InstanceID != "purchased" || op.ExitID != "staged" || op.FirewallID != "firewall" || !op.Charged {
+	if op.State != "pending" || op.Phase != "install" || op.InstanceID != "purchased" || op.ExitID != "staged" ||
+		op.FirewallID != "firewall" ||
+		!op.Charged {
 		t.Fatal("retry changed purchase identity")
 	}
 	stop()

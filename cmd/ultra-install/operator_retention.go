@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 const operatorCompletionFile = "operation.completed.json"
@@ -43,7 +44,8 @@ func operatorPrivate(path string, directory bool) error {
 		}
 		if current == path {
 			owner, ok := info.Sys().(*syscall.Stat_t)
-			if !ok || owner.Uid != uint32(os.Geteuid()) || info.Mode().Perm()&0077 != 0 || (directory && !info.IsDir()) || (!directory && !info.Mode().IsRegular()) {
+			if !ok || owner.Uid != uint32(os.Geteuid()) || info.Mode().Perm()&0077 != 0 || (directory && !info.IsDir()) ||
+				(!directory && !info.Mode().IsRegular()) {
 				return errors.New("operator_retention_private_required")
 			}
 		}
@@ -68,7 +70,8 @@ func operatorMetadata(directory string) (map[string]string, error) {
 		if path == directory {
 			return nil
 		}
-		if entry.IsDir() && (entry.Name() == "bundle" || entry.Name() == "recovery-bundle" || entry.Name() == "ansible-tmp" || entry.Name() == "__pycache__") {
+		if entry.IsDir() &&
+			(entry.Name() == "bundle" || entry.Name() == "recovery-bundle" || entry.Name() == "ansible-tmp" || entry.Name() == "__pycache__") {
 			return filepath.SkipDir
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
@@ -111,7 +114,9 @@ func operatorMetadata(directory string) (map[string]string, error) {
 				return err
 			}
 			receiptRaw, err := os.ReadFile(receiptPath)
-			if err != nil || json.Unmarshal(raw, &job) != nil || json.Unmarshal(receiptRaw, &receipt) != nil || job.Schema != 1 || (receipt.State != "succeeded" && receipt.State != "failed" && !retiredOperatorObservationValid(directory, filepath.Dir(path))) || receipt.RequestSHA != job.RequestSHA {
+			if err != nil || json.Unmarshal(raw, &job) != nil || json.Unmarshal(receiptRaw, &receipt) != nil || job.Schema != 1 ||
+				(receipt.State != "succeeded" && receipt.State != "failed" && !retiredOperatorObservationValid(directory, filepath.Dir(path))) ||
+				receipt.RequestSHA != job.RequestSHA {
 				return errors.New("operator_retention_stage_incomplete")
 			}
 			requestPath := filepath.Join(filepath.Dir(path), "request.json")
@@ -160,7 +165,8 @@ func sealCompletedOperatorOperation(directory, kind string, manifest *automation
 		if walkErr != nil {
 			return walkErr
 		}
-		if (entry.IsDir() && (entry.Name() == "bundle" || entry.Name() == "recovery-bundle" || (entry.Name() == "tools" && filepath.Base(filepath.Dir(path)) == "automation-sources"))) || (entry.Name() == "bootstrap_plan.py" && filepath.Base(filepath.Dir(path)) == "automation-sources") {
+		if (entry.IsDir() && (entry.Name() == "bundle" || entry.Name() == "recovery-bundle" || (entry.Name() == "tools" && filepath.Base(filepath.Dir(path)) == "automation-sources"))) ||
+			(entry.Name() == "bootstrap_plan.py" && filepath.Base(filepath.Dir(path)) == "automation-sources") {
 			var contents map[string]any
 			if entry.Name() == "bundle" {
 				proofPath := filepath.Join(filepath.Dir(path), "bundle.retention.json")
@@ -182,7 +188,9 @@ func sealCompletedOperatorOperation(directory, kind string, manifest *automation
 					Inventory map[string]any    `json:"inventory"`
 				}
 				requestSHA, hashErr := sourceSHA(filepath.Join(filepath.Dir(path), "request.json"))
-				if json.Unmarshal(raw, &proof) != nil || proof.Schema != 1 || proof.Path != path || proof.Inventory == nil || hashErr != nil || proof.Identity["request_sha256"] != requestSHA {
+				if json.Unmarshal(raw, &proof) != nil || proof.Schema != 1 || proof.Path != path || proof.Inventory == nil ||
+					hashErr != nil ||
+					proof.Identity["request_sha256"] != requestSHA {
 					return errors.New("operator_retention_bundle_identity_invalid")
 				}
 				contents = normalizeOperatorBundleInventory(proof.Inventory)
@@ -194,7 +202,9 @@ func sealCompletedOperatorOperation(directory, kind string, manifest *automation
 			}
 			relative, _ := filepath.Rel(directory, path)
 			if entry.Name() == "bundle" {
-				bundleReceipts[filepath.ToSlash(relative)] = filepath.ToSlash(filepath.Join(filepath.Dir(relative), "bundle.retention.json"))
+				bundleReceipts[filepath.ToSlash(relative)] = filepath.ToSlash(
+					filepath.Join(filepath.Dir(relative), "bundle.retention.json"),
+				)
 			} else {
 				payloads[filepath.ToSlash(relative)] = contents
 			}
@@ -211,7 +221,19 @@ func sealCompletedOperatorOperation(directory, kind string, manifest *automation
 	if err != nil {
 		return err
 	}
-	state := operatorCompletion{Schema: 1, Path: directory, ID: lifecycleID(directory), Kind: kind, Version: manifest.Version, Commit: manifest.SourceCommit, ManifestSHA: manifestSHA, Metadata: metadata, Payloads: payloads, RetainedUnknown: unknown, BundleReceipts: bundleReceipts}
+	state := operatorCompletion{
+		Schema:          1,
+		Path:            directory,
+		ID:              lifecycleID(directory),
+		Kind:            kind,
+		Version:         manifest.Version,
+		Commit:          manifest.SourceCommit,
+		ManifestSHA:     manifestSHA,
+		Metadata:        metadata,
+		Payloads:        payloads,
+		RetainedUnknown: unknown,
+		BundleReceipts:  bundleReceipts,
+	}
 	if len(unknown) > 0 {
 		fmt.Fprintln(os.Stderr, "operator_retention_retained_unknown:", len(unknown), "legacy payloads")
 	}
@@ -238,7 +260,11 @@ func completedOperatorOperation(directory, kind, version string) (bool, error) {
 		return true, errors.New("operator_retention_completion_invalid")
 	}
 	var state operatorCompletion
-	if json.Unmarshal(raw, &state) != nil || state.Schema != 1 || state.Path != directory || state.ID != lifecycleID(directory) || state.Kind != kind || (version != "" && state.Version != version) || len(state.Commit) != 40 || len(state.ManifestSHA) != 64 {
+	if json.Unmarshal(raw, &state) != nil || state.Schema != 1 || state.Path != directory || state.ID != lifecycleID(directory) ||
+		state.Kind != kind ||
+		(version != "" && state.Version != version) ||
+		len(state.Commit) != 40 ||
+		len(state.ManifestSHA) != 64 {
 		return true, errors.New("operator_retention_completion_invalid")
 	}
 	manifest := &automationRelease{Version: state.Version, SourceCommit: state.Commit}
@@ -434,7 +460,8 @@ func operatorRuntimeInventory(directory string) (map[string]any, error) {
 			// CPython 3.14's UTF-8 venv adds this exact alias to python3.
 			valid = valid || (relative == "venv/bin/𝜋thon" && target == "python3")
 			if strings.HasPrefix(relative, "venv/bin/python") {
-				valid = target == "python3" || target == "python" || target == "/usr/bin/python3" || regexp.MustCompile(`^/usr/bin/python3\.(12|13|14)$`).MatchString(target)
+				valid = target == "python3" || target == "python" || target == "/usr/bin/python3" ||
+					regexp.MustCompile(`^/usr/bin/python3\.(12|13|14)$`).MatchString(target)
 			}
 			if !valid {
 				return errors.New("operator_runtime_symlink_invalid")
@@ -562,7 +589,8 @@ func collectCompletedOperatorArtifacts(root string, keep ...*automationRelease) 
 			}
 			return nil
 		}
-		if entry.IsDir() && (entry.Name() == "bundle" || entry.Name() == "recovery-bundle" || entry.Name() == "ansible-tmp" || entry.Name() == "releases" || entry.Name() == "downloads" || strings.HasPrefix(entry.Name(), "runtime-")) {
+		if entry.IsDir() &&
+			(entry.Name() == "bundle" || entry.Name() == "recovery-bundle" || entry.Name() == "ansible-tmp" || entry.Name() == "releases" || entry.Name() == "downloads" || strings.HasPrefix(entry.Name(), "runtime-")) {
 			return filepath.SkipDir
 		}
 		if entry.IsDir() {
@@ -606,7 +634,8 @@ func collectCompletedOperatorArtifacts(root string, keep ...*automationRelease) 
 	}
 	protected := func(path string) bool {
 		for ref := range refs {
-			if ref == path || strings.HasPrefix(ref, path+string(os.PathSeparator)) || strings.HasPrefix(path, strings.TrimSuffix(ref, string(os.PathSeparator))+string(os.PathSeparator)) {
+			if ref == path || strings.HasPrefix(ref, path+string(os.PathSeparator)) ||
+				strings.HasPrefix(path, strings.TrimSuffix(ref, string(os.PathSeparator))+string(os.PathSeparator)) {
 				return true
 			}
 		}
@@ -618,7 +647,8 @@ func collectCompletedOperatorArtifacts(root string, keep ...*automationRelease) 
 			payloads[relative] = contents
 		}
 		for relative, receipt := range state.BundleReceipts {
-			if filepath.IsAbs(relative) || strings.Contains(relative, "..") || filepath.Base(relative) != "bundle" || receipt != filepath.ToSlash(filepath.Join(filepath.Dir(relative), "bundle.retention.json")) {
+			if filepath.IsAbs(relative) || strings.Contains(relative, "..") || filepath.Base(relative) != "bundle" ||
+				receipt != filepath.ToSlash(filepath.Join(filepath.Dir(relative), "bundle.retention.json")) {
 				return errors.New("operator_retention_bundle_reference_invalid")
 			}
 			raw, err := os.ReadFile(filepath.Join(directory, filepath.FromSlash(receipt)))
@@ -635,7 +665,8 @@ func collectCompletedOperatorArtifacts(root string, keep ...*automationRelease) 
 			payloads[relative] = normalizeOperatorBundleInventory(proof.Inventory)
 		}
 		for relative, expected := range payloads {
-			if filepath.IsAbs(relative) || strings.Contains(relative, "..") || (filepath.Base(relative) != "bundle" && filepath.Base(relative) != "recovery-bundle" && relative != "automation-sources/tools" && relative != "automation-sources/bootstrap_plan.py") {
+			if filepath.IsAbs(relative) || strings.Contains(relative, "..") ||
+				(filepath.Base(relative) != "bundle" && filepath.Base(relative) != "recovery-bundle" && relative != "automation-sources/tools" && relative != "automation-sources/bootstrap_plan.py") {
 				return errors.New("operator_retention_payload_path_invalid")
 			}
 			path := filepath.Join(directory, relative)
@@ -665,7 +696,8 @@ func collectCompletedOperatorArtifacts(root string, keep ...*automationRelease) 
 		return err
 	}
 	for _, entry := range members {
-		if !regexp.MustCompile(`^runtime-[a-f0-9]{64}$`).MatchString(entry.Name()) || dependencies[strings.TrimPrefix(entry.Name(), "runtime-")] {
+		if !regexp.MustCompile(`^runtime-[a-f0-9]{64}$`).MatchString(entry.Name()) ||
+			dependencies[strings.TrimPrefix(entry.Name(), "runtime-")] {
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
@@ -692,7 +724,8 @@ func collectCompletedOperatorArtifacts(root string, keep ...*automationRelease) 
 				Dependency string         `json:"dependency_sha256"`
 				Inventory  map[string]any `json:"inventory"`
 			}
-			if json.Unmarshal(raw, &state) != nil || state.Schema != 1 || state.Path != path || state.Dependency != strings.TrimPrefix(entry.Name(), "runtime-") {
+			if json.Unmarshal(raw, &state) != nil || state.Schema != 1 || state.Path != path ||
+				state.Dependency != strings.TrimPrefix(entry.Name(), "runtime-") {
 				return nil
 			}
 			actual, err := operatorRuntimeInventory(path)
@@ -814,12 +847,14 @@ func operatorWinningChain(directory, kind string, manifest *automationRelease, m
 			var request struct {
 				Variables map[string]any `json:"variables"`
 			}
-			if json.Unmarshal(raw, &request) != nil || request.Variables["ultra_release_version"] != manifest.Version || request.Variables["ultra_release_manifest_sha256"] != manifestSHA {
+			if json.Unmarshal(raw, &request) != nil || request.Variables["ultra_release_version"] != manifest.Version ||
+				request.Variables["ultra_release_manifest_sha256"] != manifestSHA {
 				return errors.New("operator_retention_winning_release_changed")
 			}
 			projected, _ := json.Marshal(request.Variables["ultra_release_manifest"])
 			var release automationRelease
-			if json.Unmarshal(projected, &release) != nil || release.Version != manifest.Version || release.SourceCommit != manifest.SourceCommit {
+			if json.Unmarshal(projected, &release) != nil || release.Version != manifest.Version ||
+				release.SourceCommit != manifest.SourceCommit {
 				return errors.New("operator_retention_winning_release_changed")
 			}
 		}

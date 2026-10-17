@@ -91,10 +91,35 @@ def main():
             actual = run(['docker', 'exec', container, 'sha256sum', '/usr/local/bin/ultra-relay']).split()[0]
             assert actual == hashlib.sha256(old).hexdigest(), 'compatible rollback did not restore executable bytes'
             assert run(['docker', 'exec', container, 'sha256sum', fallback]).split()[0] == hashlib.sha256(old).hexdigest()
+            # A failed bridge readiness probe runs after target activation. Its
+            # local rescue must leave the fallback stopped while fleet rollback
+            # still needs to restore the exits (and may fail doing so).
+            hosts = inventory['all']['children']
+            hosts['bridge']['hosts'] = hosts['exits']['hosts']
+            hosts['exits']['hosts'] = {}
+            variables['ultra_legacy_bridge_maintenance'] = True
+            (directory / 'inventory.json').write_text(json.dumps(inventory))
+            (directory / 'vars.json').write_text(json.dumps(variables))
+            playbook.write_text('---\n- name: Fail legacy bridge readiness\n  hosts: bridge\n  gather_facts: false\n  vars:\n    release_component: ultra-relay\n  tasks:\n    - name: Activate bridge relay\n      ansible.builtin.include_role:\n        name: release\n')
+            before = json.loads(run(['docker', 'exec', container, 'cat', '/var/lib/fixture-systemctl.json']))['activations']
+            failure = subprocess.run(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
+            assert failure.returncode != 0, 'failed legacy bridge readiness was reported as success'
+            restored = json.loads(run(['docker', 'exec', container, 'cat', '/var/lib/fixture-systemctl.json']))
+            assert not restored['active'], 'legacy bridge rescue reopened traffic before fleet rollback'
+            assert restored['activations'] == before + 1, 'legacy bridge fallback was restarted locally'
+            assert run(['docker', 'exec', container, 'sha256sum', '/usr/local/bin/ultra-relay']).split()[0] == hashlib.sha256(old).hexdigest()
+            # The common rollback starts an already restored bridge only after
+            # the exit play succeeds. Prove a failed exit blocks that later play.
+            hosts['exits']['hosts'] = {'failed-exit': dict(hosts['bridge']['hosts']['fixture'])}
+            (directory / 'inventory.json').write_text(json.dumps(inventory))
+            playbook.write_text('---\n- name: Fail exit fleet rollback\n  hosts: exits\n  gather_facts: false\n  any_errors_fatal: true\n  tasks:\n    - name: Simulate exit rollback failure\n      ansible.builtin.fail:\n        msg: fixture_exit_rollback_failed\n- name: Resume restored bridge after exits\n  hosts: bridge\n  gather_facts: false\n  tasks:\n    - name: Start restored bridge\n      ansible.builtin.systemd_service:\n        name: ultra-relay.service\n        state: started\n')
+            failure = subprocess.run(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
+            assert failure.returncode != 0, 'exit rollback failure was reported as success'
+            assert not json.loads(run(['docker', 'exec', container, 'cat', '/var/lib/fixture-systemctl.json']))['active'], 'failed exit rollback allowed the legacy bridge to start'
             playbook.write_text('---\n- name: Restore compatible tools\n  hosts: exits\n  gather_facts: false\n  tasks:\n    - name: Restore tools\n      ansible.builtin.include_role:\n        name: release\n        tasks_from: rollback-tools\n')
             run(command, env=env, timeout=180)
             assert run(['docker', 'exec', container, 'sha256sum', '/opt/ultra-recovery/monitor.py']).split()[0] == hashlib.sha256(old).hexdigest()
-            print('Release SSH role: activation, replay, preserved fallback and failed-probe rollback passed; real systemd/payload remain separate acceptance')
+            print('Release SSH role: activation, replay, preserved fallback, failed-probe rollback and legacy bridge barrier passed; real systemd/payload remain separate acceptance')
         finally:
             subprocess.run(['docker', 'rm', '-f', container], check=False, stdout=subprocess.DEVNULL)
 

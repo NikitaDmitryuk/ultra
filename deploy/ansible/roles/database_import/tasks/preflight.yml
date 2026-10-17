@@ -1,0 +1,51 @@
+---
+- name: Validate database dump preflight inputs
+  ansible.builtin.assert:
+    that:
+      - ultra_database_import_dump is string
+      - ultra_database_import_dump | length > 0
+      - ultra_database_import_destination is match('^/var/lib/ultra-db-import/[A-Za-z0-9._-]+$')
+      - ultra_database_import_db is match('^[a-z_][a-z0-9_]{0,62}$')
+      - ultra_database_import_user is match('^[a-z_][a-z0-9_]{0,62}$')
+      - ultra_database_import_sha256 is match('^[a-f0-9]{64}$')
+  no_log: true
+- name: Create private database import preflight staging directory
+  ansible.builtin.file:
+    path: /var/lib/ultra-db-import
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Preflight local archive and inspect any existing target database read-only
+  block:
+    - name: Transfer operator-local archive directly to database host
+      ansible.builtin.copy:
+        src: "{{ ultra_database_import_dump }}"
+        dest: "{{ ultra_database_import_destination }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+    - name: Install database archive preflight helper
+      ansible.builtin.copy:
+        src: "{{ ultra_database_import_script_directory }}/database_dump_import.py"
+        dest: /var/lib/ultra-db-import/database_dump_import.py
+        owner: root
+        group: root
+        mode: "0700"
+    - name: Validate archive and inspect target before PostgreSQL role mutations
+      ansible.builtin.command:
+        argv: [python3, /var/lib/ultra-db-import/database_dump_import.py, --check]
+        stdin: >-
+          {{ {'archive': ultra_database_import_destination,
+              'database': ultra_database_import_db,
+              'user': ultra_database_import_user,
+              'sha256': ultra_database_import_sha256} | to_json(preprocess_unsafe=False) }}
+      register: database_import_preflight
+      changed_when: false
+      no_log: true
+  always:
+    - name: Remove private database import preflight staging
+      ansible.builtin.file:
+        path: /var/lib/ultra-db-import
+        state: absent

@@ -24,7 +24,8 @@ func (f quotaSourceFunc) SubscriptionQuota(ctx context.Context, id string, now t
 func TestSubscriptionQuotaGroupsUseCountriesWithoutProviderNames(t *testing.T) {
 	kinds := classifyExitQuotaKinds([]db.ExitBudget{{ID: "nl", Source: "manual"}, {ID: "us", Source: "vultr"}})
 	groups := subscriptionQuotaGroupText([]exits.Node{{ID: "nl", CountryCode: "NL"}, {ID: "us", CountryCode: "US"}}, kinds)
-	if !strings.Contains(groups, "Общая квота: США") || !strings.Contains(groups, "Отдельная квота: Нидерланды") || strings.Contains(groups, "Vultr") {
+	if !strings.Contains(groups, "Общая квота: США") || !strings.Contains(groups, "Отдельная квота: Нидерланды") ||
+		strings.Contains(groups, "Vultr") {
 		t.Fatal(groups)
 	}
 }
@@ -34,7 +35,18 @@ func TestSubscriptionQuotaOwnerFormatsAndCache(t *testing.T) {
 	user := users.users["u1"]
 	user.AccountID = "owner-account"
 	users.users["u1"] = user
-	s, err := NewServer("127.0.0.1:0", "secret", users, nil, &config.Spec{Role: config.RoleBridge, DevMode: true, PublicHost: "localhost", VLESSPort: 443}, nil, nil, nil, nil, nil)
+	s, err := NewServer(
+		"127.0.0.1:0",
+		"secret",
+		users,
+		nil,
+		&config.Spec{Role: config.RoleBridge, DevMode: true, PublicHost: "localhost", VLESSPort: 443},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +57,16 @@ func TestSubscriptionQuotaOwnerFormatsAndCache(t *testing.T) {
 		if id != "owner-account" || now.IsZero() {
 			t.Fatalf("wrong quota owner/time: %s %v", id, now)
 		}
-		return db.PoolQuota{Scope: "vultr", Period: "2026-10", PersonalLimit: 1000, Used: 400, Remaining: 600, ObservedAt: &observed, State: "ready", ResetsAt: reset}, nil
+		return db.PoolQuota{
+			Scope:         "vultr",
+			Period:        "2026-10",
+			PersonalLimit: 1000,
+			Used:          400,
+			Remaining:     600,
+			ObservedAt:    &observed,
+			State:         "ready",
+			ResetsAt:      reset,
+		}, nil
 	})
 	request := func(query string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("GET", "/v1/subscriptions/issued?"+query, nil)
@@ -66,7 +87,8 @@ func TestSubscriptionQuotaOwnerFormatsAndCache(t *testing.T) {
 		if got := w.Header().Get("subscription-userinfo"); got != "upload=0; download=400; total=1000" {
 			t.Fatal(got)
 		}
-		if w.Header().Get("X-Ultra-Quota-Observed-At") != observed.Format(time.RFC3339) || w.Header().Get("X-Ultra-Quota-Resets-At") != reset.Format(time.RFC3339) {
+		if w.Header().Get("X-Ultra-Quota-Observed-At") != observed.Format(time.RFC3339) ||
+			w.Header().Get("X-Ultra-Quota-Resets-At") != reset.Format(time.RFC3339) {
 			t.Fatal("missing observation/reset")
 		}
 		if w.Header().Get("X-Ultra-Quota-Scope") != "shared" {
@@ -86,7 +108,9 @@ func TestSubscriptionQuotaOwnerFormatsAndCache(t *testing.T) {
 		t.Fatal("cache export failed", w.Body.String())
 	}
 	for _, entry := range snapshot.Entries {
-		if entry.Headers["subscription-userinfo"] != "upload=0; download=400; total=1000" || entry.Headers["announce"] == "" || entry.Headers["X-Ultra-Quota-State"] != "ready" || entry.Headers["X-Ultra-Quota-Scope"] != "shared" {
+		if entry.Headers["subscription-userinfo"] != "upload=0; download=400; total=1000" || entry.Headers["announce"] == "" ||
+			entry.Headers["X-Ultra-Quota-State"] != "ready" ||
+			entry.Headers["X-Ultra-Quota-Scope"] != "shared" {
 			t.Fatal("cache dropped quota metadata", entry.Headers)
 		}
 	}
@@ -99,9 +123,12 @@ func TestSubscriptionQuotaOwnerFormatsAndCache(t *testing.T) {
 		{name: "unobserved", q: db.PoolQuota{Scope: "vultr", PersonalLimit: 1000, State: "stale"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			s.SubscriptionQuota = quotaSourceFunc(func(context.Context, string, time.Time) (db.PoolQuota, error) { return test.q, test.err })
+			s.SubscriptionQuota = quotaSourceFunc(
+				func(context.Context, string, time.Time) (db.PoolQuota, error) { return test.q, test.err },
+			)
 			w := request("format=uri")
-			if w.Code != 200 || w.Header().Get("subscription-userinfo") != "" || (test.name != "missing" && w.Header().Get("announce") == "") {
+			if w.Code != 200 || w.Header().Get("subscription-userinfo") != "" ||
+				(test.name != "missing" && w.Header().Get("announce") == "") {
 				t.Fatal("unknown quota blocked or fabricated", w.Code, w.Header())
 			}
 			if test.name == "missing" && w.Header().Get("announce") != "" {

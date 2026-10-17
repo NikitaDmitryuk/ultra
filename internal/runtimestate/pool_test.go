@@ -12,16 +12,46 @@ import (
 func TestPoolMigrationUsesMaxPerHistoricalOwnerExit(t *testing.T) {
 	s, _, now, _ := fixture(t, 1000)
 	defer func() { _ = s.Close() }()
-	limits := []QuotaLimit{{AccountID: "account", ExitID: "a", Period: "2026-10", UsedBytes: 50, LimitBytes: 1000, ExpiresAt: now.Add(time.Hour)}, {AccountID: "account", ExitID: "b", Period: "2026-10", UsedBytes: 100, LimitBytes: 1000, ExpiresAt: now.Add(time.Hour)}, {ExitID: "a", Period: "2026-10", UsedBytes: 50, LimitBytes: 1000, ExpiresAt: now.Add(time.Hour)}, {ExitID: "b", Period: "2026-10", UsedBytes: 100, LimitBytes: 1000, ExpiresAt: now.Add(time.Hour)}}
+	limits := []QuotaLimit{
+		{AccountID: "account", ExitID: "a", Period: "2026-10", UsedBytes: 50, LimitBytes: 1000, ExpiresAt: now.Add(time.Hour)},
+		{AccountID: "account", ExitID: "b", Period: "2026-10", UsedBytes: 100, LimitBytes: 1000, ExpiresAt: now.Add(time.Hour)},
+		{ExitID: "a", Period: "2026-10", UsedBytes: 50, LimitBytes: 1000, ExpiresAt: now.Add(time.Hour)},
+		{ExitID: "b", Period: "2026-10", UsedBytes: 100, LimitBytes: 1000, ExpiresAt: now.Add(time.Hour)},
+	}
 	if err := s.SetQuotaLimits(limits); err != nil {
 		t.Fatal(err)
 	}
 	pool := ProviderPoolID("vultr")
-	migrated := []QuotaLimit{{AccountID: "account", ExitID: "a", PoolScope: "vultr", Period: "2026-10", UsedBytes: 100, LimitBytes: 100}, // removed route: deliberately expired
+	migrated := []QuotaLimit{
+		{
+			AccountID:  "account",
+			ExitID:     "a",
+			PoolScope:  "vultr",
+			Period:     "2026-10",
+			UsedBytes:  100,
+			LimitBytes: 100,
+		}, // removed route: deliberately expired
 		{AccountID: "account", ExitID: "b", PoolScope: "vultr", Period: "2026-10", LimitBytes: 1000, ExpiresAt: now.Add(time.Hour)},
 		{ExitID: "b", PoolScope: "vultr", Period: "2026-10", LimitBytes: 1000, ExpiresAt: now.Add(time.Hour)},
-		{AccountID: "account", ExitID: pool, Scope: "provider_pool", Period: "2026-10", UsedBytes: 100, LimitBytes: 300, ExpiresAt: now.Add(time.Hour)},
-		{ExitID: pool, Scope: "provider_pool", Members: []string{"a", "b"}, Period: "2026-10", UsedBytes: 100, LimitBytes: 300, ExpiresAt: now.Add(time.Hour)}}
+		{
+			AccountID:  "account",
+			ExitID:     pool,
+			Scope:      "provider_pool",
+			Period:     "2026-10",
+			UsedBytes:  100,
+			LimitBytes: 300,
+			ExpiresAt:  now.Add(time.Hour),
+		},
+		{
+			ExitID:     pool,
+			Scope:      "provider_pool",
+			Members:    []string{"a", "b"},
+			Period:     "2026-10",
+			UsedBytes:  100,
+			LimitBytes: 300,
+			ExpiresAt:  now.Add(time.Hour),
+		},
+	}
 	if err := s.SetQuotaLimits(migrated); err != nil {
 		t.Fatal(err)
 	}
@@ -55,14 +85,52 @@ func TestFiveClientsAcrossExitsShareOnePool(t *testing.T) {
 	s, _, now, _ := fixture(t, ReservationChunk*10)
 	defer func() { _ = s.Close() }()
 	pool := ProviderPoolID("vultr")
-	limits := []QuotaLimit{{ExitID: pool, Scope: "provider_pool", Members: []string{"a", "b"}, Period: "2026-10", LimitBytes: ReservationChunk * 3, ExpiresAt: now.Add(time.Hour)}}
+	limits := []QuotaLimit{
+		{
+			ExitID:     pool,
+			Scope:      "provider_pool",
+			Members:    []string{"a", "b"},
+			Period:     "2026-10",
+			LimitBytes: ReservationChunk * 3,
+			ExpiresAt:  now.Add(time.Hour),
+		},
+	}
 	for _, exit := range []string{"a", "b"} {
-		limits = append(limits, QuotaLimit{ExitID: exit, PoolScope: "vultr", Period: "2026-10", LimitBytes: ReservationChunk * 10, ExpiresAt: now.Add(time.Hour)})
+		limits = append(
+			limits,
+			QuotaLimit{
+				ExitID:     exit,
+				PoolScope:  "vultr",
+				Period:     "2026-10",
+				LimitBytes: ReservationChunk * 10,
+				ExpiresAt:  now.Add(time.Hour),
+			},
+		)
 	}
 	for _, owner := range []string{"1", "2", "3", "4", "5"} {
-		limits = append(limits, QuotaLimit{AccountID: owner, ExitID: pool, Scope: "provider_pool", Period: "2026-10", LimitBytes: ReservationChunk * 10, ExpiresAt: now.Add(time.Hour)})
+		limits = append(
+			limits,
+			QuotaLimit{
+				AccountID:  owner,
+				ExitID:     pool,
+				Scope:      "provider_pool",
+				Period:     "2026-10",
+				LimitBytes: ReservationChunk * 10,
+				ExpiresAt:  now.Add(time.Hour),
+			},
+		)
 		for _, exit := range []string{"a", "b"} {
-			limits = append(limits, QuotaLimit{AccountID: owner, ExitID: exit, PoolScope: "vultr", Period: "2026-10", LimitBytes: ReservationChunk * 10, ExpiresAt: now.Add(time.Hour)})
+			limits = append(
+				limits,
+				QuotaLimit{
+					AccountID:  owner,
+					ExitID:     exit,
+					PoolScope:  "vultr",
+					Period:     "2026-10",
+					LimitBytes: ReservationChunk * 10,
+					ExpiresAt:  now.Add(time.Hour),
+				},
+			)
 		}
 	}
 	if err := s.SetQuotaLimits(limits); err != nil {
@@ -99,10 +167,37 @@ func TestFiveClientsAcrossExitsShareOnePool(t *testing.T) {
 func TestPoolPersonalLimitCannotResetWithNewExitOrRestart(t *testing.T) {
 	s, path, now, _ := fixture(t, ReservationChunk)
 	pool := ProviderPoolID("vultr")
-	limits := []QuotaLimit{{ExitID: pool, Scope: "provider_pool", Members: []string{"exit", "replacement"}, Period: "2026-10", LimitBytes: ReservationChunk * 10, ExpiresAt: now.Add(time.Hour)}, {AccountID: "account", ExitID: pool, Scope: "provider_pool", Period: "2026-10", LimitBytes: ReservationChunk, ExpiresAt: now.Add(time.Hour)}}
+	limits := []QuotaLimit{
+		{
+			ExitID:     pool,
+			Scope:      "provider_pool",
+			Members:    []string{"exit", "replacement"},
+			Period:     "2026-10",
+			LimitBytes: ReservationChunk * 10,
+			ExpiresAt:  now.Add(time.Hour),
+		},
+		{
+			AccountID:  "account",
+			ExitID:     pool,
+			Scope:      "provider_pool",
+			Period:     "2026-10",
+			LimitBytes: ReservationChunk,
+			ExpiresAt:  now.Add(time.Hour),
+		},
+	}
 	for _, exit := range []string{"exit", "replacement"} {
 		for _, account := range []string{"", "account"} {
-			limits = append(limits, QuotaLimit{ExitID: exit, AccountID: account, PoolScope: "vultr", Period: "2026-10", LimitBytes: ReservationChunk * 10, ExpiresAt: now.Add(time.Hour)})
+			limits = append(
+				limits,
+				QuotaLimit{
+					ExitID:     exit,
+					AccountID:  account,
+					PoolScope:  "vultr",
+					Period:     "2026-10",
+					LimitBytes: ReservationChunk * 10,
+					ExpiresAt:  now.Add(time.Hour),
+				},
+			)
 		}
 	}
 	if err := s.SetQuotaLimits(limits); err != nil {

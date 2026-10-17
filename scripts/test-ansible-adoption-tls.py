@@ -44,11 +44,11 @@ class AdoptionTLSTests(unittest.TestCase):
 
     def bridge_tasks(self, name):
         plays = yaml.safe_load((ROOT / 'deploy/ansible/playbooks' / name).read_text())
-        return next(play['pre_tasks'] for play in plays if play['hosts'] == 'bridge')
+        return next(play['pre_tasks'] for play in plays if play['hosts'] == 'bridge' and 'pre_tasks' in play)
 
     def values(self):
         return {'ultra_preserve_runtime': True,
-                'ultra_spec': {'exit': {'pinned_peer_cert_sha256': OTHER}},
+                'ultra_spec': {'tunnel_tls_provision': 'self_signed', 'exit': {'pinned_peer_cert_sha256': OTHER}},
                 'ultra_exit_hosts': {'static': 'exit_static', 'dynamic': 'exit_dynamic'},
                 'ultra_bootstrap_pins': {'exit_static': PIN, 'exit_dynamic': OTHER},
                 'hostvars': {'exit_static': {'relay_fingerprint': {'stdout': 'sha256 Fingerprint=' + PIN}}, 'exit_dynamic': {'relay_fingerprint': {'stdout': 'sha256 Fingerprint=' + OTHER}}},

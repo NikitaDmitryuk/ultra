@@ -36,7 +36,7 @@ def refuses(call):
 
 def runtime_ownership_regression():
     root = source.parents[3]
-    tasks = yaml.safe_load((root / 'deploy/ansible/roles/controller/tasks/main.yml').read_text())
+    tasks = yaml.safe_load((root / 'deploy/ansible/roles/controller/tasks/runtime.yml').read_text())
     extraction = next(task['ansible.builtin.unarchive'] for task in tasks
                       if task.get('name') == 'Install offline runtime files')
     assert extraction.get('owner') == 'root' and extraction.get('group') == 'root'

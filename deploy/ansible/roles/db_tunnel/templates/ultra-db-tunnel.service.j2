@@ -1,0 +1,24 @@
+[Unit]
+Description=Ultra private PostgreSQL SSH tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/ssh -F /dev/null -N -T -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o UserKnownHostsFile=/etc/ultra-db-tunnel/known_hosts -o HostKeyAlias={{ ultra_db_tunnel_host }} -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -i /etc/ultra-db-tunnel/id_ed25519 -L 127.0.0.1:{{ db_tunnel_ultra_local_port }}:127.0.0.1:{{ db_tunnel_ultra_remote_port }} ultra-db-tunnel@{{ ultra_db_tunnel_host }}
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ultra-db-tunnel
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

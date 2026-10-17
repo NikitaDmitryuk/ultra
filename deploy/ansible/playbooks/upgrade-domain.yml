@@ -1,0 +1,45 @@
+---
+- name: Perform coordinated retained-alias domain migration
+  hosts: bridge
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  roles:
+    - upgrade_domain
+- name: Accept or retire aliases through the existing owned ingress contract
+  ansible.builtin.import_playbook: ingress.yml
+  when: ultra_upgrade_domain_action in ['accept', 'retire']
+  vars:
+    ultra_ingress_action: "{{ 'accept' if ultra_upgrade_domain_action == 'accept' else 'retire' if ultra_upgrade_domain_action == 'retire' else 'status' }}"
+- name: Publish recovery metadata after the release commit
+  hosts: bridge
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Include accepted domains and backend certificate in recovery inventory
+      ultra_cutover_finalize:
+        subscription_domain: "{{ ultra_subscription_domain }}"
+        ingress: "{{ ultra_ingress }}"
+        backend_domain: "{{ ultra_bot_domain }}"
+        bridge_url: "{{ ultra_bridge_url | default('') }}"
+        state_paths: "{{ ultra_backup_state_paths | default([]) }}"
+        artifact_paths: "{{ ultra_backup_artifact_paths | default([]) }}"
+      when: ultra_upgrade_domain_action == 'finalize'
+      no_log: true
+    - name: Capture the accepted recovery generation
+      ansible.builtin.command:
+        argv: [python3, /opt/ultra-recovery/recovery.py, capture, --config, /etc/ultra-recovery/backup.json]
+      changed_when: true
+      when: ultra_upgrade_domain_action == 'finalize'
+      no_log: true
+- name: Persist only public coordinated phase evidence
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Save verified coordinated domain phase
+      ansible.builtin.copy:
+        content: "{{ {'verified': true, 'phase': ultra_upgrade_domain_action} | to_json }}\n"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      no_log: true

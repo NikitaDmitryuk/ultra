@@ -16,6 +16,7 @@ source = Path(__file__).resolve().parents[1] / 'deploy/ansible/library/ultra_ado
 spec = importlib.util.spec_from_file_location('adoption', source)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+module.database_query = lambda instance, database, query: instance.run_command(['psql', '-c', query])
 
 
 class Done(Exception):
@@ -43,7 +44,7 @@ class FakeModule:
             target = mapped(args[-1])
             info = target.stat()
             return (0 if info.st_uid == 1001 and info.st_mode & stat.S_IRUSR else 1), '', ''
-        if args[0] == 'runuser':
+        if args[0] == 'psql':
             return 0, '24:24', ''
         raise AssertionError(args)
 

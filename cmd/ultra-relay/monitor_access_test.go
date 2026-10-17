@@ -3,14 +3,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/auth"
-	"github.com/NikitaDmitryuk/ultra/internal/config"
-	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
-	"github.com/xtls/xray-core/core"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
+	"github.com/xtls/xray-core/core"
 )
 
 func TestMonitorRestrictionsSurviveAutonomousSnapshot(t *testing.T) {

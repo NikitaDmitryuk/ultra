@@ -1,6 +1,98 @@
 # TLS между узлами bridge и exit (splithttp)
 
-Сегмент **bridge** → **exit** использует **TLS** с параметрами из `splithttp_tls` в spec и HTTP host/path из `mimic_preset`.
+Сегмент **bridge** → **exit** использует VLESS/XHTTP/TLS. Для новой установки
+задайте `MAIN_EXIT_DOMAIN=tunnel.example.com`: DNS A этого имени указывает на
+`MAIN_EXIT_IP`, bridge подключается к явному IP exit, передавая это имя в TLS SNI
+и HTTP Host. Используется проверка публичного CA и имени, без `allowInsecure`
+и без pin leaf-сертификата. Публичные варианты Happ VLESS/XHTTP/TLS и
+VLESS/TCP/REALITY на bridge от этой настройки не меняются.
+
+Канонический `install.config` больше не принимает `PRESET`. В управляемом
+режиме не добавляются придуманные Steam/API заголовки; XHTTP использует
+детерминированный путь `/ultra-xhttp` или явно заданный `SPLITHTTP_PATH`.
+Padding и остальные настройки XHTTP сохраняются.
+
+## Управляемый сертификат отдельного exit
+
+Первый поддержанный сценарий — чистый schema 2 bootstrap с одним exit,
+`REUSE_BRIDGE_SPEC=false`, прямым ingress и управляемым Vultr DNS. Имя exit
+должно быть отдельной меткой `DNS_ZONE`, отличной от имён bridge и бота.
+Перед настройкой exit Ansible на bridge создаёт принадлежащую ему A-запись
+с ролью `tunnel`; DNS credentials остаются на bridge.
+
+На exit Ansible устанавливает nginx/certbot, открывает TCP/80 в уже включённом
+UFW, выпускает отдельный HTTP-01 сертификат и настраивает `certbot.timer`.
+`TUNNEL_PORT=80` отклоняется: этот порт занят nginx для HTTP-01.
+В компонентном bootstrap DNS применяется в `bootstrap-postgres` до
+`bootstrap-exit`; последний выдаёт подтверждение CA/hostname без leaf pin.
+`bootstrap-bridge` и проверка возобновления используют этот режим из frozen
+inventory; сравнение pin сохраняется только для прежних режимов аутентификации.
+Внешний firewall провайдера должен пропускать TCP/80; автоматического изменения
+такого firewall этот сценарий не выполняет. У домена не должно быть посторонней
+AAAA-записи, направляющей ACME на другой сервер. Ошибка DNS/ACME прерывает
+установку до активации relay; самоподписанного fallback нет.
+
+Certbot hook проверяет цепочку CA, имя, срок и соответствие ключа сертификату,
+затем копирует только локальную пару в `/etc/ultra-relay` с правами 0600 и
+перезапускает relay после продления. Приватный ключ между серверами не передаётся.
+Клиенты проверяют CA/hostname, поэтому продление не требует распространения pin.
+
+## Upgrade существующей установки
+
+Штатный `upgrade` поддерживает сохранение прежнего managed ACME TLS только для
+schema 2 с прямым ingress, managed DNS и одним статическим exit. Runtime adoption,
+`REUSE_BRIDGE_SPEC=true` и forward-only для этого сценария запрещены. Не используйте
+bootstrap для обновления действующей установки.
+
+До активации проверяются прежний домен, Host/SNI, полный TLS-объект, CA/hostname
+политика без leaf pin, transport/path/порт, адрес и tunnel identity exit, точные
+пути `/etc/ultra-relay/fullchain.pem` и `privkey.pem`. Изменение или отсутствие
+доказательства идентичности отклоняется до runtime mutation. Неявное удаление
+`MAIN_EXIT_DOMAIN` тоже не переводит установленный ACME в другой TLS-режим.
+
+На exit root-only `control.lock` и `pair.lock` в `/var/lib/ultra-tunnel-tls`
+согласуют runtime с certbot hook. Fence принимает только известные байты hook
+и packaged units certbot без overrides, сохраняет request-bound journal перед
+изменениями и маскирует service/timer на диске. Уже начатое управляемое продление
+сначала завершается обычным образом; после drain устанавливается durable marker
+`blocked`. Неизвестные renewal процессы, hooks, units или чужой marker блокируют
+продолжение. Известный прежний hook временно заменяется атомарно под общим lock.
+
+Приватный checkpoint на exit сохраняет точные байты и metadata пары, согласованную
+генерацию live/archive, renewal config, ACME account, HTTP-01 vhost/webroot и vendor
+units. Копии пары проверяются OpenSSL по ключу, публичному CA, имени и сроку.
+Наружу передаются только digest/признаки готовности. Journal связывает checkpoint
+с точным runtime request и release manifest конкретной activation generation;
+native transport повторно проверяет binding, marker, masks и неизменность пары/hook
+под обоими locks перед подготовкой или изменением runtime.
+
+Apply сохраняет исходные TLS-поля, включая неизвестные установщику, и не выдаёт
+новый сертификат. Fleet rollback сначала восстанавливает runtime, затем совместимые
+бинарники и проверяет payload; лишь после этого снимается fence. При отсутствии
+канонического cert/key rollback допускает восстановление из того же локального
+checkpoint после проверки всей остальной renewal closure и остановки exit relay.
+Принимаются только отсутствующие либо точные прежние файлы: чужие bytes, metadata,
+symlinks или drift renewal state не перезаписываются. Crash между восстановлением
+двух файлов безопасно повторяется в той же генерации.
+
+Fence переживает сбой контроллера и reboot. Ошибка prepare сохраняет fence и fleet
+reservation для точного retry той же операции; не создавайте новый operation вместо
+продолжения старого. При прерванном rollback отдельная compensation inspection
+связана с той же failed activation generation и допускает отсутствующую пару
+только по её frozen checkpoint; обычная inspection остаётся строгой. После
+полного восстановления и reset поколения installer заново строго проверяет
+фактическую пару до следующей подготовки/активации. После принятия релиза либо
+полного rollback освобождение
+возвращает исходные bytes hook и прежнюю активность timer. Завершённое освобождение
+повторяется по receipt даже если уже произошло следующее штатное продление.
+
+Этот контракт относится к in-place upgrade/rollback на сохранившемся exit.
+Потеря узла, переустановка ОС и восстановление ACME account/сертификата на новом
+сервере не покрываются локальным checkpoint. При утрате или невозможности доказать
+host-local состояние операция останавливается; bootstrap не является обходом.
+
+Ниже описаны низкоуровневые форматы ранее созданных specs; они не выбираются
+параметром `PRESET` в канонической конфигурации.
 
 ## Поле `tunnel_tls_provision`
 

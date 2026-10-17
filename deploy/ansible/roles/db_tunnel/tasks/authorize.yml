@@ -1,0 +1,48 @@
+---
+- name: Validate database tunnel inputs
+  ansible.builtin.include_tasks: validate.yml
+- name: Read bridge database tunnel public key
+  ansible.builtin.slurp:
+    src: /etc/ultra-db-tunnel/id_ed25519.pub
+  delegate_to: bridge
+  register: db_tunnel_bridge_public_key_slurp
+  no_log: true
+- name: Require authorization stage on database host
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname != 'bridge'
+      - db_tunnel_bridge_public_key_slurp.content is defined
+      - "(db_tunnel_bridge_public_key_slurp.content | b64decode | trim) is match('^ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: .*)?$')"
+    fail_msg: Bridge database tunnel authorization requires a valid SSH public key read from bridge.
+- name: Create non-login database tunnel account
+  ansible.builtin.user:
+    name: ultra-db-tunnel
+    home: /var/lib/ultra-db-tunnel
+    create_home: true
+    shell: /usr/sbin/nologin
+    system: true
+    password_lock: true
+    state: present
+- name: Restrict database tunnel account home permissions
+  ansible.builtin.file:
+    path: /var/lib/ultra-db-tunnel
+    state: directory
+    owner: ultra-db-tunnel
+    group: ultra-db-tunnel
+    mode: "0700"
+- name: Create dedicated SSH authorization directory
+  ansible.builtin.file:
+    path: /var/lib/ultra-db-tunnel/.ssh
+    state: directory
+    owner: ultra-db-tunnel
+    group: ultra-db-tunnel
+    mode: "0700"
+- name: Install narrowly restricted bridge database tunnel key
+  ansible.builtin.copy:
+    content: |-
+      restrict,port-forwarding,permitopen="127.0.0.1:5432" {{ db_tunnel_bridge_public_key_slurp.content | b64decode | trim }}
+    dest: /var/lib/ultra-db-tunnel/.ssh/authorized_keys
+    owner: ultra-db-tunnel
+    group: ultra-db-tunnel
+    mode: "0600"
+  no_log: true

@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/jackc/pgx/v5"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 var ErrAccountingSchema = errors.New("incompatible accounting schema")
@@ -20,13 +21,38 @@ type accountingColumn struct {
 
 var accountingColumns = []accountingColumn{
 	{"traffic_accounts", "account_id", "uuid", true},
-	{"traffic_batches", "node_id", "uuid", true}, {"traffic_batches", "batch_id", "uuid", true}, {"traffic_batches", "digest", "bytea", true}, {"traffic_batches", "committed_at", "timestamp with time zone", true},
-	{"account_exit_usage", "account_id", "uuid", true}, {"account_exit_usage", "exit_id", "text", true}, {"account_exit_usage", "period", "text", true}, {"account_exit_usage", "uplink_bytes", "bigint", true}, {"account_exit_usage", "downlink_bytes", "bigint", true}, {"account_exit_usage", "charged_bytes", "bigint", true},
+	{
+		"traffic_batches",
+		"node_id",
+		"uuid",
+		true,
+	}, {"traffic_batches", "batch_id", "uuid", true}, {"traffic_batches", "digest", "bytea", true}, {"traffic_batches", "committed_at", "timestamp with time zone", true},
+	{
+		"account_exit_usage",
+		"account_id",
+		"uuid",
+		true,
+	}, {"account_exit_usage", "exit_id", "text", true}, {"account_exit_usage", "period", "text", true}, {"account_exit_usage", "uplink_bytes", "bigint", true}, {"account_exit_usage", "downlink_bytes", "bigint", true}, {"account_exit_usage", "charged_bytes", "bigint", true},
 	{"recovery_heartbeat", "singleton", "boolean", true}, {"recovery_heartbeat", "observed_at", "timestamp with time zone", true},
 	{"users", "account_id", "uuid", true},
-	{"notifications", "attempts", "integer", true}, {"notifications", "next_attempt_at", "timestamp with time zone", true}, {"notifications", "lease_until", "timestamp with time zone", false}, {"notifications", "last_error", "text", true}, {"notifications", "terminal", "boolean", true},
-	{"exit_traffic_budgets", "emergency_started_at", "timestamp with time zone", false}, {"exit_traffic_budgets", "emergency_baseline_bytes", "bigint", false}, {"exit_traffic_budgets", "provider_observed_local_bytes", "bigint", true},
-	{"vpn_member_notifications", "terminal", "boolean", true}, {"vpn_member_notifications", "last_error", "text", true}, {"vpn_member_notifications", "lease_until", "timestamp with time zone", false},
+	{
+		"notifications",
+		"attempts",
+		"integer",
+		true,
+	}, {"notifications", "next_attempt_at", "timestamp with time zone", true}, {"notifications", "lease_until", "timestamp with time zone", false}, {"notifications", "last_error", "text", true}, {"notifications", "terminal", "boolean", true},
+	{
+		"exit_traffic_budgets",
+		"emergency_started_at",
+		"timestamp with time zone",
+		false,
+	}, {"exit_traffic_budgets", "emergency_baseline_bytes", "bigint", false}, {"exit_traffic_budgets", "provider_observed_local_bytes", "bigint", true},
+	{
+		"vpn_member_notifications",
+		"terminal",
+		"boolean",
+		true,
+	}, {"vpn_member_notifications", "last_error", "text", true}, {"vpn_member_notifications", "lease_until", "timestamp with time zone", false},
 }
 
 // ValidateAccountingSchema checks the resolved relations, rather than trusting a
@@ -40,7 +66,8 @@ func (d *DB) ValidateAccountingSchema(ctx context.Context) error {
 func validateAccountingSchema(ctx context.Context, q schemaQuerier) error {
 	for _, c := range accountingColumns {
 		var valid bool
-		err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass($1) AND attname=$2 AND NOT attisdropped AND format_type(atttypid,atttypmod)=$3 AND attnotnull=$4)`, c.table, c.name, c.kind, c.required).Scan(&valid)
+		err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass($1) AND attname=$2 AND NOT attisdropped AND format_type(atttypid,atttypmod)=$3 AND attnotnull=$4)`, c.table, c.name, c.kind, c.required).
+			Scan(&valid)
 		if err != nil {
 			return err
 		}
@@ -48,7 +75,21 @@ func validateAccountingSchema(ctx context.Context, q schemaQuerier) error {
 			return fmt.Errorf("%w: %s.%s", ErrAccountingSchema, c.table, c.name)
 		}
 	}
-	defaults := map[string]string{"users.account_id": "gen_random_uuid()", "traffic_accounts.account_id": "gen_random_uuid()", "traffic_batches.committed_at": "now()", "account_exit_usage.uplink_bytes": "0", "account_exit_usage.downlink_bytes": "0", "account_exit_usage.charged_bytes": "0", "notifications.attempts": "0", "notifications.next_attempt_at": "now()", "notifications.last_error": "''::text", "notifications.terminal": "false", "exit_traffic_budgets.provider_observed_local_bytes": "0", "vpn_member_notifications.terminal": "false", "vpn_member_notifications.last_error": "''::text"}
+	defaults := map[string]string{
+		"users.account_id":                                   "gen_random_uuid()",
+		"traffic_accounts.account_id":                        "gen_random_uuid()",
+		"traffic_batches.committed_at":                       "now()",
+		"account_exit_usage.uplink_bytes":                    "0",
+		"account_exit_usage.downlink_bytes":                  "0",
+		"account_exit_usage.charged_bytes":                   "0",
+		"notifications.attempts":                             "0",
+		"notifications.next_attempt_at":                      "now()",
+		"notifications.last_error":                           "''::text",
+		"notifications.terminal":                             "false",
+		"exit_traffic_budgets.provider_observed_local_bytes": "0",
+		"vpn_member_notifications.terminal":                  "false",
+		"vpn_member_notifications.last_error":                "''::text",
+	}
 	for key, expected := range defaults {
 		parts := strings.SplitN(key, ".", 2)
 		var actual string

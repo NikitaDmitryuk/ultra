@@ -1,0 +1,72 @@
+---
+- name: Create PostgreSQL 16 data parent
+  ansible.builtin.file:
+    path: /var/lib/postgresql/16
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0750"
+- name: Allocate private staging directory for initial base backup
+  ansible.builtin.tempfile:
+    state: directory
+    path: /var/lib/postgresql/16
+    prefix: .ultra-replica-seed-
+  register: postgres_replica_staging
+- name: Clone and publish complete standby
+  block:
+    - name: Allow PostgreSQL to write its own staging directory
+      ansible.builtin.file:
+        path: "{{ postgres_replica_staging.path }}"
+        owner: postgres
+        group: postgres
+        mode: "0700"
+    - name: Clone primary through existing authenticated SSH tunnel
+      ansible.builtin.command:
+        argv:
+          - runuser
+          - -u
+          - postgres
+          - --
+          - /usr/lib/postgresql/16/bin/pg_basebackup
+          - --pgdata
+          - "{{ postgres_replica_staging.path }}"
+          - --dbname
+          - >-
+            host=127.0.0.1 port=25432 user=ultra_replication dbname=replication
+            passfile=/etc/ultra-postgres-replica/pgpass application_name=ultra_bridge connect_timeout=5
+          - --wal-method=stream
+          - --slot=ultra_bridge
+          - --write-recovery-conf
+          - --checkpoint=fast
+          - --no-password
+      changed_when: true
+      no_log: true
+      async: 1800
+      poll: 5
+    - name: Persist ownership and source identity in completed clone
+      ansible.builtin.copy:
+        content: >-
+          {{ {'primary_host': ultra_postgres_replica.primary_host,
+              'system_identifier': hostvars['database'].postgres_replica_primary_identity.stdout | trim} | to_json }}
+        dest: "{{ postgres_replica_staging.path }}/ultra-replica.json"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+    - name: Publish clone atomically without replacing any existing path
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - >-
+            import ctypes,os,sys; libc=ctypes.CDLL(None,use_errno=True);
+            result=libc.renameat2(-100,os.fsencode(sys.argv[1]),-100,os.fsencode(sys.argv[2]),1);
+            err=ctypes.get_errno(); result == 0 or sys.exit(os.strerror(err))
+          - "{{ postgres_replica_staging.path }}"
+          - /var/lib/postgresql/16/ultra-replica
+      changed_when: true
+  always:
+    - name: Remove only this invocation's private staging directory
+      ansible.builtin.file:
+        path: "{{ postgres_replica_staging.path }}"
+        state: absent

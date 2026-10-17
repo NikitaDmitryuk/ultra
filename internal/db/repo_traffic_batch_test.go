@@ -2,11 +2,12 @@ package db
 
 import (
 	"context"
-	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
-	"github.com/google/uuid"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
+	"github.com/google/uuid"
 )
 
 func TestBatchIdempotencyRotationAndDeletion(t *testing.T) {
@@ -21,7 +22,23 @@ func TestBatchIdempotencyRotationAndDeletion(t *testing.T) {
 		t.Fatalf("identity %v %v %#v", ok, e, u)
 	}
 	at := time.Now().UTC()
-	b := runtimestate.TrafficBatch{Version: 1, NodeID: uuid.NewString(), BatchID: uuid.NewString(), CollectedAt: at, Samples: []runtimestate.Sample{{AccountID: u.AccountID, ExitID: "exit", ExitTag: "to-exit-exit", Period: at.Format("2006-01"), UplinkBytes: 100, DownlinkBytes: 200, ChargeTotalBytes: 1024}}}
+	b := runtimestate.TrafficBatch{
+		Version:     1,
+		NodeID:      uuid.NewString(),
+		BatchID:     uuid.NewString(),
+		CollectedAt: at,
+		Samples: []runtimestate.Sample{
+			{
+				AccountID:        u.AccountID,
+				ExitID:           "exit",
+				ExitTag:          "to-exit-exit",
+				Period:           at.Format("2006-01"),
+				UplinkBytes:      100,
+				DownlinkBytes:    200,
+				ChargeTotalBytes: 1024,
+			},
+		},
+	}
 	r := NewTrafficRepo(d)
 	for range 2 {
 		if e = r.RecordBatch(ctx, b); e != nil {
@@ -31,7 +48,8 @@ func TestBatchIdempotencyRotationAndDeletion(t *testing.T) {
 	var up, down, charge int64
 	check := func(wantUp, wantDown, wantCharge int64) {
 		t.Helper()
-		e := d.Pool.QueryRow(ctx, `SELECT uplink_bytes,downlink_bytes,charged_bytes FROM account_exit_usage WHERE account_id=$1 AND exit_id='exit'`, u.AccountID).Scan(&up, &down, &charge)
+		e := d.Pool.QueryRow(ctx, `SELECT uplink_bytes,downlink_bytes,charged_bytes FROM account_exit_usage WHERE account_id=$1 AND exit_id='exit'`, u.AccountID).
+			Scan(&up, &down, &charge)
 		if e != nil || up != wantUp || down != wantDown || charge != wantCharge {
 			t.Fatalf("usage %d %d %d %v", up, down, charge, e)
 		}
@@ -109,7 +127,21 @@ func TestLateBatchAfterOlderBackupCreatesOnlyAccountingTombstone(t *testing.T) {
 	ctx := context.Background()
 	owner := uuid.NewString()
 	at := time.Now().UTC()
-	b := runtimestate.TrafficBatch{Version: 1, NodeID: uuid.NewString(), BatchID: uuid.NewString(), CollectedAt: at, Samples: []runtimestate.Sample{{AccountID: owner, ExitID: "restored-exit", ExitTag: "to-exit-restored-exit", Period: at.Format("2006-01"), ChargeTotalBytes: 262144}}}
+	b := runtimestate.TrafficBatch{
+		Version:     1,
+		NodeID:      uuid.NewString(),
+		BatchID:     uuid.NewString(),
+		CollectedAt: at,
+		Samples: []runtimestate.Sample{
+			{
+				AccountID:        owner,
+				ExitID:           "restored-exit",
+				ExitTag:          "to-exit-restored-exit",
+				Period:           at.Format("2006-01"),
+				ChargeTotalBytes: 262144,
+			},
+		},
+	}
 	if e := NewTrafficRepo(d).RecordBatch(ctx, b); e != nil {
 		t.Fatal(e)
 	}
@@ -118,7 +150,8 @@ func TestLateBatchAfterOlderBackupCreatesOnlyAccountingTombstone(t *testing.T) {
 	if e := d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE account_id=$1`, owner).Scan(&users); e != nil || users != 0 {
 		t.Fatalf("resurrected owner %d %v", users, e)
 	}
-	if e := d.Pool.QueryRow(ctx, `SELECT charged_bytes FROM account_exit_usage WHERE account_id=$1`, owner).Scan(&charge); e != nil || charge != 262144 {
+	if e := d.Pool.QueryRow(ctx, `SELECT charged_bytes FROM account_exit_usage WHERE account_id=$1`, owner).Scan(&charge); e != nil ||
+		charge != 262144 {
 		t.Fatalf("lost restored exit cost %d %v", charge, e)
 	}
 }
@@ -180,7 +213,10 @@ func TestFullCheckpointRestoresOlderDatabaseWithoutIdleLedgerGrowth(t *testing.T
 	defer func() { _ = state.Close() }()
 	now := time.Now().UTC()
 	period := now.Format("2006-01")
-	limits := []runtimestate.QuotaLimit{{AccountID: u.AccountID, ExitID: "restore-exit", Period: period, LimitBytes: 1 << 20, ExpiresAt: now.Add(time.Hour)}, {ExitID: "restore-exit", Period: period, LimitBytes: 1 << 20, ExpiresAt: now.Add(time.Hour)}}
+	limits := []runtimestate.QuotaLimit{
+		{AccountID: u.AccountID, ExitID: "restore-exit", Period: period, LimitBytes: 1 << 20, ExpiresAt: now.Add(time.Hour)},
+		{ExitID: "restore-exit", Period: period, LimitBytes: 1 << 20, ExpiresAt: now.Add(time.Hour)},
+	}
 	if err = state.SaveSnapshot(runtimestate.Snapshot{ConfirmedAt: now, Payload: []byte(`{}`)}, limits); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +257,8 @@ func TestFullCheckpointRestoresOlderDatabaseWithoutIdleLedgerGrowth(t *testing.T
 	for range 30 {
 		checkpoint(false)
 	}
-	if err = d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM traffic_batches WHERE node_id=$1`, state.NodeID()).Scan(&after); err != nil || before != after {
+	if err = d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM traffic_batches WHERE node_id=$1`, state.NodeID()).Scan(&after); err != nil ||
+		before != after {
 		t.Fatalf("idle ledger grew %d -> %d: %v", before, after, err)
 	}
 	// Simulate restoring an older backup. Runbook fences and restarts relay before this reconciliation.
@@ -230,7 +267,10 @@ func TestFullCheckpointRestoresOlderDatabaseWithoutIdleLedgerGrowth(t *testing.T
 	}
 	checkpoint(true)
 	var charged, up, down int64
-	if err = d.Pool.QueryRow(ctx, `SELECT charged_bytes,uplink_bytes,downlink_bytes FROM account_exit_usage WHERE account_id=$1 AND exit_id='restore-exit'`, u.AccountID).Scan(&charged, &up, &down); err != nil || charged != runtimestate.ReservationChunk || up != 0 || down != 0 {
+	if err = d.Pool.QueryRow(ctx, `SELECT charged_bytes,uplink_bytes,downlink_bytes FROM account_exit_usage WHERE account_id=$1 AND exit_id='restore-exit'`, u.AccountID).Scan(&charged, &up, &down); err != nil ||
+		charged != runtimestate.ReservationChunk ||
+		up != 0 ||
+		down != 0 {
 		t.Fatalf("restore %d %d %d %v", charged, up, down, err)
 	}
 }

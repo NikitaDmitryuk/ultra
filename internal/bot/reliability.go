@@ -76,6 +76,7 @@ func (b *Bot) registerHealthRoutes(mux *http.ServeMux) {
 		if !control {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"ready": control, "database": database, "relay": control, "telegram": time.Since(time.Unix(0, b.telegramLastSuccess.Load())) < 2*time.Minute, "subscription_cache": b.subscriptionCache != nil && b.subscriptionCache.fresh()})
+		_ = json.NewEncoder(w).
+			Encode(map[string]any{"ready": control, "database": database, "relay": control, "telegram": time.Since(time.Unix(0, b.telegramLastSuccess.Load())) < 2*time.Minute, "subscription_cache": b.subscriptionCache != nil && b.subscriptionCache.fresh()})
 	})
 }

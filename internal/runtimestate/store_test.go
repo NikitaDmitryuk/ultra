@@ -4,15 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/google/uuid"
-	bolt "go.etcd.io/bbolt"
-	boltErrors "go.etcd.io/bbolt/errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	bolt "go.etcd.io/bbolt"
+	boltErrors "go.etcd.io/bbolt/errors"
 )
 
 func fixture(t *testing.T, capacity int64) (*Store, string, *time.Time, []QuotaLimit) {
@@ -24,7 +25,10 @@ func fixture(t *testing.T, capacity int64) (*Store, string, *time.Time, []QuotaL
 	}
 	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
-	q := []QuotaLimit{{AccountID: "account", ExitID: "exit", Period: "2026-10", LimitBytes: capacity, ExpiresAt: now.Add(48 * time.Hour)}, {ExitID: "exit", Period: "2026-10", LimitBytes: capacity, ExpiresAt: now.Add(48 * time.Hour)}}
+	q := []QuotaLimit{
+		{AccountID: "account", ExitID: "exit", Period: "2026-10", LimitBytes: capacity, ExpiresAt: now.Add(48 * time.Hour)},
+		{ExitID: "exit", Period: "2026-10", LimitBytes: capacity, ExpiresAt: now.Add(48 * time.Hour)},
+	}
 	if e = s.SaveSnapshot(Snapshot{Revision: 1, ConfirmedAt: now, Payload: []byte(`{}`)}, q); e != nil {
 		t.Fatal(e)
 	}
@@ -238,7 +242,13 @@ func TestPrepaidBuffersDoNotCommitAgain(t *testing.T) {
 
 func TestJournalCounterAppendDuplicateAckAndReopen(t *testing.T) {
 	s, path, now, _ := fixture(t, ReservationChunk)
-	batch := TrafficBatch{Version: 1, NodeID: s.NodeID(), BatchID: uuid.NewString(), CollectedAt: *now, Samples: []Sample{{AccountID: "account", ExitID: "exit", UplinkBytes: 1}}}
+	batch := TrafficBatch{
+		Version:     1,
+		NodeID:      s.NodeID(),
+		BatchID:     uuid.NewString(),
+		CollectedAt: *now,
+		Samples:     []Sample{{AccountID: "account", ExitID: "exit", UplinkBytes: 1}},
+	}
 	if e := s.AppendBatch(batch); e != nil {
 		t.Fatal(e)
 	}

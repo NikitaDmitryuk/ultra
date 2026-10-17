@@ -47,21 +47,6 @@ func ptrFromPGUUID(id pgtype.UUID) *string {
 	return &v
 }
 
-func fromPGText(t pgtype.Text) string {
-	if !t.Valid {
-		return ""
-	}
-	return t.String
-}
-
-func ptrFromPGInt4(n pgtype.Int4) *int {
-	if !n.Valid {
-		return nil
-	}
-	v := int(n.Int32)
-	return &v
-}
-
 func ptrFromPGTime(t pgtype.Timestamptz) *time.Time {
 	if !t.Valid {
 		return nil
@@ -78,13 +63,6 @@ func timeFromPG(t pgtype.Timestamptz) time.Time {
 
 func toPGTime(t time.Time) pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: t, Valid: true}
-}
-
-func toPGTimePtr(t *time.Time) pgtype.Timestamptz {
-	if t == nil {
-		return pgtype.Timestamptz{}
-	}
-	return toPGTime(*t)
 }
 
 func toPGInterval(d time.Duration) pgtype.Interval {

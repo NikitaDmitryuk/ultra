@@ -1,4 +1,15 @@
 ---
+- name: Select the frozen host rollback manifest
+  ansible.builtin.set_fact:
+    release_previous_manifest: "{{ ultra_host_previous_manifest | default(ultra_previous_manifest) }}"
+- name: Require the emergency relay fallback to read the target schema
+  ansible.builtin.assert:
+    that:
+      - "'service-access-v1' in ultra_previous_relay_manifest.capabilities"
+      - "'provider-pool-quota-v1' in ultra_previous_relay_manifest.capabilities"
+      - ultra_previous_relay_manifest.database_schema_min | int <= ultra_release_manifest.database_schema_min | int
+      - ultra_previous_relay_manifest.database_schema_max | int >= ultra_release_manifest.database_schema_max | int
+  when: release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined
 - name: Resolve the compatible rollback component
   ansible.builtin.set_fact:
     release_rollback_name: "{{ release_component }}-linux-{{ ultra_architecture }}"
@@ -8,18 +19,27 @@
       - release_component in ['ultra-relay', 'ultra-bot']
       - ultra_architecture in ['amd64', 'arm64']
       - ultra_release_version is ansible.builtin.match('^v[0-9]+\.[0-9]+\.[0-9]+$')
-      - "'provider-pool-quota-v1' in ultra_previous_manifest.capabilities"
-      - "'service-access-v1' in ultra_previous_manifest.capabilities"
-      - ultra_previous_manifest.database_schema_max | int >= ultra_release_manifest.database_schema_max | int
-      - ultra_previous_manifest.database_schema_min | int <= ultra_release_manifest.database_schema_min | int
-      - ultra_previous_manifest.assets | selectattr('name', 'equalto', release_rollback_name) | list | length == 1
+      - "'provider-pool-quota-v1' in release_previous_manifest.capabilities"
+      - "'service-access-v1' in release_previous_manifest.capabilities"
+      - release_previous_manifest.database_schema_max | int >= ultra_release_manifest.database_schema_max | int
+      - release_previous_manifest.database_schema_min | int <= ultra_release_manifest.database_schema_min | int
+      - >-
+        (ultra_previous_relay_manifest.assets
+        if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined
+        else release_previous_manifest.assets) |
+        selectattr('name', 'equalto', release_rollback_name) | list | length == 1
 - name: Read the expected compatible hash
   ansible.builtin.set_fact:
-    release_rollback_asset: "{{ ultra_previous_manifest.assets | selectattr('name', 'equalto', release_rollback_name) | first }}"
+    release_rollback_asset: >-
+      {{ (ultra_previous_relay_manifest.assets
+          if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined
+          else release_previous_manifest.assets) |
+         selectattr('name', 'equalto', release_rollback_name) | first }}
 - name: Inspect the active code during rollback
   ansible.builtin.stat:
     path: "/usr/local/bin/{{ release_component }}"
     checksum_algorithm: sha256
+    follow: false
   register: release_rollback_active
 - name: Restore compatible code if activation happened
   when: release_rollback_active.stat.checksum | default('') != release_rollback_asset.sha256
@@ -48,3 +68,16 @@
       ansible.builtin.systemd_service:
         name: "{{ release_component }}.service"
         state: restarted
+- name: Verify exact restored bytes even when the fallback was already installed
+  ansible.builtin.stat:
+    path: "/usr/local/bin/{{ release_component }}"
+    checksum_algorithm: sha256
+    follow: false
+  register: release_rollback_verified
+- name: Require the exact regular restored component before readiness
+  ansible.builtin.assert:
+    that:
+      - release_rollback_verified.stat.isreg | default(false)
+      - not release_rollback_verified.stat.islnk | default(false)
+      - release_rollback_verified.stat.checksum == release_rollback_asset.sha256
+      - release_rollback_verified.stat.size | int == release_rollback_asset.size | int

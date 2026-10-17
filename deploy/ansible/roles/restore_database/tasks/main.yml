@@ -1,0 +1,98 @@
+---
+- name: Require dedicated database restore identity
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname == 'database'
+      - ultra_restore_database_plan.restore_id is match('^[a-f0-9]{64}$')
+      - ultra_restore_database_plan.database_host == ansible_host
+  no_log: true
+- name: Inspect database restore staging parent
+  ansible.builtin.stat:
+    path: /var/lib/ultra-restore
+  register: restore_database_parent
+- name: Reject symlink database staging parent
+  ansible.builtin.assert:
+    that: not restore_database_parent.stat.islnk | default(false)
+- name: Create private database restore parent
+  ansible.builtin.file:
+    path: /var/lib/ultra-restore
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Inspect database restore staging directory
+  ansible.builtin.stat:
+    path: "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database"
+  register: restore_database_directory
+- name: Reject symlink database staging directory
+  ansible.builtin.assert:
+    that: not restore_database_directory.stat.islnk | default(false)
+- name: Create private database restore staging
+  ansible.builtin.file:
+    path: "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Transfer authenticated database restore helpers
+  ansible.builtin.copy:
+    src: "{{ ultra_restore_script_directory }}/{{ item }}"
+    dest: "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database/{{ item }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: [restore_database.py, restore_common.py, recovery.py]
+- name: Transfer authenticated database generation
+  ansible.builtin.copy:
+    src: "{{ ultra_restore_stage_archive }}"
+    dest: "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database/stage.tar.gz"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+- name: Persist private database restore plan
+  ansible.builtin.copy:
+    content: "{{ ultra_restore_database_plan | to_json(preprocess_unsafe=False) }}"
+    dest: "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database/plan.json"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+- name: Verify authenticated generation and empty database target before mutation
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database/restore_database.py"
+      - --check
+      - --directory
+      - "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database"
+  register: restore_database_preflight
+  changed_when: false
+  no_log: true
+- name: Require verified database preflight acknowledgement
+  ansible.builtin.assert:
+    that: (restore_database_preflight.stdout | from_json).verified | bool
+  no_log: true
+- name: Provision dedicated PostgreSQL before restoring into an empty database
+  ansible.builtin.include_role:
+    name: postgres
+- name: Authorize the authenticated restored bridge tunnel key
+  ansible.builtin.include_role:
+    name: db_tunnel
+  vars:
+    db_tunnel_ultra_stage: authorize
+- name: Apply dedicated database restore
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database/restore_database.py"
+      - --directory
+      - "/var/lib/ultra-restore/{{ ultra_restore_database_plan.restore_id }}-database"
+    stdin: "{{ ultra_restore_database_plan | to_json(preprocess_unsafe=False) }}"
+  register: restore_database_result
+  changed_when: true
+  no_log: true
+- name: Require verified database restore acknowledgement
+  ansible.builtin.assert:
+    that: (restore_database_result.stdout | from_json).verified | bool
+  no_log: true

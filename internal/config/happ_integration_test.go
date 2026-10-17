@@ -79,7 +79,12 @@ func testHappBridgeFailover(t *testing.T, transport, fingerprint string) {
 		bridge.DevMode = false
 		bridge.PublicHost, bridge.ListenAddress = "127.0.0.1", "127.0.0.1"
 		bridge.VLESSPort = freePort(t)
-		bridge.Reality = RealitySpec{PrivateKey: keys.PrivateKey, PublicKey: keys.PublicKey, Dest: camouflage.Listener.Addr().String(), ServerNames: []string{"example.com"}}
+		bridge.Reality = RealitySpec{
+			PrivateKey:  keys.PrivateKey,
+			PublicKey:   keys.PublicKey,
+			Dest:        camouflage.Listener.Addr().String(),
+			ServerNames: []string{"example.com"},
+		}
 		bridge.AntiCensor = nil
 		port := bridge.VLESSPort
 		count := 1
@@ -88,7 +93,16 @@ func testHappBridgeFailover(t *testing.T, transport, fingerprint string) {
 			bridge.AntiCensor = &AntiCensorSpec{PublicXHTTPPort: port}
 			count = 2
 		}
-		endpoint := SubscriptionBridge{ID: fmt.Sprint(i), Host: "127.0.0.1", Port: port, PublicKey: keys.PublicKey, ServerName: "example.com", Transport: transport, Path: bridge.SplithttpPath, Fingerprint: fingerprint}
+		endpoint := SubscriptionBridge{
+			ID:          fmt.Sprint(i),
+			Host:        "127.0.0.1",
+			Port:        port,
+			PublicKey:   keys.PublicKey,
+			ServerName:  "example.com",
+			Transport:   transport,
+			Path:        bridge.SplithttpPath,
+			Fingerprint: fingerprint,
+		}
 		if transport == "mixed" {
 			endpoint.Transport = "tcp"
 			if i == 0 {
@@ -96,8 +110,23 @@ func testHappBridgeFailover(t *testing.T, transport, fingerprint string) {
 				tlsCertificate = cert
 				port = freePort(t)
 				bridge.LegacyPublicEnabled = BoolPtr(false)
-				bridge.PublicXHTTPTLS = &PublicXHTTPTLSSpec{Port: port, ServerName: "example.com", Path: "/mixed", Mode: "stream-up", CertificateFile: cert, KeyFile: key}
-				endpoint = SubscriptionBridge{ID: fmt.Sprint(i), Host: "127.0.0.1", Port: port, Security: "tls", Transport: "xhttp", ServerName: "example.com", Path: "/mixed"}
+				bridge.PublicXHTTPTLS = &PublicXHTTPTLSSpec{
+					Port:            port,
+					ServerName:      "example.com",
+					Path:            "/mixed",
+					Mode:            "stream-up",
+					CertificateFile: cert,
+					KeyFile:         key,
+				}
+				endpoint = SubscriptionBridge{
+					ID:         fmt.Sprint(i),
+					Host:       "127.0.0.1",
+					Port:       port,
+					Security:   "tls",
+					Transport:  "xhttp",
+					ServerName: "example.com",
+					Path:       "/mixed",
+				}
 			}
 		}
 		data, err := BuildBridgeXRayJSON(bridge, []auth.User{user}, nil, "", strategy, "error")
@@ -110,7 +139,9 @@ func testHappBridgeFailover(t *testing.T, transport, fingerprint string) {
 		}
 		// Only the fixture's server egress redirects to a local destination.
 		cfg["inbounds"] = cfg["inbounds"].([]any)[:count]
-		cfg["outbounds"] = []any{map[string]any{"protocol": "freedom", "settings": localFreedomSettings(destination.Listener.Addr().String())}}
+		cfg["outbounds"] = []any{
+			map[string]any{"protocol": "freedom", "settings": localFreedomSettings(destination.Listener.Addr().String())},
+		}
 		delete(cfg, "routing")
 		delete(cfg, "dns")
 		configs[i], err = json.Marshal(cfg)
@@ -129,7 +160,9 @@ func testHappBridgeFailover(t *testing.T, transport, fingerprint string) {
 	}
 	if tlsCertificate != "" {
 		out := profile["outbounds"].([]any)[1].(map[string]any)
-		out["streamSettings"].(map[string]any)["tlsSettings"].(map[string]any)["certificates"] = []any{map[string]any{"certificateFile": tlsCertificate, "usage": "verify"}}
+		out["streamSettings"].(map[string]any)["tlsSettings"].(map[string]any)["certificates"] = []any{
+			map[string]any{"certificateFile": tlsCertificate, "usage": "verify"},
+		}
 	}
 	profile["inbounds"].([]any)[0].(map[string]any)["port"] = freePort(t)
 	// A local HTTP probe avoids an external dependency; cadence and strategy stay unchanged.

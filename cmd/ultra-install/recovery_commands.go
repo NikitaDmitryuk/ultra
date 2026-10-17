@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 
 	recoveryassets "github.com/NikitaDmitryuk/ultra/deploy/recovery"
 )

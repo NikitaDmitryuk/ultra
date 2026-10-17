@@ -90,6 +90,7 @@ def fixture_helper_sources():
     base=Path(__file__).parent
     return {name:(base/source).read_bytes() for name,source in {
         'acceptance.py':'vm_payload.py', 'restore_host.py':'restore_host.py',
+        'db_connection.py':'db_connection.py',
         'restore_common.py':'restore_common.py'}.items()}
 
 
@@ -99,6 +100,10 @@ def execute(args):
     topology=json.loads((directory/'topology.json').read_text())
     if not topology.get('synthetic_only') or not topology.get('isolation_verified_at'):
         raise ValueError('verified_synthetic_topology_required')
+    vpn = {topology['nodes'][node] for node in ('bridge', 'nl', 'us', 'replacement')}
+    databases = {topology['nodes'].get(node) for node in ('database', 'database_restore')}
+    if None in databases or len(databases) != 2 or vpn & databases:
+        raise ValueError('isolated_dedicated_database_vm_fixture_required')
     receipt_path=directory/'acceptance.json'
     receipt=json.loads(receipt_path.read_text()) if receipt_path.exists() else {'started_at':int(time.time()),'completed':[],'synthetic_only':True}
     def save():receipt_path.write_text(json.dumps(receipt));receipt_path.chmod(0o600)
@@ -114,7 +119,8 @@ def execute(args):
     def apply():
         plan=json.loads((Path(__file__).parent.parent / 'install-plan-v2.example.json').read_text())
         plan['ssh']={'user':'root','identity':topology['identity'],'strict_host_key':True}
-        plan['bridge'].update(ssh_host=topology['nodes']['bridge'],public_host=topology['nodes']['bridge'])
+        plan['bridge'].update(address=topology['nodes']['bridge'], ssh_host=topology['nodes']['bridge'], public_host=topology['nodes']['bridge'], ssh_identity=topology['identity'])
+        plan['database'].update(enabled=True, primary_host=topology['nodes']['database'], ssh_user='root', ssh_identity=topology['identity'])
         plan['exits']=[{'name':'NL','ssh_host':topology['nodes']['nl'],'priority':100},{'name':'US','ssh_host':topology['nodes']['us'],'priority':200}]
         plan['bot'].update(domain='vpn.fixture.test')
         env=directory/'synthetic-bot.env';env.write_text('TELEGRAM_BOT_TOKEN=123456:synthetic_fixture_token_only\nULTRA_RELAY_ADMIN_TOKEN=synthetic_fixture_admin_token_only\n');env.chmod(0o600)
@@ -171,6 +177,8 @@ def execute(args):
     (directory/'fence.json').write_text(json.dumps(fence))
     config={'format':1,'source':'bridge','bundle':receipt['bundle'],'identity':str(directory/'extracted-identity.age'),'fence_file':str(directory/'fence.json'),'state_dir':str(directory/'restore-runs'),
             'target':{'host':fence['target_host'],'identity':topology['identity'],'known_hosts':topology['known_hosts']},
+            'database_host':topology['nodes']['database_restore'],
+            'database_target':{'host':'root@'+topology['nodes']['database_restore'],'identity':topology['identity'],'known_hosts':topology['known_hosts']},
             'ingress':{'host':'root@'+topology['nodes']['nl'],'identity':topology['identity'],'known_hosts':topology['known_hosts']},
             'new_bridge_provider':'fixture-a','old_bridge_address':topology['nodes']['bridge'],'new_bridge_address':topology['nodes']['replacement'],'public_host':topology['nodes']['replacement'],'subscription_domain':'vpn.fixture.test','readiness_timeout':900,'isolated_peer_addresses':list(topology['nodes'].values())}
     (directory/'restore.json').write_text(json.dumps(config))

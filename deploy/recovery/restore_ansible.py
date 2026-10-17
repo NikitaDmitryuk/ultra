@@ -11,6 +11,7 @@ import subprocess
 import time
 import uuid
 from recovery import atomic_json
+from recovery import private
 from restore_common import APP_UNITS, AUTOMATION_UNITS
 
 
@@ -79,7 +80,9 @@ def phase(config, directory, plan, action, archive):
                  'ultra_restore_directory': '/var/lib/ultra-restore/' + plan['restore_id'],
                  'ultra_restore_plan': plan, 'ultra_restore_script_directory': str(Path(__file__).parent),
                  'ultra_restore_stage_archive': str(archive), 'ultra_restore_app_units': APP_UNITS,
-                 'ultra_restore_automation_units': AUTOMATION_UNITS}
+                 'ultra_restore_automation_units': AUTOMATION_UNITS,
+                 'ultra_db_tunnel_host': plan['database_host'],
+                 'ultra_db_tunnel_known_hosts_source': config['database_target']['known_hosts']}
     atomic_json(attempt / 'inventory.json', inventory)
     atomic_json(attempt / 'variables.json', variables)
     operation = attempt / 'operation'
@@ -98,6 +101,68 @@ def phase(config, directory, plan, action, archive):
         if action != 'ready' or time.monotonic() >= deadline:
             raise ValueError('pinned_remote_action_failed')
         time.sleep(5)
+
+
+def database(config, directory, plan, archive):
+    """Restore PostgreSQL through operator-pinned SSH directly to its dedicated host."""
+    endpoint = config['database_target']
+    private(endpoint['identity'])
+    pins = Path(endpoint['known_hosts'])
+    if pins.is_symlink() or not pins.is_file() or pins.stat().st_mode & 0o022 or not pins.read_bytes():
+        raise ValueError('trusted_known_hosts_required')
+    user, address = endpoint['host'].split('@', 1)
+    if address != plan.get('database_host'):
+        raise ValueError('restore_database_target_mismatch')
+    from restore_common import stage_manifests, sha
+    state, _ = stage_manifests(directory / 'stage')
+    public_key_name = 'state/etc/ultra-db-tunnel/id_ed25519.pub'
+    public_key = directory / 'stage' / public_key_name
+    row = state['files'].get(public_key_name)
+    if not row or public_key.is_symlink() or not public_key.is_file() or sha(public_key) != row['sha256']:
+        raise ValueError('restored_database_tunnel_key_missing')
+    public_key_text = public_key.read_text().strip()
+    if not re.fullmatch(r'ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: .*)?', public_key_text):
+        raise ValueError('restored_database_tunnel_key_invalid')
+    from restore_host import database_spec
+    spec = json.loads((directory / 'stage/state/etc/ultra-relay/spec.json').read_text())
+    database_name, database_user, database_password = database_spec(spec)
+    if (database_name, database_user) != (plan['database']['name'], plan['database']['user']):
+        raise ValueError('restore_database_credentials_mismatch')
+    attempt = directory / ('ansible-database-' + plan['restore_id'] + '-' + str(uuid.uuid4()))
+    attempt.mkdir(mode=0o700)
+    inventory = {'all': {'hosts': {'bridge': {
+        'ansible_host': config['target']['host'].split('@', 1)[1],
+        'ansible_user': config['target']['host'].split('@', 1)[0],
+        'ansible_port': config['target'].get('port', 22),
+        'ansible_ssh_private_key_file': config['target']['identity'],
+        'ansible_ssh_args': '-F /dev/null -o ControlMaster=no -o ControlPath=none',
+        'ansible_ssh_common_args': '-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o UserKnownHostsFile=' + shlex.quote(config['target']['known_hosts']),
+        'db_tunnel_ultra_public_key': public_key_text,
+    }}, 'children': {'restore_databases': {'hosts': {'database': {
+        'ansible_host': address, 'ansible_user': user, 'ansible_port': endpoint.get('port', 22),
+        'ansible_ssh_private_key_file': endpoint['identity'],
+        'ansible_ssh_args': '-F /dev/null -o ControlMaster=no -o ControlPath=none',
+        'ansible_ssh_common_args': '-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o UserKnownHostsFile=' + shlex.quote(endpoint['known_hosts']),
+    }}}}}}
+    variables = {'ultra_restore_database_plan': plan,
+                 'ultra_postgres': {'name': database_name, 'user': database_user, 'password': database_password},
+                 'ultra_db_tunnel_host': plan['database_host'],
+                 'ultra_restore_stage_archive': str(archive),
+                 'ultra_restore_script_directory': str(Path(__file__).parent)}
+    atomic_json(attempt / 'inventory.json', inventory)
+    atomic_json(attempt / 'variables.json', variables)
+    result = subprocess.run([os.environ.get('ULTRA_INSTALL_BINARY', '/usr/local/bin/ultra-install'),
+                             'ansible-run', '--operation', 'restore-database',
+                             '--inventory', str(attempt / 'inventory.json'),
+                             '--variables', str(attempt / 'variables.json'),
+                             '--state-dir', str(attempt / 'operation'), *runtime_arguments(config)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1900)
+    if result.returncode:
+        raise ValueError('pinned_remote_action_failed')
+    response = json.loads((attempt / 'operation/result.json').read_text())
+    if response.get('verified') is not True:
+        raise ValueError('dedicated_database_restore_unverified')
+    return response
 
 
 def peer_inputs(config, endpoint, plan):

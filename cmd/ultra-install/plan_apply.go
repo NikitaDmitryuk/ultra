@@ -16,8 +16,16 @@ import (
 )
 
 func applyPlanN(p *installplan.InstallPlan, format string) {
+	if p.Secrets.DatabaseDumpFile != "" {
+		exitOnErr("local database dump preflight", installplan.VerifyDatabaseDump(p.Secrets.DatabaseDumpFile, p.Secrets.DatabaseDumpSHA256))
+	}
 	if p.Automation == nil {
-		exitOnErr("controller release preflight", fmt.Errorf("independent Ansible controller requires canonical schema 2 configuration and a complete verified release; plan, render and doctor remain read-only"))
+		exitOnErr(
+			"controller release preflight",
+			fmt.Errorf(
+				"independent Ansible controller requires canonical schema 2 configuration and a complete verified release; plan, render and doctor remain read-only",
+			),
+		)
 	}
 	exitOnErr("automation preflight", preflightAutomation(p))
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -73,9 +81,35 @@ func applyPlanN(p *installplan.InstallPlan, format string) {
 		exitOnErr("bootstrap existing publication", json.Unmarshal(existingJSON, &existing))
 		exitOnErr("bootstrap existing publication", checkPublishedIngressPlan(p, &existing))
 	}
-	inventory, inspection, err = prepareReservedBootstrap(ctx, p, inventory, inspection, directory, lockDirectory, python, executable, format)
+	inventory, inspection, err = prepareReservedBootstrap(
+		ctx,
+		p,
+		inventory,
+		inspection,
+		directory,
+		lockDirectory,
+		python,
+		executable,
+		format,
+	)
 	exitOnErr("reserved Ansible bootstrap inputs", err)
-	exitOnErr("Ansible bootstrap transaction", applyReservedBootstrap(ctx, originalCtx, p, inventory, inspection, directory, planRoot, lockDirectory, python, executable, format, release))
+	exitOnErr(
+		"Ansible bootstrap transaction",
+		applyReservedBootstrap(
+			ctx,
+			originalCtx,
+			p,
+			inventory,
+			inspection,
+			directory,
+			planRoot,
+			lockDirectory,
+			python,
+			executable,
+			format,
+			release,
+		),
+	)
 	emitInstallEvent(format, installplan.EventStep, "", "install finished", "")
 }
 
@@ -110,7 +144,9 @@ func checkPublishedIngressPlan(p *installplan.InstallPlan, existing *config.Spec
 		return fmt.Errorf("adoption_gateway_plan_mismatch")
 	}
 	active := existing.PrimaryXHTTP
-	if active.ServerName != requested.Domain || active.Host != requested.PublicHost || active.Path != requested.Path || active.BackendPort != requested.BackendPort || active.Port != 443 {
+	if active.ServerName != requested.Domain || active.Host != requested.PublicHost || active.Path != requested.Path ||
+		active.BackendPort != requested.BackendPort ||
+		active.Port != 443 {
 		return fmt.Errorf("published_ingress_change_requires_explicit_cutover")
 	}
 	return nil

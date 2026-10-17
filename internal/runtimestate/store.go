@@ -569,7 +569,16 @@ func (s *Store) appendBatch(batch TrafficBatch, full bool) error {
 				last = int64(binary.BigEndian.Uint64(v))
 			}
 			if q.Spent > 0 && (full || q.Spent > last) {
-				batch.Samples = append(batch.Samples, Sample{AccountID: q.AccountID, ExitID: q.ExitID, ExitTag: "to-exit-" + q.ExitID, Period: q.Period, ChargeTotalBytes: q.Spent})
+				batch.Samples = append(
+					batch.Samples,
+					Sample{
+						AccountID:        q.AccountID,
+						ExitID:           q.ExitID,
+						ExitTag:          "to-exit-" + q.ExitID,
+						Period:           q.Period,
+						ChargeTotalBytes: q.Spent,
+					},
+				)
 				queued[k] = q.Spent
 			}
 		}

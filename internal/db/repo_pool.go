@@ -31,7 +31,8 @@ type providerPool struct {
 // Unknown physical routes cannot be excluded silently from the shared pool.
 func validatePoolMembership(ctx context.Context, tx pgx.Tx, period string) error {
 	var unknown bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM account_exit_usage u LEFT JOIN quota_exit_membership m ON m.exit_id=u.exit_id WHERE u.period=$1 AND u.exit_id NOT IN ('','direct','block') AND GREATEST(u.uplink_bytes+u.downlink_bytes,u.charged_bytes)>0 AND m.exit_id IS NULL)`, period).Scan(&unknown)
+	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM account_exit_usage u LEFT JOIN quota_exit_membership m ON m.exit_id=u.exit_id WHERE u.period=$1 AND u.exit_id NOT IN ('','direct','block') AND GREATEST(u.uplink_bytes+u.downlink_bytes,u.charged_bytes)>0 AND m.exit_id IS NULL)`, period).
+		Scan(&unknown)
 	if err != nil {
 		return err
 	}
@@ -43,7 +44,8 @@ func validatePoolMembership(ctx context.Context, tx pgx.Tx, period string) error
 
 func poolUsage(ctx context.Context, tx pgx.Tx, period, account string) (int64, error) {
 	var used int64
-	err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(GREATEST(u.uplink_bytes+u.downlink_bytes,u.charged_bytes)),0)::bigint FROM account_exit_usage u JOIN quota_exit_membership m ON m.exit_id=u.exit_id AND m.scope='vultr' WHERE u.period=$1 AND ($2='' OR u.account_id::text=$2)`, period, account).Scan(&used)
+	err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(GREATEST(u.uplink_bytes+u.downlink_bytes,u.charged_bytes)),0)::bigint FROM account_exit_usage u JOIN quota_exit_membership m ON m.exit_id=u.exit_id AND m.scope='vultr' WHERE u.period=$1 AND ($2='' OR u.account_id::text=$2)`, period, account).
+		Scan(&used)
 	return used, err
 }
 
@@ -60,7 +62,8 @@ func loadProviderPool(ctx context.Context, tx pgx.Tx, now time.Time) (providerPo
 	if err := validatePoolMembership(ctx, tx, period); err != nil {
 		return p, err
 	}
-	err := tx.QueryRow(ctx, `SELECT accrued_bytes,provider_used_bytes,remaining_bytes,observed_local_bytes,observed_at,provider_error FROM provider_quota_pools WHERE scope='vultr' AND period=$1`, period).Scan(&p.Accrued, &p.ProviderUsed, &p.Remaining, &p.ObservedLocal, &p.Observed, &p.Error)
+	err := tx.QueryRow(ctx, `SELECT accrued_bytes,provider_used_bytes,remaining_bytes,observed_local_bytes,observed_at,provider_error FROM provider_quota_pools WHERE scope='vultr' AND period=$1`, period).
+		Scan(&p.Accrued, &p.ProviderUsed, &p.Remaining, &p.ObservedLocal, &p.Observed, &p.Error)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return p, err
 	}
@@ -69,7 +72,8 @@ func loadProviderPool(ctx context.Context, tx pgx.Tx, now time.Time) (providerPo
 }
 
 func (p providerPool) available(now time.Time) int64 {
-	if p.Observed == nil || now.Before(p.Observed.Add(-time.Minute)) || !now.Before(p.Observed.Add(24*time.Hour)) || p.Observed.UTC().Format("2006-01") != now.UTC().Format("2006-01") {
+	if p.Observed == nil || now.Before(p.Observed.Add(-time.Minute)) || !now.Before(p.Observed.Add(24*time.Hour)) ||
+		p.Observed.UTC().Format("2006-01") != now.UTC().Format("2006-01") {
 		return 0
 	}
 	// The local watermark is captured before the provider request, not on receipt.
@@ -78,7 +82,12 @@ func (p providerPool) available(now time.Time) int64 {
 }
 
 func (r *QuotaRepo) SubscriptionQuota(ctx context.Context, account string, now time.Time) (PoolQuota, error) {
-	q := PoolQuota{Scope: "vultr", Period: now.UTC().Format("2006-01"), State: "unknown", ResetsAt: time.Date(now.UTC().Year(), now.UTC().Month()+1, 1, 0, 0, 0, 0, time.UTC)}
+	q := PoolQuota{
+		Scope:    "vultr",
+		Period:   now.UTC().Format("2006-01"),
+		State:    "unknown",
+		ResetsAt: time.Date(now.UTC().Year(), now.UTC().Month()+1, 1, 0, 0, 0, 0, time.UTC),
+	}
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
 		return q, err
@@ -120,7 +129,8 @@ func (r *QuotaRepo) SubscriptionQuota(ctx context.Context, account string, now t
 			continue
 		}
 		var used int64
-		err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(GREATEST(uplink_bytes+downlink_bytes,charged_bytes)),0)::bigint FROM account_exit_usage WHERE exit_id=$1 AND period=$2`, b.ID, q.Period).Scan(&used)
+		err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(GREATEST(uplink_bytes+downlink_bytes,charged_bytes)),0)::bigint FROM account_exit_usage WHERE exit_id=$1 AND period=$2`, b.ID, q.Period).
+			Scan(&used)
 		if err != nil {
 			return q, err
 		}
@@ -169,9 +179,18 @@ func (r *QuotaRepo) ProviderWatermark(ctx context.Context, now time.Time) (int64
 }
 
 // Per-exit emergency capacity is a second bound, never another provider pool.
-func effectivePoolExitRemaining(ctx context.Context, tx pgx.Tx, b ExitBudget, p providerPool, used int64, now time.Time) (int64, string, error) {
+func effectivePoolExitRemaining(
+	ctx context.Context,
+	tx pgx.Tx,
+	b ExitBudget,
+	p providerPool,
+	used int64,
+	now time.Time,
+) (int64, string, error) {
 	remaining := p.available(now)
-	if p.Observed == nil || b.Observed == nil || b.Observed.UTC().Format("2006-01") != now.UTC().Format("2006-01") || !now.Before(b.Observed.Add(24*time.Hour)) || now.Before(b.Observed.Add(-time.Minute)) {
+	if p.Observed == nil || b.Observed == nil || b.Observed.UTC().Format("2006-01") != now.UTC().Format("2006-01") ||
+		!now.Before(b.Observed.Add(24*time.Hour)) ||
+		now.Before(b.Observed.Add(-time.Minute)) {
 		return 0, "provider_unavailable", nil
 	}
 	if b.Error == "" && p.Error == "" && now.Sub(*b.Observed) <= 15*time.Minute && now.Sub(*p.Observed) <= 15*time.Minute {
@@ -192,7 +211,12 @@ func effectivePoolExitRemaining(ctx context.Context, tx pgx.Tx, b ExitBudget, p 
 	return remaining, "", nil
 }
 
-func (r *QuotaRepo) poolRuntimeLimits(ctx context.Context, tx pgx.Tx, budgets []ExitBudget, now, expires time.Time) ([]runtimestate.QuotaLimit, error) {
+func (r *QuotaRepo) poolRuntimeLimits(
+	ctx context.Context,
+	tx pgx.Tx,
+	budgets []ExitBudget,
+	now, expires time.Time,
+) ([]runtimestate.QuotaLimit, error) {
 	out := []runtimestate.QuotaLimit{}
 	p, err := loadProviderPool(ctx, tx, now)
 	if err != nil {
@@ -227,7 +251,11 @@ func (r *QuotaRepo) poolRuntimeLimits(ctx context.Context, tx pgx.Tx, budgets []
 	}
 	// Supply every DB physical pair, including revoked owners and removed exits.
 	// They are expired migration records, never authorization for those routes.
-	rows, err = tx.Query(ctx, `SELECT u.account_id::text,u.exit_id,GREATEST(u.uplink_bytes+u.downlink_bytes,u.charged_bytes) FROM account_exit_usage u JOIN quota_exit_membership m ON m.exit_id=u.exit_id AND m.scope='vultr' WHERE u.period=$1`, period)
+	rows, err = tx.Query(
+		ctx,
+		`SELECT u.account_id::text,u.exit_id,GREATEST(u.uplink_bytes+u.downlink_bytes,u.charged_bytes) FROM account_exit_usage u JOIN quota_exit_membership m ON m.exit_id=u.exit_id AND m.scope='vultr' WHERE u.period=$1`,
+		period,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +266,18 @@ func (r *QuotaRepo) poolRuntimeLimits(ctx context.Context, tx pgx.Tx, budgets []
 			rows.Close()
 			return nil, err
 		}
-		out = append(out, runtimestate.QuotaLimit{ChargeOnly: true, AccountID: account, PoolScope: "vultr", ExitID: id, Period: period, UsedBytes: used, LimitBytes: used})
+		out = append(
+			out,
+			runtimestate.QuotaLimit{
+				ChargeOnly: true,
+				AccountID:  account,
+				PoolScope:  "vultr",
+				ExitID:     id,
+				Period:     period,
+				UsedBytes:  used,
+				LimitBytes: used,
+			},
+		)
 	}
 	err = rows.Err()
 	rows.Close()
@@ -246,14 +285,28 @@ func (r *QuotaRepo) poolRuntimeLimits(ctx context.Context, tx pgx.Tx, budgets []
 		return nil, err
 	}
 	poolID := runtimestate.ProviderPoolID("vultr")
-	out = append(out, runtimestate.QuotaLimit{Scope: "provider_pool", ExitID: poolID, Period: period, UsedBytes: p.Used, LimitBytes: p.Used + p.available(now), ExpiresAt: deadline, Members: members})
+	out = append(
+		out,
+		runtimestate.QuotaLimit{
+			Scope:      "provider_pool",
+			ExitID:     poolID,
+			Period:     period,
+			UsedBytes:  p.Used,
+			LimitBytes: p.Used + p.available(now),
+			ExpiresAt:  deadline,
+			Members:    members,
+		},
+	)
 	type owner struct {
 		ID           string
 		Used, Limit  int64
 		ServiceLimit int64
 	}
 	owners := []owner{}
-	rows, err = tx.Query(ctx, `SELECT u.account_id::text,COALESCE(s.monthly_bytes,0) FROM users u LEFT JOIN service_access s ON s.account_id=u.account_id WHERE u.is_active AND NOT u.member_pending AND u.kind='vless'`)
+	rows, err = tx.Query(
+		ctx,
+		`SELECT u.account_id::text,COALESCE(s.monthly_bytes,0) FROM users u LEFT JOIN service_access s ON s.account_id=u.account_id WHERE u.is_active AND NOT u.member_pending AND u.kind='vless'`,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -282,14 +335,26 @@ func (r *QuotaRepo) poolRuntimeLimits(ctx context.Context, tx pgx.Tx, budgets []
 			o.ServiceLimit = o.Limit
 			o.Limit = quota.SafeBudget(p.Accrued)
 		}
-		out = append(out, runtimestate.QuotaLimit{Scope: "provider_pool", AccountID: o.ID, ExitID: poolID, Period: period, UsedBytes: o.Used, LimitBytes: o.Limit, ExpiresAt: deadline})
+		out = append(
+			out,
+			runtimestate.QuotaLimit{
+				Scope:      "provider_pool",
+				AccountID:  o.ID,
+				ExitID:     poolID,
+				Period:     period,
+				UsedBytes:  o.Used,
+				LimitBytes: o.Limit,
+				ExpiresAt:  deadline,
+			},
+		)
 	}
 	for _, b := range budgets {
 		if !b.Enabled || b.Source != "vultr" {
 			continue
 		}
 		var used int64
-		err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(GREATEST(uplink_bytes+downlink_bytes,charged_bytes)),0)::bigint FROM account_exit_usage WHERE exit_id=$1 AND period=$2`, b.ID, period).Scan(&used)
+		err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(GREATEST(uplink_bytes+downlink_bytes,charged_bytes)),0)::bigint FROM account_exit_usage WHERE exit_id=$1 AND period=$2`, b.ID, period).
+			Scan(&used)
 		if err != nil {
 			return nil, err
 		}
@@ -301,7 +366,14 @@ func (r *QuotaRepo) poolRuntimeLimits(ctx context.Context, tx pgx.Tx, budgets []
 		if b.Observed != nil {
 			exitDeadline = minTime(exitDeadline, b.Observed.Add(24*time.Hour))
 		}
-		global := runtimestate.QuotaLimit{PoolScope: "vultr", ExitID: b.ID, Period: period, UsedBytes: used, LimitBytes: used + left, ExpiresAt: exitDeadline}
+		global := runtimestate.QuotaLimit{
+			PoolScope:  "vultr",
+			ExitID:     b.ID,
+			Period:     period,
+			UsedBytes:  used,
+			LimitBytes: used + left,
+			ExpiresAt:  exitDeadline,
+		}
 		if b.Observed != nil {
 			global.EmergencyAfter = b.Observed.Add(15 * time.Minute)
 			global.EmergencyBytes = EmergencyBytes
@@ -309,7 +381,8 @@ func (r *QuotaRepo) poolRuntimeLimits(ctx context.Context, tx pgx.Tx, budgets []
 		out = append(out, global)
 		for _, o := range owners {
 			var physical int64
-			err = tx.QueryRow(ctx, `SELECT COALESCE(MAX(GREATEST(uplink_bytes+downlink_bytes,charged_bytes)),0)::bigint FROM account_exit_usage WHERE exit_id=$1 AND period=$2 AND account_id=$3`, b.ID, period, o.ID).Scan(&physical)
+			err = tx.QueryRow(ctx, `SELECT COALESCE(MAX(GREATEST(uplink_bytes+downlink_bytes,charged_bytes)),0)::bigint FROM account_exit_usage WHERE exit_id=$1 AND period=$2 AND account_id=$3`, b.ID, period, o.ID).
+				Scan(&physical)
 			if err != nil {
 				return nil, err
 			}
@@ -317,7 +390,18 @@ func (r *QuotaRepo) poolRuntimeLimits(ctx context.Context, tx pgx.Tx, budgets []
 			if o.ServiceLimit > 0 {
 				personalLeft = min(personalLeft, o.ServiceLimit-physical)
 			}
-			out = append(out, runtimestate.QuotaLimit{PoolScope: "vultr", AccountID: o.ID, ExitID: b.ID, Period: period, UsedBytes: physical, LimitBytes: physical + max(0, min(personalLeft, left)), ExpiresAt: exitDeadline})
+			out = append(
+				out,
+				runtimestate.QuotaLimit{
+					PoolScope:  "vultr",
+					AccountID:  o.ID,
+					ExitID:     b.ID,
+					Period:     period,
+					UsedBytes:  physical,
+					LimitBytes: physical + max(0, min(personalLeft, left)),
+					ExpiresAt:  exitDeadline,
+				},
+			)
 		}
 	}
 	return out, nil
@@ -325,26 +409,30 @@ func (r *QuotaRepo) poolRuntimeLimits(ctx context.Context, tx pgx.Tx, budgets []
 
 // PreflightBatches checks all pending periods before any can be acknowledged.
 func (r *QuotaRepo) PreflightBatches(ctx context.Context, batches []runtimestate.TrafficBatch) error {
-	var hasPool bool
-	if err := r.db.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quota_exit_membership WHERE scope='vultr')`).Scan(&hasPool); err != nil {
-		return err
-	}
-	if !hasPool {
-		return nil
-	}
+	ids := make([]string, 0)
+	seen := map[string]bool{}
 	for _, batch := range batches {
 		for _, sample := range batch.Samples {
-			if sample.ExitID == "" || sample.ExitID == "direct" || sample.ExitID == "block" {
-				continue
-			}
-			var known bool
-			if err := r.db.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quota_exit_membership WHERE exit_id=$1)`, sample.ExitID).Scan(&known); err != nil {
-				return err
-			}
-			if !known {
-				return errors.New("unclassified pending quota route")
+			id := sample.ExitID
+			if id != "" && id != "direct" && id != "block" && !seen[id] {
+				ids = append(ids, id)
+				seen[id] = true
 			}
 		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var unknown bool
+	err := r.db.Pool.QueryRow(ctx, `SELECT
+ EXISTS(SELECT 1 FROM quota_exit_membership WHERE scope='vultr') AND
+ EXISTS(SELECT 1 FROM unnest($1::text[]) AS pending(exit_id)
+ WHERE NOT EXISTS(SELECT 1 FROM quota_exit_membership m WHERE m.exit_id=pending.exit_id))`, ids).Scan(&unknown)
+	if err != nil {
+		return err
+	}
+	if unknown {
+		return errors.New("unclassified pending quota route")
 	}
 	return nil
 }

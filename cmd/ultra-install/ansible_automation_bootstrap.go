@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/google/uuid"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	recoveryassets "github.com/NikitaDmitryuk/ultra/deploy/recovery"
 	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
@@ -18,7 +19,13 @@ import (
 // ansibleBootstrapAutomationGeneration uses the frozen fleet inventory.
 // It validates release artifacts before projecting source paths; secrets are not
 // included in inventory, process arguments, or public events.
-func ansibleBootstrapAutomationGeneration(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, architecture, python, executable string, generation int) error {
+func ansibleBootstrapAutomationGeneration(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	directory, architecture, python, executable string,
+	generation int,
+) error {
 	if p.Automation == nil {
 		return fmt.Errorf("automation configuration required")
 	}
@@ -44,7 +51,8 @@ func ansibleBootstrapAutomationGeneration(ctx context.Context, p *installplan.In
 	selected := []map[string]any{}
 	for _, tool := range tools {
 		name := filepath.Base(tool["destination"].(string))
-		if !strings.HasPrefix(name, "test_") && (filepath.Ext(name) == ".py" || filepath.Ext(name) == ".service" || filepath.Ext(name) == ".timer") {
+		if !strings.HasPrefix(name, "test_") &&
+			(filepath.Ext(name) == ".py" || filepath.Ext(name) == ".service" || filepath.Ext(name) == ".timer") {
 			selected = append(selected, tool)
 			members = append(members, name)
 		}
@@ -56,7 +64,15 @@ func ansibleBootstrapAutomationGeneration(ctx context.Context, p *installplan.In
 	if err != nil {
 		return err
 	}
-	selected = append(selected, map[string]any{"source": filepath.Join(a.ReleaseDir, asset.Name), "destination": "/usr/local/bin/ultra-client", "mode": "0755", "sha256": asset.SHA})
+	selected = append(
+		selected,
+		map[string]any{
+			"source":      filepath.Join(a.ReleaseDir, asset.Name),
+			"destination": "/usr/local/bin/ultra-client",
+			"mode":        "0755",
+			"sha256":      asset.SHA,
+		},
+	)
 	installer, err := upgradeAsset(manifest, "ultra-install-linux-"+architecture)
 	if err != nil {
 		return err
@@ -78,6 +94,7 @@ func ansibleBootstrapAutomationGeneration(ctx context.Context, p *installplan.In
 		return err
 	}
 	configuration["database"] = p.Database.Name
+	configuration["database_host"] = p.Database.PrimaryHost
 	if p.Database.Name == "" {
 		configuration["database"] = "ultra_db"
 	}
@@ -87,15 +104,15 @@ func ansibleBootstrapAutomationGeneration(ctx context.Context, p *installplan.In
 	configuration["tools"] = selected
 	controllerDirectory := managedControllerDirectory(a.Version)
 	configuration["controller_directory"] = controllerDirectory
-	compute, dns, err := prepareProviderSecrets(p, stage)
+	providerKey, err := prepareProviderSecrets(p, stage)
 	if err != nil {
 		return err
 	}
-	if compute != "" {
-		configuration["cloud_key_file"] = compute
+	if providerKey != "" {
+		configuration["cloud_key_file"] = providerKey
 	}
-	if dns != "" {
-		configuration["dns"].(map[string]any)["api_key_file"] = dns
+	if a.DNS != nil {
+		configuration["dns"].(map[string]any)["api_key_file"] = providerKey
 	}
 	planner, err := recoveryassets.Scripts.ReadFile("bootstrap_plan.py")
 	if err != nil {
@@ -111,7 +128,7 @@ func ansibleBootstrapAutomationGeneration(ctx context.Context, p *installplan.In
 		"ultra_install_source": filepath.Join(a.ReleaseDir, installer.Name), "ultra_install_sha256": installer.SHA,
 		"ultra_automation_configuration": configuration, "ultra_automation_tools": selected,
 		"ultra_automation_planner_source": plannerPath, "ultra_automation_pins_source": a.KnownHostsFile,
-		"ultra_automation_cloud_source": compute, "ultra_automation_dns_source": dns,
+		"ultra_automation_cloud_source":     providerKey,
 		"ultra_automation_manifest_source":  filepath.Join(a.ReleaseDir, "release-manifest.json"),
 		"ultra_automation_emergency_source": filepath.Join(a.ReleaseDir, emergency.Name),
 	}
@@ -119,7 +136,17 @@ func ansibleBootstrapAutomationGeneration(ctx context.Context, p *installplan.In
 		return err
 	}
 	configuration["release_signature"] = variables["ultra_automation_signature_source"] != ""
-	_, err = runBootstrapMutationStage(ctx, "bootstrap-automation", inventory, variables, directory, "automation", generation, python, executable)
+	_, err = runBootstrapMutationStage(
+		ctx,
+		"bootstrap-automation",
+		inventory,
+		variables,
+		directory,
+		"automation",
+		generation,
+		python,
+		executable,
+	)
 	return err
 }
 
@@ -144,7 +171,13 @@ func hasAutomationCapability(manifest *automationRelease, name string) bool {
 // verifyBootstrapAutomation must run after releasing the caller's fleet lease.
 // Each observation is a separate bounded read so reconcile and backup can acquire
 // the infrastructure lease between observations; success records fresh evidence.
-func verifyBootstrapAutomation(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, python, executable string, generation int) error {
+func verifyBootstrapAutomation(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	directory, python, executable string,
+	generation int,
+) error {
 	if generation < 1 || generation > 100 {
 		return fmt.Errorf("automation generation invalid")
 	}

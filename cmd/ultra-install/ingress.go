@@ -55,7 +55,10 @@ func runIngressCommand(args []string) {
 	}
 	var settings map[string]any
 	exitOnErr("ingress plan", json.Unmarshal(raw, &settings))
-	p := &installplan.InstallPlan{SSH: installplan.SSHConfig{User: *user, Identity: *identity}, Bridge: installplan.BridgeConfig{SSHHost: *host, Address: *host, RemoteDir: "/etc/ultra-relay"}}
+	p := &installplan.InstallPlan{
+		SSH:    installplan.SSHConfig{User: *user, Identity: *identity},
+		Bridge: installplan.BridgeConfig{SSHHost: *host, Address: *host, RemoteDir: "/etc/ultra-relay"},
+	}
 	stateRoot, err := bootstrapStateRoot()
 	exitOnErr("ingress state", err)
 	exitOnErr("private ingress state", ensurePrivateBootstrapDirectory(stateRoot))
@@ -106,7 +109,19 @@ func runIngressCommand(args []string) {
 	}
 	domain, _ := settings["domain"].(string)
 	email, _ := settings["email"].(string)
-	variables := map[string]any{"ultra_lock_directory": lockDirectory, "ultra_ingress": settings, "ultra_ingress_action": *action, "ultra_ingress_transaction": "/var/lib/ultra-ingress/ansible-" + hex.EncodeToString(sum[:]) + "-" + filepath.Base(directory), "ultra_ingress_domains": uniqueIngressDomains(domain, botDomain), "ultra_ingress_email": email, "ultra_bot_domain": botDomain, "ultra_bot_port": botPort, "ultra_subscription_enabled": false, "ultra_subscription_domain": botDomain, "ultra_bridge_ipv4": "127.0.0.1"}
+	variables := map[string]any{
+		"ultra_lock_directory":       lockDirectory,
+		"ultra_ingress":              settings,
+		"ultra_ingress_action":       *action,
+		"ultra_ingress_transaction":  "/var/lib/ultra-ingress/ansible-" + hex.EncodeToString(sum[:]) + "-" + filepath.Base(directory),
+		"ultra_ingress_domains":      uniqueIngressDomains(domain, botDomain),
+		"ultra_ingress_email":        email,
+		"ultra_bot_domain":           botDomain,
+		"ultra_bot_port":             botPort,
+		"ultra_subscription_enabled": false,
+		"ultra_subscription_domain":  botDomain,
+		"ultra_bridge_ipv4":          "127.0.0.1",
+	}
 	_, err = deployansible.RunLocal(ctx, "ingress", inventory, variables, filepath.Join(directory, "apply"), python, executable)
 	exitOnErr("Ansible ingress "+*action, err)
 	if *action != "status" {

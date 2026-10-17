@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"path"
 	"reflect"
 	"strings"
@@ -105,6 +106,9 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 	if p.Features.GenerateExitTLS {
 		tlsProv = config.TunnelTLSSelfSigned
 	}
+	if p.Features.MainExitDomain != "" {
+		tlsProv = config.TunnelTLSACME
+	}
 	var realitySpec config.RealitySpec
 	if p.Bridge.ReuseSpec {
 		realitySpec = opts.ExistingBridge.Reality
@@ -200,42 +204,65 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 	} else {
 		bridgeSpec.VLESSFlow = p.Features.VLESSFlow
 	}
+	var credentialDSN string
+	if p.Database.Enabled && p.Secrets.DatabaseCredentialsFile != "" {
+		var err error
+		credentialDSN, err = ReadDatabaseCredentials(p.Secrets.DatabaseCredentialsFile)
+		if err != nil {
+			return nil, err
+		}
+	}
 	var pgCfg *install.PostgresConfig
 	var dbDSN string
 	if p.Bridge.ReuseSpec && opts.ExistingBridge.Database != nil && opts.ExistingBridge.Database.DSN != "" {
-		// Adoption must retain the database identity and password; changing the
-		// role credentials would break replicas and the rollback binary.
+		// Keep the existing database identity and credentials during repeated installation.
 		previous := *opts.ExistingBridge.Database
 		bridgeSpec.Database = &previous
 		dbDSN = previous.DSN
+		if credentialDSN != "" && credentialDSN != previous.DSN {
+			return nil, fmt.Errorf("database credentials file conflicts with existing bridge")
+		}
+		if p.Database.Enabled {
+			u, err := url.Parse(previous.DSN)
+			if err != nil || u.User == nil || u.Hostname() != "127.0.0.1" || u.Port() != "25432" ||
+				strings.TrimPrefix(u.Path, "/") != p.Database.Name ||
+				u.User.Username() != p.Database.User {
+				return nil, fmt.Errorf("existing database must already use the dedicated DB tunnel; migrate explicitly before reuse")
+			}
+			password, ok := u.User.Password()
+			if !ok || password == "" {
+				return nil, fmt.Errorf("existing database credentials required")
+			}
+			pgCfg = &install.PostgresConfig{
+				DBName:                   p.Database.Name,
+				DBUser:                   p.Database.User,
+				DBPassword:               password,
+				RepairExistingCredential: true,
+				Port:                     25432,
+			}
+		}
 	} else if p.Database.Enabled {
-		primaryHost := p.Database.PrimaryHost
-		if strings.TrimSpace(primaryHost) == "" {
-			primaryHost = p.Bridge.Address
+		pc := &install.PostgresConfig{DBName: p.Database.Name, DBUser: p.Database.User, Port: 25432}
+		if credentialDSN != "" {
+			u, err := url.Parse(credentialDSN)
+			if err != nil || u.User == nil || u.Hostname() != "127.0.0.1" || u.Port() != "25432" || strings.TrimPrefix(u.Path, "/") != p.Database.Name || u.User.Username() != p.Database.User {
+				return nil, fmt.Errorf("database credentials must match the configured dedicated database")
+			}
+			password, ok := u.User.Password()
+			if !ok || password == "" {
+				return nil, fmt.Errorf("database credentials file requires existing password")
+			}
+			pc.DBPassword = password
+			pc.RepairExistingCredential = true
 		}
-		replicaHost := p.Database.ReplicaHost
-		if strings.TrimSpace(replicaHost) == "" && len(p.Exits) > 0 {
-			replicaHost = p.Exits[0].SSHHost
-		}
-		bridgeHBA := p.Bridge.Address
-		if primaryHost == p.Bridge.Address || primaryHost == p.Bridge.SSHHost {
-			bridgeHBA = "127.0.0.1"
-		}
-		pc := &install.PostgresConfig{
-			DBName:      p.Database.Name,
-			DBUser:      p.Database.User,
-			BridgeHost:  bridgeHBA,
-			ReplicaHost: replicaHost,
+		if p.Database.RepairAppCredentials {
+			pc.RepairExistingCredential = true
 		}
 		if err := pc.Defaults(); err != nil {
 			return nil, err
 		}
 		pgCfg = pc
-		dbHost := primaryHost
-		if dbHost == p.Bridge.Address || dbHost == p.Bridge.SSHHost {
-			dbHost = "127.0.0.1"
-		}
-		dbDSN = pc.DSN(dbHost)
+		dbDSN = pc.DSN("127.0.0.1")
 		bridgeSpec.Database = &config.DatabaseSpec{DSN: dbDSN}
 		bridgeSpec.Stats = &config.StatsSpec{CollectIntervalSeconds: 60}
 	}
@@ -359,7 +386,9 @@ func renderPreservedRuntime(p *InstallPlan, opts RenderOptions) (*DesiredState, 
 	names := make(map[string]bool, len(opts.PriorBootstrap))
 	for _, entry := range opts.PriorBootstrap {
 		key := net.JoinHostPort(entry.Address, fmt.Sprint(entry.Port))
-		if strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Address) == "" || entry.Port <= 0 || entry.Port > 65535 || strings.TrimSpace(entry.TunnelUUID) == "" || names[entry.Name] {
+		if strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Address) == "" || entry.Port <= 0 || entry.Port > 65535 ||
+			strings.TrimSpace(entry.TunnelUUID) == "" ||
+			names[entry.Name] {
 			return nil, fmt.Errorf("adoption existing bootstrap topology is invalid")
 		}
 		if _, exists := routes[key]; exists {
@@ -396,7 +425,8 @@ func renderPreservedRuntime(p *InstallPlan, opts RenderOptions) (*DesiredState, 
 			return nil, fmt.Errorf("adoption requires canonical existing exit certificate paths")
 		}
 		entry, ok := routes[net.JoinHostPort(ex.DialAddr, fmt.Sprint(ex.Port))]
-		if !ok || exit.VLESSPort != ex.Port || entry.TunnelUUID != exit.Exit.TunnelUUID || (ex.TunnelUUID != "" && ex.TunnelUUID != entry.TunnelUUID) {
+		if !ok || exit.VLESSPort != ex.Port || entry.TunnelUUID != exit.Exit.TunnelUUID ||
+			(ex.TunnelUUID != "" && ex.TunnelUUID != entry.TunnelUUID) {
 			return nil, fmt.Errorf("adoption static exit does not match existing bootstrap topology")
 		}
 		ds.ExitSpecs[ex.Name] = raw
@@ -557,5 +587,7 @@ func normalizeDomains(items []string) []string {
 }
 
 func errorsForReuseRender() error {
-	return fmt.Errorf("render for bridge.reuse_spec=true requires reading the remote bridge spec; use apply with read-only Ansible target inspection")
+	return fmt.Errorf(
+		"render for bridge.reuse_spec=true requires reading the remote bridge spec; use apply with read-only Ansible target inspection",
+	)
 }

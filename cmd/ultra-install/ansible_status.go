@@ -42,9 +42,17 @@ func ansibleAutomationStatus(ctx context.Context, p *installplan.InstallPlan, py
 	if err != nil {
 		return err
 	}
-	receipt, err := deployansible.RunLocal(ctx, "status-automation", inventory, map[string]any{}, filepath.Join(directory, "status"), python, executable)
+	receipt, err := deployansible.RunLocal(
+		ctx,
+		"status-automation",
+		inventory,
+		map[string]any{},
+		filepath.Join(directory, "status"),
+		python,
+		executable,
+	)
 	if err != nil {
-		return errors.New("automation_status_unavailable")
+		return automationStatusFailure(receipt.Diagnostic)
 	}
 	raw, err := json.Marshal(publicAutomationStatus(receipt.Result.Values))
 	if err != nil {
@@ -57,9 +65,22 @@ func ansibleAutomationStatus(ctx context.Context, p *installplan.InstallPlan, py
 	return nil
 }
 
+func automationStatusFailure(diagnostic deployansible.Diagnostic) error {
+	// The fixed status playbook can fail a task or SSH connection. Only publish
+	// these callback classifications; receipt fields and executor errors may
+	// otherwise contain private host data or arbitrary module output.
+	switch diagnostic.Code {
+	case "task_failed", "host_unreachable", "ssh_connection_refused", "ssh_authentication_failed",
+		"ssh_control_path_too_long", "ssh_pin_mismatch", "ssh_temporary_directory_failed":
+		return fmt.Errorf("automation_status_unavailable (%s)", diagnostic.Code)
+	default:
+		return errors.New("automation_status_unavailable")
+	}
+}
+
 func publicAutomationStatus(values map[string]any) map[string]any {
 	result := map[string]any{}
-	for _, key := range []string{"ready", "independent", "version", "backup_age_seconds", "controller_age_seconds", "replicas_ready", "reasons"} {
+	for _, key := range []string{"ready", "independent", "version", "backup_age_seconds", "controller_age_seconds", "reasons"} {
 		if value, ok := values[key]; ok {
 			result[key] = value
 		}

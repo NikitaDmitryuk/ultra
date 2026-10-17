@@ -5,10 +5,47 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"os"
 	"path/filepath"
+
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 )
+
+// Validate explicit retry authorization before runtime compensation mutates the
+// previous attempt. resetFailedUpgradeAttempt performs the same check before it
+// archives release stages; a live or committed attempt must never be unwound.
+func requireFailedUpgradeAttempt(directory string, generation int) error {
+	failed := false
+	steps, err := upgradeFailedAttemptStages(directory, generation)
+	if err != nil {
+		return err
+	}
+	for _, step := range steps {
+		raw, err := readBootstrapGenerationInput(filepath.Join(upgradeDependentStageDirectory(directory, step, generation), "receipt.json"))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return errors.New("retry_receipt_invalid")
+		}
+		var receipt struct {
+			State string `json:"state"`
+		}
+		if json.Unmarshal(raw, &receipt) != nil {
+			return errors.New("retry_receipt_invalid")
+		}
+		if step == "commit" && receipt.State == "succeeded" {
+			return errors.New("retry_operation_already_committed")
+		}
+		if receipt.State == "failed" || (step == "rollback" && receipt.State == "succeeded") {
+			failed = true
+		}
+	}
+	if !failed {
+		return errors.New("retry_failed_operation_required")
+	}
+	return nil
+}
 
 // Caller must hold the operation lease and verify recovery before resetting.
 // Only terminal failure receipts are reset; frozen inputs and fallbacks stay intact.
@@ -28,7 +65,9 @@ func resetFailedUpgradeAttempt(directory string) error {
 		}
 		archiveRaw, archiveErr := os.ReadFile(archivePath)
 		var job, archived map[string]any
-		if archiveErr != nil || json.Unmarshal(jobRaw, &job) != nil || json.Unmarshal(archiveRaw, &archived) != nil || archived["request_sha256"] != job["request_sha256"] || archived["binary_sha256"] != job["binary_sha256"] {
+		if archiveErr != nil || json.Unmarshal(jobRaw, &job) != nil || json.Unmarshal(archiveRaw, &archived) != nil ||
+			archived["request_sha256"] != job["request_sha256"] ||
+			archived["binary_sha256"] != job["binary_sha256"] {
 			return errors.New("retry_job_receipt_conflict")
 		}
 		previous := float64(1)
@@ -40,33 +79,8 @@ func resetFailedUpgradeAttempt(directory string) error {
 		}
 		return syncUpgradeDirectory(filepath.Join(directory, "activate"))
 	}
-	failed := false
-	for _, step := range []string{"publish", "rollback", "commit", "activate"} {
-		path := filepath.Join(upgradeDependentStageDirectory(directory, step, generation), "receipt.json")
-		info, err := os.Lstat(path)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 1<<20 {
-			return errors.New("retry_receipt_invalid")
-		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		var receipt map[string]any
-		if json.Unmarshal(raw, &receipt) != nil {
-			return errors.New("retry_receipt_invalid")
-		}
-		if step == "commit" && receipt["state"] == "succeeded" {
-			return errors.New("retry_operation_already_committed")
-		}
-		if receipt["state"] == "failed" || (step == "rollback" && receipt["state"] == "succeeded") {
-			failed = true
-		}
-	}
-	if !failed {
-		return errors.New("retry_failed_operation_required")
+	if err := requireFailedUpgradeAttempt(directory, generation); err != nil {
+		return err
 	}
 	for _, step := range []string{"publish", "rollback", "commit", "activate"} {
 		path := filepath.Join(upgradeDependentStageDirectory(directory, step, generation), "receipt.json")
@@ -296,4 +310,34 @@ func upgradeDependentStageDirectory(directory, step string, generation int) stri
 		return filepath.Join(directory, step)
 	}
 	return filepath.Join(directory, fmt.Sprintf("%s-generation-%d", step, generation))
+}
+
+// Domain stages belong to the durable generation/attempt marker. Never scan
+// similarly named directories or infer the latest attempt from a failed receipt.
+func upgradeFailedAttemptStages(directory string, generation int) ([]string, error) {
+	steps := []string{"runtime-prepare", "runtime-apply", "runtime-rollback", "publish", "rollback", "commit", "activate"}
+	raw, err := readBootstrapGenerationInput(filepath.Join(directory, fmt.Sprintf("domain-generation-%d.json", generation)))
+	if os.IsNotExist(err) {
+		return steps, nil
+	}
+	if err != nil {
+		return nil, errors.New("upgrade_domain_attempt_invalid")
+	}
+	var marker struct {
+		Version    int `json:"version"`
+		Generation int `json:"generation"`
+		Attempt    int `json:"attempt"`
+	}
+	if json.Unmarshal(raw, &marker) != nil || marker.Version != 1 || marker.Generation != generation || marker.Attempt < 1 ||
+		marker.Attempt > 1000 {
+		return nil, errors.New("upgrade_domain_attempt_invalid")
+	}
+	for _, action := range []string{"prepare", "apply", "accept", "rollback", "rollback-dns", "promote", "retire", "retire-dns"} {
+		step := "domain-" + action
+		if marker.Attempt > 1 {
+			step += fmt.Sprintf("-attempt-%d", marker.Attempt)
+		}
+		steps = append(steps, step)
+	}
+	return steps, nil
 }

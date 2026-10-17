@@ -106,7 +106,12 @@ func TestRunnerRestoresAfterListenerFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	invalid := []byte(fmt.Sprintf(`{"inbounds":[{"listen":"127.0.0.1","port":%d,"protocol":"socks","settings":{}}],"outbounds":[{"protocol":"freedom"}]}`, occupied.Addr().(*net.TCPAddr).Port))
+	invalid := []byte(
+		fmt.Sprintf(
+			`{"inbounds":[{"listen":"127.0.0.1","port":%d,"protocol":"socks","settings":{}}],"outbounds":[{"protocol":"freedom"}]}`,
+			occupied.Addr().(*net.TCPAddr).Port,
+		),
+	)
 	if err := r.Reload(invalid); err == nil {
 		t.Fatal("occupied port accepted")
 	}
@@ -119,7 +124,9 @@ func TestRunnerRestoresAfterListenerFailure(t *testing.T) {
 }
 
 func TestRunnerEquivalentXHTTPHeaders(t *testing.T) {
-	data := []byte(`{"outbounds":[{"tag":"proxy","protocol":"vless","settings":{"vnext":[{"address":"127.0.0.1","port":1,"users":[{"id":"2784871e-d8a9-4e1f-b831-3d86aa8653ee","encryption":"none"}]}]},"streamSettings":{"network":"xhttp","security":"none","xhttpSettings":{"path":"/test","headers":{"User-Agent":"test","Accept":"text/plain","X-Test":"test","Origin":"https://example.com"}}}}]}`)
+	data := []byte(
+		`{"outbounds":[{"tag":"proxy","protocol":"vless","settings":{"vnext":[{"address":"127.0.0.1","port":1,"users":[{"id":"2784871e-d8a9-4e1f-b831-3d86aa8653ee","encryption":"none"}]}]},"streamSettings":{"network":"xhttp","security":"none","xhttpSettings":{"path":"/test","headers":{"User-Agent":"test","Accept":"text/plain","X-Test":"test","Origin":"https://example.com"}}}}]}`,
+	)
 	var r Runner
 	if err := r.StartJSON(data); err != nil {
 		t.Fatal(err)

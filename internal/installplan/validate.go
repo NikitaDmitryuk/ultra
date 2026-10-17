@@ -4,28 +4,43 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/loglevel"
 )
 
+// ValidatePlan accepts only the complete operator installation schema.
 func ValidatePlan(p *InstallPlan) error {
+	return validatePlan(p, false)
+}
+
+// localProjection is private to host-local runtime projection. Its historical
+// v1 in-process data shape carries no deployment policy and is never an install.
+func validatePlan(p *InstallPlan, localProjection bool) error {
 	if p == nil {
 		return errors.New("install plan is nil")
-	}
-	if p.SchemaVersion == 0 {
-		p.SchemaVersion = CurrentSchemaVersion
 	}
 	if p.AdoptRuntime && (!p.FullAutomation() || !p.Bridge.ReuseSpec) {
 		return errors.New("runtime adoption requires schema 2 and an existing bridge")
 	}
-	if p.SchemaVersion != 1 && p.SchemaVersion != CurrentSchemaVersion {
-		return fmt.Errorf("unsupported install plan schema_version %d", p.SchemaVersion)
+	if localProjection {
+		if p.SchemaVersion != 1 || p.Automation != nil || p.AdoptRuntime {
+			return errors.New("invalid host-local runtime projection envelope")
+		}
+	} else if p.SchemaVersion != CurrentSchemaVersion {
+		return fmt.Errorf("only install plan schema_version %d is supported (received %d)", CurrentSchemaVersion, p.SchemaVersion)
 	}
 	if err := validateAutomation(p); err != nil {
 		return err
 	}
+	return validatePlanRoles(p)
+}
+
+// validatePlanRoles is shared with read-only adoption preparation. Callers that
+// deploy a plan must first enforce its schema and complete automation policy.
+func validatePlanRoles(p *InstallPlan) error {
 	if strings.TrimSpace(p.SSH.User) == "" {
 		p.SSH.User = "root"
 	}
@@ -108,11 +123,42 @@ func ValidatePlan(p *InstallPlan) error {
 			e.Priority = 100 + i*100
 		}
 	}
+	if domain := p.Features.MainExitDomain; domain != "" {
+		if net.ParseIP(domain) != nil || !validTunnelDomain(domain) || strings.ToLower(domain) != domain {
+			return errors.New("MAIN_EXIT_DOMAIN must be a lowercase DNS hostname")
+		}
+		if len(p.Exits) != 1 || net.ParseIP(p.Exits[0].SSHHost).To4() == nil || p.Exits[0].DialAddr != p.Exits[0].SSHHost {
+			return errors.New("managed tunnel TLS requires one exit dialed by its explicit IP")
+		}
+		if p.Exits[0].Port == 80 {
+			return errors.New("managed tunnel TLS requires TUNNEL_PORT other than 80; HTTP-01 nginx occupies TCP/80")
+		}
+		if p.AdoptRuntime || p.Bridge.ReuseSpec {
+			return errors.New("managed tunnel TLS requires fresh bootstrap with REUSE_BRIDGE_SPEC=false")
+		}
+		if p.Automation == nil || p.Automation.DNS == nil || p.Automation.Ingress == nil || p.Automation.Ingress.ForwardHost != "" {
+			return errors.New("managed tunnel TLS requires schema 2 direct ingress and managed DNS")
+		}
+		zone := p.Automation.DNS.Zone
+		label := strings.TrimSuffix(domain, "."+zone)
+		if domain == label || strings.Contains(label, ".") || label == p.Automation.DNS.SubscriptionName ||
+			label == p.Automation.DNS.VPNName ||
+			domain == p.Bot.Domain {
+			return errors.New("MAIN_EXIT_DOMAIN must be a distinct single label in DNS_ZONE")
+		}
+		p.Features.Preset = "standard"
+		p.Features.Transport = string(config.TunnelTransportSplitHTTP)
+		p.Features.GenerateExitTLS = false
+		p.Features.SplitHTTPHost = domain
+		if p.Features.SplitHTTPPath == "" {
+			p.Features.SplitHTTPPath = "/ultra-xhttp"
+		}
+	}
 	if strings.TrimSpace(p.Features.Preset) == "" || p.Features.Preset == "plusgaming" {
 		p.Features.Preset = "apijson"
 	}
-	if p.Features.Preset != "apijson" && p.Features.Preset != "steamlike" {
-		return errors.New("features.preset must be apijson or steamlike")
+	if p.Features.Preset != "apijson" && p.Features.Preset != "steamlike" && p.Features.Preset != "standard" {
+		return errors.New("features.preset is unsupported")
 	}
 	if strings.TrimSpace(p.Features.Transport) == "" {
 		p.Features.Transport = string(config.TunnelTransportSplitHTTP)
@@ -147,7 +193,36 @@ func ValidatePlan(p *InstallPlan) error {
 			return err
 		}
 	}
+	if p.Secrets.DatabaseDumpFile != "" && (!p.Database.Enabled || p.Bridge.ReuseSpec || p.AdoptRuntime) {
+		return errors.New("DATABASE_DUMP requires a dedicated database and fresh bootstrap without REUSE_BRIDGE_SPEC")
+	}
+	if p.AdoptRuntime && p.Database.Enabled {
+		return errors.New(
+			"legacy runtime adoption is unavailable for dedicated databases; use an explicitly reviewed bootstrap with reuse_spec",
+		)
+	}
+	if p.Database.ReplicaHost != "" {
+		return errors.New("database replicas are no longer supported; use a dedicated DB_HOST")
+	}
+	if p.Database.RepairAppCredentials && !p.Database.Enabled {
+		return errors.New("DB_REPAIR_APP_CREDENTIALS requires DATABASE_IP")
+	}
 	if p.Database.Enabled {
+		if net.ParseIP(p.Database.PrimaryHost).To4() == nil || p.Database.PrimaryHost == p.Bridge.Address ||
+			p.Database.PrimaryHost == p.Bridge.SSHHost {
+			return errors.New("database.primary_host must be the IP of a dedicated database server")
+		}
+		for _, exit := range p.Exits {
+			if p.Database.PrimaryHost == exit.SSHHost || p.Database.PrimaryHost == exit.DialAddr {
+				return errors.New("database server must be separate from VPN exit hosts")
+			}
+		}
+		if p.Database.SSHUser == "" {
+			p.Database.SSHUser = p.SSH.User
+		}
+		if p.Database.SSHIdentity == "" {
+			p.Database.SSHIdentity = p.SSH.Identity
+		}
 		if p.Database.Name == "" {
 			p.Database.Name = "ultra_db"
 		}
@@ -169,4 +244,17 @@ func validatePort(name string, port int) error {
 		return fmt.Errorf("%s must be 1..65535", name)
 	}
 	return nil
+}
+
+func validTunnelDomain(name string) bool {
+	if len(name) > 253 || !strings.Contains(name, ".") {
+		return false
+	}
+	label := regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+	for _, part := range strings.Split(name, ".") {
+		if !label.MatchString(part) {
+			return false
+		}
+	}
+	return true
 }

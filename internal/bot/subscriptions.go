@@ -4,12 +4,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/subscriptionmeta"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionmeta"
 )
 
 func validBotUsername(username string) bool {
@@ -84,7 +85,11 @@ func (b *Bot) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	req.URL.RawQuery = url.Values{"format": r.URL.Query()["format"], "transport": r.URL.Query()["transport"], "preview": r.URL.Query()["preview"]}.Encode()
+	req.URL.RawQuery = url.Values{
+		"format":    r.URL.Query()["format"],
+		"transport": r.URL.Query()["transport"],
+		"preview":   r.URL.Query()["preview"],
+	}.Encode()
 	if acceptance != nil {
 		query := req.URL.Query()
 		query.Set("preview", "reserve")

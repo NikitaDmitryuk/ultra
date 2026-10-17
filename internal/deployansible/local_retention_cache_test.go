@@ -27,7 +27,15 @@ func retainedCacheFixture(t *testing.T) (string, string, []byte, string, map[str
 	digest := sha256.Sum256(raw)
 	id := hex.EncodeToString(digest[:])
 	job := map[string]any{"schema_version": 1, "operation": "retain-artifacts", "request_sha256": id, "binary_sha256": id, "attempt": 1}
-	saved := map[string]any{"schema_version": 1, "operation": "retain-artifacts", "request_sha256": id, "binary_sha256": id, "attempt": 1, "state": "succeeded", "result": map[string]any{"verified": true}}
+	saved := map[string]any{
+		"schema_version": 1,
+		"operation":      "retain-artifacts",
+		"request_sha256": id,
+		"binary_sha256":  id,
+		"attempt":        1,
+		"state":          "succeeded",
+		"result":         map[string]any{"verified": true},
+	}
 	if err := writePrivate(filepath.Join(directory, "request.json"), raw); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +55,15 @@ func TestCollectedRetentionRunLocalReturnsDurableSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	receipt, err := RunLocal(ctx, "retain-artifacts", map[string]any{}, map[string]any{}, directory, "/nonexistent/python", "/nonexistent/ansible")
+	receipt, err := RunLocal(
+		ctx,
+		"retain-artifacts",
+		map[string]any{},
+		map[string]any{},
+		directory,
+		"/nonexistent/python",
+		"/nonexistent/ansible",
+	)
 	if err != nil || receipt.State != "succeeded" || receipt.Result.Values["verified"] != true {
 		t.Fatal("completed retention re-executed", receipt, err)
 	}

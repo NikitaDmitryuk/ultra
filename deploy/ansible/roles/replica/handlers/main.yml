@@ -1,6 +1,0 @@
----
-- name: Restart managed PostgreSQL standby
-  ansible.builtin.systemd_service:
-    name: ultra-postgres-replica.service
-    daemon_reload: true
-    state: restarted

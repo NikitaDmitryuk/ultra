@@ -45,7 +45,15 @@ func (b *bandwidthFixture) AccountBandwidth(context.Context) (cloud.AccountBandw
 
 func TestBandwidthUsesOneAccruedPoolWithoutExitShares(t *testing.T) {
 	calls := []string{}
-	repo := &budgetFixture{calls: &calls, budgets: []db.ExitBudget{{ID: "a", Instance: "a", Source: "vultr", Enabled: true, Monthly: 100}, {ID: "b", Instance: "b", Source: "vultr", Enabled: true, Monthly: 9000}, {ID: "off", Source: "vultr"}, {ID: "manual", Source: "manual", Enabled: true}}}
+	repo := &budgetFixture{
+		calls: &calls,
+		budgets: []db.ExitBudget{
+			{ID: "a", Instance: "a", Source: "vultr", Enabled: true, Monthly: 100},
+			{ID: "b", Instance: "b", Source: "vultr", Enabled: true, Monthly: 9000},
+			{ID: "off", Source: "vultr"},
+			{ID: "manual", Source: "manual", Enabled: true},
+		},
+	}
 	err := refreshBandwidth(context.Background(), repo, &bandwidthFixture{calls: &calls}, time.Now())
 	if err != nil {
 		t.Fatal(err)

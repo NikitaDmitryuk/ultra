@@ -42,22 +42,34 @@ def main():
                 'ansible_ssh_common_args':'-o StrictHostKeyChecking=yes -o UserKnownHostsFile='+str(pins),
             }}}}}}
             files=[]
-            for name in ['recovery.py','monitor.py','heartbeat.py']:
+            for name in ['recovery.py','db_connection.py','monitor.py','heartbeat.py']:
                 files.append({'source':str(ROOT/'deploy/recovery'/name),'destination':'/opt/ultra-recovery/'+name,'mode':'0755'})
             for name in ['ultra-recovery-prune.service','ultra-recovery-prune.timer']:
                 files.append({'source':str(ROOT/'deploy/recovery'/name),'destination':'/etc/systemd/system/'+name,'mode':'0644'})
             variables={'ultra_recovery_files':files,'ultra_monitor_mode':'none'}
             for name,value in [('inventory',inventory),('variables',variables)]:
                 path=directory/(name+'.json');path.write_text(json.dumps(value));path.chmod(0o600)
+            ansible_error=directory/'ansible.stderr'
+            wrapped_playbook=directory/'ansible-playbook'
+            wrapped_playbook.write_text(
+                '#!/usr/bin/env python3\n'
+                'import pathlib,subprocess,sys\n'
+                f"result=subprocess.run([{args.ansible_playbook!r},*sys.argv[1:]],stdout=subprocess.PIPE,stderr=subprocess.PIPE)\n"
+                f"pathlib.Path({str(ansible_error)!r}).write_bytes(result.stderr[-4000:]) if result.returncode else None\n"
+                'sys.stdout.buffer.write(result.stdout);sys.stderr.buffer.write(result.stderr);sys.exit(result.returncode)\n')
+            wrapped_playbook.chmod(0o700)
             def apply(expect_success=True):
                 job=directory/str(uuid.uuid4())
                 command=[args.installer,'ansible-run','--operation','reconcile','--inventory',str(directory/'inventory.json'),
                          '--variables',str(directory/'variables.json'),'--state-dir',str(job),'--python','/usr/bin/python3',
-                         '--executable',args.ansible_playbook]
+                         '--executable',str(wrapped_playbook)]
+                ansible_error.unlink(missing_ok=True)
                 result=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=300)
                 receipt=json.loads((job/'receipt.json').read_text())
                 if expect_success and result.returncode:
-                    raise ValueError(str(receipt.get('diagnostic',{})))
+                    stderr=result.stderr.decode('utf-8','replace').strip()[-2000:]
+                    playbook_stderr=ansible_error.read_text(errors='replace')[-4000:] if ansible_error.exists() else ''
+                    raise ValueError(f"recovery receiver failed (exit {result.returncode}): {receipt.get('code', 'unknown')} {receipt.get('diagnostic', {})}; {stderr}; ansible: {playbook_stderr}")
                 assert (receipt['state']=='succeeded')==expect_success
             apply()
             before=run(['docker','exec',container,'stat','-c','%Y','/opt/ultra-recovery/recovery.py'])

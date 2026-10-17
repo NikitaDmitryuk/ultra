@@ -8,6 +8,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/db/sqlc"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"gorm.io/gorm/clause"
 )
 
 // ErrInvalidToken is returned when an invite token does not exist or is already used.
@@ -30,40 +31,48 @@ func NewBotAdminRepo(db *DB) *BotAdminRepo { return &BotAdminRepo{db: db} }
 
 // IsAdmin returns true if telegramID is a registered bot admin.
 func (r *BotAdminRepo) IsAdmin(ctx context.Context, telegramID int64) (bool, error) {
-	return r.db.Queries.IsBotAdmin(ctx, telegramID)
+	var rows []BotAdmin
+	err := r.db.orm.WithContext(ctx).
+		Table("bot_admins").
+		Select("telegram_id").
+		Where("telegram_id = ?", telegramID).
+		Limit(1).
+		Find(&rows).
+		Error
+	return len(rows) > 0, err
 }
 
 // AddAdmin registers a Telegram user as a bot admin.
 func (r *BotAdminRepo) AddAdmin(ctx context.Context, telegramID int64, name string) error {
-	return r.db.Queries.UpsertBotAdmin(ctx, sqlc.UpsertBotAdminParams{TelegramID: telegramID, TelegramName: name})
+	return r.db.orm.WithContext(ctx).
+		Table("bot_admins").
+		Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "telegram_id"}}, DoUpdates: clause.AssignmentColumns([]string{"telegram_name"})}).
+		Create(map[string]any{"telegram_id": telegramID, "telegram_name": name}).
+		Error
 }
 
 // ListAdmins returns all registered bot admins.
 func (r *BotAdminRepo) ListAdmins(ctx context.Context) ([]BotAdmin, error) {
-	rows, err := r.db.Queries.ListBotAdmins(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]BotAdmin, 0, len(rows))
-	for _, a := range rows {
-		out = append(out, BotAdmin{TelegramID: a.TelegramID, TelegramName: a.TelegramName, AddedAt: timeFromPG(a.AddedAt)})
-	}
-	return out, nil
+	out := []BotAdmin{}
+	err := r.db.orm.WithContext(ctx).Table("bot_admins").Order("added_at").Find(&out).Error
+	return out, err
 }
 
 // RemoveAdmin removes a Telegram user from bot admins.
 func (r *BotAdminRepo) RemoveAdmin(ctx context.Context, telegramID int64) error {
-	return r.db.Queries.RemoveBotAdmin(ctx, telegramID)
+	return r.db.orm.WithContext(ctx).Table("bot_admins").Where("telegram_id = ?", telegramID).Delete(&BotAdmin{}).Error
 }
 
 // HasAnyAdmin returns true when at least one admin is registered.
 func (r *BotAdminRepo) HasAnyAdmin(ctx context.Context) (bool, error) {
-	return r.db.Queries.HasAnyBotAdmin(ctx)
+	var rows []BotAdmin
+	err := r.db.orm.WithContext(ctx).Table("bot_admins").Select("telegram_id").Limit(1).Find(&rows).Error
+	return len(rows) > 0, err
 }
 
 // CreateInviteToken stores a new single-use invite token.
 func (r *BotAdminRepo) CreateInviteToken(ctx context.Context, token string) error {
-	return r.db.Queries.CreateInviteToken(ctx, token)
+	return r.db.orm.WithContext(ctx).Table("bot_invite_tokens").Create(map[string]any{"token": token}).Error
 }
 
 // ConsumeInviteToken validates the token, registers telegramID as admin, and marks the token used.
@@ -96,4 +105,11 @@ func (r *BotAdminRepo) ConsumeInviteToken(ctx context.Context, token string, tel
 	}
 
 	return tx.Commit(ctx)
+}
+
+// FirstAdmin selects the original recipient deterministically for monitor notices.
+func (r *BotAdminRepo) FirstAdmin(ctx context.Context) (BotAdmin, error) {
+	var row BotAdmin
+	err := cloudLookupError(r.db.orm.WithContext(ctx).Table("bot_admins").Order("added_at, telegram_id").Take(&row).Error)
+	return row, err
 }

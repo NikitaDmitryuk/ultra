@@ -68,7 +68,13 @@ type managedXHTTPListener struct {
 	wg      sync.WaitGroup
 }
 
-func listenManagedXHTTP(ctx context.Context, address xnet.Address, port xnet.Port, settings *internet.MemoryStreamConfig, handler internet.ConnHandler) (internet.Listener, error) {
+func listenManagedXHTTP(
+	ctx context.Context,
+	address xnet.Address,
+	port xnet.Port,
+	settings *internet.MemoryStreamConfig,
+	handler internet.ConnHandler,
+) (internet.Listener, error) {
 	// HTTP/3 has its own correctly closed server; this workaround is TCP-only.
 	if tls, ok := settings.SecuritySettings.(*xtls.Config); ok && len(tls.NextProtocol) == 1 && tls.NextProtocol[0] == "h3" {
 		return splithttp.ListenXH(ctx, address, port, settings, handler)

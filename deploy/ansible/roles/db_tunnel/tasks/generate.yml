@@ -1,0 +1,32 @@
+---
+- name: Validate database tunnel inputs
+  ansible.builtin.include_tasks: validate.yml
+- name: Require generate stage on bridge inventory host
+  ansible.builtin.assert:
+    that: inventory_hostname == 'bridge'
+- name: Install database tunnel SSH client
+  ansible.builtin.apt:
+    name: openssh-client
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+- name: Create private database tunnel directory
+  ansible.builtin.file:
+    path: /etc/ultra-db-tunnel
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Generate dedicated Ed25519 key when absent
+  ansible.builtin.command:
+    argv: [ssh-keygen, -q, -t, ed25519, -N, "", -C, ultra-db-tunnel, -f, /etc/ultra-db-tunnel/id_ed25519]
+    creates: /etc/ultra-db-tunnel/id_ed25519
+  no_log: true
+- name: Enforce private key permissions
+  ansible.builtin.file:
+    path: /etc/ultra-db-tunnel/id_ed25519
+    state: file
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true

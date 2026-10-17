@@ -1,0 +1,25 @@
+[Unit]
+Description=Ultra bridge PostgreSQL 16 physical standby
+Requires=ultra-db-tunnel.service
+After=network-online.target ultra-db-tunnel.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=postgres
+Group=postgres
+RuntimeDirectory=ultra-postgres-replica
+RuntimeDirectoryMode=0700
+ExecStart=/usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/ultra-replica -c config_file=/etc/ultra-postgres-replica/postgresql.conf
+KillSignal=SIGINT
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/postgresql/16/ultra-replica /run/ultra-postgres-replica
+
+[Install]
+WantedBy=multi-user.target

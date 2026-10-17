@@ -2,10 +2,11 @@ package bot
 
 import (
 	"context"
-	"github.com/NikitaDmitryuk/ultra/internal/db"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/db"
 )
 
 type membershipStatus struct {

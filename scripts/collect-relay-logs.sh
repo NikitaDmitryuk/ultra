@@ -42,8 +42,8 @@ load_config_hosts() {
 	local f="${1:-}"
 	[[ -n "$f" ]] || return 0
 	load_install_config "$f" || return 0
-	BRIDGE="${BRIDGE:-${FRONT:-}}"
-	EXIT="${EXIT:-${BACK:-}}"
+	BRIDGE="${BRIDGE:-}"
+	EXIT="${EXIT:-}"
 	EXIT2="${EXIT2:-}"
 	SSH_USER=${SSH_USER:-root}
 }
@@ -76,13 +76,7 @@ if [[ -z "${BRIDGE// }" ]]; then
 	usage
 fi
 
-if [[ -n "${IDENTITY:-}" && ${#SSH_EXTRA[@]} -eq 0 ]]; then
-	id="$IDENTITY"
-	if [[ "$id" == ~/* ]]; then
-		id="$HOME/${id#~/}"
-	fi
-	SSH_EXTRA=(-i "$id")
-fi
+SSH_EXPLICIT_IDENTITY=${SSH_EXTRA[1]:-}
 
 SSH_CONNECT_TIMEOUT="${ULTRA_SSH_CONNECT_TIMEOUT:-15}"
 SSH_OPTS=(
@@ -97,10 +91,13 @@ SKIPPED=()
 run_host() {
 	local label=$1
 	local host=$2
+	local host_identity=${SSH_EXPLICIT_IDENTITY:-$(install_identity_for_host "$host")}
+	local host_ssh_extra=()
+	[[ -z "$host_identity" ]] || host_ssh_extra=(-i "$host_identity")
 	[[ -n "${host// }" ]] || return 0
 	echo "========== $label ($host) =========="
 	if [[ "$SINCE_RESTART" -eq 1 ]]; then
-		if ! ssh "${SSH_OPTS[@]}" "${SSH_EXTRA[@]}" "${SSH_USER}@${host}" bash -s "$LINES" <<'REMOTE'
+		if ! ssh "${SSH_OPTS[@]}" "${host_ssh_extra[@]}" "${SSH_USER}@${host}" bash -s "$LINES" <<'REMOTE'
 set -euo pipefail
 LINES=${1:?}
 ts=$(systemctl show ultra-relay -p ActiveEnterTimestamp --value 2>/dev/null | head -1 || true)
@@ -115,7 +112,7 @@ REMOTE
 			FAILED+=("$label ($host)")
 		fi
 	else
-		if ! ssh "${SSH_OPTS[@]}" "${SSH_EXTRA[@]}" "${SSH_USER}@${host}" \
+		if ! ssh "${SSH_OPTS[@]}" "${host_ssh_extra[@]}" "${SSH_USER}@${host}" \
 			"journalctl -u ultra-relay -n ${LINES} --no-pager -o short-iso"; then
 			echo "WARNING: $label ($host): SSH или journalctl недоступны" >&2
 			FAILED+=("$label ($host)")

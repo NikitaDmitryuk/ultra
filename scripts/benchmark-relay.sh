@@ -149,15 +149,16 @@ else
 	fi
 fi
 
-BRIDGE="${BRIDGE:-${FRONT:-}}"
-EXIT="${EXIT:-${BACK:-}}"
+BRIDGE="${BRIDGE:-}"
+EXIT="${EXIT:-}"
 if [[ -z "${BRIDGE// }" || -z "${EXIT// }" ]]; then
 	echo "benchmark-relay: BRIDGE and EXIT are required (install.config or env)." >&2
 	exit 1
 fi
 
-if [[ -n "${IDENTITY:-}" && ${#SSH_EXTRA[@]} -eq 0 ]]; then
-	id="$IDENTITY"
+SSH_EXPLICIT_IDENTITY=${SSH_EXTRA[1]:-}
+if [[ -n "${BRIDGE_SSH_IDENTITY:-}" && ${#SSH_EXTRA[@]} -eq 0 ]]; then
+	id="$BRIDGE_SSH_IDENTITY"
 	if [[ "$id" == ~/* ]]; then
 		id="$HOME/${id#~/}"
 	fi
@@ -309,8 +310,11 @@ echo "local_socks_xray_upload: curl_rc=${up_rc} ${up_line} mbps=$(mbps_from_curl
 remote_exit_bench() {
 	local host=$1
 	local label=$2
+	local host_identity=${SSH_EXPLICIT_IDENTITY:-$(install_identity_for_host "$host")}
+	local host_ssh_extra=()
+	[[ -z "$host_identity" ]] || host_ssh_extra=(-i "$host_identity")
 	echo "--- exit ${label} (${host}) direct-vs-WARP ---"
-	ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${SSH_EXTRA[@]}" "${SSH_USER}@${host}" bash -s "$DOWNLOAD_URL" "$WARP_PORT" <<'EOS'
+	ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${host_ssh_extra[@]}" "${SSH_USER}@${host}" bash -s "$DOWNLOAD_URL" "$WARP_PORT" <<'EOS'
 set -euo pipefail
 url=${1:?}
 warp_port=${2:?}

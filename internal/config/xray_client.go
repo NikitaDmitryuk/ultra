@@ -361,7 +361,18 @@ func buildTransportProfiles(spec *Spec, user auth.User) ([]ClientProfileExport, 
 		if err != nil {
 			return err
 		}
-		profiles = append(profiles, ClientProfileExport{EntryID: "primary", ID: id, Name: name, Transport: transport, XRayOutboundJSON: exp.XRayOutboundJSON, VLESSURI: exp.VLESSURI, FullConfigBase64: base64.StdEncoding.EncodeToString(full)})
+		profiles = append(
+			profiles,
+			ClientProfileExport{
+				EntryID:          "primary",
+				ID:               id,
+				Name:             name,
+				Transport:        transport,
+				XRayOutboundJSON: exp.XRayOutboundJSON,
+				VLESSURI:         exp.VLESSURI,
+				FullConfigBase64: base64.StdEncoding.EncodeToString(full),
+			},
+		)
 		return nil
 	}
 	id, name, transport := ClientProfileFastTCPReality, "Основной · TCP REALITY", "tcp"

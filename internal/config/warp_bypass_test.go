@@ -3,14 +3,22 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"testing"
+
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 	"github.com/xtls/xray-core/core"
-	"testing"
 )
 
 func TestWARPDestinationBypassKeepsDefaultProxy(t *testing.T) {
 	cert, key := testCertificate(t)
-	spec := &Spec{Role: RoleExit, ListenAddress: "127.0.0.1", VLESSPort: 12345, Exit: ExitTunnelSpec{TunnelUUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee"}, ExitCertPaths: CertPaths{CertFile: cert, KeyFile: key}, AntiCensor: &AntiCensorSpec{WARPProxy: true, WARPDirectDomains: []string{"control.example"}}}
+	spec := &Spec{
+		Role:          RoleExit,
+		ListenAddress: "127.0.0.1",
+		VLESSPort:     12345,
+		Exit:          ExitTunnelSpec{TunnelUUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee"},
+		ExitCertPaths: CertPaths{CertFile: cert, KeyFile: key},
+		AntiCensor:    &AntiCensorSpec{WARPProxy: true, WARPDirectDomains: []string{"control.example"}},
+	}
 	strat, _ := mimic.New("steamlike")
 	data, err := BuildExitXRayJSON(spec, strat, "none")
 	if err != nil {

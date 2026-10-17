@@ -21,7 +21,13 @@ const (
 
 // Subscription choices are intentionally smaller than the compatible /client export.
 // Existing credentials and transports remain valid; reads never create credentials.
-func subscriptionURIs(spec *config.Spec, user auth.User, nodes []exits.Node, health map[string]exits.Health, transport string) ([]string, error) {
+func subscriptionURIs(
+	spec *config.Spec,
+	user auth.User,
+	nodes []exits.Node,
+	health map[string]exits.Health,
+	transport string,
+) ([]string, error) {
 	uris := []string{}
 	add := func(u auth.User, name, description, selectedTransport string) error {
 		exp, err := config.BuildSubscriptionExport(spec, u, selectedTransport)
@@ -58,7 +64,12 @@ func subscriptionHapp(spec *config.Spec, user auth.User, nodes []exits.Node, hea
 	return profiles, err
 }
 
-func eachSubscriptionProfile(user auth.User, nodes []exits.Node, _ map[string]exits.Health, add func(auth.User, string, string) error) error {
+func eachSubscriptionProfile(
+	user auth.User,
+	nodes []exits.Node,
+	_ map[string]exits.Health,
+	add func(auth.User, string, string) error,
+) error {
 	if err := add(user, automaticProfileName, automaticProfileDescription); err != nil {
 		return err
 	}

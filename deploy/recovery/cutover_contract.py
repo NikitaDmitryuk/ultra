@@ -29,11 +29,12 @@ def candidate_spec(before, target):
     old = before.get('primary_xhttp', {})
     if not old or old.get('published', True) is not True or old.get('port') != 443:
         raise ValueError('cutover_requires_published_primary')
-    if old['path'] != target['path'] or old['backend_port'] != target['backend_port']:
+    if old['backend_port'] != target['backend_port']:
         raise ValueError('cutover_cannot_change_transport')
     primary = after['primary_xhttp']
     primary['host'] = target['public_host']
     primary['server_name'] = target['domain']
+    primary['path'] = target['path']
     for descriptor in after.get('subscription_bridges', []):
         if descriptor.get('security') != 'tls':
             continue
@@ -41,6 +42,7 @@ def candidate_spec(before, target):
             raise ValueError('cutover_unknown_tls_publication')
         descriptor['host'] = target['public_host']
         descriptor['server_name'] = target['domain']
+        descriptor['path'] = target['path']
     return after
 
 
@@ -59,6 +61,8 @@ def single_alias_probe(profile, old, target, bridge_ip):
     selected['tag'] = 'cutover-edge-only'
     selected['settings']['vnext'][0]['address'] = bridge_ip
     selected['streamSettings']['tlsSettings']['serverName'] = target['domain']
+    if target.get('path'):
+        selected.setdefault('streamSettings', {}).setdefault('xhttpSettings', {})['path'] = target['path']
     selected['streamSettings']['tlsSettings'].pop('allowInsecure', None)
     if selected['streamSettings'].get('xhttpSettings', {}).get('downloadSettings'):
         raise ValueError('cutover_split_download_requires_explicit_plan')

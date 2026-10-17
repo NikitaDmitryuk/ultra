@@ -83,7 +83,14 @@ func RetryFrozenBootstrap(ctx context.Context, directory, python, executable str
 
 func bootstrapRetryOperation(operation string) bool {
 	switch operation {
-	case "bootstrap", "bootstrap-postgres", "bootstrap-exit", "bootstrap-bridge", "adopt-replica-tunnels", "ingress", "configure-bot", "bootstrap-automation", "reserve-rolledback-bootstrap":
+	case "bootstrap",
+		"bootstrap-postgres",
+		"bootstrap-exit",
+		"bootstrap-bridge",
+		"ingress",
+		"configure-bot",
+		"bootstrap-automation",
+		"reserve-rolledback-bootstrap":
 		return true
 	default:
 		return false
@@ -143,7 +150,11 @@ func retryFailedLocalAttemptWith(directory string, syncDir func(string) error) e
 		return err
 	}
 	hash := sha256.Sum256(request)
-	if job["request_sha256"] != hex.EncodeToString(hash[:]) || receipt["request_sha256"] != job["request_sha256"] || receipt["binary_sha256"] != job["binary_sha256"] || receipt["operation"] != job["operation"] || receipt["schema_version"] != job["schema_version"] || job["schema_version"] != float64(1) {
+	if job["request_sha256"] != hex.EncodeToString(hash[:]) || receipt["request_sha256"] != job["request_sha256"] ||
+		receipt["binary_sha256"] != job["binary_sha256"] ||
+		receipt["operation"] != job["operation"] ||
+		receipt["schema_version"] != job["schema_version"] ||
+		job["schema_version"] != float64(1) {
 		return errors.New("retry_job_receipt_conflict")
 	}
 	binary, ok := job["binary_sha256"].(string)
@@ -211,6 +222,45 @@ func retryFailedLocalAttemptWith(directory string, syncDir func(string) error) e
 			return err
 		}
 	}
+	// The controller writes its diagnostic with O_EXCL. Archive the previous
+	// attempt's result and remove it before retry so a later failure cannot
+	// inherit a stale task name in its receipt.
+	diagnosticPath := filepath.Join(directory, "diagnostic.json")
+	diagnostic, diagnosticErr := readRetryPrivate(diagnosticPath)
+	if diagnosticErr != nil && !os.IsNotExist(diagnosticErr) {
+		return diagnosticErr
+	}
+	if diagnosticErr == nil {
+		diagnosticArchive := filepath.Join(history, fmt.Sprintf("diagnostic-attempt-%d.json", old))
+		savedDiagnostic, archiveErr := readRetryPrivate(diagnosticArchive)
+		if archiveErr == nil {
+			if !bytes.Equal(savedDiagnostic, diagnostic) {
+				return errors.New("retry_diagnostic_history_conflict")
+			}
+		} else if !os.IsNotExist(archiveErr) {
+			return archiveErr
+		} else {
+			file, createErr := os.CreateTemp(history, ".diagnostic-")
+			if createErr != nil {
+				return createErr
+			}
+			name := file.Name()
+			defer os.Remove(name) //nolint:errcheck
+			if _, err = file.Write(diagnostic); err == nil {
+				err = file.Sync()
+			}
+			closeErr := file.Close()
+			if err != nil {
+				return err
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			if err = os.Link(name, diagnosticArchive); err != nil {
+				return err
+			}
+		}
+	}
 	if err = syncDir(history); err != nil {
 		return err
 	}
@@ -247,6 +297,11 @@ func retryFailedLocalAttemptWith(directory string, syncDir func(string) error) e
 	if err = syncDir(directory); err != nil {
 		return err
 	}
+	if diagnosticErr == nil {
+		if err = os.Remove(diagnosticPath); err != nil {
+			return err
+		}
+	}
 	if err = os.Remove(receiptPath); err != nil {
 		return err
 	}
@@ -255,7 +310,11 @@ func retryFailedLocalAttemptWith(directory string, syncDir func(string) error) e
 
 // ResumeFrozenBootstrapRollback retries only the original fixed rollback stage.
 // It is deliberately separate from the bootstrap compatibility CLI allowlist.
-func ResumeFrozenBootstrapRollback(ctx context.Context, inventory, variables map[string]any, directory, python, executable string) (Receipt, error) {
+func ResumeFrozenBootstrapRollback(
+	ctx context.Context,
+	inventory, variables map[string]any,
+	directory, python, executable string,
+) (Receipt, error) {
 	if _, ok := ctx.Value(operationLeaseKey{}).(*operationLease); !ok {
 		return Receipt{}, errors.New("retry requires operation lease")
 	}

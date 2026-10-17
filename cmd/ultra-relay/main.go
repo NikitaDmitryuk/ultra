@@ -6,13 +6,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/xtls/xray-core/core"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/xtls/xray-core/core"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/config"

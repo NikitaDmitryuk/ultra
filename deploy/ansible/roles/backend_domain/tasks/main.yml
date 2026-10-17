@@ -87,6 +87,8 @@
         old: "{{ ultra_backend_old_domain }}"
         new: "{{ ultra_backend_domain }}"
         public: "{{ ultra_subscription_domain }}"
+        old_port: "{{ ultra_backend_old_port | default(ultra_bot_port | default(8444)) }}"
+        new_port: "{{ ultra_backend_new_port | default(ultra_bot_port | default(8444)) }}"
       no_log: true
 - name: Restore backend on explicit rollback
   when: ultra_backend_action in ['rollback', 'accept-rollback']
@@ -98,6 +100,8 @@
         old: "{{ ultra_backend_old_domain }}"
         new: "{{ ultra_backend_domain }}"
         public: "{{ ultra_subscription_domain }}"
+        old_port: "{{ ultra_backend_old_port | default(ultra_bot_port | default(8444)) }}"
+        new_port: "{{ ultra_backend_new_port | default(ultra_bot_port | default(8444)) }}"
       register: backend_domain_restore
       no_log: true
     - name: Validate restored Nginx configuration
@@ -147,6 +151,8 @@
         old: "{{ ultra_backend_old_domain }}"
         new: "{{ ultra_backend_domain }}"
         public: "{{ ultra_subscription_domain }}"
+        old_port: "{{ ultra_backend_old_port | default(ultra_bot_port | default(8444)) }}"
+        new_port: "{{ ultra_backend_new_port | default(ultra_bot_port | default(8444)) }}"
       when: ultra_backend_action == 'apply'
       no_log: true
     - name: Check configured Nginx
@@ -218,6 +224,8 @@
         old: "{{ ultra_backend_old_domain }}"
         new: "{{ ultra_backend_domain }}"
         public: "{{ ultra_subscription_domain }}"
+        old_port: "{{ ultra_backend_old_port | default(ultra_bot_port | default(8444)) }}"
+        new_port: "{{ ultra_backend_new_port | default(ultra_bot_port | default(8444)) }}"
       no_log: true
   rescue:
     - name: Restore previous environment, SNI and renewal hook after failure
@@ -227,6 +235,8 @@
         old: "{{ ultra_backend_old_domain }}"
         new: "{{ ultra_backend_domain }}"
         public: "{{ ultra_subscription_domain }}"
+        old_port: "{{ ultra_backend_old_port | default(ultra_bot_port | default(8444)) }}"
+        new_port: "{{ ultra_backend_new_port | default(ultra_bot_port | default(8444)) }}"
       when: ultra_backend_action == 'apply'
       no_log: true
     - name: Validate previous configuration

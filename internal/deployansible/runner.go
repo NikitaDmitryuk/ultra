@@ -83,7 +83,8 @@ func (r ExitRequest) validatePolicy() error {
 	if r.Port < 0 || r.Port > 65535 {
 		return errors.New("invalid SSH port")
 	}
-	if net.ParseIP(r.Host) == nil || net.ParseIP(r.BridgeIPv4).To4() == nil || !regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`).MatchString(r.User) {
+	if net.ParseIP(r.Host) == nil || net.ParseIP(r.BridgeIPv4).To4() == nil ||
+		!regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`).MatchString(r.User) {
 		return errors.New("invalid Ansible exit target")
 	}
 	if !filepath.IsAbs(r.Identity) || !filepath.IsAbs(r.KnownHosts) {
@@ -183,7 +184,14 @@ func prepareInputs(directory, binary string, request ExitRequest, inputs []*os.F
 	if err = writePrivate(filepath.Join(directory, "known_hosts"), pinsData); err != nil {
 		return err
 	}
-	job := map[string]any{"identity_sha256": hex.EncodeToString(identityHash[:]), "known_hosts_sha256": hex.EncodeToString(pinsHash[:]), "schema_version": 1, "operation": "configure-exit", "request_sha256": hex.EncodeToString(requestHash[:]), "binary_sha256": hex.EncodeToString(binaryHash[:])}
+	job := map[string]any{
+		"identity_sha256":    hex.EncodeToString(identityHash[:]),
+		"known_hosts_sha256": hex.EncodeToString(pinsHash[:]),
+		"schema_version":     1,
+		"operation":          "configure-exit",
+		"request_sha256":     hex.EncodeToString(requestHash[:]),
+		"binary_sha256":      hex.EncodeToString(binaryHash[:]),
+	}
 	if err = writeJSON(filepath.Join(directory, "job.json"), job); err != nil {
 		return err
 	}
@@ -221,7 +229,17 @@ func Execute(ctx context.Context, directory, python, executable string) (Result,
 		return Result{}, errors.New("absolute executor paths required")
 	}
 	bundle := filepath.Join(directory, "bundle")
-	command := exec.CommandContext(ctx, python, filepath.Join(bundle, "controller.py"), "--job", directory, "--bundle", bundle, "--executable", executable)
+	command := exec.CommandContext(
+		ctx,
+		python,
+		filepath.Join(bundle, "controller.py"),
+		"--job",
+		directory,
+		"--bundle",
+		bundle,
+		"--executable",
+		executable,
+	)
 	isolateCommand(command)
 	command.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 	err := command.Run()
@@ -247,8 +265,8 @@ func Execute(ctx context.Context, directory, python, executable string) (Result,
 		if _, err = hex.DecodeString(receipt.Result.CertPin); err != nil {
 			return Result{}, errors.New("ansible certificate pin invalid")
 		}
-	} else if receipt.Result.Values["verified"] != true {
-		return Result{}, errors.New("ansible replica acknowledgement invalid")
+	} else {
+		return Result{}, errors.New("unsupported typed ansible operation")
 	}
 	return receipt.Result, nil
 }

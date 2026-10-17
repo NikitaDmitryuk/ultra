@@ -35,7 +35,7 @@ tmp="${manifest}.tmp"
   printf '  "schema_version": 1,\n'
   printf '  "version": "%s",\n' "$(json_escape "$VERSION")"
   printf '  "source_commit": "%s",\n' "$SOURCE_COMMIT"
-  printf '  "capabilities": ["service-access-v1", "provider-pool-quota-v1", "lifecycle-gate-v1"],\n'
+  printf '  "capabilities": ["service-access-v1", "provider-pool-quota-v1", "lifecycle-gate-v1", "ansible-deploy-v1"],\n'
   printf '  "database_schema_min": 24,\n'
   printf '  "database_schema_max": 25,\n'
   printf '  "assets": [\n'

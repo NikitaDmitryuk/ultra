@@ -124,8 +124,17 @@ func TestStableSubscriptionAndLegacyRecovery(t *testing.T) {
 		t.Fatal("legacy token rotated", e)
 	}
 	var hash []byte
-	if e = d.Pool.QueryRow(ctx, `SELECT token_hash FROM subscription_tokens WHERE user_uuid=$1`, u.UUID).Scan(&hash); e != nil || string(hash) != string(digest[:]) {
+	if e = d.Pool.QueryRow(ctx, `SELECT token_hash FROM subscription_tokens WHERE user_uuid=$1`, u.UUID).Scan(&hash); e != nil ||
+		string(hash) != string(digest[:]) {
 		t.Fatal("legacy hash changed", e)
+	}
+	reissued, rotated, e := r.GetOrReissue(ctx, u.UUID)
+	if e != nil || !rotated || reissued == first {
+		t.Fatal("legacy subscription was not explicitly reissued", rotated, e)
+	}
+	again, rotated, e := r.GetOrReissue(ctx, u.UUID)
+	if e != nil || rotated || again != reissued {
+		t.Fatal("reissued subscription was not stable", rotated, e)
 	}
 }
 
@@ -280,7 +289,15 @@ func TestMemberTrafficDirectionsKeepRecreatedExitHistory(t *testing.T) {
 		if id == other {
 			country = "YY"
 		}
-		_, err := d.Pool.Exec(ctx, `INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid,country_code,city,display_name,enabled) VALUES($1,'fixture',$2,443,$3,$4,'Test City','Test City',$5)`, id, fmt.Sprintf("192.0.2.%d", i+1), uuid.NewString(), country, id != old)
+		_, err := d.Pool.Exec(
+			ctx,
+			`INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid,country_code,city,display_name,enabled) VALUES($1,'fixture',$2,443,$3,$4,'Test City','Test City',$5)`,
+			id,
+			fmt.Sprintf("192.0.2.%d", i+1),
+			uuid.NewString(),
+			country,
+			id != old,
+		)
 		if err != nil {
 			t.Fatal(err)
 		}

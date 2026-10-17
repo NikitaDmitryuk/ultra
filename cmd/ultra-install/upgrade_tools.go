@@ -13,6 +13,20 @@ import (
 	"strings"
 )
 
+func isExitUpgradeRecoveryTool(base string) bool {
+	return base == "recovery.py" || base == "db_connection.py" || base == "monitor.py" || base == "heartbeat.py" ||
+		strings.HasPrefix(base, "ultra-monitor") || strings.HasPrefix(base, "ultra-recovery-prune")
+}
+
+func requireUpgradeTool(tools []map[string]any, name string) error {
+	for _, tool := range tools {
+		if filepath.Base(tool["destination"].(string)) == name {
+			return nil
+		}
+	}
+	return errors.New("recovery_bundle_incomplete")
+}
+
 func extractUpgradeTools(archivePath, directory string, previous map[string]string) ([]map[string]any, error) {
 	file, err := os.Open(archivePath)
 	if err != nil {
@@ -39,7 +53,12 @@ func extractUpgradeTools(archivePath, directory string, previous map[string]stri
 		if err != nil {
 			return nil, err
 		}
-		if member.Typeflag != tar.TypeReg || !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)$`).MatchString(member.Name) || seen[member.Name] || member.Size < 0 || member.Size > 4<<20 || len(seen) >= 64 {
+		if member.Typeflag != tar.TypeReg ||
+			!regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)$`).MatchString(member.Name) ||
+			seen[member.Name] ||
+			member.Size < 0 ||
+			member.Size > 4<<20 ||
+			len(seen) >= 64 {
 			return nil, errors.New("unsafe_recovery_member")
 		}
 		total += member.Size
@@ -64,9 +83,22 @@ func extractUpgradeTools(archivePath, directory string, previous map[string]stri
 			mode = "0644"
 		}
 		key := sha256.Sum256([]byte(destination))
-		tools = append(tools, map[string]any{"source": source, "destination": destination, "mode": mode, "sha256": sum, "previous_sha256": previous[member.Name], "backup_name": hex.EncodeToString(key[:])})
+		tools = append(
+			tools,
+			map[string]any{
+				"source":          source,
+				"destination":     destination,
+				"mode":            mode,
+				"sha256":          sum,
+				"previous_sha256": previous[member.Name],
+				"backup_name":     hex.EncodeToString(key[:]),
+			},
+		)
 	}
-	for _, name := range []string{"recovery.py", "monitor.py", "heartbeat.py", "reconcile.py", "ultra-recovery-backup.service", "ultra-recovery-backup.timer"} {
+	for _, name := range []string{
+		"recovery.py", "monitor.py", "heartbeat.py", "reconcile.py",
+		"ultra-recovery-backup.service", "ultra-recovery-backup.timer",
+	} {
 		if !seen[name] {
 			return nil, errors.New("recovery_bundle_incomplete")
 		}
@@ -109,5 +141,12 @@ func upgradeClientTool(target, previous *automationRelease, source, arch string)
 		return nil, err
 	}
 	key := sha256.Sum256([]byte("/usr/local/bin/ultra-client"))
-	return map[string]any{"source": filepath.Join(source, asset.Name), "destination": "/usr/local/bin/ultra-client", "mode": "0755", "sha256": asset.SHA, "previous_sha256": old.SHA, "backup_name": hex.EncodeToString(key[:])}, nil
+	return map[string]any{
+		"source":          filepath.Join(source, asset.Name),
+		"destination":     "/usr/local/bin/ultra-client",
+		"mode":            "0755",
+		"sha256":          asset.SHA,
+		"previous_sha256": old.SHA,
+		"backup_name":     hex.EncodeToString(key[:]),
+	}, nil
 }

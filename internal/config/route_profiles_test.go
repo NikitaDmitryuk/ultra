@@ -1,9 +1,10 @@
 package config
 
 import (
-	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"net/url"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
 )
 
 func TestLocationProfilesPreserveLegacyAndDistinctCredentials(t *testing.T) {
@@ -14,7 +15,9 @@ func TestLocationProfilesPreserveLegacyAndDistinctCredentials(t *testing.T) {
 		t.Fatal(e)
 	}
 	exit := "00000000-0000-0000-0000-000000000012"
-	user.Routes = []auth.RouteCredential{{UUID: "00000000-0000-0000-0000-000000000013", LocationID: "fra", Name: "Frankfurt", ExitID: &exit, Published: true}}
+	user.Routes = []auth.RouteCredential{
+		{UUID: "00000000-0000-0000-0000-000000000013", LocationID: "fra", Name: "Frankfurt", ExitID: &exit, Published: true},
+	}
 	profiles, e := BuildClientProfiles(spec, user)
 	if e != nil {
 		t.Fatal(e)

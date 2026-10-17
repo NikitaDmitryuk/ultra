@@ -43,7 +43,9 @@ func assertTypedRetentionReceipt(t *testing.T, directory string) {
 	if err = json.Unmarshal(inventoryRaw, &normalized); err != nil {
 		t.Fatal(err)
 	}
-	if receipt.Schema != 1 || receipt.Path != filepath.Join(directory, "bundle") || receipt.Identity["request_sha256"] != hex.EncodeToString(digest[:]) || !reflect.DeepEqual(normalized, receipt.Inventory) {
+	if receipt.Schema != 1 || receipt.Path != filepath.Join(directory, "bundle") ||
+		receipt.Identity["request_sha256"] != hex.EncodeToString(digest[:]) ||
+		!reflect.DeepEqual(normalized, receipt.Inventory) {
 		t.Fatal("typed bundle ownership does not match frozen inputs")
 	}
 }
@@ -65,28 +67,5 @@ func TestTypedExitPreparesBundleOwnership(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(directory, "bundle.retention.json")); !os.IsNotExist(err) {
 		t.Fatal("claimed legacy exit bundle")
-	}
-}
-
-func TestTypedReplicaPreparesOwnershipAndPreservesLegacy(t *testing.T) {
-	request := replicaFixture(t)
-	inputs, err := openReplicaInputs(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeInputs(inputs)
-	directory := filepath.Join(t.TempDir(), "replica")
-	if err := prepareReplica(directory, "configure-replica", request, inputs); err != nil {
-		t.Fatal(err)
-	}
-	assertTypedRetentionReceipt(t, directory)
-	if err := os.Remove(filepath.Join(directory, "bundle.retention.json")); err != nil {
-		t.Fatal(err)
-	}
-	if err := prepareReplica(directory, "configure-replica", request, inputs); err != nil {
-		t.Fatal("legacy resume blocked", err)
-	}
-	if _, err := os.Lstat(filepath.Join(directory, "bundle.retention.json")); !os.IsNotExist(err) {
-		t.Fatal("claimed legacy replica bundle")
 	}
 }

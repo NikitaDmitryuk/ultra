@@ -116,7 +116,7 @@ function page(self, responses) {
     },
   });
   vm.runInContext(source, context);
-  return { context, el, calls, copied, opened };
+  return { context, el, calls, copied, opened, responses };
 }
 test("personal cabinet reuses subscription and opens HTTPS import without admin APIs", async () => {
   const p = page(true, {
@@ -154,6 +154,25 @@ test("personal cabinet reuses subscription and opens HTTPS import without admin 
   assert.equal(p.el("#switch").hidden, false);
   assert.ok(p.calls.every((c) => c.path.startsWith("/api/self")));
   assert.ok(p.calls.every((c) => c.options.cache === "no-store"));
+});
+
+test("subscription recovery tells the user the previous URL was invalidated", async () => {
+  const p = page(true, {
+    "/api/self": {
+      registered: true,
+      member: { uuid: "owner", active: true, pending: false },
+    },
+    "/api/self/exits": { exits: [], profiles: [] },
+    "/api/self/subscription": {
+      url: "https://vpn.example/sub/new",
+      import_url: "https://vpn.example/happ#new",
+      rotated: true,
+    },
+  });
+  await flush();
+  await p.el("#copy-sub").onclick();
+  assert.deepEqual(p.copied, ["https://vpn.example/sub/new"]);
+  assert.match(p.el("#notice").textContent, /Старая ссылка подписки отозвана/);
 });
 test("disabled access cannot issue a subscription", async () => {
   const p = page(true, {
@@ -203,6 +222,176 @@ test("Vultr displays server DTO price and replica state", async () => {
   assert.ok(!p.el("#app").innerHTML.includes("$undefined"));
   assert.ok(p.el("#app").innerHTML.includes("Копия обновляется"));
   assert.ok(!p.el("#app").innerHTML.includes("Добавить узел вручную"));
+});
+
+test("Vultr status polling updates the existing card without replacing its price", async () => {
+  const op = {
+    id: "op",
+    offer: {
+      region: { city: "Frankfurt" },
+      plan: { id: "vc2-1c-1gb" },
+      price: { monthly_cost: 5, hourly_cost: 0.007 },
+    },
+    state: "pending",
+    phase: "create",
+    charged: false,
+  };
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/cloud/operations": [op],
+    "/api/cloud/quotas": { nodes: [], budgets: [] },
+    "/api/cloud/replicas": [],
+  });
+  await flush();
+  vm.runInContext('currentTab = "service"', p.context);
+  await vm.runInContext("service()", p.context);
+  const html = p.el("#app").innerHTML;
+  const status = { className: "", textContent: "" };
+  let detailsHTML = "";
+  let detailsWrites = 0;
+  const details = {
+    get innerHTML() {
+      return detailsHTML;
+    },
+    set innerHTML(value) {
+      detailsWrites++;
+      detailsHTML = value;
+    },
+  };
+  const card = {
+    dataset: { opCard: "op" },
+    hidden: false,
+    querySelector(selector) {
+      return selector === "[data-op-status]" ? status : details;
+    },
+  };
+  p.el("#app").querySelectorAll = (selector) =>
+    selector === "[data-op-card]" ? [card] : [];
+  p.responses["/api/cloud/operations"] = [
+    { ...op, state: "unknown", phase: "verify", charged: true },
+  ];
+
+  await vm.runInContext(
+    "refreshOperationCards(viewVersion)",
+    p.context,
+  );
+
+  assert.equal(p.el("#app").innerHTML, html);
+  assert.ok(html.includes("$5/месяц"));
+  assert.equal(status.textContent, "Результат создания проверяется");
+  assert.match(details.innerHTML, /Оплата продолжается/);
+  await vm.runInContext("refreshOperationCards(viewVersion)", p.context);
+  assert.equal(detailsWrites, 1);
+});
+
+test("Vultr create and delete refresh preserve existing card and price nodes", async () => {
+  const makeOp = (id, state = "pending") => ({
+    id,
+    offer: {
+      region: { city: "Frankfurt" },
+      plan: { id: "vc2-1c-1gb" },
+      price: { monthly_cost: 5, hourly_cost: 0.007 },
+    },
+    state,
+    phase: "create",
+    charged: false,
+  });
+  const keepStatus = { className: "", textContent: "Создание сервера" };
+  const keepDetails = { innerHTML: "" };
+  const keepPrice = { textContent: "$5/месяц" };
+  const keepCard = {
+    dataset: { opCard: "keep" },
+    hidden: false,
+    price: keepPrice,
+    querySelector(selector) {
+      return selector === "[data-op-status]" ? keepStatus : keepDetails;
+    },
+    remove() {
+      this.removed = true;
+    },
+  };
+  const deletedCard = {
+    dataset: { opCard: "delete" },
+    remove() {
+      this.removed = true;
+    },
+  };
+  const addedCards = [];
+  const operations = {
+    innerHTML: "",
+    querySelectorAll() {
+      return [keepCard, deletedCard, ...addedCards].filter((card) => !card.removed);
+    },
+    querySelector(selector) {
+      if (selector === "#create-server") return { remove() {} };
+      return null;
+    },
+    insertAdjacentHTML(position, html) {
+      this.innerHTML += html;
+      const match = html.match(/data-op-card="([^"]+)"/);
+      if (match) {
+        addedCards.push({
+          dataset: { opCard: match[1] },
+          remove() {
+            this.removed = true;
+          },
+          querySelector() {
+            return { className: "", textContent: "", innerHTML: "" };
+          },
+        });
+      }
+    },
+  };
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/cloud/operations": [makeOp("keep"), makeOp("delete")],
+    "/api/cloud/quotas": { nodes: [], budgets: [] },
+    "/api/cloud/replicas": [],
+  });
+  await flush();
+  vm.runInContext('currentTab = "service"', p.context);
+  await vm.runInContext("service()", p.context);
+  const originalView = p.el("#app").innerHTML;
+  p.el("#app").querySelector = (selector) =>
+    selector === "#cloud-operations" ? operations : p.el(selector);
+
+  p.responses["/api/cloud/operations"] = [
+    makeOp("keep", "unknown"),
+    makeOp("new"),
+    makeOp("delete", "deleted"),
+  ];
+  await vm.runInContext("service(true)", p.context);
+
+  assert.equal(p.el("#app").innerHTML, originalView);
+  assert.equal(keepCard.removed, undefined);
+  assert.equal(keepCard.price, keepPrice);
+  assert.equal(keepStatus.textContent, "Результат создания проверяется");
+  assert.equal(deletedCard.removed, true);
+  assert.ok(addedCards.some((card) => card.dataset.opCard === "new"));
+
+  p.context.ops = operations;
+  vm.runInContext("reconcileCloudOperations(ops, [], true, null)", p.context);
+  assert.equal(keepCard.removed, undefined);
+  assert.equal(keepCard.price, keepPrice);
+  assert.match(operations.innerHTML, /data-cloud-unavailable/);
+});
+
+test("reinstall is offered only for a failed staged cloud identity", async () => {
+  const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
+  await flush();
+  for (const [change, allowed] of [
+    [{}, true],
+    [{ state: "ready" }, false],
+    [{ phase: "install" }, false],
+    [{ exit_id: "other" }, false],
+    [{ serves_subscription_ingress: true }, false],
+  ]) {
+    p.context.recovery = { id: "op", exit_id: "op", instance_id: "vm", state: "failed", phase: "verify", ...change };
+    const html = vm.runInContext("cloudOperationDetailsHTML(recovery)", p.context);
+    assert.equal(html.includes('data-action="reinstall"'), allowed);
+  }
 });
 
 test("traffic activity is separate from permission and does not imply online", async () => {

@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/NikitaDmitryuk/ultra/internal/auth"
-	"github.com/NikitaDmitryuk/ultra/internal/config"
-	"github.com/jackc/pgx/v5"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/jackc/pgx/v5"
 )
 
 type SubscriptionStore interface {
@@ -183,8 +184,12 @@ func labelSubscriptionURI(raw, name string) string {
 func experimentalHapp(exp *config.ClientExport, name string) map[string]any {
 	exp.XRayOutboundJSON["tag"] = "proxy"
 	return map[string]any{"remarks": name, "log": map[string]any{"loglevel": "warning"},
-		"inbounds":  []any{map[string]any{"listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": map[string]any{"udp": true}}},
-		"outbounds": []any{exp.XRayOutboundJSON}, "routing": map[string]any{"rules": []any{map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"}}}}
+		"inbounds": []any{
+			map[string]any{"listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": map[string]any{"udp": true}},
+		},
+		"outbounds": []any{
+			exp.XRayOutboundJSON,
+		}, "routing": map[string]any{"rules": []any{map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"}}}}
 }
 
 // Only authorised acceptance requests enter this bounded diagnostic. No request

@@ -3,6 +3,7 @@ package cloudinstall
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/cloud"
@@ -30,8 +32,6 @@ type ExitConfigurer interface {
 
 type Provisioner struct {
 	Configurer                           ExitConfigurer
-	CheckReady                           func(context.Context) error
-	RemoveReplica                        func(context.Context, string) error
 	API                                  *cloud.Vultr
 	DB                                   *db.DB
 	Bridge                               *config.Spec
@@ -40,7 +40,6 @@ type Provisioner struct {
 	Identity, StateDir, BridgeIP, Binary string
 	Apply                                func(context.Context) error
 	Refresh                              func(context.Context) error
-	Replica                              func(context.Context, string, install.Remote) (string, error)
 }
 
 func (p *Provisioner) port() int {
@@ -57,19 +56,18 @@ func (p *Provisioner) remote(op *cloud.Operation, instance cloud.Instance) (inst
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return install.Remote{}, e
 	}
-	return install.Remote{Host: instance.IP, Identity: p.Identity, KnownHosts: filepath.Join(dir, "known_hosts")}, nil
+	return install.Remote{
+		Host:             instance.IP,
+		Identity:         p.Identity,
+		KnownHosts:       filepath.Join(dir, "known_hosts"),
+		RequireKnownHost: op.Reinstall,
+	}, nil
 }
 func (p *Provisioner) Prepare(ctx context.Context, op *cloud.Operation) (cloud.CreateRequest, error) {
-	if p.CheckReady == nil || p.Replica == nil {
-		return cloud.CreateRequest{}, errors.New("replication setup required")
-	}
 	if p.Configurer == nil {
 		return cloud.CreateRequest{}, errors.New("ansible controller required")
 	}
 	if e := p.Configurer.Ready(ctx); e != nil {
-		return cloud.CreateRequest{}, e
-	}
-	if e := p.CheckReady(ctx); e != nil {
 		return cloud.CreateRequest{}, e
 	}
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" || net.ParseIP(p.BridgeIP).To4() == nil {
@@ -133,7 +131,21 @@ func (p *Provisioner) node(ctx context.Context, op *cloud.Operation, instance cl
 		return n, e
 	}
 	disabled := false
-	n, e = repo.Add(ctx, exits.AddParams{ID: op.ID, Name: "vultr-" + op.Offer.Region.ID, Address: instance.IP, Port: p.port(), Priority: 200, Enabled: &disabled, CountryCode: op.Offer.Region.Country, CountryName: op.Offer.Region.Country, City: op.Offer.Region.City, DisplayName: op.Offer.Region.City + ", " + op.Offer.Region.Country})
+	n, e = repo.Add(
+		ctx,
+		exits.AddParams{
+			ID:          op.ID,
+			Name:        "vultr-" + op.Offer.Region.ID,
+			Address:     instance.IP,
+			Port:        p.port(),
+			Priority:    200,
+			Enabled:     &disabled,
+			CountryCode: op.Offer.Region.Country,
+			CountryName: op.Offer.Region.Country,
+			City:        op.Offer.Region.City,
+			DisplayName: op.Offer.Region.City + ", " + op.Offer.Region.Country,
+		},
+	)
 	if e == nil {
 		op.ExitID = n.ID
 	}
@@ -146,7 +158,9 @@ func (p *Provisioner) exitSpec(node exits.Node) config.Spec {
 		MimicPreset: p.Bridge.MimicPreset, ListenAddress: "0.0.0.0", VLESSPort: node.Port,
 		SplithttpHost: p.Bridge.SplithttpHost, SplithttpPath: p.Bridge.SplithttpPath,
 		SplitHTTPTLS: p.Bridge.SplitHTTPTLS, TunnelTransport: p.Bridge.TunnelTransport,
-		TunnelTLSProvision: p.Bridge.TunnelTLSProvision,
+		// The cloud worker provisions an IP exit with a pinned certificate;
+		// the bridge's static ACME domain is not owned by this instance.
+		TunnelTLSProvision: config.TunnelTLSSelfSigned,
 		Exit:               config.ExitTunnelSpec{TunnelUUID: node.TunnelUUID},
 		ExitCertPaths:      config.CertPaths{CertFile: "/etc/ultra-relay/fullchain.pem", KeyFile: "/etc/ultra-relay/privkey.pem"},
 	}
@@ -164,12 +178,173 @@ func (p *Provisioner) exitSpec(node exits.Node) config.Spec {
 	return spec
 }
 
+var errReinstallSnapshotUnavailable = errors.New("reserved reinstall attempt snapshot unavailable")
+
+// reinstallInputs commits the whole attempt with one rename. A retry never reads
+// live binary/configuration files once its attempt directory has been published.
+func (p *Provisioner) reinstallInputs(
+	op *cloud.Operation,
+	request deployansible.ExitRequest,
+) (string, deployansible.ExitRequest, error) {
+	dir := filepath.Join(p.StateDir, op.ID, fmt.Sprintf("install-attempt-%d", op.InstallAttempt))
+	binary := filepath.Join(dir, "ultra-relay")
+	load := func() (string, deployansible.ExitRequest, error) {
+		var saved deployansible.ExitRequest
+		raw, err := os.ReadFile(filepath.Join(dir, "request.json"))
+		if err != nil {
+			return "", saved, err
+		}
+		if err = json.Unmarshal(raw, &saved); err != nil {
+			return "", saved, err
+		}
+		jobID, err := configurationAttemptJobID(op.ID, op.InstallAttempt, binary, saved)
+		if err != nil {
+			return "", saved, err
+		}
+		digest, err := os.ReadFile(filepath.Join(dir, "job-id"))
+		if err != nil || string(digest) != jobID ||
+			(op.ReinstallJobID != "" && op.ReinstallJobID != jobID) {
+			return "", saved, errors.New("reinstall attempt inputs changed")
+		}
+		return binary, saved, nil
+	}
+	if _, err := os.Stat(dir); err == nil {
+		return load()
+	} else if !os.IsNotExist(err) {
+		return "", request, err
+	}
+	// A controller might still own a receipt created by an older worker. Never
+	// replace its inputs with current desired state.
+	if op.ReinstallJobID != "" {
+		return "", request, errReinstallSnapshotUnavailable
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(dir), ".install-attempt-")
+	if err != nil {
+		return "", request, err
+	}
+	defer os.RemoveAll(tmp) //nolint:errcheck
+	saved := request
+	saved.Identity = filepath.Join(dir, "identity")
+	saved.KnownHosts = filepath.Join(dir, "known_hosts")
+	for _, input := range []struct {
+		source, name string
+		mode         os.FileMode
+	}{
+		{p.Binary, "ultra-relay", 0700},
+		{request.Identity, "identity", 0600},
+		{request.KnownHosts, "known_hosts", 0600},
+	} {
+		if err := copyAttemptInput(input.source, filepath.Join(tmp, input.name), input.mode); err != nil {
+			return "", request, err
+		}
+	}
+	raw, err := json.Marshal(saved)
+	if err != nil {
+		return "", request, err
+	}
+	if err = os.WriteFile(filepath.Join(tmp, "request.json"), raw, 0600); err != nil {
+		return "", request, err
+	}
+	// Hash the staged copies while retaining the final paths in the request.
+	// Hashing uses paths only in request JSON, and contents for the input files.
+	staged := saved
+	staged.Identity = filepath.Join(tmp, "identity")
+	staged.KnownHosts = filepath.Join(tmp, "known_hosts")
+	jobID, err := configurationInputsJobID(op.ID, op.InstallAttempt, filepath.Join(tmp, "ultra-relay"), saved, staged)
+	if err != nil {
+		return "", request, err
+	}
+	if err = os.WriteFile(filepath.Join(tmp, "job-id"), []byte(jobID), 0600); err != nil {
+		return "", request, err
+	}
+	if err = os.Rename(tmp, dir); err != nil {
+		// A concurrent caller may have committed the same attempt first.
+		if _, statErr := os.Stat(dir); statErr != nil {
+			return "", request, err
+		}
+	}
+	return load()
+}
+
+func copyAttemptInput(source, target string, mode os.FileMode) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return errors.New("configuration inputs unavailable")
+	}
+	defer input.Close() //nolint:errcheck
+	output, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(output, input)
+	closeErr := output.Close()
+	return errors.Join(copyErr, closeErr)
+}
+
+func (p *Provisioner) reconcileReinstallFirewall(
+	ctx context.Context,
+	op *cloud.Operation,
+	node exits.Node,
+	bridgeIPv4 string,
+) error {
+	if net.ParseIP(bridgeIPv4).To4() == nil || node.Port < 1 || node.Port > 65535 ||
+		op.FirewallID == "" {
+		return errors.New("reinstall firewall inputs invalid")
+	}
+	firewall, err := p.API.EnsureFirewall(ctx, op.ID, bridgeIPv4, node.Port)
+	if err != nil {
+		return err
+	}
+	if firewall != op.FirewallID {
+		return errors.New("reinstall firewall identity mismatch")
+	}
+	return nil
+}
+
 func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance cloud.Instance) error {
 	c, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	remote, e := p.remote(op, instance)
 	if e != nil {
 		return e
+	}
+	var node exits.Node
+	var request deployansible.ExitRequest
+	binary := filepath.Join(p.StateDir, op.ID, "ultra-relay")
+	if op.Reinstall {
+		node, e = db.NewExitNodeRepo(p.DB).Get(c, op.ExitID)
+		if e != nil {
+			return e
+		}
+		if e := validateReinstallTarget(op, node, instance); e != nil {
+			return e
+		}
+		release, err := db.NewExitNodeRepo(p.DB).GuardCloudReinstall(c, op, node, instance)
+		if err != nil {
+			return err
+		}
+		defer release()
+		request = deployansible.ExitRequest{
+			Host: instance.IP, User: "root", Identity: p.Identity, KnownHosts: remote.KnownHosts,
+			BridgeIPv4: p.BridgeIP, Spec: p.exitSpec(node),
+		}
+		binary, request, e = p.reinstallInputs(op, request)
+		if e != nil {
+			if errors.Is(e, errReinstallSnapshotUnavailable) {
+				// Legacy receipts have no immutable inputs to replay. Only terminal
+				// proof may release ownership; even then this install must fail so
+				// an explicit retry creates a fresh attempt on the existing VPS.
+				cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				releaseErr := p.ReleaseReinstall(cleanup, op)
+				stop()
+				return errors.Join(e, releaseErr)
+			}
+			return e
+		}
+		remote.Identity, remote.KnownHosts = request.Identity, request.KnownHosts
+		if e = p.reconcileReinstallFirewall(c, op, node, request.BridgeIPv4); e != nil {
+			return e
+		}
 	}
 	for {
 		if _, e = remote.Run(c, "true"); e == nil {
@@ -181,33 +356,125 @@ func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance
 		case <-time.After(5 * time.Second):
 		}
 	}
-	node, e := p.node(c, op, instance)
-	if e != nil {
-		return e
+	if !op.Reinstall {
+		node, e = p.node(c, op, instance)
+		if e != nil {
+			return e
+		}
 	}
-	spec := p.exitSpec(node)
-	if e = spec.Validate(); e != nil {
+	if op.Reinstall {
+		// Public certificate only; strict SSH checking retains the operation's
+		// original host identity before any desired files are installed.
+		fingerprint, err := remote.Run(
+			c,
+			"set -o pipefail\nopenssl x509 -in /etc/ultra-relay/fullchain.pem -outform DER | sha256sum\n",
+		)
+		if err != nil || len(strings.Fields(string(fingerprint))) != 2 ||
+			strings.Fields(string(fingerprint))[0] != node.PinnedPeerCertSHA256 {
+			return errors.New("reinstall certificate identity mismatch")
+		}
+	}
+	if !op.Reinstall {
+		request = deployansible.ExitRequest{
+			Host: instance.IP, User: "root", Identity: p.Identity, KnownHosts: remote.KnownHosts,
+			BridgeIPv4: p.BridgeIP, Spec: p.exitSpec(node),
+		}
+	}
+	if e = request.Spec.Validate(); e != nil {
 		return errors.New("generated exit spec invalid")
 	}
 	if p.Configurer == nil {
 		return errors.New("ansible controller required")
 	}
-	request := deployansible.ExitRequest{
-		Host: instance.IP, User: "root", Identity: p.Identity, KnownHosts: remote.KnownHosts, BridgeIPv4: p.BridgeIP, Spec: spec,
+	if op.Reinstall {
+		jobID, err := configurationAttemptJobID(op.ID, op.InstallAttempt, binary, request)
+		if err != nil {
+			return err
+		}
+		if err := db.NewExitNodeRepo(p.DB).ReserveCloudReinstall(c, op, jobID, node.Address); err != nil {
+			return err
+		}
 	}
-	binary := filepath.Join(p.StateDir, op.ID, "ultra-relay")
-	result, err := p.configureExit(c, op, binary, request)
+	var result deployansible.Result
+	var err error
+	if op.Reinstall {
+		// Dispatch exactly the durably reserved identity, even if an input file
+		// changes between computing its digest and opening submission inputs.
+		result, err = p.Configurer.ConfigureExit(c, op.ReinstallJobID, binary, request)
+	} else {
+		result, err = p.configureExit(c, op, binary, request)
+	}
+	if op.Reinstall {
+		// The controller may keep running after this caller times out. Persisted
+		// host ownership survives that timeout; only a terminal receipt clears it.
+		cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		releaseErr := p.ReleaseReinstall(cleanup, op)
+		stop()
+		if releaseErr != nil {
+			return errors.Join(err, releaseErr)
+		}
+	}
 	if err != nil {
 		return err
+	}
+	if op.Reinstall && result.CertPin != node.PinnedPeerCertSHA256 {
+		return errors.New("reinstall certificate identity changed")
 	}
 	if err = p.Routes.SetPin(c, node.ID, result.CertPin); err != nil {
 		return err
 	}
-	op.ReplicationState = "not_configured"
 	return nil
 }
 
-func (p *Provisioner) configureExit(ctx context.Context, op *cloud.Operation, binary string, request deployansible.ExitRequest) (deployansible.Result, error) {
+func (p *Provisioner) ReleaseReinstall(ctx context.Context, op *cloud.Operation) error {
+	return releaseReinstall(ctx, op, p.Configurer, db.NewExitNodeRepo(p.DB).ClearCloudReinstall)
+}
+
+func releaseReinstall(
+	ctx context.Context,
+	op *cloud.Operation,
+	configurer ExitConfigurer,
+	clear func(context.Context, *cloud.Operation) error,
+) error {
+	if op.ReinstallTarget == "" {
+		return cloud.ErrConflict
+	}
+	if op.ReinstallJobID == "" {
+		return clear(ctx, op)
+	}
+	reader, ok := configurer.(interface {
+		ConfigurationTerminal(context.Context, string) (bool, error)
+	})
+	if !ok || op.ReinstallJobID == "" {
+		return cloud.ErrConflict
+	}
+	terminal, err := reader.ConfigurationTerminal(ctx, op.ReinstallJobID)
+	if err != nil {
+		return err
+	}
+	if !terminal {
+		return cloud.ErrConflict
+	}
+	return clear(ctx, op)
+}
+
+func validateReinstallTarget(op *cloud.Operation, node exits.Node, instance cloud.Instance) error {
+	pin, err := hex.DecodeString(node.PinnedPeerCertSHA256)
+	if op.ID != op.ExitID || node.ID != op.ID || node.Enabled || node.Address != instance.IP || instance.ID != op.InstanceID ||
+		net.ParseIP(
+			node.Address,
+		) == nil || err != nil || len(pin) != sha256.Size || strings.ToLower(node.PinnedPeerCertSHA256) != node.PinnedPeerCertSHA256 {
+		return errors.New("reinstall target identity mismatch")
+	}
+	return nil
+}
+
+func (p *Provisioner) configureExit(
+	ctx context.Context,
+	op *cloud.Operation,
+	binary string,
+	request deployansible.ExitRequest,
+) (deployansible.Result, error) {
 	jobID, err := configurationAttemptJobID(op.ID, op.InstallAttempt, binary, request)
 	if err != nil {
 		return deployansible.Result{}, err
@@ -221,7 +488,21 @@ func configurationJobID(owner, binary string, request deployansible.ExitRequest)
 	return configurationAttemptJobID(owner, 0, binary, request)
 }
 
-func configurationAttemptJobID(owner string, attempt uint64, binary string, request deployansible.ExitRequest) (string, error) {
+func configurationAttemptJobID(
+	owner string,
+	attempt uint64,
+	binary string,
+	request deployansible.ExitRequest,
+) (string, error) {
+	return configurationInputsJobID(owner, attempt, binary, request, request)
+}
+
+func configurationInputsJobID(
+	owner string,
+	attempt uint64,
+	binary string,
+	request, files deployansible.ExitRequest,
+) (string, error) {
 	data, err := json.Marshal(request)
 	if err != nil {
 		return "", err
@@ -236,7 +517,7 @@ func configurationAttemptJobID(owner string, attempt uint64, binary string, requ
 	if attempt != 0 {
 		_, _ = fmt.Fprintf(hash, "retry:%d:", attempt)
 	}
-	for _, path := range []string{binary, request.Identity, request.KnownHosts} {
+	for _, path := range []string{binary, files.Identity, files.KnownHosts} {
 		file, err := os.Open(path)
 		if err != nil {
 			return "", errors.New("configuration inputs unavailable")
@@ -288,17 +569,139 @@ func (p *Provisioner) Verify(ctx context.Context, op *cloud.Operation, instance 
 		return errors.New("provisioning probe startup failed")
 	}
 	defer runner.Close() //nolint:errcheck
-	for i := 0; i < 3; i++ {
-		h := runner.ProbeExit(ctx, node, spec.HealthTargets())
-		if !h.Reachable || !h.InternetOK {
-			return errors.New("full tunnel check failed")
+	return verifyTunnelWithRetry(ctx, func(probeCtx context.Context) exits.Health {
+		return runner.ProbeExit(probeCtx, node, spec.HealthTargets())
+	})
+}
+
+const (
+	verifyRetryTimeout    = 2 * time.Minute
+	verifyRetryInterval   = time.Second
+	verifyRetryMaxBackoff = 10 * time.Second
+	verifyConsecutiveOK   = 3
+)
+
+func verifyTunnelWithRetry(ctx context.Context, probe func(context.Context) exits.Health) error {
+	return verifyTunnelWithRetryPolicy(
+		ctx,
+		probe,
+		verifyRetryTimeout,
+		verifyRetryInterval,
+		verifyRetryMaxBackoff,
+	)
+}
+
+func verifyTunnelWithRetryPolicy(
+	ctx context.Context,
+	probe func(context.Context) exits.Health,
+	timeout, interval, maxBackoff time.Duration,
+) error {
+	retryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	backoff := interval
+	consecutiveOK := 0
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		if ctx.Err() != nil {
-			return ctx.Err()
+		h := probe(retryCtx)
+		lastErr = verifyHealth(h)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if retryCtx.Err() != nil {
+			return verifyTimeoutError(lastErr)
+		}
+		if lastErr == nil {
+			consecutiveOK++
+			if consecutiveOK == verifyConsecutiveOK {
+				return nil
+			}
+		} else {
+			consecutiveOK = 0
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-retryCtx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		case <-timer.C:
+		}
+		if retryCtx.Err() != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return verifyTimeoutError(lastErr)
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
 		}
 	}
-	return nil
 }
+
+func verifyTimeoutError(lastErr error) error {
+	if lastErr != nil {
+		return lastErr
+	}
+	return errors.New("tunnel verification timed out before consecutive health checks")
+}
+
+// Verification diagnostics deliberately exclude node identity and probe targets.
+// Keep this separate from exits.Health: that type also contains addresses/URLs.
+type verificationCheck struct {
+	OK         bool   `json:"ok"`
+	Error      string `json:"error,omitempty"`
+	Bytes      int64  `json:"bytes"`
+	DurationMS int64  `json:"duration_ms"`
+}
+
+type verificationError struct {
+	reachable  bool
+	internetOK bool
+	checks     []verificationCheck
+}
+
+func (e *verificationError) CloudDiagnostics() map[string]any {
+	return map[string]any{
+		"reachable": e.reachable, "internet_ok": e.internetOK,
+		"checks": append([]verificationCheck(nil), e.checks...),
+	}
+}
+
+func (e *verificationError) Error() string {
+	data, _ := json.Marshal(e.CloudDiagnostics()) // Only fixed strings, bools and integers.
+	return "full tunnel check failed: " + string(data)
+}
+
+func verifyHealth(h exits.Health) error {
+	if h.Reachable && h.InternetOK {
+		return nil
+	}
+	e := &verificationError{reachable: h.Reachable, internetOK: h.InternetOK}
+	for _, check := range h.Checks {
+		code := check.Error
+		switch code {
+		case "http_status", "body_size", "response_failed", "tls_handshake_failed",
+			"response_timeout", "tls_handshake_timeout", "deadline_or_cancel":
+		default:
+			code = "response_failed"
+		}
+		if check.OK {
+			code = ""
+		}
+		e.checks = append(e.checks, verificationCheck{
+			OK: check.OK, Error: code, Bytes: check.Bytes, DurationMS: check.DurationMS,
+		})
+	}
+	return e
+}
+
 func (p *Provisioner) Publish(ctx context.Context, op *cloud.Operation) error {
 	budget := db.NewQuotaRepo(p.DB)
 	if e := budget.EnsureVultr(ctx, op.ExitID, op.InstanceID, int64(op.Offer.Plan.Bandwidth)*1_000_000_000); e != nil {
@@ -328,7 +731,8 @@ func (p *Provisioner) Unpublish(ctx context.Context, op *cloud.Operation) error 
 		return nil
 	}
 	disabled := false
-	if _, e := db.NewExitNodeRepo(p.DB).Update(ctx, op.ExitID, exits.UpdatePatch{Enabled: &disabled}); e != nil && !errors.Is(e, db.ErrExitNotFound) {
+	if _, e := db.NewExitNodeRepo(p.DB).Update(ctx, op.ExitID, exits.UpdatePatch{Enabled: &disabled}); e != nil &&
+		!errors.Is(e, db.ErrExitNotFound) {
 		return e
 	}
 	if e := p.Routes.Unpublish(ctx, op.ExitID); e != nil {
@@ -340,10 +744,5 @@ func (p *Provisioner) Unpublish(ctx context.Context, op *cloud.Operation) error 
 	return p.Apply(ctx)
 }
 func (p *Provisioner) Cleanup(ctx context.Context, op *cloud.Operation) error {
-	if p.RemoveReplica != nil {
-		if e := p.RemoveReplica(ctx, op.ExitID); e != nil {
-			return e
-		}
-	}
 	return p.API.DeleteFirewall(ctx, op.FirewallID)
 }

@@ -64,7 +64,14 @@ func loadHappAcceptance(path, token string, now time.Time) (*happAcceptance, err
 	}
 	digest, err := hex.DecodeString(c.TokenDigest)
 	expected := sha256.Sum256([]byte(token))
-	if err != nil || subtle.ConstantTimeCompare(digest, expected[:]) != 1 || c.IssuedAt.After(now) || !c.ExpiresAt.After(now) || c.ExpiresAt.Sub(c.IssuedAt) > time.Hour || !c.ExpiresAt.After(c.IssuedAt) || c.PrimaryPort < 1024 || c.PrimaryPort > 65535 || c.ReservePort < 1024 || c.ReservePort > 65535 || c.PrimaryPort == c.ReservePort {
+	if err != nil || subtle.ConstantTimeCompare(digest, expected[:]) != 1 || c.IssuedAt.After(now) || !c.ExpiresAt.After(now) ||
+		c.ExpiresAt.Sub(c.IssuedAt) > time.Hour ||
+		!c.ExpiresAt.After(c.IssuedAt) ||
+		c.PrimaryPort < 1024 ||
+		c.PrimaryPort > 65535 ||
+		c.ReservePort < 1024 ||
+		c.ReservePort > 65535 ||
+		c.PrimaryPort == c.ReservePort {
 		return nil, invalid
 	}
 	return &c, nil

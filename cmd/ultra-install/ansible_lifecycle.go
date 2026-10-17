@@ -85,7 +85,8 @@ func validLocalLifecycleIdentity(p *installplan.InstallPlan, info os.FileInfo, r
 		Machine string `json:"machine_sha256"`
 		Address string `json:"address"`
 	}
-	if json.Unmarshal(raw, &identity) != nil || identity.Schema != 1 || identity.Role != "bridge" || net.ParseIP(identity.Address) == nil || !host.Equal(net.ParseIP(identity.Address)) {
+	if json.Unmarshal(raw, &identity) != nil || identity.Schema != 1 || identity.Role != "bridge" || net.ParseIP(identity.Address) == nil ||
+		!host.Equal(net.ParseIP(identity.Address)) {
 		return false
 	}
 	machineText := strings.TrimSpace(string(machine))
@@ -97,7 +98,26 @@ func validLocalLifecycleIdentity(p *installplan.InstallPlan, info os.FileInfo, r
 
 // ansibleLifecycle binds every stage to a durable bridge reservation. This
 // directory is the whole immutable attempt, not a per-stage work directory.
-func ansibleLifecycle(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, python, executable, phase string, drain bool) error {
+func ansibleLifecycle(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	directory, python, executable, phase string,
+	drain bool,
+) error {
+	_, err := ansibleLifecycleTransition(ctx, p, inventory, directory, python, executable, phase, drain, false)
+	return err
+}
+
+// ansibleLifecycleReserve returns only after the broker confirms this exact
+// operation ID and phase. Callers may then safely install same-ID recovery
+// before attempting any operation that can fail after reservation.
+func ansibleLifecycleReserve(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	directory, python, executable, phase string,
+) (deployansible.Receipt, error) {
 	id := lifecycleID(directory)
 	if localLifecycleBridge(p) {
 		socket := os.Getenv("ULTRA_ANSIBLE_SOCKET")
@@ -105,31 +125,79 @@ func ansibleLifecycle(ctx context.Context, p *installplan.InstallPlan, inventory
 			socket = "/run/ultra-ansible/controller.sock"
 		}
 		if err := (deployansible.Client{Socket: socket}).LifecycleWithOperationLock(ctx, id, phase); err != nil {
-			return err
+			return deployansible.Receipt{}, err
 		}
-		if phase == "applying" && drain {
-			return drainLocalLifecycle(ctx)
+		return deployansible.Receipt{
+			Result: deployansible.Result{Values: map[string]any{"verified": true, "reservation_id": id, "reservation_phase": phase}},
+		}, nil
+	}
+	receipt, err := ansibleLifecycleTransition(ctx, p, inventory, directory, python, executable, phase, false, true)
+	if err != nil {
+		return deployansible.Receipt{}, err
+	}
+	values := receipt.Result.Values
+	if values["verified"] != true || values["reservation_id"] != id || values["reservation_phase"] != phase {
+		return deployansible.Receipt{}, errors.New("lifecycle_reservation_unverified")
+	}
+	return receipt, nil
+}
+
+func ansibleLifecycleTransition(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	directory, python, executable, phase string,
+	drain, reserveOnly bool,
+) (deployansible.Receipt, error) {
+	id := lifecycleID(directory)
+	if localLifecycleBridge(p) {
+		if err := (deployansible.Client{Socket: lifecycleSocket()}).LifecycleWithOperationLock(ctx, id, phase); err != nil {
+			return deployansible.Receipt{}, err
 		}
-		if phase == "applying" && !drain {
-			return assertLocalRelayStopped(ctx)
+		if phase == "applying" && !reserveOnly {
+			if drain {
+				if err := drainLocalLifecycle(ctx); err != nil {
+					return deployansible.Receipt{}, err
+				}
+			} else if err := assertLocalRelayStopped(ctx); err != nil {
+				return deployansible.Receipt{}, err
+			}
 		}
-		return nil
+		return deployansible.Receipt{
+			Result: deployansible.Result{Values: map[string]any{"verified": true, "reservation_id": id, "reservation_phase": phase}},
+		}, nil
 	}
 	// A native remote root module performs the exact same fixed transition and
 	// drain. For local bridge it is idempotent after the OFD handoff above.
-	variables := map[string]any{"ultra_lifecycle_id": id, "ultra_lifecycle_phase": phase, "ultra_lifecycle_drain": drain}
+	variables := map[string]any{
+		"ultra_lifecycle_id":           id,
+		"ultra_lifecycle_phase":        phase,
+		"ultra_lifecycle_drain":        drain,
+		"ultra_lifecycle_reserve_only": reserveOnly,
+	}
 	stage, err := os.MkdirTemp(directory, "lifecycle-"+phase+"-")
 	if err != nil {
-		return err
+		return deployansible.Receipt{}, err
 	}
 	if err = os.Remove(stage); err != nil {
-		return err
+		return deployansible.Receipt{}, err
 	}
-	_, err = deployansible.RunLocal(ctx, "lifecycle", inventory, variables, stage, python, executable)
-	return err
+	return deployansible.RunLocal(ctx, "lifecycle", inventory, variables, stage, python, executable)
 }
 
-func prepareBootstrapController(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, architecture, python, executable string) (map[string]any, error) {
+func lifecycleSocket() string {
+	if socket := os.Getenv("ULTRA_ANSIBLE_SOCKET"); socket != "" {
+		return socket
+	}
+	return "/run/ultra-ansible/controller.sock"
+}
+
+func prepareBootstrapController(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	directory, architecture, python, executable string,
+) (map[string]any, error) {
 	if p.Automation == nil {
 		return nil, fmt.Errorf("independent controller release required for fleet lifecycle")
 	}
@@ -150,9 +218,19 @@ func prepareBootstrapController(ctx context.Context, p *installplan.InstallPlan,
 	if err != nil {
 		return nil, err
 	}
-	variables := map[string]any{"ultra_controller_bridge_address": p.Bridge.Address, "ultra_adoption_schedules_file": filepath.Join(directory, "adoption-schedules.json"), "ultra_adoption_receipt_file": filepath.Join(directory, "adoption-maintenance.json"), "ultra_adoption_contract_content": string(contract), "ultra_adoption_contract_sha256": fmt.Sprintf("%x", sha256.Sum256(contract)), "ultra_lifecycle_id": lifecycleID(directory), "ultra_controller_directory": managedControllerDirectory(a.Version),
-		"ultra_install_source": filepath.Join(a.ReleaseDir, installer.Name), "ultra_install_sha256": installer.SHA,
-		"ultra_controller_runtime_archive": filepath.Join(a.ReleaseDir, runtime.Name), "ultra_controller_runtime_sha256": runtime.SHA}
+	variables := map[string]any{
+		"ultra_controller_bridge_address":  p.Bridge.Address,
+		"ultra_adoption_schedules_file":    filepath.Join(directory, "adoption-schedules.json"),
+		"ultra_adoption_receipt_file":      filepath.Join(directory, "adoption-maintenance.json"),
+		"ultra_adoption_contract_content":  string(contract),
+		"ultra_adoption_contract_sha256":   fmt.Sprintf("%x", sha256.Sum256(contract)),
+		"ultra_lifecycle_id":               lifecycleID(directory),
+		"ultra_controller_directory":       managedControllerDirectory(a.Version),
+		"ultra_install_source":             filepath.Join(a.ReleaseDir, installer.Name),
+		"ultra_install_sha256":             installer.SHA,
+		"ultra_controller_runtime_archive": filepath.Join(a.ReleaseDir, runtime.Name),
+		"ultra_controller_runtime_sha256":  runtime.SHA,
+	}
 	stage, err := os.MkdirTemp(directory, "controller-prepare-")
 	if err != nil {
 		return nil, err
@@ -197,7 +275,8 @@ func drainLocalLifecycle(ctx context.Context) error {
 	var result struct {
 		Verified bool `json:"verified"`
 	}
-	if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&result) != nil || !result.Verified {
+	if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&result) != nil ||
+		!result.Verified {
 		return errors.New("lifecycle_drain_failed")
 	}
 	return nil
@@ -206,7 +285,14 @@ func drainLocalLifecycle(ctx context.Context) error {
 // prepareReservedBootstrap is a single pre-base transaction. Legacy service
 // recovery runs before returning an error; os.Exit in the outer CLI cannot skip
 // it. Once base mutation starts, recovery belongs to compatible release rollback.
-func prepareReservedBootstrap(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, inspection map[string]bootstrapInspection, directory, stateRoot, python, executable string, formats ...string) (frozen map[string]any, result map[string]bootstrapInspection, returnErr error) {
+func prepareReservedBootstrap(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	inspection map[string]bootstrapInspection,
+	directory, stateRoot, python, executable string,
+	formats ...string,
+) (frozen map[string]any, result map[string]bootstrapInspection, returnErr error) {
 	// A proven rollback reuses its original checkpoint and identities. Re-running
 	// checkpoint capture would compare the emergency binary to a newer manifest.
 	if _, err := os.Lstat(filepath.Join(directory, "inventory.frozen.json")); err == nil {
@@ -229,7 +315,15 @@ func prepareReservedBootstrap(ctx context.Context, p *installplan.InstallPlan, i
 			if err != nil {
 				return nil, nil, err
 			}
-			_, err = deployansible.RunLocalRetryFailed(ctx, "reserve-rolledback-bootstrap", original, map[string]any{"ultra_lifecycle_id": lifecycleID(directory), "ultra_lock_directory": stateRoot}, bootstrapMutationStage(directory, "reserve-rolledback", generation), python, executable)
+			_, err = deployansible.RunLocalRetryFailed(
+				ctx,
+				"reserve-rolledback-bootstrap",
+				original,
+				map[string]any{"ultra_lifecycle_id": lifecycleID(directory), "ultra_lock_directory": stateRoot},
+				bootstrapMutationStage(directory, "reserve-rolledback", generation),
+				python,
+				executable,
+			)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -280,7 +374,15 @@ func prepareReservedBootstrap(ctx context.Context, p *installplan.InstallPlan, i
 			err = os.Remove(stage)
 		}
 		if err == nil {
-			_, err = deployansible.RunLocal(cleanup, "resume-adoption", inventory, map[string]any{"ultra_lifecycle_id": lifecycleID(directory)}, stage, python, executable)
+			_, err = deployansible.RunLocal(
+				cleanup,
+				"resume-adoption",
+				inventory,
+				map[string]any{"ultra_lifecycle_id": lifecycleID(directory)},
+				stage,
+				python,
+				executable,
+			)
 		}
 		if err != nil {
 			returnErr = errors.Join(returnErr, errors.New("pre_base_previous_service_recovery_unconfirmed"))
@@ -331,7 +433,12 @@ func prepareReservedBootstrap(ctx context.Context, p *installplan.InstallPlan, i
 
 // Only an already frozen, private attempt may skip a second application drain
 // during rollback. The broker separately requires the same still-active UUID.
-func ansibleResumeFrozenLifecycle(ctx context.Context, p *installplan.InstallPlan, inventory map[string]any, directory, python, executable string) error {
+func ansibleResumeFrozenLifecycle(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	directory, python, executable string,
+) error {
 	frozen, _, err := bootstrapFinalizationInputs(directory)
 	expected, marshalErr := json.Marshal(inventory)
 	actual, frozenErr := json.Marshal(frozen)
@@ -353,7 +460,20 @@ func ansibleResumeFrozenLifecycle(ctx context.Context, p *installplan.InstallPla
 	if err = os.Remove(stage); err != nil {
 		return err
 	}
-	_, err = deployansible.RunLocal(ctx, "lifecycle", inventory, map[string]any{"ultra_lifecycle_id": id, "ultra_lifecycle_phase": "applying", "ultra_lifecycle_drain": false, "ultra_lifecycle_resume": true}, stage, python, executable)
+	_, err = deployansible.RunLocal(
+		ctx,
+		"lifecycle",
+		inventory,
+		map[string]any{
+			"ultra_lifecycle_id":     id,
+			"ultra_lifecycle_phase":  "applying",
+			"ultra_lifecycle_drain":  false,
+			"ultra_lifecycle_resume": true,
+		},
+		stage,
+		python,
+		executable,
+	)
 	return err
 }
 
@@ -388,7 +508,15 @@ func restoreAdoptionSchedules(ctx context.Context, inventory map[string]any, dir
 	if err = os.Remove(stage); err != nil {
 		return err
 	}
-	_, err = deployansible.RunLocal(ctx, "resume-schedules", inventory, map[string]any{"ultra_adoption_schedules": schedules}, stage, python, executable)
+	_, err = deployansible.RunLocal(
+		ctx,
+		"resume-schedules",
+		inventory,
+		map[string]any{"ultra_adoption_schedules": schedules},
+		stage,
+		python,
+		executable,
+	)
 	return err
 }
 

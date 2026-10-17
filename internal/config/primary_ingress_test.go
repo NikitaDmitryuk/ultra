@@ -13,7 +13,11 @@ import (
 
 func TestPrimaryIngressPublicationAndListeners(t *testing.T) {
 	s := bridgeSpecForAntiCensorTest()
-	s.PrimaryXHTTP = &PrimaryXHTTPIngress{Host: "bridge.example", BackendPort: 18080, PublicXHTTPTLSSpec: PublicXHTTPTLSSpec{Port: 443, ServerName: "site.example", Path: "/connect"}}
+	s.PrimaryXHTTP = &PrimaryXHTTPIngress{
+		Host:               "bridge.example",
+		BackendPort:        18080,
+		PublicXHTTPTLSSpec: PublicXHTTPTLSSpec{Port: 443, ServerName: "site.example", Path: "/connect"},
+	}
 	s.LegacyPublicEnabled = BoolPtr(false)
 	s.GatewayVLESSPort = 18081
 	u := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", IsActive: true}
@@ -22,7 +26,8 @@ func TestPrimaryIngressPublicationAndListeners(t *testing.T) {
 		t.Fatal(err)
 	}
 	uri, _ := url.Parse(exp.VLESSURI)
-	if uri.User.Username() != u.UUID || uri.Query().Get("security") != "tls" || uri.Query().Get("flow") != "" || uri.Hostname() != "bridge.example" {
+	if uri.User.Username() != u.UUID || uri.Query().Get("security") != "tls" || uri.Query().Get("flow") != "" ||
+		uri.Hostname() != "bridge.example" {
 		t.Fatal("wrong primary export")
 	}
 	strat, _ := mimic.New("steamlike")
@@ -60,7 +65,11 @@ func TestPrimaryIngressPublicationAndListeners(t *testing.T) {
 
 func TestExperimentalDescriptorValidation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "profile.json")
-	p := ExperimentalProfile{Host: "bridge.example", StatusPort: 18082, Endpoint: PublicXHTTPTLSSpec{Port: 5543, ServerName: "site.example", Path: "/test"}}
+	p := ExperimentalProfile{
+		Host:       "bridge.example",
+		StatusPort: 18082,
+		Endpoint:   PublicXHTTPTLSSpec{Port: 5543, ServerName: "site.example", Path: "/test"},
+	}
 	write := func() {
 		raw, _ := json.Marshal(p)
 		if err := os.WriteFile(path, raw, 0600); err != nil {
@@ -86,9 +95,16 @@ func TestExperimentalDescriptorValidation(t *testing.T) {
 
 func TestPrimaryIngressForwardingEntries(t *testing.T) {
 	s := bridgeSpecForAntiCensorTest()
-	s.PrimaryXHTTP = &PrimaryXHTTPIngress{Host: "bridge.example", BackendPort: 18080, PublicXHTTPTLSSpec: PublicXHTTPTLSSpec{Port: 443, ServerName: "site.example", Path: "/connect", Fingerprint: "firefox"}}
+	s.PrimaryXHTTP = &PrimaryXHTTPIngress{
+		Host:               "bridge.example",
+		BackendPort:        18080,
+		PublicXHTTPTLSSpec: PublicXHTTPTLSSpec{Port: 443, ServerName: "site.example", Path: "/connect", Fingerprint: "firefox"},
+	}
 	s.LegacyPublicEnabled = BoolPtr(false)
-	s.PublicEntries = []PublicEntry{{ID: "tls", Host: "backup.example", TCPPort: 8443, XHTTPTLSPort: 9443}, {ID: "legacy", Host: "legacy.example", TCPPort: 8443}}
+	s.PublicEntries = []PublicEntry{
+		{ID: "tls", Host: "backup.example", TCPPort: 8443, XHTTPTLSPort: 9443},
+		{ID: "legacy", Host: "legacy.example", TCPPort: 8443},
+	}
 	profiles, err := BuildClientProfiles(s, auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", IsActive: true})
 	if err != nil {
 		t.Fatal(err)

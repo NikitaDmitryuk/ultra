@@ -3,10 +3,11 @@ package db
 import (
 	"context"
 	"encoding/base64"
-	"github.com/NikitaDmitryuk/ultra/internal/subscriptionkey"
-	"github.com/google/uuid"
 	"testing"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionkey"
+	"github.com/google/uuid"
 )
 
 func TestMonitorIdentityAndQuotaSurviveRecreation(t *testing.T) {
@@ -33,15 +34,30 @@ func TestMonitorIdentityAndQuotaSurviveRecreation(t *testing.T) {
 	first.UUID = rotated
 	exit := uuid.NewString()
 	now := time.Now().UTC()
-	_, e = d.Pool.Exec(ctx, `INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid) VALUES($1,'fixture','127.0.0.1',12001,$2)`, exit, uuid.NewString())
+	_, e = d.Pool.Exec(
+		ctx,
+		`INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid) VALUES($1,'fixture','127.0.0.1',12001,$2)`,
+		exit,
+		uuid.NewString(),
+	)
 	if e != nil {
 		t.Fatal(e)
 	}
-	_, e = d.Pool.Exec(ctx, `INSERT INTO exit_traffic_budgets(exit_id,monthly_bytes,source,is_fallback) VALUES($1,32000000000000,'manual',true)`, exit)
+	_, e = d.Pool.Exec(
+		ctx,
+		`INSERT INTO exit_traffic_budgets(exit_id,monthly_bytes,source,is_fallback) VALUES($1,32000000000000,'manual',true)`,
+		exit,
+	)
 	if e != nil {
 		t.Fatal(e)
 	}
-	_, e = d.Pool.Exec(ctx, `INSERT INTO account_exit_usage(account_id,exit_id,period,charged_bytes) VALUES($1,$2,$3,5368709120)`, first.AccountID, exit, now.Format("2006-01"))
+	_, e = d.Pool.Exec(
+		ctx,
+		`INSERT INTO account_exit_usage(account_id,exit_id,period,charged_bytes) VALUES($1,$2,$3,5368709120)`,
+		first.AccountID,
+		exit,
+		now.Format("2006-01"),
+	)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -60,7 +76,8 @@ func TestMonitorIdentityAndQuotaSurviveRecreation(t *testing.T) {
 	var blocked bool
 	var reason string
 	var used, limit int64
-	e = d.Pool.QueryRow(ctx, `SELECT blocked,reason,used_bytes,limit_bytes FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, next.UUID, exit).Scan(&blocked, &reason, &used, &limit)
+	e = d.Pool.QueryRow(ctx, `SELECT blocked,reason,used_bytes,limit_bytes FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, next.UUID, exit).
+		Scan(&blocked, &reason, &used, &limit)
 	if e != nil || !blocked || reason != "monitor_quota_exhausted" || used != 5368709120 || limit != 5368709120 {
 		t.Fatalf("quota returned: blocked=%v reason=%s used=%d limit=%d err=%v", blocked, reason, used, limit, e)
 	}
@@ -108,7 +125,10 @@ func TestMonitorCannotObtainPublicSubscription(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	r := NewSubscriptionRepo(d, &subscriptionkey.Ring{Active: "v1", Keys: map[string]string{"v1": base64.StdEncoding.EncodeToString(make([]byte, 32))}})
+	r := NewSubscriptionRepo(
+		d,
+		&subscriptionkey.Ring{Active: "v1", Keys: map[string]string{"v1": base64.StdEncoding.EncodeToString(make([]byte, 32))}},
+	)
 	if _, e = r.Rotate(ctx, u.UUID); e == nil {
 		t.Fatal("service received public subscription")
 	}

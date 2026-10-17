@@ -13,6 +13,55 @@ import (
 	"time"
 )
 
+func TestClientFailureIncludesSavedDiagnosticCode(t *testing.T) {
+	for _, code := range []string{"ssh_pin_mismatch", "ingress_tls_hostname_mismatch", "task_failed", ""} {
+		t.Run("code="+code, func(t *testing.T) {
+			socket := filepath.Join(t.TempDir(), "worker.sock")
+			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close() //nolint:errcheck
+			response := Response{Code: "ansible_failed", Diagnostic: Diagnostic{
+				Node: "bridge", Stage: "Verify service readiness", Code: code,
+			}}
+			done := make(chan error, 1)
+			go func() {
+				conn, err := listener.AcceptUnix()
+				if err != nil {
+					done <- err
+					return
+				}
+				defer conn.Close() //nolint:errcheck
+				_, inputs, err := receiveRequest(conn)
+				closeInputs(inputs)
+				if err == nil {
+					var raw []byte
+					raw, err = json.Marshal(response)
+					if err == nil {
+						err = sendRequest(conn, append(raw, '\n'), nil)
+					}
+				}
+				done <- err
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			saved, err := (Client{Socket: socket}).exchange(ctx, Message{Action: "status"})
+			want := "ansible_failed (bridge: Verify service readiness"
+			if code != "" {
+				want += "; " + code
+			}
+			want += ")"
+			if err == nil || err.Error() != want || saved.Diagnostic != response.Diagnostic {
+				t.Fatalf("failure = %v, diagnostic = %+v; want %s, %+v", err, saved.Diagnostic, want, response.Diagnostic)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestWorkerContinuesAfterClientDisconnectAndRestart(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -122,5 +171,63 @@ path.chmod(0o600)
 	request.Host = "192.0.2.99"
 	if _, err = client.ConfigureExit(ctx, id, binary, request); err == nil {
 		t.Fatal("different topology accepted on retry")
+	}
+}
+
+func TestLifecycleRetirementDispatchAuthorization(t *testing.T) {
+	for _, action := range []string{"lease-retire", "lease-supersede"} {
+		t.Run(action, func(t *testing.T) {
+			root := lifecycleTestDirectory(t)
+			gate, err := openLifecycleGate(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer gate.close()
+			id := "11111111-2222-3333-4444-555555555555"
+			if result := gate.transition(id, "applying"); result.Code != "" {
+				t.Fatal(result)
+			}
+			socket := filepath.Join(root, "controller.sock")
+			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close() //nolint:errcheck
+			done := make(chan Response, 1)
+			go func() {
+				conn, err := listener.AcceptUnix()
+				if err != nil {
+					done <- Response{Code: "accept_failed"}
+					return
+				}
+				defer conn.Close() //nolint:errcheck
+				done <- handleConnection(conn, root, uint32(os.Geteuid()), gate)
+			}()
+			conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socket, Net: "unix"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close() //nolint:errcheck
+			var inputs []*os.File
+			if action == "lease-supersede" {
+				inputs = []*os.File{gate.lock}
+			}
+			if err := sendRequest(conn, []byte(`{"action":"`+action+`","id":"`+id+`","next_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}`+"\n"), inputs); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case result := <-done:
+				if os.Geteuid() == 0 {
+					if result.Code != "" || (action == "lease-retire" && (result.State != "released" || gate.blocked())) ||
+						(action == "lease-supersede" && (result.State != "applying" || !gate.blocked())) {
+						t.Fatal("root retirement dispatch failed", result)
+					}
+				} else if result.Code != "controller_access_denied" || !gate.blocked() || gate.retired[id] {
+					t.Fatal("non-root retired root lifecycle", result)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("retirement dispatch timed out")
+			}
+		})
 	}
 }

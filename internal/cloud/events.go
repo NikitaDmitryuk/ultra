@@ -2,9 +2,22 @@ package cloud
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 )
+
+type cloudDiagnosticError interface {
+	CloudDiagnostics() map[string]any
+}
+
+func cloudDiagnostics(err error) map[string]any {
+	var diagnostic cloudDiagnosticError
+	if errors.As(err, &diagnostic) {
+		return diagnostic.CloudDiagnostics()
+	}
+	return nil
+}
 
 type Event struct {
 	Message     string    `json:"message,omitempty"`
@@ -32,7 +45,17 @@ func (s *Service) advanceLogged(ctx context.Context, op Operation) error {
 		log = slog.Default()
 	}
 	if report {
-		log.Info("cloud operation stage started", "operation_id", op.ID, "phase", op.Phase, "region", op.Offer.Region.ID, "plan", op.Offer.Plan.ID)
+		log.Info(
+			"cloud operation stage started",
+			"operation_id",
+			op.ID,
+			"phase",
+			op.Phase,
+			"region",
+			op.Offer.Region.ID,
+			"plan",
+			op.Offer.Plan.ID,
+		)
 	}
 	err := s.advance(ctx, op)
 	end, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -60,6 +83,23 @@ func (s *Service) advanceLogged(ctx context.Context, op Operation) error {
 	if event.Outcome == "failed" {
 		level = slog.LevelWarn
 	}
-	log.Log(end, level, "cloud operation stage finished", "operation_id", op.ID, "phase", op.Phase, "outcome", event.Outcome, "error_code", event.Code, "http_status", event.HTTPStatus, "duration_ms", event.DurationMS, "journal_saved", saved)
+	attrs := []any{
+		"operation_id", op.ID,
+		"phase", op.Phase,
+		"outcome", event.Outcome,
+		"error_code", event.Code,
+		"http_status", event.HTTPStatus,
+		"duration_ms", event.DurationMS,
+		"journal_saved", saved,
+	}
+	if diagnostics := cloudDiagnostics(err); diagnostics != nil {
+		attrs = append(attrs, "diagnostics", diagnostics)
+	}
+	log.Log(
+		end,
+		level,
+		"cloud operation stage finished",
+		attrs...,
+	)
 	return err
 }

@@ -2,9 +2,10 @@ package adminapi
 
 import (
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 )
 
 func TestIngressErrorContract(t *testing.T) {

@@ -1,0 +1,78 @@
+---
+- name: Stage the signed collector import dependency
+  ansible.builtin.include_tasks: capture-dependency.yml
+# The archive member was extracted only after signed release verification.
+# Keep active tools/fallback inventory unchanged until the normal refresh phase.
+- name: Inspect the signed release capture collector source
+  ansible.builtin.stat:
+    path: "{{ ultra_recovery_capture_tool.source }}"
+    checksum_algorithm: sha256
+    follow: false
+  delegate_to: localhost
+  become: false
+  register: release_capture_source
+- name: Require exact signed release collector bytes
+  ansible.builtin.assert:
+    that:
+      - release_capture_source.stat.isreg | default(false)
+      - not release_capture_source.stat.islnk | default(false)
+      - release_capture_source.stat.checksum == ultra_recovery_capture_tool.sha256
+- name: Inspect the retained private collector directory
+  ansible.builtin.stat:
+    path: "/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/capture"
+    follow: false
+  register: release_capture_directory
+- name: Reject an unsafe retained collector directory
+  ansible.builtin.assert:
+    that:
+      - >-
+        not release_capture_directory.stat.exists or
+        (release_capture_directory.stat.isdir | default(false) and
+        not release_capture_directory.stat.islnk | default(false) and
+        release_capture_directory.stat.uid == 0 and
+        release_capture_directory.stat.mode == '0700')
+- name: Prepare the private operation capture collector directory
+  ansible.builtin.file:
+    path: "/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/capture"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Inspect any retained operation collector before replacing it
+  ansible.builtin.stat:
+    path: "/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/capture/recovery.py"
+    checksum_algorithm: sha256
+    follow: false
+  register: release_capture_retained
+- name: Reject drift in a retained collector
+  ansible.builtin.assert:
+    that:
+      - >-
+        not release_capture_retained.stat.exists or
+        (release_capture_retained.stat.isreg | default(false) and
+        not release_capture_retained.stat.islnk | default(false) and
+        release_capture_retained.stat.uid == 0 and
+        release_capture_retained.stat.mode == '0600' and
+        release_capture_retained.stat.checksum == ultra_recovery_capture_tool.sha256)
+- name: Stage the verified collector without changing active tools
+  ansible.builtin.copy:
+    src: "{{ ultra_recovery_capture_tool.source }}"
+    dest: "/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/capture/recovery.py"
+    owner: root
+    group: root
+    mode: "0600"
+- name: Inspect the staged collector immediately before capture
+  ansible.builtin.stat:
+    path: "/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/capture/recovery.py"
+    checksum_algorithm: sha256
+    follow: false
+  register: release_capture_staged
+- name: Require a private exact collector before execution
+  ansible.builtin.assert:
+    that:
+      - release_capture_staged.stat.isreg | default(false)
+      - not release_capture_staged.stat.islnk | default(false)
+      - release_capture_staged.stat.uid == 0
+      - release_capture_staged.stat.mode == '0600'
+      - release_capture_staged.stat.checksum == ultra_recovery_capture_tool.sha256
+      - release_capture_staged.stat.size == release_capture_source.stat.size

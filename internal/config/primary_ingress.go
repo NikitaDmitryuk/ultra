@@ -45,7 +45,9 @@ func validatePublicEndpoint(host string, t *PublicXHTTPTLSSpec) error {
 	if err := t.validateFingerprint(); err != nil {
 		return err
 	}
-	if host == "" || strings.ContainsAny(host, "/@?# \t\r\n") || t.Port < 1 || t.Port > 65535 || t.ServerName == "" || net.ParseIP(t.ServerName) != nil || strings.ContainsAny(t.ServerName, "/: \t\r\n") {
+	if host == "" || strings.ContainsAny(host, "/@?# \t\r\n") || t.Port < 1 || t.Port > 65535 || t.ServerName == "" ||
+		net.ParseIP(t.ServerName) != nil ||
+		strings.ContainsAny(t.ServerName, "/: \t\r\n") {
 		return fmt.Errorf("invalid public XHTTP endpoint")
 	}
 	if t.Path == "" || !strings.HasPrefix(t.Path, "/") || strings.ContainsAny(t.Path, "?# \t\r\n") {
@@ -83,7 +85,10 @@ func (s *Spec) validatePrimaryIngress() error {
 		ap = ap + "," + sp
 	}
 	check := func(p int) error {
-		if p < 1 || p > 65535 || ports[p] || strings.Contains(","+ap+",", fmt.Sprintf(",%d,", p)) || p == s.VLESSPort || (s.PublicXHTTPTLS != nil && p == s.PublicXHTTPTLS.Port) || (s.AntiCensor != nil && p == s.AntiCensor.PublicXHTTPPort) || (s.BotTelegramProxy != nil && p == botTelegramProxyPort(s.BotTelegramProxy)) {
+		if p < 1 || p > 65535 || ports[p] || strings.Contains(","+ap+",", fmt.Sprintf(",%d,", p)) || p == s.VLESSPort ||
+			(s.PublicXHTTPTLS != nil && p == s.PublicXHTTPTLS.Port) ||
+			(s.AntiCensor != nil && p == s.AntiCensor.PublicXHTTPPort) ||
+			(s.BotTelegramProxy != nil && p == botTelegramProxyPort(s.BotTelegramProxy)) {
 			return fmt.Errorf("ingress backend port conflict")
 		}
 		ports[p] = true
@@ -128,7 +133,8 @@ func LoadExperimentalProfile(path string) (*ExperimentalProfile, error) {
 	if err = validatePublicEndpoint(p.Host, &p.Endpoint); err != nil {
 		return nil, err
 	}
-	if p.Endpoint.CertificateFile != "" || p.Endpoint.KeyFile != "" || p.Endpoint.Download != nil || p.StatusPort < 1 || p.StatusPort > 65535 {
+	if p.Endpoint.CertificateFile != "" || p.Endpoint.KeyFile != "" || p.Endpoint.Download != nil || p.StatusPort < 1 ||
+		p.StatusPort > 65535 {
 		return nil, fmt.Errorf("experimental descriptor contains private or invalid fields")
 	}
 	return &p, nil
@@ -143,7 +149,13 @@ func (s *ExperimentalTransportSpec) Validate() error {
 		return err
 	}
 	t := &s.Profile.Endpoint
-	if !filepath.IsAbs(t.CertificateFile) || !filepath.IsAbs(t.KeyFile) || s.BackendPort < 1 || s.BackendPort > 65535 || s.Profile.StatusPort < 1 || s.Profile.StatusPort > 65535 || s.BackendPort == t.Port || s.Profile.StatusPort == t.Port || s.Profile.StatusPort == s.BackendPort || t.Download != nil {
+	if !filepath.IsAbs(t.CertificateFile) || !filepath.IsAbs(t.KeyFile) || s.BackendPort < 1 || s.BackendPort > 65535 ||
+		s.Profile.StatusPort < 1 ||
+		s.Profile.StatusPort > 65535 ||
+		s.BackendPort == t.Port ||
+		s.Profile.StatusPort == t.Port ||
+		s.Profile.StatusPort == s.BackendPort ||
+		t.Download != nil {
 		return fmt.Errorf("invalid experimental gateway configuration")
 	}
 	return nil
@@ -157,7 +169,11 @@ func BuildExperimentalGateway(s *ExperimentalTransportSpec) ([]byte, error) {
 	return json.Marshal(map[string]any{
 		"log": map[string]any{"loglevel": "error"},
 		"inbounds": []any{map[string]any{"listen": "0.0.0.0", "port": s.Profile.Endpoint.Port, "protocol": "dokodemo-door",
-			"settings": map[string]any{"address": "127.0.0.1", "port": s.BackendPort, "network": "tcp"}, "streamSettings": publicTLSStream(spec, true)}},
+			"settings": map[string]any{
+				"address": "127.0.0.1",
+				"port":    s.BackendPort,
+				"network": "tcp",
+			}, "streamSettings": publicTLSStream(spec, true)}},
 		"outbounds": []any{map[string]any{"protocol": "freedom", "settings": map[string]any{"proxyProtocol": 2}}},
 	})
 }

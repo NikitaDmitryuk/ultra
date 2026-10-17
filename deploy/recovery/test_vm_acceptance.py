@@ -9,14 +9,21 @@ import vm_acceptance
 
 
 class GenerationReceipt(unittest.TestCase):
+    def test_fixture_replaces_role_specific_bridge_identity(self):
+        source=Path(vm_acceptance.__file__).read_text()
+        self.assertIn("ssh_identity=topology['identity']", source)
+        self.assertIn("address=topology['nodes']['bridge']", source)
+
     def test_payload_helpers_import_without_restore_modules_installed_in_product(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)
-            for name,data in vm_acceptance.fixture_helper_sources().items():
+            helpers=vm_acceptance.fixture_helper_sources()
+            self.assertIn('db_connection.py',helpers)
+            for name,data in helpers.items():
                 (root/name).write_bytes(data)
             # The product installs recovery.py, but not operator-only restore modules.
             (root/'recovery.py').write_bytes(Path(vm_acceptance.__file__).with_name('recovery.py').read_bytes())
-            code='import runpy,sys;sys.path.insert(0,sys.argv[1]);v=runpy.run_path(sys.argv[1]+"/acceptance.py");assert callable(v["seed"])'
+            code='import runpy,sys;sys.path.insert(0,sys.argv[1]);v=runpy.run_path(sys.argv[1]+"/acceptance.py");assert callable(v["seed"]);import db_connection;assert db_connection.__file__==sys.argv[1]+"/db_connection.py"'
             subprocess.run([sys.executable,'-I','-c',code,str(root)],check=True,capture_output=True)
 
     def test_fetches_confirmed_receiver_pair_and_verifies_before_writing(self):

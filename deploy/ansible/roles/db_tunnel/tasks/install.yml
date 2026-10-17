@@ -1,0 +1,70 @@
+---
+- name: Validate database tunnel inputs
+  ansible.builtin.include_tasks: validate.yml
+- name: Require install stage on bridge inventory host
+  ansible.builtin.assert:
+    that: inventory_hostname in ['bridge', 'target']
+- name: Require pinned known_hosts source path
+  ansible.builtin.assert:
+    that:
+      - ultra_db_tunnel_known_hosts_source is defined
+      - ultra_db_tunnel_known_hosts_source is string
+      - ultra_db_tunnel_known_hosts_source is match('^/')
+      - "'..' not in ultra_db_tunnel_known_hosts_source.split('/')"
+- name: Inspect pinned known_hosts source on controller
+  ansible.builtin.stat:
+    path: "{{ ultra_db_tunnel_known_hosts_source }}"
+    follow: false
+  delegate_to: localhost
+  become: false
+  register: db_tunnel_known_hosts_stat
+- name: Require regular pinned known_hosts file
+  ansible.builtin.assert:
+    that:
+      - db_tunnel_known_hosts_stat.stat.isreg | default(false)
+      - not (db_tunnel_known_hosts_stat.stat.islnk | default(true))
+- name: Create private database tunnel directory
+  ansible.builtin.file:
+    path: /etc/ultra-db-tunnel
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Install pinned database SSH host keys
+  ansible.builtin.copy:
+    src: "{{ ultra_db_tunnel_known_hosts_source }}"
+    dest: /etc/ultra-db-tunnel/known_hosts
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart ultra database tunnel
+- name: Enforce private key permissions
+  ansible.builtin.file:
+    path: /etc/ultra-db-tunnel/id_ed25519
+    state: file
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+- name: Install database tunnel systemd unit
+  ansible.builtin.template:
+    src: ultra-db-tunnel.service.j2
+    dest: /etc/systemd/system/ultra-db-tunnel.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart ultra database tunnel
+- name: Activate database tunnel configuration
+  ansible.builtin.meta: flush_handlers
+- name: Ensure database tunnel enabled and running
+  ansible.builtin.systemd_service:
+    name: ultra-db-tunnel.service
+    enabled: true
+    state: started
+    daemon_reload: true
+- name: Wait for local PostgreSQL tunnel listener
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ db_tunnel_ultra_local_port }}"
+    state: started
+    timeout: 30

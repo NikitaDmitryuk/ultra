@@ -167,10 +167,22 @@ func loadExit(t *testing.T, spec *config.Spec, strategy mimic.Strategy, tcp, udp
 		t.Fatal(err)
 	}
 	freedom := func(tag, destination string) map[string]any {
-		return map[string]any{"tag": tag, "protocol": "freedom", "settings": map[string]any{"redirect": destination, "finalRules": []any{map[string]any{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}}
+		return map[string]any{
+			"tag":      tag,
+			"protocol": "freedom",
+			"settings": map[string]any{
+				"redirect":   destination,
+				"finalRules": []any{map[string]any{"action": "allow", "ip": []string{"127.0.0.0/8"}}},
+			},
+		}
 	}
 	cfg["outbounds"] = []any{freedom("tcp", tcp), freedom("udp", udp)}
-	cfg["routing"] = map[string]any{"rules": []any{map[string]any{"type": "field", "network": "udp", "outboundTag": "udp"}, map[string]any{"type": "field", "network": "tcp", "outboundTag": "tcp"}}}
+	cfg["routing"] = map[string]any{
+		"rules": []any{
+			map[string]any{"type": "field", "network": "udp", "outboundTag": "udp"},
+			map[string]any{"type": "field", "network": "tcp", "outboundTag": "tcp"},
+		},
+	}
 	raw, _ = json.Marshal(cfg)
 	r := new(proxy.Runner)
 	if err = r.StartJSON(raw); err != nil {
@@ -221,9 +233,40 @@ func TestFiveClientsDuringDurableShippingArtifactCopyAndFailover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := &config.Spec{Role: config.RoleBridge, DevMode: true, ListenAddress: "127.0.0.1", VLESSPort: cacheTestPort(t), AdminListen: fmt.Sprintf("127.0.0.1:%d", cacheTestPort(t)), SplitRouting: config.BoolPtr(false), SplithttpHost: "cache.test", SplitHTTPTLS: config.SplitHTTPTLSSpec{ServerName: "cache.test"}, TunnelTLSProvision: config.TunnelTLSSelfSigned, ProbeURLs: []string{payloadA.URL}, Database: &config.DatabaseSpec{DSN: "postgres://unused:unused@127.0.0.1:1/control_disabled"}}
+	spec := &config.Spec{
+		Role:               config.RoleBridge,
+		DevMode:            true,
+		ListenAddress:      "127.0.0.1",
+		VLESSPort:          cacheTestPort(t),
+		AdminListen:        fmt.Sprintf("127.0.0.1:%d", cacheTestPort(t)),
+		SplitRouting:       config.BoolPtr(false),
+		SplithttpHost:      "cache.test",
+		SplitHTTPTLS:       config.SplitHTTPTLSSpec{ServerName: "cache.test"},
+		TunnelTLSProvision: config.TunnelTLSSelfSigned,
+		ProbeURLs:          []string{payloadA.URL},
+		Database:           &config.DatabaseSpec{DSN: "postgres://unused:unused@127.0.0.1:1/control_disabled"},
+	}
 	tunnel := uuid.NewString()
-	nodes := []exits.Node{{ID: uuid.NewString(), Address: "127.0.0.1", Port: cacheTestPort(t), TunnelUUID: tunnel, PinnedPeerCertSHA256: pin, Priority: 100, Enabled: true}, {ID: uuid.NewString(), Address: "127.0.0.1", Port: cacheTestPort(t), TunnelUUID: tunnel, PinnedPeerCertSHA256: pin, Priority: 200, Enabled: true}}
+	nodes := []exits.Node{
+		{
+			ID:                   uuid.NewString(),
+			Address:              "127.0.0.1",
+			Port:                 cacheTestPort(t),
+			TunnelUUID:           tunnel,
+			PinnedPeerCertSHA256: pin,
+			Priority:             100,
+			Enabled:              true,
+		},
+		{
+			ID:                   uuid.NewString(),
+			Address:              "127.0.0.1",
+			Port:                 cacheTestPort(t),
+			TunnelUUID:           tunnel,
+			PinnedPeerCertSHA256: pin,
+			Priority:             200,
+			Enabled:              true,
+		},
+	}
 	makeExit := func(n exits.Node, tcp, udp string) *proxy.Runner {
 		copy := *spec
 		copy.Role = config.RoleExit
@@ -237,34 +280,86 @@ func TestFiveClientsDuringDurableShippingArtifactCopyAndFailover(t *testing.T) {
 	users := make([]auth.User, 5)
 	now := time.Now().UTC()
 	pool := runtimestate.ProviderPoolID("vultr")
-	limits := []runtimestate.QuotaLimit{{ExitID: pool, Scope: "provider_pool", Members: []string{nodes[0].ID, nodes[1].ID}, Period: now.Format("2006-01"), LimitBytes: 128 * 1024 * 1024, ExpiresAt: now.Add(runtimeLease)}}
+	limits := []runtimestate.QuotaLimit{
+		{
+			ExitID:     pool,
+			Scope:      "provider_pool",
+			Members:    []string{nodes[0].ID, nodes[1].ID},
+			Period:     now.Format("2006-01"),
+			LimitBytes: 128 * 1024 * 1024,
+			ExpiresAt:  now.Add(runtimeLease),
+		},
+	}
 	for _, node := range nodes {
 		if _, err := database.Pool.Exec(context.Background(), `INSERT INTO quota_exit_membership(exit_id,scope) VALUES($1,'vultr')`, node.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for i := range users {
-		users[i] = auth.User{UUID: uuid.NewString(), AccountID: uuid.NewString(), IsActive: true, Routes: []auth.RouteCredential{{UUID: uuid.NewString(), ExitID: &nodes[0].ID}}}
-		limits = append(limits, runtimestate.QuotaLimit{AccountID: users[i].AccountID, ExitID: pool, Scope: "provider_pool", Period: now.Format("2006-01"), LimitBytes: 32 * 1024 * 1024, ExpiresAt: now.Add(runtimeLease)})
+		users[i] = auth.User{
+			UUID:      uuid.NewString(),
+			AccountID: uuid.NewString(),
+			IsActive:  true,
+			Routes:    []auth.RouteCredential{{UUID: uuid.NewString(), ExitID: &nodes[0].ID}},
+		}
+		limits = append(
+			limits,
+			runtimestate.QuotaLimit{
+				AccountID:  users[i].AccountID,
+				ExitID:     pool,
+				Scope:      "provider_pool",
+				Period:     now.Format("2006-01"),
+				LimitBytes: 32 * 1024 * 1024,
+				ExpiresAt:  now.Add(runtimeLease),
+			},
+		)
 		for _, n := range nodes {
-			limits = append(limits, runtimestate.QuotaLimit{PoolScope: "vultr", AccountID: users[i].AccountID, ExitID: n.ID, Period: now.Format("2006-01"), LimitBytes: 32 * 1024 * 1024, ExpiresAt: now.Add(runtimeLease)})
+			limits = append(
+				limits,
+				runtimestate.QuotaLimit{
+					PoolScope:  "vultr",
+					AccountID:  users[i].AccountID,
+					ExitID:     n.ID,
+					Period:     now.Format("2006-01"),
+					LimitBytes: 32 * 1024 * 1024,
+					ExpiresAt:  now.Add(runtimeLease),
+				},
+			)
 		}
 	}
 	for _, n := range nodes {
-		limits = append(limits, runtimestate.QuotaLimit{PoolScope: "vultr", ExitID: n.ID, Period: now.Format("2006-01"), LimitBytes: 128 * 1024 * 1024, ExpiresAt: now.Add(runtimeLease)})
+		limits = append(
+			limits,
+			runtimestate.QuotaLimit{
+				PoolScope:  "vultr",
+				ExitID:     n.ID,
+				Period:     now.Format("2006-01"),
+				LimitBytes: 128 * 1024 * 1024,
+				ExpiresAt:  now.Add(runtimeLease),
+			},
+		)
 	}
 	path := filepath.Join(t.TempDir(), "runtime.db")
 	store, err := runtimestate.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := runtimeSnapshotV1{Version: 3, Fingerprint: runtimeFingerprint(spec), Users: snapshotUsers(users), Nodes: nodes, Limits: limits}
+	snapshot := runtimeSnapshotV1{
+		Version:     3,
+		Fingerprint: runtimeFingerprint(spec),
+		Users:       snapshotUsers(users),
+		Nodes:       nodes,
+		Limits:      limits,
+	}
 	raw, _ := json.Marshal(snapshot)
 	if err = store.SaveSnapshot(runtimestate.Snapshot{Revision: 1, ConfirmedAt: now, Payload: raw}, limits); err != nil {
 		t.Fatal(err)
 	}
 	_ = store.Close()
-	runner := &loadRuntimeRunner{cacheIntegrationRunner: &cacheIntegrationRunner{Runner: new(proxy.Runner), healthPort: cacheTestPort(t)}, state: make(chan *runtimestate.Store, 1)}
+	runner := &loadRuntimeRunner{
+		cacheIntegrationRunner: &cacheIntegrationRunner{Runner: new(proxy.Runner), healthPort: cacheTestPort(t)},
+		state:                  make(chan *runtimestate.Store, 1),
+	}
 	ctx, cancelBridge := context.WithCancel(context.Background())
 	bridgeDone := make(chan error, 1)
 	go func() {
@@ -357,7 +452,26 @@ func TestFiveClientsDuringDurableShippingArtifactCopyAndFailover(t *testing.T) {
 	var tcpA, tcpB, echoA, echoB [5]atomic.Int64
 	for i, user := range users {
 		client := new(proxy.Runner)
-		raw, _ := json.Marshal(map[string]any{"log": map[string]any{"loglevel": "error"}, "outbounds": []any{map[string]any{"protocol": "vless", "settings": map[string]any{"vnext": []any{map[string]any{"address": "127.0.0.1", "port": spec.VLESSPort, "users": []any{map[string]any{"id": user.Routes[0].UUID, "encryption": "none"}}}}}, "streamSettings": map[string]any{"network": "tcp", "security": "none"}}}})
+		raw, _ := json.Marshal(
+			map[string]any{
+				"log": map[string]any{"loglevel": "error"},
+				"outbounds": []any{
+					map[string]any{
+						"protocol": "vless",
+						"settings": map[string]any{
+							"vnext": []any{
+								map[string]any{
+									"address": "127.0.0.1",
+									"port":    spec.VLESSPort,
+									"users":   []any{map[string]any{"id": user.Routes[0].UUID, "encryption": "none"}},
+								},
+							},
+						},
+						"streamSettings": map[string]any{"network": "tcp", "security": "none"},
+					},
+				},
+			},
+		)
 		if err = client.StartJSON(raw); err != nil {
 			t.Fatal(err)
 		}
@@ -369,13 +483,16 @@ func TestFiveClientsDuringDurableShippingArtifactCopyAndFailover(t *testing.T) {
 		traffic.Add(2)
 		go func() {
 			defer traffic.Done()
-			tr := &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-				dest, err := xnet.ParseDestination(network + ":" + address)
-				if err != nil {
-					return nil, err
-				}
-				return core.Dial(ctx, client.Instance(), dest)
-			}}
+			tr := &http.Transport{
+				DisableKeepAlives: true,
+				DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+					dest, err := xnet.ParseDestination(network + ":" + address)
+					if err != nil {
+						return nil, err
+					}
+					return core.Dial(ctx, client.Instance(), dest)
+				},
+			}
 			defer tr.CloseIdleConnections()
 			hc := &http.Client{Transport: tr}
 			for flows.Err() == nil {
@@ -531,7 +648,11 @@ func TestFiveClientsDuringDurableShippingArtifactCopyAndFailover(t *testing.T) {
 	if accounts != 5 || actual <= 5*65536 || charged < actual || charged != expectedCharge {
 		t.Fatalf("durable load accounting invalid: accounts=%d actual=%d charged=%d expected=%d", accounts, actual, charged, expectedCharge)
 	}
-	t.Logf("five TCP+UDP clients, checkpoints/replay including lost commit reply, artifact copies=%d, confirmed bytes=%d", copies.Load(), actual)
+	t.Logf(
+		"five TCP+UDP clients, checkpoints/replay including lost commit reply, artifact copies=%d, confirmed bytes=%d",
+		copies.Load(),
+		actual,
+	)
 }
 
 type loadUsers []auth.User

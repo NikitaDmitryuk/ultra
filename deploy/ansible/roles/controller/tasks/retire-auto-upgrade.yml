@@ -6,8 +6,8 @@
     checksum_algorithm: sha256
     follow: false
   loop:
-    - {name: ultra-auto-upgrade.service, sha256: e53a052444834db11f1a3a88b0473f2e484b148c9435a23379c01b26abcb4112}
-    - {name: ultra-auto-upgrade.timer, sha256: c50e1fcdd70106ea222433707f663d8900dc72d2e2fd7db00f7dd97265ab2074}
+    - { name: ultra-auto-upgrade.service, sha256: e53a052444834db11f1a3a88b0473f2e484b148c9435a23379c01b26abcb4112 }
+    - { name: ultra-auto-upgrade.timer, sha256: c50e1fcdd70106ea222433707f663d8900dc72d2e2fd7db00f7dd97265ab2074 }
   register: controller_legacy_auto_upgrade_units
 - name: Refuse to remove modified automatic release units
   ansible.builtin.assert:

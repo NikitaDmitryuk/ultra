@@ -7,15 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/config"
-	"github.com/NikitaDmitryuk/ultra/internal/subscriptionmeta"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionmeta"
 )
 
 const subscriptionCacheLifetime = 24 * time.Hour
@@ -111,7 +114,9 @@ func (c *subscriptionCache) replace(entries map[string]cachedSubscription) error
 }
 func (c *subscriptionCache) replaceLocked(entries map[string]cachedSubscription) error {
 	// Publish memory only after the durable file has been committed.
-	data, err := json.Marshal(subscriptionCacheSnapshot{Version: 1, HappDefaultJSON: c.happDefaultJSON, BotUsername: c.botUsername, Entries: entries})
+	data, err := json.Marshal(
+		subscriptionCacheSnapshot{Version: 1, HappDefaultJSON: c.happDefaultJSON, BotUsername: c.botUsername, Entries: entries},
+	)
 	if err != nil || len(data) > maxSubscriptionCacheSize {
 		return errors.New("subscription cache too large")
 	}
@@ -221,7 +226,9 @@ func (b *Bot) refreshSubscriptionCache(ctx context.Context) error {
 		return errors.New("subscription cache upstream unavailable")
 	}
 	req.Header.Set("Authorization", "Bearer "+b.adminAPIToken)
-	response, err := (&http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+	response, err := (&http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(
+		req,
+	)
 	if err != nil {
 		return errors.New("subscription cache upstream unavailable")
 	}
@@ -266,6 +273,39 @@ func (b *Bot) refreshSubscriptionCache(ctx context.Context) error {
 	}
 	return nil
 }
+
+func subscriptionCacheFailureReason(err error) string {
+	if err == nil {
+		return "none"
+	}
+	message := err.Error()
+	switch {
+	case message == "subscription cache upstream unavailable":
+		return "upstream_unavailable"
+	case strings.HasPrefix(message, "subscription cache upstream status "):
+		status, parseErr := strconv.Atoi(strings.TrimPrefix(message, "subscription cache upstream status "))
+		if parseErr == nil && status >= 100 && status <= 599 {
+			return "upstream_http_" + strconv.Itoa(status)
+		}
+		return "upstream_http_error"
+	case message == "subscription cache response too large":
+		return "response_too_large"
+	case message == "invalid subscription cache response":
+		return "invalid_response"
+	case message == "subscription cache upstream stale":
+		return "upstream_stale"
+	case message == "subscription cache refresh superseded by revocation":
+		return "superseded_by_revocation"
+	case message == "subscription cache refresh exceeded revocation bound":
+		return "revocation_bound"
+	case message == "subscription cache too large":
+		return "cache_too_large"
+	default:
+		// Cache persistence errors can contain filesystem paths; log only a class.
+		return "cache_persist_failed"
+	}
+}
+
 func (b *Bot) StartSubscriptionCacheWorker(ctx context.Context) {
 	if b.subscriptionCache == nil {
 		return
@@ -278,7 +318,7 @@ func (b *Bot) StartSubscriptionCacheWorker(ctx context.Context) {
 			err := b.refreshSubscriptionCache(c)
 			cancel()
 			if err != nil && ctx.Err() == nil {
-				b.log.Warn("subscription cache refresh unavailable")
+				b.log.Warn("subscription cache refresh unavailable", "reason", subscriptionCacheFailureReason(err))
 			}
 			select {
 			case <-ctx.Done():
@@ -311,7 +351,12 @@ func (b *Bot) serveSubscriptionFallback(w http.ResponseWriter, _ string, token s
 	}
 	c := b.subscriptionCache
 	c.mu.RLock()
-	format, err := config.ResolveSubscriptionFormat(r.URL.Query().Get("format"), r.URL.Query().Get("transport"), r.UserAgent(), c.happDefaultJSON)
+	format, err := config.ResolveSubscriptionFormat(
+		r.URL.Query().Get("format"),
+		r.URL.Query().Get("transport"),
+		r.UserAgent(),
+		c.happDefaultJSON,
+	)
 	if err != nil {
 		c.mu.RUnlock()
 		return false

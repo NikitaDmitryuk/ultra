@@ -14,10 +14,12 @@ import (
 	"strings"
 	"syscall"
 
+	recoveryassets "github.com/NikitaDmitryuk/ultra/deploy/recovery"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 type bootstrapGeoAsset struct {
@@ -59,11 +61,16 @@ func bootstrapInventory(p *installplan.InstallPlan, directory string) (map[strin
 	return bootstrapInventoryWithNativeAttestation(p, directory, attestNativeAdoption)
 }
 
-func bootstrapInventoryWithNativeAttestation(p *installplan.InstallPlan, directory string, attest func(*installplan.InstallPlan) (string, error)) (map[string]any, error) {
+func bootstrapInventoryWithNativeAttestation(
+	p *installplan.InstallPlan,
+	directory string,
+	attest func(*installplan.InstallPlan) (string, error),
+) (map[string]any, error) {
+
 	if p.Bridge.RemoteDir != "/etc/ultra-relay" {
 		return nil, fmt.Errorf("ansible bootstrap requires canonical remote directory /etc/ultra-relay")
 	}
-	if p.SSH.Identity == "" {
+	if p.BridgeSSHIdentity() == "" {
 		return nil, fmt.Errorf("explicit pinned SSH identity required")
 	}
 	pins := os.Getenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS")
@@ -80,11 +87,22 @@ func bootstrapInventoryWithNativeAttestation(p *installplan.InstallPlan, directo
 	if _, err = os.Stat(pins); err != nil {
 		return nil, fmt.Errorf("SSH pins required: %w", err)
 	}
-	identity, err := filepath.Abs(p.SSH.Identity)
+	identity, err := filepath.Abs(p.BridgeSSHIdentity())
 	if err != nil {
 		return nil, err
 	}
-	common := map[string]any{"ansible_user": p.SSH.User, "ansible_become": p.SSH.User != "root", "ansible_become_method": "sudo", "ansible_become_flags": "-H -S -n", "ansible_ssh_private_key_file": identity, "ansible_ssh_common_args": "-F /dev/null -o ControlMaster=no -o ControlPath=none -o UpdateHostKeys=no -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=" + shellQuote(pins), "ultra_remote_dir": p.Bridge.RemoteDir, "ultra_inspect_dir": filepath.Join(directory, "inspection")}
+	common := map[string]any{
+		"ansible_user":                 p.SSH.User,
+		"ansible_become":               p.SSH.User != "root",
+		"ansible_become_method":        "sudo",
+		"ansible_become_flags":         "-H -S -n",
+		"ansible_ssh_private_key_file": identity,
+		"ansible_ssh_common_args": "-F /dev/null -o ControlMaster=no -o ControlPath=none -o UpdateHostKeys=no -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=" + shellQuote(
+			pins,
+		),
+		"ultra_remote_dir":  p.Bridge.RemoteDir,
+		"ultra_inspect_dir": filepath.Join(directory, "inspection"),
+	}
 	bridge := map[string]any{"ansible_host": p.Bridge.SSHHost}
 	if p.BridgeNative {
 		if _, err := attest(p); err != nil {
@@ -96,25 +114,74 @@ func bootstrapInventoryWithNativeAttestation(p *installplan.InstallPlan, directo
 	}
 	nodes := map[string]any{}
 	for n, ex := range p.Exits {
-		nodes["exit_"+strconv.Itoa(n)] = map[string]any{"ansible_host": ex.SSHHost}
+		exitIdentity := p.ExitSSHIdentity(ex)
+		if exitIdentity == "" {
+			return nil, fmt.Errorf("explicit pinned exit SSH identity required")
+		}
+		exitIdentity, err = filepath.Abs(exitIdentity)
+		if err != nil {
+			return nil, err
+		}
+		nodes["exit_"+strconv.Itoa(n)] = map[string]any{"ansible_host": ex.SSHHost, "ansible_ssh_private_key_file": exitIdentity}
 	}
 	db := map[string]any{}
 	if p.Database.Enabled {
-		primary := p.Database.PrimaryHost
-		if primary == "" || primary == p.Bridge.SSHHost || primary == p.Bridge.Address {
-			db["bridge"] = map[string]any{}
-		} else {
-			return nil, fmt.Errorf("ansible bootstrap requires primary on bridge; remote primary requires dedicated migration")
+		if p.Database.PrimaryHost == "" || p.Database.PrimaryHost == p.Bridge.SSHHost || p.Database.PrimaryHost == p.Bridge.Address {
+			return nil, fmt.Errorf("dedicated database server required")
 		}
+		dbIdentity := p.Database.SSHIdentity
+		if dbIdentity == "" {
+			dbIdentity = p.SSH.Identity
+		}
+		if dbIdentity == "" {
+			return nil, fmt.Errorf("explicit pinned database SSH identity required")
+		}
+		dbIdentity, err = filepath.Abs(dbIdentity)
+		if err != nil {
+			return nil, err
+		}
+		dbUser := p.Database.SSHUser
+		if dbUser == "" {
+			dbUser = p.SSH.User
+		}
+		db["database"] = map[string]any{
+			"ansible_host":                 p.Database.PrimaryHost,
+			"ansible_user":                 dbUser,
+			"ansible_become":               dbUser != "root",
+			"ansible_ssh_private_key_file": dbIdentity,
+		}
+		common["ultra_db_tunnel_host"] = p.Database.PrimaryHost
+		common["ultra_db_tunnel_known_hosts_source"] = pins
+
 	}
-	return map[string]any{"all": map[string]any{"vars": common, "children": map[string]any{"bridge": map[string]any{"hosts": map[string]any{"bridge": bridge}}, "exits": map[string]any{"hosts": nodes}, "databases": map[string]any{"hosts": db}}}}, nil
+	return map[string]any{
+		"all": map[string]any{
+			"vars": common,
+			"children": map[string]any{
+				"bridge":    map[string]any{"hosts": map[string]any{"bridge": bridge}},
+				"exits":     map[string]any{"hosts": nodes},
+				"databases": map[string]any{"hosts": db},
+			},
+		},
+	}, nil
 }
 
-func inspectBootstrap(ctx context.Context, p *installplan.InstallPlan, directory, python, executable string, lockRoots ...string) (map[string]any, map[string]bootstrapInspection, error) {
+func inspectBootstrap(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	directory, python, executable string,
+	lockRoots ...string,
+) (map[string]any, map[string]bootstrapInspection, error) {
 	return inspectBootstrapWithTopology(ctx, p, directory, python, executable, true, lockRoots...)
 }
 
-func inspectBootstrapWithTopology(ctx context.Context, p *installplan.InstallPlan, directory, python, executable string, discoverTopology bool, lockRoots ...string) (map[string]any, map[string]bootstrapInspection, error) {
+func inspectBootstrapWithTopology(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	directory, python, executable string,
+	discoverTopology bool,
+	lockRoots ...string,
+) (map[string]any, map[string]bootstrapInspection, error) {
 	var topology *adoptionTopology
 	if p.AdoptRuntime && discoverTopology {
 		lockRoot := filepath.Dir(directory)
@@ -146,7 +213,15 @@ func inspectBootstrapWithTopology(ctx context.Context, p *installplan.InstallPla
 	if len(lockRoots) > 0 {
 		lockRoot = lockRoots[0]
 	}
-	_, err = deployansible.RunLocal(ctx, "inspect-bootstrap", inventory, map[string]any{"ultra_lock_directory": lockRoot}, filepath.Join(directory, "inspect"), python, executable)
+	_, err = deployansible.RunLocal(
+		ctx,
+		"inspect-bootstrap",
+		inventory,
+		map[string]any{"ultra_lock_directory": lockRoot},
+		filepath.Join(directory, "inspect"),
+		python,
+		executable,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -193,6 +268,11 @@ func bootstrapRenderOptions(p *installplan.InstallPlan, inspection map[string]bo
 		}
 		return opts, nil
 	}
+	if !p.Bridge.ReuseSpec {
+		// An explicit fresh bootstrap replaces any partial application state left
+		// by an earlier failed attempt. Only frozen retries may reuse its spec.
+		return opts, nil
+	}
 	p.Bridge.ReuseSpec = true
 	var prior config.Spec
 	if err = json.Unmarshal(raw, &prior); err != nil {
@@ -234,7 +314,9 @@ func bootstrapRenderOptions(p *installplan.InstallPlan, inspection map[string]bo
 		if p.AdoptRuntime {
 			return opts, fmt.Errorf("runtime adoption requires existing bootstrap routes")
 		}
-		opts.PriorBootstrap = []exits.BootstrapEntry{{Name: "primary", Address: prior.Exit.Address, Port: prior.Exit.Port, TunnelUUID: prior.Exit.TunnelUUID, Priority: 100}}
+		opts.PriorBootstrap = []exits.BootstrapEntry{
+			{Name: "primary", Address: prior.Exit.Address, Port: prior.Exit.Port, TunnelUUID: prior.Exit.TunnelUUID, Priority: 100},
+		}
 	}
 	for n := range p.Exits {
 		ex := &p.Exits[n]
@@ -296,11 +378,32 @@ func sourceSHA(path string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.DesiredState, inventory map[string]any, inspection map[string]bootstrapInspection, directory string) error {
+func prepareBootstrapVariables(
+	p *installplan.InstallPlan,
+	ds *installplan.DesiredState,
+	inventory map[string]any,
+	inspection map[string]bootstrapInspection,
+	directory string,
+) error {
+	if ds.DBDSN != "" && !p.Database.Enabled {
+		return fmt.Errorf("explicit dedicated DB_HOST required before installing an existing database-backed bridge")
+	}
 	all := inventory["all"].(map[string]any)
 	children := all["children"].(map[string]any)
 	bridge := children["bridge"].(map[string]any)["hosts"].(map[string]any)["bridge"].(map[string]any)
 	nodes := children["exits"].(map[string]any)["hosts"].(map[string]any)
+	// Bind only the private path into the initial inventory. Frozen legacy
+	// inventories must keep their original request identity on retry.
+	if source, _, err := prepareUpgradeSubscriptionStage(p, directory, 1); err != nil {
+		return err
+	} else if source != "" {
+		bridge["ultra_upgrade_subscription_key_source"] = source
+	}
+	if p.Features.MainExitDomain != "" {
+		if err := prepareAnsibleDNS(p, bridge); err != nil {
+			return err
+		}
+	}
 	all["vars"].(map[string]any)["ultra_host_bootstrap"] = true
 	all["vars"].(map[string]any)["ultra_bridge_ipv4"] = p.Bridge.Address
 	all["vars"].(map[string]any)["ultra_preserve_runtime"] = p.AdoptRuntime
@@ -342,6 +445,10 @@ func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.Desir
 			vars["ultra_relay_environment"] = string(oldEnvironment)
 		}
 		vars["ultra_generate_exit_tls"] = p.Features.GenerateExitTLS
+		if p.Features.MainExitDomain != "" {
+			vars["ultra_tunnel_domain"] = p.Features.MainExitDomain
+			vars["ultra_tunnel_email"] = p.Automation.Ingress.Email
+		}
 		vars["ultra_warp_enabled"] = p.Features.WARP
 		vars["ultra_warp_port"] = p.Features.WARPPort
 		if p.AdoptRuntime {
@@ -399,7 +506,44 @@ func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.Desir
 	}
 	if ds.PostgresConfig != nil {
 		c := ds.PostgresConfig
-		bridge["ultra_postgres"] = map[string]any{"name": c.DBName, "user": c.DBUser, "password": c.DBPassword, "repl_user": c.ReplUser, "repl_password": c.ReplPassword}
+		replicationPassword := postgresReplicationPassword(c.DBPassword)
+		children["databases"].(map[string]any)["hosts"].(map[string]any)["database"].(map[string]any)["ultra_postgres"] = map[string]any{
+			"name":                   c.DBName,
+			"user":                   c.DBUser,
+			"password":               c.DBPassword,
+			"reconcile_app_password": c.RepairExistingCredential,
+			"replication_password":   replicationPassword,
+		}
+		bridge["ultra_postgres_replica"] = map[string]any{
+			"primary_host": p.Database.PrimaryHost,
+			"password":     replicationPassword,
+		}
+		if p.Secrets.DatabaseDumpFile != "" {
+			dbvars := children["databases"].(map[string]any)["hosts"].(map[string]any)["database"].(map[string]any)
+			archive, err := filepath.Abs(p.Secrets.DatabaseDumpFile)
+			if err != nil {
+				return err
+			}
+			scripts := filepath.Join(directory, "database-import")
+			if err := os.MkdirAll(scripts, 0700); err != nil {
+				return err
+			}
+			helper, err := recoveryassets.Scripts.ReadFile("database_dump_import.py")
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(scripts, "database_dump_import.py"), helper, 0600); err != nil {
+				return err
+			}
+			dbvars["ultra_database_import_dump"] = archive
+			dbvars["ultra_database_import_sha256"] = p.Secrets.DatabaseDumpSHA256
+			dbvars["ultra_database_import_destination"] = "/var/lib/ultra-db-import/bootstrap.dump"
+			dbvars["ultra_database_import_db"] = c.DBName
+			dbvars["ultra_database_import_user"] = c.DBUser
+			dbvars["ultra_database_import_password"] = c.DBPassword
+			dbvars["ultra_database_import_script_directory"] = scripts
+		}
+
 	}
 	if p.Bot.Enabled {
 		src, err := binary(inspection["bridge"].Architecture, "bot")
@@ -434,12 +578,29 @@ func prepareBootstrapVariables(p *installplan.InstallPlan, ds *installplan.Desir
 		if err != nil {
 			return err
 		}
-		bridge["ultra_relay_environment"] = mergeBootstrapEnvironment(string(oldEnvironment), ds.BridgeEnv+fmt.Sprintf("ULTRA_BOT_DOMAIN=%s\nULTRA_BOT_PUBLIC_URL=https://%s\nULTRA_BOT_PORT=%d\nULTRA_BOT_TELEGRAM_SOCKS5=127.0.0.1:10809\n", p.Bot.Domain, p.PublicSubscriptionDomain(), p.Bot.Port))
+		bridge["ultra_relay_environment"] = mergeBootstrapEnvironment(
+			string(oldEnvironment),
+			ds.BridgeEnv+fmt.Sprintf(
+				"ULTRA_BOT_DOMAIN=%s\nULTRA_BOT_PUBLIC_URL=https://%s\nULTRA_BOT_PORT=%d\nULTRA_BOT_TELEGRAM_SOCKS5=127.0.0.1:10809\n",
+				p.Bot.Domain,
+				p.PublicSubscriptionDomain(),
+				p.Bot.Port,
+			),
+		)
 		if p.AdoptRuntime {
 			bridge["ultra_relay_environment"] = string(oldEnvironment)
 		}
 	}
 	return nil
+}
+
+// postgresReplicationPassword is stable across bootstrap retries while remaining
+// separate from the application login. PBKDF2 makes the derivation expensive if
+// the source credential has lower entropy, without persisting another secret.
+func postgresReplicationPassword(databasePassword string) string {
+	const salt = "ultra-postgres-replication-v2"
+	derived := pbkdf2.Key([]byte(databasePassword), []byte(salt), 600_000, 32, sha256.New)
+	return hex.EncodeToString(derived)
 }
 
 // Freeze the installed geo generation rather than resolving a newer release during adoption.
@@ -480,7 +641,12 @@ func ensurePrivateBootstrapDirectory(directory string) error {
 
 // Freeze generated identities before the first mutating play. Retries adopt the
 // exact original inputs even when the target was only partially configured.
-func freezeBootstrapInventory(p *installplan.InstallPlan, inventory map[string]any, inspection map[string]bootstrapInspection, directory string) (map[string]any, error) {
+func freezeBootstrapInventory(
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	inspection map[string]bootstrapInspection,
+	directory string,
+) (map[string]any, error) {
 	target := filepath.Join(directory, "inventory.frozen.json")
 	read := func() (map[string]any, error) {
 		info, err := os.Lstat(target)
@@ -655,7 +821,7 @@ func saveBootstrapAttempt(target string, value any) error {
 
 // Preserve unrelated runtime references while replacing only installer-owned keys.
 func mergeBootstrapEnvironment(previous, desired string) string {
-	owned := map[string]bool{}
+	owned := map[string]bool{"ULTRA_REPLICATION_KEY_FILE": true}
 	for _, line := range strings.Split(desired, "\n") {
 		key, _, ok := strings.Cut(line, "=")
 		if ok {

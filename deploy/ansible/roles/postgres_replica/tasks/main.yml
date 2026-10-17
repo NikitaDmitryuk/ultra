@@ -1,0 +1,126 @@
+---
+- name: Require fixed bridge replica topology
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname == 'bridge'
+      - ultra_postgres_replica.primary_host == hostvars['database'].ansible_host
+      - ultra_postgres_replica.password is match('^[a-f0-9]{64}$')
+      - hostvars['database'].postgres_replica_primary_identity.stdout | trim is match('^[0-9]+$')
+  no_log: true
+- name: Inspect bridge replica data directory without following links
+  ansible.builtin.stat:
+    path: /var/lib/postgresql/16/ultra-replica
+    follow: false
+  register: postgres_replica_data
+- name: Require absent or regular replica data directory
+  ansible.builtin.assert:
+    that:
+      - not postgres_replica_data.stat.exists or (postgres_replica_data.stat.isdir | default(false) and not postgres_replica_data.stat.islnk)
+- name: Validate existing owned standby before changing anything
+  ansible.builtin.include_tasks: inspect.yml
+  when: postgres_replica_data.stat.exists
+- name: Configure PostgreSQL package repository
+  ansible.builtin.include_role:
+    name: postgres
+    tasks_from: repository
+- name: Install PostgreSQL cluster management tools
+  ansible.builtin.apt:
+    name: postgresql-common
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+- name: Prevent creation of an unrelated bridge primary cluster
+  ansible.builtin.lineinfile:
+    path: /etc/postgresql-common/createcluster.conf
+    regexp: '^#?\s*create_main_cluster\s*='
+    line: create_main_cluster = false
+    create: true
+    mode: "0644"
+- name: Install PostgreSQL 16 standby server
+  ansible.builtin.apt:
+    name: postgresql-16
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+- name: Create private standby configuration directory
+  ansible.builtin.file:
+    path: /etc/ultra-postgres-replica
+    state: directory
+    owner: root
+    group: postgres
+    mode: "0750"
+- name: Persist dedicated replication password file
+  ansible.builtin.copy:
+    content: "127.0.0.1:25432:replication:ultra_replication:{{ ultra_postgres_replica.password }}\n"
+    dest: /etc/ultra-postgres-replica/pgpass
+    owner: postgres
+    group: postgres
+    mode: "0600"
+  no_log: true
+- name: Verify dedicated replication login against the expected primary
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - postgres
+      - --
+      - /usr/lib/postgresql/16/bin/psql
+      - --no-psqlrc
+      - --no-password
+      - --dbname
+      - >-
+        host=127.0.0.1 port=25432 user=ultra_replication dbname=replication replication=true
+        passfile=/etc/ultra-postgres-replica/pgpass connect_timeout=5
+      - --tuples-only
+      - --no-align
+      - --command
+      - IDENTIFY_SYSTEM
+  register: postgres_replica_remote_identity
+  changed_when: false
+- name: Require tunnel replication protocol to reach the same cluster
+  ansible.builtin.assert:
+    that: postgres_replica_remote_identity.stdout.split('|')[0] == hostvars['database'].postgres_replica_primary_identity.stdout | trim
+- name: Seed only a missing owned bridge standby
+  ansible.builtin.include_tasks: seed.yml
+  when: not postgres_replica_data.stat.exists
+- name: Verify standby physical identity before startup
+  ansible.builtin.include_tasks: identity.yml
+- name: Install loopback standby server configuration
+  ansible.builtin.template:
+    src: postgresql.conf.j2
+    dest: /etc/ultra-postgres-replica/postgresql.conf
+    owner: root
+    group: postgres
+    mode: "0640"
+  register: postgres_replica_config
+- name: Install peer-only standby local authentication
+  ansible.builtin.copy:
+    content: "local all postgres peer\n"
+    dest: /etc/ultra-postgres-replica/pg_hba.conf
+    owner: root
+    group: postgres
+    mode: "0640"
+  register: postgres_replica_hba
+- name: Install empty standby username map
+  ansible.builtin.copy:
+    content: "# No username mappings.\n"
+    dest: /etc/ultra-postgres-replica/pg_ident.conf
+    owner: root
+    group: postgres
+    mode: "0640"
+- name: Install dedicated standby service
+  ansible.builtin.template:
+    src: ultra-postgres-replica.service.j2
+    dest: /etc/systemd/system/ultra-postgres-replica.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: postgres_replica_service
+- name: Start persistent bridge standby after database tunnel
+  ansible.builtin.systemd_service:
+    name: ultra-postgres-replica.service
+    enabled: true
+    daemon_reload: true
+    state: "{{ 'restarted' if (postgres_replica_config.changed or postgres_replica_hba.changed or postgres_replica_service.changed) else 'started' }}"
+- name: Verify live primary to standby WAL replay
+  ansible.builtin.import_tasks: verify.yml

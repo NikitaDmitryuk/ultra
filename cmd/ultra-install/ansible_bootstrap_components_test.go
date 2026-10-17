@@ -25,7 +25,13 @@ func TestBootstrapComponentsResumeAndRollbackGeneration(t *testing.T) {
 	if err := os.Mkdir(directory, 0700); err != nil {
 		t.Fatal(err)
 	}
-	inventory := map[string]any{"all": map[string]any{"children": map[string]any{"exits": map[string]any{"hosts": map[string]any{"exit_1": map[string]any{}, "exit_0": map[string]any{}}}}}}
+	inventory := map[string]any{
+		"all": map[string]any{
+			"children": map[string]any{
+				"exits": map[string]any{"hosts": map[string]any{"exit_1": map[string]any{}, "exit_0": map[string]any{}}},
+			},
+		},
+	}
 	vars := map[string]any{"ultra_lock_directory": root}
 	stub := filepath.Join(root, "ansible-playbook")
 	source := "#!" + python + `
@@ -90,7 +96,11 @@ f=job/'result.json';f.write_text(json.dumps(result));f.chmod(0o600)
 }
 
 func TestBootstrapComponentAliasOrderAndRejection(t *testing.T) {
-	inventory := map[string]any{"all": map[string]any{"children": map[string]any{"exits": map[string]any{"hosts": map[string]any{"exit_10": nil, "exit_2": nil, "exit_0": nil}}}}}
+	inventory := map[string]any{
+		"all": map[string]any{
+			"children": map[string]any{"exits": map[string]any{"hosts": map[string]any{"exit_10": nil, "exit_2": nil, "exit_0": nil}}},
+		},
+	}
 	aliases, err := bootstrapComponentExits(inventory)
 	if err != nil || strings.Join(aliases, ",") != "exit_0,exit_2,exit_10" {
 		t.Fatalf("aliases %v %v", aliases, err)

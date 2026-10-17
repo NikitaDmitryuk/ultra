@@ -17,7 +17,11 @@ import (
 // from an old bootstrap job. Original roles and all other infrastructure source
 // bytes stay intact; only the supervisor and three fixed component plays change.
 // This operator-only API has no caller-selected operation or overlay paths.
-func RunLocalRetryFailedAdaptedBootstrapPostgres(ctx context.Context, inventory, variables map[string]any, directory, source, python, executable string) (Receipt, error) {
+func RunLocalRetryFailedAdaptedBootstrapPostgres(
+	ctx context.Context,
+	inventory, variables map[string]any,
+	directory, source, python, executable string,
+) (Receipt, error) {
 	lease, ok := ctx.Value(operationLeaseKey{}).(*operationLease)
 	if !ok {
 		return Receipt{}, errors.New("retry requires operation lease")
@@ -69,7 +73,8 @@ func verifyOrPrepareAdaptedBootstrapPostgres(inventory, variables map[string]any
 	}
 	frozenRaw, _ := json.Marshal(frozen.Inventory)
 	nextRaw, _ := json.Marshal(inventory)
-	if frozen.Inventory == nil || !bytes.Equal(frozenRaw, nextRaw) || frozen.Variables["ultra_lock_directory"] != variables["ultra_lock_directory"] {
+	if frozen.Inventory == nil || !bytes.Equal(frozenRaw, nextRaw) ||
+		frozen.Variables["ultra_lock_directory"] != variables["ultra_lock_directory"] {
 		return errors.New("bootstrap_adapter_frozen_inventory_changed")
 	}
 	baseExport, err := pinnedBootstrapExporter(source, directory, "bootstrap-postgres", request)
@@ -96,7 +101,15 @@ func verifyOrPrepareAdaptedBootstrapPostgres(inventory, variables map[string]any
 	}
 	overlayRaw, _ := json.Marshal(overlayHashes)
 	overlayHash := sha256.Sum256(overlayRaw)
-	proof, _ := json.Marshal(map[string]any{"schema": 1, "parent_source": source, "parent_request_sha256": job["request_sha256"], "parent_bundle_sha256": hex.EncodeToString(baseHash[:]), "adapter_sha256": hex.EncodeToString(overlayHash[:])})
+	proof, _ := json.Marshal(
+		map[string]any{
+			"schema":                1,
+			"parent_source":         source,
+			"parent_request_sha256": job["request_sha256"],
+			"parent_bundle_sha256":  hex.EncodeToString(baseHash[:]),
+			"adapter_sha256":        hex.EncodeToString(overlayHash[:]),
+		},
+	)
 	if _, statErr := os.Lstat(directory); statErr == nil {
 		saved, readErr := readRetryPrivate(filepath.Join(directory, "bundle.adapter.json"))
 		if readErr != nil || !bytes.Equal(saved, proof) {

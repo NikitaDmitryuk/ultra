@@ -11,14 +11,13 @@ import signal
 import subprocess
 import time
 
-LOCAL_OPERATIONS = {'retain-artifacts', 'resume-schedules', 'rollback-adoption', 'reserve-rolledback-bootstrap', 'resume-adoption', 'lifecycle', 'prepare-controller', 'inspect-upgrade', 'preflight-retry', 'status-automation', 'inspect-release-hosts', 'resume-automation', 'configure-bot', 'configure-exit-operator', 'inspect-bootstrap', 'bootstrap', 'bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'bootstrap-automation', 'verify-bootstrap-automation', 'adopt', 'adopt-topology', 'adopt-replica-tunnels', 'upgrade', 'rollback', 'verify-release', 'commit-release', 'publish-release', 'ingress', 'reconcile', 'restore', 'restore-peer', 'replica', 'domain-cutover', 'backend-domain', 'bridge-migrate', 'bridge-migrate-inspect', 'bridge-migrate-fence', 'bridge-migrate-probe', 'bridge-migrate-rollback-peers'}
-OPERATIONS = {'configure-exit', 'configure-replica', 'stop-replica'} | LOCAL_OPERATIONS
+LOCAL_OPERATIONS = {'wait-upgrade-readiness', 'bootstrap-forward-broker', 'contain-upgrade', 'drain-upgrade-workers', 'retain-artifacts', 'resume-schedules', 'rollback-adoption', 'reserve-rolledback-bootstrap', 'resume-adoption', 'lifecycle', 'prepare-controller', 'inspect-upgrade', 'preflight-retry', 'status-automation', 'inspect-release-hosts', 'resume-automation', 'configure-bot', 'configure-exit-operator', 'inspect-bootstrap', 'bootstrap', 'bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'bootstrap-automation', 'verify-bootstrap-automation', 'adopt', 'adopt-topology', 'upgrade', 'rollback', 'verify-release', 'commit-release', 'publish-release', 'ingress', 'reconcile', 'restore', 'restore-database', 'restore-peer', 'domain-cutover', 'backend-domain', 'upgrade-dns-migration', 'inspect-upgrade-runtime', 'inspect-upgrade-maintenance', 'upgrade-runtime', 'inspect-upgrade-domains', 'upgrade-domain'}
+OPERATIONS = {'configure-exit'} | LOCAL_OPERATIONS
 
 # Operation identities and authorization stay distinct even when implementation
 # is shared. Never derive a playbook path from caller-provided input.
 PLAYBOOKS = {operation: operation for operation in OPERATIONS}
-PLAYBOOKS.update({'configure-replica': 'replica',
-                 'configure-exit-operator': 'configure-exit',
+PLAYBOOKS.update({'configure-exit-operator': 'configure-exit',
                  'domain-cutover': 'ingress'})
 
 
@@ -27,6 +26,24 @@ def operation_playbook(operation):
         return PLAYBOOKS[operation] + '.yml'
     except KeyError:
         raise ValueError('unsupported_operation') from None
+
+
+def bootstrap_ca_name(inventory, alias):
+    """Bind CA receipts to the frozen request policy, never self-reported mode."""
+    host = inventory.get('all', {}).get('children', {}).get('exits', {}).get('hosts', {}).get(alias)
+    if not isinstance(host, dict):
+        raise ValueError('invalid_bootstrap_exit_identity')
+    domain = host.get('ultra_tunnel_domain', '')
+    if not domain:
+        return None
+    spec = host.get('ultra_spec', {})
+    tls = spec.get('splithttp_tls', {})
+    if (not isinstance(domain, str) or spec.get('role') != 'exit'
+            or spec.get('tunnel_tls_provision') != 'acme_letsencrypt'
+            or spec.get('splithttp_host') != domain or tls.get('server_name') != domain
+            or tls.get('omit_sni') or tls.get('sni_mode') == 'omit'):
+        raise ValueError('invalid_bootstrap_ca_policy')
+    return domain
 
 
 def atomic(path, data):
@@ -61,6 +78,41 @@ def write_unsafe_variables(path, value):
         stream.write(unsafe_yaml(value, unsafe_keys=False) + '\n')
         stream.flush()
         os.fsync(stream.fileno())
+
+
+def configure_localhost(inventory):
+    """Keep delegated controller tasks off remote hosts and home-dir temp paths."""
+    if not isinstance(inventory, dict):
+        raise ValueError('invalid_inventory')
+    all_inventory = inventory.get('all')
+    if all_inventory is None and 'all' not in inventory:
+        all_inventory = {}
+        inventory['all'] = all_inventory
+    if not isinstance(all_inventory, dict):
+        raise ValueError('invalid_inventory')
+    hosts = all_inventory.setdefault('hosts', {})
+    if not isinstance(hosts, dict) or 'localhost' in hosts:
+        raise ValueError('controller_host_conflict')
+    hosts['localhost'] = {
+        'ansible_connection': 'local',
+        'ansible_remote_tmp': '/dev/shm',
+    }
+
+
+def playbook_environment(directory, bundle):
+    return {
+        'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+        'HOME': str(directory),
+        'ANSIBLE_CONFIG': str(Path(bundle) / 'ansible.cfg'),
+        # Ansible 2.20 creates module payloads with tempfile.mkdtemp(), which
+        # follows TMPDIR instead of ANSIBLE_LOCAL_TEMP. Keep controller scratch
+        # on tmpfs; /tmp and ~/.ansible/tmp can be quota-limited.
+        'TMPDIR': '/dev/shm',
+        'ANSIBLE_LOCAL_TEMP': '/dev/shm',
+        'ANSIBLE_NOCOLOR': '1',
+        'PYTHONDONTWRITEBYTECODE': '1',
+        'ULTRA_ANSIBLE_DIAGNOSTIC_FILE': str(directory / 'diagnostic.json'),
+    }
 
 
 def load_private(path, raw=False):
@@ -112,41 +164,6 @@ def execute(directory, executable, bundle):
         inventory = request['inventory']
         variables = request['variables']
         variables['ultra_result_file'] = str(directory / 'result.json')
-        atomic(directory / 'inventory.json', inventory)
-        atomic(directory / 'variables.json', variables)
-        write_unsafe_variables(directory / 'variables.yml', variables)
-    elif job['operation'] in ('configure-replica', 'stop-replica'):
-        import ipaddress
-        import shlex
-        if not re.fullmatch(r'[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}', request.get('id', '')):
-            raise ValueError('invalid_replica_identity')
-        slot = 'ultra_' + request['id'].replace('-', '')
-        inventory = {'all': {'children': {'bridges': {'hosts': {'bridge': {'ansible_connection': 'local'}}}}}}
-        variables = {'ultra_replica_slot': slot, 'ultra_result_file': str(directory / 'result.json')}
-        if job['operation'] == 'configure-replica':
-            ipaddress.ip_address(request['host'])
-            if not re.fullmatch(r'[a-z_][a-z0-9_]*', request['user']) or not re.fullmatch(r'[a-f0-9]{48,128}', request['password']):
-                raise ValueError('invalid_replica_credentials')
-            if request['architecture'] not in ('x86_64', 'aarch64') or not 1 <= request['primary_port'] <= 65535:
-                raise ValueError('invalid_replica_layout')
-            for name in ('identity', 'known_hosts'):
-                if hashlib.sha256(load_private(directory / name, raw=True)).hexdigest() != job[name + '_sha256']:
-                    raise ValueError('ssh_identity_changed')
-            inventory['all']['children']['replicas'] = {'hosts': {'replica': {
-                'ansible_host': request['host'], 'ansible_user': 'root',
-                'ansible_ssh_private_key_file': str(directory / 'identity'),
-                'ansible_ssh_args': '-F /dev/null -o ControlMaster=no -o ControlPath=none',
-                'ansible_ssh_common_args': '-o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o IdentitiesOnly=yes -o UserKnownHostsFile=' + shlex.quote(str(directory / 'known_hosts')),
-            }}}
-            for key in ('user', 'password', 'primary_port', 'architecture', 'connections', 'workers', 'prepared', 'locks', 'senders'):
-                variables['ultra_replica_' + key] = request[key]
-            variables['ultra_replica_required_bytes'] = request['required_bytes']
-            variables['ultra_replica_address'] = request['host']
-            variables['ultra_replica_identity_source'] = str(directory / 'identity')
-            variables['ultra_replica_known_hosts_source'] = str(directory / 'known_hosts')
-        atomic(directory / 'inventory.json', inventory)
-        atomic(directory / 'variables.json', variables)
-        write_unsafe_variables(directory / 'variables.yml', variables)
     else:
         if request['spec']['role'] != 'exit':
             raise ValueError('exit_spec_required')
@@ -171,12 +188,13 @@ def execute(directory, executable, bundle):
         variables = {'ultra_spec': request['spec'], 'ultra_bridge_ipv4': request['bridge_ipv4'],
                      'ultra_relay_source': str(directory / 'ultra-relay'),
                      'ultra_relay_sha256': job['binary_sha256'], 'ultra_result_file': str(directory / 'result.json')}
-        atomic(directory / 'inventory.json', inventory)
-        atomic(directory / 'variables.json', variables)
-        write_unsafe_variables(directory / 'variables.yml', variables)
         binary = directory / 'ultra-relay'
         if binary.is_symlink() or hashlib.sha256(binary.read_bytes()).hexdigest() != job['binary_sha256']:
             raise ValueError('binary_changed')
+    configure_localhost(inventory)
+    atomic(directory / 'inventory.json', inventory)
+    atomic(directory / 'variables.json', variables)
+    write_unsafe_variables(directory / 'variables.yml', variables)
     write_unsafe_variables(directory / 'inventory.yml', inventory)
     receipt = directory / 'receipt.json'
     if receipt.exists():
@@ -191,35 +209,31 @@ def execute(directory, executable, bundle):
     result_path.unlink(missing_ok=True)
     state = {**job, 'state': 'running', 'started_at': int(time.time())}
     atomic(receipt, state)
-    environment = {
-        'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-        'HOME': str(directory),
-        'ANSIBLE_CONFIG': str(Path(bundle) / 'ansible.cfg'),
-        'ANSIBLE_LOCAL_TEMP': str(directory / 'ansible-tmp'),
-        'ANSIBLE_NOCOLOR': '1',
-        'PYTHONDONTWRITEBYTECODE': '1',
-        'ULTRA_ANSIBLE_DIAGNOSTIC_FILE': str(directory / 'diagnostic.json'),
-    }
+    environment = playbook_environment(directory, bundle)
     try:
         exit_code = run_playbook([
             str(executable), '-i', str(directory / 'inventory.yml'),
             str(Path(bundle) / 'playbooks' / operation_playbook(job['operation'])),
             '--extra-vars', '@' + str(directory / 'variables.yml'),
-        ], bundle, environment)
+        ], bundle, environment, timeout=700 if job['operation'] == 'wait-upgrade-readiness' else 900)
         if exit_code:
             if (directory / 'diagnostic.json').exists():
                 state['diagnostic'] = load_private(directory / 'diagnostic.json')
             state.update(state='failed', code='ansible_failed', exit_code=exit_code)
         else:
             result = load_private(result_path)
-            if job['operation'] in ('configure-exit', 'bootstrap-exit') and not re.fullmatch(r'[a-f0-9]{64}', result.get('cert_pin', '')):
+            ca_name = (bootstrap_ca_name(inventory, variables.get('ultra_bootstrap_exit_host'))
+                       if job['operation'] == 'bootstrap-exit' else None)
+            if ca_name is not None:
+                if ('cert_pin' in result or result.get('tls_auth') != 'ca'
+                        or result.get('tls_server_name') != ca_name):
+                    raise ValueError('invalid_bootstrap_ca_receipt')
+            elif job['operation'] in ('configure-exit', 'bootstrap-exit') and not re.fullmatch(r'[a-f0-9]{64}', result.get('cert_pin', '')):
                 raise ValueError('invalid_certificate_pin')
-            if job['operation'] in ('bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'adopt-replica-tunnels') and result.get('verified') is not True:
+            if job['operation'] in ('bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge') and result.get('verified') is not True:
                 raise ValueError('invalid_bootstrap_component_acknowledgement')
             if job['operation'] == 'bootstrap-exit' and result.get('exit_host') != variables.get('ultra_bootstrap_exit_host'):
                 raise ValueError('invalid_bootstrap_exit_identity')
-            if job['operation'] in ('configure-replica', 'stop-replica') and result.get('verified') is not True:
-                raise ValueError('invalid_replica_acknowledgement')
             state.update(state='succeeded', result=result)
     except InterruptedError:
         # Operator/service cancellation is resumable, unlike a terminal timeout.

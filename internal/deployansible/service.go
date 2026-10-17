@@ -22,12 +22,12 @@ import (
 type Client struct{ Socket string }
 type Message struct {
 	leaseInputs []*os.File
-	Action      string          `json:"action"`
-	ID          string          `json:"id"`
-	Binary      string          `json:"binary,omitempty"`
-	Request     *ExitRequest    `json:"request,omitempty"`
-	Replica     *ReplicaRequest `json:"replica,omitempty"`
-	NodeID      string          `json:"node_id,omitempty"`
+	Action      string       `json:"action"`
+	ID          string       `json:"id"`
+	NextID      string       `json:"next_id,omitempty"`
+	Binary      string       `json:"binary,omitempty"`
+	Request     *ExitRequest `json:"request,omitempty"`
+	NodeID      string       `json:"node_id,omitempty"`
 }
 type Response struct {
 	leaseOutputs []*os.File
@@ -72,16 +72,6 @@ func (c Client) exchange(ctx context.Context, message Message) (Response, error)
 		}
 		defer closeInputs(inputs)
 	}
-	if message.Action == "submit-replica" {
-		if message.Replica == nil {
-			return Response{}, errors.New("replica request required")
-		}
-		inputs, err = openReplicaInputs(*message.Replica)
-		if err != nil {
-			return Response{}, err
-		}
-		defer closeInputs(inputs)
-	}
 	data, err := json.Marshal(message)
 	if err != nil || len(data) > 1<<20 {
 		return Response{}, errors.New("invalid controller request")
@@ -100,6 +90,10 @@ func (c Client) exchange(ctx context.Context, message Message) (Response, error)
 	}
 	if response.Code != "" {
 		closeInputs(outputs)
+		if response.Diagnostic.Code != "" {
+			return response, fmt.Errorf("%s (%s: %s; %s)", response.Code,
+				response.Diagnostic.Node, response.Diagnostic.Stage, response.Diagnostic.Code)
+		}
 		return response, fmt.Errorf("%s (%s: %s)", response.Code, response.Diagnostic.Node, response.Diagnostic.Stage)
 	}
 	if (message.Action == "lease-attach" && len(outputs) != 1) || (message.Action != "lease-attach" && len(outputs) != 0) {
@@ -113,6 +107,23 @@ func (c Client) exchange(ctx context.Context, message Message) (Response, error)
 func (c Client) Ready(ctx context.Context) error {
 	_, err := c.exchange(ctx, Message{Action: "ready"})
 	return err
+}
+
+// ConfigurationTerminal reads the durable receipt, including terminal failures
+// whose diagnostic code makes exchange return an error alongside the response.
+func (c Client) ConfigurationTerminal(ctx context.Context, id string) (bool, error) {
+	response, err := c.exchange(ctx, Message{Action: "status", ID: id})
+	switch response.State {
+	case "succeeded", "failed":
+		return true, nil
+	case "queued", "running":
+		return false, err
+	default:
+		if err != nil {
+			return false, err
+		}
+		return false, errors.New("configuration receipt unavailable")
+	}
 }
 
 func (c Client) ConfigureExit(ctx context.Context, id, binary string, request ExitRequest) (Result, error) {
@@ -304,7 +315,9 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 	if err = decoder.Decode(&message); err != nil {
 		return Response{Code: "invalid_request"}
 	}
-	if message.Action != "submit" && message.Action != "submit-replica" && message.Action != "lease-applying" && message.Action != "lease-resume" && len(inputs) != 0 {
+	if message.Action != "submit" && message.Action != "lease-applying" && message.Action != "lease-resume" &&
+		message.Action != "lease-supersede" &&
+		len(inputs) != 0 {
 		return Response{Code: "unexpected_submitted_inputs"}
 	}
 	if message.Action == "lifecycle-status" {
@@ -317,6 +330,19 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 		return Response{State: "ready"}
 	}
 	switch message.Action {
+	case "lease-supersede":
+		if uid != 0 {
+			return Response{Code: "controller_access_denied"}
+		}
+		if len(inputs) != 1 {
+			return Response{Code: "unexpected_submitted_inputs"}
+		}
+		return gate.supersede(message.ID, message.NextID, inputs[0])
+	case "lease-retire":
+		if uid != 0 {
+			return Response{Code: "controller_access_denied"}
+		}
+		return gate.retire(message.ID)
 	case "lease-attach":
 		if uid != 0 {
 			return Response{Code: "controller_access_denied"}
@@ -344,20 +370,8 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 	}
 	directory := filepath.Join(state, message.ID)
 	switch message.Action {
-	case "submit-replica":
-		if message.Replica == nil || len(inputs) != 2 || message.Replica.ValidatePolicy() != nil {
-			return Response{Code: "invalid_replica_request"}
-		}
-		if err = prepareReplica(directory, "configure-replica", *message.Replica, inputs); err != nil {
-			return Response{Code: "replica_preparation_failed"}
-		}
-	case "stop-replica":
-		if !jobID.MatchString(message.NodeID) {
-			return Response{Code: "invalid_replica_request"}
-		}
-		if err = prepareReplica(directory, "stop-replica", map[string]string{"id": message.NodeID}, nil); err != nil {
-			return Response{Code: "replica_preparation_failed"}
-		}
+	case "submit-replica", "stop-replica":
+		return Response{Code: "replication_no_longer_supported"}
 	case "submit":
 		if message.Request == nil || len(inputs) != 3 {
 			return Response{Code: "exit_request_required"}

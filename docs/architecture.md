@@ -12,6 +12,17 @@
 
 ## Компоненты и потоки
 
+В каждой установке главный сервер — `bridge`: на нём находятся публичный VPN-вход,
+управление маршрутизацией и независимый исполнитель установки. `exit` всегда
+остаётся отдельным узлом выхода трафика; он не становится главным сервером из-за
+порядка подключения, SSH-маршрута или своего положения в конфигурации. Разделение
+ролей задаётся планом установки и проверяется по коду [плана](../internal/installplan/render.go)
+и [исполнителя](../cmd/ultra-install/plan_apply.go).
+Оператор подключается к `bridge`; при управляемых операциях сам bridge-контроллер
+открывает Ansible SSH-соединения к exit. Exit не служит промежуточным SSH-хостом
+для входа оператора на bridge. Источник: [контроллер Ansible](../deploy/ansible/roles/controller)
+и [исполнитель заданий](../internal/deployansible/service.go).
+
 Подписка по умолчанию выдаёт VLESS URI. Явный `format=happ` включает экспериментальные
 JSON-профили с клиентским выбором входа;
 текущая публикация задаётся статическим `subscription_bridges` в spec: REALITY либо XHTTP/TLS. Синхронизация
@@ -36,15 +47,23 @@ JSON-профили с клиентским выбором входа;
 flowchart LR
     Client[Клиент] --> Bridge[ultra-relay: bridge / Xray]
     Bridge --> Exit[ultra-relay: exit / Xray]
+    Operator[Оператор] -->|SSH| Bridge
+    Bridge -.->|Ansible SSH для управления| Exit
     Bridge --> Direct[Прямой выход]
     Telegram[Telegram / Mini App] --> Bot[ultra-bot]
     Bot --> API[Admin API bridge]
     API --> Managers[Менеджеры пользователей и exit]
     Managers --> DB[(PostgreSQL)]
+    DB -.->|async physical replication| BridgeReplica[(PostgreSQL standby)]
     Managers --> Config[Сборка конфигурации]
     Config --> Bridge
     Bot --> DB
 ```
+
+PostgreSQL primary работает на отдельном `database`; ограниченный async standby
+работает на `bridge` в отдельном кластере. Relay и bot продолжают использовать
+primary через bridge SSH-туннель, потому что запуск relay применяет миграции.
+Реплика не продвигается автоматически и не заменяет зашифрованные backups.
 
 Схема показывает основные отношения, а не все вызовы. API Mini App обращается к Admin API
 для управления пользователями и exit, а состояние администраторов и уведомлений бот
@@ -61,8 +80,12 @@ flowchart LR
 - `internal/auth` управляет пользователями и кешем через интерфейс `DBUserRepo`.
   Интерфейс объявлен здесь, чтобы не создавать цикл `auth → db → auth`.
   См. [DBManager](../internal/auth/dbmanager.go).
-- `internal/db` реализует хранение, преобразования моделей и миграции; SQLC генерирует
-  низкоуровневые запросы. См. [подключение БД](../internal/db/db.go) и [конфигурацию sqlc](../sqlc.yaml).
+- `internal/db` реализует хранение, преобразования моделей и миграции. SQLC генерирует
+  PostgreSQL-запросы; обычный cloud CRUD использует GORM через тот же pgx pool.
+  Нумерованные SQL-миграции остаются единственным владельцем схемы; учёт трафика
+  и транзакционные блокировки выполняются через pgx/SQLC. См.
+  [подключение БД](../internal/db/db.go), [адаптер ORM](../internal/db/orm.go)
+  и [правила разработки](development.md#postgresql-sqlc-и-orm).
 - `internal/exits` управляет списком и выбором exit по health/priority. См.
   [менеджер](../internal/exits/manager.go) и [селектор](../internal/exits/selector.go).
 - `internal/installplan` валидирует и рендерит план; `cmd/ultra-install` передаёт установку
@@ -143,7 +166,11 @@ Mini App проверяет Telegram initData и права администра
 Бот проверяет Telegram, relay применяет изменения пользователей к ядру. Сохраняемый
 номер изменения защищает подтверждение от конкурентной записи.
 [Worker Vultr](vultr.md) работает на bridge; новые локации публикуются после проверки.
-[Реплики PostgreSQL](replication.md) служат ручному восстановлению, запись остаётся на bridge.
+PostgreSQL размещается на отдельном DB-сервере. Bridge подключается через
+закреплённый SSH-туннель с loopback-портом 25432; отдельный standby-кластер
+PostgreSQL на bridge принимает физическую репликацию. Bootstrap создаёт БД и
+проверяет поток primary → standby, миграции применяет relay на primary. См.
+[контракт развёртывания](automation.md).
 
 ## Управляемый HTTPS VPN-вход
 

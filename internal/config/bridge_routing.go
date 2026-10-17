@@ -299,5 +299,12 @@ func BridgeNeedsBlockOutbound(spec *Spec) bool {
 // Gemini and its authentication/static endpoints need a consistent foreign egress.
 // Explicit domain_direct rules still take precedence.
 func geminiExitDomains() []string {
-	return []string{"domain:gemini.google.com", "domain:aistudio.google.com", "domain:generativelanguage.googleapis.com", "domain:accounts.google.com", "domain:googleusercontent.com", "domain:gstatic.com"}
+	return []string{
+		"domain:gemini.google.com",
+		"domain:aistudio.google.com",
+		"domain:generativelanguage.googleapis.com",
+		"domain:accounts.google.com",
+		"domain:googleusercontent.com",
+		"domain:gstatic.com",
+	}
 }

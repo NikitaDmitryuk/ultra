@@ -30,6 +30,9 @@ type Operation struct {
 	HTTPStatus                int       `json:"http_status,omitempty"`
 	ReplicationState          string    `json:"replication_state,omitempty"`
 	InstallAttempt            uint64    `json:"install_attempt,omitempty"`
+	Reinstall                 bool      `json:"reinstall,omitempty"`
+	ReinstallJobID            string    `json:"reinstall_job_id,omitempty"`
+	ReinstallTarget           string    `json:"reinstall_target,omitempty"`
 	ID                        string    `json:"id"`
 	Offer                     Offer     `json:"offer"`
 	State                     string    `json:"state"`
@@ -134,7 +137,15 @@ func (s *Service) Quote(ctx context.Context, actor int64, region, plan, replace 
 	if !available {
 		return Offer{}, APIError{Code: "region_unavailable"}
 	}
-	offer := Offer{ID: uuid.NewString(), Actor: actor, Region: selected, Plan: tariff, Price: price, ExpiresAt: s.now().Add(5 * time.Minute), ReplaceID: replace}
+	offer := Offer{
+		ID:        uuid.NewString(),
+		Actor:     actor,
+		Region:    selected,
+		Plan:      tariff,
+		Price:     price,
+		ExpiresAt: s.now().Add(5 * time.Minute),
+		ReplaceID: replace,
+	}
 	return offer, s.Store.SaveOffer(ctx, offer)
 }
 func (s *Service) checkOffer(ctx context.Context, o Offer) error {
@@ -219,13 +230,25 @@ func (s *Service) Action(ctx context.Context, actor int64, id, action string) er
 		return e
 	}
 	switch action {
+	case "reinstall":
+		// Recovery is limited to the staged, unpublished identity that failed
+		// verification. Ready nodes use the coordinated fleet installer.
+		if s.IsIngress(op) || op.State != "failed" || op.Phase != "verify" || op.InstanceID == "" || op.ExitID != op.ID ||
+			op.InstallAttempt == ^uint64(0) {
+			return ErrConflict
+		}
+		op.InstallAttempt++
+		op.Reinstall = true
+		op.Phase = "install"
+		op.State = "pending"
+		op.Error, op.ErrorMessage, op.HTTPStatus = "", "", 0
 	case "retry":
 		if op.State != "failed" && op.State != "unknown" {
 			return ErrConflict
 		}
-		// Only an explicit retry creates another installation attempt. Keep the
-		// purchase and existing VM stable, and persist before the worker sees it.
-		if op.Phase == "install" {
+		// An outstanding target reservation retains its attempt on retry, even
+		// before job binding. Otherwise an explicit retry creates a generation.
+		if op.Phase == "install" && op.ReinstallTarget == "" {
 			if op.InstallAttempt == ^uint64(0) {
 				return ErrConflict
 			}
@@ -247,6 +270,17 @@ func (s *Service) Action(ctx context.Context, actor int64, id, action string) er
 		}
 		if op.InstanceID == "" {
 			return ErrConflict
+		}
+		if op.ReinstallTarget != "" {
+			releaser, ok := s.Provisioner.(interface {
+				ReleaseReinstall(context.Context, *Operation) error
+			})
+			if !ok {
+				return ErrConflict
+			}
+			if err := releaser.ReleaseReinstall(ctx, &op); err != nil {
+				return err
+			}
 		}
 		op.State = "pending"
 		op.Phase = "unpublish"

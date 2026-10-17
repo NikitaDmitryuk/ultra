@@ -1,0 +1,52 @@
+- name: Ensure root-only subscription key staging directory exists
+  ansible.builtin.file:
+    path: /var/lib/ultra-ansible/subscription-keys
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+- name: Stage subscription keyring for the privileged installer module
+  ansible.builtin.copy:
+    src: "{{ ultra_upgrade_subscription_key_source }}"
+    dest: /var/lib/ultra-ansible/subscription-keys/incoming.json
+    owner: root
+    group: root
+    mode: "0600"
+    diff: false
+  no_log: true
+- name: Ensure relay automation directory exists
+  ansible.builtin.file:
+    path: /var/lib/ultra-relay/automation
+    state: directory
+    owner: ultra-relay
+    group: ultra-relay
+    mode: "0700"
+- name: Install subscription keyring with ownership and content validation
+  ultra_subscription_keys:
+    src: /var/lib/ultra-ansible/subscription-keys/incoming.json
+    dest: /var/lib/ultra-relay/automation/subscription-keys.json
+  no_log: true
+- name: Ensure relay service drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/ultra-relay.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+- name: Configure subscription keyring path for the relay service
+  ansible.builtin.template:
+    src: subscription.conf.j2
+    dest: /etc/systemd/system/ultra-relay.service.d/subscription.conf
+    owner: root
+    group: root
+    mode: "0644"
+    diff: false
+  no_log: true
+- name: Load the subscription keyring drop-in into systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+- name: Remove temporary root subscription keyring copy
+  ansible.builtin.file:
+    path: /var/lib/ultra-ansible/subscription-keys/incoming.json
+    state: absent
+  no_log: true

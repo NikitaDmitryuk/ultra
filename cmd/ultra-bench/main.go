@@ -40,7 +40,12 @@ func measure(ctx context.Context, c *http.Client, target string, total *atomic.I
 	s := sample{Target: parsed.Hostname() + parsed.Path}
 	start := time.Now()
 	var dns, connect, tlsDone, first atomic.Int64
-	trace := &httptrace.ClientTrace{TLSHandshakeDone: func(tls.ConnectionState, error) { tlsDone.Store(time.Since(start).Milliseconds()) }, DNSDone: func(httptrace.DNSDoneInfo) { dns.Store(time.Since(start).Milliseconds()) }, ConnectDone: func(_, _ string, _ error) { connect.Store(time.Since(start).Milliseconds()) }, GotFirstResponseByte: func() { first.Store(time.Since(start).Milliseconds()) }}
+	trace := &httptrace.ClientTrace{
+		TLSHandshakeDone:     func(tls.ConnectionState, error) { tlsDone.Store(time.Since(start).Milliseconds()) },
+		DNSDone:              func(httptrace.DNSDoneInfo) { dns.Store(time.Since(start).Milliseconds()) },
+		ConnectDone:          func(_, _ string, _ error) { connect.Store(time.Since(start).Milliseconds()) },
+		GotFirstResponseByte: func() { first.Store(time.Since(start).Milliseconds()) },
+	}
 	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), "GET", target, nil)
 	if err == nil {
 		req.Header.Set("Accept-Encoding", "identity")
@@ -77,7 +82,11 @@ func measure(ctx context.Context, c *http.Client, target string, total *atomic.I
 	return s
 }
 func run() error {
-	targets := flag.String("urls", "https://httpbingo.org/bytes/65536,https://speed.cloudflare.com/__down?bytes=65536,https://gemini.google.com/", "comma-separated HTTPS GET targets")
+	targets := flag.String(
+		"urls",
+		"https://httpbingo.org/bytes/65536,https://speed.cloudflare.com/__down?bytes=65536,https://gemini.google.com/",
+		"comma-separated HTTPS GET targets",
+	)
 	proxyURL := flag.String("proxy", "", "explicit http:// or socks5h:// proxy, empty means direct")
 	repeats := flag.Int("repeat", 5, "repetitions")
 	streams := flag.Int("streams", 1, "parallel streams (1 or 4)")
@@ -93,7 +102,12 @@ func run() error {
 			return fmt.Errorf("targets must be HTTPS URLs without credentials")
 		}
 	}
-	tr := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 3 * time.Second}).DialContext, TLSHandshakeTimeout: 5 * time.Second, DisableKeepAlives: true}
+	tr := &http.Transport{
+		Proxy:               nil,
+		DialContext:         (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
+		TLSHandshakeTimeout: 5 * time.Second,
+		DisableKeepAlives:   true,
+	}
 	if *proxyURL != "" {
 		u, err := url.Parse(*proxyURL)
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "socks5" && u.Scheme != "socks5h") {
@@ -166,7 +180,17 @@ func run() error {
 			first = append(first, s.FirstMS)
 			connect = append(connect, s.ConnectMS)
 		}
-		emit(map[string]any{"summary": target, "requests": len(entries), "error_fraction": float64(errors) / float64(len(entries)), "ttfb_median_ms": percentile(first, .5), "ttfb_p95_ms": percentile(first, .95), "connect_median_ms": percentile(connect, .5), "connect_p95_ms": percentile(connect, .95)})
+		emit(
+			map[string]any{
+				"summary":           target,
+				"requests":          len(entries),
+				"error_fraction":    float64(errors) / float64(len(entries)),
+				"ttfb_median_ms":    percentile(first, .5),
+				"ttfb_p95_ms":       percentile(first, .95),
+				"connect_median_ms": percentile(connect, .5),
+				"connect_p95_ms":    percentile(connect, .95),
+			},
+		)
 	}
 	if failures.Load() > 0 {
 		return fmt.Errorf("%d unsuccessful transfers", failures.Load())

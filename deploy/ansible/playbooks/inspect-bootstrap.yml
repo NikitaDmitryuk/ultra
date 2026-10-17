@@ -1,6 +1,6 @@
 ---
 - name: Inspect bootstrap targets without mutation
-  hosts: all
+  hosts: all:!localhost
   gather_facts: false
   any_errors_fatal: true
   tasks:

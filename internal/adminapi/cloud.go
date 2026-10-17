@@ -104,7 +104,10 @@ func cloudResult(w http.ResponseWriter, value any, e error) {
 	if e != nil {
 		status := 503
 		switch {
-		case errors.Is(e, cloud.ErrIngressInUse), errors.Is(e, cloud.ErrLimit), errors.Is(e, cloud.ErrConflict), errors.Is(e, cloud.ErrPriceChanged):
+		case errors.Is(e, cloud.ErrIngressInUse),
+			errors.Is(e, cloud.ErrLimit),
+			errors.Is(e, cloud.ErrConflict),
+			errors.Is(e, cloud.ErrPriceChanged):
 			status = 409
 		}
 		w.Header().Set("Content-Type", "application/json")

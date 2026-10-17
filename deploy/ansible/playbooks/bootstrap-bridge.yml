@@ -20,7 +20,7 @@
           - item.pinned_peer_cert_sha256 == ultra_bootstrap_pins[ultra_exit_hosts[item.name]]
         fail_msg: adopted_exit_certificate_pin_mismatch
       loop: "{{ ultra_bootstrap_entries }}"
-      when: ultra_preserve_runtime | default(false) | bool
+      when: (ultra_preserve_runtime | default(false) | bool) and ultra_spec.tunnel_tls_provision != 'acme_letsencrypt'
       no_log: true
     - name: Require the frozen database topology before bridge activation
       ultra_adopt_topology:
@@ -34,7 +34,7 @@
           - ultra_bootstrap_pins[ultra_exit_hosts[item.name]] is match('^[a-f0-9]{64}$')
       loop: "{{ ultra_bootstrap_entries }}"
       no_log: true
-      when: not (ultra_preserve_runtime | default(false) | bool)
+      when: not (ultra_preserve_runtime | default(false) | bool) and ultra_spec.tunnel_tls_provision != 'acme_letsencrypt'
     - name: Start pinned bootstrap assembly
       ansible.builtin.set_fact:
         bootstrap_pinned: "{{ ultra_bootstrap_entries if ultra_preserve_runtime | default(false) | bool else [] }}"
@@ -46,18 +46,46 @@
              ultra_bootstrap_pins[ultra_exit_hosts[item.name]]})] }}
       loop: "{{ ultra_bootstrap_entries }}"
       no_log: true
-      when: not (ultra_preserve_runtime | default(false) | bool)
+      when: not (ultra_preserve_runtime | default(false) | bool) and ultra_spec.tunnel_tls_provision != 'acme_letsencrypt'
+    - name: Preserve CA hostname authentication without distributing leaf pins
+      ansible.builtin.set_fact:
+        bootstrap_pinned: "{{ ultra_bootstrap_entries }}"
+      no_log: true
+      when: ultra_spec.tunnel_tls_provision == 'acme_letsencrypt'
     - name: Preserve the primary exit certificate pin
       ansible.builtin.set_fact:
         ultra_spec: "{{ ultra_spec | combine({'exit': ultra_spec.exit | combine({'pinned_peer_cert_sha256': bootstrap_pinned[0].pinned_peer_cert_sha256})}) }}"
       no_log: true
-      when: not (ultra_preserve_runtime | default(false) | bool)
+      when: not (ultra_preserve_runtime | default(false) | bool) and ultra_spec.tunnel_tls_provision != 'acme_letsencrypt'
+    - name: Reconcile uniquely matched imported exit identities before bridge activation
+      ultra_dump_exit_identity:
+        database: "{{ hostvars['database'].ultra_database_import_db }}"
+        user: "{{ hostvars['database'].ultra_database_import_user }}"
+        password: "{{ hostvars['database'].ultra_database_import_password }}"
+        archive_sha256: "{{ hostvars['database'].ultra_database_import_sha256 }}"
+        entries: "{{ bootstrap_pinned }}"
+        tls_policy: "{{ 'ca' if ultra_spec.tunnel_tls_provision == 'acme_letsencrypt' else 'pin' }}"
+      delegate_to: database
+      when:
+        - "'database' in hostvars"
+        - hostvars['database'].ultra_database_import_sha256 | default('') | length > 0
+        - not (ultra_preserve_runtime | default(false) | bool)
   roles:
     - host
     - role: geo
       when: ultra_geo_enabled | default(false) | bool
     - relay
   tasks:
+    - name: Install configured subscription keyring
+      ansible.builtin.include_role:
+        name: upgrade_subscription
+      when: ultra_upgrade_subscription_key_source | default('') | length > 0
+    - name: Restart relay with configured subscription keyring
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: restarted
+        daemon_reload: true
+      when: ultra_upgrade_subscription_key_source | default('') | length > 0
     - name: Install pinned bootstrap routes
       ansible.builtin.copy:
         content: "{{ bootstrap_pinned | to_nice_json(preprocess_unsafe=False) }}"

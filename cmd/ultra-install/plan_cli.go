@@ -31,6 +31,8 @@ func handlePlanSubcommand(args []string) bool {
 		runDeploymentConfigRewrite(args[1:])
 	case "release-probe":
 		runReleaseProbeCommand(args[1:])
+	case "runtime-probe":
+		runRuntimeProbeCommand(args[1:])
 	case "ansible-lease":
 		runAnsibleLease(args[1:])
 	case "ansible-run":
@@ -45,6 +47,8 @@ func handlePlanSubcommand(args []string) bool {
 		runAnsibleExit(args[1:])
 	case "bootstrap", "status", "upgrade":
 		runAutomationCommand(args[0], args[1:])
+	case "operator-upgrade":
+		runOperatorUpgradeCommand(args[1:])
 	case "domain-cutover":
 		runDomainCutoverCommand(args[1:])
 	case "backend-domain":

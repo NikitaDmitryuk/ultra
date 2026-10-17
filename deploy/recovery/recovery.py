@@ -17,8 +17,10 @@ import tarfile
 import tempfile
 import time
 import uuid
+import db_connection
 
-MAX_BYTES = 512 * 1024 * 1024
+MAX_BYTES = 512 * 1024 * 1024  # State plus DB, and each encrypted object.
+MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024  # Expanded artifact, including manifest.
 MAX_FILES = 20000
 NAME = re.compile(r'(?:backup-[0-9]{10}-[a-f0-9]{32}|artifact-[a-f0-9]{64})\.age$')
 SOURCE = re.compile(r'[a-zA-Z0-9_-]{1,64}$')
@@ -29,6 +31,13 @@ EXCLUDED_FILES = {
     Path('/var/lib/ultra-relay/recovery-reconcile-status.json'),
 }
 EXCLUDED_DIRECTORIES = {Path('/var/lib/ultra-relay/releases'), Path('/var/lib/ultra-relay/candidates')}
+# Manual deployment keeps its subscription probe in retryable operation inputs
+# until the cutover completes. Those inputs are selected state, but the URL is
+# an ephemeral credential and must not be copied into recovery bundles.
+EPHEMERAL_PROBE_FILE = 'subscription-probe-url'
+PROBE_INPUT_FILES = {'request.json', 'variables.json', 'vars.yml', 'variables.yml'}
+PROBE_VARIABLE_NAME = b'ultra_cutover_subscription_url'
+PROBE_VARIABLE_FIELD = re.compile(rb'(?<![A-Za-z0-9_])' + PROBE_VARIABLE_NAME + rb'(?![A-Za-z0-9_])["\']?[ \t]{0,16}:')
 # Operation-pinned code and candidate rollback code must survive recovery, but
 # their bytes belong in the versioned artifact rather than every database dump.
 VERSIONED_STATE_PATHS = (
@@ -113,7 +122,7 @@ def repository(path, source, initialize=False):
     return path
 
 
-def collect(paths, excluded_paths=()):
+def collect(paths, excluded_paths=(), *, max_bytes=None):
     """Dereference only selected files; sockets/devices and active runtime DB are excluded."""
     result = {}
     excluded_paths = {Path(path) for path in excluded_paths}
@@ -127,6 +136,8 @@ def collect(paths, excluded_paths=()):
             raise ValueError('required state missing')
         candidates = [path] if path.is_file() else sorted(path.rglob('*'))
         for candidate in candidates:
+            if contains_ephemeral_probe(candidate):
+                continue
             if candidate in EXCLUDED_FILES:
                 continue  # Derived cache and health receipts are recomputed after restore.
             if any(p == candidate or p in candidate.parents for p in excluded_paths):
@@ -143,9 +154,31 @@ def collect(paths, excluded_paths=()):
             safe_name(name)
             result[name] = {'sha256': digest(candidate), 'mode': candidate.stat().st_mode & 0o777,
                             'bytes': candidate.stat().st_size}
-    if len(result) > MAX_FILES or sum(row['bytes'] for row in result.values()) > MAX_BYTES:
+    if len(result) > MAX_FILES or sum(row['bytes'] for row in result.values()) > (MAX_BYTES if max_bytes is None else max_bytes):
         raise ValueError('state exceeds backup limits')
     return result
+
+
+def contains_ephemeral_probe(path):
+    """Exclude the staged probe URL and serialized operation inputs carrying it.
+
+    The exact URL is never materialized or logged here; only the variable name
+    is searched. Other operation files and unrelated state remain recoverable.
+    """
+    if path.name == EPHEMERAL_PROBE_FILE:
+        return True
+    if path.name not in PROBE_INPUT_FILES or not path.is_file():
+        return False
+    with path.open('rb') as stream:
+        overlap = b''
+        while True:
+            chunk = stream.read(64 * 1024)
+            if not chunk:
+                return False
+            data = overlap + chunk
+            if PROBE_VARIABLE_FIELD.search(data):
+                return True
+            overlap = data[-(len(PROBE_VARIABLE_NAME) + 16):]
 
 
 def capture_artifact_paths(config):
@@ -168,7 +201,8 @@ def capture_artifact_paths(config):
 
 
 def pack(destination, metadata, files):
-    if len(files) > MAX_FILES or sum(Path(p).stat().st_size for p in files.values()) > MAX_BYTES:
+    max_bytes = MAX_ARTIFACT_BYTES if metadata.get('kind') == 'artifact' else MAX_BYTES
+    if len(files) > MAX_FILES or sum(Path(p).stat().st_size for p in files.values()) > max_bytes:
         raise ValueError('bundle exceeds backup limits')
     manifest = dict(metadata, format=1, files={})
     with tarfile.open(destination, 'w:gz', dereference=True) as archive:
@@ -184,19 +218,22 @@ def pack(destination, metadata, files):
             with open(path, 'rb') as stream:
                 archive.addfile(info, stream)
         payload = json.dumps(manifest, sort_keys=True).encode()
+        if sum(row['bytes'] for row in manifest['files'].values()) + len(payload) > max_bytes:
+            raise ValueError('bundle exceeds backup limits')
         info = tarfile.TarInfo('manifest.json')
         info.mode, info.size = 0o600, len(payload)
         archive.addfile(info, io.BytesIO(payload))
     return manifest
 
 
-def inspect_bundle(path):
+def inspect_bundle(path, *, max_bytes=None):
+    max_bytes = MAX_BYTES if max_bytes is None else max_bytes
     with tarfile.open(path) as archive:
         members, total = [], 0
         for item in archive:
             total += item.size
             members.append(item)
-            if len(members) > MAX_FILES + 2 or total > MAX_BYTES:
+            if len(members) > MAX_FILES + 2 or total > max_bytes:
                 raise ValueError('archive exceeds limits')
         seen = set()
         for item in members:
@@ -218,8 +255,8 @@ def inspect_bundle(path):
         return manifest
 
 
-def unpack(path, target):
-    manifest = inspect_bundle(path)
+def unpack(path, target, *, max_bytes=None):
+    manifest = inspect_bundle(path, max_bytes=max_bytes)
     target = Path(target)
     if target.is_symlink() or (target.exists() and any(target.iterdir())):
         raise ValueError('restore requires an empty staging directory')
@@ -251,7 +288,13 @@ def ssh(config, destination, command, **kwargs):
     return run(args + [host, shlex.join(command)], **kwargs)
 
 
+def validate_ciphertext(path):
+    if not 0 < Path(path).stat().st_size <= MAX_BYTES:
+        raise ValueError('encrypted backup exceeds bounds')
+
+
 def deliver(config, destination, source, encrypted, snapshot):
+    validate_ciphertext(encrypted)
     command = ['python3', '/opt/ultra-recovery/recovery.py', 'receive', '--repository',
                '/var/lib/ultra-recovery', '--source', source, '--name', encrypted.name,
                '--sha256', digest(encrypted), '--snapshot', str(snapshot)]
@@ -281,6 +324,60 @@ def diagnostic_status(config, successful, snapshot, completed):
                 group=grp.getgrnam('ultra-relay').gr_gid)
 
 
+CONTROLLER_RETIREMENT_PATH = '/var/lib/ultra-ansible/lifecycle-retired.json'
+LIFECYCLE_PATH = '/var/lib/ultra-ansible/lifecycle.json'
+DATABASE_PRESERVATION_ROOT = Path('/var/lib/ultra-ansible/upgrade')
+
+
+def capture_state_paths(config):
+    paths = list(config['state_paths'])
+    for raw in config.get('optional_state_paths', []):
+        path = Path(raw)
+        if path.is_symlink():
+            raise ValueError('controller_enforcement_migration_required')
+        if path.exists():
+            if not path.is_file():
+                raise ValueError('controller_enforcement_migration_required')
+            paths.append(raw)
+    # Retirement state is an enforcement floor, even when the installed backup
+    # policy predates this file. Reselect it around every dump like other state.
+    retirement = Path(CONTROLLER_RETIREMENT_PATH)
+    if retirement.is_symlink():
+        raise ValueError('controller_enforcement_migration_required')
+    if retirement.exists():
+        if not retirement.is_file():
+            raise ValueError('controller_enforcement_migration_required')
+        paths.append(str(private(retirement)))
+    # Existing policies predate DB preservation. Carry the current operation's
+    # anchor even before policy publication, and reselect around every dump.
+    lifecycle_path = Path(LIFECYCLE_PATH)
+    if lifecycle_path.is_symlink():
+        raise ValueError('database_preservation_capture_invalid')
+    if lifecycle_path.exists():
+        lifecycle = read_config(lifecycle_path)
+        operation = lifecycle.get('id', '')
+        if not isinstance(operation, str) or not re.fullmatch(r'[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}', operation):
+            raise ValueError('database_preservation_capture_invalid')
+        paths.append(str(lifecycle_path))
+        directory = DATABASE_PRESERVATION_ROOT / operation
+        anchor = directory / 'database-preservation.json'
+        if DATABASE_PRESERVATION_ROOT.is_symlink() or directory.is_symlink() or anchor.is_symlink():
+            raise ValueError('database_preservation_capture_invalid')
+        if anchor.exists():
+            paths.append(str(private(anchor)))
+    return sorted(set(paths))
+
+
+def validate_database_dump(path):
+    if not path.is_file() or path.stat().st_size == 0:
+        raise ValueError('database dump validation failed')
+    # A root-only capture directory is not traversable by postgres, so validate
+    # the archive under the same root identity that owns the capture.
+    result = run(['pg_restore', '--list', str(path)], stdout=subprocess.PIPE)
+    if not any(line.strip() and not line.lstrip().startswith(b';') for line in result.stdout.splitlines()):
+        raise ValueError('database dump validation failed')
+
+
 def create(config):
     source = config['source']
     repo = repository(config['repository'], source)
@@ -294,39 +391,48 @@ def create(config):
         with tempfile.TemporaryDirectory(prefix='.capture-', dir=repo) as work:
             work = Path(work)
             artifact_paths = capture_artifact_paths(config)
-            before = collect(config['state_paths'], artifact_paths)
-            artifacts = collect(artifact_paths)
+            before = collect(capture_state_paths(config), artifact_paths)
+            artifacts = collect(artifact_paths, max_bytes=MAX_ARTIFACT_BYTES)
             artifact_manifest = json.dumps(artifacts, sort_keys=True).encode()
             artifact_id = hashlib.sha256(artifact_manifest).hexdigest()
             artifact = repo / ('artifact-' + artifact_id + '.age')
             if not artifact.exists():
                 bundle = work / 'artifact.tar.gz'
                 packed = pack(bundle, {'kind': 'artifact', 'source': source}, {name: Path('/') / name for name in artifacts})
-                if packed['files'] != artifacts or collect(artifact_paths) != artifacts:
+                if packed['files'] != artifacts or collect(artifact_paths, max_bytes=MAX_ARTIFACT_BYTES) != artifacts:
                     raise ValueError('binary artifacts changed during capture')
-                inspect_bundle(bundle)
+                inspect_bundle(bundle, max_bytes=MAX_ARTIFACT_BYTES)
                 candidate = work / artifact.name
                 encrypt(bundle, candidate, config['recipient'])
+                validate_ciphertext(candidate)
                 os.replace(candidate, artifact)
                 sync_directory(repo)
+            validate_ciphertext(artifact)
             snapshot = int(time.time())
             dump = work / 'database.dump'
-            with dump.open('wb') as stream:
-                run(['runuser', '-u', 'postgres', '--', 'pg_dump', '-Fc', '--no-owner', '--no-acl', config['database']], stdout=stream)
-            if collect(config['state_paths'], artifact_paths) != before:
+            parsed_dsn = db_connection.dsn_from_runtime(config['database'])
+            with db_connection.pgpass(work, parsed_dsn) as environment, dump.open('wb') as stream:
+                run(db_connection.connection_args(parsed_dsn, config['database'], 'pg_dump') +
+                    ['-Fc', '--no-owner', '--no-acl'], stdout=stream, env=environment)
+            if collect(capture_state_paths(config), artifact_paths) != before:
                 raise ValueError('configuration changed during capture; retry next interval')
+            # Parse the entire custom-archive TOC before encrypting or delivering.
+            # This verifies archive readability; it is not a restore rehearsal.
+            validate_database_dump(dump)
             bundle = work / 'backup.tar.gz'
             files = {'state/' + name: Path('/') / name for name in before}
             files['database.dump'] = dump
             pack(bundle, {'kind': 'backup', 'source': source, 'snapshot_at': snapshot,
-                          'artifact': artifact.name, 'database': config['database']}, files)
+                          'artifact': artifact.name, 'database': config['database'],
+                          'controller_enforcement_floor': int(CONTROLLER_RETIREMENT_PATH.lstrip('/') in before)}, files)
             # Hash again after archive reads to avoid pairing a dump with changed keys.
-            if collect(config['state_paths'], artifact_paths) != before:
+            if collect(capture_state_paths(config), artifact_paths) != before:
                 raise ValueError('configuration changed during archive')
-            if capture_artifact_paths(config) != artifact_paths or collect(artifact_paths) != artifacts:
+            if capture_artifact_paths(config) != artifact_paths or collect(artifact_paths, max_bytes=MAX_ARTIFACT_BYTES) != artifacts:
                 raise ValueError('binary artifacts changed during capture')
             encrypted = work / ('backup-' + str(snapshot) + '-' + uuid.uuid4().hex + '.age')
             encrypt(bundle, encrypted, config['recipient'])
+            validate_ciphertext(encrypted)
             successful, errors = [], []
             for destination in destinations:
                 try:
@@ -348,7 +454,7 @@ def create(config):
                 raise ValueError('backup exceeded freshness budget')
             completed = int(time.time())
             atomic_json(repo / 'last-success.json', {'source': source, 'snapshot_at': snapshot,
-                         'completed_at': completed, 'destinations': successful,
+                         'completed_at': completed, 'destinations': successful, 'dump_verified': True,
                          'backup_name': encrypted.name, 'backup_sha256': digest(encrypted),
                          'artifact_name': artifact.name, 'artifact_sha256': digest(artifact),
                          'delivered_target_ids': [item.get('id', item.get('name', item['host'])) for item in destinations if item['host'] in successful]})
@@ -421,6 +527,7 @@ def restore(args):
         raise ValueError('restore requires a new absolute staging directory')
     with tempfile.TemporaryDirectory(prefix='ultra-verify-') as tmp:
         plain = Path(tmp) / 'bundle.tar.gz'
+        validate_ciphertext(args.bundle)
         run(['age', '-d', '-i', args.identity, '-o', str(plain), args.bundle])
         manifest = inspect_bundle(plain)
         if manifest.get('kind') != 'backup' or not SOURCE.fullmatch(manifest.get('source', '')):
@@ -430,8 +537,9 @@ def restore(args):
             raise ValueError('invalid artifact reference')
         artifact = Path(args.bundle).parent / artifact_name
         artifact_plain = Path(tmp) / 'artifact.tar.gz'
+        validate_ciphertext(artifact)
         run(['age', '-d', '-i', args.identity, '-o', str(artifact_plain), str(artifact)])
-        artifact_manifest = inspect_bundle(artifact_plain)
+        artifact_manifest = inspect_bundle(artifact_plain, max_bytes=MAX_ARTIFACT_BYTES)
         if artifact_manifest.get('kind') != 'artifact' or artifact_manifest.get('source') != manifest['source']:
             raise ValueError('wrong recovery artifact source')
         artifact_id = hashlib.sha256(json.dumps(artifact_manifest['files'], sort_keys=True).encode()).hexdigest()
@@ -441,7 +549,7 @@ def restore(args):
             if getattr(args, 'test_stage', False):
                 # Disposable off-host rehearsal, never an activation or promotion.
                 unpack(plain, target)
-                unpack(artifact_plain, target / 'artifacts')
+                unpack(artifact_plain, target / 'artifacts', max_bytes=MAX_ARTIFACT_BYTES)
             return manifest
         if not args.fence_file:
             raise ValueError('operator fencing attestation required')
@@ -450,7 +558,7 @@ def restore(args):
         if fence.get('source') != manifest['source'] or fence.get('confirmed_offline') is not True or not 0 <= age <= 3600:
             raise ValueError('fencing attestation missing, stale or wrong source')
         unpack(plain, target)
-        unpack(artifact_plain, target / 'artifacts')
+        unpack(artifact_plain, target / 'artifacts', max_bytes=MAX_ARTIFACT_BYTES)
         return manifest
 
 

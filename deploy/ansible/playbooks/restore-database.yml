@@ -1,0 +1,16 @@
+---
+- name: Restore verified database onto the dedicated database server
+  hosts: restore_databases
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - restore_database
+- name: Confirm dedicated database restore
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Persist verified database restore result
+      ansible.builtin.copy:
+        content: '{"verified": true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"

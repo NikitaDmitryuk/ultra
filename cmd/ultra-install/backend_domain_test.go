@@ -16,9 +16,12 @@ import (
 
 func backendTestPlan() *installplan.InstallPlan {
 	return &installplan.InstallPlan{
-		Bridge:     installplan.BridgeConfig{SSHHost: "192.0.2.1", Address: "192.0.2.1"},
-		Bot:        installplan.BotConfig{Domain: "old.example.com", SubscriptionDomain: "sync.example.com"},
-		Automation: &installplan.AutomationConfig{Ingress: &installplan.AutomationIngress{Domain: "edge.example.com"}, DNS: &installplan.AutomationDNS{Zone: "example.com"}},
+		Bridge: installplan.BridgeConfig{SSHHost: "192.0.2.1", Address: "192.0.2.1"},
+		Bot:    installplan.BotConfig{Domain: "old.example.com", SubscriptionDomain: "sync.example.com"},
+		Automation: &installplan.AutomationConfig{
+			Ingress: &installplan.AutomationIngress{Domain: "edge.example.com"},
+			DNS:     &installplan.AutomationDNS{Zone: "example.com"},
+		},
 	}
 }
 
@@ -28,12 +31,27 @@ func TestBackendDomainPolicyPreservesPublicNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if values["ultra_subscription_domain"] != "sync.example.com" || values["ultra_backend_vpn_domain"] != "edge.example.com" || p.Bot.Domain != "old.example.com" {
+	if values["ultra_subscription_domain"] != "sync.example.com" || values["ultra_backend_vpn_domain"] != "edge.example.com" ||
+		p.Bot.Domain != "old.example.com" {
 		t.Fatal("public or canonical identity changed")
 	}
 	accept, err := backendDomainPolicy(p, "core.example.com", "example.com", "accept", "", "/tmp/pins", "ops@example.com")
 	if err != nil || values["ultra_backend_transaction"] != accept["ultra_backend_transaction"] {
 		t.Fatal("acceptance must reverify same transaction")
+	}
+}
+
+func TestBackendDomainPolicyUsesExplicitPreviousWhenTargetIsPredeclared(t *testing.T) {
+	p := backendTestPlan()
+	p.Bot.Domain = "core.example.com"
+	for _, action := range []string{"apply", "accept"} {
+		values, err := backendDomainPolicy(p, "core.example.com", "example.com", action, "old.example.com", "/tmp/pins", "ops@example.com")
+		if err != nil {
+			t.Fatalf("%s rejected predeclared target: %v", action, err)
+		}
+		if values["ultra_backend_old_domain"] != "old.example.com" {
+			t.Fatalf("%s did not retain explicit previous backend: %#v", action, values["ultra_backend_old_domain"])
+		}
 	}
 }
 
@@ -57,11 +75,20 @@ func TestBackendDomainRollbackAfterAcceptanceKeepsOriginalTransaction(t *testing
 		t.Fatal(err)
 	}
 	p.Bot.Domain = "core.example.com"
-	after, err := backendDomainPolicy(p, "core.example.com", "example.com", "accept-rollback", "old.example.com", "/tmp/pins", "ops@example.com")
+	after, err := backendDomainPolicy(
+		p,
+		"core.example.com",
+		"example.com",
+		"accept-rollback",
+		"old.example.com",
+		"/tmp/pins",
+		"ops@example.com",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before["ultra_backend_transaction"] != after["ultra_backend_transaction"] || !strings.HasPrefix(after["ultra_backend_transaction"].(string), "/var/lib/ultra-ingress/backend-") {
+	if before["ultra_backend_transaction"] != after["ultra_backend_transaction"] ||
+		!strings.HasPrefix(after["ultra_backend_transaction"].(string), "/var/lib/ultra-ingress/backend-") {
 		t.Fatal("rollback lost original transaction")
 	}
 }
@@ -171,7 +198,9 @@ func TestBackendDomainFailedActionCanRetryOrRollback(t *testing.T) {
 				t.Fatalf("recovery could not resume existing reservation: %v", err)
 			}
 			events = backendOperationEvents(t, root)
-			if len(events) != 6 || events[3].Action != "applying" || events[4].Action != action || events[5].Action != "released" || events[0].ID != events[3].ID || events[0].ID != events[5].ID {
+			if len(events) != 6 || events[3].Action != "applying" || events[4].Action != action || events[5].Action != "released" ||
+				events[0].ID != events[3].ID ||
+				events[0].ID != events[5].ID {
 				t.Fatalf("recovery lost lifecycle identity/order: %+v", events)
 			}
 			if events[4].Job == failedJob || events[4].Transaction != events[1].Transaction {
@@ -305,7 +334,9 @@ func TestBackendDomainFailedAcceptanceCanRetry(t *testing.T) {
 		t.Fatal("failed immutable receipt prevented acceptance retry", err)
 	}
 	events := backendOperationEvents(t, root)
-	if len(events) != 5 || events[1].Action != "accept" || events[3].Action != "accept" || events[4].Action != "released" || events[0].ID != events[2].ID || events[1].Job == events[3].Job {
+	if len(events) != 5 || events[1].Action != "accept" || events[3].Action != "accept" || events[4].Action != "released" ||
+		events[0].ID != events[2].ID ||
+		events[1].Job == events[3].Job {
 		t.Fatalf("acceptance retry lost reservation or reused job: %+v", events)
 	}
 	canonical, err := os.ReadFile(filepath.Join(root, "install.config"))
@@ -329,7 +360,9 @@ func TestBackendDomainReleaseFailureCanRetry(t *testing.T) {
 		t.Fatal("release recovery could not resume", err)
 	}
 	events := backendOperationEvents(t, root)
-	if len(events) != 6 || events[0].ID != events[3].ID || events[1].Action != "apply" || events[4].Action != "apply" || events[1].Job == events[4].Job || events[5].Action != "released" {
+	if len(events) != 6 || events[0].ID != events[3].ID || events[1].Action != "apply" || events[4].Action != "apply" ||
+		events[1].Job == events[4].Job ||
+		events[5].Action != "released" {
 		t.Fatalf("release retry did not reverify same reservation: %+v", events)
 	}
 }

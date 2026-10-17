@@ -607,13 +607,38 @@ func TestBuildBridgeBotTelegramProxy(t *testing.T) {
 }
 
 func TestArchivedSOCKSDoesNotBecomePublicInboundOrVLESS(t *testing.T) {
-	spec := &Spec{Role: RoleBridge, DevMode: true, VLESSPort: 10443, PublicHost: "example.com", ListenAddress: "0.0.0.0", SplitRouting: BoolPtr(false), Exit: ExitTunnelSpec{Address: "127.0.0.1", Port: 51001, TunnelUUID: "11111111-2222-3333-4444-555555555555"}, BotTelegramProxy: &BotTelegramProxySpec{Enabled: true}}
+	spec := &Spec{
+		Role:             RoleBridge,
+		DevMode:          true,
+		VLESSPort:        10443,
+		PublicHost:       "example.com",
+		ListenAddress:    "0.0.0.0",
+		SplitRouting:     BoolPtr(false),
+		Exit:             ExitTunnelSpec{Address: "127.0.0.1", Port: 51001, TunnelUUID: "11111111-2222-3333-4444-555555555555"},
+		BotTelegramProxy: &BotTelegramProxySpec{Enabled: true},
+	}
 	strategy, err := mimic.New("apijson")
 	if err != nil {
 		t.Fatal(err)
 	}
 	port := 10810
-	encoded, err := BuildBridgeXRayJSON(spec, []auth.User{{UUID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", Kind: "socks5", IsActive: true, SocksPort: &port, SocksUsername: "old", SocksPassword: "old"}}, nil, "", strategy, "warning")
+	encoded, err := BuildBridgeXRayJSON(
+		spec,
+		[]auth.User{
+			{
+				UUID:          "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+				Kind:          "socks5",
+				IsActive:      true,
+				SocksPort:     &port,
+				SocksUsername: "old",
+				SocksPassword: "old",
+			},
+		},
+		nil,
+		"",
+		strategy,
+		"warning",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

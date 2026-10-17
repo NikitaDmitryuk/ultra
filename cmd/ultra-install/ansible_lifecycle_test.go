@@ -145,7 +145,10 @@ func (f identityFixtureInfo) Sys() any          { return &syscall.Stat_t{Uid: f.
 func TestNonLoopbackAliasNeedsMachineBoundPrivateIdentity(t *testing.T) {
 	p := &installplan.InstallPlan{Bridge: installplan.BridgeConfig{SSHHost: "198.18.0.10", Address: "198.18.0.10"}}
 	machine := []byte("0123456789abcdef0123456789abcdef\n")
-	identity := fmt.Sprintf(`{"schema_version":1,"role":"bridge","address":"198.18.0.10","machine_sha256":"%x"}`, sha256.Sum256([]byte(strings.TrimSpace(string(machine)))))
+	identity := fmt.Sprintf(
+		`{"schema_version":1,"role":"bridge","address":"198.18.0.10","machine_sha256":"%x"}`,
+		sha256.Sum256([]byte(strings.TrimSpace(string(machine)))),
+	)
 	info := identityFixtureInfo{mode: 0600, owner: 0}
 	if validLocalLifecycleIdentity(p, info, nil, machine) {
 		t.Fatal("matching operator alias was enough without target identity")
@@ -192,7 +195,10 @@ func TestAttestedLocalBridgeWithUnavailableBrokerNeverFallsBackToSSH(t *testing.
 	t.Setenv("ULTRA_ANSIBLE_SOCKET", filepath.Join(root, "missing-controller.sock"))
 	p := &installplan.InstallPlan{Bridge: installplan.BridgeConfig{SSHHost: "198.18.0.10", Address: "198.18.0.10"}}
 	machine := []byte("0123456789abcdef0123456789abcdef\n")
-	identity := fmt.Sprintf(`{"schema_version":1,"role":"bridge","address":"198.18.0.10","machine_sha256":"%x"}`, sha256.Sum256([]byte(strings.TrimSpace(string(machine)))))
+	identity := fmt.Sprintf(
+		`{"schema_version":1,"role":"bridge","address":"198.18.0.10","machine_sha256":"%x"}`,
+		sha256.Sum256([]byte(strings.TrimSpace(string(machine)))),
+	)
 	// Model the same root-owned physical attestation used by the production
 	// selector without requiring root or writing the machine's system receipt.
 	local := validLocalLifecycleIdentity(p, identityFixtureInfo{mode: 0600, owner: 0}, []byte(identity), machine)

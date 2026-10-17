@@ -44,7 +44,14 @@ func buildBridgeExitOutbounds(
 	for _, n := range enabled {
 		out = append(
 			out,
-			bridgeExitVLESSOutbound(exits.OutboundTag(n.ID), n.Address, n.Port, n.TunnelUUID, w, buildStream(n.Address, n.PinnedPeerCertSHA256)),
+			bridgeExitVLESSOutbound(
+				exits.OutboundTag(n.ID),
+				n.Address,
+				n.Port,
+				n.TunnelUUID,
+				w,
+				buildStream(n.Address, n.PinnedPeerCertSHA256),
+			),
 		)
 	}
 	legacyNode, ok := findEnabledExit(enabled, activeExitID)

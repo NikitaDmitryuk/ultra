@@ -79,7 +79,11 @@ func TestSelfTrafficOwnerIsolation(t *testing.T) {
 		case "/v1/members/123":
 			_ = json.NewEncoder(w).Encode(db.Member{TelegramID: 123, Active: false})
 		case "/v1/members/123/traffic":
-			_, _ = w.Write([]byte(`{"month":"2026-09","routes":[{"tag":"to-exit-old","name":"Atlanta, US","group":"location:US:atlanta","pool_scope":"vultr"},{"tag":"direct","name":"Напрямую с bridge"}],"quota_pools":[{"scope":"vultr","state":"available"}],"days":[]}`))
+			_, _ = w.Write(
+				[]byte(
+					`{"month":"2026-09","routes":[{"tag":"to-exit-old","name":"Atlanta, US","group":"location:US:atlanta","pool_scope":"vultr"},{"tag":"direct","name":"Напрямую с bridge"}],"quota_pools":[{"scope":"vultr","state":"available"}],"days":[]}`,
+				),
+			)
 		default:
 			t.Errorf("wrong owner: %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -107,7 +111,9 @@ func TestSelfTrafficOwnerIsolation(t *testing.T) {
 		}
 		if valid {
 			body := w.Body.String()
-			if strings.Contains(body, "vultr") || !strings.Contains(body, `"quota_kind":"shared"`) || !strings.Contains(body, `"quota_kind":"direct"`) || !strings.Contains(body, `"name":"США"`) {
+			if strings.Contains(body, "vultr") || !strings.Contains(body, `"quota_kind":"shared"`) ||
+				!strings.Contains(body, `"quota_kind":"direct"`) ||
+				!strings.Contains(body, `"name":"США"`) {
 				t.Fatal("public traffic leaked provider or lost neutral labels", body)
 			}
 		}
@@ -134,7 +140,12 @@ func TestStartMemberOpensCabinetWithoutConsumingAdminInvite(t *testing.T) {
 	repo := &startMemberRepo{}
 	sender := &fakeMsgSender{}
 	b := &Bot{adminRepo: repo, msgSender: sender, miniAppURL: "https://access.example.net"}
-	msg := &tgbotapi.Message{From: &tgbotapi.User{ID: 42}, Chat: &tgbotapi.Chat{ID: 42, Type: "private"}, Text: "/start member", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 6}}}
+	msg := &tgbotapi.Message{
+		From:     &tgbotapi.User{ID: 42},
+		Chat:     &tgbotapi.Chat{ID: 42, Type: "private"},
+		Text:     "/start member",
+		Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 6}},
+	}
 	b.handleStart(context.Background(), msg)
 	if repo.consumed != 0 || sender.calls != 1 {
 		t.Fatalf("member route consumed invite or did not send cabinet: consumed=%d sends=%d", repo.consumed, sender.calls)

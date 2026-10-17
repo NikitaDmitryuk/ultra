@@ -25,14 +25,19 @@
     - host
     - role: warp
       when: ultra_warp_enabled | default(false) | bool
+    - role: tunnel_certificate
+      when: ultra_tunnel_domain | default('') | length > 0
     - relay
   tasks:
     - name: Persist verified exit certificate identity
       ansible.builtin.copy:
         content: >-
-          {{ {'verified': true, 'exit_host': inventory_hostname,
-          'cert_pin': relay_fingerprint.stdout.split('=')[-1] | replace(':', '') | lower}
-          | to_json(preprocess_unsafe=False) }}
+          {{ ({'verified': true, 'exit_host': inventory_hostname,
+               'tls_auth': 'ca', 'tls_server_name': ultra_tunnel_domain}
+              if ultra_tunnel_domain | default('') | length > 0 else
+              {'verified': true, 'exit_host': inventory_hostname,
+               'cert_pin': relay_fingerprint.stdout.split('=')[-1] | replace(':', '') | lower})
+              | to_json(preprocess_unsafe=False) }}
         dest: "{{ ultra_result_file }}"
         mode: "0600"
       delegate_to: localhost

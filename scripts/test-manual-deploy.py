@@ -11,12 +11,228 @@ import tempfile
 import tarfile
 import hashlib
 import shutil
+import signal
+import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location('manual_deploy', Path(__file__).with_name('manual-deploy.py'))
 D = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(D)
+SUBSCRIPTION_PROBE_INPUT = D.subscription_probe_input
+
+
+
+class ReimagedAdoptionArchive(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.repo = Path(self.temp.name)
+        self.root = self.repo / 'dist/manual'
+        self.root.mkdir(parents=True, mode=0o700)
+        self.config = self.repo / 'install.config'
+        self.current = b'# new fleet: preserve byte for byte\nINSTALL_SCHEMA_VERSION=2\n'
+        D.atomic_write(self.config, self.current)
+        self.previous = b'INSTALL_SCHEMA_VERSION=2\nBRIDGE=192.0.2.10\nBRIDGE_SSH_HOST=192.0.2.10\nULTRA_AUTOMATION_VERSION=v2.4.2\n'
+        commit = 'a' * 40
+        version = 'v0.0.' + str(int(commit, 16))
+        attempt = D.remote_attempt(self.previous, version, allow_legacy_keys=True)
+        release = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + commit + '-' + attempt) / 'release'
+        self.backup = self.root / ('install.config.before-' + version + '-123')
+        D.atomic_write(self.backup, self.previous)
+        self.record = {'schema': 1, 'adopt': True, 'stage': 'adoption_apply', 'mutator_dispatched': True,
+                       'commit': commit, 'version': version, 'remote_attempt': attempt, 'manifest_sha256': 'd' * 64,
+                       'transport_binding': 'c' * 64,
+                       'previous_sha256': D.sha(self.previous), 'backup': self.backup.name,
+                       'config_sha256': D.sha(D.config_candidate(self.previous, version, release))}
+        self.journal = self.root / 'operation.json'
+        self.save_record()
+        self.reason = 'All former fleet targets wiped and reimaged by operator'
+
+    def save_record(self):
+        self.raw = json.dumps(self.record, sort_keys=True).encode()
+        D.atomic_write(self.journal, self.raw)
+
+    def archive(self, **changes):
+        arguments = dict(root=self.root, config=self.config, journal_sha=D.sha(self.raw),
+                         backup_sha=D.sha(self.previous), config_sha=D.sha(self.current),
+                         reason=self.reason, acknowledged=True)
+        arguments.update(changes)
+        with patch.object(D, 'run', side_effect=AssertionError('remote/build command forbidden')), patch.object(
+                D, 'rollout', side_effect=AssertionError('deployment forbidden')):
+            return D.archive_reimaged_adoption(**arguments)
+
+    def test_archive_preserves_current_config_backup_and_original_journal_and_is_idempotent(self):
+        identity = self.config.stat()
+        archive = self.archive()
+        self.assertFalse(self.journal.exists())
+        self.assertEqual((archive / 'operation.json').read_bytes(), self.raw)
+        self.assertEqual(self.backup.read_bytes(), self.previous)
+        self.assertEqual(self.config.read_bytes(), self.current)
+        self.assertEqual(self.config.stat(), identity)
+        self.assertEqual(archive.stat().st_mode & 0o777, 0o700)
+        for path in archive.iterdir():
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        metadata = json.loads((archive / 'metadata.json').read_bytes())
+        self.assertEqual(metadata['journal_sha256'], D.sha(self.raw))
+        self.assertEqual(metadata['backup_sha256'], D.sha(self.previous))
+        self.assertEqual(metadata['config_sha256'], D.sha(self.current))
+        self.assertEqual(metadata['reason'], self.reason)
+        before = (archive / 'metadata.json').read_bytes()
+        self.assertEqual(self.archive(), archive)
+        self.assertEqual((archive / 'metadata.json').read_bytes(), before)
+
+    def test_legacy_fields_are_allowed_only_for_historical_attempt_validation(self):
+        with self.assertRaisesRegex(D.DeployError, '^operator_legacy_config_key_forbidden$'):
+            D.remote_attempt(self.previous, self.record['version'])
+        self.assertEqual(D.remote_attempt(self.previous, self.record['version'], allow_legacy_keys=True),
+                         self.record['remote_attempt'])
+        self.assertTrue(self.journal.exists())
+
+    def test_requires_exact_adoption_class_and_metadata(self):
+        original = dict(self.record)
+        for key, value in [('schema', True), ('schema', 2), ('adopt', False), ('stage', 'upgrade'),
+                           ('mutator_dispatched', False), ('remote_attempt', 'f' * 64),
+                           ('manifest_sha256', None), ('transport_binding', None), ('transport_binding', 'C' * 64),
+                           ('previous_sha256', 'f' * 64),
+                           ('config_sha256', 'f' * 64), ('backup', '../install.config'), ('forward_only', True),
+                           ('forward_only', False), ('forward_only', None), ('unknown_marker', True),
+                           ('staged_config_sha256', 'e' * 64), ('forward_journal_sha256', 'e' * 64),
+                           ('forward_prior_journal_sha256', 'e' * 64)]:
+            with self.subTest(key=key, value=value):
+                self.record = dict(original, **{key: value})
+                self.save_record()
+                with self.assertRaises(D.DeployError):
+                    self.archive()
+                self.assertEqual(self.journal.read_bytes(), self.raw)
+                self.assertEqual(self.config.read_bytes(), self.current)
+        self.assertFalse(list(self.root.glob('operation.reimaged-adoption-*')))
+
+    def test_explicit_acknowledgment_digests_and_reason_required(self):
+        for change in [{'acknowledged': False}, {'reason': ''}, {'reason': 'line\nbreak'},
+                       {'journal_sha': 'f' * 64}, {'backup_sha': 'f' * 64}, {'config_sha': 'f' * 64}]:
+            with self.subTest(change=change), self.assertRaises(D.DeployError):
+                self.archive(**change)
+        self.assertEqual(self.journal.read_bytes(), self.raw)
+        self.assertFalse(list(self.root.glob('operation.reimaged-adoption-*')))
+
+    def test_symlinks_and_nonprivate_or_hardlinked_inputs_rejected(self):
+        for path in [self.config, self.backup, self.journal]:
+            with self.subTest(path=path.name):
+                path.chmod(0o644)
+                with self.assertRaises(D.DeployError):
+                    self.archive()
+                path.chmod(0o600)
+                moved = path.with_name(path.name + '.saved')
+                path.rename(moved)
+                path.symlink_to(moved)
+                with self.assertRaises((D.DeployError, OSError)):
+                    self.archive()
+                path.unlink()
+                os.link(moved, path)
+                with self.assertRaises(D.DeployError):
+                    self.archive()
+                path.unlink()
+                moved.rename(path)
+        self.assertEqual(self.journal.read_bytes(), self.raw)
+
+    def test_existing_archive_collision_never_overwritten(self):
+        archive = self.root / ('operation.reimaged-adoption-' + D.sha(self.raw))
+        archive.mkdir(mode=0o700)
+        D.atomic_write(archive / 'unrelated-proof', b'retain')
+        with self.assertRaises(D.DeployError):
+            self.archive()
+        self.assertEqual((archive / 'unrelated-proof').read_bytes(), b'retain')
+        self.assertEqual(self.journal.read_bytes(), self.raw)
+
+    def test_interrupted_before_and_after_journal_rename_can_resume(self):
+        real_cdll = D.ctypes.CDLL
+        for after in (False, True):
+            with self.subTest(after=after):
+                def interrupted(*args, **kwargs):
+                    libc = real_cdll(*args, **kwargs)
+                    real_rename = libc.renameat2
+                    def rename(source_fd, source, target_fd, target, flag):
+                        if source == b'operation.json':
+                            if after:
+                                self.assertEqual(real_rename(source_fd, source, target_fd, target, flag), 0)
+                            raise OSError('simulated_crash')
+                        return real_rename(source_fd, source, target_fd, target, flag)
+                    libc.renameat2 = rename
+                    return libc
+                with patch.object(D.ctypes, 'CDLL', side_effect=interrupted), self.assertRaisesRegex(OSError, 'simulated_crash'):
+                    self.archive()
+                archive = self.archive()
+                self.assertEqual((archive / 'operation.json').read_bytes(), self.raw)
+                self.assertEqual(self.config.read_bytes(), self.current)
+                if not after:
+                    # Reset only this fixture for the second crash boundary.
+                    (archive / 'operation.json').rename(self.journal)
+                    (archive / 'metadata.json').unlink()
+                    archive.rmdir()
+
+    def test_atomic_publication_collision_keeps_original_journal_and_foreign_proof(self):
+        real_cdll = D.ctypes.CDLL
+        archive = self.root / ('operation.reimaged-adoption-' + D.sha(self.raw))
+        def collide(*args, **kwargs):
+            archive.mkdir(mode=0o700)
+            D.atomic_write(archive / 'foreign-proof', b'retain')
+            return real_cdll(*args, **kwargs)
+        with patch.object(D.ctypes, 'CDLL', side_effect=collide), self.assertRaises(OSError):
+            self.archive()
+        self.assertEqual(self.journal.read_bytes(), self.raw)
+        self.assertEqual((archive / 'foreign-proof').read_bytes(), b'retain')
+
+    def test_fsync_failure_after_move_retains_evidence_and_retry_succeeds(self):
+        real_fsync = D.os.fsync
+        def fail_after_move(descriptor):
+            if not self.journal.exists():
+                raise OSError('fsync_interrupted')
+            real_fsync(descriptor)
+        with patch.object(D.os, 'fsync', side_effect=fail_after_move), self.assertRaisesRegex(OSError, 'fsync_interrupted'):
+            self.archive()
+        archive = self.archive()
+        self.assertEqual((archive / 'operation.json').read_bytes(), self.raw)
+        self.assertEqual(self.config.read_bytes(), self.current)
+
+    def test_config_mutation_before_rename_keeps_active_journal(self):
+        original_write = D.atomic_write
+        def mutate(path, raw, **kwargs):
+            original_write(path, raw, **kwargs)
+            if path.name == 'metadata.json':
+                self.config.write_bytes(self.current + b'changed')
+        with patch.object(D, 'atomic_write', side_effect=mutate), self.assertRaises(D.DeployError):
+            self.archive()
+        self.assertEqual(self.journal.read_bytes(), self.raw)
+        self.assertFalse(list(self.root.glob('operation.reimaged-adoption-*')))
+        self.assertTrue(list(self.root.glob('.reimaged-adoption-*')))
+
+    def test_retry_rejects_changed_evidence_config_backup_or_acknowledgment(self):
+        archive = self.archive()
+        for change in [{'reason': 'different'}, {'acknowledged': False}]:
+            with self.subTest(change=change), self.assertRaises(D.DeployError):
+                self.archive(**change)
+        for path in [self.config, self.backup, archive / 'operation.json', archive / 'metadata.json']:
+            raw = path.read_bytes()
+            path.write_bytes(raw + b' ')
+            with self.subTest(path=path.name), self.assertRaises(D.DeployError):
+                self.archive()
+            path.write_bytes(raw)
+        self.assertEqual((archive / 'operation.json').read_bytes(), self.raw)
+
+    def test_cli_is_local_even_with_dirty_checkout_and_has_no_prerequisites(self):
+        argv = ['manual-deploy.py', '--archive-reimaged-adoption', '--acknowledge-former-hosts-reimaged',
+                '--archive-reason', self.reason, '--journal-sha256', D.sha(self.raw),
+                '--backup-sha256', D.sha(self.previous), '--config-sha256', D.sha(self.current)]
+        with patch.object(D, '__file__', str(self.repo / 'scripts/manual-deploy.py')), patch.object(
+                D.sys, 'argv', argv), patch.dict(D.os.environ, {'ADOPT': '0'}), patch.object(
+                D.shutil, 'which', side_effect=AssertionError('no tools')), patch.object(
+                D, 'run', side_effect=AssertionError('no subprocess')), patch.object(
+                D, 'build_candidate', side_effect=AssertionError('no build')), contextlib.redirect_stdout(io.StringIO()):
+            D.main()
+        self.assertFalse(self.journal.exists())
+        self.assertEqual(self.config.read_bytes(), self.current)
 
 
 class ManualDeploy(unittest.TestCase):
@@ -30,23 +246,236 @@ class ManualDeploy(unittest.TestCase):
         self.original = b'# keep\nINSTALL_SCHEMA_VERSION=2\nOTHER="literal $() ${HOME}"\nULTRA_AUTOMATION_VERSION=v1.2.3\nULTRA_AUTOMATION_RELEASE_DIR=/old\n'
         self.config.write_bytes(self.original)
         self.config.chmod(0o600)
-        self.commit = 'abcdef123456789012345678901234567890abcdef'
+        self.commit = 'a' * 40
         self.version = 'v0.0.' + str(int(self.commit, 16))
         self.bundle = self.root / self.version
         self.bundle.mkdir()
+        (self.bundle / 'release-manifest.json').write_bytes(b'fixture-manifest')
         self.calls = []
+        self.probe_inputs = {}
 
     def run_fixture(self, command, cwd, stage, capture=False, env=None):
         self.calls.append((stage, command))
 
-    def rollout(self, adopt=False, runner=None):
-        with patch.object(D, 'run', runner or self.run_fixture), patch.object(D.platform, 'system', return_value='Linux'), patch.object(D.platform, 'machine', return_value='x86_64'), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            D.rollout(self.repo, self.root, self.bundle, self.commit, self.version, adopt)
+    def read_probe_input(self, path, limit=4096):
+        path = Path(path)
+        if path in self.probe_inputs and path.exists():
+            return self.probe_inputs[path][:limit + 1]
+        return SUBSCRIPTION_PROBE_INPUT(path, limit)
+
+    def rollout(self, adopt=False, runner=None, config_path=None, retry_failed=False, probe_env_file=None, forward_only=False, continue_forward_only=False):
+        probe_input = self.read_probe_input if hasattr(self, 'probe_inputs') else SUBSCRIPTION_PROBE_INPUT
+        with patch.object(D, 'subscription_probe_input', side_effect=probe_input), patch.object(D, 'run', runner or self.run_fixture), patch.object(D.platform, 'system', return_value='Linux'), patch.object(D.platform, 'machine', return_value='x86_64'), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            D.rollout(self.repo, self.root, self.bundle, self.commit, self.version, adopt, config_path, retry_failed, probe_env_file, forward_only, continue_forward_only)
+
+    def probe_env(self, value=b'https://old.example.com/sub/probe-value'):
+        path = self.repo / '.env'
+        self.probe_inputs[path] = b'IGNORED_SETTING="$(must-not-execute)\xff\nULTRA_SUBSCRIPTION_PROBE_URL=' + value + b'\n'
+        path.write_bytes(b'private fixture input\n')
+        path.chmod(0o600)
+        return path
+
+    def test_probe_env_allowlist_literals_and_invalid_inputs(self):
+        path = self.probe_env(b'"https://old.example.com/sub/probe-value" # comment')
+        with patch.object(D, 'subscription_probe_input', side_effect=self.read_probe_input):
+            self.assertEqual(D.subscription_probe_from_env(path), b'https://old.example.com/sub/probe-value')
+        for value in (b'', b'http://old.example.com/sub/token', b'https://old.example.com/sub/token?secret=1',
+                      b'https://old.example.com/sub/token#fragment', b'https://user@old.example.com/sub/token',
+                      b'https://old.example.com:443/sub/token', b'"$(secret)"', b'"unterminated', b'\xff',
+                      b'https://old.example.com/sub/token\nULTRA_SUBSCRIPTION_PROBE_URL=https://old.example.com/sub/other'):
+            with self.subTest(value=value):
+                self.probe_env(value)
+                with patch.object(D, 'subscription_probe_input', side_effect=self.read_probe_input):
+                    with self.assertRaisesRegex(D.DeployError, '^subscription_probe_env_invalid$'):
+                        D.subscription_probe_from_env(path)
+        self.probe_inputs.pop(path)
+        path.write_bytes(b'OTHER=private-value\n')
+        self.assertIsNone(D.subscription_probe_from_env(path, optional=True))
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_env_key_missing$'):
+            D.subscription_probe_from_env(path)
+        path.unlink()
+        self.assertIsNone(D.subscription_probe_from_env(path, optional=True))
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_env_file_missing$'):
+            D.subscription_probe_from_env(path)
+
+    def test_local_probe_snapshot_argv_secrecy_cleanup_and_replay_binding(self):
+        secret = b'https://old.example.com/sub/fixture-token'
+        self.probe_env(secret)
+        def runner(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            self.assertNotIn(secret.decode(), repr(command))
+            if stage == 'upgrade':
+                snapshot = Path(command[command.index('--subscription-probe-url-file') + 1])
+                self.assertEqual(D.subscription_probe_input(snapshot), secret)
+        self.rollout(runner=runner)
+        self.assertFalse((self.root / 'subscription-probe-url').exists())
+        self.assertNotIn(secret, self.config.read_bytes())
+        self.assertEqual(next(self.root.glob('probe-binding-*')).read_bytes(), D.sha(secret).encode())
+        self.probe_env(b'https://old.example.com/sub/replacement')
+        with self.assertRaisesRegex(D.DeployError, '^manual_operation_probe_changed$'):
+            self.rollout()
+
+    def test_local_dispatched_probe_retry_preserves_frozen_inputs_until_migration(self):
+        path = self.probe_env()
+        def failed(command, cwd, stage, **kwargs):
+            if stage == 'upgrade':
+                raise D.DeployError('fixture_failed')
+        with self.assertRaisesRegex(D.DeployError, 'fixture_failed'):
+            self.rollout(runner=failed)
+        before = {p.name: p.read_bytes() for p in self.root.iterdir() if p.is_file()}
+        self.probe_env(b'https://old.example.com/sub/replacement')
+        for retry in (False, True):
+            with self.assertRaisesRegex(D.DeployError, '^manual_operation_quiescence_migration_required$'):
+                self.rollout(probe_env_file=path, retry_failed=retry)
+        path.unlink()
+        with self.assertRaisesRegex(D.DeployError, '^manual_operation_quiescence_migration_required$'):
+            self.rollout(retry_failed=True)
+        self.assertEqual({p.name: p.read_bytes() for p in self.root.iterdir() if p.is_file()}, before)
+
+    def test_killed_manual_parent_cannot_retry_with_detached_worker_alive(self):
+        worker = '''import os,pathlib,sys,time
+root=pathlib.Path(sys.argv[1])
+(root/'worker-started').write_text(str(os.getpid()))
+for _ in range(500):
+    if (root/'allow-worker').exists():
+        (root/'old-worker-mutation').write_text('late')
+        break
+    time.sleep(.01)
+'''
+        helper = '''import importlib.util,pathlib,subprocess,sys
+from unittest.mock import patch
+spec=importlib.util.spec_from_file_location('manual_fixture',sys.argv[1])
+d=importlib.util.module_from_spec(spec);spec.loader.exec_module(d)
+repo,root,bundle=map(pathlib.Path,sys.argv[2:5])
+def run(command,cwd,stage,**kwargs):
+    if stage=='upgrade':
+        subprocess.run([sys.executable,'-I','-c',sys.argv[7],str(root)],
+                       start_new_session=True,check=True)
+with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_from_env',return_value=None):
+    d.rollout(repo,root,bundle,sys.argv[5],sys.argv[6],False)
+'''
+        parent = subprocess.Popen([D.sys.executable, '-I', '-c', helper, D.__file__, str(self.repo),
+                                   str(self.root), str(self.bundle), self.commit, self.version, worker],
+                                  env={'PATH': '/usr/bin:/bin'}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        def wait_for(name):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if (self.root / name).exists():
+                    return
+                time.sleep(.01)
+            self.fail('fixture timeout: ' + name)
+        try:
+            wait_for('worker-started')
+            parent.kill()
+            self.assertEqual(parent.wait(timeout=5), -signal.SIGKILL)
+            journal = (self.root / 'operation.json').read_bytes()
+            self.assertTrue(json.loads(journal)['mutator_dispatched'])
+            for retry in (False, True):
+                with self.assertRaisesRegex(D.DeployError, '^manual_operation_quiescence_migration_required$'):
+                    self.rollout(retry_failed=retry)
+            self.assertEqual(self.calls, [])
+            self.assertEqual((self.root / 'operation.json').read_bytes(), journal)
+            (self.root / 'allow-worker').write_text('finish bounded fixture')
+            wait_for('old-worker-mutation')
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait(timeout=5)
+            (self.root / 'allow-worker').write_text('finish bounded fixture')
+
+    def test_probe_read_only_failure_cleans_snapshot_and_binding(self):
+        self.probe_env()
+        def failed(command, cwd, stage, **kwargs):
+            if stage == 'doctor':
+                raise D.DeployError('fixture_failed')
+        with self.assertRaises(D.DeployError):
+            self.rollout(runner=failed)
+        self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertFalse((self.root / 'subscription-probe-url').exists())
+        self.assertFalse(list(self.root.glob('probe-binding-*')))
+
+    def test_invalid_probe_env_fails_before_canonical_update(self):
+        path = self.probe_env(b'not-a-url')
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_env_invalid$'):
+            self.rollout(probe_env_file=path)
+        self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertFalse((self.root / 'operation.json').exists())
+        self.assertFalse(list(self.root.glob('install.config.before-*')))
+
+    def test_probe_default_uses_canonical_config_directory_outside_checkout(self):
+        canonical = self.repo / 'canonical'
+        canonical.mkdir()
+        config = canonical / 'install.config'
+        D.atomic_write(config, self.original)
+        secret = b'https://old.example.com/sub/canonical-token'
+        canonical_env = canonical / '.env'
+        D.atomic_write(canonical_env, b'private fixture input\n')
+        self.probe_inputs[canonical_env] = b'ULTRA_SUBSCRIPTION_PROBE_URL=' + secret + b'\n'
+        self.probe_env(b'https://old.example.com/sub/wrong-checkout-token')
+        def runner(command, cwd, stage, **kwargs):
+            if stage == 'upgrade':
+                snapshot = Path(command[command.index('--subscription-probe-url-file') + 1])
+                self.assertEqual(snapshot.read_bytes(), secret)
+        self.rollout(config_path=config, runner=runner)
 
     def test_numeric_version_exact_commit_round_trip_and_path_limit(self):
         self.assertRegex(self.version, r'^v[0-9]+\.[0-9]+\.[0-9]+$')
         self.assertEqual(int(self.version[5:]), int(self.commit, 16))
         self.assertLess(len(self.version), 95)
+
+    def test_subscription_probe_requires_explicit_private_regular_file(self):
+        probe = self.repo / 'probe'
+        raw = b'fixture input\n'
+        probe.write_bytes(raw)
+        probe.chmod(0o600)
+        self.assertEqual(D.subscription_probe_input(probe), raw)
+        for mode in (0o644, 0o400):
+            probe.chmod(mode)
+            with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+                D.subscription_probe_input(probe)
+        probe.chmod(0o600)
+        hardlink = self.repo / 'hardlink'
+        os.link(probe, hardlink)
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+            D.subscription_probe_input(probe)
+        hardlink.unlink()
+        link = self.repo / 'link'
+        link.symlink_to(probe)
+        with self.assertRaises(OSError):
+            D.subscription_probe_input(link)
+        for data in (b'', b'x' * 4097):
+            probe.write_bytes(data)
+            with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+                D.subscription_probe_input(probe)
+
+    def test_subscription_probe_rejects_directory_fifo_and_parent_symlink(self):
+        fifo = self.repo / 'fifo'
+        os.mkfifo(fifo, 0o600)
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+            D.subscription_probe_input(fifo)
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+            D.subscription_probe_input(self.repo)
+        alias = self.repo / 'alias'
+        alias.symlink_to(self.root, target_is_directory=True)
+        probe = self.root / 'probe'
+        probe.write_bytes(b'fixture input')
+        probe.chmod(0o600)
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+            D.subscription_probe_input(alias / 'probe')
+        info = probe.stat()
+        foreign = SimpleNamespace(st_mode=info.st_mode, st_uid=os.geteuid() + 1, st_nlink=1, st_size=info.st_size)
+        with patch.object(D.os, 'fstat', return_value=foreign):
+            with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+                D.subscription_probe_input(probe)
+        path = self.probe_env()
+        path.write_bytes(b'x' * (1024 * 1024 + 1))
+        with self.assertRaisesRegex(D.DeployError, '^subscription_probe_private_file_required$'):
+            D.subscription_probe_from_env(path)
+
+    def test_canonical_config_lock_is_shared_across_worktree_path_aliases(self):
+        alias = self.repo / 'other-worktree'
+        alias.symlink_to(self.repo, target_is_directory=True)
+        self.assertEqual(D.canonical_config_lock(self.config), D.canonical_config_lock(alias / 'install.config'))
 
     def test_only_two_canonical_values_change_without_shell_evaluation(self):
         self.rollout()
@@ -56,8 +485,173 @@ class ManualDeploy(unittest.TestCase):
         self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
         self.assertEqual(next(self.root.glob('install.config.before-*')).read_bytes(), self.original)
         self.assertEqual([stage for stage, _ in self.calls], ['doctor', 'upgrade', 'status'])
-        self.assertIn('--release-dir', self.calls[1][1])
+        self.assertIn('operator-upgrade', self.calls[1][1])
+        self.assertIn('--source-commit', self.calls[1][1])
+        self.assertIn('--manifest-sha256', self.calls[1][1])
+        self.assertIn('--config-sha256', self.calls[1][1])
         self.assertFalse((self.root / 'operation.json').exists())
+
+    def test_success_removes_one_time_baseline_setting_and_preserves_readable_mode(self):
+        self.config.chmod(0o644)
+        self.config.write_bytes(self.original + b'ULTRA_UPGRADE_BASELINE_FILE=/private/baseline.json\n')
+        original = self.config.read_bytes()
+        self.rollout()
+        self.assertNotIn(b'ULTRA_UPGRADE_BASELINE_FILE=', self.config.read_bytes())
+        self.assertEqual(D.config_values(self.config.read_bytes())['ULTRA_AUTOMATION_VERSION'], self.version)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(next(self.root.glob('install.config.before-*')).read_bytes(), original)
+
+    def test_failed_upgrade_retains_one_time_baseline_setting(self):
+        self.config.write_bytes(self.original + b'ULTRA_UPGRADE_BASELINE_FILE=/private/baseline.json\n')
+        def runner(command, cwd, stage, capture=False, env=None):
+            if stage == 'upgrade':
+                raise D.DeployError('fixture_failure')
+        with self.assertRaises(D.DeployError):
+            self.rollout(runner=runner)
+        self.assertIn(b'ULTRA_UPGRADE_BASELINE_FILE=/private/baseline.json', self.config.read_bytes())
+
+    def test_completed_legacy_journal_cannot_assert_authoritative_drain(self):
+        desired = D.config_candidate(self.original, self.version, self.bundle)
+        pending = desired + b'ULTRA_UPGRADE_BASELINE_FILE=/private/baseline.json\n'
+        completed = D.remove_config_key(pending, 'ULTRA_UPGRADE_BASELINE_FILE')
+        record = {'schema': 1, 'commit': self.commit, 'version': self.version, 'adopt': False,
+                  'backup': 'install.config.before-' + self.version + '-1', 'previous_sha256': D.sha(self.original),
+                  'config_sha256': D.sha(pending), 'stage': 'completed', 'mutator_dispatched': True,
+                  'transport_binding': None, 'manifest_sha256': None, 'final_config_sha256': D.sha(completed),
+                  'remote_attempt': None}
+        self.config.write_bytes(completed)
+        D.atomic_write(self.root / 'operation.json', json.dumps(record).encode())
+        with self.assertRaisesRegex(D.DeployError, '^manual_operation_quiescence_migration_required$'):
+            self.rollout()
+        self.assertTrue((self.root / 'operation.json').exists())
+        self.assertEqual(self.config.read_bytes(), completed)
+        self.assertEqual(self.calls, [])
+
+    def test_signed_upgrade_baseline_cannot_prove_legacy_worker_drain(self):
+        journal = {'schema': 1, 'commit': self.commit, 'version': 'v2.4.2', 'remote_attempt': 'a' * 64,
+                   'manifest_sha256': None, 'mutator_dispatched': True}
+        manifest = {'source_commit': self.commit, 'version': 'v2.4.2',
+                    'assets': [{'name': 'asset-' + str(i)} for i in range(14)]}
+        manifest_raw = json.dumps(manifest, sort_keys=True).encode()
+        journal['manifest_sha256'] = D.sha(manifest_raw)
+        journal_raw = json.dumps(journal, sort_keys=True).encode()
+        old_release = self.repo / 'old-release'
+        old_release.mkdir()
+        manifest_path = old_release / 'release-manifest.json'
+        journal_path = self.repo / 'old-operation.json'
+        descriptor_path = self.repo / 'baseline.json'
+        manifest_path.write_bytes(manifest_raw); manifest_path.chmod(0o600)
+        journal_path.write_bytes(journal_raw); journal_path.chmod(0o600)
+        descriptor = {'schema': 1, 'journal': str(journal_path), 'journal_sha256': D.sha(journal_raw),
+                      'manifest': str(manifest_path), 'manifest_sha256': D.sha(manifest_raw),
+                      'bridge': {}, 'exits': {}}
+        descriptor_path.write_text(json.dumps(descriptor)); descriptor_path.chmod(0o600)
+        config = self.original + ('ULTRA_UPGRADE_BASELINE_FILE=' + str(descriptor_path) + '\n').encode()
+        remote_root = Path('/var/lib/ultra-ansible/operator-inputs/manual-new-attempt')
+        with self.assertRaisesRegex(D.DeployError, '^manual_operation_quiescence_migration_required$'):
+            D.stage_upgrade_baseline(config, self.version, remote_root)
+        self.assertEqual(journal_path.read_bytes(), journal_raw)
+        journal_path.write_bytes(journal_raw + b' ')
+        with self.assertRaisesRegex(D.DeployError, 'baseline_local_pin_changed'):
+            D.stage_upgrade_baseline(config, self.version, remote_root)
+
+    def test_staging_archive_contains_only_the_two_baseline_inputs(self):
+        manifest = {'source_commit': self.commit, 'version': self.version,
+                    'assets': [{'name': 'fixture', 'sha256': D.sha(b'fixture'), 'size': 7}]}
+        raw_manifest = json.dumps(manifest).encode()
+        (self.bundle / 'release-manifest.json').write_bytes(raw_manifest)
+        (self.bundle / 'fixture').write_bytes(b'fixture')
+        config = self.original
+        extras = {'baseline/descriptor.json': b'{"schema":1}',
+                  'baseline/operator-journal.json': b'{"schema":1}'}
+        def process(command, **kwargs):
+            with tarfile.open(fileobj=kwargs['stdin'], mode='r|') as archive:
+                members = [(member.name, archive.extractfile(member).read()) for member in archive]
+            self.assertEqual([name for name, _ in members], ['release/release-manifest.json', 'release/fixture',
+                'install.config', 'baseline/descriptor.json', 'baseline/operator-journal.json'])
+            return subprocess.CompletedProcess(command, 0, json.dumps({'architecture': 'arm64',
+                'manifest_sha256': D.sha(raw_manifest), 'config_sha256': D.sha(config),
+                'attempt': D.remote_attempt(config, self.version)}).encode())
+        with patch.object(D.subprocess, 'run', process):
+            receipt = D.stage_remote(self.repo, self.root, self.bundle, config,
+                ['ssh', '-F', '/dev/null', 'root@192.0.2.10'], self.commit, self.version,
+                D.sha(raw_manifest), extras)
+        self.assertEqual(receipt['architecture'], 'arm64')
+
+    def test_legacy_dispatch_blocks_before_any_input_or_transport_access(self):
+        for stage in ('prepared', 'bridge_staging', 'doctor', 'adoption_apply', 'upgrade', 'status', 'completed'):
+            for retry in (False, True):
+                with self.subTest(stage=stage, retry=retry):
+                    record = {'schema': 1, 'commit': 'b8b8126' + '0' * 33,
+                              'stage': stage, 'mutator_dispatched': True,
+                              'quiescent': True, 'drained': True, 'execution_safety_protocol': 999,
+                              'quiescence_evidence': {'verified': True}}
+                    raw = json.dumps(record).encode()
+                    D.atomic_write(self.root / 'operation.json', raw)
+                    with patch.object(D, 'canonical_file', side_effect=AssertionError('config reopened')), \
+                         patch.object(D, 'operator_transport', side_effect=AssertionError('transport reopened')), \
+                         patch.object(D, 'subscription_probe_from_env', side_effect=AssertionError('credential reopened')):
+                        with self.assertRaisesRegex(D.DeployError, '^manual_operation_quiescence_migration_required$'):
+                            self.rollout(retry_failed=retry)
+                    self.assertEqual((self.root / 'operation.json').read_bytes(), raw)
+                    self.assertEqual(self.config.read_bytes(), self.original)
+                    self.assertEqual(self.calls, [])
+
+    def test_retry_failed_is_explicitly_forwarded_to_operator_upgrade(self):
+        self.rollout(retry_failed=True)
+        command = self.calls[1][1]
+        self.assertIn('operator-upgrade', command)
+        self.assertIn('--retry-failed', command)
+
+    def test_forward_only_archives_dispatched_upgrade_and_is_explicitly_forwarded(self):
+        old = {'schema': 1, 'commit': self.commit, 'version': self.version, 'stage': 'upgrade',
+               'mutator_dispatched': True, 'remote_attempt': 'c' * 64,
+               'manifest_sha256': 'd' * 64, 'staged_config_sha256': 'e' * 64}
+        D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
+        def failed_forward(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'upgrade':
+                self.assertIn('--forward-only', command)
+                raise D.DeployError('fixture_failed')
+        with self.assertRaisesRegex(D.DeployError, '^fixture_failed$'):
+            self.rollout(forward_only=True, runner=failed_forward)
+        archived = list(self.root.glob('operation.forward-only-abandoned-*.json'))
+        self.assertEqual(len(archived), 1)
+        self.assertEqual(json.loads(archived[0].read_bytes()), old)
+        record = json.loads((self.root / 'operation.json').read_bytes())
+        self.assertTrue(record['forward_only'])
+        self.assertIn('--forward-only', self.calls[1][1])
+
+    def test_forward_only_requires_exact_failed_upgrade_and_rejects_conflicts(self):
+        with self.assertRaisesRegex(D.DeployError, '^manual_forward_only_requires_dispatched_upgrade$'):
+            self.rollout(forward_only=True)
+        old = {'schema': 1, 'commit': 'b' * 40, 'version': 'v0.0.2', 'stage': 'completed',
+               'mutator_dispatched': True, 'remote_attempt': 'c' * 64}
+        D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
+        with self.assertRaisesRegex(D.DeployError, '^manual_forward_only_requires_dispatched_upgrade$'):
+            self.rollout(forward_only=True)
+        self.assertEqual(json.loads((self.root / 'operation.json').read_bytes()), old)
+        old['stage'] = 'upgrade'
+        D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
+        with self.assertRaisesRegex(D.DeployError, '^manual_forward_only_upgrade_only$'):
+            self.rollout(forward_only=True, retry_failed=True)
+
+    def test_readable_canonical_config_keeps_its_mode(self):
+        self.config.chmod(0o644)
+        self.rollout(config_path=self.config)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o644)
+        self.assertIn(self.version.encode(), self.config.read_bytes())
+        self.assertEqual(next(self.root.glob('install.config.before-*')).stat().st_mode & 0o777, 0o600)
+
+    def test_readable_canonical_config_keeps_mode_when_preflight_fails(self):
+        self.config.chmod(0o644)
+
+        def failing_doctor(command, cwd, stage, capture=False, env=None):
+            raise D.DeployError('fixture_failure')
+        with self.assertRaises(D.DeployError):
+            self.rollout(config_path=self.config, runner=failing_doctor)
+        self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o644)
 
     def test_explicit_adoption_compares_then_applies_without_redundant_upgrade(self):
         self.rollout(adopt=True)
@@ -87,16 +681,19 @@ class ManualDeploy(unittest.TestCase):
         self.assertEqual(record['stage'], 'upgrade')
         record['commit'] = '0' * 40
         (self.root / 'operation.json').write_text(json.dumps(record))
-        with self.assertRaisesRegex(D.DeployError, 'conflicting_unfinished'):
+        with self.assertRaisesRegex(D.DeployError, 'manual_operation_quiescence_migration_required'):
             self.rollout()
 
-    def test_retry_same_operation_keeps_original_backup(self):
+    def test_retry_dispatched_operation_is_blocked_and_keeps_original_backup(self):
         def runner(command, cwd, stage, capture=False, env=None):
             if stage == 'upgrade':
                 raise D.DeployError('fixture_failure')
         with self.assertRaises(D.DeployError):
             self.rollout(runner=runner)
-        self.rollout()
+        self.calls.clear()
+        with self.assertRaisesRegex(D.DeployError, '^manual_operation_quiescence_migration_required$'):
+            self.rollout(retry_failed=True)
+        self.assertEqual(self.calls, [])
         self.assertEqual(next(self.root.glob('install.config.before-*')).read_bytes(), self.original)
 
     def test_retry_preflight_failure_never_restores_after_prior_mutator_dispatch(self):
@@ -120,7 +717,7 @@ class ManualDeploy(unittest.TestCase):
         with self.assertRaises(D.DeployError):
             self.rollout(runner=runner)
         self.config.write_bytes(self.config.read_bytes() + b'CHANGED=1\n')
-        with self.assertRaisesRegex(D.DeployError, 'canonical_config_changed'):
+        with self.assertRaisesRegex(D.DeployError, 'manual_operation_quiescence_migration_required'):
             self.rollout()
 
     def test_prepared_journal_recovers_crash_before_config_update(self):
@@ -133,12 +730,18 @@ class ManualDeploy(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), desired)
 
     def test_private_config_and_symlink_requirements(self):
-        self.config.chmod(0o644)
-        with self.assertRaisesRegex(D.DeployError, '0600'):
-            self.rollout()
+        for mode in (0o640, 0o664):
+            with self.subTest(mode=oct(mode)):
+                self.config.chmod(mode)
+                with self.assertRaisesRegex(D.DeployError, 'readable_file'):
+                    self.rollout()
+        fifo = self.repo / 'install.config.fifo'
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(D.DeployError, '^canonical_config_requires_owned_regular_readable_file$'):
+            D.canonical_file(fifo)
         self.config.unlink()
         self.config.symlink_to(self.root / 'missing')
-        with self.assertRaisesRegex(D.DeployError, '0600'):
+        with self.assertRaisesRegex(D.DeployError, 'readable_file'):
             self.rollout()
 
     def test_duplicate_release_keys_fail_closed(self):
@@ -146,11 +749,31 @@ class ManualDeploy(unittest.TestCase):
             D.config_candidate(self.original + b'ULTRA_AUTOMATION_VERSION=v9.9.9\n', self.version, self.bundle)
 
     def test_attempt_identity_normalizes_derived_fields_without_recursion(self):
-        for raw in [self.original, b'BRIDGE=192.0.2.10\n']:
+        for raw in [self.original, b'BRIDGE_IP=192.0.2.10\n']:
             attempt = D.remote_attempt(raw, self.version)
             derived = D.config_candidate(raw, self.version, '/var/lib/ultra-ansible/operator-inputs/manual-' + self.commit + '-' + attempt + '/release')
             self.assertEqual(D.remote_attempt(derived, self.version), attempt)
             self.assertNotEqual(D.remote_attempt(derived + b'CORRECTION=1\n', self.version), attempt)
+
+    def test_completed_baseline_keeps_attempt_only_for_unchanged_config(self):
+        baseline = self.repo / 'baseline.json'
+        configured = self.original.replace(b'OTHER="literal $() ${HOME}"\n',
+            ('ULTRA_UPGRADE_BASELINE_FILE=' + str(baseline) + '\n').encode() + b'OTHER="literal $() ${HOME}"\n')
+        attempt = D.remote_attempt(configured, self.version)
+        release = '/var/lib/ultra-ansible/operator-inputs/manual-' + self.commit + '-' + attempt + '/release'
+        installed = D.config_candidate(configured, self.version, release)
+        completed = D.remove_config_key(installed, 'ULTRA_UPGRADE_BASELINE_FILE')
+        backup = self.root / ('install.config.before-' + self.version + '-1')
+        D.atomic_write(backup, configured)
+        def staged_config(raw, version, remote_root):
+            return D.config_candidate(raw, version, remote_root / 'release', remote_root / 'baseline/descriptor.json'), {'baseline/descriptor.json': b'{}'}
+        with patch.object(D, 'stage_upgrade_baseline', side_effect=staged_config):
+            replay = D.completed_baseline_replay(self.root, completed, self.version, self.commit)
+        self.assertEqual(replay[0], attempt)
+        self.assertEqual(D.remove_config_key(replay[1], 'ULTRA_UPGRADE_BASELINE_FILE'), completed)
+        changed = completed + b'CORRECTED_POLICY=1\n'
+        with patch.object(D, 'stage_upgrade_baseline', side_effect=staged_config):
+            self.assertIsNone(D.completed_baseline_replay(self.root, changed, self.version, self.commit))
 
     def test_nested_lock_fails_closed(self):
         with D.lock(self.root / 'lock'):
@@ -187,6 +810,7 @@ class ManualDeploy(unittest.TestCase):
                 (cwd / 'dist').mkdir()
                 (cwd / 'dist/release-manifest.json').write_text('{}')
                 (cwd / 'dist/ultra-install-linux-amd64').write_bytes(b'fixture')
+        (self.bundle / 'release-manifest.json').unlink()
         self.bundle.rmdir()
         with patch.object(D, 'prepare_runtime_environment', return_value={}), patch.object(D, 'run', runner), patch.object(D, 'verify_bundle', side_effect=lambda *args: validations.append(args)):
             bundle = D.build_candidate(self.repo, self.root, self.commit, self.version)
@@ -207,6 +831,8 @@ class ManualDeploy(unittest.TestCase):
 
 class NativeDeploy(unittest.TestCase):
     rollout = ManualDeploy.rollout
+    probe_env = ManualDeploy.probe_env
+    read_probe_input = ManualDeploy.read_probe_input
     run_fixture = ManualDeploy.run_fixture
 
     def setUp(self):
@@ -224,7 +850,7 @@ class NativeDeploy(unittest.TestCase):
             'ansible_ssh_common_args': '-F /dev/null -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=' + str(self.pins)},
             'children': {'bridge': {'hosts': {'bridge': {'ansible_host': '192.0.2.10'}}},
                          'exits': {'hosts': {'exit_0': {'ansible_host': '192.0.2.20'}}}}}}
-        self.original += b'BRIDGE=192.0.2.10\nBRIDGE_SSH_HOST=192.0.2.10\nULTRA_AUTOMATION_STATIC_NODES=\'[{"address":"192.0.2.20"}]\'\nSECRETS_ENV_FILE=/etc/ultra-relay/.env\n'
+        self.original += b'BRIDGE_IP=192.0.2.10\nMAIN_EXIT_IP=192.0.2.20\nBRIDGE_SSH_KEY=/tmp/bridge-key\nMAIN_EXIT_SSH_KEY=/tmp/exit-key\nDATABASE_IP=192.0.2.30\nDATABASE_SSH_KEY=/tmp/database-key\nULTRA_AUTOMATION_STATIC_NODES=\'[{"address":"192.0.2.20"}]\'\nSECRETS_ENV_FILE=/etc/ultra-relay/.env\n'
         self.config.write_bytes(self.original)
         self.write_inventory()
         self.manifest = json.dumps({'source_commit': self.commit, 'version': self.version, 'assets': []}).encode()
@@ -235,7 +861,12 @@ class NativeDeploy(unittest.TestCase):
         self.pin_probe = patch.object(D.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0))
         self.pin_probe.start()
         self.addCleanup(self.pin_probe.stop)
-        self.stage = patch.object(D, 'stage_remote', return_value='arm64')
+        def staged_receipt(*args):
+            config, version, manifest_sha = args[3], args[6], args[7]
+            return {'architecture': 'arm64', 'manifest_sha256': manifest_sha, 'config_sha256': D.sha(config),
+                    'attempt': D.remote_attempt(config, version)}
+        self.staged_receipt = staged_receipt
+        self.stage = patch.object(D, 'stage_remote', side_effect=staged_receipt)
         self.stage_mock = self.stage.start()
         self.addCleanup(self.stage.stop)
 
@@ -254,15 +885,730 @@ class NativeDeploy(unittest.TestCase):
         self.assertEqual(self.calls[0][1][1:3], ['plan', '--config'])
         for stage, command in self.calls[1:]:
             self.assertEqual(command[:3], ['ssh', '-F', '/dev/null'])
-            proxy = command[command.index('-o', command.index('22') + 1) + 1]
-            self.assertIn('ProxyCommand=ssh -F /dev/null', proxy)
-            self.assertIn('-W %h:%p root@192.0.2.20', proxy)
+            self.assertEqual(command[-2], 'root@192.0.2.10')
+            self.assertFalse(any('ProxyCommand=' in token for token in command))
             remote = D.shlex.split(command[-1])
             self.assertEqual(remote[:3], ['python3', '-I', '-c'])
-            self.assertEqual(remote[4:11], ['run', self.commit, self.version, D.sha(self.manifest), D.sha(self.config.read_bytes()), D.remote_attempt(self.original, self.version), 'arm64'])
-            self.assertEqual(remote[-1], stage)
+            self.assertEqual(remote[4:11], ['run', self.commit, self.version, D.sha(self.manifest), D.sha(self.stage_mock.call_args.args[3]), D.remote_attempt(self.original, self.version), 'arm64'])
+            self.assertEqual(remote[11], stage)
+            self.assertEqual(remote[12], '0')
         self.assertIn("'--bridge-native'", D.REMOTE_PROGRAM)
-        self.assertIn("'upgrade':['upgrade'", D.REMOTE_PROGRAM)
+        self.assertIn("'upgrade':['operator-upgrade'", D.REMOTE_PROGRAM)
+
+    def test_native_retry_failed_is_bound_to_upgrade_handoff(self):
+        self.rollout(retry_failed=True)
+        command = next(command for stage, command in self.calls if stage == 'upgrade')
+        remote = D.shlex.split(command[-1])
+        self.assertEqual(remote[11], 'upgrade')
+        self.assertEqual(remote[12], '1')
+
+    def test_forward_only_transport_options_are_confined_to_upgrade(self):
+        old = {'schema': 1, 'commit': self.commit, 'version': self.version, 'stage': 'upgrade',
+               'mutator_dispatched': True, 'remote_attempt': 'c' * 64,
+               'manifest_sha256': 'd' * 64, 'staged_config_sha256': 'e' * 64}
+        D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
+        self.rollout(forward_only=True)
+        calls = {stage: D.shlex.split(command[-1]) for stage, command in self.calls if stage in ('doctor', 'upgrade', 'status')}
+        archived = next(self.root.glob('operation.forward-only-abandoned-*.json'))
+        forward_sha = D.sha(archived.read_bytes())
+        self.assertEqual(calls['doctor'][13], '0')
+        self.assertEqual(calls['doctor'][15], forward_sha)
+        self.assertEqual(calls['upgrade'][13], '1')
+        self.assertEqual(calls['upgrade'][15], forward_sha)
+        self.assertEqual(calls['status'][13], '0')
+        self.assertEqual(calls['status'][15], forward_sha)
+
+    def failed_forward_fixture(self):
+        old_commit = 'b' * 40
+        old = {'schema': 1, 'commit': old_commit, 'version': 'v0.0.' + str(int(old_commit, 16)),
+               'stage': 'upgrade', 'mutator_dispatched': True, 'remote_attempt': 'c' * 64,
+               'manifest_sha256': 'd' * 64, 'staged_config_sha256': 'e' * 64}
+        D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
+        def fail(command, cwd, stage, **kwargs):
+            if stage == 'upgrade':
+                raise D.DeployError('fixture_failed')
+        with self.assertRaisesRegex(D.DeployError, 'fixture_failed'):
+            self.rollout(forward_only=True, runner=fail)
+        self.calls.clear()
+        self.stage_mock.reset_mock()
+        return old
+
+    def continuation_runner(self, old, change=None):
+        record = json.loads((self.root / 'operation.json').read_bytes())
+        def runner(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'forward_continuation_attestation':
+                state = Path('/var/lib/ultra-ansible') / ('upgrade-' + old['version'])
+                args = D.shlex.split(command[-1])
+                target_version, prior_version, prior_sha = args[-10], args[-5], args[-1]
+                prior_state = Path('/var/lib/ultra-ansible') / ('upgrade-' + prior_version)
+                target_state = Path('/var/lib/ultra-ansible') / ('upgrade-' + target_version)
+                chain = {'phase': 'restart' if record['commit'] == self.commit else 'start',
+                    'proof_sha256': record['forward_journal_sha256'],
+                    'prior_journal_sha256': prior_sha,
+                    'original_id': str(D.uuid.UUID(bytes=hashlib.sha256(str(state).encode()).digest()[:16], version=4)),
+                    'prior_id': str(D.uuid.UUID(bytes=hashlib.sha256(str(prior_state).encode()).digest()[:16], version=4)),
+                    'new_id': str(D.uuid.UUID(bytes=hashlib.sha256(str(target_state).encode()).digest()[:16], version=4)),
+                    'prior_evidence_sha256': 'a' * 64, 'original_handoff_sha256': 'b' * 64,
+                    'original_evidence_sha256': 'c' * 64, 'original_retirement_sha256': 'd' * 64}
+                receipt = {'architecture': 'arm64', 'manifest_sha256': record['manifest_sha256'],
+                    'config_sha256': record['staged_config_sha256'], 'attempt': record['remote_attempt'],
+                    'forward_journal_sha256': record['forward_journal_sha256'],
+                    'prior_candidate': None, 'chain_attestation': chain,
+                    'lifecycle_id': str(D.uuid.UUID(bytes=hashlib.sha256(str(state).encode()).digest()[:16], version=4))}
+                if len(args)<24:
+                    receipt.pop('chain_attestation')
+                receipt.update(change or {})
+                return json.dumps(receipt)
+        return runner
+
+    def test_continue_forward_only_retains_original_proof_and_exact_candidate(self):
+        old = self.failed_forward_fixture()
+        original_proof = next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes()
+        config = self.config.read_bytes()
+        with patch.object(D, 'subscription_probe_from_env', side_effect=AssertionError('must not read env')):
+            self.rollout(continue_forward_only=True, runner=self.continuation_runner(old, {'prior_candidate': {}, 'operation_absent': True}))
+        self.assertFalse(self.stage_mock.called)
+        self.assertEqual(self.config.read_bytes(), config)
+        self.assertEqual([p.read_bytes() for p in self.root.glob('operation.forward-only-abandoned-*.json')], [original_proof])
+        upgrade = D.shlex.split(next(command for stage, command in self.calls if stage == 'upgrade')[-1])
+        self.assertEqual(upgrade[13], '1')
+        self.assertEqual(upgrade[15], D.sha(original_proof))
+        self.assertEqual(upgrade[16], '1')
+        self.assertNotIn('--retry-failed', upgrade)
+
+    def new_candidate_fixture(self):
+        self.commit = 'c' * 40
+        self.version = 'v0.0.' + str(int(self.commit, 16))
+        self.bundle = self.root / self.version
+        self.bundle.mkdir()
+        self.manifest = json.dumps({'source_commit': self.commit, 'version': self.version, 'assets': []}).encode()
+        (self.bundle / 'release-manifest.json').write_bytes(self.manifest)
+
+    def test_continue_new_head_retains_pre_handoff_receipt_without_chain_attestation(self):
+        old=self.failed_forward_fixture()
+        runner=self.continuation_runner(old,{'chain_attestation':None})
+        self.new_candidate_fixture()
+        self.rollout(continue_forward_only=True,runner=runner)
+        upgrade=D.shlex.split(next(command for stage,command in self.calls if stage=='upgrade')[-1])
+        self.assertEqual(upgrade[16],'1')
+        self.assertEqual(upgrade[-6],json.loads(next(self.root.glob('operation.forward-only-retry-*.json')).read_bytes())['commit'])
+
+    def test_continue_new_head_rejects_absent_candidate_before_mutating_recovery_state(self):
+        self.probe_env()
+        old = self.failed_forward_fixture()
+        attest = self.continuation_runner(old, {'prior_candidate': {}, 'operation_absent': True})
+        self.new_candidate_fixture()
+        canonical = self.repo / 'canonical.config'
+        self.config.rename(canonical)
+        canonical.chmod(0o644)
+        config = canonical.read_bytes()
+        before = {str(p.relative_to(self.root)): (p.read_bytes(), p.stat().st_mode & 0o777)
+                  for p in self.root.rglob('*') if p.is_file()}
+        with patch.object(D, 'subscription_probe_from_env', side_effect=AssertionError('must not read env')):
+            with self.assertRaisesRegex(D.DeployError, '^manual_forward_continuation_missing_prior_candidate$'):
+                self.rollout(config_path=canonical, continue_forward_only=True, runner=attest)
+        self.assertEqual(canonical.read_bytes(), config)
+        self.assertEqual(canonical.stat().st_mode & 0o777, 0o644)
+        self.assertFalse(self.config.exists())
+        self.assertEqual({str(p.relative_to(self.root)): (p.read_bytes(), p.stat().st_mode & 0o777)
+                          for p in self.root.rglob('*') if p.is_file()}, before)
+        self.assertFalse(list(self.root.glob('operation.forward-only-retry-*.json')))
+        self.assertFalse(self.stage_mock.called)
+        self.assertEqual([stage for stage, _ in self.calls], ['canonical_policy', 'forward_continuation_attestation'])
+
+    def test_continue_new_head_archives_failed_candidate_as_history_preserving_production_proof(self):
+        old = self.failed_forward_fixture()
+        failed_raw = (self.root / 'operation.json').read_bytes()
+        failed = json.loads(failed_raw)
+        proof = next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes()
+        attest = self.continuation_runner(old)
+        self.new_candidate_fixture()
+        def runner(command, cwd, stage, **kwargs):
+            response = attest(command, cwd, stage, **kwargs)
+            if stage == 'forward_continuation_attestation':
+                tokens=D.shlex.split(command[-1])
+                self.assertEqual(tokens[-6:-1],[failed['commit'],failed['version'],failed['remote_attempt'],
+                    failed['manifest_sha256'],failed['staged_config_sha256']])
+                self.assertEqual(tokens[-1],D.sha(failed_raw))
+                self.assertIsNone(json.loads(response)['prior_candidate'])
+                self.assertNotIn('operation_absent', json.loads(response))
+            if stage == 'upgrade':
+                record = json.loads((self.root / 'operation.json').read_bytes())
+                self.assertEqual(record['commit'], self.commit)
+                self.assertNotEqual(record['commit'], failed['commit'])
+                self.assertNotEqual(record['version'], failed['version'])
+                self.assertEqual(record['forward_journal_sha256'], D.sha(proof))
+                self.assertNotEqual(record['forward_journal_sha256'], D.sha(failed_raw))
+                history = self.root / record['forward_retry_history']
+                self.assertEqual(history.read_bytes(), failed_raw)
+                self.assertEqual(history.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(record['forward_retry_history_sha256'], D.sha(failed_raw))
+                raise D.DeployError('new_failure')
+            return response
+        canonical = self.repo / 'canonical.config'
+        self.config.rename(canonical)
+        canonical.chmod(0o644)
+        with patch.object(D, 'subscription_probe_from_env', side_effect=AssertionError('must not read env')):
+            with self.assertRaisesRegex(D.DeployError, 'new_failure'):
+                self.rollout(config_path=canonical, continue_forward_only=True, runner=runner)
+        self.assertEqual(canonical.stat().st_mode & 0o777, 0o644)
+        self.assertFalse(self.config.exists())
+        self.assertEqual(self.stage_mock.call_args.args[8]['forward-operation.json'], proof)
+        self.assertEqual([p.read_bytes() for p in self.root.glob('operation.forward-only-abandoned-*.json')], [proof])
+        self.assertEqual(len(list(self.root.glob('operation.forward-only-retry-*.json'))), 1)
+        self.assertEqual([s for s, _ in self.calls].count('forward_continuation_attestation'), 2)
+        same_candidate = self.continuation_runner(old)
+        prior_sha = json.loads((self.root / 'operation.json').read_bytes())['forward_prior_journal_sha256']
+        attested_prior = []
+        self.stage_mock.reset_mock()
+        def resume(command, cwd, stage, **kwargs):
+            response = same_candidate(command, cwd, stage, **kwargs)
+            if stage == 'forward_continuation_attestation':
+                self.assertIn(prior_sha, command[-1])
+                attested_prior.append(prior_sha)
+            if stage == 'upgrade':
+                tokens = D.shlex.split(command[-1])
+                record = json.loads((self.root / 'operation.json').read_bytes())
+                history = json.loads((self.root / record['forward_retry_history']).read_bytes())
+                self.assertTrue(tokens[-13].endswith('/forward-prior-operation.json'))
+                self.assertEqual(tokens[-12], prior_sha)
+                self.assertEqual(tokens[-11:-6], [self.commit, self.version, D.sha(self.manifest),
+                    record['staged_config_sha256'], record['remote_attempt']])
+                self.assertEqual(tokens[-6:-1], [history['commit'], history['version'], history['remote_attempt'],
+                    history['manifest_sha256'], history['staged_config_sha256']])
+                self.assertEqual(tokens[-1], prior_sha)
+            return response
+        with patch.object(D, 'subscription_probe_from_env', side_effect=AssertionError('must not read env')):
+            self.rollout(config_path=canonical, continue_forward_only=True, runner=resume)
+        self.assertEqual(attested_prior, [prior_sha])
+        self.assertFalse(self.stage_mock.called)
+
+    def test_continue_new_head_doctor_failure_restores_failed_operation_and_frozen_probe(self):
+        self.probe_env()
+        old = self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        config = self.config.read_bytes()
+        probe = (self.root / 'subscription-probe-url').read_bytes()
+        attest = self.continuation_runner(old)
+        self.new_candidate_fixture()
+        def runner(command, cwd, stage, **kwargs):
+            if stage == 'doctor':
+                raise D.DeployError('doctor_failed_exit_1')
+            return attest(command, cwd, stage, **kwargs)
+        with self.assertRaisesRegex(D.DeployError, 'doctor_failed_exit_1'):
+            self.rollout(continue_forward_only=True, runner=runner)
+        self.assertEqual((self.root / 'operation.json').read_bytes(), before)
+        self.assertEqual(self.config.read_bytes(), config)
+        self.assertEqual((self.root / 'subscription-probe-url').read_bytes(), probe)
+
+    def test_continue_new_head_second_attestation_failure_restores_original_recovery_state(self):
+        self.probe_env()
+        old = self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        config = self.config.read_bytes()
+        probe = (self.root / 'subscription-probe-url').read_bytes()
+        attest = self.continuation_runner(old)
+        self.new_candidate_fixture()
+        attestations = 0
+        def runner(command, cwd, stage, **kwargs):
+            nonlocal attestations
+            if stage == 'forward_continuation_attestation':
+                attestations += 1
+                if attestations == 2:
+                    pending = json.loads((self.root / 'operation.json').read_bytes())
+                    self.assertEqual(pending['stage'], 'forward_continuation_preflight')
+                    self.assertIs(pending['mutator_dispatched'], False)
+                    raise D.DeployError('second_attestation_failed')
+            return attest(command, cwd, stage, **kwargs)
+        with self.assertRaisesRegex(D.DeployError, 'second_attestation_failed'):
+            self.rollout(continue_forward_only=True, runner=runner)
+        self.assertEqual((self.root / 'operation.json').read_bytes(), before)
+        self.assertEqual(self.config.read_bytes(), config)
+        self.assertEqual((self.root / 'subscription-probe-url').read_bytes(), probe)
+        self.assertEqual([p.read_bytes() for p in self.root.glob('operation.forward-only-retry-*.json')], [before])
+        self.assertFalse(any(stage == 'upgrade' for stage, _ in self.calls))
+        self.rollout(continue_forward_only=True, runner=attest)
+
+    def test_continue_new_head_write_failures_restore_or_recover_at_every_local_boundary(self):
+        # Exercise both errors before replacement and death after a durable
+        # replacement, including recovery interrupted while restoring config.
+        for boundary in ['history', 'backup', 'probe', 'journal', 'config', 'binding', 'bridge_staging', 'doctor', 'forward_continuation_preflight']:
+            for after in [False, True]:
+                with self.subTest(boundary=boundary, after=after):
+                    fixture = NativeDeploy(methodName='runTest')
+                    fixture.setUp()
+                    try:
+                        fixture.probe_env()
+                        old = fixture.failed_forward_fixture()
+                        before = (fixture.root / 'operation.json').read_bytes()
+                        config = fixture.config.read_bytes()
+                        probe = (fixture.root / 'subscription-probe-url').read_bytes()
+                        attest = fixture.continuation_runner(old)
+                        fixture.new_candidate_fixture()
+                        real_write = D.atomic_write
+                        injected = False
+                        def write(path, raw, **kwargs):
+                            nonlocal injected
+                            selected = ((boundary == 'history' and path.name.startswith('operation.forward-only-retry-')) or
+                                (boundary == 'backup' and path.name.startswith('install.config.before-' + fixture.version)) or
+                                (boundary == 'probe' and path.name == 'subscription-probe-url') or
+                                (boundary == 'journal' and path.name == 'operation.json' and json.loads(raw).get('stage') == 'prepared') or
+                                (boundary == 'config' and path == fixture.config) or
+                                (boundary == 'binding' and path.name.startswith('probe-binding-' + fixture.commit)) or
+                                (boundary in ['bridge_staging', 'doctor', 'forward_continuation_preflight'] and
+                                 path.name == 'operation.json' and json.loads(raw).get('stage') == boundary))
+                            if selected and not injected:
+                                injected = True
+                                if after:
+                                    real_write(path, raw, **kwargs)
+                                raise OSError('injected_write_failure')
+                            return real_write(path, raw, **kwargs)
+                        with patch.object(D, 'atomic_write', side_effect=write):
+                            # Simulate process death preventing in-process
+                            # restoration; the next invocation must recover.
+                            with patch.object(D, 'restore_forward_preflight', side_effect=OSError('interrupted_recovery')):
+                                with self.assertRaises(OSError):
+                                    fixture.rollout(continue_forward_only=True, runner=attest)
+                        self.assertTrue(injected)
+                        self.assertFalse(any(stage == 'upgrade' for stage, _ in fixture.calls))
+                        recovered = False
+                        def check_recovered(command, cwd, stage, **kwargs):
+                            nonlocal recovered
+                            if stage == 'canonical_policy':
+                                self.assertEqual((fixture.root / 'operation.json').read_bytes(), before)
+                                self.assertEqual(fixture.config.read_bytes(), config)
+                                self.assertEqual((fixture.root / 'subscription-probe-url').read_bytes(), probe)
+                                recovered = True
+                            return attest(command, cwd, stage, **kwargs)
+                        fixture.rollout(continue_forward_only=True, runner=check_recovered)
+                        self.assertTrue(recovered)
+                    finally:
+                        fixture.doCleanups()
+
+    def test_continue_recovers_when_config_restored_but_old_journal_restore_was_interrupted(self):
+        old = self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        config = self.config.read_bytes()
+        attest = self.continuation_runner(old)
+        self.new_candidate_fixture()
+        real_write = D.atomic_write
+        def fail_restore(command, cwd, stage, **kwargs):
+            if stage == 'doctor':
+                raise D.DeployError('doctor_failure')
+            return attest(command, cwd, stage, **kwargs)
+        def write(path, raw, **kwargs):
+            if path == self.root / 'operation.json' and raw == before:
+                self.assertEqual(self.config.read_bytes(), config)
+                raise OSError('journal_restore_interrupted')
+            return real_write(path, raw, **kwargs)
+        with patch.object(D, 'atomic_write', side_effect=write):
+            with self.assertRaisesRegex(OSError, 'journal_restore_interrupted'):
+                self.rollout(continue_forward_only=True, runner=fail_restore)
+        self.assertIs(json.loads((self.root / 'operation.json').read_bytes())['mutator_dispatched'], False)
+        self.assertEqual(self.config.read_bytes(), config)
+        pending = (self.root / 'operation.json').read_bytes()
+        for arguments in [{'forward_only': True}, {'retry_failed': True}, {'adopt': True},
+                          {'probe_env_file': self.repo / 'unused-private-input'}]:
+            with self.subTest(arguments=arguments):
+                with self.assertRaisesRegex(D.DeployError, 'manual_forward_continuation_arguments_invalid'):
+                    self.rollout(continue_forward_only=True, **arguments)
+                self.assertEqual((self.root / 'operation.json').read_bytes(), pending)
+                self.assertEqual(self.config.read_bytes(), config)
+        self.rollout(continue_forward_only=True, runner=attest)
+
+    def test_ordinary_retry_rejects_all_unfinished_forward_journals_without_touching_recovery_state(self):
+        self.probe_env()
+        self.failed_forward_fixture()
+        journal = self.root / 'operation.json'
+        original = json.loads(journal.read_bytes())
+        config = self.config.read_bytes()
+        probe = (self.root / 'subscription-probe-url').read_bytes()
+        proof = next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes()
+        for stage, dispatched in [('prepared', False), ('bridge_staging', False), ('doctor', False),
+                                  ('forward_continuation_preflight', False), ('upgrade', True), ('status', True)]:
+            for retry in [False, True]:
+                with self.subTest(stage=stage, retry=retry):
+                    pending = json.dumps(dict(original, stage=stage, mutator_dispatched=dispatched)).encode()
+                    D.atomic_write(journal, pending)
+                    self.calls.clear()
+                    self.stage_mock.reset_mock()
+                    with patch.object(D, 'atomic_write', side_effect=AssertionError('must not write')):
+                        with self.assertRaisesRegex(D.DeployError, 'manual_forward_operation_requires_explicit_continuation'):
+                            self.rollout(retry_failed=retry)
+                    self.assertEqual(journal.read_bytes(), pending)
+                    self.assertEqual(self.config.read_bytes(), config)
+                    self.assertEqual((self.root / 'subscription-probe-url').read_bytes(), probe)
+                    self.assertEqual(next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes(), proof)
+                    self.assertEqual(self.calls, [])
+                    self.assertFalse(self.stage_mock.called)
+
+    def test_continue_preflight_recovery_rejects_unrelated_or_changed_journals(self):
+        old = self.failed_forward_fixture()
+        journal = self.root / 'operation.json'
+        before = journal.read_bytes()
+        config = self.config.read_bytes()
+        original = json.loads(before)
+        for change in [{'stage': 'prepared', 'mutator_dispatched': False},
+                       {'stage': 'prepared', 'mutator_dispatched': False, 'forward_retry_history': '../operation.json'},
+                       {'stage': 'upgrade', 'mutator_dispatched': False}]:
+            raw = json.dumps(dict(original, **change)).encode()
+            D.atomic_write(journal, raw)
+            with self.assertRaises(D.DeployError):
+                self.rollout(continue_forward_only=True)
+            self.assertEqual(journal.read_bytes(), raw)
+            self.assertEqual(self.config.read_bytes(), config)
+        D.atomic_write(journal, before)
+
+    def test_continue_new_head_attestation_failure_leaves_config_journal_and_archives_unchanged(self):
+        old = self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        config = self.config.read_bytes()
+        attest = self.continuation_runner(old, {'lifecycle_id': 'foreign'})
+        self.new_candidate_fixture()
+        with self.assertRaisesRegex(D.DeployError, 'manual_forward_continuation_receipt_invalid'):
+            self.rollout(continue_forward_only=True, runner=attest)
+        self.assertEqual((self.root / 'operation.json').read_bytes(), before)
+        self.assertEqual(self.config.read_bytes(), config)
+        self.assertFalse(self.stage_mock.called)
+        self.assertFalse(list(self.root.glob('operation.forward-only-retry-*.json')))
+
+    def test_forward_only_cannot_archive_failed_forward_candidate_as_predecessor(self):
+        self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        with self.assertRaisesRegex(D.DeployError, 'manual_forward_operation_requires_explicit_continuation'):
+            self.rollout(forward_only=True)
+        self.assertEqual((self.root / 'operation.json').read_bytes(), before)
+        self.assertEqual(len(list(self.root.glob('operation.forward-only-abandoned-*.json'))), 1)
+        self.assertFalse(self.stage_mock.called)
+
+    def test_continue_forward_only_doctor_failure_retains_retryable_original_journal(self):
+        old = self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        attest = self.continuation_runner(old)
+        def runner(command, cwd, stage, **kwargs):
+            if stage == 'doctor':
+                raise D.DeployError('doctor_failed_exit_1')
+            return attest(command, cwd, stage, **kwargs)
+        with self.assertRaisesRegex(D.DeployError, 'doctor_failed_exit_1'):
+            self.rollout(continue_forward_only=True, runner=runner)
+        self.assertEqual(json.loads((self.root / 'operation.json').read_bytes()), json.loads(before))
+        self.assertFalse(self.stage_mock.called)
+
+    def test_continue_forward_only_rejects_changed_receipt_without_replacing_journal(self):
+        old = self.failed_forward_fixture()
+        before = (self.root / 'operation.json').read_bytes()
+        for change in ({'forward_journal_sha256': 'f' * 64}, {'lifecycle_id': 'foreign'},
+                       {'config_sha256': 'f' * 64}, {'attempt': 'f' * 64}, {'architecture': 'amd64'}):
+            with self.subTest(change=change):
+                with self.assertRaises(D.DeployError):
+                    self.rollout(continue_forward_only=True, runner=self.continuation_runner(old, change))
+                self.assertEqual((self.root / 'operation.json').read_bytes(), before)
+        self.assertFalse(self.stage_mock.called)
+
+    def test_continue_forward_only_rejects_changed_local_bindings(self):
+        self.failed_forward_fixture()
+        journal = self.root / 'operation.json'
+        before = journal.read_bytes()
+        base = json.loads(before)
+        for key, value in [('commit', 'f' * 40), ('manifest_sha256', 'f' * 64),
+                           ('remote_attempt', 'f' * 64), ('staged_config_sha256', 'f' * 64),
+                           ('transport_binding', {}), ('forward_journal_sha256', 'f' * 64),
+                           ('forward_only', False)]:
+            with self.subTest(key=key):
+                D.atomic_write(journal, json.dumps(dict(base, **{key: value})).encode())
+                with self.assertRaises(D.DeployError):
+                    self.rollout(continue_forward_only=True)
+        D.atomic_write(journal, before)
+        proof = next(self.root.glob('operation.forward-only-abandoned-*.json'))
+        proof.write_bytes(b'{}')
+        with self.assertRaisesRegex(D.DeployError, 'manual_forward_continuation_proof_changed'):
+            self.rollout(continue_forward_only=True)
+        self.assertFalse(self.stage_mock.called)
+        self.assertEqual(self.calls, [])
+
+    def legacy_record(self):
+        attempt = D.remote_attempt(self.original, self.version)
+        release = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + self.commit + '-' + attempt) / 'release'
+        self.original = D.config_candidate(self.original, self.version, release)
+        self.config.write_bytes(self.original)
+        _, binding = D.operator_transport(str(self.operator / 'inventory.json'), self.original)
+        return {'schema': 1, 'commit': self.commit, 'version': self.version, 'stage': 'upgrade',
+                'mutator_dispatched': True, 'remote_attempt': D.remote_attempt(self.original, self.version), 'manifest_sha256': 'd' * 64,
+                'config_sha256': D.sha(self.original), 'transport_binding': binding}
+
+    def pre_direct_transport_binding(self):
+        # Reproduce the released fingerprint independently of the compatibility
+        # implementation, including the old common identity for exit_0.
+        info = self.identity.lstat()
+        target = {'host': '192.0.2.10',
+                  'identity_file': [str(self.identity), info.st_ino, info.st_size, info.st_mtime_ns],
+                  'pins_file': str(self.pins), 'pins_sha256': D.sha(self.pins.read_bytes())}
+        jump_identity = Path(self.inventory['all']['children']['exits']['hosts']['exit_0'].get(
+            'ansible_ssh_private_key_file', str(self.identity)))
+        jump_info = jump_identity.lstat()
+        jump = dict(target, host='192.0.2.20', identity_file=[str(jump_identity), jump_info.st_ino,
+                    jump_info.st_size, jump_info.st_mtime_ns])
+        return D.sha(json.dumps({'source_sha256': D.sha((self.operator / 'inventory.json').read_bytes()),
+                                 'target': target, 'jump': jump}, sort_keys=True).encode())
+
+    def assert_direct_recovery_calls(self):
+        for stage, command in self.calls:
+            if command[0] == 'ssh':
+                self.assertEqual(command[-2], 'root@192.0.2.10')
+                self.assertIn('ProxyJump=none', command)
+                self.assertFalse(any('ProxyCommand=' in token for token in command))
+
+    def test_pre_direct_legacy_forward_only_requires_exact_binding_and_attestation(self):
+        old = dict(self.legacy_record(), transport_binding=self.pre_direct_transport_binding())
+        D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
+        def runner(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'legacy_operation_attestation':
+                return json.dumps(dict(old, staged_config_sha256=old['config_sha256']))
+            if stage == 'upgrade':
+                raise D.DeployError('fixture_failed')
+        with self.assertRaisesRegex(D.DeployError, 'fixture_failed'):
+            self.rollout(forward_only=True, runner=runner)
+        archived = next(self.root.glob('operation.forward-only-abandoned-*.json'))
+        self.assertEqual(json.loads(archived.read_bytes()), dict(old, staged_config_sha256=old['config_sha256']))
+        self.assertEqual(self.calls[0][0], 'legacy_operation_attestation')
+        self.assert_direct_recovery_calls()
+        _, direct_binding = D.operator_transport(str(self.operator / 'inventory.json'), self.config.read_bytes())
+        self.assertEqual(json.loads((self.root / 'operation.json').read_bytes())['transport_binding'], direct_binding)
+        self.assertNotEqual(direct_binding, old['transport_binding'])
+
+    def test_pre_direct_forward_only_existing_staged_digest_requires_attestation(self):
+        old = dict(self.legacy_record(), transport_binding=self.pre_direct_transport_binding())
+        old['staged_config_sha256'] = old['config_sha256']
+        raw = json.dumps(old).encode()
+        journal = self.root / 'operation.json'
+        D.atomic_write(journal, raw)
+        def reject(command, cwd, stage, **kwargs):
+            self.assertEqual(stage, 'legacy_operation_attestation')
+            raise D.DeployError('fixture_attestation_failed')
+        with self.assertRaisesRegex(D.DeployError, 'fixture_attestation_failed'):
+            self.rollout(forward_only=True, runner=reject)
+        self.assertEqual(journal.read_bytes(), raw)
+        self.assertEqual(self.config.read_bytes(), self.original)
+        bad = dict(old, staged_config_sha256='f' * 64)
+        D.atomic_write(journal, json.dumps(bad).encode())
+        with self.assertRaisesRegex(D.DeployError, 'manual_legacy_operation_binding_changed'):
+            self.rollout(forward_only=True)
+        self.assertFalse(self.calls)
+        self.assertFalse(self.stage_mock.called)
+        D.atomic_write(journal, raw)
+        def runner(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'legacy_operation_attestation':
+                return json.dumps(old)
+        self.rollout(forward_only=True, runner=runner)
+        self.assertEqual(json.loads(next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes()), old)
+        self.assertEqual(self.calls[0][0], 'legacy_operation_attestation')
+        self.assert_direct_recovery_calls()
+
+    def test_pre_direct_continuation_preserves_history_and_restores_preflight(self):
+        old = self.failed_forward_fixture()
+        journal = self.root / 'operation.json'
+        record = json.loads(journal.read_bytes())
+        record['transport_binding'] = self.pre_direct_transport_binding()
+        D.atomic_write(journal, json.dumps(record).encode())
+        before = journal.read_bytes()
+        config = self.config.read_bytes()
+        attest = self.continuation_runner(old)
+        self.new_candidate_fixture()
+        def fail_doctor(command, cwd, stage, **kwargs):
+            if stage == 'doctor':
+                raise D.DeployError('fixture_doctor_failure')
+            return attest(command, cwd, stage, **kwargs)
+        with self.assertRaisesRegex(D.DeployError, 'fixture_doctor_failure'):
+            self.rollout(continue_forward_only=True, runner=fail_doctor)
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(self.config.read_bytes(), config)
+        self.rollout(continue_forward_only=True, runner=attest)
+        self.assert_direct_recovery_calls()
+        self.assertEqual([p.read_bytes() for p in self.root.glob('operation.forward-only-retry-*.json')], [before, before])
+
+    def test_pre_direct_same_candidate_continuation_is_attested_before_dispatch(self):
+        old = self.failed_forward_fixture()
+        journal = self.root / 'operation.json'
+        record = json.loads(journal.read_bytes())
+        record['transport_binding'] = self.pre_direct_transport_binding()
+        D.atomic_write(journal, json.dumps(record).encode())
+        before = journal.read_bytes()
+        with self.assertRaisesRegex(D.DeployError, 'manual_forward_continuation_receipt_invalid'):
+            self.rollout(continue_forward_only=True, runner=self.continuation_runner(old, {'attempt': 'f' * 64}))
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertFalse(self.stage_mock.called)
+        self.assertNotIn('upgrade', [stage for stage, _ in self.calls])
+        self.rollout(continue_forward_only=True, runner=self.continuation_runner(old))
+        self.assert_direct_recovery_calls()
+
+    def test_pre_direct_adoption_journal_is_not_supported_recovery(self):
+        old = dict(self.legacy_record(), transport_binding=self.pre_direct_transport_binding(),
+                   stage='adoption_apply', adopt=True)
+        raw = json.dumps(old).encode()
+        journal = self.root / 'operation.json'
+        D.atomic_write(journal, raw)
+        for arguments in ({}, {'retry_failed': True}, {'forward_only': True}, {'continue_forward_only': True}):
+            with self.subTest(arguments=arguments), self.assertRaises(D.DeployError):
+                self.rollout(**arguments)
+            self.assertEqual(journal.read_bytes(), raw)
+            self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertFalse(self.calls)
+        self.assertFalse(self.stage_mock.called)
+
+    def test_pre_direct_recovery_rejects_changed_legacy_identity_or_pins(self):
+        for change in ('identity', 'pins', 'missing_pin', 'source', 'jump_identity'):
+            with self.subTest(change=change):
+                jump_identity = self.repo / 'exit-operator-key'
+                jump_identity.write_bytes(b'fixture exit key metadata only')
+                jump_identity.chmod(0o600)
+                self.inventory['all']['children']['exits']['hosts']['exit_0']['ansible_ssh_private_key_file'] = str(jump_identity)
+                self.write_inventory()
+                old = self.legacy_record()
+                old['transport_binding'] = self.pre_direct_transport_binding()
+                raw = json.dumps(old).encode()
+                D.atomic_write(self.root / 'operation.json', raw)
+                if change == 'identity':
+                    info = self.identity.stat()
+                    os.utime(self.identity, ns=(info.st_atime_ns, info.st_mtime_ns + 1))
+                elif change == 'pins':
+                    self.pins.write_bytes(b'changed pins')
+                elif change == 'source':
+                    self.inventory['all']['vars']['fixture_changed'] = True
+                    self.write_inventory()
+                elif change == 'jump_identity':
+                    info = jump_identity.stat()
+                    os.utime(jump_identity, ns=(info.st_atime_ns, info.st_mtime_ns + 1))
+                else:
+                    D.subprocess.run.return_value = subprocess.CompletedProcess([], 1)
+                with self.assertRaises(D.DeployError):
+                    self.rollout(forward_only=True)
+                self.assertEqual((self.root / 'operation.json').read_bytes(), raw)
+                self.assertEqual(self.config.read_bytes(), self.original)
+                self.assertFalse(self.calls)
+                self.assertFalse(self.stage_mock.called)
+                D.subprocess.run.return_value = subprocess.CompletedProcess([], 0)
+
+    def test_legacy_forward_only_archives_attested_hash_and_preserves_original_fields(self):
+        old = self.legacy_record()
+        D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
+        def runner(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'legacy_operation_attestation':
+                self.assertTrue(kwargs['capture'])
+                self.assertEqual(command[:3], ['ssh', '-F', '/dev/null'])
+                return json.dumps(dict(old, staged_config_sha256=old['config_sha256']))
+        self.rollout(forward_only=True, runner=runner)
+        archived = next(self.root.glob('operation.forward-only-abandoned-*.json'))
+        self.assertEqual(json.loads(archived.read_bytes()), dict(old, staged_config_sha256=old['config_sha256']))
+        self.assertEqual(self.calls[0][0], 'legacy_operation_attestation')
+
+    def test_legacy_forward_only_attests_exact_baseline_relocation(self):
+        # The old local baseline files no longer need to exist for this read.
+        self.original += b'ULTRA_UPGRADE_BASELINE_FILE=/nonexistent/private-baseline.json\n'
+        old = self.legacy_record()
+        old_root = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + self.commit + '-' + old['remote_attempt'])
+        expected = D.config_candidate(self.original, self.version, old_root / 'release', old_root / 'baseline/descriptor.json')
+        self.assertNotEqual(D.sha(expected), old['config_sha256'])
+        D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
+        def runner(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'legacy_operation_attestation':
+                self.assertEqual(D.shlex.split(command[-1])[-1], D.sha(expected))
+                return json.dumps(dict(old, staged_config_sha256=D.sha(expected)))
+        self.rollout(forward_only=True, runner=runner)
+        archived = next(self.root.glob('operation.forward-only-abandoned-*.json'))
+        self.assertEqual(json.loads(archived.read_bytes()), dict(old, staged_config_sha256=D.sha(expected)))
+
+    def test_legacy_forward_only_rejection_preserves_config_and_journal(self):
+        for kind in ('transport', 'config', 'attempt', 'version', 'release', 'failure', 'receipt', 'digest', 'malformed'):
+            with self.subTest(kind=kind):
+                old = self.legacy_record()
+                if kind == 'transport': old['transport_binding'] = 'x' * 64
+                if kind == 'config': old['config_sha256'] = 'f' * 64
+                if kind == 'attempt': old['remote_attempt'] = 'f' * 64
+                if kind in ('version', 'release'):
+                    self.original = D.config_candidate(self.original, 'v0.0.1' if kind == 'version' else self.version,
+                        '/wrong' if kind == 'release' else D.config_values(self.original)['ULTRA_AUTOMATION_RELEASE_DIR'])
+                    self.config.write_bytes(self.original)
+                    old['config_sha256'] = D.sha(self.original)
+                raw = json.dumps(old).encode()
+                D.atomic_write(self.root / 'operation.json', raw)
+                def runner(command, cwd, stage, **kwargs):
+                    if stage == 'legacy_operation_attestation':
+                        if kind == 'failure': raise D.DeployError('fixture_ssh_failure')
+                        if kind == 'malformed': return 'not json'
+                        receipt = dict(old, staged_config_sha256=old['config_sha256'])
+                        if kind == 'receipt': receipt['commit'] = 'f' * 40
+                        if kind == 'digest': receipt['staged_config_sha256'] = 'f' * 64
+                        return json.dumps(receipt)
+                with self.assertRaises(D.DeployError):
+                    self.rollout(forward_only=True, runner=runner)
+                self.assertEqual((self.root / 'operation.json').read_bytes(), raw)
+                self.assertEqual(self.config.read_bytes(), self.original)
+                self.assertFalse(list(self.root.glob('operation.forward-only-abandoned-*')))
+                self.assertFalse(list(self.root.glob('install.config.before-*')))
+                self.stage_mock.assert_not_called()
+
+    def test_native_probe_archive_handoff_preserves_dispatched_cleanup_journal(self):
+        secret = b'https://old.example.com/sub/fixture-token'
+        self.probe_env(secret)
+        original_run = self.run_fixture
+        def failed_cleanup(command, cwd, stage, **kwargs):
+            original_run(command, cwd, stage)
+            self.assertNotIn(secret.decode(), repr(command))
+            if stage == 'probe_cleanup':
+                raise D.DeployError('fixture_cleanup_failed')
+        with self.assertRaisesRegex(D.DeployError, 'fixture_cleanup_failed'):
+            self.rollout(runner=failed_cleanup)
+        extra = self.stage_mock.call_args.args[8]
+        self.assertEqual(extra['subscription-probe-url'], secret)
+        self.assertEqual(extra['subscription-probe.sha256'], D.sha(secret).encode())
+        upgrade = next(command for stage, command in self.calls if stage == 'upgrade')
+        self.assertEqual(D.shlex.split(upgrade[-1])[14], D.sha(secret))
+        record = json.loads((self.root / 'operation.json').read_bytes())
+        self.assertEqual(record['stage'], 'completed')
+        self.assertEqual(record['probe_sha256'], D.sha(secret))
+        self.assertNotIn(secret, (self.root / 'operation.json').read_bytes())
+        self.probe_env(b'https://old.example.com/sub/new-token')
+        self.calls.clear()
+        self.rollout()
+        self.assertEqual([stage for stage, _ in self.calls], ['canonical_policy', 'probe_cleanup'])
+        self.assertFalse((self.root / 'operation.json').exists())
+        self.assertFalse((self.root / 'subscription-probe-url').exists())
+
+    def test_native_predispatch_failure_cleans_private_copies(self):
+        self.probe_env()
+        def failed(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'doctor':
+                raise D.DeployError('fixture_failed')
+        with self.assertRaises(D.DeployError):
+            self.rollout(runner=failed)
+        self.assertEqual([stage for stage, _ in self.calls], ['canonical_policy', 'doctor', 'probe_cleanup'])
+        self.assertFalse((self.root / 'subscription-probe-url').exists())
+        self.assertEqual(self.config.read_bytes(), self.original)
+
+    def test_stage_remote_probe_sends_exact_pair_without_env_or_credential_argv(self):
+        secret = b'https://old.example.com/sub/fixture-token'
+        manifest = {'source_commit': self.commit, 'version': self.version, 'assets': []}
+        raw = json.dumps(manifest).encode()
+        (self.bundle / 'release-manifest.json').write_bytes(raw)
+        files = {'subscription-probe-url': secret, 'subscription-probe.sha256': D.sha(secret).encode()}
+        def process(command, **kwargs):
+            self.assertNotIn(secret.decode(), repr(command))
+            with tarfile.open(fileobj=kwargs['stdin'], mode='r|') as archive:
+                entries = {member.name: archive.extractfile(member).read() for member in archive}
+            self.assertEqual(entries, {'release/release-manifest.json': raw, 'install.config': self.original, **files})
+            self.assertEqual(D.shlex.split(command[-1])[-1], D.sha(secret))
+            return subprocess.CompletedProcess(command, 0, json.dumps({'architecture': 'arm64',
+                'manifest_sha256': D.sha(raw), 'config_sha256': D.sha(self.original),
+                'attempt': D.remote_attempt(self.original, self.version)}).encode())
+        with patch.object(D.subprocess, 'run', process):
+            D.stage_remote(self.repo, self.root, self.bundle, self.original, ['ssh', 'fixture'],
+                           self.commit, self.version, D.sha(raw), files)
 
     def test_native_interrupted_staging_is_retryable_without_dispatch(self):
         self.stage_mock.side_effect = D.DeployError('bridge_staging_failed')
@@ -271,9 +1617,32 @@ class NativeDeploy(unittest.TestCase):
         self.assertFalse((self.root / 'operation.json').exists())
         self.assertEqual(self.config.read_bytes(), self.original)
         self.assertEqual([s for s, _ in self.calls], ['canonical_policy'])
-        self.stage_mock.side_effect = None
+        self.stage_mock.side_effect = self.staged_receipt
         self.rollout(adopt=True)
         self.assertEqual(next(self.root.glob('install.config.before-*')).read_bytes(), self.original)
+
+    def test_native_same_commit_replay_keeps_remote_attempt_after_baseline_cleanup(self):
+        self.config.write_bytes(self.original + b'ULTRA_UPGRADE_BASELINE_FILE=/private/baseline.json\n')
+        baseline_setting = self.config.read_bytes()
+        original_prepare = D.stage_upgrade_baseline
+        def prepared(config, version, remote_root):
+            if not D.config_values(config).get('ULTRA_UPGRADE_BASELINE_FILE'):
+                return original_prepare(config, version, remote_root)
+            staged = D.config_candidate(config, version, remote_root / 'release', remote_root / 'baseline/descriptor.json')
+            return staged, {'baseline/descriptor.json': b'{}', 'baseline/operator-journal.json': b'{}'}
+        with patch.object(D, 'stage_upgrade_baseline', side_effect=prepared):
+            first_attempt = D.remote_attempt(baseline_setting, self.version)
+            self.rollout()
+            self.assertNotIn(b'ULTRA_UPGRADE_BASELINE_FILE=', self.config.read_bytes())
+            first_config = self.stage_mock.call_args.args[3]
+            self.rollout()
+        first, second = self.stage_mock.call_args_list
+        self.assertEqual(first.args[3], first_config)
+        self.assertEqual(second.args[3], first_config)
+        with patch.object(D, 'stage_upgrade_baseline', side_effect=prepared):
+            self.assertEqual(D.completed_baseline_replay(self.root, self.config.read_bytes(), self.version, self.commit)[0], first_attempt)
+        self.assertEqual(first.args[1], second.args[1])
+        self.assertEqual(D.remote_attempt(first.args[3], self.version), D.remote_attempt(second.args[3], self.version))
 
     def test_native_changed_transport_or_manifest_rejects_resume(self):
         def failure(command, cwd, stage, **kwargs):
@@ -282,11 +1651,11 @@ class NativeDeploy(unittest.TestCase):
         with self.assertRaises(D.DeployError):
             self.rollout(runner=failure)
         self.pins.write_bytes(b'new pins')
-        with self.assertRaisesRegex(D.DeployError, 'transport_or_manifest_changed'):
+        with self.assertRaisesRegex(D.DeployError, 'manual_operation_quiescence_migration_required'):
             self.rollout()
         self.pins.write_bytes(b'fixture pins')
         (self.bundle / 'release-manifest.json').write_bytes(self.manifest + b' ')
-        with self.assertRaisesRegex(D.DeployError, 'transport_or_manifest_changed'):
+        with self.assertRaisesRegex(D.DeployError, 'manual_operation_quiescence_migration_required'):
             self.rollout()
 
     def test_native_wrong_topology_and_provenance_fail_before_config_change(self):
@@ -338,17 +1707,18 @@ class NativeDeploy(unittest.TestCase):
         with self.assertRaises(D.DeployError):
             self.rollout(runner=failure)
         self.identity.chmod(0o644)
-        with self.assertRaisesRegex(D.DeployError, 'identity_private_required'):
+        with self.assertRaisesRegex(D.DeployError, 'manual_operation_quiescence_migration_required'):
             self.rollout()
         self.identity.chmod(0o600)
         self.identity.write_bytes(b'replaced credential')
-        with self.assertRaisesRegex(D.DeployError, 'transport_or_manifest_changed'):
+        with self.assertRaisesRegex(D.DeployError, 'manual_operation_quiescence_migration_required'):
             self.rollout()
 
     def test_native_forbidden_secrets_fail_before_any_copy_or_stage(self):
-        for key in ['TELEGRAM_BOT_TOKEN', 'MINISIGN_SECRET_KEY', 'MINISIGN_PASSWORD',
+        for key in ['TELEGRAM_BOT_TOKEN', 'PROVIDER_API_KEY', 'MINISIGN_SECRET_KEY', 'MINISIGN_PASSWORD',
                     'MINISIGN_PRIVATE_KEY_FILE', 'ULTRA_RELEASE_SIGNING_PRIVATE_KEY',
-                    'RELEASE_SIGNING_PASSPHRASE', 'ultra_db_dsn']:
+                    'RELEASE_SIGNING_PASSPHRASE', 'EXAMPLE_PROVIDER_API_KEY', 'example_provider_api_key', 'ultra_db_dsn',
+                    'ULTRA_CUTOVER_SUBSCRIPTION_URL']:
             with self.subTest(key=key):
                 raw = self.original + key.encode() + b'=sensitive-fixture\n'
                 self.config.write_bytes(raw)
@@ -397,7 +1767,7 @@ class NativeDeploy(unittest.TestCase):
         with patch.object(Path, 'read_bytes', read), patch.object(D.subprocess, 'run', process):
             architecture = D.stage_remote(self.repo, self.root, self.bundle, self.original,
                 ['ssh', '-F', '/dev/null', 'root@192.0.2.10'], self.commit, self.version, D.sha(raw_manifest))
-        self.assertEqual(architecture, 'arm64')
+        self.assertEqual(architecture['architecture'], 'arm64')
 
     def test_native_canonical_route_survives_deleted_adopt_directory(self):
         shutil.rmtree(self.operator.parent)
@@ -411,7 +1781,7 @@ class NativeDeploy(unittest.TestCase):
         self.assertEqual([s for s, _ in self.calls], ['canonical_policy', 'doctor', 'adoption_check', 'adoption_apply', 'status'])
         transport = self.stage_mock.call_args.args[4]
         self.assertEqual(transport[-1], 'root@192.0.2.10')
-        self.assertTrue(any('ProxyCommand=ssh -F /dev/null' in token and '-W %h:%p root@192.0.2.20' in token for token in transport))
+        self.assertFalse(any('ProxyCommand=' in token for token in transport))
 
     def test_native_canonical_route_requires_both_local_references(self):
         with patch.dict(os.environ, {'ULTRA_OPERATOR_INVENTORY': '', 'ULTRA_OPERATOR_IDENTITY': str(self.identity),
@@ -461,10 +1831,14 @@ class RemoteProgram(unittest.TestCase):
         self.program = self.program.replace('need(os.geteuid()==0)', 'need(True)').replace('info.st_uid==0', 'info.st_uid==os.geteuid()')
         self.root = self.parent / ('manual-' + self.commit + '-' + D.remote_attempt(self.config, self.version))
 
-    def archive(self, mutate=None):
-        entries = [('release/release-manifest.json', self.manifest)]
+    def archive(self, mutate=None, forward_journal=None, forward_prior_operation=None, manifest=None, config=None):
+        entries = [('release/release-manifest.json', self.manifest if manifest is None else manifest)]
         entries += [('release/' + name, data) for name, data in self.assets.items()]
-        entries += [('install.config', self.config)]
+        entries += [('install.config', self.config if config is None else config)]
+        if forward_journal is not None:
+            entries.append(('forward-operation.json', forward_journal))
+        if forward_prior_operation is not None:
+            entries.append(('forward-prior-operation.json', forward_prior_operation))
         if mutate:
             entries = mutate(entries)
         stream = io.BytesIO()
@@ -475,9 +1849,767 @@ class RemoteProgram(unittest.TestCase):
                 archive.addfile(entry, io.BytesIO(raw))
         return stream.getvalue()
 
-    def execute(self, mode, data=None, *args):
-        return subprocess.run([D.sys.executable, '-I', '-c', self.program, mode, self.commit, self.version,
-            D.sha(self.manifest), D.sha(self.config), D.remote_attempt(self.config, self.version), *args], input=data, capture_output=True)
+    def execute(self, mode, data=None, *args, probe_sha='', forward_only=False, forward_sha='', prior_sha='', prior_version='v0.0.1', identity=None):
+        if mode == 'run':
+            args = (*args, *(['0'] * max(0, 4 - len(args))))
+            args = (*args[:3], '1' if forward_only else '0', *args[4:])
+            if forward_sha:
+                args = (*args, probe_sha, forward_sha)
+            elif probe_sha:
+                args = (*args, probe_sha)
+            if prior_sha:
+                args = (*args, str(self.parent.parent / ('upgrade-'+prior_version)),
+                        str(self.root / 'forward-prior-operation.json'), prior_sha)
+        else:
+            if forward_sha:
+                args = (*args, probe_sha, forward_sha, prior_sha)
+            elif probe_sha:
+                args = (*args, probe_sha)
+        commit, version, manifest, config, attempt = identity or (
+            self.commit, self.version, self.manifest, self.config, D.remote_attempt(self.config, self.version))
+        return subprocess.run([D.sys.executable, '-I', '-c', self.program, mode, commit, version,
+            D.sha(manifest), D.sha(config), attempt, *args], input=data, capture_output=True)
+
+    def absent_operation_fixture(self):
+        old_commit = 'b' * 40
+        old_version = 'v0.0.' + str(int(old_commit, 16))
+        old_attempt = 'd' * 64
+        old_inputs = self.parent / ('manual-' + old_commit + '-' + old_attempt)
+        (old_inputs / 'release').mkdir(parents=True, mode=0o700)
+        old_inputs.chmod(0o700)
+        old_manifest = json.dumps({'source_commit': old_commit, 'version': old_version}).encode()
+        old_config = b'INSTALL_SCHEMA_VERSION=2\n'
+        D.atomic_write(old_inputs / 'release/release-manifest.json', old_manifest)
+        D.atomic_write(old_inputs / 'install.config', old_config)
+        proof = {'schema': 1, 'commit': old_commit, 'version': old_version,
+                 'remote_attempt': old_attempt, 'stage': 'upgrade', 'mutator_dispatched': True,
+                 'manifest_sha256': D.sha(old_manifest), 'staged_config_sha256': D.sha(old_config)}
+        proof_raw = json.dumps(proof).encode()
+        prior_commit = 'c' * 40
+        prior_version = 'v0.0.' + str(int(prior_commit, 16))
+        prior = json.dumps({'commit': prior_commit, 'version': prior_version, 'remote_attempt': 'e' * 64}).encode()
+        staged = self.execute('stage', self.archive(forward_journal=proof_raw, forward_prior_operation=prior),
+                              forward_sha=D.sha(proof_raw), prior_sha=D.sha(prior))
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        operation = self.parent.parent / ('upgrade-' + self.version)
+        old_directory = self.parent.parent / ('upgrade-' + old_version)
+        old_id = str(D.uuid.UUID(bytes=hashlib.sha256(str(old_directory).encode()).digest()[:16], version=4))
+        D.atomic_write(self.parent.parent / 'lifecycle.json', json.dumps({'id': old_id, 'phase': 'applying'}).encode())
+        return operation, old_inputs, old_id, proof_raw, D.sha(prior), prior_version
+
+    def chain_fixture(self, root_is_prior=False):
+        state=self.parent.parent
+        prior_commit='c'*40
+        prior_version='v0.0.'+str(int(prior_commit,16))
+        prior_attempt='e'*64
+        old_commit='b'*40
+        old_version='v0.0.'+str(int(old_commit,16))
+        old_attempt='d'*64
+        def identity(path):
+            return str(D.uuid.UUID(bytes=hashlib.sha256(str(path).encode()).digest()[:16],version=4))
+        old=state/('upgrade-'+old_version)
+        prior=state/('upgrade-'+prior_version)
+        target=state/('upgrade-'+self.version)
+        old_id,prior_id,new_id=map(identity,(old,prior,target))
+        def inputs(commit,version,attempt):
+            directory=self.parent/('manual-'+commit+'-'+attempt)
+            (directory/'release').mkdir(parents=True,mode=0o700)
+            directory.chmod(0o700)
+            manifest=json.dumps({'source_commit':commit,'version':version}).encode()
+            config=b'fixture config'
+            D.atomic_write(directory/'release/release-manifest.json',manifest)
+            D.atomic_write(directory/'install.config',config)
+            return D.sha(manifest),D.sha(config)
+        old_manifest,old_config=inputs(old_commit,old_version,old_attempt)
+        prior_manifest,prior_config=(None,None) if root_is_prior else inputs(prior_commit,prior_version,prior_attempt)
+        proof=json.dumps({'schema':1,'commit':old_commit,'version':old_version,'remote_attempt':old_attempt,
+            'stage':'upgrade','mutator_dispatched':True,'manifest_sha256':old_manifest,
+            'staged_config_sha256':old_config}).encode()
+        proof_sha=D.sha(proof)
+        history=json.dumps({'schema':1,'commit':prior_commit,'version':prior_version,'remote_attempt':prior_attempt,
+            'stage':'upgrade','mutator_dispatched':True,'manifest_sha256':prior_manifest,
+            'staged_config_sha256':prior_config,'forward_journal_sha256':proof_sha}).encode()
+        history_sha=D.sha(history)
+        inventory={'all':{'children':{'bridge':{'hosts':{'bridge':{}}}}}}
+        (old/'activate').mkdir(parents=True,mode=0o700)
+        old.chmod(0o700)
+        request=json.dumps({'inventory':inventory,'variables':{'ultra_lifecycle_id':old_id}}).encode()
+        for name,raw in {'activate/request.json':request,'activate/job.json':b'{}',
+                         'activate/receipt.json':b'{}','operator-plan.json':b'{}'}.items():
+            D.atomic_write(old/name,raw)
+        prior.mkdir(mode=0o700)
+        for name in ['operator-plan.json','execution-mode.json','identity','inventory.frozen.json']:
+            D.atomic_write(prior/name,b'{}')
+        for name in ['inspect','hosts','domain-inspect','architectures','recovery-bundle',
+                     'forward-maintenance-fixture','handoff-drain-fixture']:
+            directory=prior/name
+            directory.mkdir(mode=0o700)
+            if name=='architectures':
+                D.atomic_write(directory/'bridge.json',b'{}')
+            elif name!='recovery-bundle':
+                for artifact in ['request.json','job.json','receipt.json','result.json']:
+                    D.atomic_write(directory/artifact,b'{}')
+        D.atomic_write(prior/'forward-handoff.json',json.dumps({'schema':1,'proof_sha256':proof_sha,
+            'old_id':old_id,'new_id':prior_id,'drain_directory':str(prior/'handoff-drain-fixture')}).encode())
+        ledger=json.dumps({'version':1,'ids':[old_id],'handoff':{'old_id':old_id,'new_id':prior_id}}).encode()
+        D.atomic_write(state/'lifecycle-retired.json',ledger)
+        D.atomic_write(state/'lifecycle.json',json.dumps({'id':prior_id,'phase':'applying'}).encode())
+        prior_root_manifest=(json.dumps({'source_commit':prior_commit,'version':prior_version,
+            'assets':[{'name':name,'size':len(raw),'sha256':D.sha(raw)} for name,raw in self.assets.items()]},
+            sort_keys=True,separators=(',',':')).encode())
+        prior_config_raw=b'fixture config'
+        if root_is_prior:
+            prior_manifest=D.sha(prior_root_manifest)
+            prior_config=D.sha(prior_config_raw)
+            history=json.dumps({'schema':1,'commit':prior_commit,'version':prior_version,
+                'remote_attempt':prior_attempt,'stage':'upgrade','mutator_dispatched':True,
+                'manifest_sha256':prior_manifest,'staged_config_sha256':prior_config,
+                'forward_journal_sha256':proof_sha}).encode()
+            history_sha=D.sha(history)
+        root_identity=(prior_commit,prior_version,prior_root_manifest,prior_config_raw,prior_attempt) if root_is_prior else None
+        root_prior=(json.dumps({'commit':old_commit,'version':old_version,'remote_attempt':old_attempt,
+            'manifest_sha256':old_manifest,'staged_config_sha256':old_config,
+            'forward_journal_sha256':proof_sha},sort_keys=True,separators=(',',':')).encode() if root_is_prior else history)
+        root_prior_sha=D.sha(root_prior)
+        staged=self.execute('stage',self.archive(forward_journal=proof,forward_prior_operation=root_prior,
+                                manifest=root_identity[2] if root_identity else None,
+                                config=root_identity[3] if root_identity else None),
+                            forward_sha=proof_sha,prior_sha=root_prior_sha,identity=root_identity)
+        self.assertEqual(staged.returncode,0,staged.stderr)
+        chain_args=[self.commit,self.version,D.sha(self.manifest),D.sha(self.config),D.remote_attempt(self.config,self.version),
+                    prior_commit,prior_version,prior_attempt,prior_manifest,prior_config,history_sha]
+        def continued():
+            return self.execute('continue',None,'',proof_sha,root_prior_sha,*chain_args,identity=root_identity)
+        first=continued()
+        self.assertEqual(first.returncode,0,first.stderr)
+        attestation=json.loads(first.stdout)['chain_attestation']
+        target.mkdir(mode=0o700)
+        chain={key:value for key,value in attestation.items() if key!='phase'}
+        chain.update(schema=1,original_retirement_json=ledger.decode())
+        D.atomic_write(target/'forward-chain.json',json.dumps(chain).encode())
+        def dispatched():
+            return self.execute('run',None,self.architecture,'upgrade','0','1','',proof_sha,'1',
+                str(prior),str(self.root/'forward-prior-operation.json'),history_sha,*chain_args,forward_only=True)
+        return continued,dispatched,target,prior,old_id,prior_id,new_id,proof_sha,history_sha,chain_args,root_prior_sha
+
+    def test_chain_continue_from_prior_root_keeps_inherited_journal_distinct(self):
+        continued,_,_,_,_,_,_,proof_sha,chain_prior_sha,_,root_prior_sha=self.chain_fixture(root_is_prior=True)
+        # B's root carries the authenticated A journal, while the requested C
+        # transition names B's own journal as its immediate predecessor.
+        self.assertNotEqual(root_prior_sha,chain_prior_sha)
+        result=continued()
+        self.assertEqual(result.returncode,0,result.stderr)
+        receipt=json.loads(result.stdout)
+        self.assertEqual(receipt['chain_attestation']['proof_sha256'],proof_sha)
+        self.assertEqual(receipt['chain_attestation']['prior_journal_sha256'],chain_prior_sha)
+
+    def test_chain_continue_and_run_validate_A_owned_prefix_and_B_owned_restart(self):
+        continued,dispatched,target,prior,old_id,prior_id,new_id,proof_sha,history_sha,args,_=self.chain_fixture()
+        for phase in ['start','restart']:
+            with self.subTest(phase=phase):
+                if phase=='restart':
+                    request=json.dumps({'inventory':{'all':{'children':{'bridge':{'hosts':{'bridge':{}}}}}},
+                        'variables':{'ultra_lock_directory':str(self.parent.parent),
+                                     'ultra_forward_old_id':prior_id,'ultra_lifecycle_id':new_id}},
+                        sort_keys=True,separators=(',',':')).encode()
+                    request_sha=D.sha(request)
+                    result={'verified':True,'old_id':prior_id,'new_id':new_id}
+                    job={'schema_version':1,'operation':'drain-upgrade-workers',
+                         'request_sha256':request_sha,'binary_sha256':request_sha}
+                    drain=target/'handoff-drain-fixture'
+                    drain.mkdir(mode=0o700)
+                    raws={'request.json':request,'job.json':json.dumps(job).encode(),
+                          'receipt.json':json.dumps(dict(job,state='succeeded',result=result)).encode(),
+                          'result.json':json.dumps(result).encode()}
+                    for name,raw in raws.items(): D.atomic_write(drain/name,raw)
+                    intent={'schema':1,'proof_sha256':proof_sha,'old_id':prior_id,'new_id':new_id,
+                            'drain_directory':str(drain)}
+                    for key,name in [('request_sha256','request.json'),('job_sha256','job.json'),
+                                     ('receipt_sha256','receipt.json'),('result_sha256','result.json')]:
+                        intent[key]=D.sha(raws[name])
+                    D.atomic_write(target/'forward-handoff.json',json.dumps(intent).encode())
+                    D.atomic_write(self.parent.parent/'lifecycle-retired.json',json.dumps({'version':1,
+                        'ids':[old_id,prior_id],'handoff':{'old_id':prior_id,'new_id':new_id}}).encode())
+                    D.atomic_write(self.parent.parent/'lifecycle.json',json.dumps({'id':new_id,'phase':'applying'}).encode())
+                receipt=continued()
+                self.assertEqual(receipt.returncode,0,receipt.stderr)
+                self.assertEqual(json.loads(receipt.stdout)['chain_attestation']['phase'],phase)
+                run=dispatched()
+                self.assertEqual(run.returncode,0,run.stderr)
+                executed=json.loads(self.result.read_bytes())
+                self.assertIn('--forward-prior-journal-sha256',executed)
+                self.assertIn(history_sha,executed)
+                self.result.unlink()
+                chain=target/'forward-chain.json'
+                raw=chain.read_bytes()
+                changed=json.loads(raw)
+                changed['prior_evidence_sha256']='f'*64
+                D.atomic_write(chain,json.dumps(changed).encode())
+                self.assertNotEqual(continued().returncode,0)
+                self.assertNotEqual(dispatched().returncode,0)
+                self.assertFalse(self.result.exists())
+                D.atomic_write(chain,raw)
+                args[-1]='bad'
+                self.assertNotEqual(continued().returncode,0)
+                self.assertNotEqual(dispatched().returncode,0)
+                args[-1]=history_sha
+
+    def test_continuation_accepts_absent_operation_under_lock_and_retries_same_candidate(self):
+        operation, _, old_id, proof, prior_sha, prior_version = self.absent_operation_fixture()
+        before = {str(p): p.read_bytes() for p in self.parent.parent.rglob('*') if p.is_file()}
+        continued = self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha)
+        self.assertEqual(continued.returncode, 0, continued.stderr)
+        receipt = json.loads(continued.stdout)
+        self.assertEqual(receipt['prior_candidate'], {})
+        self.assertIs(receipt['operation_absent'], True)
+        self.assertEqual(receipt['lifecycle_id'], old_id)
+        self.assertFalse(operation.exists())
+        self.assertEqual({str(p): p.read_bytes() for p in self.parent.parent.rglob('*') if p.is_file()}, before)
+        self.assertFalse(self.result.exists())
+        dispatched = self.execute('run', None, self.architecture, 'upgrade', '0', '1', '', D.sha(proof), '1',
+                                  forward_only=True, prior_sha=prior_sha, prior_version=prior_version)
+        self.assertEqual(dispatched.returncode, 0, dispatched.stderr)
+        self.assertIn('--forward-only', json.loads(self.result.read_bytes()))
+
+    def test_new_head_chain_request_retains_O_owned_pre_handoff_protocol(self):
+        _,_,_,proof,prior_sha,_=self.absent_operation_fixture()
+        # New-head probes include chain inputs, but O still owns the lifecycle.
+        # The absent A prefix must retain its existing pre-handoff receipt.
+        target_commit='f'*40
+        args=[target_commit,'v0.0.'+str(int(target_commit,16)),'1'*64,'2'*64,'3'*64,
+              self.commit,self.version,D.remote_attempt(self.config,self.version),
+              D.sha(self.manifest),D.sha(self.config),'4'*64]
+        result=self.execute('continue',None,'',D.sha(proof),prior_sha,*args)
+        self.assertEqual(result.returncode,0,result.stderr)
+        receipt=json.loads(result.stdout)
+        self.assertTrue(receipt['operation_absent'])
+        self.assertNotIn('chain_attestation',receipt)
+        operation=self.parent.parent/('upgrade-'+self.version)
+        operation.mkdir(mode=0o700)
+        for name in ['execution-mode.json','operator-plan.json']:
+            D.atomic_write(operation/name,b'{}')
+        result=self.execute('continue',None,'',D.sha(proof),prior_sha,*args)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertNotIn('chain_attestation',json.loads(result.stdout))
+        (self.root/'install.config').chmod(0o644)
+        self.assertNotEqual(self.execute('continue',None,'',D.sha(proof),prior_sha,*args).returncode,0)
+
+    def test_absent_operation_continuation_rejects_busy_lock(self):
+        _, _, _, proof, prior_sha, _ = self.absent_operation_fixture()
+        with D.lock(self.parent / 'manual-deploy.lock'):
+            rejected = self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn(b'BlockingIOError', rejected.stderr)
+        self.assertFalse(self.result.exists())
+
+    def test_absent_operation_is_rechecked_before_dispatch_after_attestation(self):
+        operation, _, _, proof, prior_sha, prior_version = self.absent_operation_fixture()
+        continued = self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha)
+        self.assertEqual(continued.returncode, 0, continued.stderr)
+        # A competing dispatch after attestation must not reuse the absence proof.
+        operation.mkdir(mode=0o700)
+        for name in ['operator-plan.json', 'execution-mode.json']:
+            D.atomic_write(operation / name, b'{}')
+        (operation / 'activate').mkdir(mode=0o700)
+        dispatched = self.execute('run', None, self.architecture, 'upgrade', '0', '1', '', D.sha(proof), '1',
+                                  forward_only=True, prior_sha=prior_sha, prior_version=prior_version)
+        self.assertNotEqual(dispatched.returncode, 0)
+        self.assertFalse(self.result.exists())
+
+    def test_absent_operation_continuation_rejects_changed_bindings(self):
+        _, old_inputs, old_id, proof, prior_sha, _ = self.absent_operation_fixture()
+        lifecycle = self.parent.parent / 'lifecycle.json'
+        for path in [self.root / 'install.config', self.root / 'release/fixture-0',
+                     self.root / 'forward-operation.json', self.root / 'forward-prior-operation.json',
+                     old_inputs / 'release/release-manifest.json', old_inputs / 'install.config']:
+            with self.subTest(path=str(path)):
+                original = path.read_bytes()
+                D.atomic_write(path, b'changed')
+                self.assertNotEqual(self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha).returncode, 0)
+                D.atomic_write(path, original)
+        for state in [{'id': 'foreign', 'phase': 'applying'}, {'id': old_id, 'phase': 'released'}]:
+            with self.subTest(lifecycle=state):
+                D.atomic_write(lifecycle, json.dumps(state).encode())
+                self.assertNotEqual(self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha).returncode, 0)
+        D.atomic_write(lifecycle, json.dumps({'id': old_id, 'phase': 'applying'}).encode())
+        for key, value in [('schema', 2), ('stage', 'status'), ('mutator_dispatched', False), ('remote_attempt', 'bad')]:
+            with self.subTest(proof=key):
+                changed = json.loads(proof)
+                changed[key] = value
+                changed_raw = json.dumps(changed).encode()
+                D.atomic_write(self.root / 'forward-operation.json', changed_raw)
+                self.assertNotEqual(self.execute('continue', forward_sha=D.sha(changed_raw), prior_sha=prior_sha).returncode, 0)
+        self.assertFalse(self.result.exists())
+
+    def test_absent_operation_exception_rejects_existing_unsafe_paths(self):
+        operation, _, _, proof, prior_sha, _ = self.absent_operation_fixture()
+        for kind in ['dangling symlink', 'directory symlink', 'file', 'public directory', 'activation', 'drain']:
+            with self.subTest(kind=kind):
+                if kind == 'dangling symlink':
+                    operation.symlink_to(self.parent.parent / 'missing')
+                elif kind == 'directory symlink':
+                    operation.symlink_to(self.root, target_is_directory=True)
+                elif kind == 'file':
+                    D.atomic_write(operation, b'{}')
+                else:
+                    operation.mkdir(mode=0o700)
+                    if kind == 'public directory':
+                        operation.chmod(0o755)
+                    else:
+                        for name in ['operator-plan.json', 'execution-mode.json']:
+                            D.atomic_write(operation / name, b'{}')
+                        (operation / ('activate' if kind == 'activation' else 'handoff-drain-unsafe')).mkdir(mode=0o700)
+                rejected = self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertFalse(self.result.exists())
+                if operation.is_symlink() or operation.is_file():
+                    operation.unlink()
+                else:
+                    D.shutil.rmtree(operation)
+
+    def test_partial_broker_bootstrap_continuation_accepts_prior_digest_and_missing_ledger(self):
+        old_commit = 'b' * 40
+        old_version = 'v0.0.' + str(int(old_commit, 16))
+        proof = json.dumps({'commit': old_commit, 'version': old_version}).encode()
+        forward_sha = D.sha(proof)
+        prior = json.dumps({'commit': old_commit, 'version': old_version}).encode()
+        prior_sha = D.sha(prior)
+        staged = self.execute('stage', self.archive(forward_journal=proof, forward_prior_operation=prior),
+                              forward_sha=forward_sha, prior_sha=prior_sha)
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        operation = self.parent.parent / ('upgrade-' + self.version)
+        operation.mkdir(mode=0o700)
+        for name in ['operator-plan.json', 'execution-mode.json']:
+            D.atomic_write(operation / name, b'{}')
+        old_state = self.parent.parent / ('upgrade-' + old_version)
+        old_id = str(D.uuid.UUID(bytes=hashlib.sha256(str(old_state).encode()).digest()[:16], version=4))
+        D.atomic_write(self.parent.parent / 'lifecycle.json', json.dumps({'id': old_id, 'phase': 'applying'}).encode())
+        new_id = str(D.uuid.UUID(bytes=hashlib.sha256(str(operation).encode()).digest()[:16], version=4))
+        drain = operation / 'handoff-drain-fixture'
+        drain.mkdir(mode=0o700)
+        drain_request = json.dumps({'inventory': {}, 'variables': {
+            'ultra_lock_directory': str(self.parent.parent), 'ultra_forward_old_id': old_id,
+            'ultra_lifecycle_id': new_id}}, sort_keys=True, separators=(',', ':')).encode()
+        drain_sha = D.sha(drain_request)
+        drain_result = {'verified': True, 'old_id': old_id, 'new_id': new_id}
+        drain_receipt = {'schema_version': 1, 'operation': 'drain-upgrade-workers',
+                         'request_sha256': drain_sha, 'binary_sha256': drain_sha,
+                         'state': 'succeeded', 'code': '', 'result': drain_result}
+        drain_rows = {'request.json': drain_request,
+                      'job.json': json.dumps({k: v for k, v in drain_receipt.items() if k not in ('state', 'code', 'result')}).encode(),
+                      'receipt.json': json.dumps(drain_receipt).encode(),
+                      'result.json': json.dumps(drain_result).encode()}
+        for name, raw in drain_rows.items():
+            D.atomic_write(drain / name, raw)
+        bootstrap = operation / 'broker-bootstrap-fixture'
+        bootstrap.mkdir(mode=0o700)
+        request = json.dumps({'inventory': {}, 'variables': {
+            'ultra_lock_directory': str(self.parent.parent), 'ultra_forward_old_id': old_id,
+            'ultra_forward_candidate_id': new_id,
+            'ultra_controller_directory': '/opt/ultra-ansible/releases/managed-'+self.version}},
+            sort_keys=True, separators=(',', ':')).encode()
+        request_sha = D.sha(request)
+        result = {'verified': True, 'old_id': old_id,
+                  'controller_directory': '/opt/ultra-ansible/releases/managed-'+self.version}
+        receipt = {'schema_version': 1, 'operation': 'bootstrap-forward-broker',
+                   'request_sha256': request_sha, 'binary_sha256': request_sha,
+                   'state': 'succeeded', 'code': '', 'result': result}
+        rows = {'request.json': request,
+                'job.json': json.dumps({k: v for k, v in receipt.items() if k not in ('state', 'code', 'result')}).encode(),
+                'receipt.json': json.dumps(receipt).encode(), 'result.json': json.dumps(result).encode()}
+        for name, raw in rows.items():
+            D.atomic_write(bootstrap / name, raw)
+        continued = self.execute('continue', forward_sha=forward_sha, prior_sha=prior_sha)
+        self.assertEqual(continued.returncode, 0, continued.stderr)
+        self.assertEqual(json.loads(continued.stdout)['prior_candidate']['version'], self.version)
+        self.assertFalse((self.parent.parent / 'lifecycle-retired.json').exists())
+        unrelated_old='d'*8+'-'+'d'*4+'-'+'d'*4+'-'+'d'*4+'-'+'d'*12
+        unrelated_new='e'*8+'-'+'e'*4+'-'+'e'*4+'-'+'e'*4+'-'+'e'*12
+        ledger={'version':1,'ids':[unrelated_old],
+                'handoff':{'old_id':unrelated_old,'new_id':unrelated_new}}
+        D.atomic_write(self.parent.parent/'lifecycle-retired.json',json.dumps(ledger).encode())
+        ledger_continued=self.execute('continue',forward_sha=forward_sha,prior_sha=prior_sha)
+        self.assertEqual(ledger_continued.returncode,0,ledger_continued.stderr)
+        doctor = self.execute('run', None, self.architecture, 'doctor', '0', '0', '', forward_sha, '0',
+                              forward_only=False, forward_sha='', prior_sha=prior_sha, prior_version=old_version)
+        # The prior pointer is parsed by the run protocol before any installer action.
+        self.assertEqual(doctor.returncode, 0, doctor.stderr)
+
+
+    def failed_broker_guard_fixture(self):
+        operation, _, old_id, proof, prior_sha, _ = self.absent_operation_fixture()
+        operation.mkdir(mode=0o700)
+        for name in ['operator-plan.json', 'execution-mode.json']:
+            D.atomic_write(operation / name, b'{}')
+        old_version = json.loads(proof)['version']
+        old_operation = self.parent.parent / ('upgrade-' + old_version)
+        (old_operation / 'activate').mkdir(parents=True, mode=0o700)
+        old_operation.chmod(0o700)
+        identity = {'directory': '/opt/ultra-ansible/releases/managed-' + old_version,
+                    'installer_sha256': '1' * 64, 'runtime_sha256': '2' * 64, 'unit_sha256': '3' * 64}
+        inventory = {'all': {'children': {'bridge': {'hosts': {'bridge': {
+            'ultra_controller_directory': identity['directory'],
+            'ultra_install_sha256': identity['installer_sha256'],
+            'ultra_controller_runtime_sha256': identity['runtime_sha256'],
+            'ultra_target_controller_unit_sha256': identity['unit_sha256']}}}}}}
+        old_request = json.dumps({'inventory': inventory, 'variables': {'ultra_lifecycle_id': old_id}}).encode()
+        old_job = {'schema_version': 1, 'operation': 'upgrade',
+                   'request_sha256': D.sha(old_request), 'binary_sha256': D.sha(old_request)}
+        D.atomic_write(old_operation / 'activate/request.json', old_request)
+        for name in ['job.json', 'receipt.json']:
+            D.atomic_write(old_operation / 'activate' / name, json.dumps(old_job).encode())
+        new_id = str(D.uuid.UUID(bytes=hashlib.sha256(str(operation).encode()).digest()[:16], version=4))
+        stage = operation / 'broker-bootstrap-fixture'
+        stage.mkdir(mode=0o700)
+        request = json.dumps({'inventory': inventory, 'variables': {
+            'ultra_lock_directory': str(self.parent.parent), 'ultra_forward_old_id': old_id,
+            'ultra_forward_candidate_id': new_id, 'ultra_forward_expected_brokers': [identity],
+            'ultra_controller_directory': '/opt/ultra-ansible/releases/managed-' + self.version}}).encode()
+        job = {'schema_version': 1, 'operation': 'bootstrap-forward-broker',
+               'request_sha256': D.sha(request), 'binary_sha256': D.sha(request)}
+        diagnostic = {'stage': 'Verify frozen broker identity and predecessor gate before replacement',
+                      'node': 'bridge', 'code': 'task_failed'}
+        receipt = dict(job, state='failed', code='ansible_failed', exit_code=2, diagnostic=diagnostic)
+        for name, value in [('request.json', request), ('job.json', json.dumps(job).encode()),
+                            ('receipt.json', json.dumps(receipt).encode()),
+                            ('diagnostic.json', json.dumps(diagnostic).encode())]:
+            D.atomic_write(stage / name, value)
+        return operation, stage, proof, prior_sha
+
+    def test_continuation_accepts_only_pre_mutation_failed_broker_guard(self):
+        operation, stage, proof, prior_sha = self.failed_broker_guard_fixture()
+        before = {str(p): p.read_bytes() for p in self.parent.parent.rglob('*') if p.is_file()}
+        continued = self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha)
+        self.assertEqual(continued.returncode, 0, continued.stderr)
+        self.assertEqual(json.loads(continued.stdout)['prior_candidate']['version'], self.version)
+        self.assertFalse((stage / 'result.json').exists())
+        self.assertFalse((operation / 'forward-handoff.json').exists())
+        self.assertFalse(self.result.exists())
+        self.assertEqual({str(p): p.read_bytes() for p in self.parent.parent.rglob('*') if p.is_file()}, before)
+
+    def test_failed_broker_guard_rejects_changed_or_missing_evidence(self):
+        operation, stage, proof, prior_sha = self.failed_broker_guard_fixture()
+        def reject():
+            result = self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(self.result.exists())
+        changes = [('receipt.json', 'state', 'running'), ('receipt.json', 'code', 'controller_failed'),
+                   ('receipt.json', 'exit_code', 1), ('receipt.json', 'exit_code', True),
+                   ('receipt.json', 'operation', 'upgrade'), ('job.json', 'operation', 'upgrade'),
+                   ('job.json', 'request_sha256', 'f' * 64), ('receipt.json', 'binary_sha256', 'f' * 64),
+                   ('receipt.json', 'result', {'verified': True}),
+                   ('diagnostic.json', 'stage', 'Install only immutable broker runtime and service'),
+                   ('diagnostic.json', 'node', 'exit'), ('diagnostic.json', 'code', 'host_unreachable')]
+        for name, key, value in changes:
+            with self.subTest(file=name, field=key, value=value):
+                path = stage / name
+                raw = path.read_bytes()
+                changed = json.loads(raw)
+                changed[key] = value
+                D.atomic_write(path, json.dumps(changed).encode())
+                reject()
+                D.atomic_write(path, raw)
+        for name in ['request.json', 'job.json', 'receipt.json', 'diagnostic.json']:
+            with self.subTest(missing=name):
+                path = stage / name
+                raw = path.read_bytes()
+                path.unlink()
+                reject()
+                D.atomic_write(path, raw)
+        # Even matching diagnostics cannot bless a later, mutating task.
+        receipt_raw = (stage / 'receipt.json').read_bytes()
+        diagnostic_raw = (stage / 'diagnostic.json').read_bytes()
+        diagnostic = json.loads(diagnostic_raw)
+        diagnostic['stage'] = 'Restart even if an earlier attempt already installed this runtime'
+        receipt = json.loads(receipt_raw)
+        receipt['diagnostic'] = diagnostic
+        D.atomic_write(stage / 'diagnostic.json', json.dumps(diagnostic).encode())
+        D.atomic_write(stage / 'receipt.json', json.dumps(receipt).encode())
+        reject()
+        D.atomic_write(stage / 'diagnostic.json', diagnostic_raw)
+        D.atomic_write(stage / 'receipt.json', receipt_raw)
+        # Request hashes alone cannot substitute another fleet or broker.
+        request_raw = (stage / 'request.json').read_bytes()
+        job_raw = (stage / 'job.json').read_bytes()
+        for key, value in [('ultra_forward_old_id', 'foreign'), ('ultra_forward_candidate_id', 'foreign'),
+                           ('ultra_forward_expected_brokers', []), ('ultra_controller_directory', '/tmp/foreign')]:
+            with self.subTest(variable=key):
+                request = json.loads(request_raw)
+                request['variables'][key] = value
+                raw = json.dumps(request).encode()
+                D.atomic_write(stage / 'request.json', raw)
+                for name, saved in [('job.json', job_raw), ('receipt.json', receipt_raw)]:
+                    item = json.loads(saved)
+                    item['request_sha256'] = item['binary_sha256'] = D.sha(raw)
+                    D.atomic_write(stage / name, json.dumps(item).encode())
+                reject()
+        with self.subTest(inventory='changed with matching request hashes'):
+            request = json.loads(request_raw)
+            request['inventory']['all']['children']['bridge']['hosts']['bridge']['ansible_host'] = '192.0.2.99'
+            raw = json.dumps(request).encode()
+            D.atomic_write(stage / 'request.json', raw)
+            for name, saved in [('job.json', job_raw), ('receipt.json', receipt_raw)]:
+                item = json.loads(saved)
+                item['request_sha256'] = item['binary_sha256'] = D.sha(raw)
+                D.atomic_write(stage / name, json.dumps(item).encode())
+            reject()
+        D.atomic_write(stage / 'request.json', request_raw)
+        D.atomic_write(stage / 'job.json', job_raw)
+        D.atomic_write(stage / 'receipt.json', receipt_raw)
+        old_version = json.loads(proof)['version']
+        old_activate = self.parent.parent / ('upgrade-' + old_version) / 'activate'
+        for name in ['request.json', 'job.json', 'receipt.json']:
+            with self.subTest(missing_predecessor=name):
+                path = old_activate / name
+                raw = path.read_bytes()
+                path.unlink()
+                reject()
+                D.atomic_write(path, raw)
+        with self.subTest(missing_prior_journal_digest=True):
+            self.assertNotEqual(self.execute('continue', forward_sha=D.sha(proof)).returncode, 0)
+        for path in [stage / 'result.json', operation / 'forward-handoff.json']:
+            D.atomic_write(path, b'{}')
+            reject()
+            path.unlink()
+        (operation / 'activate').mkdir(mode=0o700)
+        reject()
+        (operation / 'activate').rmdir()
+        lifecycle = self.parent.parent / 'lifecycle.json'
+        original = json.loads(lifecycle.read_bytes())
+        for state in [dict(original, phase='released'), dict(original, id='foreign')]:
+            D.atomic_write(lifecycle, json.dumps(state).encode())
+            reject()
+
+    def test_continuation_attests_existing_inputs_and_pre_handoff_lifecycle(self):
+        old_commit = 'b' * 40
+        old_version = 'v0.0.' + str(int(old_commit, 16))
+        proof = json.dumps({'commit': old_commit, 'version': old_version}).encode()
+        digest = D.sha(proof)
+        staged = self.execute('stage', self.archive(forward_journal=proof), forward_sha=digest)
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        operation = self.parent.parent / ('upgrade-' + self.version)
+        operation.mkdir(mode=0o700)
+        for name in ['operator-plan.json', 'execution-mode.json']:
+            D.atomic_write(operation / name, b'{}')
+        old_directory = self.parent.parent / ('upgrade-' + old_version)
+        old_id = str(D.uuid.UUID(bytes=hashlib.sha256(str(old_directory).encode()).digest()[:16], version=4))
+        lifecycle = self.parent.parent / 'lifecycle.json'
+        D.atomic_write(lifecycle, json.dumps({'id': old_id, 'phase': 'applying'}).encode())
+        receipt = self.execute('continue', forward_sha=digest)
+        self.assertEqual(receipt.returncode, 0, receipt.stderr)
+        self.assertEqual(json.loads(receipt.stdout)['lifecycle_id'], old_id)
+        self.assertIsNone(json.loads(receipt.stdout)['prior_candidate'])
+        self.assertNotIn('operation_absent', json.loads(receipt.stdout))
+        self.assertFalse(self.result.exists())
+        dispatched = self.execute('run', None, self.architecture, 'upgrade', '0', '1', '', digest, '1', forward_only=True)
+        self.assertEqual(dispatched.returncode, 0, dispatched.stderr)
+        self.assertIn('--forward-only', json.loads(self.result.read_bytes()))
+        self.result.unlink()
+        for mutation in ['activate', 'lifecycle', 'proof', 'asset']:
+            with self.subTest(mutation=mutation):
+                if mutation == 'activate':
+                    (operation / 'activate').mkdir()
+                elif mutation == 'lifecycle':
+                    D.atomic_write(lifecycle, b'{"id":"foreign","phase":"applying"}')
+                elif mutation == 'proof':
+                    D.atomic_write(self.root / 'forward-operation.json', b'{}')
+                else:
+                    D.atomic_write(self.root / 'release' / 'fixture-0', b'changed')
+                rejected = self.execute('continue', forward_sha=digest)
+                self.assertNotEqual(rejected.returncode, 0)
+                dispatched = self.execute('run', None, self.architecture, 'upgrade', '0', '1', '', digest, '1', forward_only=True)
+                self.assertNotEqual(dispatched.returncode, 0)
+                self.assertFalse(self.result.exists())
+                if mutation == 'activate':
+                    (operation / 'activate').rmdir()
+                elif mutation == 'lifecycle':
+                    D.atomic_write(lifecycle, json.dumps({'id': old_id, 'phase': 'applying'}).encode())
+                elif mutation == 'proof':
+                    D.atomic_write(self.root / 'forward-operation.json', proof)
+
+    def test_continuation_accepts_saved_handoff_and_rejects_tampering_and_supersede(self):
+        old_commit='b'*40
+        old_version='v0.0.'+str(int(old_commit,16))
+        old_attempt='c'*64
+        old_manifest=json.dumps({'source_commit':old_commit,'version':old_version,'assets':[]}).encode()
+        old_config=b'ULTRA_AUTOMATION_VERSION='+old_version.encode()+b'\n'
+        old_inputs=self.parent/('manual-'+old_commit+'-'+old_attempt)
+        (old_inputs/'release').mkdir(parents=True,mode=0o700)
+        old_inputs.chmod(0o700)
+        D.atomic_write(old_inputs/'release/release-manifest.json',old_manifest)
+        D.atomic_write(old_inputs/'install.config',old_config)
+        proof={'schema':1,'commit':old_commit,'version':old_version,'remote_attempt':old_attempt,
+               'stage':'upgrade','mutator_dispatched':True,'manifest_sha256':D.sha(old_manifest),
+               'staged_config_sha256':D.sha(old_config)}
+        proof_raw=json.dumps(proof,separators=(',',':')).encode()
+        digest=D.sha(proof_raw)
+        failed=self.parent.parent/('upgrade-'+self.version)
+        failed.mkdir(mode=0o700)
+        for name in ['execution-mode.json','operator-plan.json']:
+            D.atomic_write(failed/name,b'{}')
+        previous=self.parent.parent/('upgrade-'+old_version)
+        (previous/'activate').mkdir(parents=True,mode=0o700)
+        previous.chmod(0o700)
+        for name in ['execution-mode.json','operator-plan.json']:
+            D.atomic_write(previous/name,b'{}')
+        (previous/'inspect').mkdir(mode=0o700)
+        D.atomic_write(previous/'inspect/request.json',b'{}')
+        (previous/'activate/bundle').mkdir(mode=0o700)
+        D.atomic_write(previous/'activate/inventory.json',b'{}')
+        D.atomic_write(previous/'activate/variables.json',b'{}')
+        D.atomic_write(previous/'activate/bundle/controller.py',b'# retained immutable bundle')
+        old_id=str(D.uuid.UUID(bytes=hashlib.sha256(str(previous).encode()).digest()[:16],version=4))
+        new_id=str(D.uuid.UUID(bytes=hashlib.sha256(str(failed).encode()).digest()[:16],version=4))
+        inventory={'all':{'children':{'bridge':{'hosts':{'bridge':{}}},'exits':{'hosts':{'exit_0':{}}}}}}
+        prior_request=json.dumps({'inventory':inventory,'variables':{'ultra_lifecycle_id':old_id}},sort_keys=True,separators=(',',':')).encode()
+        D.atomic_write(previous/'activate/request.json',prior_request)
+        prior_job=json.dumps({'schema_version':1,'operation':'upgrade','request_sha256':D.sha(prior_request),
+                              'binary_sha256':D.sha(prior_request)}).encode()
+        D.atomic_write(previous/'activate/job.json',prior_job)
+        D.atomic_write(previous/'activate/receipt.json',prior_job)
+        D.atomic_write(self.parent.parent/'lifecycle.json',json.dumps({'id':old_id,'phase':'applying'}).encode())
+        drain=failed/'handoff-drain-fixture'
+        drain.mkdir(mode=0o700)
+        request=json.dumps({'inventory':inventory,'variables':{'ultra_lock_directory':str(self.parent.parent),
+            'ultra_forward_old_id':old_id,'ultra_lifecycle_id':new_id}},sort_keys=True,separators=(',',':')).encode()
+        reqsha=D.sha(request)
+        result={'verified':True,'old_id':old_id,'new_id':new_id}
+        receipt={'schema_version':1,'operation':'drain-upgrade-workers','request_sha256':reqsha,
+                 'binary_sha256':reqsha,'state':'succeeded','code':'','result':result}
+        raws={'request.json':request,'job.json':json.dumps({k:v for k,v in receipt.items() if k not in ('state','code','result')}).encode(),
+              'receipt.json':json.dumps(receipt).encode(),'result.json':json.dumps(result).encode()}
+        for name,raw in raws.items(): D.atomic_write(drain/name,raw)
+        (drain/'bundle').mkdir(mode=0o700)
+        D.atomic_write(drain/'inventory.json',json.dumps(inventory).encode())
+        D.atomic_write(drain/'variables.json',json.dumps({'ultra_lock_directory':str(self.parent.parent),
+            'ultra_forward_old_id':old_id,'ultra_lifecycle_id':new_id}).encode())
+        D.atomic_write(drain/'bundle/controller.py',b'# retained immutable bundle')
+        # Real controller output includes its lock and private HOME workspace.
+        workspace=drain/'.ansible'
+        (workspace/'tmp').mkdir(parents=True,mode=0o700)
+        workspace.chmod(0o700)
+        D.atomic_write(workspace/'tmp/cache',b'generated')
+        D.atomic_write(drain/'execution.lock',b'')
+        intent={'schema':1,'proof_sha256':digest,'old_id':old_id,'new_id':new_id,'drain_directory':str(drain),
+                'request_sha256':reqsha,'job_sha256':D.sha(raws['job.json']),
+                'receipt_sha256':D.sha(raws['receipt.json']),'result_sha256':D.sha(raws['result.json'])}
+        D.atomic_write(failed/'forward-handoff.json',json.dumps(intent).encode())
+        bootstrap=failed/'broker-bootstrap-fixture'
+        bootstrap.mkdir(mode=0o700)
+        bootstrap_result={'verified':True,'old_id':old_id,'controller_directory':'/opt/ultra-ansible/releases/managed-fixture'}
+        bootstrap_request=json.dumps({'inventory':inventory,'variables':{'ultra_lock_directory':str(self.parent.parent)}},
+                                    sort_keys=True,separators=(',',':')).encode()
+        bootstrap_sha=D.sha(bootstrap_request)
+        bootstrap_receipt={'schema_version':1,'operation':'bootstrap-forward-broker','request_sha256':bootstrap_sha,
+                           'binary_sha256':bootstrap_sha,'state':'succeeded','code':'','result':bootstrap_result}
+        bootstrap_raws={'request.json':bootstrap_request,'job.json':json.dumps({k:v for k,v in bootstrap_receipt.items() if k not in ('state','code','result')}).encode(),
+                        'receipt.json':json.dumps(bootstrap_receipt).encode(),'result.json':json.dumps(bootstrap_result).encode()}
+        for name,raw in bootstrap_raws.items(): D.atomic_write(bootstrap/name,raw)
+        (bootstrap/'bundle').mkdir(mode=0o700)
+        D.atomic_write(bootstrap/'bundle/controller.py',b'# retained immutable bundle')
+        ledger={'version':1,'ids':[],'handoff':{'old_id':'d'*8+'-'+'d'*4+'-'+'d'*4+'-'+'d'*4+'-'+'d'*12,
+                                                 'new_id':'e'*8+'-'+'e'*4+'-'+'e'*4+'-'+'e'*4+'-'+'e'*12}}
+        retired=self.parent.parent/'lifecycle-retired.json'
+        D.atomic_write(retired,json.dumps(ledger).encode())
+        staged=self.execute('stage',self.archive(forward_journal=proof_raw),forward_sha=digest)
+        self.assertEqual(staged.returncode,0,staged.stderr)
+        valid=self.execute('continue',forward_sha=digest)
+        self.assertEqual(valid.returncode,0,valid.stderr)
+        self.assertEqual(json.loads(valid.stdout)['prior_candidate']['commit'],self.commit)
+        for artifact in ['.ansible','execution.lock']:
+            path=drain/artifact
+            for kind in ['wrong_type','symlink','mode','owner','nested_symlink','nested_mode']:
+                if kind.startswith('nested') and artifact!='.ansible':
+                    continue
+                with self.subTest(artifact=artifact,unsafe=kind):
+                    saved=drain/(artifact+'.saved')
+                    if kind in ['wrong_type','symlink']:
+                        path.rename(saved)
+                    try:
+                        if kind=='wrong_type':
+                            if artifact=='.ansible': D.atomic_write(path,b'file')
+                            else: path.mkdir(mode=0o700)
+                        elif kind=='symlink': path.symlink_to(saved)
+                        elif kind=='mode': path.chmod(0o755 if artifact=='.ansible' else 0o644)
+                        elif kind=='owner':
+                            if os.geteuid()!=0: self.skipTest('foreign ownership requires root')
+                            os.chown(path,1,-1)
+                        elif kind=='nested_symlink': (path/'tmp/link').symlink_to(path/'tmp/cache')
+                        elif kind=='nested_mode': (path/'tmp/cache').chmod(0o644)
+                        # Keep the renamed artifact outside the exact stage inventory.
+                        if saved.exists(): saved.rename(self.directory/'artifact-saved')
+                        rejected=self.execute('continue',forward_sha=digest)
+                        self.assertNotEqual(rejected.returncode,0)
+                    finally:
+                        outside=self.directory/'artifact-saved'
+                        if outside.exists(): outside.rename(saved)
+                        if kind in ['wrong_type','symlink']:
+                            if path.is_symlink() or path.is_file(): path.unlink()
+                            else: path.rmdir()
+                            saved.rename(path)
+                        elif kind=='mode': path.chmod(0o700 if artifact=='.ansible' else 0o600)
+                        elif kind=='owner' and os.geteuid()==0: os.chown(path,0,-1)
+                        elif kind=='nested_symlink': (path/'tmp/link').unlink()
+                        elif kind=='nested_mode': (path/'tmp/cache').chmod(0o600)
+        mutations=[
+            ('extra_operation',lambda: D.atomic_write(failed/'unexpected',b'new')),
+            ('extra_drain',lambda: D.atomic_write(drain/'unexpected',b'new')),
+            ('activation',lambda: (failed/'activate').mkdir()),
+            ('lifecycle',lambda: D.atomic_write(self.parent.parent/'lifecycle.json',b'{"id":"foreign","phase":"applying"}')),
+            ('retirement',lambda: D.atomic_write(retired,json.dumps({'version':1,'ids':[old_id,new_id],
+                'handoff':{'old_id':old_id,'new_id':new_id}}).encode())),
+            ('job_digest',lambda: D.atomic_write(drain/'job.json',b'{}')),
+        ]
+        for name,mutate in mutations:
+            with self.subTest(name=name):
+                mutate()
+                rejected=self.execute('continue',forward_sha=digest)
+                self.assertNotEqual(rejected.returncode,0)
+                if name=='extra_operation': (failed/'unexpected').unlink()
+                elif name=='extra_drain': (drain/'unexpected').unlink()
+                elif name=='activation': (failed/'activate').rmdir()
+                elif name=='lifecycle': D.atomic_write(self.parent.parent/'lifecycle.json',json.dumps({'id':old_id,'phase':'applying'}).encode())
+                elif name=='retirement': D.atomic_write(retired,json.dumps(ledger).encode())
+                elif name=='job_digest': D.atomic_write(drain/'job.json',raws['job.json'])
+
+    def test_remote_probe_exact_archive_private_argv_cleanup_and_replay(self):
+        secret = b'https://old.example.com/sub/fixture-token'
+        probe_sha = D.sha(secret)
+        def archive(raw=secret, binding=probe_sha.encode()):
+            return self.archive(lambda rows: rows + [('subscription-probe-url', raw),
+                                                    ('subscription-probe.sha256', binding)])
+        staged = self.execute('stage', archive(), probe_sha=probe_sha)
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        self.assertNotIn(secret, staged.stdout + staged.stderr)
+        path = self.root / 'subscription-probe-url'
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.read_bytes(), secret)
+        upgraded = self.execute('run', None, self.architecture, 'upgrade', '1', probe_sha=probe_sha)
+        self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+        argv = json.loads(self.result.read_bytes())
+        self.assertEqual(argv[argv.index('--subscription-probe-url-file') + 1], str(path))
+        self.assertNotIn(secret.decode(), repr(argv))
+        for _ in range(2):
+            cleaned = self.execute('cleanup', probe_sha=probe_sha)
+            self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
+            self.assertFalse(path.exists())
+        self.assertEqual((self.root / 'subscription-probe.sha256').read_bytes(), probe_sha.encode())
+        missing = self.execute('run', None, self.architecture, 'upgrade', probe_sha=probe_sha)
+        self.assertNotEqual(missing.returncode, 0)
+        replay = self.execute('stage', archive(), probe_sha=probe_sha)
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual(path.read_bytes(), secret)
+        replacement = b'https://old.example.com/sub/replacement'
+        rejected = self.execute('stage', archive(replacement, D.sha(replacement).encode()), probe_sha=D.sha(replacement))
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(path.read_bytes(), secret)
+        for data in (archive(b'changed'), self.archive(lambda rows: rows + [('subscription-probe.sha256', probe_sha.encode())]),
+                     archive(binding=b'x' * 64)):
+            rejected = self.execute('stage', data, probe_sha=probe_sha)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertNotIn(secret, rejected.stdout + rejected.stderr)
+        path.chmod(0o644)
+        self.assertNotEqual(self.execute('run', None, self.architecture, 'upgrade', probe_sha=probe_sha).returncode, 0)
 
     def test_actual_stage_native_commands_and_no_secret_copy(self):
         staged = self.execute('stage', self.archive())
@@ -486,14 +2618,117 @@ class RemoteProgram(unittest.TestCase):
         self.assertEqual((self.root / 'install.config').read_bytes(), self.config)
         self.assertEqual(json.loads(staged.stdout)['architecture'], self.architecture)
         for action, expected in [('doctor', ['doctor']), ('adoption_check', ['adopt', '--adopt-runtime', '--bridge-native', '--check']),
-                                 ('adoption_apply', ['apply', '--adopt-runtime', '--bridge-native']), ('upgrade', ['upgrade']), ('status', ['status'])]:
+                                 ('adoption_apply', ['apply', '--adopt-runtime', '--bridge-native']),
+                                 ('upgrade', ['operator-upgrade', '--release-dir', str(self.root / 'release'),
+                                              '--source-commit', self.commit, '--version', self.version,
+                                              '--manifest-sha256', D.sha(self.manifest), '--config-sha256', D.sha(self.config)]),
+                                 ('status', ['status'])]:
             run = self.execute('run', None, self.architecture, action)
             self.assertEqual(run.returncode, 0, run.stderr)
             argv = json.loads(self.result.read_bytes())
             self.assertEqual(argv[:len(expected)], expected)
             self.assertEqual(argv[-2:], ['--config', str(self.root / 'install.config')])
+        retried = self.execute('run', None, self.architecture, 'upgrade', '1')
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        self.assertIn('--retry-failed', json.loads(self.result.read_bytes()))
+        journal = b'{"stage":"upgrade"}'
+        journal_sha = D.sha(journal)
+        staged_forward = self.execute('stage', self.archive(forward_journal=journal), forward_sha=journal_sha)
+        self.assertEqual(staged_forward.returncode, 0, staged_forward.stderr)
+        self.assertEqual((self.root / 'forward-operation.json').read_bytes(), journal)
+        doctor = self.execute('run', None, self.architecture, 'doctor', forward_sha=journal_sha)
+        self.assertEqual(doctor.returncode, 0, doctor.stderr)
+        self.assertEqual(json.loads(self.result.read_bytes())[0], 'doctor')
+        forwarded = self.execute('run', None, self.architecture, 'upgrade', forward_only=True, forward_sha=journal_sha)
+        self.assertEqual(forwarded.returncode, 0, forwarded.stderr)
+        forwarded_argv = json.loads(self.result.read_bytes())
+        self.assertIn('--forward-only', forwarded_argv)
+        self.assertEqual(forwarded_argv[forwarded_argv.index('--forward-journal-file') + 1], str(self.root / 'forward-operation.json'))
+        self.assertEqual(forwarded_argv[forwarded_argv.index('--forward-journal-sha256') + 1], journal_sha)
+        status = self.execute('run', None, self.architecture, 'status', forward_sha=journal_sha)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(self.result.read_bytes())[0], 'status')
+        cleaned = self.execute('cleanup', forward_sha=journal_sha)
+        self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
+        self.assertFalse((self.root / 'forward-operation.json').exists())
+        # A lost SSH acknowledgement leaves the local operation journal intact;
+        # the remote cleanup must therefore accept an already absent proof.
+        cleaned_again = self.execute('cleanup', forward_sha=journal_sha)
+        self.assertEqual(cleaned_again.returncode, 0, cleaned_again.stderr)
         again = self.execute('stage', self.archive())
         self.assertEqual(again.returncode, 0, again.stderr)
+
+    def test_actual_stage_rejects_legacy_baseline_before_same_commit_replay(self):
+        local_state = self.directory / 'local-state'
+        local_state.mkdir(mode=0o700)
+        old_commit, old_attempt = 'b' * 40, 'c' * 64
+        old_assets = [{'name': 'asset-' + str(i)} for i in range(14)]
+        old_manifest = json.dumps({'source_commit': old_commit, 'version': 'v2.4.2',
+                                   'assets': old_assets}, sort_keys=True).encode()
+        old_manifest_path = local_state / 'release-manifest.json'
+        old_manifest_path.write_bytes(old_manifest); old_manifest_path.chmod(0o400)
+        journal = {'schema': 1, 'commit': old_commit, 'version': 'v2.4.2', 'remote_attempt': old_attempt,
+                   'manifest_sha256': D.sha(old_manifest), 'mutator_dispatched': True}
+        journal_raw = json.dumps(journal, sort_keys=True).encode()
+        journal_path = local_state / 'operation.json'
+        journal_path.write_bytes(journal_raw); journal_path.chmod(0o600)
+        descriptor_path = local_state / 'upgrade-baseline.json'
+        descriptor = {'schema': 1, 'journal': str(journal_path), 'journal_sha256': D.sha(journal_raw),
+                      'manifest': str(old_manifest_path), 'manifest_sha256': D.sha(old_manifest)}
+        descriptor_path.write_text(json.dumps(descriptor, sort_keys=True)); descriptor_path.chmod(0o600)
+        original = (b'SECRETS_ENV_FILE=/etc/ultra-relay/.env\n'
+                    + ('ULTRA_UPGRADE_BASELINE_FILE=' + str(descriptor_path) + '\n').encode()
+                    + b'POLICY=unchanged\n')
+        attempt = D.remote_attempt(original, self.version)
+        self.root = self.parent / ('manual-' + self.commit + '-' + attempt)
+        production_root = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + self.commit + '-' + attempt)
+        prepare_baseline = D.stage_upgrade_baseline
+        def fixture_prepare(raw_config, version, remote_root):
+            self.assertEqual(remote_root, production_root)
+            staged, files = prepare_baseline(raw_config, version, production_root)
+            staged = staged.replace(str(production_root / 'baseline/descriptor.json').encode(),
+                                    str(self.root / 'baseline/descriptor.json').encode())
+            staged_descriptor = json.loads(files['baseline/descriptor.json'])
+            staged_descriptor['manifest'] = staged_descriptor['manifest'].replace(
+                '/var/lib/ultra-ansible/operator-inputs', str(self.parent))
+            staged_descriptor['journal'] = staged_descriptor['journal'].replace(
+                str(production_root), str(self.root))
+            files['baseline/descriptor.json'] = (json.dumps(staged_descriptor, sort_keys=True, separators=(',', ':')) + '\n').encode()
+            return staged, files
+        with self.assertRaisesRegex(D.DeployError, '^manual_operation_quiescence_migration_required$'):
+            D.stage_upgrade_baseline(original, self.version, production_root)
+        self.assertFalse(self.root.exists())
+
+    def test_actual_stage_baseline_requires_exact_private_inventory_and_rechecks_it(self):
+        old_commit, old_attempt, old_manifest_sha = 'b' * 40, 'c' * 64, 'd' * 64
+        journal = {'schema': 1, 'commit': old_commit, 'remote_attempt': old_attempt,
+                   'manifest_sha256': old_manifest_sha, 'mutator_dispatched': True}
+        journal_raw = json.dumps(journal, sort_keys=True).encode()
+        self.config += b'ULTRA_UPGRADE_BASELINE_FILE=' + (str(self.parent / 'baseline/descriptor.json')).encode() + b'\n'
+        self.root = self.parent / ('manual-' + self.commit + '-' + D.remote_attempt(self.config, self.version))
+        old_release = self.parent / ('manual-' + old_commit + '-' + old_attempt) / 'release'
+        descriptor = {'schema': 1, 'journal': str(self.root / 'baseline/operator-journal.json'),
+                      'journal_sha256': D.sha(journal_raw),
+                      'manifest': str(old_release / 'release-manifest.json'),
+                      'manifest_sha256': old_manifest_sha}
+        descriptor_raw = json.dumps(descriptor, sort_keys=True).encode()
+        entries = [('release/release-manifest.json', self.manifest)]
+        entries += [('release/' + name, data) for name, data in self.assets.items()]
+        entries += [('install.config', self.config), ('baseline/descriptor.json', descriptor_raw),
+                    ('baseline/operator-journal.json', journal_raw)]
+        def archive_with(rows):
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode='w|') as archive:
+                for name, raw in rows:
+                    entry = tarfile.TarInfo(name); entry.size = len(raw)
+                    archive.addfile(entry, io.BytesIO(raw))
+            return stream.getvalue()
+        staged = self.execute('stage', archive_with(entries))
+        self.assertNotEqual(staged.returncode, 0)
+        self.assertIn(b'manual_operation_quiescence_migration_required', staged.stderr)
+        self.assertFalse(self.root.exists())
+        self.assertFalse(list(self.parent.glob('.manual-*')))
+        self.assertFalse(self.result.exists())
 
     def test_bad_asset_incomplete_stage_and_unexpected_files_never_publish(self):
         for mutate in [lambda rows: rows[:-1], lambda rows: rows + [('../escape', b'bad')],
@@ -648,6 +2883,130 @@ class RuntimeReuse(unittest.TestCase):
         self.write_pair()
         with self.assertRaisesRegex(ValueError, 'unsafe runtime archive'):
             self.runtime.validate_pair(self.cache, self.requirements)
+
+
+class LegacyForwardAttestation(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.state = Path(self.temporary.name) / 'state'
+        self.state.mkdir(mode=0o700)
+        self.parent = self.state / 'operator-inputs'
+        self.parent.mkdir(mode=0o700)
+        D.atomic_write(self.parent / 'manual-deploy.lock', b'')
+        self.commit = 'a' * 40
+        self.version = 'v0.0.' + str(int(self.commit, 16))
+        self.attempt = 'b' * 64
+        self.config = b'INSTALL_SCHEMA_VERSION=2\n'
+        self.manifest = {'source_commit': self.commit, 'version': self.version, 'assets': []}
+        self.manifest_raw = json.dumps(self.manifest).encode()
+        self.root = self.parent / ('manual-' + self.commit + '-' + self.attempt)
+        self.root.mkdir(mode=0o700)
+        (self.root / 'release').mkdir(mode=0o700)
+        D.atomic_write(self.root / 'install.config', self.config)
+        D.atomic_write(self.root / 'release/release-manifest.json', self.manifest_raw)
+        self.directory = self.state / ('upgrade-' + self.version)
+        self.directory.mkdir(mode=0o700)
+        self.activate = self.directory / 'activate'
+        self.activate.mkdir(mode=0o700)
+        import uuid
+        operation_id = str(uuid.UUID(bytes=hashlib.sha256(str(self.directory).encode()).digest()[:16], version=4))
+        request = {'inventory': {'all': {'children': {'bridge': {'hosts': {'bridge': {}}}, 'exits': {'hosts': {'exit_0': {}}}}}},
+                   'variables': {'ultra_lifecycle_id': operation_id, 'ultra_release_manifest_sha256': D.sha(self.manifest_raw),
+                                 'ultra_release_manifest': self.manifest}}
+        self.request_raw = json.dumps(request).encode()
+        D.atomic_write(self.activate / 'request.json', self.request_raw)
+        self.job = {'schema_version': 1, 'operation': 'upgrade', 'request_sha256': D.sha(self.request_raw)}
+        for name in ('job.json', 'receipt.json'):
+            D.atomic_write(self.activate / name, json.dumps(self.job).encode())
+        self.program = D.REMOTE_LEGACY_ATTEST.replace("Path('/var/lib/ultra-ansible')", 'Path(' + repr(str(self.state)) + ')')
+        self.program = self.program.replace('os.geteuid()==0', 'True').replace('info.st_uid==0', 'info.st_uid==os.geteuid()')
+
+    def execute(self):
+        return subprocess.run([D.sys.executable, '-I', '-c', self.program, self.commit, self.version,
+                               self.attempt, D.sha(self.manifest_raw), D.sha(self.config)], capture_output=True)
+
+    def test_attestation_returns_only_exact_identities_without_writing(self):
+        before = {str(p): p.read_bytes() for p in self.state.rglob('*') if p.is_file()}
+        result = self.execute()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {'schema': 1, 'commit': self.commit, 'version': self.version,
+            'remote_attempt': self.attempt, 'manifest_sha256': D.sha(self.manifest_raw), 'staged_config_sha256': D.sha(self.config)})
+        self.assertEqual({str(p): p.read_bytes() for p in self.state.rglob('*') if p.is_file()}, before)
+        self.assertNotIn(self.config, result.stdout)
+
+    def test_attestation_rejects_changed_config_manifest_request_job_receipt(self):
+        for path in (self.root / 'install.config', self.root / 'release/release-manifest.json',
+                     self.activate / 'request.json', self.activate / 'job.json', self.activate / 'receipt.json'):
+            with self.subTest(path=path.name):
+                original = path.read_bytes()
+                D.atomic_write(path, b'{}')
+                self.assertNotEqual(self.execute().returncode, 0)
+                D.atomic_write(path, original)
+
+    def test_attestation_rejects_cross_operation_and_unbound_request_receipts(self):
+        for key, value in (('ultra_lifecycle_id', 'other-operation'), ('ultra_release_manifest_sha256', 'c' * 64),
+                           ('ultra_release_manifest', dict(self.manifest, source_commit='c' * 40))):
+            request = json.loads(self.request_raw)
+            request['variables'][key] = value
+            raw = json.dumps(request).encode()
+            D.atomic_write(self.activate / 'request.json', raw)
+            for name in ('job.json', 'receipt.json'):
+                D.atomic_write(self.activate / name, json.dumps(dict(self.job, request_sha256=D.sha(raw))).encode())
+            self.assertNotEqual(self.execute().returncode, 0)
+
+    def test_attestation_rejects_public_symlink_missing_and_busy_evidence(self):
+        path = self.root / 'install.config'
+        path.chmod(0o644)
+        self.assertNotEqual(self.execute().returncode, 0)
+        path.chmod(0o600)
+        target = self.root / 'copy.config'
+        path.rename(target)
+        path.symlink_to(target)
+        self.assertNotEqual(self.execute().returncode, 0)
+        path.unlink()
+        self.assertNotEqual(self.execute().returncode, 0)
+        target.rename(path)
+        with D.lock(self.parent / 'manual-deploy.lock'):
+            self.assertNotEqual(self.execute().returncode, 0)
+
+
+class PerRoleOperatorIdentity(unittest.TestCase):
+    def test_manual_transport_connects_directly_to_bridge(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            bridge=root/'bridge-key';exit=root/'exit-key';pins=root/'known_hosts'
+            for path in (bridge,exit,pins):
+                path.write_bytes(b'synthetic fixture only');path.chmod(0o600)
+            config=("BRIDGE_IP=192.0.2.10\nMAIN_EXIT_IP=192.0.2.20\nDATABASE_IP=192.0.2.30\nBRIDGE_SSH_KEY="+str(bridge)+
+                    "\nDATABASE_SSH_KEY=/tmp/database-key\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE="+str(pins)+
+                    "\nULTRA_AUTOMATION_STATIC_NODES='[{\"name\":\"primary\",\"address\":\"192.0.2.20\"}]'\n").encode()
+            with patch.dict(os.environ,{'ULTRA_OPERATOR_IDENTITY':'','ULTRA_OPERATOR_KNOWN_HOSTS':''}), \
+                    patch.object(D.subprocess,'run',return_value=subprocess.CompletedProcess([],0)):
+                argv,_=D.operator_transport(None,config)
+            self.assertEqual(argv[-1],'root@192.0.2.10')
+            self.assertEqual(argv[argv.index('-i')+1],str(bridge))
+            self.assertFalse(any('ProxyCommand=' in token or str(exit) in token for token in argv))
+
+    def test_retired_key_contract_matches_go_parser(self):
+        import ast
+        import inspect
+        import re
+        tree = ast.parse(inspect.getsource(D.config_values))
+        legacy = next(node for node in ast.walk(tree)
+                      if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'legacy_keys' for target in node.targets))
+        python_keys = ast.literal_eval(legacy.value)
+        canonical = (Path(__file__).resolve().parents[1] / 'internal/installplan/canonical.go').read_text()
+        retired = canonical.split('case "BRIDGE"', 1)[1].split(':', 1)[0]
+        self.assertEqual(python_keys, {'BRIDGE', *re.findall(r'"([A-Z0-9_]+)"', retired)})
+
+    def test_old_config_aliases_are_rejected_without_fallback(self):
+        for key in ('BRIDGE', 'BRIDGE_SSH_HOST', 'BRIDGE_SSH_IDENTITY', 'EXIT',
+                    'EXIT_SSH_IDENTITY', 'EXIT2', 'EXIT2_SSH_IDENTITY', 'DB_HOST',
+                    'IDENTITY', 'FRONT', 'BACK', 'DB_SSH_IDENTITY', 'DB_ENABLE',
+                   'DB_REPLICA', 'DB_SSH_USER', 'EXIT2_NAME', 'EXIT2_DIAL', 'EXIT2_PRIORITY'):
+            with self.subTest(key=key), self.assertRaisesRegex(D.DeployError, '^operator_legacy_config_key_forbidden$'):
+                D.config_values((key + '=192.0.2.10\n').encode())
 
 
 if __name__ == '__main__':
