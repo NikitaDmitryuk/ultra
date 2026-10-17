@@ -95,3 +95,46 @@ func TestAnsibleControllerPreflightPreventsPurchasePreparation(t *testing.T) {
 		t.Fatalf("unexpected preflight result: %v", err)
 	}
 }
+
+func TestVerifyHealthPreservesSafeFailureDiagnostics(t *testing.T) {
+	for _, code := range []string{"http_status", "body_size", "response_failed", "tls_handshake_failed", "response_timeout", "tls_handshake_timeout", "deadline_or_cancel"} {
+		t.Run(code, func(t *testing.T) {
+			err := verifyHealth(exits.Health{ID: "private-node", Reachable: true, Checks: []exits.ProbeResult{
+				{Target: "https://private.example/check?token=secret", Error: code, Bytes: 1234, DurationMS: 456},
+			}})
+			var diagnostic *verificationError
+			if !errors.As(err, &diagnostic) {
+				t.Fatalf("missing typed failure: %v", err)
+			}
+			data, marshalErr := json.Marshal(diagnostic.CloudDiagnostics())
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			want := `{"checks":[{"ok":false,"error":"` + code + `","bytes":1234,"duration_ms":456}],"internet_ok":false,"reachable":true}`
+			if string(data) != want || !strings.Contains(err.Error(), want) {
+				t.Fatalf("failure details lost: %s / %v", data, err)
+			}
+			if strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("private probe input retained: %v", err)
+			}
+		})
+	}
+}
+
+func TestVerifyHealthUsesClosedClassificationsAndOriginalGate(t *testing.T) {
+	for _, reachable := range []bool{false, true} {
+		for _, internetOK := range []bool{false, true} {
+			h := exits.Health{Reachable: reachable, InternetOK: internetOK, Checks: []exits.ProbeResult{
+				{Error: "secret error from upstream", Bytes: 9, DurationMS: 10},
+				{OK: true, Error: "secret ignored on success", Bytes: 65536},
+			}}
+			err := verifyHealth(h)
+			if (err == nil) != (reachable && internetOK) {
+				t.Fatalf("gate changed for reachable=%t internetOK=%t: %v", reachable, internetOK, err)
+			}
+			if err != nil && (strings.Contains(err.Error(), "secret") || !strings.Contains(err.Error(), "response_failed")) {
+				t.Fatalf("unbounded classification: %v", err)
+			}
+		}
+	}
+}

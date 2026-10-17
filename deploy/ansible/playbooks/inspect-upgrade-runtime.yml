@@ -1,6 +1,6 @@
 ---
 - name: Inspect canonical runtime using only the checked fixed host probe
-  hosts: all
+  hosts: all:!localhost
   gather_facts: false
   become: true
   any_errors_fatal: true
@@ -105,7 +105,7 @@
     - name: Assemble the fixed host evidence map
       ansible.builtin.set_fact:
         runtime_probe_hosts: "{{ runtime_probe_hosts | default({}) | combine({item: hostvars[item].runtime_probe_evidence}) }}"
-      loop: "{{ groups['all'] }}"
+      loop: "{{ groups['all'] | difference(['localhost']) }}"
       no_log: true
     - name: Save only verified public summaries
       ansible.builtin.copy:

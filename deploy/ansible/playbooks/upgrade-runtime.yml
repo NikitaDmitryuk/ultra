@@ -1,6 +1,6 @@
 ---
 - name: Prepare all host candidates before runtime mutation
-  hosts: all
+  hosts: all:!localhost
   gather_facts: false
   become: true
   any_errors_fatal: true
@@ -11,7 +11,7 @@
         tasks_from: phase
       when: ultra_runtime_action == 'prepare'
 - name: Validate complete fleet bindings before coordinated disruption
-  hosts: all
+  hosts: all:!localhost
   gather_facts: false
   become: true
   any_errors_fatal: true
@@ -55,7 +55,7 @@
         that:
           - hostvars[item].runtime_fleet_binding.verified | bool
           - hostvars[item].runtime_fleet_binding.bound | bool
-      loop: "{{ groups['all'] }}"
+      loop: "{{ groups['all'] | difference(['localhost']) }}"
       when: ultra_runtime_action == 'apply'
       no_log: true
     - name: Stop bot traffic for the bound fleet transition
@@ -148,7 +148,7 @@
       when: ultra_runtime_action in ['apply', 'rollback'] and runtime_transaction_evidence.bound | bool
       no_log: true
 - name: Commit only surviving receipt-owned external effects after release acceptance
-  hosts: all
+  hosts: all:!localhost
   gather_facts: false
   become: true
   any_errors_fatal: true
@@ -167,7 +167,7 @@
       when: ultra_runtime_action == 'commit'
       no_log: true
 - name: Restore managed renewal only after release acceptance or complete binary rollback
-  hosts: all
+  hosts: all:!localhost
   gather_facts: false
   become: true
   any_errors_fatal: true
@@ -192,7 +192,7 @@
     - name: Collect safe host status
       ansible.builtin.set_fact:
         runtime_transaction_hosts: "{{ runtime_transaction_hosts | default({}) | combine({item: hostvars[item].runtime_transaction_evidence}) }}"
-      loop: "{{ groups['all'] }}"
+      loop: "{{ groups['all'] | difference(['localhost']) }}"
       no_log: true
     - name: Save the verified fixed phase
       ansible.builtin.copy:

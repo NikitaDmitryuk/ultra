@@ -398,8 +398,8 @@ func (p *Provisioner) Verify(ctx context.Context, op *cloud.Operation, instance 
 	defer runner.Close() //nolint:errcheck
 	for i := 0; i < 3; i++ {
 		h := runner.ProbeExit(ctx, node, spec.HealthTargets())
-		if !h.Reachable || !h.InternetOK {
-			return errors.New("full tunnel check failed")
+		if err := verifyHealth(h); err != nil {
+			return err
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -407,6 +407,57 @@ func (p *Provisioner) Verify(ctx context.Context, op *cloud.Operation, instance 
 	}
 	return nil
 }
+
+// Verification diagnostics deliberately exclude node identity and probe targets.
+// Keep this separate from exits.Health: that type also contains addresses/URLs.
+type verificationCheck struct {
+	OK         bool   `json:"ok"`
+	Error      string `json:"error,omitempty"`
+	Bytes      int64  `json:"bytes"`
+	DurationMS int64  `json:"duration_ms"`
+}
+
+type verificationError struct {
+	reachable  bool
+	internetOK bool
+	checks     []verificationCheck
+}
+
+func (e *verificationError) CloudDiagnostics() map[string]any {
+	return map[string]any{
+		"reachable": e.reachable, "internet_ok": e.internetOK,
+		"checks": append([]verificationCheck(nil), e.checks...),
+	}
+}
+
+func (e *verificationError) Error() string {
+	data, _ := json.Marshal(e.CloudDiagnostics()) // Only fixed strings, bools and integers.
+	return "full tunnel check failed: " + string(data)
+}
+
+func verifyHealth(h exits.Health) error {
+	if h.Reachable && h.InternetOK {
+		return nil
+	}
+	e := &verificationError{reachable: h.Reachable, internetOK: h.InternetOK}
+	for _, check := range h.Checks {
+		code := check.Error
+		switch code {
+		case "http_status", "body_size", "response_failed", "tls_handshake_failed",
+			"response_timeout", "tls_handshake_timeout", "deadline_or_cancel":
+		default:
+			code = "response_failed"
+		}
+		if check.OK {
+			code = ""
+		}
+		e.checks = append(e.checks, verificationCheck{
+			OK: check.OK, Error: code, Bytes: check.Bytes, DurationMS: check.DurationMS,
+		})
+	}
+	return e
+}
+
 func (p *Provisioner) Publish(ctx context.Context, op *cloud.Operation) error {
 	budget := db.NewQuotaRepo(p.DB)
 	if e := budget.EnsureVultr(ctx, op.ExitID, op.InstanceID, int64(op.Offer.Plan.Bandwidth)*1_000_000_000); e != nil {

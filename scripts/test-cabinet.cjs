@@ -248,7 +248,17 @@ test("Vultr status polling updates the existing card without replacing its price
   await vm.runInContext("service()", p.context);
   const html = p.el("#app").innerHTML;
   const status = { className: "", textContent: "" };
-  const details = { innerHTML: "" };
+  let detailsHTML = "";
+  let detailsWrites = 0;
+  const details = {
+    get innerHTML() {
+      return detailsHTML;
+    },
+    set innerHTML(value) {
+      detailsWrites++;
+      detailsHTML = value;
+    },
+  };
   const card = {
     dataset: { opCard: "op" },
     hidden: false,
@@ -271,6 +281,8 @@ test("Vultr status polling updates the existing card without replacing its price
   assert.ok(html.includes("$5/месяц"));
   assert.equal(status.textContent, "Результат создания проверяется");
   assert.match(details.innerHTML, /Оплата продолжается/);
+  await vm.runInContext("refreshOperationCards(viewVersion)", p.context);
+  assert.equal(detailsWrites, 1);
 });
 
 test("reinstall is offered only for a failed staged cloud identity", async () => {

@@ -1,6 +1,6 @@
 ---
 - name: Prove abandoned upgrade workers are gone on every frozen host
-  hosts: all
+  hosts: all:!localhost
   gather_facts: false
   any_errors_fatal: true
   strategy: linear

@@ -392,6 +392,13 @@ func prepareBootstrapVariables(
 	children := all["children"].(map[string]any)
 	bridge := children["bridge"].(map[string]any)["hosts"].(map[string]any)["bridge"].(map[string]any)
 	nodes := children["exits"].(map[string]any)["hosts"].(map[string]any)
+	// Bind only the private path into the initial inventory. Frozen legacy
+	// inventories must keep their original request identity on retry.
+	if source, _, err := prepareUpgradeSubscriptionStage(p, directory, 1); err != nil {
+		return err
+	} else if source != "" {
+		bridge["ultra_upgrade_subscription_key_source"] = source
+	}
 	if p.Features.MainExitDomain != "" {
 		if err := prepareAnsibleDNS(p, bridge); err != nil {
 			return err

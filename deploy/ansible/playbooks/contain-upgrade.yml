@@ -2,7 +2,7 @@
 # Keep nginx available for unrelated virtual hosts; stopped bot and relay remove
 # candidate request handlers. Timers own no processes and lack service PID fields.
 - name: Stop failed candidate writers across the handoff-proven frozen fleet
-  hosts: all
+  hosts: all:!localhost
   gather_facts: false
   strategy: linear
   vars:
@@ -68,7 +68,7 @@
     - name: Require affirmative shutdown proof from the whole fleet
       ansible.builtin.assert:
         that: hostvars[item].ultra_candidate_contained | default(false) | bool
-      loop: '{{ groups["all"] }}'
+      loop: '{{ groups["all"] | difference(["localhost"]) }}'
     - name: Record same-operation maintenance confirmation
       ansible.builtin.copy:
         content: "{{ {'verified': true, 'maintenance_id': ultra_lifecycle_id} | to_json(preprocess_unsafe=False) }}"

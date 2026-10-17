@@ -6,7 +6,10 @@
   tasks:
     - name: Wait without discovery or private topology inspection
       ansible.builtin.script:
-        cmd: "{{ playbook_dir }}/../roles/release/files/state.py --wait-readiness --lifecycle-id {{ ultra_readiness_lifecycle_id }} {{ '--reservation-pending' if ultra_readiness_reservation_pending | bool else '' }}"
+        cmd: >-
+          {{ playbook_dir }}/../roles/release/files/state.py --wait-readiness --lifecycle-id
+          {{ ultra_readiness_lifecycle_id }}
+          {{ '--reservation-pending' if ultra_readiness_reservation_pending | bool else '' }}
         executable: /usr/bin/python3
       become: true
       changed_when: false

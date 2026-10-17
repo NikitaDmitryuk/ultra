@@ -481,6 +481,13 @@ preflight для поддерживаемого retry, но не снимает 
 540-секундный предел `ultra-recovery-reconcile.service` с минутным запасом.
 Один уже выполняющийся обмен с controller может завершиться ещё до 10 секунд
 после этого окна.
+Все три слоя временных файлов Ansible на машине оператора — `TMPDIR`,
+`ANSIBLE_LOCAL_TEMP` и `ansible_remote_tmp` для делегированных localhost-задач —
+направлены в `/dev/shm`: Ansible 2.20 распаковывает модуль через Python
+`tempfile`, который не учитывает `ANSIBLE_LOCAL_TEMP`, а `/tmp` и домашний
+каталог могут быть ограничены квотой. Локальный host явно добавляется только
+для делегирования и исключается из удалённых playbook-ов `hosts: all` и циклов
+по удалённому fleet; SSH-узлы сохраняют собственный путь временных файлов.
 Перед новой обычной upgrade-операцией `wait-upgrade-readiness` ожидает свежих
 публичных recovery-наблюдений без lifecycle reservation и infrastructure lock,
 чтобы reconcile мог обновить их. Проверка читает два JSON-файла readiness и

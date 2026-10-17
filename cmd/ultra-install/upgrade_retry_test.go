@@ -442,7 +442,12 @@ if operation=='wait-upgrade-readiness':
     fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
     os.close(fd)
     output=job/'result.json'
-    output.write_text(json.dumps({'verified':True,'ready':True}))
+    result={'verified':True,'ready':True}
+    if variables.get('ultra_readiness_reservation_pending'):
+        assert variables['ultra_readiness_lifecycle_id']
+        assert (state/'upgrade'/'gate').read_text()=='applying'
+        result.update({'reservation_id':variables['ultra_readiness_lifecycle_id'],'reservation_phase':'applying'})
+    output.write_text(json.dumps(result))
     output.chmod(0o600)
     sys.exit(0)
 if operation=='inspect-upgrade' and variables.get('ultra_controller_enforcement_preflight_only'):

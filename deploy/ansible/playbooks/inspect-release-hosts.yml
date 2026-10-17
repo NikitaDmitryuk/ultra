@@ -12,7 +12,7 @@
       register: upgrade_baseline_verified
       when: ultra_upgrade_baseline_input is defined
 - name: Read exact frozen fleet architectures
-  hosts: all
+  hosts: all:!localhost
   gather_facts: false
   any_errors_fatal: true
   tasks:

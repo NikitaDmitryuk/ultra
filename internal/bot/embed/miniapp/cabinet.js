@@ -902,11 +902,16 @@ async function refreshOperationCards(version) {
       card.hidden = false;
       const status = card.querySelector("[data-op-status]");
       if (status) {
-        status.className = `badge ${op.state === "ready" ? "good" : op.state === "failed" || op.state === "unknown" ? "bad" : "wait"}`;
-        status.textContent = serverStateLabel(op, capacity);
+        const className = `badge ${op.state === "ready" ? "good" : op.state === "failed" || op.state === "unknown" ? "bad" : "wait"}`;
+        const text = serverStateLabel(op, capacity);
+        if (status.className !== className) status.className = className;
+        if (status.textContent !== text) status.textContent = text;
       }
       const details = card.querySelector("[data-op-details]");
-      if (details) details.innerHTML = cloudOperationDetailsHTML(op);
+      if (details) {
+        const html = cloudOperationDetailsHTML(op);
+        if (details.innerHTML !== html) details.innerHTML = html;
+      }
     }
     bindCloudOperationControls();
     if (ops.some((o) => o.state === "pending" || o.state === "unknown"))

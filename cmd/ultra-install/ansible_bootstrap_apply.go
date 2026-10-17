@@ -102,6 +102,10 @@ func applyReservedBootstrap(
 	if p.AdoptRuntime && !components {
 		return errors.New("adoption_component_anchor_required")
 	}
+	cleanupSubscription, err := prepareFrozenBootstrapSubscription(p, inventory, directory)
+	if err != nil {
+		return err
+	}
 	if !components {
 		// An existing frozen monolithic job keeps its original implementation.
 		linked := false
@@ -119,6 +123,11 @@ func applyReservedBootstrap(
 		}
 	} else if err := runBootstrapComponents(ctx, inventory, operationVars, directory, generation, python, executable); err != nil {
 		return err
+	}
+	if cleanupSubscription != nil {
+		if err := cleanupSubscription(); err != nil {
+			return errors.New("bootstrap_subscription_stage_cleanup_failed")
+		}
 	}
 	if p.FullAutomation() && p.AdoptRuntime {
 		if err := ansibleBootstrapIngress(ctx, p, inventory, bootstrapMutationStage(directory, "ingress-adopt", generation), python, executable, "adopt", operationVars, bootstrapMutationOriginalStage(directory, "ingress-adopt", generation)); err != nil {

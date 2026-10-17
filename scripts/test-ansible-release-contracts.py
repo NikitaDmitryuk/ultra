@@ -163,7 +163,7 @@ class Contracts(unittest.TestCase):
 
     def test_forward_failure_containment_confirms_every_fixed_unit_and_host(self):
         plays = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/contain-upgrade.yml').read_text())
-        self.assertEqual([play['hosts'] for play in plays], ['all', 'bridge'])
+        self.assertEqual([play['hosts'] for play in plays], ['all:!localhost', 'bridge'])
         self.assertEqual(plays[0]['strategy'], 'linear')
         first = plays[0]['tasks']
         units = plays[0]['vars']['containment_units']

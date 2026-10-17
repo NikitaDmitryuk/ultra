@@ -180,6 +180,16 @@
       when: ultra_geo_enabled | default(false) | bool
     - relay
   tasks:
+    - name: Install configured subscription keyring
+      ansible.builtin.include_role:
+        name: upgrade_subscription
+      when: ultra_upgrade_subscription_key_source | default('') | length > 0
+    - name: Restart relay with configured subscription keyring
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: restarted
+        daemon_reload: true
+      when: ultra_upgrade_subscription_key_source | default('') | length > 0
     - name: Install pinned bootstrap routes
       ansible.builtin.copy:
         content: "{{ bootstrap_pinned | to_nice_json(preprocess_unsafe=False) }}"

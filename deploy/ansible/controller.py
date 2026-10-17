@@ -80,6 +80,41 @@ def write_unsafe_variables(path, value):
         os.fsync(stream.fileno())
 
 
+def configure_localhost(inventory):
+    """Keep delegated controller tasks off remote hosts and home-dir temp paths."""
+    if not isinstance(inventory, dict):
+        raise ValueError('invalid_inventory')
+    all_inventory = inventory.get('all')
+    if all_inventory is None and 'all' not in inventory:
+        all_inventory = {}
+        inventory['all'] = all_inventory
+    if not isinstance(all_inventory, dict):
+        raise ValueError('invalid_inventory')
+    hosts = all_inventory.setdefault('hosts', {})
+    if not isinstance(hosts, dict) or 'localhost' in hosts:
+        raise ValueError('controller_host_conflict')
+    hosts['localhost'] = {
+        'ansible_connection': 'local',
+        'ansible_remote_tmp': '/dev/shm',
+    }
+
+
+def playbook_environment(directory, bundle):
+    return {
+        'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+        'HOME': str(directory),
+        'ANSIBLE_CONFIG': str(Path(bundle) / 'ansible.cfg'),
+        # Ansible 2.20 creates module payloads with tempfile.mkdtemp(), which
+        # follows TMPDIR instead of ANSIBLE_LOCAL_TEMP. Keep controller scratch
+        # on tmpfs; /tmp and ~/.ansible/tmp can be quota-limited.
+        'TMPDIR': '/dev/shm',
+        'ANSIBLE_LOCAL_TEMP': '/dev/shm',
+        'ANSIBLE_NOCOLOR': '1',
+        'PYTHONDONTWRITEBYTECODE': '1',
+        'ULTRA_ANSIBLE_DIAGNOSTIC_FILE': str(directory / 'diagnostic.json'),
+    }
+
+
 def load_private(path, raw=False):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd) as stream:
@@ -129,9 +164,6 @@ def execute(directory, executable, bundle):
         inventory = request['inventory']
         variables = request['variables']
         variables['ultra_result_file'] = str(directory / 'result.json')
-        atomic(directory / 'inventory.json', inventory)
-        atomic(directory / 'variables.json', variables)
-        write_unsafe_variables(directory / 'variables.yml', variables)
     else:
         if request['spec']['role'] != 'exit':
             raise ValueError('exit_spec_required')
@@ -156,12 +188,13 @@ def execute(directory, executable, bundle):
         variables = {'ultra_spec': request['spec'], 'ultra_bridge_ipv4': request['bridge_ipv4'],
                      'ultra_relay_source': str(directory / 'ultra-relay'),
                      'ultra_relay_sha256': job['binary_sha256'], 'ultra_result_file': str(directory / 'result.json')}
-        atomic(directory / 'inventory.json', inventory)
-        atomic(directory / 'variables.json', variables)
-        write_unsafe_variables(directory / 'variables.yml', variables)
         binary = directory / 'ultra-relay'
         if binary.is_symlink() or hashlib.sha256(binary.read_bytes()).hexdigest() != job['binary_sha256']:
             raise ValueError('binary_changed')
+    configure_localhost(inventory)
+    atomic(directory / 'inventory.json', inventory)
+    atomic(directory / 'variables.json', variables)
+    write_unsafe_variables(directory / 'variables.yml', variables)
     write_unsafe_variables(directory / 'inventory.yml', inventory)
     receipt = directory / 'receipt.json'
     if receipt.exists():
@@ -176,15 +209,7 @@ def execute(directory, executable, bundle):
     result_path.unlink(missing_ok=True)
     state = {**job, 'state': 'running', 'started_at': int(time.time())}
     atomic(receipt, state)
-    environment = {
-        'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-        'HOME': str(directory),
-        'ANSIBLE_CONFIG': str(Path(bundle) / 'ansible.cfg'),
-        'ANSIBLE_LOCAL_TEMP': str(directory / 'ansible-tmp'),
-        'ANSIBLE_NOCOLOR': '1',
-        'PYTHONDONTWRITEBYTECODE': '1',
-        'ULTRA_ANSIBLE_DIAGNOSTIC_FILE': str(directory / 'diagnostic.json'),
-    }
+    environment = playbook_environment(directory, bundle)
     try:
         exit_code = run_playbook([
             str(executable), '-i', str(directory / 'inventory.yml'),
