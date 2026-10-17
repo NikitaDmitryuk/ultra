@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
@@ -136,5 +137,82 @@ func TestVerifyHealthUsesClosedClassificationsAndOriginalGate(t *testing.T) {
 				t.Fatalf("unbounded classification: %v", err)
 			}
 		}
+	}
+}
+
+func TestVerifyTunnelRetriesUntilThreeConsecutiveSuccesses(t *testing.T) {
+	results := []exits.Health{
+		{Reachable: true},
+		{Reachable: true, InternetOK: true},
+		{Reachable: true}, // A failure resets the consecutive-success count.
+		{Reachable: true, InternetOK: true},
+		{Reachable: true, InternetOK: true},
+		{Reachable: true, InternetOK: true},
+	}
+	calls := 0
+	err := verifyTunnelWithRetryPolicy(context.Background(), func(context.Context) exits.Health {
+		h := results[calls]
+		calls++
+		return h
+	}, time.Second, time.Nanosecond, time.Nanosecond)
+	if err != nil {
+		t.Fatalf("verification failed after recovery: %v", err)
+	}
+	if calls != len(results) {
+		t.Fatalf("probe calls = %d, want %d", calls, len(results))
+	}
+}
+
+func TestVerifyTunnelPersistentFailureReturnsDiagnosticsAtTimeout(t *testing.T) {
+	err := verifyTunnelWithRetryPolicy(context.Background(), func(context.Context) exits.Health {
+		return exits.Health{Reachable: true}
+	}, 5*time.Millisecond, time.Millisecond, time.Millisecond)
+	var diagnostic *verificationError
+	if !errors.As(err, &diagnostic) {
+		t.Fatalf("persistent probe failure = %v, want verification diagnostics", err)
+	}
+}
+
+func TestVerifyTunnelStopsOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	err := verifyTunnelWithRetryPolicy(ctx, func(context.Context) exits.Health {
+		calls++
+		cancel()
+		return exits.Health{Reachable: true}
+	}, time.Second, time.Millisecond, time.Millisecond)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("verification error = %v, want context cancellation", err)
+	}
+	if calls != 1 {
+		t.Fatalf("probe calls after cancellation = %d, want 1", calls)
+	}
+}
+
+func TestVerifyTunnelDoesNotAcceptSuccessAfterParentCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	err := verifyTunnelWithRetryPolicy(ctx, func(context.Context) exits.Health {
+		calls++
+		if calls == verifyConsecutiveOK {
+			cancel()
+		}
+		return exits.Health{Reachable: true, InternetOK: true}
+	}, time.Second, time.Nanosecond, time.Nanosecond)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("verification error = %v, want context cancellation", err)
+	}
+	if calls != verifyConsecutiveOK {
+		t.Fatalf("probe calls = %d, want %d", calls, verifyConsecutiveOK)
+	}
+}
+
+func TestVerifyTunnelDoesNotAcceptSuccessAfterRetryDeadline(t *testing.T) {
+	err := verifyTunnelWithRetryPolicy(context.Background(), func(ctx context.Context) exits.Health {
+		<-ctx.Done()
+		return exits.Health{Reachable: true, InternetOK: true}
+	}, time.Millisecond, time.Nanosecond, time.Nanosecond)
+	if err == nil || err.Error() != "tunnel verification timed out before consecutive health checks" {
+		t.Fatalf("verification error = %v, want sanitized retry timeout", err)
 	}
 }

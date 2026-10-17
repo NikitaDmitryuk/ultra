@@ -16,6 +16,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/db"
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionkey"
 )
 
 type testSubscriptions struct{ token string }
@@ -119,6 +121,37 @@ func TestSubscriptionHTTP(t *testing.T) {
 	}
 	if w := request("GET", "/v1/subscriptions/issued", true); w.Code != 404 {
 		t.Fatal("revoked", w.Code)
+	}
+}
+
+func TestMemberSubscriptionFailureReason(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{subscriptionkey.ErrUnavailable, "key_unavailable"},
+		{db.ErrLegacySubscription, "legacy_credential"},
+		{pgx.ErrNoRows, "member_not_found_or_inactive"},
+		{errors.New("sensitive database detail"), "storage_or_issuance_failure"},
+	} {
+		if got := subscriptionFailureReason(tc.err); got != tc.want {
+			t.Fatalf("subscriptionFailureReason(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestMemberSubscriptionUnavailableWhenRepoMissing(t *testing.T) {
+	var output bytes.Buffer
+	server := &Server{Members: &MemberService{}, log: slog.New(slog.NewJSONHandler(&output, nil))}
+	req := httptest.NewRequest(http.MethodPost, "/v1/members/17/subscription", nil)
+	req.SetPathValue("id", "17")
+	w := httptest.NewRecorder()
+	server.memberSubscription(w, req)
+	if w.Code != http.StatusServiceUnavailable || w.Body.String() != "operation unavailable; retry\n" {
+		t.Fatalf("unexpected nil-repository response: %d %q", w.Code, w.Body.String())
+	}
+	if strings.Contains(output.String(), "sensitive") || !strings.Contains(output.String(), "key_unavailable") {
+		t.Fatalf("missing safe reason or leaked details: %s", output.String())
 	}
 }
 

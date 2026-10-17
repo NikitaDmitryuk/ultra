@@ -56,6 +56,14 @@ Telegram initData для авторизации.
 [Happ app management](https://github.com/HappDev/happ_su/blob/main/dev-docs/app-management.md),
 [публичный обработчик](../internal/bot/subscriptions.go).
 
+При сбое выдачи Admin API bridge отвечает `503 operation unavailable; retry`;
+бот проксирует статус в Mini App с общим текстом `operation unavailable`.
+Bridge записывает только фиксированную причину (`key_unavailable`,
+`legacy_credential`, `member_not_found_or_inactive` или
+`storage_or_issuance_failure`), без member ID, токена, URL, SQL и текста ошибки;
+ошибки поиска пользователя классифицируются так же. Для расследования сопоставляй
+класс с журналом `ultra-relay`, не включая дамп секретов.
+
 ## JSON-подписка с выбором входа
 
 `/sub/<token>` по умолчанию возвращает прежние VLESS URI. Флаг spec
