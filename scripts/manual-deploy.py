@@ -355,15 +355,16 @@ def completed_baseline_replay(root, config, version, commit):
 def validate_config_policy(raw):
     # Match installplan.DisallowedDeploymentSecret before creating any backup,
     # temporary input, or remote copy. The exact built Go parser runs below too.
-    forbidden = {'TELEGRAM_BOT_TOKEN', 'ULTRA_VULTR_API_KEY', 'ULTRA_VULTR_DNS_API_KEY',
-                 'ULTRA_CUTOVER_SUBSCRIPTION_URL', 'ULTRA_SUBSCRIPTION_PROBE_URL', 'ULTRA_RELAY_ADMIN_TOKEN', 'ULTRA_DB_DSN'}
+    forbidden = {'TELEGRAM_BOT_TOKEN', 'ULTRA_CUTOVER_SUBSCRIPTION_URL',
+                 'ULTRA_SUBSCRIPTION_PROBE_URL', 'ULTRA_RELAY_ADMIN_TOKEN', 'ULTRA_DB_DSN'}
     for line in raw.decode().splitlines():
         if not line.strip() or line.lstrip().startswith('#') or '=' not in line:
             continue
         key = line.split('=', 1)[0].strip().upper()
         signing = any(word in key for word in ['MINISIGN', 'SIGNING'])
         private = any(word in key for word in ['SECRET', 'PRIVATE', 'PASSWORD', 'PASSPHRASE'])
-        require(key not in forbidden and not (signing and private), 'canonical_config_contains_forbidden_secret')
+        require(key not in forbidden and not key.endswith('_API_KEY') and not (signing and private),
+                'canonical_config_contains_forbidden_secret')
         require(not key.startswith('ULTRA_AUTO_UPGRADE_'), 'canonical_config_contains_removed_policy')
 
 

@@ -211,10 +211,12 @@
   no_log: true
 - name: Install optional DNS API key privately
   ansible.builtin.copy:
-    src: "{{ ultra_automation_dns_source }}"
+    src: "{{ ultra_automation_cloud_source }}"
     dest: /etc/ultra-recovery/dns-api-key
     mode: "0600"
-  when: ultra_automation_dns_source | default('') | length > 0
+  when:
+    - ultra_automation_configuration.dns is defined
+    - ultra_automation_cloud_source | default('') | length > 0
   no_log: true
 - name: Create relay service drop-in directory
   ansible.builtin.file:

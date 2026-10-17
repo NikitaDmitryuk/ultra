@@ -20,9 +20,9 @@ func prepareAnsibleDNS(p *installplan.InstallPlan, variables map[string]any) err
 	if err != nil {
 		return err
 	}
-	key := secrets["ULTRA_VULTR_DNS_API_KEY"]
+	key := strings.TrimSpace(secrets["ULTRA_VULTR_API_KEY"])
 	if key == "" {
-		return errors.New("canonical DNS credential required")
+		return errors.New("canonical Vultr API key required for managed DNS")
 	}
 	source, err := recoveryassets.Scripts.ReadFile("dns.py")
 	if err != nil {

@@ -104,15 +104,15 @@ func ansibleBootstrapAutomationGeneration(
 	configuration["tools"] = selected
 	controllerDirectory := managedControllerDirectory(a.Version)
 	configuration["controller_directory"] = controllerDirectory
-	compute, dns, err := prepareProviderSecrets(p, stage)
+	providerKey, err := prepareProviderSecrets(p, stage)
 	if err != nil {
 		return err
 	}
-	if compute != "" {
-		configuration["cloud_key_file"] = compute
+	if providerKey != "" {
+		configuration["cloud_key_file"] = providerKey
 	}
-	if dns != "" {
-		configuration["dns"].(map[string]any)["api_key_file"] = dns
+	if a.DNS != nil {
+		configuration["dns"].(map[string]any)["api_key_file"] = providerKey
 	}
 	planner, err := recoveryassets.Scripts.ReadFile("bootstrap_plan.py")
 	if err != nil {
@@ -128,7 +128,7 @@ func ansibleBootstrapAutomationGeneration(
 		"ultra_install_source": filepath.Join(a.ReleaseDir, installer.Name), "ultra_install_sha256": installer.SHA,
 		"ultra_automation_configuration": configuration, "ultra_automation_tools": selected,
 		"ultra_automation_planner_source": plannerPath, "ultra_automation_pins_source": a.KnownHostsFile,
-		"ultra_automation_cloud_source": compute, "ultra_automation_dns_source": dns,
+		"ultra_automation_cloud_source":     providerKey,
 		"ultra_automation_manifest_source":  filepath.Join(a.ReleaseDir, "release-manifest.json"),
 		"ultra_automation_emergency_source": filepath.Join(a.ReleaseDir, emergency.Name),
 	}

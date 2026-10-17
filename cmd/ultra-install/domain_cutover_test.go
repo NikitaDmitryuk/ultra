@@ -62,20 +62,57 @@ func TestParseCutoverPollIgnoresLoginNoise(t *testing.T) {
 	}
 }
 
-func TestDomainCutoverUsesSharedSubscriptionProbeURL(t *testing.T) {
+func TestDomainCutoverUsesSharedVultrAPIKey(t *testing.T) {
 	url := "https://sync.example.com/sub/fixture-token"
-	key := "fixture-dns-key"
+	key := "fixture-provider-key"
 	gotURL, gotKey, err := domainCutoverProbeInputs(map[string]string{
 		"ULTRA_SUBSCRIPTION_PROBE_URL": url,
-		"ULTRA_VULTR_DNS_API_KEY":      key,
+		"ULTRA_VULTR_API_KEY":          key,
 	})
 	if err != nil || gotURL != url || gotKey != key {
 		t.Fatalf("shared probe inputs = (%q, %q, %v)", gotURL, gotKey, err)
 	}
 	if _, _, err = domainCutoverProbeInputs(map[string]string{
 		"ULTRA_CUTOVER_SUBSCRIPTION_URL": url,
-		"ULTRA_VULTR_DNS_API_KEY":        key,
+		"ULTRA_VULTR_API_KEY":            key,
 	}); err == nil {
 		t.Fatal("legacy cutover URL was unexpectedly accepted")
+	}
+}
+
+func TestDomainCutoverRejectsMissingProbeInputsBeforeStateChanges(t *testing.T) {
+	for name, raw := range map[string]string{
+		"missing URL": "ULTRA_VULTR_API_KEY=fixture-provider-key\n",
+		"missing key": "ULTRA_SUBSCRIPTION_PROBE_URL=https://sync.example.com/sub/fixture-token\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			env := filepath.Join(root, ".env")
+			if err := os.WriteFile(env, []byte(raw), 0600); err != nil {
+				t.Fatal(err)
+			}
+			state := filepath.Join(root, "state")
+			t.Setenv("ULTRA_INSTALL_STATE_DIR", state)
+			p := &installplan.InstallPlan{
+				Bridge:  installplan.BridgeConfig{Address: "192.0.2.1", SSHHost: "fixture.example.com"},
+				Secrets: installplan.SecretsConfig{EnvFile: env},
+			}
+			err := applyDomainCutover(
+				p,
+				filepath.Join(root, "install.config"),
+				"sync.example.com",
+				"edge.example.com",
+				"example.com",
+				filepath.Join(root, "receipt.json"),
+				filepath.Join(root, "known_hosts"),
+				"ops@example.com",
+			)
+			if err == nil || !strings.Contains(err.Error(), "canonical") {
+				t.Fatalf("missing probe input error = %v", err)
+			}
+			if _, statErr := os.Stat(state); !os.IsNotExist(statErr) {
+				t.Fatalf("cutover created state before validating probe inputs: %v", statErr)
+			}
+		})
 	}
 }

@@ -33,7 +33,7 @@ func TestCanonicalV2MappingAndLegacyBoundary(t *testing.T) {
 	if _, err := CanonicalValuesToPlan(v); err == nil {
 		t.Fatal("retired schema 1 accepted")
 	}
-	for _, key := range []string{"ULTRA_VULTR_API_KEY", "ULTRA_VULTR_DNS_API_KEY", "ULTRA_SUBSCRIPTION_PROBE_URL", "TELEGRAM_BOT_TOKEN"} {
+	for _, key := range []string{"ULTRA_VULTR_API_KEY", "PROVIDER_API_KEY", "ULTRA_SUBSCRIPTION_PROBE_URL", "TELEGRAM_BOT_TOKEN"} {
 		v := canonicalFixture()
 		v[key] = "private-fixture"
 		_, err := CanonicalValuesToPlan(v)
@@ -95,7 +95,6 @@ func TestBotEnvironmentExcludesProvidersAndUnknownKeys(t *testing.T) {
 		map[string]string{
 			"TELEGRAM_BOT_TOKEN":           "fixture",
 			"ULTRA_VULTR_API_KEY":          "privatecompute",
-			"ULTRA_VULTR_DNS_API_KEY":      "privatedns",
 			"ULTRA_SUBSCRIPTION_PROBE_URL": "https://sync.example.com/sub/privateprobe",
 			"ARBITRARY":                    "privateother",
 			"ULTRA_BOT_PUBLIC_URL":         "https://sync.example.com",
@@ -114,6 +113,14 @@ func TestSubscriptionProbeURLsAreDisallowedDeploymentSecrets(t *testing.T) {
 	for _, key := range []string{"ULTRA_SUBSCRIPTION_PROBE_URL", "ULTRA_CUTOVER_SUBSCRIPTION_URL"} {
 		if !DisallowedDeploymentSecret(key) {
 			t.Fatalf("subscription probe URL key %q is not protected by shared deployment-secret rule", key)
+		}
+	}
+}
+
+func TestAnyAPIKeyIsDisallowedDeploymentSecret(t *testing.T) {
+	for _, key := range []string{"ULTRA_VULTR_API_KEY", "EXAMPLE_PROVIDER_API_KEY", "example_provider_api_key"} {
+		if !DisallowedDeploymentSecret(key) {
+			t.Fatalf("API key name %q is allowed in deployment configuration", key)
 		}
 	}
 }

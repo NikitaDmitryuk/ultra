@@ -52,7 +52,9 @@ func TestDomainCutoverPlannerPreservesSeparateDialAndTLSNames(t *testing.T) {
 		!reflect.DeepEqual(vars["ultra_dns_receipt_seed"], owned) {
 		t.Fatal("lost caller-owned identity or evidence")
 	}
-	if vars["ultra_dns_config"].(map[string]any)["vpn_name"] != "edge" {
+	if vars["ultra_dns_api_key"] != "fixture-key" ||
+		vars["ultra_dns_config"].(map[string]any)["vpn_name"] != "edge" ||
+		vars["ultra_dns_config"].(map[string]any)["api_key_file"] != "/etc/ultra-recovery/dns-api-key" {
 		t.Fatal("dial host replaced DNS TLS identity")
 	}
 	after, _ := json.Marshal(prior)

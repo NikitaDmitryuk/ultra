@@ -69,8 +69,9 @@ public age recipient, Telegram ID, домены и несекретную пол
 Неизвестный или изменённый pin блокирует операцию. Конфигурация узлов не должна
 исполнять Jinja-выражения: входные контейнеры передаются с `!unsafe`.
 
-`.env` содержит `TELEGRAM_BOT_TOKEN`, `ULTRA_VULTR_API_KEY` для compute и
-отдельный `ULTRA_VULTR_DNS_API_KEY` для DNS. `SECRETS_ENV_FILE` переопределяет путь;
+`.env` содержит `TELEGRAM_BOT_TOKEN` и единый `ULTRA_VULTR_API_KEY` для compute
+и DNS. Ключу нужны права управления VPS, firewall, SSH-ключами и DNS-записями
+используемой зоны. `SECRETS_ENV_FILE` переопределяет путь;
 `BOT_ENV_FILE` поддерживается для совместимости. Секретные ключи в
 `install.config` отклоняются. Приватные производные файлы имеют права 0600;
 бот не получает ключи управления провайдером. Поддерживаемый

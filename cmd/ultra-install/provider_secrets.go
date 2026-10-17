@@ -11,32 +11,22 @@ import (
 )
 
 // prepareProviderSecrets creates disposable projections, never additional operator inputs.
-func prepareProviderSecrets(p *installplan.InstallPlan, directory string) (string, string, error) {
+func prepareProviderSecrets(p *installplan.InstallPlan, directory string) (string, error) {
 	if p == nil || p.Automation == nil {
-		return "", "", errors.New("automation configuration required")
+		return "", errors.New("automation configuration required")
 	}
 	values, err := readProviderSecretValues(p)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	compute := p.Automation.CloudKeyFile
-	if values["ULTRA_VULTR_API_KEY"] != "" {
-		compute, err = writeProviderSecret(directory, "compute-key", values["ULTRA_VULTR_API_KEY"])
-		if err != nil {
-			return "", "", err
-		}
+	key := strings.TrimSpace(values["ULTRA_VULTR_API_KEY"])
+	if p.Automation.DNS != nil && key == "" {
+		return "", errors.New("ULTRA_VULTR_API_KEY required for managed DNS")
 	}
-	dns := ""
-	if p.Automation.DNS != nil {
-		dns, err = writeProviderSecret(directory, "dns-key", values["ULTRA_VULTR_DNS_API_KEY"])
-		if err != nil {
-			return "", "", err
-		}
-		if dns == "" {
-			return "", "", errors.New("ULTRA_VULTR_DNS_API_KEY missing from canonical secrets")
-		}
+	if key == "" {
+		return p.Automation.CloudKeyFile, nil
 	}
-	return compute, dns, nil
+	return writeProviderSecret(directory, "provider-api-key", key)
 }
 
 func prepareComputeProviderSecret(p *installplan.InstallPlan, directory string) (string, error) {

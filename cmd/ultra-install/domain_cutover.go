@@ -164,6 +164,14 @@ func applyDomainCutover(p *installplan.InstallPlan, configFile, subscription, vp
 	if bridgeIP == nil || bridgeIP.To4() == nil {
 		return errors.New("cutover bridge address must be explicit IPv4")
 	}
+	secrets, err := installplan.ReadSecretsFile(p.SecretsEnvFile())
+	if err != nil {
+		return errors.New("canonical cutover secrets unavailable")
+	}
+	url, key, err := domainCutoverProbeInputs(secrets)
+	if err != nil {
+		return err
+	}
 	if err := os.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins); err != nil {
 		return err
 	}
@@ -233,14 +241,6 @@ func applyDomainCutover(p *installplan.InstallPlan, configFile, subscription, vp
 	}
 	if !existing.PrimaryXHTTPIsPublished() {
 		return errors.New("cutover requires existing published primary")
-	}
-	secrets, err := installplan.ReadSecretsFile(p.SecretsEnvFile())
-	if err != nil {
-		return errors.New("canonical cutover secrets unavailable")
-	}
-	url, key, err := domainCutoverProbeInputs(secrets)
-	if err != nil {
-		return err
 	}
 	receiptInfo, err := os.Lstat(receipt)
 	if err != nil || !receiptInfo.Mode().IsRegular() || receiptInfo.Mode().Perm()&0077 != 0 {
@@ -317,9 +317,9 @@ func applyDomainCutover(p *installplan.InstallPlan, configFile, subscription, vp
 
 func domainCutoverProbeInputs(secrets map[string]string) (string, string, error) {
 	url := strings.TrimSpace(secrets["ULTRA_SUBSCRIPTION_PROBE_URL"])
-	key := strings.TrimSpace(secrets["ULTRA_VULTR_DNS_API_KEY"])
+	key := strings.TrimSpace(secrets["ULTRA_VULTR_API_KEY"])
 	if url == "" || key == "" || strings.ContainsAny(url+key, "\r\n\x00") {
-		return "", "", errors.New("canonical subscription probe URL and DNS key required")
+		return "", "", errors.New("canonical subscription probe URL and Vultr API key required")
 	}
 	return url, key, nil
 }

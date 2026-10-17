@@ -217,14 +217,15 @@ func BotEnvironment(values map[string]string) ([]byte, error) {
 	return []byte(out.String()), nil
 }
 
-// DisallowedDeploymentSecret is shared by parsing and remote projection. Public
-// verification key references are policy; private signing material is never deployable.
+// DisallowedDeploymentSecret is shared by parsing and remote projection. API keys
+// and private signing material belong in secrets, not deployment configuration.
 func DisallowedDeploymentSecret(key string) bool {
 	key = strings.ToUpper(key)
+	if strings.HasSuffix(key, "_API_KEY") {
+		return true
+	}
 	switch key {
 	case "TELEGRAM_BOT_TOKEN",
-		"ULTRA_VULTR_API_KEY",
-		"ULTRA_VULTR_DNS_API_KEY",
 		"ULTRA_CUTOVER_SUBSCRIPTION_URL",
 		"ULTRA_SUBSCRIPTION_PROBE_URL",
 		"ULTRA_RELAY_ADMIN_TOKEN",

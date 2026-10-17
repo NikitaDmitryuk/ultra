@@ -1715,9 +1715,9 @@ class NativeDeploy(unittest.TestCase):
             self.rollout()
 
     def test_native_forbidden_secrets_fail_before_any_copy_or_stage(self):
-        for key in ['TELEGRAM_BOT_TOKEN', 'MINISIGN_SECRET_KEY', 'MINISIGN_PASSWORD',
+        for key in ['TELEGRAM_BOT_TOKEN', 'PROVIDER_API_KEY', 'MINISIGN_SECRET_KEY', 'MINISIGN_PASSWORD',
                     'MINISIGN_PRIVATE_KEY_FILE', 'ULTRA_RELEASE_SIGNING_PRIVATE_KEY',
-                    'RELEASE_SIGNING_PASSPHRASE', 'ultra_db_dsn',
+                    'RELEASE_SIGNING_PASSPHRASE', 'EXAMPLE_PROVIDER_API_KEY', 'example_provider_api_key', 'ultra_db_dsn',
                     'ULTRA_CUTOVER_SUBSCRIPTION_URL']:
             with self.subTest(key=key):
                 raw = self.original + key.encode() + b'=sensitive-fixture\n'

@@ -26,7 +26,7 @@ type domainCutoverDesired struct {
 func buildDomainCutoverVariables(
 	desired domainCutoverDesired,
 	existing *config.Spec,
-	directory, lockDirectory, subscriptionURL, dnsKey string,
+	directory, lockDirectory, subscriptionURL, apiKey string,
 	owned map[string]any,
 ) (map[string]any, error) {
 	if existing == nil || !existing.PrimaryXHTTPIsPublished() || existing.PrimaryXHTTP.Port != 443 {
@@ -40,8 +40,8 @@ func buildDomainCutoverVariables(
 	if bridgeIP == nil || bridgeIP.To4() == nil || desired.BotPort < 1 || desired.BotPort > 65535 {
 		return nil, errors.New("cutover requires bridge IPv4 and backend port")
 	}
-	if desired.Subscription == desired.VPN || subscriptionURL == "" || dnsKey == "" || owned == nil ||
-		strings.ContainsAny(subscriptionURL+dnsKey, "\r\n\x00") {
+	if desired.Subscription == desired.VPN || subscriptionURL == "" || apiKey == "" || owned == nil ||
+		strings.ContainsAny(subscriptionURL+apiKey, "\r\n\x00") {
 		return nil, errors.New("cutover requires distinct domains and verified DNS and probe inputs")
 	}
 	if desired.StagingPort == 0 {
@@ -87,7 +87,7 @@ func buildDomainCutoverVariables(
 	return map[string]any{
 		"ultra_lock_directory": lockDirectory, "ultra_ingress_action": "cutover", "ultra_ingress": params, "ultra_ingress_transaction": "/var/lib/ultra-ingress/ansible-" + hex.EncodeToString(txnHash[:]),
 		"ultra_ingress_email": desired.Email, "ultra_ingress_domains": uniqueIngressDomains(desired.Subscription, desired.VPN, desired.BotDomain), "ultra_subscription_enabled": true, "ultra_subscription_domain": desired.Subscription, "ultra_bot_domain": desired.BotDomain, "ultra_bot_port": desired.BotPort, "ultra_bridge_url": "https://" + desired.Subscription + "/healthz", "ultra_bridge_ipv4": bridgeIP.String(),
-		"ultra_cutover_subscription_url": subscriptionURL, "ultra_cutover_contract_source": string(contract), "ultra_dns_source_content": string(source), "ultra_dns_api_key": dnsKey, "ultra_dns_receipt_seed": owned,
+		"ultra_cutover_subscription_url": subscriptionURL, "ultra_cutover_contract_source": string(contract), "ultra_dns_source_content": string(source), "ultra_dns_api_key": apiKey, "ultra_dns_receipt_seed": owned,
 		"ultra_dns_config": map[string]any{
 			"provider":          "vultr",
 			"zone":              desired.Zone,
