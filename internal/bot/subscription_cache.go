@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -271,6 +273,39 @@ func (b *Bot) refreshSubscriptionCache(ctx context.Context) error {
 	}
 	return nil
 }
+
+func subscriptionCacheFailureReason(err error) string {
+	if err == nil {
+		return "none"
+	}
+	message := err.Error()
+	switch {
+	case message == "subscription cache upstream unavailable":
+		return "upstream_unavailable"
+	case strings.HasPrefix(message, "subscription cache upstream status "):
+		status, parseErr := strconv.Atoi(strings.TrimPrefix(message, "subscription cache upstream status "))
+		if parseErr == nil && status >= 100 && status <= 599 {
+			return "upstream_http_" + strconv.Itoa(status)
+		}
+		return "upstream_http_error"
+	case message == "subscription cache response too large":
+		return "response_too_large"
+	case message == "invalid subscription cache response":
+		return "invalid_response"
+	case message == "subscription cache upstream stale":
+		return "upstream_stale"
+	case message == "subscription cache refresh superseded by revocation":
+		return "superseded_by_revocation"
+	case message == "subscription cache refresh exceeded revocation bound":
+		return "revocation_bound"
+	case message == "subscription cache too large":
+		return "cache_too_large"
+	default:
+		// Cache persistence errors can contain filesystem paths; log only a class.
+		return "cache_persist_failed"
+	}
+}
+
 func (b *Bot) StartSubscriptionCacheWorker(ctx context.Context) {
 	if b.subscriptionCache == nil {
 		return
@@ -283,7 +318,7 @@ func (b *Bot) StartSubscriptionCacheWorker(ctx context.Context) {
 			err := b.refreshSubscriptionCache(c)
 			cancel()
 			if err != nil && ctx.Err() == nil {
-				b.log.Warn("subscription cache refresh unavailable")
+				b.log.Warn("subscription cache refresh unavailable", "reason", subscriptionCacheFailureReason(err))
 			}
 			select {
 			case <-ctx.Done():

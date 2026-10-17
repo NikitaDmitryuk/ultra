@@ -39,6 +39,26 @@ func TestConstructionDoesNotContactTelegram(t *testing.T) {
 		t.Fatal("import page unavailable offline", w.Code)
 	}
 }
+
+func TestSubscriptionCacheFailureReasonIsSanitized(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "transport", err: errors.New("subscription cache upstream unavailable"), want: "upstream_unavailable"},
+		{name: "HTTP status", err: errors.New("subscription cache upstream status 503"), want: "upstream_http_503"},
+		{name: "invalid response", err: errors.New("invalid subscription cache response"), want: "invalid_response"},
+		{name: "filesystem detail", err: errors.New("open /secret/path: permission denied"), want: "cache_persist_failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := subscriptionCacheFailureReason(test.err); got != test.want {
+				t.Fatalf("reason=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
 func TestFailedDeliveryIsNotAcknowledged(t *testing.T) {
 	repo := &fakeAlertsTele{}
 	sender := &fakeMsgSender{err: errors.New("send failed")}

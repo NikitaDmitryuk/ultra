@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -237,5 +238,34 @@ func TestSelfSubscriptionPassesRotationNotice(t *testing.T) {
 	}
 	if !got.Rotated || got.URL != "https://vpn.example/sub/new-token" || got.ImportURL != "https://vpn.example/happ#new-token" {
 		t.Fatalf("unexpected response: %+v", got)
+	}
+}
+
+func TestSelfSubscriptionFailureLogsStatusWithoutUpstreamBody(t *testing.T) {
+	const body = "secret upstream response"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, body, http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+	var logOutput bytes.Buffer
+	b := &Bot{
+		botToken: "test-token", adminRepo: &fakeAdminLister{}, adminAPIURL: upstream.URL,
+		miniAppURL: "https://vpn.example", log: slog.New(slog.NewTextHandler(&logOutput, nil)),
+	}
+	mux := http.NewServeMux()
+	b.registerMiniAppRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/api/self/subscription", nil)
+	req.Header.Set(initDataHeader, signedInitData(t, b.botToken, 123))
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, req)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want %d", response.Code, http.StatusServiceUnavailable)
+	}
+	logged := logOutput.String()
+	if !strings.Contains(logged, "subscription issuance unavailable") || !strings.Contains(logged, "upstream_status=503") {
+		t.Fatalf("missing sanitized diagnostic fields: %q", logged)
+	}
+	if strings.Contains(logged, body) || strings.Contains(logged, "test-token") {
+		t.Fatalf("log exposed upstream or bot secret: %q", logged)
 	}
 }

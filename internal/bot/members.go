@@ -254,11 +254,13 @@ func (b *Bot) selfSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	status, e := b.relayJSON(r.Context(), "POST", fmt.Sprintf("/v1/members/%d/subscription", u.ID), nil, &result)
 	if e != nil {
+		b.log.Warn("subscription issuance unavailable", "upstream_status", status)
 		memberHTTPError(w, status)
 		return
 	}
 	base, e := url.Parse(b.miniAppURL)
 	if e != nil || base.Scheme != "https" || base.Host == "" {
+		b.log.Warn("subscription issuance unavailable", "reason", "public_origin_invalid")
 		memberHTTPError(w, 503)
 		return
 	}
