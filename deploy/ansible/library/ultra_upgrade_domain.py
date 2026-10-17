@@ -13,12 +13,12 @@ HOST = re.compile(r'[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\Z')
 HASH = re.compile(r'[a-f0-9]{64}\Z')
 
 
-def trusted(path, private=False, relay_spec=False):
+def trusted(path, private=False, allow_relay_owner=False):
     if path.is_symlink():
         raise ValueError('domain_symlink')
     info = path.stat()
     owners = {os.geteuid()}
-    if relay_spec:
+    if allow_relay_owner:
         try:
             owners.add(pwd.getpwnam('ultra-relay').pw_uid)
         except KeyError:
@@ -67,7 +67,8 @@ def current_experiment_ports(root, specification, receipt):
 
 
 def inspect(root=Path('/'), policy=None):
-    spec = json.loads(trusted(root / 'etc/ultra-relay/spec.json', relay_spec=True))
+    # The relay owns its spec and private environment file; retain no-symlink and mode checks.
+    spec = json.loads(trusted(root / 'etc/ultra-relay/spec.json', allow_relay_owner=True))
     primary = spec.get('primary_xhttp')
     if spec.get('role') != 'bridge' or not primary or not primary.get('published', True) or primary.get('port') != 443:
         raise ValueError('domain_published_primary_required')
@@ -135,7 +136,7 @@ def inspect(root=Path('/'), policy=None):
             raise ValueError('domain_backup_policy_uncertain')
     reconcile = json.loads(trusted(root / 'etc/ultra-recovery/reconcile.json', True))
     admin_id = trusted(root / 'etc/ultra-recovery/admin-chat-id', True).decode('utf-8').strip()
-    environment = trusted(root / 'etc/ultra-relay/environment', True).decode('utf-8')
+    environment = trusted(root / 'etc/ultra-relay/environment', True, allow_relay_owner=True).decode('utf-8')
     bot_ports = re.findall(r'^ULTRA_BOT_PORT=(\d+)$', environment, re.M)
     if len(bot_ports) != 1 or not 1 <= int(bot_ports[0]) <= 65535:
         raise ValueError('domain_bot_port_uncertain')

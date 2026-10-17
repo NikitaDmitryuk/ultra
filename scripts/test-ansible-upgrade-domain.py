@@ -124,7 +124,21 @@ class UpgradeDomainTests(unittest.TestCase):
                        'age_recipient': 'age1fixture', 'bridge_provider': 'fixture', 'static_nodes': nodes,
                        'admin_telegram_id': 123, 'bridge_ipv4': '192.0.2.1',
                        'state_paths': [], 'artifact_paths': []}
-            evidence = domain.inspect(root, desired)
+            environment = root / 'etc/ultra-relay/environment'
+            actual_stat = Path.stat
+            relay_uid = 12345
+
+            def service_stat(path, *args, **kwargs):
+                result = actual_stat(path, *args, **kwargs)
+                if path == environment:
+                    values = list(result)
+                    values[4] = relay_uid
+                    return os.stat_result(values)
+                return result
+
+            with patch.object(Path, 'stat', service_stat), \
+                    patch.object(domain.pwd, 'getpwnam', return_value=SimpleNamespace(pw_uid=relay_uid)):
+                evidence = domain.inspect(root, desired)
             self.assertEqual(evidence['path'], '/old')
             self.assertEqual(evidence['bot_port'], 8444)
             self.assertEqual(evidence['dns_ttl'], 300)
@@ -283,9 +297,12 @@ class UpgradeDomainTests(unittest.TestCase):
 
             with patch.object(Path, 'stat', service_stat), patch.object(backend.pwd, 'getpwnam', return_value=SimpleNamespace(pw_uid=service_uid)), patch.object(backend.os, 'fchown') as chown:
                 self.assertEqual(backend.read(environment), environment.read_bytes())
-                self.assertEqual(domain.trusted(specification, relay_spec=True), specification.read_bytes())
+                self.assertEqual(domain.trusted(specification, allow_relay_owner=True), specification.read_bytes())
+                self.assertEqual(domain.trusted(environment, True, allow_relay_owner=True), environment.read_bytes())
                 with self.assertRaisesRegex(ValueError, 'untrusted_file'):
                     domain.trusted(specification)
+                with self.assertRaisesRegex(ValueError, 'untrusted_file'):
+                    domain.trusted(environment, True)
                 state = backend.prepare(root / 'transaction', 'old.example.com', 'bot.example.com', 'sync.example.com', root, preserve_recovery=True)
                 image = next(item for item in state['files'] if item['path'] == str(environment))
                 self.assertEqual((image['uid'], image['gid'], image['mode']), (service_uid, service_gid, 0o600))
