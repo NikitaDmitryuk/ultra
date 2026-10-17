@@ -19,7 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from recovery import atomic_json, repository
+from recovery import MAX_ARTIFACT_BYTES, MAX_BYTES, atomic_json, repository
 from restore_common import APP_UNITS, AUTOMATION_UNITS, PHASES, fence, safe_target, sha, stage_manifests, system_unit, safe_error_code
 
 
@@ -354,7 +354,9 @@ class Host:
         try:
             with tarfile.open(self.directory / 'stage.tar.gz') as archive:
                 members = archive.getmembers()
-                if len(members) > 45000 or sum(item.size for item in members) > 1024**3:
+                state_bytes = sum(item.size for item in members if not item.name.startswith('artifacts/'))
+                artifact_bytes = sum(item.size for item in members if item.name.startswith('artifacts/'))
+                if len(members) > 45000 or state_bytes > MAX_BYTES or artifact_bytes > MAX_ARTIFACT_BYTES:
                     raise ValueError('stage_archive_exceeds_bounds')
                 seen = set()
                 for item in members:

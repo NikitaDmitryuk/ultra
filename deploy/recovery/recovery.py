@@ -19,7 +19,8 @@ import time
 import uuid
 import db_connection
 
-MAX_BYTES = 512 * 1024 * 1024
+MAX_BYTES = 512 * 1024 * 1024  # State plus DB, and each encrypted object.
+MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024  # Expanded artifact, including manifest.
 MAX_FILES = 20000
 NAME = re.compile(r'(?:backup-[0-9]{10}-[a-f0-9]{32}|artifact-[a-f0-9]{64})\.age$')
 SOURCE = re.compile(r'[a-zA-Z0-9_-]{1,64}$')
@@ -121,7 +122,7 @@ def repository(path, source, initialize=False):
     return path
 
 
-def collect(paths, excluded_paths=()):
+def collect(paths, excluded_paths=(), *, max_bytes=None):
     """Dereference only selected files; sockets/devices and active runtime DB are excluded."""
     result = {}
     excluded_paths = {Path(path) for path in excluded_paths}
@@ -153,7 +154,7 @@ def collect(paths, excluded_paths=()):
             safe_name(name)
             result[name] = {'sha256': digest(candidate), 'mode': candidate.stat().st_mode & 0o777,
                             'bytes': candidate.stat().st_size}
-    if len(result) > MAX_FILES or sum(row['bytes'] for row in result.values()) > MAX_BYTES:
+    if len(result) > MAX_FILES or sum(row['bytes'] for row in result.values()) > (MAX_BYTES if max_bytes is None else max_bytes):
         raise ValueError('state exceeds backup limits')
     return result
 
@@ -200,7 +201,8 @@ def capture_artifact_paths(config):
 
 
 def pack(destination, metadata, files):
-    if len(files) > MAX_FILES or sum(Path(p).stat().st_size for p in files.values()) > MAX_BYTES:
+    max_bytes = MAX_ARTIFACT_BYTES if metadata.get('kind') == 'artifact' else MAX_BYTES
+    if len(files) > MAX_FILES or sum(Path(p).stat().st_size for p in files.values()) > max_bytes:
         raise ValueError('bundle exceeds backup limits')
     manifest = dict(metadata, format=1, files={})
     with tarfile.open(destination, 'w:gz', dereference=True) as archive:
@@ -216,19 +218,22 @@ def pack(destination, metadata, files):
             with open(path, 'rb') as stream:
                 archive.addfile(info, stream)
         payload = json.dumps(manifest, sort_keys=True).encode()
+        if sum(row['bytes'] for row in manifest['files'].values()) + len(payload) > max_bytes:
+            raise ValueError('bundle exceeds backup limits')
         info = tarfile.TarInfo('manifest.json')
         info.mode, info.size = 0o600, len(payload)
         archive.addfile(info, io.BytesIO(payload))
     return manifest
 
 
-def inspect_bundle(path):
+def inspect_bundle(path, *, max_bytes=None):
+    max_bytes = MAX_BYTES if max_bytes is None else max_bytes
     with tarfile.open(path) as archive:
         members, total = [], 0
         for item in archive:
             total += item.size
             members.append(item)
-            if len(members) > MAX_FILES + 2 or total > MAX_BYTES:
+            if len(members) > MAX_FILES + 2 or total > max_bytes:
                 raise ValueError('archive exceeds limits')
         seen = set()
         for item in members:
@@ -250,8 +255,8 @@ def inspect_bundle(path):
         return manifest
 
 
-def unpack(path, target):
-    manifest = inspect_bundle(path)
+def unpack(path, target, *, max_bytes=None):
+    manifest = inspect_bundle(path, max_bytes=max_bytes)
     target = Path(target)
     if target.is_symlink() or (target.exists() and any(target.iterdir())):
         raise ValueError('restore requires an empty staging directory')
@@ -283,7 +288,13 @@ def ssh(config, destination, command, **kwargs):
     return run(args + [host, shlex.join(command)], **kwargs)
 
 
+def validate_ciphertext(path):
+    if not 0 < Path(path).stat().st_size <= MAX_BYTES:
+        raise ValueError('encrypted backup exceeds bounds')
+
+
 def deliver(config, destination, source, encrypted, snapshot):
+    validate_ciphertext(encrypted)
     command = ['python3', '/opt/ultra-recovery/recovery.py', 'receive', '--repository',
                '/var/lib/ultra-recovery', '--source', source, '--name', encrypted.name,
                '--sha256', digest(encrypted), '--snapshot', str(snapshot)]
@@ -381,20 +392,22 @@ def create(config):
             work = Path(work)
             artifact_paths = capture_artifact_paths(config)
             before = collect(capture_state_paths(config), artifact_paths)
-            artifacts = collect(artifact_paths)
+            artifacts = collect(artifact_paths, max_bytes=MAX_ARTIFACT_BYTES)
             artifact_manifest = json.dumps(artifacts, sort_keys=True).encode()
             artifact_id = hashlib.sha256(artifact_manifest).hexdigest()
             artifact = repo / ('artifact-' + artifact_id + '.age')
             if not artifact.exists():
                 bundle = work / 'artifact.tar.gz'
                 packed = pack(bundle, {'kind': 'artifact', 'source': source}, {name: Path('/') / name for name in artifacts})
-                if packed['files'] != artifacts or collect(artifact_paths) != artifacts:
+                if packed['files'] != artifacts or collect(artifact_paths, max_bytes=MAX_ARTIFACT_BYTES) != artifacts:
                     raise ValueError('binary artifacts changed during capture')
-                inspect_bundle(bundle)
+                inspect_bundle(bundle, max_bytes=MAX_ARTIFACT_BYTES)
                 candidate = work / artifact.name
                 encrypt(bundle, candidate, config['recipient'])
+                validate_ciphertext(candidate)
                 os.replace(candidate, artifact)
                 sync_directory(repo)
+            validate_ciphertext(artifact)
             snapshot = int(time.time())
             dump = work / 'database.dump'
             parsed_dsn = db_connection.dsn_from_runtime(config['database'])
@@ -415,10 +428,11 @@ def create(config):
             # Hash again after archive reads to avoid pairing a dump with changed keys.
             if collect(capture_state_paths(config), artifact_paths) != before:
                 raise ValueError('configuration changed during archive')
-            if capture_artifact_paths(config) != artifact_paths or collect(artifact_paths) != artifacts:
+            if capture_artifact_paths(config) != artifact_paths or collect(artifact_paths, max_bytes=MAX_ARTIFACT_BYTES) != artifacts:
                 raise ValueError('binary artifacts changed during capture')
             encrypted = work / ('backup-' + str(snapshot) + '-' + uuid.uuid4().hex + '.age')
             encrypt(bundle, encrypted, config['recipient'])
+            validate_ciphertext(encrypted)
             successful, errors = [], []
             for destination in destinations:
                 try:
@@ -513,6 +527,7 @@ def restore(args):
         raise ValueError('restore requires a new absolute staging directory')
     with tempfile.TemporaryDirectory(prefix='ultra-verify-') as tmp:
         plain = Path(tmp) / 'bundle.tar.gz'
+        validate_ciphertext(args.bundle)
         run(['age', '-d', '-i', args.identity, '-o', str(plain), args.bundle])
         manifest = inspect_bundle(plain)
         if manifest.get('kind') != 'backup' or not SOURCE.fullmatch(manifest.get('source', '')):
@@ -522,8 +537,9 @@ def restore(args):
             raise ValueError('invalid artifact reference')
         artifact = Path(args.bundle).parent / artifact_name
         artifact_plain = Path(tmp) / 'artifact.tar.gz'
+        validate_ciphertext(artifact)
         run(['age', '-d', '-i', args.identity, '-o', str(artifact_plain), str(artifact)])
-        artifact_manifest = inspect_bundle(artifact_plain)
+        artifact_manifest = inspect_bundle(artifact_plain, max_bytes=MAX_ARTIFACT_BYTES)
         if artifact_manifest.get('kind') != 'artifact' or artifact_manifest.get('source') != manifest['source']:
             raise ValueError('wrong recovery artifact source')
         artifact_id = hashlib.sha256(json.dumps(artifact_manifest['files'], sort_keys=True).encode()).hexdigest()
@@ -533,7 +549,7 @@ def restore(args):
             if getattr(args, 'test_stage', False):
                 # Disposable off-host rehearsal, never an activation or promotion.
                 unpack(plain, target)
-                unpack(artifact_plain, target / 'artifacts')
+                unpack(artifact_plain, target / 'artifacts', max_bytes=MAX_ARTIFACT_BYTES)
             return manifest
         if not args.fence_file:
             raise ValueError('operator fencing attestation required')
@@ -542,7 +558,7 @@ def restore(args):
         if fence.get('source') != manifest['source'] or fence.get('confirmed_offline') is not True or not 0 <= age <= 3600:
             raise ValueError('fencing attestation missing, stale or wrong source')
         unpack(plain, target)
-        unpack(artifact_plain, target / 'artifacts')
+        unpack(artifact_plain, target / 'artifacts', max_bytes=MAX_ARTIFACT_BYTES)
         return manifest
 
 

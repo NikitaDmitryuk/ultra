@@ -12,7 +12,9 @@ import stat
 import subprocess
 import tarfile
 
-MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024  # Transport, including tar/gzip overhead.
+MAX_STATE_BYTES = 512 * 1024 * 1024
+MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024
 MAX_DUMP_BYTES = 512 * 1024 * 1024
 RESTORE_ROOT = Path('/var/lib/ultra-restore')
 
@@ -70,7 +72,9 @@ def extract_dump(archive_path, directory, expected_stage_digest, expected_dump_d
         return dump_path
     with tarfile.open(archive_path, 'r:gz') as archive:
         members = archive.getmembers()
-        if len(members) > 45000 or sum(member.size for member in members) > MAX_ARCHIVE_BYTES:
+        state_bytes = sum(member.size for member in members if not member.name.startswith('artifacts/'))
+        artifact_bytes = sum(member.size for member in members if member.name.startswith('artifacts/'))
+        if len(members) > 45000 or state_bytes > MAX_STATE_BYTES or artifact_bytes > MAX_ARTIFACT_BYTES:
             raise ValueError('restore_stage_exceeds_bounds')
         selected = [member for member in members if member.name == 'database.dump']
         if len(selected) != 1 or not selected[0].isfile() or selected[0].size <= 0 or selected[0].size > MAX_DUMP_BYTES:

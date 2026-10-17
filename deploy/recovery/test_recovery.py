@@ -81,7 +81,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(list(self.repo.glob('artifact-*.age')))
     def test_capture_receipt_matches_delivered_cipher_and_artifact(self):
         state=self.root/'spec.json';state.write_text('{}')
-        binary=self.root/'binary';binary.write_bytes(b'fixture-binary')
+        binary=self.root/'binary';binary.write_bytes(b'fixture-binary'*1024)
         ledger=self.root/'lifecycle-retired.json';ledger.write_text('{"version":1,"ids":["retired"]}')
         ledger.chmod(0o600)
         config={'source':'bridge','repository':str(self.repo),'database':'ultra_test','state_paths':[str(state)],
@@ -101,7 +101,7 @@ class RecoveryTests(unittest.TestCase):
             return argparse.Namespace(returncode=0)
         def encrypt(source,target,recipient):target.write_bytes(source.read_bytes())
         def deliver(config,destination,source,encrypted,snapshot):delivered[encrypted.name]=encrypted.read_bytes()
-        with mock.patch.object(recovery,'CONTROLLER_RETIREMENT_PATH',str(ledger)),mock.patch.object(recovery,'run',side_effect=run),mock.patch.object(recovery,'encrypt',side_effect=encrypt),mock.patch.object(recovery,'verify_remote_artifact',side_effect=ValueError('missing')),mock.patch.object(recovery,'deliver',side_effect=deliver):
+        with mock.patch.object(recovery,'MAX_BYTES',4096),mock.patch.object(recovery,'MAX_ARTIFACT_BYTES',32768),mock.patch.object(recovery,'CONTROLLER_RETIREMENT_PATH',str(ledger)),mock.patch.object(recovery,'run',side_effect=run),mock.patch.object(recovery,'encrypt',side_effect=encrypt),mock.patch.object(recovery,'verify_remote_artifact',side_effect=ValueError('missing')),mock.patch.object(recovery,'deliver',side_effect=deliver):
             recovery.create(config)
         receipt=json.loads((self.repo/'last-success.json').read_text())
         self.assertEqual(receipt['source'],'bridge')
@@ -336,6 +336,110 @@ class RecoveryTests(unittest.TestCase):
         source=self.root/'large';source.write_bytes(b'x'*100)
         with mock.patch.object(recovery,'MAX_BYTES',10):
             with self.assertRaises(ValueError):recovery.pack(self.root/'out',{}, {'database.dump':source})
+
+    def test_artifact_collection_has_separate_boundary(self):
+        source=self.root/'binary';source.write_bytes(b'x'*100)
+        with mock.patch.object(recovery,'MAX_BYTES',50),mock.patch.object(recovery,'MAX_ARTIFACT_BYTES',100):
+            with self.assertRaisesRegex(ValueError,'state exceeds backup limits'):
+                recovery.collect([str(source)])
+            self.assertEqual(len(recovery.collect([str(source)],max_bytes=recovery.MAX_ARTIFACT_BYTES)),1)
+            source.write_bytes(b'x'*101)
+            with self.assertRaisesRegex(ValueError,'state exceeds backup limits'):
+                recovery.collect([str(source)],max_bytes=recovery.MAX_ARTIFACT_BYTES)
+
+    def test_manifest_counts_toward_pack_inspect_and_unpack_boundaries(self):
+        source=self.root/'binary';source.write_bytes(b'x'*100)
+        bundle=self.root/'bundle.tar.gz'
+        for kind, limit_name in (('backup','MAX_BYTES'),('artifact','MAX_ARTIFACT_BYTES')):
+            with self.subTest(kind=kind):
+                manifest=recovery.pack(bundle,{'kind':kind},{'binary':source})
+                total=100+len(json.dumps(manifest,sort_keys=True).encode())
+                with mock.patch.object(recovery,limit_name,total):
+                    recovery.pack(bundle,{'kind':kind},{'binary':source})
+                    self.assertEqual(recovery.inspect_bundle(bundle,max_bytes=total),manifest)
+                    recovery.unpack(bundle,self.root/kind,max_bytes=total)
+                with mock.patch.object(recovery,limit_name,total-1):
+                    with self.assertRaisesRegex(ValueError,'bundle exceeds backup limits'):
+                        recovery.pack(self.root/'rejected',{'kind':kind},{'binary':source})
+                with self.assertRaisesRegex(ValueError,'archive exceeds limits'):
+                    recovery.inspect_bundle(bundle,max_bytes=total-1)
+                with self.assertRaisesRegex(ValueError,'archive exceeds limits'):
+                    recovery.unpack(bundle,self.root/('rejected-'+kind),max_bytes=total-1)
+                self.assertFalse((self.root/('rejected-'+kind)).exists())
+
+    def test_ciphertext_bound_and_receiver_reserve_stay_at_state_limit(self):
+        stamp=int(time.time());name='artifact-'+'a'*64+'.age'
+        encrypted=self.root/name;encrypted.write_bytes(b'x'*100)
+        with mock.patch.object(recovery,'MAX_BYTES',100),mock.patch.object(recovery,'MAX_ARTIFACT_BYTES',200):
+            recovery.validate_ciphertext(encrypted)
+            reserve=100+1024**3
+            args=self.args(name,b'x'*100,stamp)
+            with mock.patch.object(recovery.shutil,'disk_usage',return_value=argparse.Namespace(free=reserve)):
+                recovery.receive(args,io.BytesIO(b'x'*100))
+                with self.assertRaisesRegex(ValueError,'encrypted backup exceeds bounds'):
+                    recovery.receive(self.args(name,b'x'*101,stamp),io.BytesIO(b'x'*101))
+            with mock.patch.object(recovery.shutil,'disk_usage',return_value=argparse.Namespace(free=reserve-1)):
+                with self.assertRaisesRegex(ValueError,'receiver disk reserve reached'):
+                    recovery.receive(args,io.BytesIO(b'x'*100))
+            encrypted.write_bytes(b'x'*101)
+            with mock.patch.object(recovery,'ssh') as ssh:
+                with self.assertRaisesRegex(ValueError,'encrypted backup exceeds bounds'):
+                    recovery.deliver({}, {}, 'bridge',encrypted,stamp)
+                ssh.assert_not_called()
+
+    def test_oversized_new_and_cached_artifact_never_delivers(self):
+        binary=self.root/'binary';binary.write_bytes(b'x'*100)
+        config={'source':'bridge','repository':str(self.repo),'database':'ultra_test',
+                'state_paths':[],'artifact_paths':[str(binary)],'recipient':'unused',
+                'destinations':[{'host':'exit','required':True}]}
+        def encrypt(source,target,recipient): target.write_bytes(b'x'*51)
+        with mock.patch.object(recovery,'MAX_BYTES',50),mock.patch.object(recovery,'MAX_ARTIFACT_BYTES',1024),mock.patch.object(recovery,'encrypt',side_effect=encrypt),mock.patch.object(recovery,'deliver') as deliver:
+            with self.assertRaisesRegex(ValueError,'encrypted backup exceeds bounds'): recovery.create(config)
+            self.assertFalse(list(self.repo.glob('artifact-*.age')))
+            artifacts=recovery.collect([str(binary)],max_bytes=recovery.MAX_ARTIFACT_BYTES)
+            artifact_id=hashlib.sha256(json.dumps(artifacts,sort_keys=True).encode()).hexdigest()
+            (self.repo/('artifact-'+artifact_id+'.age')).write_bytes(b'x'*51)
+            with self.assertRaisesRegex(ValueError,'encrypted backup exceeds bounds'): recovery.create(config)
+            deliver.assert_not_called()
+            self.assertFalse((self.repo/'last-success.json').exists())
+
+    def test_oversized_backup_ciphertext_never_delivers(self):
+        config={'source':'bridge','repository':str(self.repo),'database':'ultra_test',
+                'state_paths':[],'artifact_paths':[],'recipient':'unused',
+                'destinations':[{'host':'exit','required':True}]}
+        def run(args,**kwargs):
+            if args[0]=='pg_dump': kwargs['stdout'].write(b'fixture-dump')
+            return argparse.Namespace(stdout=b'1; fixture TOC\n',returncode=0)
+        def encrypt(source,target,recipient):
+            target.write_bytes(b'x'*(1025 if target.name.startswith('backup-') else 10))
+        with mock.patch.object(recovery,'MAX_BYTES',1024),mock.patch.object(recovery,'run',side_effect=run),mock.patch.object(recovery,'encrypt',side_effect=encrypt),mock.patch.object(recovery,'deliver') as deliver:
+            with self.assertRaisesRegex(ValueError,'encrypted backup exceeds bounds'): recovery.create(config)
+            deliver.assert_not_called()
+            self.assertFalse((self.repo/'last-success.json').exists())
+
+    def test_verify_and_restore_stage_larger_artifact_with_small_ciphertext(self):
+        binary=self.root/'binary';binary.write_bytes(b'x'*8192)
+        artifacts=recovery.collect([str(binary)])
+        artifact_id=hashlib.sha256(json.dumps(artifacts,sort_keys=True).encode()).hexdigest()
+        artifact=self.root/('artifact-'+artifact_id+'.age')
+        recovery.pack(artifact,{'kind':'artifact','source':'bridge'},
+                      {name:binary for name in artifacts})
+        dump=self.root/'dump';dump.write_bytes(b'fixture-dump')
+        bundle=self.root/'backup.age'
+        recovery.pack(bundle,{'kind':'backup','source':'bridge','artifact':artifact.name},
+                      {'database.dump':dump})
+        identity=self.root/'identity';identity.write_text('fixture');identity.chmod(0o600)
+        def decrypt(args):
+            Path(args[args.index('-o')+1]).write_bytes(Path(args[-1]).read_bytes())
+        with mock.patch.object(recovery,'MAX_BYTES',2048),mock.patch.object(recovery,'MAX_ARTIFACT_BYTES',16384),mock.patch.object(recovery,'run',side_effect=decrypt):
+            for command in ('verify','restore'):
+                with self.subTest(command=command):
+                    target=self.root/command
+                    fence=self.root/'fence';fence.write_text(json.dumps({'source':'bridge','confirmed_offline':True,'confirmed_at':time.time()}));fence.chmod(0o600)
+                    args=argparse.Namespace(command=command,identity=str(identity),target=str(target),
+                                            bundle=str(bundle),test_stage=True,fence_file=str(fence))
+                    recovery.restore(args)
+                    self.assertEqual((target/'artifacts'/next(iter(artifacts))).read_bytes(),binary.read_bytes())
 
 class EncryptedRecoveryTests(unittest.TestCase):
     def setUp(self):

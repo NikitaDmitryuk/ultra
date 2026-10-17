@@ -135,7 +135,7 @@ class VersionedStateTests(unittest.TestCase):
         asset.write_bytes(b'x' * 100)
         self.config['artifact_paths'] = [str(asset)]
         binary_bytes = sum(path.stat().st_size for path in self.binaries)
-        with mock.patch.object(recovery, 'MAX_BYTES', binary_bytes + asset.stat().st_size - 1):
+        with mock.patch.object(recovery, 'MAX_ARTIFACT_BYTES', binary_bytes + asset.stat().st_size - 1):
             with self.assertRaisesRegex(ValueError, 'exceeds backup limits'):
                 self.capture()
         self.assertFalse(self.delivered)
@@ -155,11 +155,11 @@ class VersionedStateTests(unittest.TestCase):
                 self.capture()
         self.assertFalse(self.delivered)
 
-    def test_actual_512_mib_limit_rejects_oversized_artifact_before_delivery(self):
+    def test_actual_1_gib_limit_rejects_oversized_artifact_before_delivery(self):
         # Sparse file and mocked digest exercise the real bound without a large
-        # disk allocation or a half-gigabyte hashing pass in the test suite.
+        # disk allocation or a gigabyte hashing pass in the test suite.
         with self.binaries[0].open('wb') as stream:
-            stream.truncate(recovery.MAX_BYTES + 1)
+            stream.truncate(recovery.MAX_ARTIFACT_BYTES + 1)
         with mock.patch.object(recovery, 'digest', return_value='a' * 64):
             with self.assertRaisesRegex(ValueError, 'exceeds backup limits'):
                 self.capture()

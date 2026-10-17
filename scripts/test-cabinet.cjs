@@ -285,6 +285,99 @@ test("Vultr status polling updates the existing card without replacing its price
   assert.equal(detailsWrites, 1);
 });
 
+test("Vultr create and delete refresh preserve existing card and price nodes", async () => {
+  const makeOp = (id, state = "pending") => ({
+    id,
+    offer: {
+      region: { city: "Frankfurt" },
+      plan: { id: "vc2-1c-1gb" },
+      price: { monthly_cost: 5, hourly_cost: 0.007 },
+    },
+    state,
+    phase: "create",
+    charged: false,
+  });
+  const keepStatus = { className: "", textContent: "Создание сервера" };
+  const keepDetails = { innerHTML: "" };
+  const keepPrice = { textContent: "$5/месяц" };
+  const keepCard = {
+    dataset: { opCard: "keep" },
+    hidden: false,
+    price: keepPrice,
+    querySelector(selector) {
+      return selector === "[data-op-status]" ? keepStatus : keepDetails;
+    },
+    remove() {
+      this.removed = true;
+    },
+  };
+  const deletedCard = {
+    dataset: { opCard: "delete" },
+    remove() {
+      this.removed = true;
+    },
+  };
+  const addedCards = [];
+  const operations = {
+    innerHTML: "",
+    querySelectorAll() {
+      return [keepCard, deletedCard, ...addedCards].filter((card) => !card.removed);
+    },
+    querySelector(selector) {
+      if (selector === "#create-server") return { remove() {} };
+      return null;
+    },
+    insertAdjacentHTML(position, html) {
+      this.innerHTML += html;
+      const match = html.match(/data-op-card="([^"]+)"/);
+      if (match) {
+        addedCards.push({
+          dataset: { opCard: match[1] },
+          remove() {
+            this.removed = true;
+          },
+          querySelector() {
+            return { className: "", textContent: "", innerHTML: "" };
+          },
+        });
+      }
+    },
+  };
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/cloud/operations": [makeOp("keep"), makeOp("delete")],
+    "/api/cloud/quotas": { nodes: [], budgets: [] },
+    "/api/cloud/replicas": [],
+  });
+  await flush();
+  vm.runInContext('currentTab = "service"', p.context);
+  await vm.runInContext("service()", p.context);
+  const originalView = p.el("#app").innerHTML;
+  p.el("#app").querySelector = (selector) =>
+    selector === "#cloud-operations" ? operations : p.el(selector);
+
+  p.responses["/api/cloud/operations"] = [
+    makeOp("keep", "unknown"),
+    makeOp("new"),
+    makeOp("delete", "deleted"),
+  ];
+  await vm.runInContext("service(true)", p.context);
+
+  assert.equal(p.el("#app").innerHTML, originalView);
+  assert.equal(keepCard.removed, undefined);
+  assert.equal(keepCard.price, keepPrice);
+  assert.equal(keepStatus.textContent, "Результат создания проверяется");
+  assert.equal(deletedCard.removed, true);
+  assert.ok(addedCards.some((card) => card.dataset.opCard === "new"));
+
+  p.context.ops = operations;
+  vm.runInContext("reconcileCloudOperations(ops, [], true, null)", p.context);
+  assert.equal(keepCard.removed, undefined);
+  assert.equal(keepCard.price, keepPrice);
+  assert.match(operations.innerHTML, /data-cloud-unavailable/);
+});
+
 test("reinstall is offered only for a failed staged cloud identity", async () => {
   const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
   await flush();

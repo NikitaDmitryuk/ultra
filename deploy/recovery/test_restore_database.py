@@ -127,6 +127,37 @@ class DedicatedDatabaseRestoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'restore_database_dump_digest_mismatch'):
             restore_database.extract_dump(*args, verify_toc=False)
 
+    def test_stage_has_independent_state_and_artifact_bounds_and_unchanged_dump_bound(self):
+        for dump_size,state_size,artifact_size,accepted in (
+                (10,40,100,True), (10,41,100,False), (10,40,101,False), (11,39,100,False)):
+            with self.subTest(dump=dump_size,state=state_size,artifacts=artifact_size):
+                dump=b'd'*dump_size
+                with tarfile.open(self.archive,'w:gz') as output:
+                    for name,payload in (('database.dump',dump),('manifest.json',b's'*state_size),
+                                         ('artifacts/binary',b'a'*artifact_size)):
+                        item=tarfile.TarInfo(name);item.size=len(payload)
+                        output.addfile(item,io.BytesIO(payload))
+                args=(self.archive,self.directory,restore_database.digest(self.archive),hashlib.sha256(dump).hexdigest())
+                with mock.patch.object(restore_database,'MAX_STATE_BYTES',50),mock.patch.object(restore_database,'MAX_ARTIFACT_BYTES',100),mock.patch.object(restore_database,'MAX_DUMP_BYTES',10):
+                    if accepted:
+                        path=restore_database.extract_dump(*args,verify_toc=False)
+                        self.assertEqual(path.read_bytes(),dump)
+                        path.unlink()
+                    else:
+                        with self.assertRaisesRegex(ValueError,'restore_stage_exceeds_bounds|restore_database_dump_missing'):
+                            restore_database.extract_dump(*args,verify_toc=False)
+                        self.assertFalse((self.directory/'database.dump').exists())
+
+    def test_stage_transport_allows_more_than_old_one_gib_cap(self):
+        # Sparse transport checks the physical-file limit without allocating or
+        # parsing a multi-gigabyte fixture; expanded limits are tested separately.
+        with self.archive.open('wb') as stream:
+            stream.truncate(1024**3+1)
+        self.assertEqual(restore_database.private_file(self.archive,restore_database.MAX_ARCHIVE_BYTES),self.archive)
+        self.assertEqual(restore_database.MAX_STATE_BYTES,512*1024**2)
+        self.assertEqual(restore_database.MAX_ARTIFACT_BYTES,1024**3)
+        self.assertEqual(restore_database.MAX_DUMP_BYTES,512*1024**2)
+
     def test_populated_database_is_never_overwritten(self):
         def sql(statement, database='postgres'):
             if 'pg_control_system' in statement: return '1000001:16384'

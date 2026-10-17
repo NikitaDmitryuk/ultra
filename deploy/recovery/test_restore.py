@@ -49,6 +49,28 @@ class RestoreContracts(unittest.TestCase):
         self.root = Path(self.temp.name)
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_host_stage_enforces_independent_state_and_artifact_limits(self):
+        import io
+        import tarfile
+        archive=self.root/'stage.tar.gz'
+        for state_size,artifact_size,accepted in ((50,100,True),(51,100,False),(50,101,False)):
+            with self.subTest(state=state_size,artifact=artifact_size):
+                with tarfile.open(archive,'w:gz') as output:
+                    for name,size in (('database.dump',state_size),('artifacts/binary',artifact_size)):
+                        info=tarfile.TarInfo(name);info.size=size
+                        output.addfile(info,io.BytesIO(b'x'*size))
+                target=host.Host(self.root,{'restore_id':'a'*64,'stage_sha256':common.sha(archive)})
+                with mock.patch.object(host,'MAX_BYTES',50),mock.patch.object(host,'MAX_ARTIFACT_BYTES',100),mock.patch.object(host,'stage_manifests',return_value=({},{})):
+                    if accepted:
+                        target.unpack()
+                        self.assertEqual((target.stage/'artifacts/binary').stat().st_size,100)
+                        shutil.rmtree(target.stage)
+                    else:
+                        with self.assertRaisesRegex(ValueError,'stage_archive_exceeds_bounds'):target.unpack()
+                        self.assertFalse(target.stage.exists())
+                        self.assertFalse((self.root/'stage.pending').exists())
+
     def test_seed_retirement_resumes_after_crash_and_rejects_foreign_marker(self):
         directory=self.root/'replica';retired=self.root/'retired';directory.mkdir();retired.mkdir()
         seed=directory/'seed';seed.mkdir();(seed/'payload').write_text('owned old seed')
