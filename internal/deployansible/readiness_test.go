@@ -2,6 +2,7 @@ package deployansible
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,7 +40,7 @@ output.chmod(0o600)
 		t.Fatal(err)
 	}
 	// With no reconcile, the probe must leave the lock available to a producer.
-	if err := WaitUpgradeReadiness(context.Background(), map[string]any{}, root, python, runner, "11111111-2222-3333-4444-555555555555", false); err != nil {
+	if err := WaitUpgradeReadiness(context.Background(), map[string]any{}, root, python, runner, "11111111-2222-3333-4444-555555555555", false, ""); err != nil {
 		t.Fatal(err)
 	}
 	// A running reconcile may hold the same lock throughout the probe.
@@ -55,7 +56,7 @@ output.chmod(0o600)
 	if err := os.WriteFile(filepath.Join(root, "reconcile-active"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := WaitUpgradeReadiness(context.Background(), map[string]any{}, root, python, runner, "11111111-2222-3333-4444-555555555555", false); err != nil {
+	if err := WaitUpgradeReadiness(context.Background(), map[string]any{}, root, python, runner, "11111111-2222-3333-4444-555555555555", false, ""); err != nil {
 		t.Fatal(err)
 	}
 	// Ordinary operations still require that lock, even for a readiness playbook.
@@ -73,6 +74,74 @@ output.chmod(0o600)
 	}
 }
 
+func TestReadinessProbePersistsOnlySafeFailureDiagnostic(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python unavailable")
+	}
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	operation := filepath.Join(root, "upgrade")
+	if err := os.Mkdir(operation, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runner := filepath.Join(root, "ansible-fail")
+	script := "#!" + python + "\n" + `import json,os,pathlib,sys
+job=pathlib.Path(sys.argv[-1][1:]).parent
+(job/'diagnostic.json').write_text(json.dumps({'stage':'Inspect current broker readiness','node':'bridge','code':'task_failed'}))
+(job/'diagnostic.json').chmod(0o600)
+sys.exit(2)
+`
+	if err := os.WriteFile(runner, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	err = WaitUpgradeReadiness(context.Background(), map[string]any{}, root, python, runner,
+		"11111111-2222-3333-4444-555555555555", false, operation)
+	if err == nil {
+		t.Fatal("failed readiness probe succeeded")
+	}
+	paths, err := filepath.Glob(filepath.Join(operation, "readiness-diagnostic-*.json"))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("diagnostic files=%v err=%v", paths, err)
+	}
+	info, err := os.Stat(paths[0])
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("private diagnostic stat=%v err=%v", info, err)
+	}
+	var diagnostic Diagnostic
+	raw, err := os.ReadFile(paths[0])
+	if err != nil || json.Unmarshal(raw, &diagnostic) != nil {
+		t.Fatalf("read diagnostic: %v", err)
+	}
+	if diagnostic != (Diagnostic{Stage: "Inspect current broker readiness", Node: "bridge", Code: "task_failed"}) {
+		t.Fatalf("unexpected diagnostic: %+v", diagnostic)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 3 {
+		t.Fatalf("diagnostic contains unexpected fields: %s (%v)", raw, err)
+	}
+	if err := os.WriteFile(runner, []byte("#!"+python+"\n"+`import json,os,pathlib,sys
+job=pathlib.Path(sys.argv[-1][1:]).parent
+(job/'diagnostic.json').write_text(json.dumps({'stage':'Inspect second readiness attempt','node':'bridge','code':'task_failed'}))
+(job/'diagnostic.json').chmod(0o600)
+sys.exit(2)
+`), 0700); err != nil {
+		t.Fatal(err)
+	}
+	_ = WaitUpgradeReadiness(context.Background(), map[string]any{}, root, python, runner,
+		"11111111-2222-3333-4444-555555555555", false, operation)
+	paths, err = filepath.Glob(filepath.Join(operation, "readiness-diagnostic-*.json"))
+	if err != nil || len(paths) != 2 {
+		t.Fatalf("retry diagnostic files=%v err=%v", paths, err)
+	}
+	latest, err := os.ReadFile(paths[1])
+	if err != nil || json.Unmarshal(latest, &diagnostic) != nil || diagnostic.Stage != "Inspect second readiness attempt" {
+		t.Fatalf("latest diagnostic=%s err=%v", latest, err)
+	}
+}
+
 func TestReadinessProbeRejectsLeasedContextAndGenericEntryPoint(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
@@ -83,7 +152,7 @@ func TestReadinessProbeRejectsLeasedContextAndGenericEntryPoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	if err := WaitUpgradeReadiness(ctx, nil, root, "/usr/bin/python3", "/usr/bin/true", "11111111-2222-3333-4444-555555555555", false); err == nil ||
+	if err := WaitUpgradeReadiness(ctx, nil, root, "/usr/bin/python3", "/usr/bin/true", "11111111-2222-3333-4444-555555555555", false, ""); err == nil ||
 		!strings.Contains(err.Error(), "unleased_context") {
 		t.Fatalf("leased probe accepted: %v", err)
 	}
@@ -128,7 +197,7 @@ func TestReadinessProbeRequiresCurrentExactReservationForPendingJob(t *testing.T
 			if err := os.WriteFile(runner, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
-			err := WaitUpgradeReadiness(context.Background(), map[string]any{}, root, python, runner, id, item.pending)
+			err := WaitUpgradeReadiness(context.Background(), map[string]any{}, root, python, runner, id, item.pending, "")
 			if (err != nil) != item.wantError {
 				t.Fatalf("error=%v wantError=%t", err, item.wantError)
 			}

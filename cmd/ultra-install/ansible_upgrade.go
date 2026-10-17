@@ -171,7 +171,7 @@ func ansibleUpgrade(
 			}
 			if !reserved || !localLifecycleBridge(p) {
 				pending := upgradeApplyingReservationPending(directory)
-				if err = deployansible.WaitUpgradeReadiness(originalCtx, inventory, lockDirectory, python, executable, lifecycleID(directory), pending); err != nil {
+				if err = deployansible.WaitUpgradeReadiness(originalCtx, inventory, lockDirectory, python, executable, lifecycleID(directory), pending, directory); err != nil {
 					return err
 				}
 			}

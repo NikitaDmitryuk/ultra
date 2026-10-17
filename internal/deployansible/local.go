@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -70,6 +71,7 @@ func WaitUpgradeReadiness(
 	inventory map[string]any,
 	lockDirectory, python, executable, lifecycleID string,
 	pending bool,
+	diagnosticDirectory string,
 ) error {
 	if !jobID.MatchString(lifecycleID) {
 		return errors.New("invalid_readiness_lifecycle_id")
@@ -99,6 +101,11 @@ func WaitUpgradeReadiness(
 		executable,
 	)
 	if err != nil {
+		if diagnosticDirectory != "" {
+			if diagnosticErr := persistReadinessDiagnostic(diagnosticDirectory, receipt.Diagnostic); diagnosticErr != nil {
+				return errors.Join(err, errors.New("readiness_diagnostic_persist_failed"))
+			}
+		}
 		return err
 	}
 	if receipt.Result.Values["verified"] != true || ((pending || receipt.Result.Values["ready"] != true) &&
@@ -106,6 +113,46 @@ func WaitUpgradeReadiness(
 		return errors.New("upgrade_readiness_probe_unverified")
 	}
 	return nil
+}
+
+// persistReadinessDiagnostic retains only the fixed callback fields after a
+// failed temporary readiness probe. The request, inventory, result, and raw
+// Ansible output remain private and are still removed with the probe directory.
+func persistReadinessDiagnostic(directory string, diagnostic Diagnostic) error {
+	if diagnostic.Code == "" || diagnostic.Stage == "" || diagnostic.Node == "" ||
+		len(diagnostic.Code) > 64 || len(diagnostic.Stage) > 160 || len(diagnostic.Node) > 128 {
+		return nil
+	}
+	info, err := os.Lstat(directory)
+	if err != nil || !info.IsDir() || !ownedByProcess(info) || info.Mode().Perm()&0077 != 0 {
+		return errors.New("private readiness diagnostic directory required")
+	}
+	raw, err := json.Marshal(diagnostic)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(directory, fmt.Sprintf("readiness-diagnostic-%d.json", time.Now().UnixNano()))
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err = file.Write(raw); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err = file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	directoryFile, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	defer directoryFile.Close() //nolint:errcheck
+	return directoryFile.Sync()
 }
 
 // RunLocalRetryFailed is an explicit operator retry. Successful cached stages stay
