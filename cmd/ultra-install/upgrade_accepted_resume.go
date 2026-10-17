@@ -3,6 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
@@ -45,4 +50,77 @@ func upgradeAcceptedResumeContract(
 		contract["domain"] = d
 	}
 	return contract, nil
+}
+
+// A committed retry must resume the already accepted candidate configuration.
+// Keep that exact contract separate from retry-preflight's additional fields.
+func upgradeRetryResumeContracts(contract map[string]any, committed bool) (map[string]any, map[string]any) {
+	retry := make(map[string]any, len(contract)+1)
+	for key, value := range contract {
+		retry[key] = value
+	}
+	retry["mode"] = "compensation"
+	if !committed {
+		return retry, nil
+	}
+	accepted := make(map[string]any, len(contract))
+	for key, value := range contract {
+		accepted[key] = value
+	}
+	retry["mode"] = "committed"
+	return retry, accepted
+}
+
+func upgradeResumeVariables(lock, operation string, legacy bool, legacySHA string, accepted map[string]any) map[string]any {
+	variables := map[string]any{"ultra_lock_directory": lock}
+	if legacy {
+		variables["ultra_legacy_bridge_maintenance"] = true
+		variables["ultra_legacy_bridge_sha256"] = legacySHA
+		variables["ultra_lifecycle_id"] = operation
+		if accepted != nil {
+			variables["ultra_legacy_accepted_resume"] = accepted
+		}
+	}
+	return variables
+}
+
+// Only an already committed continuation may reuse this exact successful
+// cleanup. Ordinary failed/rolled-back attempts must restore schedules anew.
+func successfulUpgradeResume(directory string, inventory, variables map[string]any) (bool, error) {
+	expected, err := json.Marshal(map[string]any{"inventory": inventory, "variables": variables})
+	if err != nil {
+		return false, err
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return false, err
+	}
+	expectedSHA := digestSHA256(expected)
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "resume-") {
+			continue
+		}
+		stage := filepath.Join(directory, entry.Name())
+		if operatorPrivate(stage, true) != nil {
+			continue
+		}
+		jobRaw, jobErr := readBootstrapGenerationInput(filepath.Join(stage, "job.json"))
+		requestRaw, requestErr := readBootstrapGenerationInput(filepath.Join(stage, "request.json"))
+		receiptRaw, receiptErr := readBootstrapGenerationInput(filepath.Join(stage, "receipt.json"))
+		var job struct {
+			Schema    int    `json:"schema_version"`
+			Operation string `json:"operation"`
+			Request   string `json:"request_sha256"`
+			Binary    string `json:"binary_sha256"`
+		}
+		var receipt deployansible.Receipt
+		if jobErr != nil || requestErr != nil || receiptErr != nil || string(requestRaw) != string(expected) ||
+			json.Unmarshal(jobRaw, &job) != nil || json.Unmarshal(receiptRaw, &receipt) != nil ||
+			job.Schema != 1 || job.Operation != "resume-automation" || job.Request != expectedSHA || !runtimeHostValidDigest(job.Binary) ||
+			receipt.RequestSHA256 != expectedSHA || receipt.BinarySHA256 != job.Binary || receipt.State != "succeeded" {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
 }

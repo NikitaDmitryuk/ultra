@@ -162,6 +162,7 @@ build-bench:
 test-ui:
 	python3 scripts/test-mobile-bootstrap.py
 	python3 scripts/test-ansible-release-contracts.py
+	python3 scripts/test-controller-enforcement.py
 	python3 scripts/test-database-preservation.py
 	python3 scripts/test-ansible-upgrade-baseline.py
 	python3 scripts/test-verify-miniapp.py
@@ -188,6 +189,8 @@ ansible-dist:
 
 test-ansible:
 	python3 scripts/test-ansible-controller-process.py
+	python3 scripts/test-ansible-release-contracts.py
+	python3 scripts/test-controller-enforcement.py
 	python3 scripts/test-ansible-db-tunnel-authorization.py
 	python3 scripts/test-ansible-safe-diagnostic.py
 	python3 scripts/test-release-ci.py

@@ -265,16 +265,42 @@ DNS-подготовка компенсируется отдельно. Толь
 [maintenance barrier](../deploy/ansible/library/ultra_upgrade_maintenance.py),
 [rollback](../deploy/ansible/playbooks/rollback.yml).
 
-Перед lifecycle reservation и установкой cleanup обычный upgrade отдельным свежим
-read-only заданием проверяет на bridge отсутствие `lifecycle-retired.json`.
-Файл означает, что прежний controller мог не соблюдать выведенные из эксплуатации
-операции; текущий контракт не доказывает безопасный rollback через такой controller.
-При наличии файла upgrade прекращается до maintenance и активации, не запуская
-cleanup, который мог бы возобновить уже остановленные службы. Проверка выполняется
-заново при каждом запуске и повторе; результат прошлой попытки не кэшируется.
-Защита перед rollback остаётся отдельной проверкой.
+Перед lifecycle reservation обычный upgrade отдельным свежим заданием проверяет
+`lifecycle-retired.json`. При отсутствии файла действует обычный путь. Для ledger v1
+без pending handoff и исходного `released` lifecycle допускается operation-bound
+доказательство enforcement: точные candidate и rollback broker binaries запускаются
+в отдельных временных state/socket без production jobs. Проверяются отказ retired ID,
+закрытый applying gate и перезапуск с передачей прежнего OFD. Ни production ledger,
+ни службы во время этих probes не изменяются; candidate копируется только в scratch.
+
+Приватный `controller-enforcement.json` связывает доказательство с operation,
+frozen plan/inventory, manifest, machine, точными ledger bytes и identities обоих
+runtimes. После reservation доказательство проверяется заново. Перед сменой unit
+записывается отдельный write-ahead intent; retry разрешает только закреплённые
+old/new unit, symlink и executable combinations при том же active lifecycle.
+Candidate проверяется по sealed inventory, rollback — по сохранённому tree hash;
+после restart проверяется фактический systemd executable. Ledger не переписывается.
+Изменение ledger, release, runtime или lifecycle вне этого перехода блокирует работу.
+Публикация bridge intent восстанавливает только точную приватную пару final/pending
+с одним inode и двумя ссылками; чужие или неполные остатки блокируют retry.
+После commit, финализации effects/domain и успешного resume schedules installer
+сохраняет локальный `controller-enforcement-release-intent.json` с хешами frozen
+receipts. До сбора этих metadata проверяется successful winning chain и сохраняются
+retirement proofs только для точных superseded read-only observations. Уже успешный
+resume в текущем process не повторяется; committed continuation может использовать
+только exact successful resume-automation request/receipt с теми же inventory и
+accepted runtime/domain variables и проверенными request/binary hashes. Mutating и
+неаутентифицированные running jobs по-прежнему блокируют completion.
+При crash до/после release retry проверяет эти хеши и новым read-only
+probe подтверждает тот же ledger, proof, фактически работающий candidate и собственный
+lifecycle ID. Для собственного active lifecycle выполняется только ожидающий release,
+затем новый probe должен подтвердить `released`; после этого записывается completion.
+Без intent такой released candidate не разрешает ни reserve, ни обычный upgrade retry.
+Rollback/restore без собственного точного proof сохраняют отказ до первой мутации;
+доказательство совместимости upgrade не является миграцией restore snapshot.
 Источники: [upgrade preflight](../cmd/ultra-install/ansible_upgrade.go),
-[read-only playbook](../deploy/ansible/playbooks/inspect-upgrade.yml),
+[proof binding](../cmd/ultra-install/upgrade_enforcement.go),
+[behavioral verifier](../deploy/ansible/library/ultra_controller_enforcement.py),
 [rollback floor](../deploy/ansible/roles/release/tasks/controller-rollback-preflight.yml).
 
 Служба `ultra-ansible-controller` работает на bridge независимо от relay и бота.

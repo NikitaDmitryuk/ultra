@@ -1,7 +1,6 @@
 ---
-# Older immutable brokers ignore the retirement ledger. Its presence establishes
-# a monotonic enforcement floor; restoring a signed old unit is not a capability
-# proof. Keep the current broker until an enforcing-runtime migration exists.
+# Restoring a signed old unit is not a capability proof. A present floor requires
+# the exact operation-bound behavioral proof for both selected broker runtimes.
 - name: Inspect the persistent controller enforcement floor
   ansible.builtin.stat:
     path: /var/lib/ultra-ansible/lifecycle-retired.json
@@ -10,10 +9,38 @@
     get_mime: false
     get_attributes: false
   register: release_controller_rollback_retirement
-- name: Refuse controller rollback across the persistent enforcement floor
+- name: Reject a linked or nonregular controller floor
   ansible.builtin.assert:
     that:
       - release_controller_rollback_retirement.stat.exists is defined
-      - release_controller_rollback_retirement.stat.exists is sameas false
       - not (release_controller_rollback_retirement.stat.islnk | default(false))
+      - not release_controller_rollback_retirement.stat.exists or (release_controller_rollback_retirement.stat.isreg | default(false))
+      - release_controller_rollback_retirement.stat.exists or (ultra_controller_enforcement_spec | default({})).get('proof', {}) | length == 0
     fail_msg: controller_rollback_enforcement_migration_required
+- name: Require exact operation proof before changing an enforcing controller
+  when: release_controller_rollback_retirement.stat.exists
+  block:
+    - name: Reject rollback or restore without its own verified operation
+      ansible.builtin.assert:
+        that:
+          - ultra_controller_enforcement_spec is defined
+          - ultra_controller_enforcement_spec.operation_id == ultra_lifecycle_id
+          - ultra_controller_enforcement_spec.manifest_sha256 == ultra_release_manifest_sha256
+          - ultra_controller_enforcement_spec.proof | length > 0
+          - ultra_controller_enforcement_spec.candidates[ultra_architecture].identity.directory == ultra_controller_directory
+          - ultra_controller_enforcement_spec.candidates[ultra_architecture].identity.installer_sha256 == ultra_install_sha256
+          - ultra_controller_enforcement_spec.candidates[ultra_architecture].identity.runtime_sha256 == ultra_controller_runtime_sha256
+          - ultra_controller_enforcement_spec.candidates[ultra_architecture].identity.unit_sha256 == ultra_target_controller_unit_sha256
+          - ultra_controller_enforcement_spec.proof.rollback.directory == ultra_previous_controller_directory
+          - ultra_controller_enforcement_spec.proof.rollback.unit_sha256 == ultra_previous_controller_unit_sha256
+        fail_msg: controller_rollback_enforcement_migration_required
+    - name: Revalidate both runtimes and the unchanged live ledger
+      ultra_controller_enforcement:
+        action: verify
+        operation_id: "{{ ultra_lifecycle_id }}"
+        scope_sha256: "{{ ultra_controller_enforcement_spec.scope_sha256 }}"
+        manifest_sha256: "{{ ultra_release_manifest_sha256 }}"
+        candidate: "{{ ultra_controller_enforcement_spec.candidates[ultra_architecture].identity }}"
+        proof: "{{ ultra_controller_enforcement_spec.proof }}"
+        phase: "{{ ultra_controller_enforcement_phase | default('before') }}"
+      no_log: true

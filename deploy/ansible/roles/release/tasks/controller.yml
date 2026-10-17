@@ -1,4 +1,6 @@
 ---
+- name: Verify enforcement before selecting a controller or fallback
+  ansible.builtin.import_tasks: controller-rollback-preflight.yml
 - name: Inspect the adopted controller service
   ansible.builtin.stat:
     path: /etc/systemd/system/ultra-ansible-controller.service
@@ -35,7 +37,15 @@
   ansible.builtin.include_role:
     name: controller
 - name: Activate the new independent controller before verification
+  ansible.builtin.import_tasks: controller-rollback-preflight.yml
+  vars:
+    ultra_controller_enforcement_phase: staged
+- name: Restart the exact verified enforcing controller
   ansible.builtin.meta: flush_handlers
+- name: Verify the active candidate preserves the live enforcement floor
+  ansible.builtin.import_tasks: controller-rollback-preflight.yml
+  vars:
+    ultra_controller_enforcement_phase: candidate
 - name: Align recovery metadata with the activated immutable controller
   ansible.builtin.import_tasks: backup-identity.yml
   vars:

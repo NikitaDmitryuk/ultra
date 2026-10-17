@@ -20,16 +20,19 @@ type retiredOperatorObservation struct {
 	WinnerReceiptSHA string `json:"winning_receipt_sha256"`
 }
 type operatorObservation struct {
-	operation      string
-	state          string
-	code           string
-	verified       bool
-	floorAbsent    bool
-	requestSHA     string
-	receiptSHA     string
-	version        string
-	manifestSHA    string
-	manifestSource string
+	operation           string
+	state               string
+	code                string
+	verified            bool
+	floorAbsent         bool
+	requestSHA          string
+	receiptSHA          string
+	version             string
+	manifestSHA         string
+	manifestSource      string
+	enforcementScope    string
+	enforcementVerified bool
+	inventorySHA        string
 }
 
 func readOperatorObservation(stage string) (operatorObservation, error) {
@@ -59,8 +62,9 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 		Code   string `json:"code"`
 		Hash   string `json:"request_sha256"`
 		Result struct {
-			Verified    bool `json:"verified"`
-			FloorAbsent bool `json:"controller_enforcement_floor_absent"`
+			Verified    bool           `json:"verified"`
+			FloorAbsent bool           `json:"controller_enforcement_floor_absent"`
+			Enforcement map[string]any `json:"controller_enforcement_proof"`
 		} `json:"result"`
 	}
 	var request struct {
@@ -93,10 +97,27 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 			inventory == nil {
 			return result, errors.New("operator_retention_preflight_invalid")
 		}
-		if len(request.Variables) != 2 || !lockOK || lock == "" ||
+		if (len(request.Variables) != 2 && len(request.Variables) != 3) || !lockOK || lock == "" ||
 			request.Variables["ultra_controller_enforcement_preflight_only"] != true {
 			return result, errors.New("operator_retention_preflight_invalid")
 		}
+		if len(request.Variables) == 3 {
+			spec, ok := request.Variables["ultra_controller_enforcement_spec"].(map[string]any)
+			scope, scopeOK := spec["scope_sha256"].(string)
+			if !ok || len(spec) != 6 || !scopeOK || !validEnforcementSHA(scope) ||
+				spec["operation_id"] != lifecycleID(filepath.Dir(stage)) ||
+				(spec["phase"] != "preflight" && spec["phase"] != "reserved" && spec["phase"] != "completion") {
+				return result, errors.New("operator_retention_preflight_invalid")
+			}
+			result.enforcementScope = scope
+			if len(receipt.Result.Enforcement) != 0 {
+				if validateEnforcementProof(receipt.Result.Enforcement, spec) != nil {
+					return result, errors.New("operator_retention_preflight_invalid")
+				}
+				result.enforcementVerified = true
+			}
+		}
+		result.inventorySHA = digestSHA256(exact["inventory"])
 	}
 	hash, err := sourceSHA(filepath.Join(stage, "request.json"))
 	if err != nil || job.Schema != 1 || job.Hash != hash || receipt.Hash != hash {
@@ -106,15 +127,13 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 	if err != nil {
 		return result, err
 	}
-	result = operatorObservation{
-		operation:   job.Operation,
-		state:       receipt.State,
-		code:        receipt.Code,
-		verified:    receipt.Result.Verified,
-		floorAbsent: receipt.Result.FloorAbsent,
-		requestSHA:  hash,
-		receiptSHA:  receiptHash,
-	}
+	result.operation = job.Operation
+	result.state = receipt.State
+	result.code = receipt.Code
+	result.verified = receipt.Result.Verified
+	result.floorAbsent = receipt.Result.FloorAbsent
+	result.requestSHA = hash
+	result.receiptSHA = receiptHash
 	if job.Operation == "verify-release" {
 		result.version, _ = request.Variables["ultra_release_version"].(string)
 		result.manifestSHA, _ = request.Variables["ultra_release_manifest_sha256"].(string)
@@ -126,7 +145,14 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 }
 func sameOperatorObservationRelease(left, right operatorObservation) bool {
 	if left.operation == "inspect-upgrade" {
-		return right.operation == left.operation && left.requestSHA == right.requestSHA && right.floorAbsent
+		if right.operation != left.operation {
+			return false
+		}
+		if left.requestSHA == right.requestSHA && right.floorAbsent {
+			return true
+		}
+		return right.enforcementVerified && left.enforcementScope != "" &&
+			left.enforcementScope == right.enforcementScope && left.inventorySHA == right.inventorySHA
 	}
 	return left.operation == right.operation && left.version != "" && left.version == right.version &&
 		left.manifestSHA == right.manifestSHA &&

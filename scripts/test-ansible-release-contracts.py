@@ -110,7 +110,7 @@ class Contracts(unittest.TestCase):
 
     def test_controller_rollback_rejects_retirement_state_and_preserves_absent_state(self):
         path = ROOT / 'deploy/ansible/roles/release/tasks/controller-rollback-preflight.yml'
-        inspect, guard = yaml.safe_load(path.read_text())
+        inspect, guard, proof = yaml.safe_load(path.read_text())
         self.assertEqual(inspect['ansible.builtin.stat']['path'], '/var/lib/ultra-ansible/lifecycle-retired.json')
         self.assertFalse(inspect['ansible.builtin.stat']['follow'])
         self.assertFalse(inspect['ansible.builtin.stat']['get_checksum'])
@@ -124,12 +124,17 @@ class Contracts(unittest.TestCase):
                 # absent, regular, directory and dangling-symlink filesystem states.
                 try:
                     info = ledger.lstat()
-                    observed = {'exists': True, 'islnk': stat.S_ISLNK(info.st_mode)}
+                    observed = {'exists': True, 'islnk': stat.S_ISLNK(info.st_mode), 'isreg': stat.S_ISREG(info.st_mode)}
                 except FileNotFoundError:
                     observed = {'exists': False}
                 variables = {'release_controller_rollback_retirement': {'stat': observed}}
-                return all(environment.compile_expression(condition)(variables)
-                           for condition in assertion['that'])
+                regular = all(environment.compile_expression(condition)(variables)
+                              for condition in assertion['that'])
+                if regular and observed['exists']:
+                    # An absent/old restore request cannot supply the new exact
+                    # runtime proof. Detailed proof drift is tested separately.
+                    return environment.compile_expression(proof['block'][0]['ansible.builtin.assert']['that'][0])(variables)
+                return regular
             self.assertTrue(allowed(), 'supported rollback without retirement obligations must remain available')
             for contents in ('{"version":1,"ids":["retired"]}', '{"version":1,"ids":[]}', 'invalid'):
                 ledger.write_text(contents)
@@ -150,12 +155,11 @@ class Contracts(unittest.TestCase):
         enabled = 'ultra_controller_enforcement_preflight_only | default(false) | bool'
         disabled = 'not (' + enabled + ')'
         self.assertEqual(guard['ansible.builtin.import_tasks'],
-                         '../roles/release/tasks/controller-rollback-preflight.yml')
+                         '../roles/release/tasks/controller-enforcement-preflight.yml')
         self.assertEqual(guard['when'], enabled)
         self.assertTrue(guard['no_log'])
         self.assertEqual(receipt['when'], enabled)
-        self.assertEqual(receipt['ansible.builtin.copy']['content'],
-                         '{"verified":true,"controller_enforcement_floor_absent":true}\n')
+        self.assertIn('release_controller_enforcement_result', receipt['ansible.builtin.copy']['content'])
         self.assertEqual(inspect['when'], disabled)
         self.assertEqual(save_inspection['when'], disabled)
 
@@ -166,6 +170,19 @@ class Contracts(unittest.TestCase):
             self.assertEqual(tasks[0]['ansible.builtin.include_role'],
                              {'name': 'release', 'tasks_from': 'controller-rollback-preflight'})
             self.assertNotIn('when', tasks[0])
+
+    def test_controller_enforcement_switch_and_rollback_use_callsite_phase(self):
+        path = ROOT / 'deploy/ansible/roles/release/tasks'
+        guard_tasks = yaml.safe_load((path / 'controller-rollback-preflight.yml').read_text())
+        module = guard_tasks[-1]['block'][-1]['ultra_controller_enforcement']
+        self.assertEqual(module['phase'], "{{ ultra_controller_enforcement_phase | default('before') }}")
+        phases = []
+        for task in yaml.safe_load((path / 'controller.yml').read_text()):
+            if task.get('ansible.builtin.import_tasks') == 'controller-rollback-preflight.yml':
+                phases.append(task.get('vars', {}).get('ultra_controller_enforcement_phase', 'before'))
+        self.assertEqual(phases, ['before', 'staged', 'candidate'])
+        rollback = yaml.safe_load((path / 'rollback-controller.yml').read_text())
+        self.assertEqual(rollback[-1]['block'][4]['vars']['ultra_controller_enforcement_phase'], 'rollback')
 
     def test_atomic_receipt_syncs_data_then_rename_then_directory(self):
         with tempfile.TemporaryDirectory() as directory:

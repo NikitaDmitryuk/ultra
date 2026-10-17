@@ -36,6 +36,10 @@
         state: restarted
         daemon_reload: true
     - name: Align recovery metadata with the restored compatible controller
+      ansible.builtin.include_tasks: controller-rollback-preflight.yml
+      vars:
+        ultra_controller_enforcement_phase: rollback
+    - name: Align recovery metadata only after enforcing rollback verification
       ansible.builtin.include_tasks: backup-identity.yml
       vars:
         release_backup_controller_directory: "{{ ultra_previous_controller_directory }}"

@@ -17,6 +17,7 @@
 | Ansible upgrade с DNS/domain/runtime effects | `python3 scripts/test-ansible-dns-migration.py`, `test-ansible-upgrade-domain.py`, `test-ansible-upgrade-runtime.py`, `test-ansible-runtime-effects.py`, `test-ansible-accepted-resume.py`, operation mapping и syntax check закреплённым Ansible runtime |
 | Блокировка продления managed tunnel TLS и приватный checkpoint | `python3 scripts/test-managed-tls-fence.py`; тот же набор включён в `go test ./cmd/ultra-install` и использует только синтетические hosts и локальный тестовый CA |
 | Forward-only lifecycle recovery / broker bootstrap | `go test ./cmd/ultra-install ./internal/deployansible`; `python3 scripts/test-manual-deploy.py`; `python3 scripts/test-forward-broker-guard.py`; operation mapping, release retention и syntax check `bootstrap-forward-broker.yml` |
+| Совместимость controller при retirement floor | `python3 scripts/test-controller-enforcement.py`; `python3 scripts/test-ansible-release-contracts.py`; focused Go tests `TestUpgradeEnforcement`, `TestEnforcementPreflightRetention`, `TestControllerEnforcementProtocol`; syntax check `inspect-upgrade.yml` |
 | SQL, репозитории, миграции | Генерация SQLC при изменении схемы/запросов; `go test ./internal/db` с отдельной тестовой БД |
 | Встроенные web-ресурсы или установочные скрипты | Тесты затронутого Go-пакета, пересборка соответствующего бинарника; для UI — `make test-ui` (Node.js 22+) и проверка затронутого сценария в браузере |
 
@@ -182,16 +183,31 @@ activation, retirement-конфликт или несовпадение remote a
 продолжение. `--retry-failed` не заменяет этот путь и не разрешает использовать
 неудавшийся candidate как predecessor.
 
-Retirement ledger устанавливает сохраняемый floor контроллера. Rollback и restore
-на узел с ledger блокируются до первой мутации; backup включает оба lifecycle journal
-и аутентифицирует `controller_enforcement_floor`. Collector всегда перечитывает
-фиксированный retirement ledger даже при старой backup policy.
+Retirement ledger устанавливает сохраняемый floor контроллера. Обычный upgrade
+может сохранить его по точному operation-bound proof candidate и rollback broker:
+до reservation оба executable проходят behavioral probes в изолированных state/socket,
+а после reservation, при выборе runtime и после restart доказательство проверяется
+по текущим identities и неизменным bytes ledger. Начальный envelope — ledger v1
+без handoff и lifecycle `released`; retry допускает только тот же operation lifecycle.
+Приватный `controller-enforcement.json` входит в completion metadata; write-ahead
+intent на bridge сохраняет допустимые old/new combinations при частичном переключении.
+Crash после публикации intent восстанавливается только по exact same-inode sibling
+pair; произвольные hardlinks не допускаются. Отдельный local release-intent связывает
+успешные commit/finalize/resume receipts до release. Retry при нём выполняет только
+свежую проверку exact candidate/ledger/own lifecycle, при необходимости завершающий
+release и повторную read-only проверку, затем seal completion. Ни reserve, ни стадии
+upgrade не переисполняются; отсутствие intent или drift сохраняют отказ.
+Rollback и restore без собственного точного proof блокируются до первой мутации.
+Backup включает оба lifecycle journal и аутентифицирует `controller_enforcement_floor`.
+Collector всегда перечитывает фиксированный retirement ledger даже при старой backup policy.
 Restore поколения с таким floor выдаёт `controller_enforcement_migration_required`:
 текущий формат не доказывает совместимость восстановленного контроллера.
 Более старый snapshot на новом узле не содержит актуального floor: для его безопасной
 миграции нужен независимый от snapshot монотонный checkpoint enforcement/retirement.
 Эти ограничения не доказывают quiescence ранее прерванной попытки.
 Источники: [manual gate](../scripts/manual-deploy.py),
+[operation proof](../cmd/ultra-install/upgrade_enforcement.go),
+[isolated verifier](../deploy/ansible/library/ultra_controller_enforcement.py),
 [rollback preflight](../deploy/ansible/roles/release/tasks/controller-rollback-preflight.yml),
 [проверка restore](../deploy/recovery/restore_common.py).
 

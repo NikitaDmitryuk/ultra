@@ -202,27 +202,20 @@ func ansibleUpgrade(
 	if err != nil {
 		return err
 	}
+	var enforcement map[string]any
 	if !forwardOnly {
-		// A retired lifecycle establishes a controller enforcement floor that
-		// ordinary upgrade/rollback cannot safely cross. Check it afresh before
-		// reserving maintenance or installing cleanup that could resume an
-		// already stopped fleet. Never reuse a previous successful observation.
-		preflightDirectory, err := os.MkdirTemp(directory, "controller-preflight-")
+		enforcement, err = upgradeEnforcementSpec(directory, releaseDir, manifest, inventory)
 		if err != nil {
 			return err
 		}
-		if err = os.Remove(preflightDirectory); err != nil {
-			return err
+		if completed, completionErr := recoverEnforcementCompletion(ctx, p, directory, lockDirectory, python, executable, manifest, inventory, enforcement); completionErr != nil ||
+			completed {
+			return completionErr
 		}
-		preflight, err := deployansible.RunLocal(ctx, "inspect-upgrade", inventory, map[string]any{
-			"ultra_lock_directory":                        lockDirectory,
-			"ultra_controller_enforcement_preflight_only": true,
-		}, preflightDirectory, python, executable)
-		if err != nil {
+		// Probe both exact broker executables in isolated state before reserving
+		// production. A fresh receipt is required even when a proof is retained.
+		if err = runEnforcementPreflight(ctx, inventory, directory, lockDirectory, python, executable, enforcement); err != nil {
 			return err
-		}
-		if values := preflight.Result.Values; values["verified"] != true || values["controller_enforcement_floor_absent"] != true {
-			return errors.New("upgrade_controller_enforcement_preflight_unverified")
 		}
 	}
 	baselineInput, err := prepareUpgradeBaseline(p.SourceValues["ULTRA_UPGRADE_BASELINE_FILE"], directory)
@@ -243,15 +236,13 @@ func ansibleUpgrade(
 		resumeDirectory, err := os.MkdirTemp(directory, "resume-")
 		if err == nil {
 			_ = os.Remove(resumeDirectory)
-			variables := map[string]any{"ultra_lock_directory": lockDirectory}
-			if legacyBridgeMaintenance {
-				variables["ultra_legacy_bridge_maintenance"] = true
-				variables["ultra_legacy_bridge_sha256"] = legacyBridgeSHA
-				variables["ultra_lifecycle_id"] = lifecycleID(directory)
-				if acceptedResume != nil {
-					variables["ultra_legacy_accepted_resume"] = acceptedResume
-				}
-			}
+			variables := upgradeResumeVariables(
+				lockDirectory,
+				lifecycleID(directory),
+				legacyBridgeMaintenance,
+				legacyBridgeSHA,
+				acceptedResume,
+			)
 			_, err = deployansible.RunLocal(cleanup, "resume-automation", inventory, variables, resumeDirectory, python, executable)
 			if err == nil {
 				resumeCompleted = true
@@ -307,6 +298,12 @@ func ansibleUpgrade(
 			returnErr = errors.Join(returnErr, err)
 		}
 	}()
+	if enforcement != nil {
+		enforcement["phase"] = "reserved"
+		if err = runEnforcementPreflight(ctx, inventory, directory, lockDirectory, python, executable, enforcement); err != nil {
+			return err
+		}
+	}
 	inspectionReceipt, err := runUpgradeInspection(
 		ctx,
 		"inspect-upgrade",
@@ -326,6 +323,14 @@ func ansibleUpgrade(
 	var inspection upgradeInspection
 	if err = json.Unmarshal(raw, &inspection); err != nil {
 		return errors.New("upgrade_inspection_invalid")
+	}
+	if enforcement != nil {
+		if proof, _ := enforcement["proof"].(map[string]any); len(proof) != 0 {
+			rollback, _ := proof["rollback"].(map[string]any)
+			if rollback["directory"] != inspection.ControllerDirectory || rollback["unit_sha256"] != inspection.ControllerUnitSHA {
+				return errors.New("upgrade_controller_enforcement_rollback_changed")
+			}
+		}
 	}
 	if forwardOnly {
 		// The active bridge bytes are explicitly known to differ from the last
@@ -546,6 +551,9 @@ func ansibleUpgrade(
 		"ultra_lifecycle_id":              lifecycleID(directory),
 		"ultra_forward_only":              forwardOnly,
 	}
+	if enforcement != nil {
+		variables["ultra_controller_enforcement_spec"] = enforcement
+	}
 	frozenInventory, err := json.Marshal(inventory)
 	if err != nil {
 		return err
@@ -614,10 +622,10 @@ func ansibleUpgrade(
 			if contractErr != nil {
 				return contractErr
 			}
-			contract["mode"] = "compensation"
-			if committedContinuation {
-				contract["mode"] = "committed"
-			}
+			// The committed chain was verified above. Preserve its accepted
+			// runtime/domain image for schedule restoration as well as preflight;
+			// retry-only mode/target fields must not cross the resume boundary.
+			contract, acceptedResume = upgradeRetryResumeContracts(contract, committedContinuation)
 			asset, assetErr := upgradeAsset(manifest, "ultra-relay-linux-"+inspection.Architecture)
 			if assetErr != nil {
 				return assetErr
@@ -786,10 +794,33 @@ func ansibleUpgrade(
 		return err
 	}
 	domainGeneration = generation
+	resumeBeforeRelease := func(cleanup context.Context) error {
+		if resumeCompleted {
+			return nil
+		}
+		if committedContinuation {
+			variables := upgradeResumeVariables(
+				lockDirectory,
+				lifecycleID(directory),
+				legacyBridgeMaintenance,
+				legacyBridgeSHA,
+				acceptedResume,
+			)
+			complete, resumeErr := successfulUpgradeResume(directory, inventory, variables)
+			if resumeErr != nil {
+				return resumeErr
+			}
+			if complete {
+				resumeCompleted = true
+				return nil
+			}
+		}
+		return resume(cleanup)
+	}
 	if committedContinuation {
 		// The accepted release already owns these runtime/domain images. Never
 		// rerun preparation, activation, publication, readiness, or compensation.
-		preActivation, resumeCompleted = false, true
+		preActivation = false
 		return finishUpgradeCommit(
 			ctx,
 			p,
@@ -800,6 +831,7 @@ func ansibleUpgrade(
 			python,
 			executable,
 			domainTransaction,
+			resumeBeforeRelease,
 			generation,
 			retryFailed,
 			manifest.Version,
@@ -1031,6 +1063,7 @@ func ansibleUpgrade(
 		python,
 		executable,
 		domainTransaction,
+		resumeBeforeRelease,
 		generation,
 		retryFailed,
 		manifest.Version,
@@ -1105,6 +1138,7 @@ func finishUpgradeCommit(
 	inventory, variables map[string]any,
 	directory, python, executable string,
 	domainTransaction *upgradeDomainTransaction,
+	resume func(context.Context) error,
 	generation int,
 	retryFailed bool,
 	version string,
@@ -1131,10 +1165,18 @@ func finishUpgradeCommit(
 	if err == nil && retryFailed {
 		err = clearRetriedVersionMarker(ctx, inspection.AutoPolicy, directory, version)
 	}
-	if err == nil {
-		err = ansibleLifecycle(ctx, p, inventory, directory, python, executable, "released", false)
+	if err != nil {
+		return err
 	}
-	return err
+	// Restore schedules while the active reservation still protects this commit.
+	// Completion-only recovery must never claim this cleanup happened implicitly.
+	if err = resume(ctx); err != nil {
+		return errors.New("upgrade_automation_resume_failed")
+	}
+	if err = saveEnforcementReleaseIntent(directory, inventory, variables, inspection.ObservedAt); err != nil {
+		return err
+	}
+	return ansibleLifecycle(ctx, p, inventory, directory, python, executable, "released", false)
 }
 
 // Failed read-only inspections get a new immutable job on the next invocation.

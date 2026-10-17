@@ -5,12 +5,12 @@
   any_errors_fatal: true
   tasks:
     - name: Check the persistent controller enforcement floor before upgrade reservation
-      ansible.builtin.import_tasks: ../roles/release/tasks/controller-rollback-preflight.yml
+      ansible.builtin.import_tasks: ../roles/release/tasks/controller-enforcement-preflight.yml
       when: ultra_controller_enforcement_preflight_only | default(false) | bool
       no_log: true
     - name: Save the private controller enforcement preflight result
       ansible.builtin.copy:
-        content: "{\"verified\":true,\"controller_enforcement_floor_absent\":true}\n"
+        content: "{{ release_controller_enforcement_result | to_json(preprocess_unsafe=False) }}\n"
         dest: "{{ ultra_result_file }}"
         mode: "0600"
       delegate_to: localhost
