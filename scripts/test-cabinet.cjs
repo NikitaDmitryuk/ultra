@@ -273,6 +273,22 @@ test("Vultr status polling updates the existing card without replacing its price
   assert.match(details.innerHTML, /Оплата продолжается/);
 });
 
+test("reinstall is offered only for a failed staged cloud identity", async () => {
+  const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
+  await flush();
+  for (const [change, allowed] of [
+    [{}, true],
+    [{ state: "ready" }, false],
+    [{ phase: "install" }, false],
+    [{ exit_id: "other" }, false],
+    [{ serves_subscription_ingress: true }, false],
+  ]) {
+    p.context.recovery = { id: "op", exit_id: "op", instance_id: "vm", state: "failed", phase: "verify", ...change };
+    const html = vm.runInContext("cloudOperationDetailsHTML(recovery)", p.context);
+    assert.equal(html.includes('data-action="reinstall"'), allowed);
+  }
+});
+
 test("traffic activity is separate from permission and does not imply online", async () => {
   const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
   await flush();

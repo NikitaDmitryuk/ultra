@@ -405,7 +405,7 @@ func (s *Server) writeExitError(w http.ResponseWriter, err error) {
 		http.Error(w, "not found", http.StatusNotFound)
 	case errors.Is(err, db.ErrExitLastEnabled):
 		http.Error(w, err.Error(), http.StatusConflict)
-	case errors.Is(err, db.ErrExitDuplicateAddr), errors.Is(err, db.ErrExitDuplicateUUID):
+	case errors.Is(err, db.ErrExitDuplicateAddr), errors.Is(err, db.ErrExitDuplicateUUID), errors.Is(err, db.ErrExitTargetBusy):
 		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		if isExitValidationError(err) {

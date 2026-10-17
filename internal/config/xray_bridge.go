@@ -114,7 +114,12 @@ func BuildBridgeXRayJSON(
 		// SNI adds no authentication and can make an otherwise reachable tunnel stall.
 		child := *spec
 		pin, pinErr := hex.DecodeString(normalizeCertSHA256(pinnedPeerCertSHA256))
-		safeOmission := spec.TunnelTLSProvision == TunnelTLSSelfSigned && net.ParseIP(address) != nil && pinErr == nil && len(pin) == 32
+		// Managed IP exits carry their own certificate identity even when the
+		// static exit uses ACME. The shared bridge policy must not discard it.
+		safeOmission := net.ParseIP(address) != nil && pinErr == nil && len(pin) == 32
+		if safeOmission {
+			child.TunnelTLSProvision = TunnelTLSSelfSigned
+		}
 		child.SplitHTTPTLS.OmitSNI = spec.SplitHTTPTLS.OmitSNI || spec.SplitHTTPTLS.SNIMode == "omit" ||
 			(spec.SplitHTTPTLS.SNIMode != "send" && safeOmission)
 		if spec.UsesGRPC() {

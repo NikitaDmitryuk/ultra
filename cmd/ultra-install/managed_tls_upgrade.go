@@ -23,7 +23,7 @@ func attachManagedTunnelVariables(
 	if p.Features.MainExitDomain == "" {
 		return nil
 	}
-	if len(p.Exits) != 1 || len(requests) != 2 || generation < 1 || releaseVariables["ultra_release_manifest"] == nil {
+	if len(p.Exits) != 1 || len(requests) < 2 || generation < 1 || releaseVariables["ultra_release_manifest"] == nil {
 		return errors.New("upgrade_managed_tunnel_identity_unverified")
 	}
 	hookSHA, err := managedTunnelHookSHA(p.Features.MainExitDomain)
@@ -38,6 +38,17 @@ func attachManagedTunnelVariables(
 		}
 		if in.Request.Role != config.RoleExit {
 			continue
+		}
+		if in.Request.Features.MainExitDomain == "" {
+			proof := in.Request.Proof
+			if !runtimeHostDynamicProofValid(proof) || !runtimeHostValidDigest(proof.CertificatePin) || in.Request.Node != "" ||
+				!in.Request.Features.GenerateExitTLS {
+				return errors.New("upgrade_managed_tunnel_identity_unverified")
+			}
+			continue
+		}
+		if in.Request.Features.MainExitDomain != p.Features.MainExitDomain || in.Request.Node != p.Exits[0].Name {
+			return errors.New("upgrade_managed_tunnel_identity_unverified")
 		}
 		in.Request.Transaction = fmt.Sprintf("%s-runtime-%d", lifecycleID(directory), generation)
 		request := struct {

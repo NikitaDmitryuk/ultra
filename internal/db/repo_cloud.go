@@ -161,7 +161,16 @@ func (r *CloudRepo) Save(ctx context.Context, op cloud.Operation) error {
 		return e
 	}
 	row := cloudOperationRow{State: op.State, Body: body, OccupiesSlot: op.State != "cancelled" && op.State != "deleted"}
-	return r.db.orm.WithContext(ctx).Where(cloudID(op.ID)).Select("state", "body", "occupies_slot").Updates(&row).Error
+	result := r.db.orm.WithContext(ctx).Where(cloudID(op.ID)).
+		Where("COALESCE(body->>'reinstall_job_id','') = ? AND COALESCE(body->>'reinstall_target','') = ?", op.ReinstallJobID, op.ReinstallTarget).
+		Select("state", "body", "occupies_slot").Updates(&row)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return cloud.ErrConflict
+	}
+	return nil
 }
 
 func (r *CloudRepo) Lock(ctx context.Context) (func(), error) {

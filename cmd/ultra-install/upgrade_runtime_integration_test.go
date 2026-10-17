@@ -195,6 +195,60 @@ func TestUpgradeRuntimeProofBoundToStaticAndDynamicFrozenTargets(t *testing.T) {
 	if other == identity {
 		t.Fatal("dynamic identity ignored target address")
 	}
+	plan.Features.MainExitDomain = "tunnel.example.com"
+	evidence := inspection.RuntimeNodes["22222222-2222-2222-2222-222222222222"]
+	evidence.CertificatePin = strings.Repeat("d", 64)
+	inspection.RuntimeNodes["22222222-2222-2222-2222-222222222222"] = evidence
+	requests, err = upgradeRuntimeRequests(plan, inspection, inventory, "fixture-runtime-1")
+	if err != nil {
+		t.Fatal("mixed ACME and managed pinned fleet rejected", err)
+	}
+	dynamic = requests["exit_22222222222222222222222222222222"].(runtimeProbeInput).Request
+	static := requests["exit_11111111111111111111111111111111"].(runtimeProbeInput).Request
+	bridge := requests["bridge"].(runtimeProbeInput).Request
+	if dynamic.Features.MainExitDomain != "" || !dynamic.Features.GenerateExitTLS ||
+		dynamic.Proof.CertificatePin != evidence.CertificatePin ||
+		static.Features.MainExitDomain != plan.Features.MainExitDomain ||
+		bridge.Features.MainExitDomain != plan.Features.MainExitDomain {
+		t.Fatal("per-node TLS policy or certificate proof lost")
+	}
+	variables := map[string]any{}
+	if err := attachManagedTunnelVariables(plan, requests, variables, map[string]any{"ultra_release_manifest": map[string]any{}}, t.TempDir(), 1); err != nil {
+		t.Fatal(err)
+	}
+	fences := variables["ultra_managed_tunnel_requests"].(map[string]string)
+	if len(fences) != 1 || fences["exit_11111111111111111111111111111111"] == "" {
+		t.Fatal("ACME fence applied to managed IP exit")
+	}
+	for _, field := range []string{"unowned", "missing pin", "malformed pin", "managed static", "multiple static"} {
+		t.Run(field, func(t *testing.T) {
+			copyPlan := *plan
+			copyInspection := inspection
+			copyInspection.RuntimeNodes = map[string]upgradeRuntimeNodeEvidence{}
+			for id, item := range inspection.RuntimeNodes {
+				copyInspection.RuntimeNodes[id] = item
+			}
+			bad := evidence
+			switch field {
+			case "unowned":
+				bad.Managed = false
+			case "missing pin":
+				bad.CertificatePin = ""
+			case "malformed pin":
+				bad.CertificatePin = "abcd"
+			case "managed static":
+				item := copyInspection.RuntimeNodes["11111111-1111-1111-1111-111111111111"]
+				item.Managed = true
+				copyInspection.RuntimeNodes["11111111-1111-1111-1111-111111111111"] = item
+			case "multiple static":
+				copyPlan.Exits = append(append([]installplan.ExitNode{}, plan.Exits...), installplan.ExitNode{Name: "second"})
+			}
+			copyInspection.RuntimeNodes["22222222-2222-2222-2222-222222222222"] = bad
+			if _, err := upgradeRuntimeRequests(&copyPlan, copyInspection, inventory, "fixture-runtime-1"); err == nil {
+				t.Fatal("unproven fleet accepted")
+			}
+		})
+	}
 	nodes["exit_22222222222222222222222222222222"].(map[string]any)["ansible_host"] = "192.0.2.9"
 	if _, err = upgradeRuntimeRequests(plan, inspection, inventory, "fixture-runtime-1"); err == nil {
 		t.Fatal("changed SSH target accepted")

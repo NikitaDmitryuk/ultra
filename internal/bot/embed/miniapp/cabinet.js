@@ -837,7 +837,7 @@ function serverStateLabel(o, capacity) {
   return phases[o.phase] || "Создание сервера";
 }
 function cloudOperationDetailsHTML(o) {
-  return `<p class="muted">${esc(serverBillingLabel(o))}</p>${o.error ? `<p class="bad">${esc(o.error_message || o.error)}</p>` : ""}${o.state === "ready" && !o.serves_subscription_ingress ? `<button class="btn secondary" data-replace="${esc(o.id)}">Сменить регион</button>` : ""}${o.state === "failed" || o.state === "unknown" ? `<button class="btn secondary" data-action="retry" data-op="${esc(o.id)}">Повторить проверку / продолжить</button>` : ""}${o.serves_subscription_ingress ? "<p>Обслуживает подписки · перед удалением или заменой перенесите HTTPS-вход</p>" : o.instance_id ? `<button class="btn danger" data-action="delete" data-op="${esc(o.id)}">Удалить сервер</button>` : o.phase === "prepare" ? `<button class="btn secondary" data-action="cancel" data-op="${esc(o.id)}">Отменить создание</button>` : ""}`;
+  return `<p class="muted">${esc(serverBillingLabel(o))}</p>${o.error ? `<p class="bad">${esc(o.error_message || o.error)}</p>` : ""}${o.state === "ready" && !o.serves_subscription_ingress ? `<button class="btn secondary" data-replace="${esc(o.id)}">Сменить регион</button>` : ""}${o.state === "failed" && o.phase === "verify" && o.exit_id === o.id && !o.serves_subscription_ingress ? `<button class="btn secondary" data-action="reinstall" data-op="${esc(o.id)}">Переустановить на этом VPS</button>` : ""}${o.state === "failed" || o.state === "unknown" ? `<button class="btn secondary" data-action="retry" data-op="${esc(o.id)}">Повторить проверку / продолжить</button>` : ""}${o.serves_subscription_ingress ? "<p>Обслуживает подписки · перед удалением или заменой перенесите HTTPS-вход</p>" : o.instance_id ? `<button class="btn danger" data-action="delete" data-op="${esc(o.id)}">Удалить сервер</button>` : o.phase === "prepare" ? `<button class="btn secondary" data-action="cancel" data-op="${esc(o.id)}">Отменить создание</button>` : ""}`;
 }
 
 function bindCloudOperationControls() {
@@ -863,7 +863,9 @@ function bindCloudOperationControls() {
             : "Продолжить операцию?",
           action === "delete"
             ? "Сначала отключим маршрут. Удаление VPS необратимо; настройки локации сохранятся для резервного маршрута."
-            : "Повтор продолжит сохранённую операцию. При неизвестном результате покупка не повторяется.",
+            : action === "reinstall"
+              ? "Повторно установим Ultra на том же неопубликованном VPS с проверкой SSH и сертификата. Новый сервер не покупается; перед публикацией проверим туннель."
+              : "Повтор продолжит сохранённую операцию. При неизвестном результате покупка не повторяется.",
           action === "delete" ? "Удалить" : "Продолжить",
           async () => {
             await api(`/api/cloud/operations/${el.dataset.op}/action`, "POST", {

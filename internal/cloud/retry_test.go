@@ -7,6 +7,92 @@ import (
 	"testing"
 )
 
+func TestReinstallOnlyRecoversFailedStagedIdentity(t *testing.T) {
+	for _, state := range []string{"failed", "ready", "pending", "unknown"} {
+		for _, phase := range []string{"verify", "install", "prepare", "publish", "cleanup"} {
+			s, provider, _ := testService()
+			store := s.Store.(*memoryStore)
+			op := Operation{ID: "purchase", ExitID: "purchase", InstanceID: "vm", State: state, Phase: phase, Charged: true}
+			store.ops[op.ID] = op
+			err := s.Action(context.Background(), 1, op.ID, "reinstall")
+			accepted := state == "failed" && phase == "verify"
+			if accepted != (err == nil) {
+				t.Fatalf("%s/%s: %v", state, phase, err)
+			}
+			saved := store.ops[op.ID]
+			if accepted {
+				if saved.Phase != "install" || saved.State != "pending" || !saved.Reinstall || saved.InstallAttempt != 1 ||
+					saved.InstanceID != op.InstanceID ||
+					saved.ExitID != op.ExitID ||
+					!saved.Charged {
+					t.Fatal("reinstall changed purchase identity")
+				}
+			} else if !reflect.DeepEqual(saved, op) {
+				t.Fatal("rejected reinstall changed operation")
+			}
+			if provider.creates != 0 {
+				t.Fatal("reinstall bought another VM")
+			}
+		}
+	}
+}
+
+func TestReinstallRejectsUnboundOrProtectedIdentity(t *testing.T) {
+	for _, kind := range []string{"node", "instance", "ingress", "generation"} {
+		s, _, _ := testService()
+		store := s.Store.(*memoryStore)
+		op := Operation{ID: "purchase", ExitID: "purchase", InstanceID: "vm", State: "failed", Phase: "verify"}
+		switch kind {
+		case "node":
+			op.ExitID = "other"
+		case "instance":
+			op.InstanceID = ""
+		case "ingress":
+			s.IngressInstanceID = op.InstanceID
+		case "generation":
+			op.InstallAttempt = ^uint64(0)
+		}
+		store.ops[op.ID] = op
+		if err := s.Action(context.Background(), 1, op.ID, "reinstall"); !errors.Is(err, ErrConflict) {
+			t.Fatalf("%s: %v", kind, err)
+		}
+		if !reflect.DeepEqual(store.ops[op.ID], op) {
+			t.Fatal("rejected reinstall changed operation")
+		}
+	}
+}
+
+func TestOutstandingReinstallRetryRetainsJobAndBlocksUnprovenDelete(t *testing.T) {
+	for _, jobID := range []string{"", "job"} {
+		s, _, _ := testService()
+		store := s.Store.(*memoryStore)
+		op := Operation{
+			ID:              "purchase",
+			ExitID:          "purchase",
+			InstanceID:      "vm",
+			State:           "failed",
+			Phase:           "install",
+			Reinstall:       true,
+			InstallAttempt:  3,
+			ReinstallJobID:  jobID,
+			ReinstallTarget: "192.0.2.2",
+		}
+		store.ops[op.ID] = op
+		if err := s.Action(context.Background(), 1, op.ID, "delete"); !errors.Is(err, ErrConflict) {
+			t.Fatal("delete escaped outstanding receipt", err)
+		}
+		if err := s.Action(context.Background(), 1, op.ID, "retry"); err != nil {
+			t.Fatal(err)
+		}
+		saved := store.ops[op.ID]
+		if saved.InstallAttempt != op.InstallAttempt || saved.ReinstallJobID != op.ReinstallJobID ||
+			saved.ReinstallTarget != op.ReinstallTarget ||
+			saved.State != "pending" {
+			t.Fatal("retry abandoned outstanding worker identity")
+		}
+	}
+}
+
 func TestRetryCreatesAttemptOnlyForFailedInstallation(t *testing.T) {
 	for _, test := range []struct {
 		state, phase  string

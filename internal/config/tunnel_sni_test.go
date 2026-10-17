@@ -65,7 +65,7 @@ func TestTunnelSNIAutomaticPerPinnedPeer(t *testing.T) {
 			{"domain", "exit.example.com", validPin, "", TunnelTLSSelfSigned, false},
 			{"missing pin", "192.0.2.1", "", "", TunnelTLSSelfSigned, false},
 			{"malformed pin", "192.0.2.1", "abcd", "", TunnelTLSSelfSigned, false},
-			{"CA verification", "192.0.2.1", validPin, "", TunnelTLSACME, false},
+			{"pinned IP alongside CA exit", "192.0.2.1", validPin, "", TunnelTLSACME, true},
 			{"explicit send", "192.0.2.1", validPin, "send", TunnelTLSSelfSigned, false},
 		} {
 			t.Run(string(transport)+"/"+tc.name, func(t *testing.T) {

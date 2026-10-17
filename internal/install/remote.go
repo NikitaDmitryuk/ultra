@@ -10,17 +10,24 @@ import (
 
 // Remote is a bounded, non-logging transport used by provisioning workers.
 // Each cloud instance has its own known_hosts file; changed host keys are rejected.
-type Remote struct{ Host, Identity, KnownHosts string }
+type Remote struct {
+	Host, Identity, KnownHosts string
+	RequireKnownHost           bool
+}
 
 func (r Remote) args() ([]string, error) {
 	if net.ParseIP(r.Host) == nil || r.Identity == "" || r.KnownHosts == "" {
 		return nil, errors.New("invalid SSH target")
 	}
+	checking := "StrictHostKeyChecking=accept-new"
+	if r.RequireKnownHost {
+		checking = "StrictHostKeyChecking=yes"
+	}
 	return []string{
 		"-o",
 		"BatchMode=yes",
 		"-o",
-		"StrictHostKeyChecking=accept-new",
+		checking,
 		"-o",
 		"UserKnownHostsFile=" + r.KnownHosts,
 		"-o",

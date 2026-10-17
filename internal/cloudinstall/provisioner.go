@@ -3,6 +3,7 @@ package cloudinstall
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/cloud"
@@ -54,7 +56,12 @@ func (p *Provisioner) remote(op *cloud.Operation, instance cloud.Instance) (inst
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return install.Remote{}, e
 	}
-	return install.Remote{Host: instance.IP, Identity: p.Identity, KnownHosts: filepath.Join(dir, "known_hosts")}, nil
+	return install.Remote{
+		Host:             instance.IP,
+		Identity:         p.Identity,
+		KnownHosts:       filepath.Join(dir, "known_hosts"),
+		RequireKnownHost: op.Reinstall,
+	}, nil
 }
 func (p *Provisioner) Prepare(ctx context.Context, op *cloud.Operation) (cloud.CreateRequest, error) {
 	if p.Configurer == nil {
@@ -151,7 +158,9 @@ func (p *Provisioner) exitSpec(node exits.Node) config.Spec {
 		MimicPreset: p.Bridge.MimicPreset, ListenAddress: "0.0.0.0", VLESSPort: node.Port,
 		SplithttpHost: p.Bridge.SplithttpHost, SplithttpPath: p.Bridge.SplithttpPath,
 		SplitHTTPTLS: p.Bridge.SplitHTTPTLS, TunnelTransport: p.Bridge.TunnelTransport,
-		TunnelTLSProvision: p.Bridge.TunnelTLSProvision,
+		// The cloud worker provisions an IP exit with a pinned certificate;
+		// the bridge's static ACME domain is not owned by this instance.
+		TunnelTLSProvision: config.TunnelTLSSelfSigned,
 		Exit:               config.ExitTunnelSpec{TunnelUUID: node.TunnelUUID},
 		ExitCertPaths:      config.CertPaths{CertFile: "/etc/ultra-relay/fullchain.pem", KeyFile: "/etc/ultra-relay/privkey.pem"},
 	}
@@ -176,6 +185,21 @@ func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance
 	if e != nil {
 		return e
 	}
+	var node exits.Node
+	if op.Reinstall {
+		node, e = db.NewExitNodeRepo(p.DB).Get(c, op.ExitID)
+		if e != nil {
+			return e
+		}
+		if e := validateReinstallTarget(op, node, instance); e != nil {
+			return e
+		}
+		release, err := db.NewExitNodeRepo(p.DB).GuardCloudReinstall(c, op, node, instance)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	for {
 		if _, e = remote.Run(c, "true"); e == nil {
 			break
@@ -186,9 +210,20 @@ func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance
 		case <-time.After(5 * time.Second):
 		}
 	}
-	node, e := p.node(c, op, instance)
-	if e != nil {
-		return e
+	if !op.Reinstall {
+		node, e = p.node(c, op, instance)
+		if e != nil {
+			return e
+		}
+	}
+	if op.Reinstall {
+		// Public certificate only; strict SSH checking retains the operation's
+		// original host identity before any desired files are installed.
+		fingerprint, err := remote.Run(c, "set -o pipefail\nopenssl x509 -in /etc/ultra-relay/fullchain.pem -outform DER | sha256sum\n")
+		if err != nil || len(strings.Fields(string(fingerprint))) != 2 ||
+			strings.Fields(string(fingerprint))[0] != node.PinnedPeerCertSHA256 {
+			return errors.New("reinstall certificate identity mismatch")
+		}
 	}
 	spec := p.exitSpec(node)
 	if e = spec.Validate(); e != nil {
@@ -201,12 +236,76 @@ func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance
 		Host: instance.IP, User: "root", Identity: p.Identity, KnownHosts: remote.KnownHosts, BridgeIPv4: p.BridgeIP, Spec: spec,
 	}
 	binary := filepath.Join(p.StateDir, op.ID, "ultra-relay")
-	result, err := p.configureExit(c, op, binary, request)
+	if op.Reinstall {
+		jobID, err := configurationAttemptJobID(op.ID, op.InstallAttempt, binary, request)
+		if err != nil {
+			return err
+		}
+		if err := db.NewExitNodeRepo(p.DB).ReserveCloudReinstall(c, op, jobID, node.Address); err != nil {
+			return err
+		}
+	}
+	var result deployansible.Result
+	var err error
+	if op.Reinstall {
+		// Dispatch exactly the durably reserved identity, even if an input file
+		// changes between computing its digest and opening submission inputs.
+		result, err = p.Configurer.ConfigureExit(c, op.ReinstallJobID, binary, request)
+	} else {
+		result, err = p.configureExit(c, op, binary, request)
+	}
+	if op.Reinstall {
+		// The controller may keep running after this caller times out. Persisted
+		// host ownership survives that timeout; only a terminal receipt clears it.
+		cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		releaseErr := p.ReleaseReinstall(cleanup, op)
+		stop()
+		if releaseErr != nil {
+			return errors.Join(err, releaseErr)
+		}
+	}
 	if err != nil {
 		return err
 	}
+	if op.Reinstall && result.CertPin != node.PinnedPeerCertSHA256 {
+		return errors.New("reinstall certificate identity changed")
+	}
 	if err = p.Routes.SetPin(c, node.ID, result.CertPin); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (p *Provisioner) ReleaseReinstall(ctx context.Context, op *cloud.Operation) error {
+	if op.ReinstallTarget == "" {
+		return cloud.ErrConflict
+	}
+	if op.ReinstallJobID == "" {
+		return db.NewExitNodeRepo(p.DB).ClearCloudReinstall(ctx, op)
+	}
+	reader, ok := p.Configurer.(interface {
+		ConfigurationTerminal(context.Context, string) (bool, error)
+	})
+	if !ok || op.ReinstallJobID == "" {
+		return cloud.ErrConflict
+	}
+	terminal, err := reader.ConfigurationTerminal(ctx, op.ReinstallJobID)
+	if err != nil {
+		return err
+	}
+	if !terminal {
+		return cloud.ErrConflict
+	}
+	return db.NewExitNodeRepo(p.DB).ClearCloudReinstall(ctx, op)
+}
+
+func validateReinstallTarget(op *cloud.Operation, node exits.Node, instance cloud.Instance) error {
+	pin, err := hex.DecodeString(node.PinnedPeerCertSHA256)
+	if op.ID != op.ExitID || node.ID != op.ID || node.Enabled || node.Address != instance.IP || instance.ID != op.InstanceID ||
+		net.ParseIP(
+			node.Address,
+		) == nil || err != nil || len(pin) != sha256.Size || strings.ToLower(node.PinnedPeerCertSHA256) != node.PinnedPeerCertSHA256 {
+		return errors.New("reinstall target identity mismatch")
 	}
 	return nil
 }

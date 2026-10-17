@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/NikitaDmitryuk/ultra/internal/cloud"
@@ -13,14 +14,43 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 )
 
+func TestReinstallRequiresExactUnpublishedPinnedTarget(t *testing.T) {
+	for _, change := range []string{"none", "published", "address", "pin", "node", "instance", "operation"} {
+		op := cloud.Operation{ID: "op", ExitID: "op", InstanceID: "vm"}
+		node := exits.Node{ID: "op", Address: "192.0.2.2", PinnedPeerCertSHA256: strings.Repeat("ab", 32)}
+		instance := cloud.Instance{ID: "vm", IP: node.Address}
+		switch change {
+		case "published":
+			node.Enabled = true
+		case "address":
+			node.Address = "192.0.2.3"
+		case "pin":
+			node.PinnedPeerCertSHA256 = "bad"
+		case "node":
+			node.ID = "other"
+		case "instance":
+			instance.ID = "other"
+		case "operation":
+			op.ExitID = "other"
+		}
+		if err := validateReinstallTarget(&op, node, instance); (err == nil) != (change == "none") {
+			t.Fatalf("%s: %v", change, err)
+		}
+	}
+}
+
 func TestProvisionedExitPreservesWireTransport(t *testing.T) {
 	bridge := &config.Spec{
-		MimicPreset:   "steamlike",
-		SplithttpPath: "/fixture",
-		XrayWire:      &config.XrayWireSpec{SplithttpMode: "stream-one", SniffingDestOverride: []string{"tls"}},
+		MimicPreset:        "steamlike",
+		TunnelTLSProvision: config.TunnelTLSACME,
+		SplithttpPath:      "/fixture",
+		XrayWire:           &config.XrayWireSpec{SplithttpMode: "stream-one", SniffingDestOverride: []string{"tls"}},
 	}
 	p := &Provisioner{Bridge: bridge}
 	spec := p.exitSpec(exits.Node{Port: 8443, TunnelUUID: "11111111-2222-3333-4444-555555555555"})
+	if spec.TunnelTLSProvision != config.TunnelTLSSelfSigned || bridge.TunnelTLSProvision != config.TunnelTLSACME {
+		t.Fatal("cloud IP exit inherited the static ACME policy or mutated the bridge")
+	}
 	strategy, _ := mimic.New(bridge.MimicPreset)
 	raw, err := config.BuildExitXRayJSON(&spec, strategy, "none")
 	if err != nil {

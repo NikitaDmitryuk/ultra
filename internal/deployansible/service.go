@@ -109,6 +109,23 @@ func (c Client) Ready(ctx context.Context) error {
 	return err
 }
 
+// ConfigurationTerminal reads the durable receipt, including terminal failures
+// whose diagnostic code makes exchange return an error alongside the response.
+func (c Client) ConfigurationTerminal(ctx context.Context, id string) (bool, error) {
+	response, err := c.exchange(ctx, Message{Action: "status", ID: id})
+	switch response.State {
+	case "succeeded", "failed":
+		return true, nil
+	case "queued", "running":
+		return false, err
+	default:
+		if err != nil {
+			return false, err
+		}
+		return false, errors.New("configuration receipt unavailable")
+	}
+}
+
 func (c Client) ConfigureExit(ctx context.Context, id, binary string, request ExitRequest) (Result, error) {
 	response, err := c.exchange(ctx, Message{Action: "submit", ID: id, Binary: binary, Request: &request})
 	if err != nil {

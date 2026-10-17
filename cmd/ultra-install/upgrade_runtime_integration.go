@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strings"
 
@@ -30,7 +31,7 @@ func upgradeRuntimeRequests(
 	if p == nil || p.SourceValues == nil {
 		return nil, errors.New("upgrade_canonical_runtime_required")
 	}
-	if p.Features.MainExitDomain != "" && (len(p.Exits) != 1 || len(inspection.Nodes) != 1) {
+	if p.Features.MainExitDomain != "" && len(p.Exits) != 1 {
 		return nil, errors.New("upgrade_managed_tunnel_single_static_exit_required")
 	}
 	r := runtimeHostRequest{
@@ -72,7 +73,7 @@ func upgradeRuntimeRequests(
 		if !evidenceFound {
 			return nil, errors.New("upgrade_runtime_exit_proof_unavailable")
 		}
-		if p.Features.MainExitDomain != "" && (evidence.Managed || evidence.CertificatePin != "") {
+		if p.Features.MainExitDomain != "" && !evidence.Managed && evidence.CertificatePin != "" {
 			return nil, errors.New("upgrade_managed_tunnel_ca_policy_unverified")
 		}
 		host, ok := hosts[alias].(map[string]any)
@@ -122,7 +123,18 @@ func upgradeRuntimeRequests(
 			CertificatePin:       evidence.CertificatePin,
 		}
 		if name == "" {
+			if p.Features.MainExitDomain != "" {
+				// Additional managed IP exits use their own pinned certificates.
+				// Only the canonical static main participates in the ACME fence.
+				if !evidence.Managed || net.ParseIP(node.Address) == nil || !runtimeHostValidDigest(evidence.CertificatePin) {
+					return nil, errors.New("upgrade_managed_tunnel_ca_policy_unverified")
+				}
+				exitRequest.Features.MainExitDomain = ""
+				exitRequest.Features.GenerateExitTLS = true
+			}
 			exitRequest.Proof.NodeID, exitRequest.Proof.TopologySHA = node.ID, inspection.TopologySHA
+		} else if p.Features.MainExitDomain != "" && evidence.Managed {
+			return nil, errors.New("upgrade_managed_tunnel_ca_policy_unverified")
 		}
 		identity, err := runtimeHostDesiredIdentity(exitRequest)
 		if err != nil {
