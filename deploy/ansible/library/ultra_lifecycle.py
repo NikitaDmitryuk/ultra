@@ -7,8 +7,31 @@ import re
 import json
 import ipaddress
 import shlex
+import time
 import urllib.request
 from pathlib import Path
+
+
+LIFECYCLE_LOCK_RETRY_SECONDS = 120
+LIFECYCLE_LOCK_RETRY_INTERVAL = 1
+INFRASTRUCTURE_BUSY = re.compile(r'(?:^|\n)Ansible lease: infrastructure_busy(?: \([^()\r\n]*\))?(?:\r?\n|$)')
+
+
+def run_lifecycle_transition(run_command, phase, sleep=time.sleep, monotonic=time.monotonic,
+                             retry_seconds=LIFECYCLE_LOCK_RETRY_SECONDS):
+    """Retry only an applying reservation rejected by the shared infrastructure lock."""
+    deadline = monotonic() + retry_seconds
+    while True:
+        code, stdout, stderr = run_command()
+        if code == 0:
+            return True
+        output = (stdout or '') + '\n' + (stderr or '')
+        if phase != 'applying' or not INFRASTRUCTURE_BUSY.search(output):
+            return False
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return None
+        sleep(min(LIFECYCLE_LOCK_RETRY_INTERVAL, remaining))
 
 
 def main():
@@ -33,9 +56,9 @@ def main():
         if module.params['phase'] != 'applying':
             module.fail_json(msg='invalid_resume_phase')
         command.append('--resume-frozen')
-    code, _, _ = module.run_command(command)
-    if code:
-        module.fail_json(msg='lifecycle_transition_failed')
+    result = run_lifecycle_transition(lambda: module.run_command(command), module.params['phase'])
+    if result is not True:
+        module.fail_json(msg='lifecycle_infrastructure_busy' if result is None else 'lifecycle_transition_failed')
     try:
         journal = Path('/var/lib/ultra-ansible/lifecycle.json')
         metadata = journal.lstat()

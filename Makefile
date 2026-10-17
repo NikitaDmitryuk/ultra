@@ -203,6 +203,7 @@ test-ansible:
 	python3 scripts/test-ansible-accepted-resume.py
 	python3 scripts/test-ansible-upgrade-domain.py
 	python3 scripts/test-ansible-runtime-effects.py
+	python3 scripts/test-ansible-lifecycle-retry.py
 	python3 scripts/test-ansible-release-identity.py
 	python3 scripts/test-ansible-upgrade-baseline.py
 	python3 scripts/test-ansible-release-retention.py
