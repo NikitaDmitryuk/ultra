@@ -12,7 +12,9 @@ import urllib.request
 from pathlib import Path
 
 
-LIFECYCLE_LOCK_RETRY_SECONDS = 120
+# Recovery reconciliation may hold the infrastructure lock for its full
+# systemd TimeoutStartSec (540s); leave one minute for scheduling and retry.
+LIFECYCLE_LOCK_RETRY_SECONDS = 600
 LIFECYCLE_LOCK_RETRY_INTERVAL = 1
 INFRASTRUCTURE_BUSY = re.compile(r'(?:^|\n)Ansible lease: infrastructure_busy(?: \([^()\r\n]*\))?(?:\r?\n|$)')
 

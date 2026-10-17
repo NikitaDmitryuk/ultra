@@ -476,7 +476,12 @@ manifest и config, все хеши assets и совпадение собств�
 sidecar-lock рядом с canonical config сериализует выкладки из разных worktree,
 передающих один и тот же `INSTALL_CONFIG`. `RETRY_FAILED=1` включает recovery
 preflight для поддерживаемого retry, но не снимает защиту от повторной отправки
-старого mutator. Для неудачной `--forward-only` операции есть
+старого mutator. При захвате lifecycle reservation повторяется только точный
+ответ `infrastructure_busy` в течение 600 секунд; это покрывает установленный
+540-секундный предел `ultra-recovery-reconcile.service` с минутным запасом.
+Один уже выполняющийся обмен с controller может завершиться ещё до 10 секунд
+после этого окна.
+Для неудачной `--forward-only` операции есть
 отдельный явный `scripts/manual-deploy.py --continue-forward-only --config
 /absolute/path/to/install.config`. Он сохраняет digest исходного production-журнала
 из `forward_journal_sha256`, а журнал неудавшегося кандидата хранит отдельно как
