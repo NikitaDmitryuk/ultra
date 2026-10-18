@@ -611,6 +611,32 @@ def remove_config_key(raw, key):
     return ''.join(lines).encode()
 
 
+def projected_upgrade_config(raw, projection=None):
+    # Bootstrap archives stay on the operator. Legacy operations retain their
+    # original byte identity unless a fresh operation explicitly binds projection.
+    require(projection in (None, 'upgrade-v1'), 'manual_config_projection_invalid')
+    if projection is None:
+        return raw
+    lines = []
+    found = False
+    for line in raw.decode().splitlines(keepends=True):
+        if re.match(r'^\s*DATABASE_DUMP\s*=', line):
+            require(not found, 'duplicate_canonical_release_key')
+            found = True
+            continue
+        lines.append(line)
+    return ''.join(lines).encode()
+
+
+def deployment_config_projection(record, transport, adopt, commit, version):
+    projection = 'upgrade-v1' if transport and not adopt else None
+    if record and record.get('commit') == commit and record.get('version') == version:
+        projection = record.get('config_projection')
+    require(projection in (None, 'upgrade-v1') and
+            (projection is None or (transport and not adopt)), 'manual_config_projection_invalid')
+    return projection
+
+
 def remote_attempt(config, version, allow_legacy_keys=False):
     # Normalize derived release fields to avoid hashing a path that contains
     # this very hash. Corrections to any other canonical input get a new kit.
@@ -672,7 +698,7 @@ def stage_upgrade_baseline(config, version, remote_root):
                            'baseline/operator-journal.json': journal_raw}
 
 
-def completed_baseline_replay(root, config, version, commit):
+def completed_baseline_replay(root, config, version, commit, projection=None):
     """Recover the exact staged bytes for a completed same-commit retry.
 
     The one-time baseline setting is removed from the canonical config after
@@ -697,7 +723,7 @@ def completed_baseline_replay(root, config, version, commit):
         return None
     attempt = release_match[2]
     remote_root = Path(release).parent
-    expected = config_candidate(config, version, remote_root / 'release')
+    expected = config_candidate(projected_upgrade_config(config, projection), version, remote_root / 'release')
     backup_pattern = 'install.config.before-' + version + '-*'
     for backup in sorted(root.glob(backup_pattern)):
         if not re.fullmatch(r'install\.config\.before-' + re.escape(version) + r'-[0-9]+', backup.name):
@@ -705,9 +731,10 @@ def completed_baseline_replay(root, config, version, commit):
         original = private_file(backup)
         if not config_values(original).get('ULTRA_UPGRADE_BASELINE_FILE'):
             continue
-        if remote_attempt(original, version) != attempt:
+        projected = projected_upgrade_config(original, projection)
+        if remote_attempt(projected, version) != attempt:
             continue
-        staged, files = stage_upgrade_baseline(original, version, remote_root)
+        staged, files = stage_upgrade_baseline(projected, version, remote_root)
         if remove_config_key(staged, 'ULTRA_UPGRADE_BASELINE_FILE') == expected:
             return attempt, staged, files
     return None
@@ -1838,9 +1865,11 @@ print(json.dumps({'schema':1,'commit':commit,'version':version,'remote_attempt':
 
 
 def attest_legacy_manual_operation(repo, record, transport, binding, current):
+    projected = projected_upgrade_config(current, record.get('config_projection'))
+
     require(transport and record.get('transport_binding') == binding and
             record.get('config_sha256') == sha(current) and
-            record.get('remote_attempt') == remote_attempt(current, record['version']),
+            record.get('remote_attempt') == remote_attempt(projected, record['version']),
             'manual_legacy_operation_binding_changed')
     old_root = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + record['commit'] + '-' + record['remote_attempt'])
     values = config_values(current)
@@ -1850,7 +1879,7 @@ def attest_legacy_manual_operation(repo, record, transport, binding, current):
     # Reproduce the sole staging transformation without opening a local
     # baseline descriptor/journal or inventing a claim about the old workers.
     baseline = old_root / 'baseline/descriptor.json' if values.get('ULTRA_UPGRADE_BASELINE_FILE') else None
-    expected_sha = sha(config_candidate(current, record['version'], old_root / 'release', baseline))
+    expected_sha = sha(config_candidate(projected, record['version'], old_root / 'release', baseline))
     require('staged_config_sha256' not in record or record['staged_config_sha256'] == expected_sha,
             'manual_legacy_operation_binding_changed')
     command = transport + [shlex.join(['python3', '-I', '-c', REMOTE_LEGACY_ATTEST,
@@ -2158,6 +2187,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     operator_inventory = os.environ.get('ULTRA_OPERATOR_INVENTORY')
     transport, transport_binding = operator_transport(operator_inventory, current) if operator_requested() else (None, None)
     secrets_source = deployment_secrets_source(existing_record, transport, adopt, commit, version)
+    projection = deployment_config_projection(existing_record, transport, adopt, commit, version)
+    staged_current = projected_upgrade_config(current, projection)
     recovery_binding = transport_binding
     recovery_record = existing_record if continue_forward_only else abandoned_record
     needs_legacy_attestation = abandoned_record is not None and 'staged_config_sha256' not in abandoned_record
@@ -2187,8 +2218,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
                 existing_record.get('adopt') is False and existing_record.get('transport_binding') == transport_binding and
                 existing_record.get('manifest_sha256') == sha((root / existing_record['version'] / 'release-manifest.json').read_bytes()) and
                 existing_record.get('config_sha256') == sha(current) and
-                existing_record.get('staged_config_sha256') == sha(current) and
-                existing_record.get('remote_attempt') == remote_attempt(current, existing_record['version']),
+                existing_record.get('staged_config_sha256') == sha(projected_upgrade_config(current, existing_record.get('config_projection'))) and
+                existing_record.get('remote_attempt') == remote_attempt(projected_upgrade_config(current, existing_record.get('config_projection')), existing_record['version']),
                 'manual_forward_continuation_inputs_changed')
         digest = existing_record.get('forward_journal_sha256', '')
         require(isinstance(digest, str) and re.fullmatch('[a-f0-9]{64}', digest),
@@ -2223,28 +2254,28 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         # secrets file. Suppress its output because the plan contains inputs.
         run([str(bundle / ('ultra-install-linux-' + architecture)), 'plan', '--config', str(config), '--format', 'json'],
             repo, 'canonical_policy')
-    replay = completed_baseline_replay(root, current, version, commit) if transport and not forward_only else None
+    replay = completed_baseline_replay(root, current, version, commit, projection) if transport and not forward_only else None
     if transport:
         if replay:
             attempt = replay[0]
         elif forward_only:
-            attempt = remote_attempt(config_candidate(current, version, '/manual-release'), version)
+            attempt = remote_attempt(config_candidate(staged_current, version, '/manual-release'), version)
         else:
-            attempt = remote_attempt(current, version)
+            attempt = remote_attempt(staged_current, version)
     else:
         attempt = None
     remote_release = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + commit + '-' + (attempt or '')) / 'release'
     manifest_sha = sha((bundle / 'release-manifest.json').read_bytes()) if transport else None
     backup = root / ('install.config.before-' + version + '-' + str(time.time_ns()))
     new = config_candidate(current, version, remote_release if transport else bundle)
-    staged_config = new
+    staged_config = projected_upgrade_config(new, projection)
     if same_candidate:
         require(new == current, 'manual_forward_continuation_inputs_changed')
     baseline_files = {}
     if transport and replay:
         staged_config, baseline_files = replay[1], replay[2]
     elif transport and not forward_only:
-        staged_config, baseline_files = stage_upgrade_baseline(current, version, remote_release.parent)
+        staged_config, baseline_files = stage_upgrade_baseline(staged_current, version, remote_release.parent)
     probe_snapshot = root / 'subscription-probe-url'
     binding = root / ('probe-binding-' + commit + '-' + (attempt or sha(new)))
 
@@ -2396,6 +2427,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
                       'transport_binding': transport_binding, 'manifest_sha256': manifest_sha, 'remote_attempt': attempt,
                       'probe_sha256': probe_sha, 'forward_only': bool(forward_only),
                       'forward_journal_sha256': forward_journal_sha, 'secrets_source': secrets_source}
+            if projection is not None:
+                record['config_projection'] = projection
             if continue_forward_only:
                 record['forward_retry_history'] = history.name
                 record['forward_retry_history_sha256'] = sha(private_file(history))

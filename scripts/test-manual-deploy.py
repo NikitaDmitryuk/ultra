@@ -1175,6 +1175,155 @@ class NativeDeploy(unittest.TestCase):
                            ('job.json', json.dumps({'operation': 'adopt', 'request_sha256': D.sha(request)}).encode())]:
             D.atomic_write(self.operator / name, data)
 
+    def test_projected_dump_transport_attestation_uses_frozen_staged_digest(self):
+        self.dump_config()
+        self.failed_forward_fixture()
+        record = json.loads((self.root / 'operation.json').read_bytes())
+        def attest(command, cwd, stage, **kwargs):
+            self.assertEqual(stage, 'legacy_operation_attestation')
+            self.assertEqual(D.shlex.split(command[-1])[-1], record['staged_config_sha256'])
+            return json.dumps(record)
+        with patch.object(D, 'run', side_effect=attest):
+            result = D.attest_legacy_manual_operation(
+                self.repo, record, ['ssh'], record['transport_binding'], self.config.read_bytes())
+        self.assertEqual(result, record)
+
+
+    def test_dump_continuation_to_new_head_projects_new_candidate(self):
+        self.dump_config()
+        old = self.failed_forward_fixture()
+        attest = self.continuation_runner(old)
+        self.new_candidate_fixture()
+        self.rollout(continue_forward_only=True, runner=attest)
+        self.assertNotIn(b'DATABASE_DUMP=', self.stage_mock.call_args.args[3])
+        self.assertIn(b'DATABASE_DUMP=', self.config.read_bytes())
+
+    def test_dump_continuation_from_legacy_to_new_head_keeps_predecessor(self):
+        self.dump_config()
+        with patch.object(D, 'deployment_config_projection', return_value=None):
+            old = self.failed_forward_fixture()
+        frozen = (self.root / 'operation.json').read_bytes()
+        self.assertNotIn('config_projection', json.loads(frozen))
+        attest = self.continuation_runner(old)
+        self.new_candidate_fixture()
+        self.rollout(continue_forward_only=True, runner=attest)
+        self.assertNotIn(b'DATABASE_DUMP=', self.stage_mock.call_args.args[3])
+        history = next(self.root.glob('operation.forward-only-retry-*.json'))
+        self.assertEqual(history.read_bytes(), frozen)
+        self.assertIn(b'DATABASE_DUMP=', self.config.read_bytes())
+
+
+    def dump_config(self):
+        self.original += b'DATABASE_DUMP=/private/operator-only.dump\n'
+        self.config.write_bytes(self.original)
+
+    def test_upgrade_projects_dump_without_changing_canonical_input(self):
+        self.dump_config()
+        self.rollout()
+        staged = self.stage_mock.call_args.args[3]
+        self.assertNotIn(b'DATABASE_DUMP=', staged)
+        self.assertIn(b'DATABASE_DUMP=/private/operator-only.dump\n', self.config.read_bytes())
+        self.assertEqual(next(self.root.glob('install.config.before-*')).read_bytes(), self.original)
+        attempt = D.remote_attempt(staged, self.version)
+        self.assertNotEqual(attempt, D.remote_attempt(self.original, self.version))
+        for stage, command in self.calls:
+            if stage == 'canonical_policy':
+                continue
+            tokens = D.shlex.split(command[-1])
+            self.assertEqual(tokens[8:10], [D.sha(staged), attempt])
+
+    def test_dump_projection_is_upgrade_only_and_rejects_unknown_policy(self):
+        self.dump_config()
+        self.rollout(adopt=True)
+        self.assertIn(b'DATABASE_DUMP=', self.stage_mock.call_args.args[3])
+        self.assertEqual(D.projected_upgrade_config(self.original), self.original)
+        with self.assertRaisesRegex(D.DeployError, 'manual_config_projection_invalid'):
+            D.projected_upgrade_config(self.original, 'future')
+
+    def test_projected_prepared_restart_keeps_exact_staged_identity(self):
+        self.dump_config()
+        def fail(command, cwd, stage, **kwargs):
+            if stage == 'upgrade':
+                raise D.DeployError('fixture_failure')
+        with self.assertRaisesRegex(D.DeployError, 'fixture_failure'):
+            self.rollout(runner=fail)
+        record = json.loads((self.root / 'operation.json').read_bytes())
+        self.assertEqual(record['config_projection'], 'upgrade-v1')
+        staged = self.stage_mock.call_args.args[3]
+        record.update(stage='prepared', mutator_dispatched=False)
+        D.atomic_write(self.root / 'operation.json', json.dumps(record).encode())
+        self.calls.clear()
+        self.rollout()
+        self.assertEqual(self.stage_mock.call_args.args[3], staged)
+
+    def test_legacy_prepared_restart_retains_unprojected_identity(self):
+        self.dump_config()
+        projection = D.deployment_config_projection
+        def legacy(record, transport, adopt, commit, version):
+            return None
+        def fail(command, cwd, stage, **kwargs):
+            if stage == 'upgrade':
+                raise D.DeployError('fixture_failure')
+        with patch.object(D, 'deployment_config_projection', side_effect=legacy):
+            with self.assertRaisesRegex(D.DeployError, 'fixture_failure'):
+                self.rollout(runner=fail)
+        record = json.loads((self.root / 'operation.json').read_bytes())
+        self.assertNotIn('config_projection', record)
+        staged = self.stage_mock.call_args.args[3]
+        record.update(stage='prepared', mutator_dispatched=False)
+        D.atomic_write(self.root / 'operation.json', json.dumps(record).encode())
+        self.rollout()
+        self.assertEqual(self.stage_mock.call_args.args[3], staged)
+        self.assertIn(b'DATABASE_DUMP=', staged)
+
+    def test_projected_dump_forward_continuation_keeps_frozen_candidate(self):
+        self.dump_config()
+        old = self.failed_forward_fixture()
+        record_raw = (self.root / 'operation.json').read_bytes()
+        record = json.loads(record_raw)
+        config = self.config.read_bytes()
+        self.assertNotEqual(record['staged_config_sha256'], D.sha(config))
+        self.rollout(continue_forward_only=True,
+            runner=self.continuation_runner(old, {'prior_candidate': {}, 'operation_absent': True}))
+        self.assertFalse(self.stage_mock.called)
+        self.assertEqual(self.config.read_bytes(), config)
+
+    def test_projection_marker_cannot_be_removed_from_frozen_continuation(self):
+        self.dump_config()
+        old = self.failed_forward_fixture()
+        record = json.loads((self.root / 'operation.json').read_bytes())
+        del record['config_projection']
+        raw = json.dumps(record).encode()
+        D.atomic_write(self.root / 'operation.json', raw)
+        with self.assertRaisesRegex(D.DeployError, 'manual_forward_continuation_inputs_changed'):
+            self.rollout(continue_forward_only=True, runner=self.continuation_runner(old))
+        self.assertEqual((self.root / 'operation.json').read_bytes(), raw)
+        self.assertFalse(self.stage_mock.called)
+
+    def test_dump_baseline_replay_binds_projection_and_preserves_backup(self):
+        self.dump_config()
+        configured = self.original + b'ULTRA_UPGRADE_BASELINE_FILE=/private/baseline.json\n'
+        projected = D.projected_upgrade_config(configured, 'upgrade-v1')
+        attempt = D.remote_attempt(projected, self.version)
+        remote_root = Path('/var/lib/ultra-ansible/operator-inputs/manual-' + self.commit + '-' + attempt)
+        installed = D.config_candidate(configured, self.version, remote_root / 'release')
+        completed = D.remove_config_key(installed, 'ULTRA_UPGRADE_BASELINE_FILE')
+        backup = self.root / ('install.config.before-' + self.version + '-1')
+        D.atomic_write(backup, configured)
+        def stage(raw, version, root):
+            self.assertNotIn(b'DATABASE_DUMP=', raw)
+            return D.config_candidate(raw, version, root / 'release', root / 'baseline/descriptor.json'), {}
+        with patch.object(D, 'stage_upgrade_baseline', side_effect=stage):
+            replay = D.completed_baseline_replay(self.root, completed, self.version, self.commit, 'upgrade-v1')
+        self.assertEqual(replay[0], attempt)
+        self.assertNotIn(b'DATABASE_DUMP=', replay[1])
+        self.assertEqual(backup.read_bytes(), configured)
+        self.assertIsNone(D.completed_baseline_replay(self.root, completed, self.version, self.commit))
+        with patch.object(D, 'stage_upgrade_baseline', side_effect=stage):
+            self.assertIsNone(D.completed_baseline_replay(
+                self.root, completed + b'OTHER_POLICY=changed\n', self.version, self.commit, 'upgrade-v1'))
+
+
     def test_native_contract_and_server_canonical_path(self):
         self.rollout(adopt=True)
         expected = '/var/lib/ultra-ansible/operator-inputs/manual-' + self.commit + '-' + D.remote_attempt(self.original, self.version) + '/release'
