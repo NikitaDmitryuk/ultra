@@ -1640,7 +1640,7 @@ elif mode=='stage':
     try:
         (pending/'release').mkdir(mode=0o700)
         seen=set();rows=None;total=0
-        with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:
+        with tarfile.open(fileobj=sys.stdin.buffer,mode='r|*') as archive:
             for member in archive:
                 name=member.name
                 need(member.isfile() and name not in seen)
@@ -1798,7 +1798,7 @@ def remote_command(transport, commit, version, manifest_sha, config_sha, attempt
 def stage_remote(repo, root, bundle, config, transport, commit, version, manifest_sha, extra_files=None):
     # A bounded on-disk stream avoids keeping release binaries in memory.
     with tempfile.TemporaryFile(dir=root) as stream:
-        with tarfile.open(fileobj=stream, mode='w|') as archive:
+        with tarfile.open(fileobj=stream, mode='w|gz') as archive:
             manifest = (bundle / 'release-manifest.json').read_bytes()
             require(sha(manifest) == manifest_sha, 'candidate_manifest_changed')
             for name in ['release-manifest.json'] + [row['name'] for row in json.loads(manifest)['assets']]:
@@ -1814,11 +1814,15 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
                 archive.addfile(entry, io.BytesIO(data))
         stream.seek(0)
         attempt = remote_attempt(config, version)
-        result = subprocess.run(remote_command(transport, commit, version, manifest_sha, sha(config), attempt, 'stage',
-                                              (extra_files or {}).get('subscription-probe.sha256', b'').decode(),
-                                              sha((extra_files or {}).get('forward-operation.json', b'')) if (extra_files or {}).get('forward-operation.json') else '',
-                                              sha((extra_files or {}).get('forward-prior-operation.json', b'')) if (extra_files or {}).get('forward-prior-operation.json') else ''),
-                                cwd=repo, stdin=stream, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+        try:
+            result = subprocess.run(remote_command(transport, commit, version, manifest_sha, sha(config), attempt, 'stage',
+                                                  (extra_files or {}).get('subscription-probe.sha256', b'').decode(),
+                                                  sha((extra_files or {}).get('forward-operation.json', b'')) if (extra_files or {}).get('forward-operation.json') else '',
+                                                  sha((extra_files or {}).get('forward-prior-operation.json', b'')) if (extra_files or {}).get('forward-prior-operation.json') else ''),
+                                    cwd=repo, stdin=stream, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    check=False, timeout=1800)
+        except subprocess.TimeoutExpired:
+            raise DeployError('bridge_staging_timeout') from None
     require(result.returncode == 0, 'bridge_staging_failed')
     receipt = json.loads(result.stdout)
     require(receipt.get('architecture') in ['amd64', 'arm64'] and receipt.get('manifest_sha256') == manifest_sha

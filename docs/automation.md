@@ -420,6 +420,11 @@ ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \
 ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 ```
 
+Build candidate выполняется в отдельном checkout и использует принадлежащий этому
+checkout Go cache; операторский `GOCACHE` не наследуется. Release передаётся bridge
+сжатым потоковым tar, staging ограничен 30 минутами и завершается ошибкой
+`bridge_staging_timeout` без запуска upgrade, если bridge не вернул receipt.
+
 Для обновления установленного bridge staged `doctor` и `operator-upgrade` используют
 явный `--secrets-source=installed-runtime`. Режим разрешён только root после проверки
 установленной идентичности bridge. Bot token берётся из `/etc/ultra-relay/bot.env`,

@@ -837,10 +837,11 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
         extras = {'baseline/descriptor.json': b'{"schema":1}',
                   'baseline/operator-journal.json': b'{"schema":1}'}
         def process(command, **kwargs):
-            with tarfile.open(fileobj=kwargs['stdin'], mode='r|') as archive:
+            with tarfile.open(fileobj=kwargs['stdin'], mode='r|*') as archive:
                 members = [(member.name, archive.extractfile(member).read()) for member in archive]
             self.assertEqual([name for name, _ in members], ['release/release-manifest.json', 'release/fixture',
                 'install.config', 'baseline/descriptor.json', 'baseline/operator-journal.json'])
+            self.assertEqual(kwargs['timeout'], 1800)
             return subprocess.CompletedProcess(command, 0, json.dumps({'architecture': 'arm64',
                 'manifest_sha256': D.sha(raw_manifest), 'config_sha256': D.sha(config),
                 'attempt': D.remote_attempt(config, self.version)}).encode())
@@ -2208,12 +2209,13 @@ class NativeDeploy(unittest.TestCase):
             return real_read(path)
         def process(command, **kwargs):
             stream = kwargs['stdin']
-            with tarfile.open(fileobj=stream, mode='r|') as archive:
+            with tarfile.open(fileobj=stream, mode='r|*') as archive:
                 members = [(member.name, archive.extractfile(member).read()) for member in archive]
             self.assertEqual(members, [('release/release-manifest.json', raw_manifest),
                                       ('release/fixture', b'fixture'), ('install.config', self.original)])
             self.assertEqual(D.shlex.split(command[-1])[4], 'stage')
             self.assertEqual(kwargs['stderr'], subprocess.DEVNULL)
+            self.assertEqual(kwargs['timeout'], 1800)
             return subprocess.CompletedProcess(command, 0, json.dumps({'architecture': 'arm64',
                 'manifest_sha256': D.sha(raw_manifest), 'config_sha256': D.sha(self.original),
                 'attempt': D.remote_attempt(self.original, self.version)}).encode())
@@ -2221,6 +2223,27 @@ class NativeDeploy(unittest.TestCase):
             architecture = D.stage_remote(self.repo, self.root, self.bundle, self.original,
                 ['ssh', '-F', '/dev/null', 'root@192.0.2.10'], self.commit, self.version, D.sha(raw_manifest))
         self.assertEqual(architecture['architecture'], 'arm64')
+
+    def test_native_staging_timeout_is_bounded_and_reported(self):
+        manifest = {'source_commit': self.commit, 'version': self.version,
+                    'assets': [{'name': 'fixture', 'sha256': D.sha(b'fixture'), 'size': 7}]}
+        raw_manifest = json.dumps(manifest).encode()
+        (self.bundle / 'release-manifest.json').write_bytes(raw_manifest)
+        (self.bundle / 'fixture').write_bytes(b'fixture')
+        def timeout(command, **kwargs):
+            self.assertEqual(kwargs['timeout'], 1800)
+            raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+        fake_subprocess = type('Subprocess', (), {'run': staticmethod(timeout),
+            'TimeoutExpired': subprocess.TimeoutExpired, 'PIPE': subprocess.PIPE,
+            'DEVNULL': subprocess.DEVNULL})
+        self.stage.stop()
+        try:
+            with patch.object(D, 'subprocess', fake_subprocess):
+                with self.assertRaisesRegex(D.DeployError, '^bridge_staging_timeout$'):
+                    D.stage_remote(self.repo, self.root, self.bundle, self.original,
+                        ['ssh', '-F', '/dev/null', 'root@192.0.2.10'], self.commit, self.version, D.sha(raw_manifest))
+        finally:
+            self.stage.start()
 
     def test_native_canonical_route_survives_deleted_adopt_directory(self):
         shutil.rmtree(self.operator.parent)
