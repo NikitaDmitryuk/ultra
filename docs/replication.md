@@ -20,8 +20,9 @@ Mini App получает `/api/cloud/replicas` через администра�
 `reachable` и `observed_role` показывают результат SQL-проверки через пул
 приложения; это не отдельная проверка SSH-доступности физического хоста.
 Старые runtime spec без `primary_host` возвращают `null`, пока metadata не
-появится при следующем render/runtime projection. Это metadata backfill не меняет
-legacy fingerprint установленной runtime identity; требуемый физический адрес по-прежнему
+появится при следующем render/runtime projection. `primary_host` исключён из нового
+fingerprint runtime identity как metadata-only поле; сохранённые fingerprints старого
+формата принимаются по прежнему алгоритму. Требуемый физический адрес по-прежнему
 закреплён в attested desired identity и сверяется с recovery metadata.
 
 Ansible PostgreSQL bootstrap устанавливает в прикладной БД функцию

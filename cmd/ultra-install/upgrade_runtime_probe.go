@@ -267,8 +267,7 @@ func inspectRuntimeHostLocked(s runtimeHostStore, in runtimeProbeInput) (runtime
 	if err != nil || !specImage.Exists {
 		return runtimeProbeResult{}, runtimeHostError("file_unavailable")
 	}
-	installed, err := runtimeHostInstalledIdentity(specImage.Data)
-	if err != nil {
+	if _, err := runtimeHostInstalledIdentity(specImage.Data); err != nil {
 		return runtimeProbeResult{}, err
 	}
 	att, err := s.image(s.path(runtimeHostIdentityFile))
@@ -288,7 +287,7 @@ func inspectRuntimeHostLocked(s runtimeHostStore, in runtimeProbeInput) (runtime
 	if err != nil {
 		return runtimeProbeResult{}, err
 	}
-	if baseline.DesiredIdentity != desired || baseline.RuntimeIdentity != installed {
+	if baseline.DesiredIdentity != desired || !runtimeHostInstalledIdentityMatches(baseline.RuntimeIdentity, specImage.Data) {
 		return runtimeProbeResult{}, runtimeHostError("migration_required")
 	}
 	p := &installplan.InstallPlan{

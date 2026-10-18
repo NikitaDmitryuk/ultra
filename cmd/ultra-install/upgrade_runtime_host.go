@@ -136,6 +136,25 @@ func runtimeHostDesiredIdentity(r runtimeHostRequest) (string, error) {
 	return identity, nil
 }
 func runtimeHostInstalledIdentity(raw []byte) (string, error) {
+	return runtimeHostInstalledIdentityFor(raw, true)
+}
+
+// runtimeHostLegacyInstalledIdentity matches attestations written before the
+// deployment metadata field primary_host was excluded from runtime identity.
+func runtimeHostLegacyInstalledIdentity(raw []byte) (string, error) {
+	return runtimeHostInstalledIdentityFor(raw, false)
+}
+
+func runtimeHostInstalledIdentityMatches(expected string, raw []byte) bool {
+	current, err := runtimeHostInstalledIdentity(raw)
+	if err == nil && current == expected {
+		return true
+	}
+	legacy, err := runtimeHostLegacyInstalledIdentity(raw)
+	return err == nil && legacy == expected
+}
+
+func runtimeHostInstalledIdentityFor(raw []byte, omitPrimaryHost bool) (string, error) {
 	var doc map[string]json.RawMessage
 	if json.Unmarshal(raw, &doc) != nil || doc == nil {
 		return "", runtimeHostError("identity_uncertain")
@@ -143,6 +162,14 @@ func runtimeHostInstalledIdentity(raw []byte) (string, error) {
 	identity := map[string]json.RawMessage{}
 	for _, key := range []string{"role", "reality", "database"} {
 		identity[key] = doc[key]
+	}
+	if omitPrimaryHost && len(doc["database"]) > 0 && string(doc["database"]) != "null" {
+		var database map[string]json.RawMessage
+		if json.Unmarshal(doc["database"], &database) != nil || database == nil {
+			return "", runtimeHostError("identity_uncertain")
+		}
+		delete(database, "primary_host")
+		identity["database"], _ = json.Marshal(database)
 	}
 	var reality map[string]json.RawMessage
 	if len(doc["reality"]) > 0 {
@@ -169,37 +196,6 @@ func runtimeHostInstalledIdentity(raw []byte) (string, error) {
 		}
 	}
 	return runtimeHostDigest(identity), nil
-}
-
-// runtimeHostPrimaryHostBackfillOnly accepts the documented metadata backfill
-// without changing hashes used by already-installed attestations.
-func runtimeHostPrimaryHostBackfillOnly(before, candidate []byte, expected string) bool {
-	if expected == "" {
-		return false
-	}
-	var beforeDoc, candidateDoc map[string]json.RawMessage
-	var beforeDB, candidateDB map[string]json.RawMessage
-	if json.Unmarshal(before, &beforeDoc) != nil || json.Unmarshal(candidate, &candidateDoc) != nil ||
-		json.Unmarshal(beforeDoc["database"], &beforeDB) != nil || json.Unmarshal(candidateDoc["database"], &candidateDB) != nil ||
-		beforeDB == nil || candidateDB == nil {
-		return false
-	}
-	if _, exists := beforeDB["primary_host"]; exists {
-		return false
-	}
-	var actual string
-	if json.Unmarshal(candidateDB["primary_host"], &actual) != nil || actual != expected {
-		return false
-	}
-	delete(candidateDB, "primary_host")
-	candidateDoc["database"], _ = json.Marshal(candidateDB)
-	normalized, err := json.Marshal(candidateDoc)
-	if err != nil {
-		return false
-	}
-	beforeIdentity, beforeErr := runtimeHostInstalledIdentity(before)
-	candidateIdentity, candidateErr := runtimeHostInstalledIdentity(normalized)
-	return beforeErr == nil && candidateErr == nil && beforeIdentity == candidateIdentity
 }
 func (s runtimeHostStore) trustedParent(path string) error {
 	for p := filepath.Dir(path); ; p = filepath.Dir(p) {
@@ -411,7 +407,7 @@ func (s runtimeHostStore) prepare(r runtimeHostRequest) (runtimeHostResult, erro
 			return runtimeHostResult{}, runtimeHostError("file_unavailable")
 		}
 		installed, err := runtimeHostInstalledIdentity(j.Before[0].Data)
-		if err != nil || installed != baseline.RuntimeIdentity {
+		if err != nil || !runtimeHostInstalledIdentityMatches(baseline.RuntimeIdentity, j.Before[0].Data) {
 			return runtimeHostResult{}, runtimeHostError("migration_required")
 		}
 		p := &installplan.InstallPlan{
@@ -441,8 +437,7 @@ func (s runtimeHostStore) prepare(r runtimeHostRequest) (runtimeHostResult, erro
 			return runtimeHostResult{}, runtimeHostError("projection_failed")
 		}
 		afterIdentity, err := runtimeHostInstalledIdentity(projected.SpecJSON)
-		if err != nil || (afterIdentity != installed &&
-			!runtimeHostPrimaryHostBackfillOnly(j.Before[0].Data, projected.SpecJSON, r.Database.PrimaryHost)) {
+		if err != nil || afterIdentity != installed {
 			return runtimeHostResult{}, runtimeHostError("migration_required")
 		}
 		j.Candidate = append(j.Candidate, j.Before...)

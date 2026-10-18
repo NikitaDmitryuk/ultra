@@ -254,9 +254,42 @@ func TestRuntimeHostFirstManagedBridgeUpgrade(t *testing.T) {
 	if err != nil || json.Unmarshal(raw, &projected) != nil || projected.Database.PrimaryHost != r.Database.PrimaryHost {
 		t.Fatal("legacy spec did not receive attested database host")
 	}
-	if !runtimeHostPrimaryHostBackfillOnly(legacySpec, raw, r.Database.PrimaryHost) {
-		t.Fatal("attested database host backfill changed runtime identity")
+	legacySpecIdentity, err := runtimeHostInstalledIdentity(legacySpec)
+	if err != nil {
+		t.Fatal(err)
 	}
+	backfilledIdentity, err := runtimeHostInstalledIdentity(raw)
+	if err != nil || backfilledIdentity != legacySpecIdentity {
+		t.Fatal("attested database host backfill changed normalized runtime identity")
+	}
+	legacyIdentity, err := runtimeHostLegacyInstalledIdentity(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalizedIdentity, err := runtimeHostInstalledIdentity(raw)
+	if err != nil || normalizedIdentity == legacyIdentity ||
+		!runtimeHostInstalledIdentityMatches(legacyIdentity, raw) {
+		t.Fatal("legacy full database fingerprint was not accepted")
+	}
+	var baseline runtimeHostAttestation
+	attestation, err := os.ReadFile(s.path(runtimeHostIdentityFile))
+	if err != nil || json.Unmarshal(attestation, &baseline) != nil {
+		t.Fatal("runtime identity attestation unavailable")
+	}
+	baseline.RuntimeIdentity = legacyIdentity
+	attestation, _ = json.Marshal(baseline)
+	if err := os.WriteFile(s.path(runtimeHostIdentityFile), attestation, 0600); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := inspectRuntimeHost(s, runtimeProbeInput{Request: r})
+	if err != nil || !probe.Verified {
+		t.Fatalf("legacy attestation after backfill: %+v %v", probe, err)
+	}
+	r.Transaction = "test-2"
+	if _, err := s.prepare(r); err != nil {
+		t.Fatalf("new transaction after metadata backfill: %v", err)
+	}
+	r.Transaction = "test-1"
 	if _, err := s.transition(r.Transaction, true); err != nil {
 		t.Fatal(err)
 	}
