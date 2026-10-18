@@ -1705,6 +1705,11 @@ elif mode=='stage':
         if prior_journal_sha: expected.add('forward-prior-operation.json')
         need(rows is not None and seen==expected)
         verify(pending)
+        architecture={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine())
+        need(platform.system()=='Linux' and architecture)
+        executable=pending/'release'/('ultra-install-linux-'+architecture)
+        executable.chmod(0o700)
+        descriptor=os.open(executable,os.O_RDONLY|os.O_NOFOLLOW);os.fsync(descriptor);os.close(descriptor)
         for directory in [pending/'release',pending]:
             fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
         if root.exists() or root.is_symlink():
@@ -1719,13 +1724,17 @@ elif mode=='stage':
                 fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
             else:
                 verify(root)
+            executable=root/'release'/('ultra-install-linux-'+architecture)
+            executable.chmod(0o700)
+            descriptor=os.open(executable,os.O_RDONLY|os.O_NOFOLLOW);os.fsync(descriptor);os.close(descriptor)
+            for directory in [root/'release',root]:
+                fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
             if probe_sha and not (root/'subscription-probe-url').exists():
                 os.rename(pending/'subscription-probe-url',root/'subscription-probe-url')
                 fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
         else:
             os.rename(pending,root)
             fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
-        architecture={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine());need(platform.system()=='Linux' and architecture)
         print(json.dumps({'architecture':architecture,'manifest_sha256':manifest_sha,'config_sha256':config_sha,'attempt':attempt,
                           'forward_prior_journal_sha256':prior_journal_sha}))
     finally:

@@ -3199,6 +3199,8 @@ class RemoteProgram(unittest.TestCase):
         self.assertEqual(set(p.name for p in self.root.iterdir()), {'release', 'install.config'})
         self.assertEqual((self.root / 'install.config').read_bytes(), self.config)
         self.assertEqual(json.loads(staged.stdout)['architecture'], self.architecture)
+        executable = self.root / 'release' / ('ultra-install-linux-' + self.architecture)
+        self.assertEqual(executable.stat().st_mode & 0o777, 0o700)
         for action, expected in [('doctor', ['doctor']), ('adoption_check', ['adopt', '--adopt-runtime', '--bridge-native', '--check']),
                                  ('adoption_apply', ['apply', '--adopt-runtime', '--bridge-native']),
                                  ('upgrade', ['operator-upgrade', '--release-dir', str(self.root / 'release'),
