@@ -16,11 +16,23 @@ func ValidatePlan(p *InstallPlan) error {
 	return validatePlan(p, false)
 }
 
+// ValidateBootstrapPlan rejects lifecycle projections even when explicit budgets
+// would otherwise let their serialized form pass ordinary plan validation.
+func ValidateBootstrapPlan(p *InstallPlan) error {
+	if p != nil && p.LifecycleOnly {
+		return errors.New("lifecycle plan cannot be used for bootstrap or apply")
+	}
+	return ValidatePlan(p)
+}
+
 // localProjection is private to host-local runtime projection. Its historical
 // v1 in-process data shape carries no deployment policy and is never an install.
 func validatePlan(p *InstallPlan, localProjection bool) error {
 	if p == nil {
 		return errors.New("install plan is nil")
+	}
+	if p.LifecycleOnly && (p.Secrets.DatabaseDumpFile != "" || p.Secrets.DatabaseDumpSHA256 != "" || p.SourceValues["DATABASE_DUMP"] != "") {
+		return errors.New("lifecycle plan must not contain bootstrap archive inputs")
 	}
 	if p.AdoptRuntime && (!p.FullAutomation() || !p.Bridge.ReuseSpec) {
 		return errors.New("runtime adoption requires schema 2 and an existing bridge")

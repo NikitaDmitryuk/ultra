@@ -21,6 +21,15 @@ func LoadConfig(path string) (*InstallPlan, error) {
 	return LoadLegacyEnvConfig(path)
 }
 
+// LoadLifecycleConfig does not inspect operator-local bootstrap archives.
+func LoadLifecycleConfig(path string) (*InstallPlan, error) {
+	values, err := parseLegacyEnvFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return CanonicalLifecycleValuesToPlan(values)
+}
+
 func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 	sshUser := valueDefault(v, "SSH_USER", "root")
 	bridgeAddress := v["BRIDGE_IP"]

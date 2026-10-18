@@ -16,6 +16,7 @@ import (
 )
 
 func applyPlanN(p *installplan.InstallPlan, format string) {
+	exitOnErr("bootstrap plan", installplan.ValidateBootstrapPlan(p))
 	if p.Secrets.DatabaseDumpFile != "" {
 		exitOnErr("local database dump preflight", installplan.VerifyDatabaseDump(p.Secrets.DatabaseDumpFile, p.Secrets.DatabaseDumpSHA256))
 	}
@@ -114,6 +115,7 @@ func applyPlanN(p *installplan.InstallPlan, format string) {
 }
 
 func applyRemotePlan(p *installplan.InstallPlan, releaseDir string, format string) {
+	exitOnErr("remote bootstrap plan", installplan.ValidateBootstrapPlan(p))
 	if releaseDir == "" {
 		releaseDir = "/opt/ultra/current"
 	}

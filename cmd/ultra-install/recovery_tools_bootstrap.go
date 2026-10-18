@@ -43,7 +43,7 @@ func runRecoveryToolsBootstrapCommand(args []string) {
 		exitOnErr("recovery bootstrap", errors.New("bootstrap_exact_candidate_and_manual_exclusion_required"))
 		return
 	}
-	p := readDeploymentOrExit("", *config)
+	p := readLifecycleDeploymentOrExit("", *config)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	exitOnErr(

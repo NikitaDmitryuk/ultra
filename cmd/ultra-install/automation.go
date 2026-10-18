@@ -33,15 +33,20 @@ func runAutomationCommand(action string, args []string) {
 	python := fs.String("python", "/usr/bin/python3", "controller Python")
 	ansible := fs.String("ansible-playbook", "", "pinned Ansible executable; otherwise resolve exact release runtime")
 	secretsSource := fs.String("secrets-source", "canonical", "canonical or installed-runtime secret inputs (upgrade only)")
+	lifecycle := fs.Bool("lifecycle", false, "explicit existing-deployment context (upgrade/status only)")
 	_ = fs.Parse(args)
 	if fs.NArg() > 0 {
 		exitOnErr("upgrade arguments", errors.New("positional arguments are not supported"))
 		return
 	}
+	if *lifecycle && action != "upgrade" && action != "status" {
+		exitOnErr("lifecycle arguments", errors.New("lifecycle context requires upgrade or status"))
+		return
+	}
 	if action == "upgrade" && *plan == "" && *configPath == "" {
 		*configPath = "install.config"
 	}
-	p := readDeploymentOrExit(*plan, *configPath)
+	p := readDeploymentForOperationOrExit(*plan, *configPath, action == "upgrade" || action == "status")
 	if action != "upgrade" && *secretsSource != "canonical" {
 		exitOnErr("secrets source", errors.New("secrets_source_upgrade_required"))
 		return
@@ -144,6 +149,7 @@ func runOperatorUpgradeCommand(args []string) {
 	python := fs.String("python", "/usr/bin/python3", "controller Python")
 	ansible := fs.String("ansible-playbook", "", "pinned Ansible executable; otherwise resolve exact release runtime")
 	secretsSource := fs.String("secrets-source", "canonical", "canonical or installed-runtime secret inputs")
+	_ = fs.Bool("lifecycle", false, "explicit existing-deployment context; operator upgrade is always lifecycle-only")
 	_ = fs.Parse(args)
 	if fs.NArg() > 0 || *configPath == "" || *releaseDir == "" || *version == "" ||
 		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(*sourceCommit) ||
@@ -165,7 +171,7 @@ func runOperatorUpgradeCommand(args []string) {
 		exitOnErr("operator upgrade config verification", errors.New("canonical config digest mismatch"))
 		return
 	}
-	p := readDeploymentOrExit("", *configPath)
+	p := readLifecycleDeploymentOrExit("", *configPath)
 	exitOnErr("operator upgrade secrets", selectPlanSecrets(p, *secretsSource))
 	if p.Automation == nil || p.Automation.Version != *version {
 		exitOnErr("operator upgrade config verification", errors.New("candidate version does not match canonical config"))

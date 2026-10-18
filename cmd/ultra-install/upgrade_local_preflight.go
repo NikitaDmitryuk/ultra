@@ -115,7 +115,7 @@ func runLocalPreflightProof(args []string) {
 		fail(errors.New("local_preflight_config_changed"))
 		return
 	}
-	p, err := installplan.LoadConfig(*config)
+	p, err := installplan.LoadLifecycleConfig(*config)
 	fail(err)
 	fail(installplan.ValidatePlan(p))
 	if p.Automation == nil || p.Automation.ReleaseDir != *release {

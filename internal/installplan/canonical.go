@@ -111,6 +111,38 @@ func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 	return p, nil
 }
 
+// CanonicalLifecycleValuesToPlan projects an existing deployment's configuration.
+// A bootstrap dump is never opened or carried into lifecycle plans or requests.
+func CanonicalLifecycleValuesToPlan(v map[string]string) (*InstallPlan, error) {
+	values := make(map[string]string, len(v))
+	for key, value := range v {
+		if key != "DATABASE_DUMP" {
+			values[key] = value
+		}
+	}
+	p, err := CanonicalValuesToPlan(values)
+	if err != nil {
+		return nil, err
+	}
+	return LifecycleProjection(p), nil
+}
+
+// LifecycleProjection carries validation context across serialized lifecycle
+// plans while dropping every bootstrap archive reference, including source data.
+func LifecycleProjection(p *InstallPlan) *InstallPlan {
+	projected := *p
+	projected.LifecycleOnly = true
+	projected.Secrets.DatabaseDumpFile = ""
+	projected.Secrets.DatabaseDumpSHA256 = ""
+	projected.SourceValues = make(map[string]string, len(p.SourceValues))
+	for key, value := range p.SourceValues {
+		if key != "DATABASE_DUMP" {
+			projected.SourceValues[key] = value
+		}
+	}
+	return &projected
+}
+
 // AdoptionPreparationValuesToPlan reads only the role inputs for read-only
 // adoption preparation. Its schema 2 envelope deliberately omits automation and
 // cannot pass ValidatePlan; server-derived policy must produce a complete plan.

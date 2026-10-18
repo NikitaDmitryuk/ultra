@@ -96,7 +96,7 @@ func discoverForwardOldOperation(proof forwardUpgradeJournal, stateRoot string) 
 	if err != nil || digestSHA256(configRaw) != journal.ConfigSHA {
 		return result, fail
 	}
-	plan, err := installplan.LoadConfig(config)
+	plan, err := installplan.LoadLifecycleConfig(config)
 	if err == nil {
 		err = bindVerificationSecretsSource(plan, string(journal.SecretsSource))
 	}

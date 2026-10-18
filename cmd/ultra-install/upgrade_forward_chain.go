@@ -835,7 +835,7 @@ func verifyForwardPostHandoffCandidate(
 	if err != nil || digestSHA256(configRaw) != journal.ConfigSHA {
 		return fail
 	}
-	plan, err := installplan.LoadConfig(config)
+	plan, err := installplan.LoadLifecycleConfig(config)
 	if err == nil {
 		err = bindVerificationSecretsSource(plan, string(journal.SecretsSource))
 	}

@@ -1708,18 +1708,21 @@ elif mode=='run':
     verify(root)
     architecture=sys.argv[7];need(architecture in ['amd64','arm64'])
     need(architecture=={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine()))
-    action=sys.argv[8];need(action in ['doctor','adoption_check','adoption_apply','upgrade','operator-upgrade','status'])
+    action=sys.argv[8];need(action in ['doctor','adoption_check','adoption_apply','upgrade','operator-upgrade','status',
+        'lifecycle_doctor','lifecycle_upgrade','lifecycle_status'])
+    lifecycle=action.startswith('lifecycle_')
+    base_action=action[len('lifecycle_'):] if lifecycle else action
     retry_failed=len(sys.argv)>9 and sys.argv[9]=='1'
     forward_only=len(sys.argv)>10 and sys.argv[10]=='1'
     continuation=len(sys.argv)>13 and sys.argv[13]=='1'
     need((len(sys.argv)<=14 or (len(sys.argv) in [17,28] and bool(prior_journal_sha))) and
          (len(sys.argv)<=13 or sys.argv[13] in ['0','1']) and
-         (not continuation or (forward_only and action=='upgrade' and
+         (not continuation or (forward_only and base_action=='upgrade' and
           ((bool(prior_journal_sha) and len(sys.argv) in [17,28]) or (not prior_journal_sha and len(sys.argv)==14)))) and
          (len(sys.argv)<=9 or sys.argv[9] in ['0','1']) and
          (len(sys.argv)<=10 or sys.argv[10] in ['0','1']) and
-         (not forward_only or (action=='upgrade' and not retry_failed and bool(forward_journal_sha))) and
-         (not prior_journal_sha or (action in ['doctor','upgrade','status'] and len(sys.argv) in [17,28] and
+         (not forward_only or (base_action=='upgrade' and not retry_failed and bool(forward_journal_sha))) and
+         (not prior_journal_sha or (base_action in ['doctor','upgrade','status'] and len(sys.argv) in [17,28] and
           sys.argv[14]==str(parent.parent/('upgrade-'+json.loads(read(root/'forward-prior-operation.json')).get('version',''))) and
           sys.argv[15]==str(root/'forward-prior-operation.json'))),
          'manual_forward_only_invalid')
@@ -1731,15 +1734,16 @@ elif mode=='run':
           'upgrade':['operator-upgrade','--release-dir',str(root/'release'),
               '--source-commit',commit,'--version',version,'--manifest-sha256',manifest_sha,
               '--config-sha256',config_sha] + (['--retry-failed'] if retry_failed else []),
-          'status':['status']}[action]
+          'status':['status']}[base_action]
+    if lifecycle: args.append('--lifecycle')
     if (root/'secrets-source.json').exists():
-        need(action in ['doctor','upgrade','status'], 'manual_secrets_source_action_invalid')
-        if action in ['doctor','upgrade']: args += ['--secrets-source','installed-runtime']
-    if action=='upgrade' and forward_only:
+        need(base_action in ['doctor','upgrade','status'], 'manual_secrets_source_action_invalid')
+        if base_action in ['doctor','upgrade']: args += ['--secrets-source','installed-runtime']
+    if base_action=='upgrade' and forward_only:
         args += ['--job-dir', '/var/lib/ultra-ansible/upgrade-'+version,
                  '--forward-only', '--forward-journal-file', str(root/'forward-operation.json'),
                  '--forward-journal-sha256', forward_journal_sha]
-    if action=='upgrade' and prior_journal_sha:
+    if base_action=='upgrade' and prior_journal_sha:
         need(len(sys.argv)>15 and sys.argv[15]==str(root/'forward-prior-operation.json'))
         prior=json.loads(read(root/'forward-prior-operation.json'))
         prior_version=prior.get('version','')
@@ -1749,7 +1753,7 @@ elif mode=='run':
         args += ['--forward-prior-candidate',sys.argv[14],
                  '--forward-prior-journal-file',str(root/'forward-prior-operation.json'),
                  '--forward-prior-journal-sha256',prior_journal_sha]
-    if action=='upgrade' and probe_sha:
+    if base_action=='upgrade' and probe_sha:
         need((root/'subscription-probe-url').exists())
         args += ['--subscription-probe-url-file',str(root/'subscription-probe-url')]
     os.chdir(root)
@@ -2252,7 +2256,10 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     if transport:
         # plan only parses/validates policy; unlike doctor it never opens the
         # secrets file. Suppress its output because the plan contains inputs.
-        run([str(bundle / ('ultra-install-linux-' + architecture)), 'plan', '--config', str(config), '--format', 'json'],
+        plan_command = [str(bundle / ('ultra-install-linux-' + architecture)), 'plan', '--config', str(config), '--format', 'json']
+        if projection == 'upgrade-v1':
+            plan_command.append('--lifecycle')
+        run(plan_command,
             repo, 'canonical_policy')
     replay = completed_baseline_replay(root, current, version, commit, projection) if transport and not forward_only else None
     if transport:
@@ -2447,7 +2454,10 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         else:
             atomic_write(binding, probe_sha.encode())
         installer = str(bundle / ('ultra-install-linux-' + architecture))
-        commands = [('doctor', [installer, 'doctor', '--config', str(config)])]
+        doctor_command = [installer, 'doctor', '--config', str(config)]
+        if projection == 'upgrade-v1':
+            doctor_command.append('--lifecycle')
+        commands = [('doctor', doctor_command)]
         if adopt:
             commands += [('adoption_check', [installer, 'adopt', '--config', str(config), '--release-dir', str(bundle), '--adopt-runtime', '--check']),
                          ('adoption_apply', [installer, 'apply', '--config', str(config), '--adopt-runtime'])]
@@ -2455,14 +2465,15 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             commands += [('upgrade', [installer, 'operator-upgrade', '--config', str(config), '--release-dir', str(bundle),
                                       '--source-commit', commit, '--version', version,
                                       '--manifest-sha256', manifest_sha or sha((bundle / 'release-manifest.json').read_bytes()),
-                                      '--config-sha256', sha(new)])]
+                                      '--config-sha256', sha(new)] + (['--lifecycle'] if projection == 'upgrade-v1' else []))]
             if forward_only:
                 commands[-1][1].append('--forward-only')
             if probe_sha:
                 commands[-1][1].extend(['--subscription-probe-url-file', str(probe_snapshot)])
             if retry_failed:
                 commands[-1][1].append('--retry-failed')
-        commands += [('status', [installer, 'status', '--config', str(config)])]
+        commands += [('status', [installer, 'status', '--config', str(config)] +
+                      (['--lifecycle'] if projection == 'upgrade-v1' else []))]
         if transport:
             require(sha(canonical_file(config)) == record['config_sha256'], 'canonical_config_changed_before_staging')
             if same_candidate:
@@ -2491,7 +2502,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             print('manual-deploy: ' + stage, flush=True)
             if transport:
                 stage_forward_only = forward_only and stage == 'upgrade'
-                remote_args = [record['remote_architecture'], stage, '1' if retry_failed else '0',
+                remote_stage = 'lifecycle_' + stage if projection == 'upgrade-v1' and stage in ('doctor', 'upgrade', 'status') else stage
+                remote_args = [record['remote_architecture'], remote_stage, '1' if retry_failed else '0',
                                '1' if stage_forward_only else '0', probe_sha,
                                record.get('forward_journal_sha256', '') if forward_only else '']
                 if same_candidate and stage=='upgrade':

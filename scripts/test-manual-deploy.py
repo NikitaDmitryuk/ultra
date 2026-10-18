@@ -1226,6 +1226,11 @@ class NativeDeploy(unittest.TestCase):
         self.assertEqual(next(self.root.glob('install.config.before-*')).read_bytes(), self.original)
         attempt = D.remote_attempt(staged, self.version)
         self.assertNotEqual(attempt, D.remote_attempt(self.original, self.version))
+        policy = next(command for stage, command in self.calls if stage == 'canonical_policy')
+        self.assertIn('--lifecycle', policy)
+        for stage in ('doctor', 'upgrade', 'status'):
+            command = next(command for call_stage, command in self.calls if call_stage == stage)
+            self.assertIn('lifecycle_' + stage, command[-1])
         for stage, command in self.calls:
             if stage == 'canonical_policy':
                 continue
@@ -1347,7 +1352,7 @@ class NativeDeploy(unittest.TestCase):
         self.rollout(retry_failed=True)
         command = next(command for stage, command in self.calls if stage == 'upgrade')
         remote = D.shlex.split(command[-1])
-        self.assertEqual(remote[11], 'upgrade')
+        self.assertEqual(remote[11], 'lifecycle_upgrade')
         self.assertEqual(remote[12], '1')
 
     def test_forward_only_transport_options_are_confined_to_upgrade(self):
@@ -2273,6 +2278,18 @@ class RemoteProgram(unittest.TestCase):
         changed = self.execute('stage', self.archive())
         self.assertNotEqual(changed.returncode, 0)
         self.assertIn(b'manual_secrets_source_changed', changed.stderr)
+
+    def test_lifecycle_actions_reach_installer_with_explicit_context(self):
+        staged = self.execute('stage', self.archive())
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        for action, command in (('lifecycle_doctor', 'doctor'),
+                                ('lifecycle_upgrade', 'operator-upgrade'),
+                                ('lifecycle_status', 'status')):
+            result = self.execute('run', None, self.architecture, action)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads(self.result.read_bytes())
+            self.assertEqual(args[0], command)
+            self.assertIn('--lifecycle', args)
 
     def test_runtime_source_rejects_adoption_and_invalid_selectors(self):
         marker = ('secrets-source.json', b'{"secrets_source":"installed-runtime"}')

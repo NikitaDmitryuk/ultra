@@ -5,6 +5,8 @@ import "time"
 const CurrentSchemaVersion = 2
 
 type InstallPlan struct {
+	// LifecycleOnly preserves the existing database policy; it cannot authorize bootstrap.
+	LifecycleOnly bool `json:"lifecycle_only,omitempty"`
 	// Secret resolution is per invocation and never part of a deployment plan.
 	SecretResolver        func() (map[string]string, error) `json:"-"`
 	SecretSource          string                            `json:"-"`

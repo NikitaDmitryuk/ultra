@@ -962,6 +962,17 @@ Ansible передаёт архив напрямую DB-хосту, провер
 Поле предназначено для свежего bootstrap с `REUSE_BRIDGE_SPEC=false`; без него
 создаётся чистая БД. Relay применяет миграции перед обслуживанием запросов.
 
+Lifecycle-команды (`upgrade`, `operator-upgrade`, `status`,
+`recovery-tools-bootstrap`) загружают конфигурацию существующей установки:
+`DATABASE_DUMP` не открывается, не хешируется и не попадает в план или запрос.
+Для предварительных `plan` и `doctor` этот контекст включается явно флагом
+`--lifecycle`. Бюджеты существующей БД остаются источником истины, даже если
+канонический файл сохраняет первоначальный `REUSE_BRIDGE_SPEC=false`.
+Такой JSON-план содержит `lifecycle_only=true`; `bootstrap`, `apply`,
+`apply-remote` и `render` отклоняют его. Обычные `plan`/`doctor` и свежий
+bootstrap сохраняют проверку реального приватного архива и его SHA-256.
+
+
 Для ручного upgrade операторский wrapper оставляет локальный dump в canonical
 `install.config`, но исключает `DATABASE_DUMP` из удалённой конфигурации операции
 (`upgrade-v1`): bridge не получает bootstrap-архив и не проверяет путь, доступный

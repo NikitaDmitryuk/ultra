@@ -58,7 +58,7 @@ func validateAutomation(p *InstallPlan) error {
 			// EnsureStaticBudgets verifies that every configured exit already has
 			// one and never resets its usage. A genuinely clean database still
 			// needs an explicit operator policy.
-			if !p.Bridge.ReuseSpec && p.Secrets.DatabaseDumpFile == "" {
+			if !p.Bridge.ReuseSpec && p.Secrets.DatabaseDumpFile == "" && !p.LifecycleOnly {
 				return errors.New("clean static exits require explicit traffic budgets")
 			}
 		} else {

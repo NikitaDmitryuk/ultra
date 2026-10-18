@@ -337,6 +337,9 @@ func operatorPayloadInventory(directory string) (map[string]any, error) {
 // plan identity; every requested deployment field and release path remain bound.
 func operatorPlanDigest(p *installplan.InstallPlan, releaseDir string) (string, error) {
 	clone := *p
+	// Lifecycle context comes from the command, not the frozen deployment policy.
+	// Omitting it preserves identity for historical plans without dump references.
+	clone.LifecycleOnly = false
 	clone.ControllerLocal = nil
 	clone.ControllerLocalTarget = ""
 	raw, err := json.Marshal(struct {
