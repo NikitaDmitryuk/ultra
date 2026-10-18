@@ -784,6 +784,12 @@ def verify_bundle(source, bundle, commit, version):
 
 def prepare_runtime_environment(repo, source):
     environment = os.environ.copy()
+    # The candidate is built from an isolated clone. Do not inherit a host Go
+    # cache that may be outside the writable workspace (for example a
+    # read-only ~/.cache/go-build in sandboxed operators).
+    go_cache = source / '.manual-go-build-cache'
+    require(not go_cache.exists() and not go_cache.is_symlink(), 'manual_go_cache_path_unsafe')
+    environment['GOCACHE'] = str(go_cache)
     # Never inherit an unchecked runtime override into a candidate build.
     environment.pop('ULTRA_VERIFIED_RUNTIME_DIR', None)
     cached = repo / 'dist'

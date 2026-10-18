@@ -3311,10 +3311,12 @@ class RuntimeReuse(unittest.TestCase):
         (self.cache / 'release-manifest.json').write_text(json.dumps({'schema_version': 1, 'source_commit': 'a' * 40, 'assets': rows}))
 
     def test_verified_pair_works_without_pip_and_is_frozen_inside_source(self):
-        with patch.object(D, 'run', side_effect=AssertionError('pip must not run')):
+        with patch.dict(os.environ, {'GOCACHE': '/read-only/operator/go-build-cache'}), \
+                patch.object(D, 'run', side_effect=AssertionError('pip must not run')):
             environment = D.prepare_runtime_environment(self.repo, self.source)
         frozen = Path(environment['ULTRA_VERIFIED_RUNTIME_DIR'])
         self.assertEqual(frozen.parent, self.source)
+        self.assertEqual(environment['GOCACHE'], str(self.source / '.manual-go-build-cache'))
         self.runtime.validate_pair(frozen, self.requirements)
         self.assertEqual((frozen / 'ultra-ansible-runtime-linux-amd64.tar.gz').read_bytes(),
                          (self.cache / 'ultra-ansible-runtime-linux-amd64.tar.gz').read_bytes())
