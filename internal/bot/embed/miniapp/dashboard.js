@@ -158,17 +158,22 @@ async function diagnostics() {
     return service();
   });
   button("refresh-diagnostics", diagnostics);
-  const [health, alerts] = await Promise.allSettled([
+  const [health, alerts, replicas] = await Promise.allSettled([
     api("/api/health"),
     api("/api/alerts/recent?limit=10"),
+    api("/api/cloud/replicas"),
   ]);
   if (version !== viewVersion) return;
   const target = document.querySelector("#network-health");
+  const primaryReachable =
+    replicas.status === "fulfilled" &&
+    Array.isArray(replicas.value) &&
+    replicas.value.some((replica) => replica.source === "primary");
   if (health.status === "fulfilled") {
     const h = health.value,
       state = healthSummary(h),
       exits = h.exits?.length ? h.exits : h.exit ? [h.exit] : [];
-    target.innerHTML = `<div class="card"><div class="row wrap"><h2>Состояние сети</h2><span class="badge ${state.tone}">${esc(state.label)}</span></div><small>Проверено: ${esc(dateLabel(h.checked_at))}</small><div class="route-row"><span>Bridge · интернет<small>Задержка ${latencyLabel(h.bridge?.internet_latency_ms)}</small></span><strong class="${h.bridge?.internet_ok ? "good" : "bad"}">${h.bridge?.internet_ok ? "Доступен" : "Недоступен"}</strong></div>${exits.map((e) => `<div class="route-row"><span>${esc(e.name || e.id)}<small>${e.active ? "Активный выход" : "Резервный выход"} · туннель ${latencyLabel(e.tunnel_latency_ms)} · интернет ${latencyLabel(e.internet_latency_ms)}</small></span><span class="badge ${e.reachable && e.internet_ok ? "good" : "bad"}">${e.reachable && e.internet_ok ? "Доступен" : e.reachable ? "Нет интернета" : "Нет туннеля"}</span></div>`).join("")}${ingressHealthHTML(h.public_ingresses || [])}</div>`;
+    target.innerHTML = `<div class="card"><div class="row wrap"><h2>Состояние сети</h2><span class="badge ${state.tone}">${esc(state.label)}</span></div><small>Проверено: ${esc(dateLabel(h.checked_at))}</small><div class="route-row"><span>Bridge · интернет<small>Задержка ${latencyLabel(h.bridge?.internet_latency_ms)}</small></span><strong class="${h.bridge?.internet_ok ? "good" : "bad"}">${h.bridge?.internet_ok ? "Доступен" : "Недоступен"}</strong></div><div class="route-row"><span>Primary PostgreSQL · database<small>Отдельный сервер · источник наблюдения standby</small></span><span class="badge ${primaryReachable ? "good" : "wait"}">${primaryReachable ? "Доступен" : "Состояние неизвестно"}</span></div>${exits.map((e) => `<div class="route-row"><span>${esc(e.name || e.id)}<small>${e.active ? "Активный выход" : "Резервный выход"} · туннель ${latencyLabel(e.tunnel_latency_ms)} · интернет ${latencyLabel(e.internet_latency_ms)}</small></span><span class="badge ${e.reachable && e.internet_ok ? "good" : "bad"}">${e.reachable && e.internet_ok ? "Доступен" : e.reachable ? "Нет интернета" : "Нет туннеля"}</span></div>`).join("")}${ingressHealthHTML(h.public_ingresses || [])}</div>`;
   } else {
     target.innerHTML = panelError("Состояние сети", "retry-health");
     button("retry-health", diagnostics);

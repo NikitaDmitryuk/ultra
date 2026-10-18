@@ -489,7 +489,25 @@ function reconcileCloudOperations(container, ops, unavailable, capacity) {
       );
   }
 }
+let replicaRefreshTimer;
+function bridgeReplicasHTML(replicas) {
+  const labels = { streaming: "Копия обновляется", syncing: "Первичная синхронизация", lagging: "Копия отстаёт", disconnected: "Нет потока репликации", unknown: "Состояние копии неизвестно" };
+  return replicas.map((r) => `<div class="card"><strong>${esc(r.name)}</strong><p>${esc(labels[r.state] || labels.unknown)}</p><small>Наблюдение с primary${r.replay_lag_bytes != null ? ` · отставание WAL: ${esc(r.replay_lag_bytes)} байт` : ""}${r.checked_at ? ` · проверено: ${esc(r.checked_at)}` : ""}</small></div>`).join("") || '<p class="muted">Состояние копии временно недоступно</p>';
+}
+function scheduleReplicaRefresh(version) {
+  clearTimeout(replicaRefreshTimer);
+  replicaRefreshTimer = setTimeout(async () => {
+    if (version !== viewVersion) return;
+    let replicas = [];
+    try { replicas = await api("/api/cloud/replicas"); } catch {}
+    if (version !== viewVersion) return;
+    const section = app.querySelector("#bridge-replicas");
+    if (section) section.innerHTML = bridgeReplicasHTML(replicas);
+    scheduleReplicaRefresh(version);
+  }, 10000);
+}
 async function service(preserveOperations = false) {
+  clearTimeout(replicaRefreshTimer);
   const version = ++viewVersion;
   clearTimeout(refreshTimer);
   let ops = [],
@@ -504,6 +522,7 @@ async function service(preserveOperations = false) {
   try {
     capacity = await api("/api/cloud/quotas");
   } catch {}
+  capacity = filterDeletedCloudExits(ops, capacity);
   let replicas = [];
   try {
     replicas = await api("/api/cloud/replicas");
@@ -514,6 +533,12 @@ async function service(preserveOperations = false) {
     const operations = app.querySelector("#cloud-operations");
     if (!operations) return;
     reconcileCloudOperations(operations, ops, unavailable, capacity);
+    const capacitySection = app.querySelector("#server-capacity");
+    if (capacitySection && capacity)
+      capacitySection.innerHTML = serverCapacityHTML(capacity);
+    const replicaSection = app.querySelector("#bridge-replicas");
+    if (replicaSection) replicaSection.innerHTML = bridgeReplicasHTML(replicas);
+    scheduleReplicaRefresh(version);
     loadCloudAccount();
     bindCloudOperationControls();
     button("create-server", () => serverOffer(""));
@@ -521,12 +546,13 @@ async function service(preserveOperations = false) {
       refreshTimer = setTimeout(() => refreshOperationCards(version), 5000);
     return;
   }
-  app.innerHTML = `<p class="eyebrow">ИНФРАСТРУКТУРА</p><h1>Сервис</h1><div class="section-tabs"><button class="active" id="servers-view">Серверы</button><button id="diagnostics-view">Диагностика</button></div><p class="muted">Управление через Vultr · не более 5 VPS</p><p class="muted">Проверка HTTPS выполняется с bridge через exit. Подключение вашего устройства проверьте в Happ: откройте сайт с включённым VPN.</p><section id="cloud-account" aria-live="polite"></section><section id="cloud-operations">${operationsHTML}</section>${capacity ? serverCapacityHTML(capacity) : "<p>Состояние выходов временно недоступно</p>"}<h2>Копии базы данных</h2><p class="muted">Основная БД на bridge. Восстановление — вручную.</p>${replicas.map((r) => `<div class="card"><strong>${esc(r.name)}</strong><p>${esc({ streaming: "Копия обновляется", syncing: "Первичная синхронизация", insufficient_space: "Недостаточно места", lagging: "Копия отстаёт", disconnected: "Нет потока репликации", unexpected_primary: "БД переведена в основную — требуется ручная проверка", error: "Копия БД недоступна: требуется проверка SSH/PostgreSQL", not_configured: "Ещё не настроена" }[r.state] || r.state)}</p><small>${r.free_bytes > 0 ? `Свободно: ${(r.free_bytes / 1073741824).toFixed(1)} ГБ` : "Свободное место: нет данных"}${r.required_bytes > 0 ? ` · нужно для копии: ${(r.required_bytes / 1073741824).toFixed(1)} ГБ` : ""}</small></div>`).join("") || '<p class="muted">Состояние копий пока недоступно</p>'}<p class="muted">Узлы, настроенные вручную, обслуживаются через локальный установщик. Они продолжают участвовать в маршрутах.</p><button class="btn secondary" id="refresh-service">Обновить</button>`;
+  app.innerHTML = `<p class="eyebrow">ИНФРАСТРУКТУРА</p><h1>Сервис</h1><div class="section-tabs"><button class="active" id="servers-view">Серверы</button><button id="diagnostics-view">Диагностика</button></div><p class="muted">Управление через Vultr · не более 5 VPS</p><p class="muted">Проверка HTTPS выполняется с bridge через exit. Подключение вашего устройства проверьте в Happ: откройте сайт с включённым VPN.</p><section id="cloud-account" aria-live="polite"></section><section id="cloud-operations">${operationsHTML}</section><section id="server-capacity">${capacity ? serverCapacityHTML(capacity) : "<p>Состояние выходов временно недоступно</p>"}</section><h2>Копии базы данных</h2><p class="muted">Основная БД на отдельном database. Физическая standby-копия на bridge, асинхронная; переключение и восстановление — вручную.</p><section id="bridge-replicas" aria-live="polite">${bridgeReplicasHTML(replicas)}</section><p class="muted">Узлы, настроенные вручную, обслуживаются через локальный установщик. Они продолжают участвовать в маршрутах.</p><button class="btn secondary" id="refresh-service">Обновить</button>`;
   button("diagnostics-view", diagnostics);
   loadCloudAccount();
   bindCloudOperationControls();
   button("create-server", () => serverOffer(""));
   button("refresh-service", service);
+  scheduleReplicaRefresh(version);
   if (ops.some((o) => o.state === "pending" || o.state === "unknown"))
     refreshTimer = setTimeout(() => {
       refreshOperationCards(version);
@@ -555,6 +581,7 @@ async function serverOffer(replace) {
   });
 }
 async function tab(name) {
+  clearTimeout(replicaRefreshTimer);
   clearTimeout(refreshTimer);
   selectTab(name);
   viewVersion++;
@@ -707,6 +734,14 @@ function serverCapacityHTML(c) {
       )
       .join("")
   );
+}
+
+function filterDeletedCloudExits(ops, capacity) {
+  if (!capacity || !Array.isArray(capacity.nodes)) return capacity;
+  const deletedExits = new Set(
+    ops.filter((o) => o.state === "deleted").map((o) => o.exit_id).filter(Boolean),
+  );
+  return { ...capacity, nodes: capacity.nodes.filter((node) => !deletedExits.has(node.id)) };
 }
 
 function personTrafficData(t, period, tag = "") {
@@ -982,6 +1017,13 @@ async function refreshOperationCards(version) {
         const html = cloudOperationDetailsHTML(op);
         if (details.innerHTML !== html) details.innerHTML = html;
       }
+    }
+    if (capacity) {
+      const capacitySection = app.querySelector("#server-capacity");
+      if (capacitySection)
+        capacitySection.innerHTML = serverCapacityHTML(
+          filterDeletedCloudExits(ops, capacity),
+        );
     }
     bindCloudOperationControls();
     if (ops.some((o) => o.state === "pending" || o.state === "unknown"))

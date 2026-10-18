@@ -289,7 +289,11 @@ def ssh(config, destination, command, **kwargs):
 
 
 def validate_ciphertext(path):
-    if not 0 < Path(path).stat().st_size <= MAX_BYTES:
+    try:
+        size = Path(path).stat().st_size
+    except OSError as exc:
+        raise ValueError('encrypted backup is unavailable') from exc
+    if not 0 < size <= MAX_BYTES:
         raise ValueError('encrypted backup exceeds bounds')
 
 
@@ -413,7 +417,7 @@ def create(config):
             parsed_dsn = db_connection.dsn_from_runtime(config['database'])
             with db_connection.pgpass(work, parsed_dsn) as environment, dump.open('wb') as stream:
                 run(db_connection.connection_args(parsed_dsn, config['database'], 'pg_dump') +
-                    ['-Fc', '--no-owner', '--no-acl'], stdout=stream, env=environment)
+                    ['-Fc', '--no-owner', '--no-acl', '--exclude-schema=ultra_monitor'], stdout=stream, env=environment)
             if collect(capture_state_paths(config), artifact_paths) != before:
                 raise ValueError('configuration changed during capture; retry next interval')
             # Parse the entire custom-archive TOC before encrypting or delivering.

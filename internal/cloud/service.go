@@ -163,11 +163,17 @@ func (s *Service) Quote(ctx context.Context, actor int64, region, plan, replace 
 	return offer, s.Store.SaveOffer(ctx, offer)
 }
 func (s *Service) checkOffer(ctx context.Context, o Offer) error {
-	if e := s.checkReplacement(ctx, o.ReplaceID); e != nil {
-		return e
-	}
 	if !s.now().Before(o.ExpiresAt) {
 		return ErrPriceChanged
+	}
+	return s.checkPurchaseOffer(ctx, o)
+}
+
+// Confirmation consumes the quote lifetime. Queued, confirmed operations still
+// revalidate the approved price and current availability before buying a VPS.
+func (s *Service) checkPurchaseOffer(ctx context.Context, o Offer) error {
+	if e := s.checkReplacement(ctx, o.ReplaceID); e != nil {
+		return e
 	}
 	plans, e := s.API.Plans(ctx)
 	if e != nil {
@@ -398,14 +404,14 @@ func (s *Service) advance(ctx context.Context, op Operation) error {
 		} else if occupied > MaxServers {
 			return s.fail(ctx, op, "capacity_limit", ErrLimit)
 		}
-		if e := s.checkOffer(ctx, op.Offer); e != nil {
+		if e := s.checkPurchaseOffer(ctx, op.Offer); e != nil {
 			return s.fail(ctx, op, "offer_expired_or_changed", e)
 		}
 		req, e := s.Provisioner.Prepare(ctx, &op)
 		if e != nil {
 			return s.fail(ctx, op, "preparation_failed", e)
 		}
-		if e = s.checkOffer(ctx, op.Offer); e != nil {
+		if e = s.checkPurchaseOffer(ctx, op.Offer); e != nil {
 			return s.fail(ctx, op, "offer_expired_or_changed", e)
 		}
 		// Store provider IDs before creating the paid resource; a timeout after this point is never blindly retried.

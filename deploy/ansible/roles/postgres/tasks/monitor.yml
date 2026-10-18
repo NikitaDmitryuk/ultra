@@ -1,0 +1,37 @@
+---
+- name: Install restricted live bridge replication observation
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --dbname, "{{ ultra_postgres.name }}"]
+    stdin: |
+      BEGIN;
+      CREATE SCHEMA IF NOT EXISTS ultra_monitor AUTHORIZATION postgres;
+      ALTER SCHEMA ultra_monitor OWNER TO postgres;
+      REVOKE ALL ON SCHEMA ultra_monitor FROM PUBLIC;
+      CREATE OR REPLACE FUNCTION ultra_monitor.bridge_replication_status()
+      RETURNS TABLE(state text, replay_lag_bytes bigint, checked_at timestamptz)
+      LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog
+      AS $monitor$
+        SELECT CASE
+          WHEN pg_catalog.pg_is_in_recovery() OR s.slot_name IS NULL THEN 'unknown'
+          WHEN r.pid IS NULL THEN 'disconnected'
+          WHEN r.state <> 'streaming' OR r.replay_lsn IS NULL THEN 'syncing'
+          WHEN pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_current_wal_lsn(), r.replay_lsn) > 16777216 THEN 'lagging'
+          ELSE 'streaming'
+        END,
+        CASE WHEN NOT pg_catalog.pg_is_in_recovery() AND r.replay_lsn IS NOT NULL
+          THEN GREATEST(0, pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_current_wal_lsn(), r.replay_lsn))::bigint
+          ELSE NULL END,
+        pg_catalog.clock_timestamp()
+        FROM (SELECT 1) AS singleton
+        LEFT JOIN pg_catalog.pg_replication_slots AS s
+          ON s.slot_name = 'ultra_bridge' AND s.slot_type = 'physical' AND NOT s.temporary
+        LEFT JOIN pg_catalog.pg_stat_replication AS r
+          ON r.pid = s.active_pid AND r.usename = 'ultra_replication' AND r.application_name = 'ultra_bridge';
+      $monitor$;
+      ALTER FUNCTION ultra_monitor.bridge_replication_status() OWNER TO postgres;
+      REVOKE ALL ON FUNCTION ultra_monitor.bridge_replication_status() FROM PUBLIC;
+      SELECT format('GRANT USAGE ON SCHEMA ultra_monitor TO %I', '{{ ultra_postgres.user }}') \gexec
+      SELECT format('GRANT EXECUTE ON FUNCTION ultra_monitor.bridge_replication_status() TO %I', '{{ ultra_postgres.user }}') \gexec
+      COMMIT;
+  changed_when: false
+  no_log: true

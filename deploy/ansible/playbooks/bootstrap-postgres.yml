@@ -39,6 +39,12 @@
       when: ultra_postgres is defined
     - role: database_import
       when: ultra_database_import_dump | default('') | length > 0
+  post_tasks:
+    - name: Configure managed bridge replication observation after database import
+      ansible.builtin.include_role:
+        name: postgres
+        tasks_from: monitor
+      when: ultra_postgres is defined
 - name: Authorize application database tunnel
   hosts: databases
   gather_facts: false
@@ -85,13 +91,19 @@
       ansible.builtin.command:
         argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only]
         stdin: |
-          SELECT * FROM pg_create_physical_replication_slot('ultra_bridge')
-            WHERE NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'ultra_bridge');
+          DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'ultra_bridge') THEN
+              PERFORM pg_create_physical_replication_slot('ultra_bridge');
+              RAISE NOTICE 'ULTRA_REPLICA_SLOT_CREATED';
+            END IF;
+          END
+          $$;
           SELECT 1 / count(*) FROM pg_replication_slots
             WHERE slot_name = 'ultra_bridge' AND slot_type = 'physical' AND NOT temporary
             AND (wal_status IS NULL OR wal_status <> 'lost');
       register: postgres_replica_slot
-      changed_when: "'ultra_bridge' in postgres_replica_slot.stdout"
+      changed_when: "'ULTRA_REPLICA_SLOT_CREATED' in postgres_replica_slot.stderr"
 - name: Configure bridge physical standby
   hosts: bridge
   gather_facts: false

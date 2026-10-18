@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -174,27 +173,6 @@ func (r *RouteRepo) ReplicationState(ctx context.Context, id, state string, free
 		Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "node_id"}}, DoUpdates: clause.Assignments(updates)}).
 		Create(row).
 		Error
-}
-
-func (r *RouteRepo) ReplicationStatuses(ctx context.Context) (any, error) {
-
-	type item struct {
-		ID        string     `json:"id"`
-		Name      string     `json:"name"`
-		State     string     `json:"state"`
-		Free      int64      `json:"free_bytes"`
-		Required  int64      `json:"required_bytes"`
-		CheckedAt *time.Time `json:"checked_at"`
-	}
-	out := []item{}
-	e := r.db.orm.WithContext(ctx).
-		Table("exit_nodes AS e").
-		Select("e.id, COALESCE(NULLIF(e.display_name, ''), NULLIF(e.city, ''), e.name) AS name, CASE WHEN n.checked_at < NOW() - INTERVAL '90 seconds' THEN 'stale' ELSE COALESCE(n.state, 'not_configured') END AS state, COALESCE(n.free_bytes, 0) AS free, COALESCE(n.required_bytes, 0) AS required, n.checked_at").
-		Joins("LEFT JOIN node_replication n ON n.node_id = e.id").
-		Order("e.name").
-		Find(&out).
-		Error
-	return out, e
 }
 
 // PrepareManual preserves the local installer path without exposing a manual cloud UI.

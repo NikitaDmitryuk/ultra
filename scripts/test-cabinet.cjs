@@ -33,7 +33,8 @@ function page(self, responses) {
   const elements = new Map(),
     calls = [],
     copied = [],
-    opened = [];
+    opened = [],
+    timers = [];
   function el(id) {
     if (!elements.has(id))
       elements.set(id, {
@@ -105,10 +106,11 @@ function page(self, responses) {
         },
       },
     },
-    setTimeout() {
-      return 1;
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay, cancelled: false });
+      return timers.length;
     },
-    clearTimeout() {},
+    clearTimeout(id) { if (timers[id - 1]) timers[id - 1].cancelled = true; },
     fetch: async (path, options) => {
       calls.push({ path, options });
       if (!(path in responses)) throw new Error("unexpected request " + path);
@@ -116,7 +118,7 @@ function page(self, responses) {
     },
   });
   vm.runInContext(source, context);
-  return { context, el, calls, copied, opened, responses };
+  return { context, el, calls, copied, opened, responses, timers };
 }
 test("personal cabinet reuses subscription and opens HTTPS import without admin APIs", async () => {
   const p = page(true, {
@@ -209,10 +211,12 @@ test("Vultr displays server DTO price and replica state", async () => {
     ],
     "/api/cloud/replicas": [
       {
-        name: "Amsterdam",
+        id: "bridge",
+        name: "Bridge PostgreSQL standby",
         state: "streaming",
-        free_bytes: 10 * 1073741824,
-        required_bytes: 5 * 1073741824,
+        source: "primary",
+        replay_lag_bytes: 0,
+        checked_at: "2026-01-01T12:00:00Z",
       },
     ],
   });
@@ -222,6 +226,29 @@ test("Vultr displays server DTO price and replica state", async () => {
   assert.ok(!p.el("#app").innerHTML.includes("$undefined"));
   assert.ok(p.el("#app").innerHTML.includes("Копия обновляется"));
   assert.ok(!p.el("#app").innerHTML.includes("Добавить узел вручную"));
+});
+
+test("deleted Vultr exits are removed from server list even if quota DTO is stale", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/cloud/operations": [
+      { id: "old-op", exit_id: "old-exit", state: "deleted" },
+    ],
+    "/api/cloud/quotas": {
+      nodes: [
+        { id: "old-exit", name: "Удалённый сервер", enabled: false },
+        { id: "active-exit", name: "Действующий сервер", enabled: true },
+      ],
+      budgets: [],
+    },
+    "/api/cloud/replicas": [],
+  });
+  await flush();
+  await vm.runInContext("service()", p.context);
+  const html = p.el("#app").innerHTML;
+  assert.ok(!html.includes("Удалённый сервер"));
+  assert.ok(html.includes("Действующий сервер"));
 });
 
 test("Vultr status polling updates the existing card without replacing its price", async () => {
@@ -285,7 +312,7 @@ test("Vultr status polling updates the existing card without replacing its price
   assert.equal(detailsWrites, 1);
 });
 
-test("Vultr create and delete refresh preserve existing card and price nodes", async () => {
+test("Vultr create and delete refresh preserve cards and remove stale exits", async () => {
   const makeOp = (id, state = "pending") => ({
     id,
     offer: {
@@ -294,6 +321,7 @@ test("Vultr create and delete refresh preserve existing card and price nodes", a
       price: { monthly_cost: 5, hourly_cost: 0.007 },
     },
     state,
+    exit_id: id === "delete" ? "removed-exit" : undefined,
     phase: "create",
     charged: false,
   });
@@ -347,7 +375,13 @@ test("Vultr create and delete refresh preserve existing card and price nodes", a
     "/api/me": { is_admin: true },
     "/api/members": [],
     "/api/cloud/operations": [makeOp("keep"), makeOp("delete")],
-    "/api/cloud/quotas": { nodes: [], budgets: [] },
+    "/api/cloud/quotas": {
+      nodes: [
+        { id: "removed-exit", name: "Removed server", enabled: true, ready: true },
+        { id: "live-exit", name: "Active server", enabled: true, ready: true },
+      ],
+      budgets: [],
+    },
     "/api/cloud/replicas": [],
   });
   await flush();
@@ -370,6 +404,11 @@ test("Vultr create and delete refresh preserve existing card and price nodes", a
   assert.equal(keepStatus.textContent, "Результат создания проверяется");
   assert.equal(deletedCard.removed, true);
   assert.ok(addedCards.some((card) => card.dataset.opCard === "new"));
+  assert.doesNotMatch(p.el("#server-capacity").innerHTML, /Removed server/);
+  assert.match(p.el("#server-capacity").innerHTML, /Active server/);
+
+  await vm.runInContext("refreshOperationCards(viewVersion)", p.context);
+  assert.doesNotMatch(p.el("#server-capacity").innerHTML, /Removed server/);
 
   p.context.ops = operations;
   vm.runInContext("reconcileCloudOperations(ops, [], true, null)", p.context);
@@ -793,6 +832,29 @@ test("ingress diagnostics distinguishes main and experiment and escapes server s
   assert.ok(html.includes("&lt;script&gt;"));
 });
 
+test("diagnostics identifies the separate primary PostgreSQL server from standby status", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/health": { bridge: { internet_ok: true }, exits: [] },
+    "/api/alerts/recent?limit=10": [],
+    "/api/cloud/replicas": [
+      {
+        id: "bridge",
+        name: "Bridge PostgreSQL standby",
+        source: "primary",
+        state: "streaming",
+      },
+    ],
+  });
+  await flush();
+  await vm.runInContext("diagnostics()", p.context);
+  const html = p.el("#network-health").innerHTML;
+  assert.match(html, /Primary PostgreSQL · database/);
+  assert.match(html, /Отдельный сервер · источник наблюдения standby/);
+  assert.match(html, /Доступен/);
+});
+
 test("overview brings monthly history and config ranking into the main cabinet", async () => {
   const p = page(false, {
     "/api/me": { is_admin: true },
@@ -845,6 +907,32 @@ test("archive config cannot export, rotate or enable unsupported access", async 
     "issue-config-sub",
   ])
     assert.ok(!html.includes(id));
+});
+test("disabling a config confirms and sends DELETE on the first confirmation click", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/users/legacy": {},
+  });
+  await flush();
+  const user = { uuid: "legacy", kind: "vless", is_active: true };
+  p.context.configDetail = async (updated) => {
+    p.context.updatedConfig = updated;
+  };
+  p.context.configUser = user;
+  vm.runInContext("bindConfigControls(configUser)", p.context);
+
+  await p.el("#disable-config").onclick();
+  assert.equal(p.el("#dialog").open, true);
+  assert.equal(p.calls.some((call) => call.path === "/api/users/legacy"), false);
+
+  await p.el("#confirm-action").onclick();
+  assert.equal(
+    p.calls.filter(
+      (call) => call.path === "/api/users/legacy" && call.options.method === "DELETE",
+    ).length,
+    1,
+  );
+  assert.equal(p.context.updatedConfig.is_active, false);
 });
 test("purge requires typed confirmation and addresses only the selected config", async () => {
   const p = page(false, {
@@ -997,4 +1085,44 @@ test("legacy traffic responses keep per-exit limits and empty quotas render noth
   assert.ok(html.includes("55 Б"));
   assert.ok(!html.includes("Общий трафик Vultr"));
   assert.equal(vm.runInContext("trafficQuotasHTML({})", p.context), "");
+});
+
+test("bridge standby uses dedicated topology and refreshes independently of operations", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/cloud/operations": [],
+    "/api/cloud/replicas": [{ id: "bridge", name: "Bridge PostgreSQL standby", source: "primary", state: "streaming", replay_lag_bytes: 0, checked_at: "2026-01-01T00:00:00Z" }],
+  });
+  await flush();
+  await vm.runInContext("service()", p.context);
+  const html = p.el("#app").innerHTML;
+  assert.match(html, /Основная БД на отдельном database/);
+  assert.match(html, /standby-копия на bridge/);
+  assert.match(html, /Наблюдение с primary/);
+  assert.match(html, /отставание WAL: 0 байт/);
+  assert.doesNotMatch(html, /Основная БД на bridge|Свободное место|Ещё не настроена/);
+  const timer = p.timers.findLast((t) => t.delay === 10000 && !t.cancelled);
+  assert.ok(timer, "standby refresh is required even with no cloud operations");
+  p.responses["/api/cloud/replicas"] = [{ name: "Bridge PostgreSQL standby", state: "disconnected" }];
+  await timer.callback();
+  assert.match(p.el("#bridge-replicas").innerHTML, /Нет потока репликации/);
+  assert.doesNotMatch(p.el("#bridge-replicas").innerHTML, /Копия обновляется/);
+  delete p.responses["/api/cloud/replicas"];
+  const retry = p.timers.findLast((t) => t.delay === 10000 && !t.cancelled);
+  await retry.callback();
+  assert.match(p.el("#bridge-replicas").innerHTML, /временно недоступно/);
+  const next = p.timers.findLast((t) => t.delay === 10000 && !t.cancelled);
+  vm.runInContext("viewVersion++", p.context);
+  const requests = p.calls.length;
+  await next.callback();
+  assert.equal(p.calls.length, requests, "stale view must not keep polling standby");
+});
+
+test("legacy exit replication states cannot claim bridge configuration", async () => {
+  const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
+  await flush();
+  const html = vm.runInContext('bridgeReplicasHTML([{name:"Bridge",state:"not_configured"}])', p.context);
+  assert.match(html, /Состояние копии неизвестно/);
+  assert.doesNotMatch(html, /Ещё не настроена/);
 });

@@ -165,6 +165,11 @@ jobs:
           python3 scripts/test-ansible-release.py --ansible-playbook "$(command -v ansible-playbook)"
           python3 scripts/test-ansible-recovery.py --installer "$PWD/ultra-install" --ansible-playbook "$(command -v ansible-playbook)"
           python3 scripts/test-ansible-forward-role.py --ansible-playbook "$(command -v ansible-playbook)"
+      - name: Verify restricted bridge PostgreSQL standby observation
+        run: |
+          docker pull postgres:16
+          python3 scripts/test-ansible-postgres-monitor.py
+          python3 scripts/test-ansible-postgres-replica-slot.py
   nginx:
     name: Primary XHTTP with actual Nginx
     runs-on: ubuntu-latest

@@ -96,3 +96,7 @@
   ansible.builtin.assert:
     that: (restore_database_result.stdout | from_json).verified | bool
   no_log: true
+- name: Reinstall managed bridge replication observation after database restore
+  ansible.builtin.include_role:
+    name: postgres
+    tasks_from: monitor

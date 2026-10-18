@@ -57,6 +57,7 @@ func configureCloud(
 		stateDir = "/var/lib/ultra-relay/vultr"
 	}
 	routes := db.NewRouteRepo(database)
+	srv.ReplicationStatus = database.BridgeReplicationStatus
 	store := db.NewCloudRepo(database)
 	srv.CloudOperationHistory = store
 	binary, e := os.Executable()

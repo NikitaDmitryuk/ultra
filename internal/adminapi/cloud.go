@@ -97,11 +97,14 @@ func (s *Server) cloudRoutes() {
 		}{budgets, nodes}, nil)
 	})
 	s.mux.HandleFunc("GET /v1/cloud/replicas", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		if s.ReplicationStatus == nil {
 			http.Error(w, "replication unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		v, e := s.ReplicationStatus(r.Context())
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		v, e := s.ReplicationStatus(ctx)
 		cloudResult(w, v, e)
 	})
 	s.mux.HandleFunc("GET /v1/cloud/catalog", s.cloudCatalog)

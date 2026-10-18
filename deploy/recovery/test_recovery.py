@@ -34,6 +34,20 @@ class RecoveryTests(unittest.TestCase):
         self.addCleanup(dsn_patch.stop)
     def tearDown(self):
         self.tmp.cleanup()
+    def test_logical_dump_excludes_managed_monitor_schema(self):
+        config={'source':'bridge','repository':str(self.repo),'database':'ultra_test',
+                'state_paths':[],'artifact_paths':[],'recipient':'unused',
+                'destinations':[{'host':'fixture-exit','required':True}]}
+        def run(args, **kwargs):
+            if args[0] == 'pg_dump':
+                self.assertIn('--exclude-schema=ultra_monitor', args)
+                raise RuntimeError('fixture dump invocation observed')
+            return argparse.Namespace(stdout=b'', returncode=0)
+        def encrypt(source, target, recipient):
+            target.write_bytes(b'fixture-encrypted-artifact')
+        with mock.patch.object(recovery, 'run', side_effect=run), mock.patch.object(recovery, 'encrypt', side_effect=encrypt):
+            with self.assertRaisesRegex(RuntimeError, 'fixture dump invocation observed'):
+                recovery.create(config)
     def args(self, name, data, stamp):
         return argparse.Namespace(repository=str(self.repo), source='bridge', name=name, sha256=hashlib.sha256(data).hexdigest(), snapshot=stamp)
     def test_interrupted_transfer_never_replaces_good_generation(self):
