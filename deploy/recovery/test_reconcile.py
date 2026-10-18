@@ -36,6 +36,9 @@ class ReconcileTests(unittest.TestCase):
                                  isinstance(target, ast.Name) and target.id == 'LIFECYCLE_LOCK_RETRY_SECONDS'
                                  for target in node.targets))
         self.assertEqual(service_timeout, 540)
+        self.assertGreaterEqual(service_timeout - reconcile.RECONCILE_BUDGET_SECONDS,
+                                2 * reconcile.CHILD_STOP_SECONDS + 10)
+        self.assertLess(reconcile.ANSIBLE_TIMEOUT_SECONDS, reconcile.RECONCILE_BUDGET_SECONDS)
         self.assertGreaterEqual(retry_seconds - service_timeout, 60)
 
     def test_timer_late_activation_has_independent_start_anchor(self):
@@ -298,21 +301,315 @@ class ReconcileTests(unittest.TestCase):
         self.assertLess(len(json.dumps(variables)),10000)
         self.assertNotIn('fixture',json.dumps(variables))
 
+    def ansible_process(self, arguments, **kwargs):
+        attempt = Path(arguments[arguments.index('--state-dir') + 1])
+        attempt.mkdir(mode=0o700, exist_ok=True)
+        inventory = json.loads(Path(arguments[arguments.index('--inventory') + 1]).read_text())
+        variables = json.loads(Path(arguments[arguments.index('--variables') + 1]).read_text())
+        reconcile.atomic_json(attempt / 'request.json', {'inventory': inventory, 'variables': variables})
+        reconcile.atomic_json(attempt / 'job.json', {'operation': 'reconcile'})
+        reconcile.atomic_json(attempt / 'receipt.json', {'state': 'succeeded'})
+        return mock.Mock(wait=mock.Mock(return_value=0))
+
     def test_ansible_inputs_private_pinned_and_no_output(self):
-        with mock.patch.object(reconcile.subprocess,'run',return_value=subprocess.CompletedProcess([],0)) as run:
-            reconcile.ansible_apply(self.config,self.primary,{'ultra_monitor_mode':'none'})
-        arguments=run.call_args.args[0]
-        self.assertEqual(arguments[1:4],['ansible-run','--operation','reconcile'])
-        path=Path(arguments[arguments.index('--inventory')+1])
-        self.assertEqual(path.stat().st_mode & 0o777,0o600)
-        host=json.loads(path.read_text())['all']['children']['recovery_nodes']['hosts']['receiver']
-        self.assertIn('StrictHostKeyChecking=yes',host['ansible_ssh_common_args'])
-        self.assertIn('-F /dev/null',host['ansible_ssh_args'])
-        self.assertEqual(run.call_args.kwargs['stdout'],subprocess.DEVNULL)
-        self.assertEqual(run.call_args.kwargs['stderr'],subprocess.DEVNULL)
-        with mock.patch.object(reconcile.subprocess,'run',return_value=subprocess.CompletedProcess([],1)):
-            with self.assertRaisesRegex(ValueError,'ansible_reconcile_failed'):
-                reconcile.ansible_apply(self.config,self.primary,{})
+        with mock.patch.object(reconcile.subprocess, 'Popen', side_effect=self.ansible_process) as run:
+            reconcile.ansible_apply(self.config, self.primary, {'ultra_monitor_mode': 'none'})
+        arguments = run.call_args.args[0]
+        self.assertEqual(arguments[1:4], ['ansible-run', '--operation', 'reconcile'])
+        path = Path(arguments[arguments.index('--inventory') + 1])
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        host = json.loads(path.read_text())['all']['children']['recovery_nodes']['hosts']['receiver']
+        self.assertIn('StrictHostKeyChecking=yes', host['ansible_ssh_common_args'])
+        self.assertIn('-F /dev/null', host['ansible_ssh_args'])
+        self.assertEqual(run.call_args.kwargs['stdout'], subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs['stderr'], subprocess.DEVNULL)
+
+    def test_interrupted_same_inputs_resume_original_attempt(self):
+        with mock.patch.object(reconcile.subprocess, 'Popen', side_effect=self.ansible_process) as run:
+            reconcile.ansible_apply(self.config, self.primary, {})
+            arguments = run.call_args.args[0]
+            attempt = Path(arguments[arguments.index('--state-dir') + 1])
+            reconcile.atomic_json(attempt / 'receipt.json', {'state': 'running', 'code': 'interrupted'})
+            reconcile.ansible_apply(self.config, self.primary, {})
+            self.assertEqual(run.call_args.args[0], arguments)
+            self.assertEqual(len(list(attempt.parent.glob('attempt-*'))), 1)
+            reconcile.atomic_json(attempt / 'receipt.json', {'state': 'running'})
+            with self.assertRaisesRegex(reconcile.ReconcileBlocked, 'ansible_pending_conflict'):
+                reconcile.ansible_apply(self.config, self.primary, {'changed': True})
+            self.assertEqual(run.call_count, 2)
+
+    def test_legacy_pending_on_later_node_blocks_all_controller_dispatch(self):
+        for journal in (None, {'calls': []}):
+            with self.subTest(journal=journal):
+                self.config['state_dir'] = str(self.root / ('legacy-' + str(journal is None)))
+                Path(self.config['state_dir']).mkdir(mode=0o700)
+
+                with mock.patch.object(reconcile.subprocess, 'Popen', side_effect=self.ansible_process) as controller:
+                    reconcile.ansible_apply(self.config, self.primary, {})
+                    arguments = controller.call_args.args[0]
+                    attempt = Path(arguments[arguments.index('--state-dir') + 1])
+                    reconcile.atomic_json(attempt / 'receipt.json', {'state': 'running'})
+                    progress = Path(self.config['state_dir']) / 'reconcile-progress.json'
+                    if journal is not None:
+                        reconcile.atomic_json(progress, journal)
+                    controller.reset_mock()
+                    with mock.patch.object(reconcile, 'refresh_monitor_profile'), \
+                         mock.patch.object(reconcile, 'cloud_private_file'), \
+                         mock.patch.object(reconcile, 'discover', return_value=[]), \
+                         mock.patch.object(reconcile, 'desired_nodes', return_value=([*self.nodes, self.primary], set())), \
+                         mock.patch.object(reconcile, 'install', side_effect=lambda config, node: reconcile.ansible_apply(config, node, {})):
+                        with self.assertRaisesRegex(ValueError, 'reconciliation unavailable'):
+                            reconcile.reconcile(self.config)
+                    controller.assert_not_called()
+                status = json.loads(Path(self.config['status_file']).read_text())
+                self.assertEqual(status['stage'], 'resume')
+                self.assertEqual(status['reason_code'], 'ansible_pending_conflict')
+                self.assertEqual(status['attempt'], attempt.name)
+                self.assertEqual(json.loads((attempt / 'receipt.json').read_text())['state'], 'running')
+
+
+    def test_full_reconcile_resumes_late_frozen_attempt(self):
+        for crash, phase in ((False, 'primary'), (True, 'primary'), (False, 'retire'), (True, 'retire')):
+            with self.subTest(crash=crash, phase=phase):
+                # Each scenario starts a separate complete reconciliation.
+                self.config['state_dir'] = str(self.root / ('resume-' + str(crash) + phase))
+                reconcile.atomic_json(self.root / 'last-success.json', {'backup_sha256': '1' * 64, 'snapshot_at': time.time()})
+                old = dict(self.primary, id='retired-node')
+                if phase == 'retire':
+                    Path(self.config['state_dir']).mkdir(mode=0o700)
+                    reconcile.atomic_json(Path(self.config['state_dir']) / 'state.json',
+                                          {'primary': 'NL', 'node_metadata': [old]})
+                for name in ('client', 'token', 'probe'):
+                    path = self.root / name
+                    path.write_bytes(b'fixture')
+                    path.chmod(0o600)
+                launches = []
+                frozen = {}
+                interrupt = True
+
+                def controller(arguments, **kwargs):
+                    nonlocal interrupt
+                    process = self.ansible_process(arguments, **kwargs)
+                    attempt = Path(arguments[arguments.index('--state-dir') + 1])
+                    request = json.loads((attempt / 'request.json').read_text())
+                    launches.append((attempt, request))
+                    variables = request['variables']
+                    if interrupt and (variables.get('ultra_monitor_mode') == phase or
+                                      phase == 'retire' and variables.get('ultra_monitor_retire')):
+                        interrupt = False
+                        reconcile.atomic_json(attempt / 'receipt.json', {'state': 'running'})
+                        frozen.update(attempt=attempt, request=(attempt / 'request.json').read_bytes(),
+                                      job=(attempt / 'job.json').read_bytes())
+                        if crash:
+                            raise KeyboardInterrupt('fixture process crash')
+                        process.wait.side_effect = [subprocess.TimeoutExpired('fixture', 450), 1]
+                    return process
+
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(reconcile, 'discover', return_value=[]))
+                    stack.enter_context(mock.patch.object(reconcile, 'desired_nodes',
+                                                        return_value=(self.nodes, {'retired-node'})))
+                    stack.enter_context(mock.patch.object(reconcile, 'cloud_private_file'))
+                    stack.enter_context(mock.patch.object(reconcile, 'create'))
+                    stack.enter_context(mock.patch.object(reconcile, 'validate_delivery'))
+                    stack.enter_context(mock.patch.object(reconcile, 'monitor_ready'))
+                    stack.enter_context(mock.patch.object(reconcile, 'ensure_heartbeat_key',
+                                                        return_value=(b'fixture', b'public')))
+                    stack.enter_context(mock.patch.object(reconcile.subprocess, 'Popen', side_effect=controller))
+                    with self.assertRaises(KeyboardInterrupt if crash else ValueError):
+                        reconcile.reconcile(self.config)
+                    if not crash:
+                        status = json.loads(Path(self.config['status_file']).read_text())
+                        self.assertEqual(status['stage'], 'primary_monitor' if phase == 'primary' else 'peer_monitor')
+                        self.assertEqual(status['reason_code'], 'ansible_child_timeout')
+                    before_retry = len(launches)
+                    self.chat.write_text('456')
+                    with self.assertRaises(ValueError):
+                        reconcile.reconcile(self.config)
+                    status = json.loads(Path(self.config['status_file']).read_text())
+                    self.assertEqual(status['reason_code'], 'ansible_pending_conflict')
+                    self.assertEqual(len(launches), before_retry)
+                    self.assertEqual(json.loads((frozen['attempt'] / 'receipt.json').read_text())['state'], 'running')
+                    self.chat.write_text('123')
+                    # An actual full restart must reach the pending primary call
+                    # before dispatching any earlier receiver work.
+                    state = reconcile.reconcile(self.config)
+                self.assertEqual(state['primary'], 'NL')
+                self.assertEqual(launches[before_retry][0], frozen['attempt'])
+                self.assertEqual(launches[before_retry][1], json.loads(frozen['request']))
+                self.assertEqual(len(launches), before_retry + 1)
+                self.assertEqual((frozen['attempt'] / 'request.json').read_bytes(), frozen['request'])
+                self.assertEqual((frozen['attempt'] / 'job.json').read_bytes(), frozen['job'])
+                self.assertFalse((Path(self.config['state_dir']) / 'reconcile-progress.json').exists())
+
+
+    def test_delayed_full_reconcile_refreshes_health_after_resuming_late_attempt(self):
+        for fresh, phase in ((True, 'retire'), (False, 'retire'), (True, 'peer'), (False, 'peer')):
+            with self.subTest(fresh=fresh, phase=phase), contextlib.ExitStack() as stack:
+                self.config['state_dir'] = str(self.root / ('delayed-' + str(fresh) + phase))
+                state_dir = Path(self.config['state_dir'])
+                state_dir.mkdir(mode=0o700)
+                old = dict(self.primary, id='retired-node')
+                reconcile.atomic_json(state_dir / 'state.json', {'primary': 'NL', 'node_metadata': [old]})
+                reconcile.atomic_json(self.root / 'last-success.json', {'backup_sha256': '1' * 64, 'snapshot_at': time.time()})
+                for name in ('client', 'token', 'probe'):
+                    path = self.root / name
+                    path.write_bytes(b'fixture')
+                    path.chmod(0o600)
+                clock = [time.time()]
+                checks = {key: True for key in ('bridge_https', 'vpn_payload', 'probe_execution', 'backup_generation',
+                                               'independent_backup', 'us_monitor', 'us_notifications')}
+                heartbeat = {'updated_at': clock[0], 'checks': checks, 'current_checks': checks}
+                launches, frozen = [], {}
+                interrupted = False
+
+                def controller(arguments, **kwargs):
+                    nonlocal interrupted
+                    process = self.ansible_process(arguments, **kwargs)
+                    attempt = Path(arguments[arguments.index('--state-dir') + 1])
+                    request = json.loads((attempt / 'request.json').read_text())
+                    variables = request['variables']
+                    launches.append((attempt, variables))
+                    if variables.get('ultra_monitor_run_once'):
+                        heartbeat['updated_at'] = clock[0] - (121 if interrupted and not fresh else 0)
+                    if (variables.get('ultra_monitor_retire') if phase == 'retire' else variables.get('ultra_monitor_mode') == 'peer') and not interrupted:
+                        interrupted = True
+                        reconcile.atomic_json(attempt / 'receipt.json', {'state': 'running'})
+                        frozen.update(attempt=attempt, request=(attempt / 'request.json').read_bytes(),
+                                      job=(attempt / 'job.json').read_bytes())
+                        process.wait.side_effect = [subprocess.TimeoutExpired('fixture', 450), 1]
+                    return process
+
+                stack.enter_context(mock.patch.object(reconcile, 'discover', return_value=[]))
+                stack.enter_context(mock.patch.object(reconcile, 'desired_nodes',
+                                                     return_value=(self.nodes if phase == 'retire' else [*self.nodes, self.primary], {'retired-node'} if phase == 'retire' else set())))
+                stack.enter_context(mock.patch.object(reconcile, 'cloud_private_file'))
+                stack.enter_context(mock.patch.object(reconcile, 'create'))
+                stack.enter_context(mock.patch.object(reconcile, 'validate_delivery'))
+                stack.enter_context(mock.patch.object(reconcile, 'ensure_heartbeat_key', return_value=(b'fixture', b'public')))
+                stack.enter_context(mock.patch.object(reconcile, 'allow_peer'))
+                stack.enter_context(mock.patch.object(reconcile, 'previous_monitor', return_value=None))
+                stack.enter_context(mock.patch.object(reconcile.subprocess, 'Popen', side_effect=controller))
+                stack.enter_context(mock.patch.object(reconcile.time, 'time', side_effect=lambda: clock[0]))
+                stack.enter_context(mock.patch.object(reconcile, 'execute', side_effect=lambda *args, **kwargs:
+                                                     subprocess.CompletedProcess([], 0, json.dumps(heartbeat).encode())))
+                with self.assertRaises(ValueError):
+                    reconcile.reconcile(self.config)
+                before_retry = len(launches)
+                clock[0] += 121
+                self.assertEqual(clock[0] - heartbeat['updated_at'], 121)
+                if fresh:
+                    reconcile.reconcile(self.config)
+                else:
+                    with self.assertRaises(ValueError):
+                        reconcile.reconcile(self.config)
+                self.assertEqual(launches[before_retry][0], frozen['attempt'])
+                self.assertTrue(launches[before_retry][1].get('ultra_monitor_retire') if phase == 'retire'
+                                else launches[before_retry][1]['ultra_monitor_mode'] == 'peer')
+                self.assertTrue(all(variables.get('ultra_monitor_run_once') for _, variables in launches[before_retry + 1:]))
+                self.assertEqual(len(launches) - before_retry, (3 if phase == 'retire' else 5) if fresh else 2)
+                self.assertEqual(json.loads(Path(self.config['status_file']).read_text())['state'], 'ready' if fresh else 'error')
+                self.assertEqual((frozen['attempt'] / 'request.json').read_bytes(), frozen['request'])
+                self.assertEqual((frozen['attempt'] / 'job.json').read_bytes(), frozen['job'])
+                if not fresh:
+                    fresh = True
+                    clock[0] += 121
+                    reconcile.reconcile(self.config)
+                    self.assertEqual(json.loads(Path(self.config['status_file']).read_text())['state'], 'ready')
+
+    def test_child_timeout_cancels_gracefully_without_fresh_attempt(self):
+        def interrupted(arguments, **kwargs):
+            process = self.ansible_process(arguments, **kwargs)
+            attempt = Path(arguments[arguments.index('--state-dir') + 1])
+            reconcile.atomic_json(attempt / 'receipt.json', {'state': 'running', 'code': 'interrupted'})
+            process.wait.side_effect = [subprocess.TimeoutExpired('fixture', 450), 1]
+            return process
+        with mock.patch.object(reconcile.subprocess, 'Popen', side_effect=interrupted) as run:
+            for _ in range(2):
+                with self.assertRaisesRegex(reconcile.ReconcileBlocked, 'ansible_child_timeout'):
+                    reconcile.ansible_apply(self.config, self.primary, {})
+            directory = Path(self.config['state_dir']) / 'ansible' / self.primary['id']
+            self.assertEqual(len(list(directory.glob('attempt-*'))), 1)
+        process = interrupted(run.call_args.args[0])
+        with mock.patch.object(reconcile.subprocess, 'Popen', return_value=process):
+            with self.assertRaises(reconcile.ReconcileBlocked):
+                reconcile.ansible_apply(self.config, self.primary, {})
+        process.terminate.assert_called_once()
+        process.kill.assert_not_called()
+
+    def test_missing_receipt_never_counts_as_success(self):
+        def missing(arguments, **kwargs):
+            process = self.ansible_process(arguments, **kwargs)
+            attempt = Path(arguments[arguments.index('--state-dir') + 1])
+            (attempt / 'receipt.json').unlink()
+            return process
+        with mock.patch.object(reconcile.subprocess, 'Popen', side_effect=missing):
+            with self.assertRaisesRegex(reconcile.ReconcileBlocked, 'ansible_receipt_unavailable'):
+                reconcile.ansible_apply(self.config, self.primary, {})
+
+    def test_budget_expiring_during_child_launch_keeps_handle_for_cancellation(self):
+        processes = []
+        def launch(arguments, **kwargs):
+            process = self.ansible_process(arguments, **kwargs)
+            processes.append(process)
+            reconcile.signal.raise_signal(reconcile.signal.SIGALRM)
+            return process
+        with reconcile.reconcile_budget(), mock.patch.object(reconcile.subprocess, 'Popen', side_effect=launch):
+            with self.assertRaisesRegex(reconcile.ReconcileBlocked, 'reconcile_budget_exhausted'):
+                reconcile.ansible_apply(self.config, self.primary, {})
+        processes[0].terminate.assert_called_once()
+        processes[0].wait.assert_called_once_with(timeout=reconcile.CHILD_STOP_SECONDS)
+
+    def test_budget_does_not_interrupt_native_subprocess_cleanup(self):
+        events = []
+        def native_run(arguments, **kwargs):
+            reconcile.signal.raise_signal(reconcile.signal.SIGALRM)
+            events.append('native cleanup completed')
+            return subprocess.CompletedProcess(arguments, 0)
+        with reconcile.reconcile_budget(), mock.patch.object(reconcile.subprocess, 'run', side_effect=native_run):
+            with self.assertRaisesRegex(reconcile.ReconcileBlocked, 'reconcile_budget_exhausted'):
+                reconcile.run_command(['fixture'], timeout=60)
+        self.assertEqual(events, ['native cleanup completed'])
+
+    def test_backup_commands_share_budget_and_reap_real_child(self):
+        import sys
+        original_run = reconcile.recovery.run
+        original_popen = subprocess.Popen
+        processes = []
+        def capture(*args, **kwargs):
+            process = original_popen(*args, **kwargs)
+            processes.append(process)
+            return process
+        with mock.patch.object(reconcile, 'RECONCILE_BUDGET_SECONDS', 0.05), \
+             mock.patch.object(subprocess, 'Popen', side_effect=capture):
+            with reconcile.reconcile_budget():
+                with self.assertRaisesRegex(reconcile.ReconcileBlocked, 'reconcile_budget_exhausted'):
+                    reconcile.recovery.run([sys.executable, '-c', 'import time; time.sleep(10)'])
+        self.assertIs(reconcile.recovery.run, original_run)
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].poll())
+
+    def test_failed_receipt_retains_safe_correlation(self):
+        def failed(arguments, **kwargs):
+            process = self.ansible_process(arguments, **kwargs)
+            attempt = Path(arguments[arguments.index('--state-dir') + 1])
+            reconcile.atomic_json(attempt / 'receipt.json', {'state': 'failed', 'code': 'ansible_failed'})
+            return process
+        with mock.patch.object(reconcile.subprocess, 'Popen', side_effect=failed):
+            with self.assertRaisesRegex(ValueError, 'ansible_reconcile_failed'):
+                reconcile.ansible_apply(self.config, self.primary, {})
+        failure = json.loads((Path(self.config['state_dir']) / 'ansible' / self.primary['id'] / 'last-failure.json').read_text())
+        self.assertEqual(failure['receipt_code'], 'ansible_failed')
+        self.assertTrue(failure['attempt'].startswith('attempt-'))
+
+    def test_total_budget_publishes_status_before_service_deadline(self):
+        with mock.patch.object(reconcile, 'RECONCILE_BUDGET_SECONDS', 0.02), \
+             mock.patch.object(reconcile, 'refresh_monitor_profile', side_effect=lambda config: time.sleep(0.1)):
+            with self.assertRaisesRegex(ValueError, 'reconciliation unavailable'):
+                reconcile.reconcile(self.config)
+        status = json.loads(Path(self.config['status_file']).read_text())
+        self.assertEqual(status['reason_code'], 'reconcile_budget_exhausted')
+        self.assertEqual(status['stage'], 'monitor_profile')
 
     def test_compaction_preserves_running_and_recent_attempts(self):
         directory=self.root/'attempts';directory.mkdir()

@@ -12,6 +12,7 @@
 | Только инструкции или документация | `make harness-check`; содержательная сверка с источниками |
 | Состав релиза, manifest или публикация GitHub Release | `python3 scripts/test-release-assets.py`, затем `python3 scripts/test-release-assets.py --dist dist`: реальный комплект должен совпадать с manifest, SHA-256, архитектурами ELF, исходными архивами и закреплёнными offline wheels |
 | Проверяющий инструмент harness | `go test ./tools/harnesscheck`; `make harness-check`; `go vet ./tools/harnesscheck` |
+| Offline rebuild-non-db preflight | `env -u DATABASE_URL go test ./cmd/ultra-install -run '^TestRebuild' -count=1`: strict evidence/scope, неподтверждённое доверие, приватность входов, blocked journal/replay/crash и paginated provider inventory; тесты не подключаются к production |
 | Go-код | Тесты затронутых пакетов, затем `make test`, `make vet`, `make lint` |
 | Конфигурация Xray, маршрутизация, failover | Тесты `./internal/config ./internal/exits ./internal/proxy`; сборка relay |
 | Ansible upgrade с DNS/domain/runtime effects | `python3 scripts/test-ansible-dns-migration.py`, `test-ansible-upgrade-domain.py`, `test-ansible-upgrade-runtime.py`, `test-ansible-runtime-effects.py`, `test-ansible-accepted-resume.py`, operation mapping и syntax check закреплённым Ansible runtime |
@@ -44,6 +45,9 @@ Go учитывает `GOTMPDIR`: смена только `TMPDIR` не пере
 общая свободная ёмкость не гарантирует доступное место для текущего UID.
 Освобождай только подтверждённые генерируемые кеши без активных пользователей;
 для отдельного Go build cache используй `GOCACHE=<проверенный-каталог> go clean -cache`.
+Если сборка упирается в квоту `/tmp`, но в workspace уже есть полный проверенный
+`.gocache`, переиспользуй его через явный `GOCACHE` и направь `GOTMPDIR` в новый
+каталог на workspace-диске; сначала проверь `df` и не удаляй соседние артефакты.
 
 Перед каждым коммитом запусти `make format`, проверь получившийся diff, затем `make lint`.
 Форматирование обязательно, а не best-effort: `goimports`, `gofmt`, `golines` и

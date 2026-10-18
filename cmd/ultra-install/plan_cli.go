@@ -23,6 +23,8 @@ func handlePlanSubcommand(args []string) bool {
 		return true
 	}
 	switch args[0] {
+	case "rebuild-non-db":
+		exitOnErr("rebuild non-DB preflight", runRebuildNonDB(args[1:], os.Stdout, time.Now()))
 	case "config-values":
 		runConfigValuesCommand(args[1:])
 	case "bridge-migrate":

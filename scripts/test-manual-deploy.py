@@ -310,6 +310,21 @@ class RecoveryStateAttestation(unittest.TestCase):
         self.assertIn(current['forward_journal_sha256'],run.call_args.args[0][-1])
         self.assertFalse(output['remote']['predecessor_causality_proven'])
 
+    def test_forward_remote_attestation_failure_reports_only_stable_phase(self):
+        config, current, remote, proof, request, original = self.forward_fixture()
+        secret_output = b'host-secret /private/path 00000000-0000-4000-8000-000000000001 ' + b'a'*64
+        with patch.dict(os.environ, {'ULTRA_OPERATOR_INVENTORY':''}), \
+             patch.object(D,'operator_transport',return_value=(['ssh'],'binding')), \
+             patch.object(subprocess,'run',return_value=SimpleNamespace(returncode=255,stdout=secret_output,
+                 stderr=secret_output)) as run:
+            with self.assertRaisesRegex(D.DeployError,
+                    '^recovery_attestation_remote_failed_phase_forward_predecessor$') as raised:
+                self.collect(config)
+        self.assertEqual(run.call_args.kwargs['stderr'],subprocess.DEVNULL)
+        for value in (secret_output.decode(), 'host-secret', '/private/path', original,
+                      current['forward_journal_sha256'], current['remote_attempt']):
+            self.assertNotIn(value, str(raised.exception))
+
     def test_forward_collector_rejects_missing_or_changed_local_proof_before_ssh(self):
         config, current, remote, proof, request, original = self.forward_fixture()
         archive = self.root/'manual/operation.forward-only-abandoned-1.json'

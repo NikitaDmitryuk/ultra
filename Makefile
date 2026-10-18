@@ -189,6 +189,7 @@ ansible-dist:
 
 test-ansible:
 	python3 scripts/test-ansible-controller-process.py
+	python3 scripts/test-upgrade-worker-drain.py
 	python3 scripts/test-ansible-release-contracts.py
 	python3 scripts/test-controller-enforcement.py
 	python3 scripts/test-ansible-db-tunnel-authorization.py

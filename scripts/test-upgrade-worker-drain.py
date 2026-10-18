@@ -68,12 +68,13 @@ class WorkerDrain(unittest.TestCase):
         with patch.object(Path, 'iterdir', side_effect=PermissionError('fixture')):
             with self.assertRaises(PermissionError): gate.census('old', 'new', False, Path('/synthetic'), 30)
 
-    def test_playbook_covers_all_hosts_and_does_not_mutate(self):
+    def test_playbook_covers_managed_hosts_and_does_not_mutate(self):
         import yaml
         plays = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/drain-upgrade-workers.yml').read_text())
-        self.assertEqual(plays[0]['hosts'], 'all')
+        self.assertEqual(plays[0]['hosts'], 'all:!localhost')
         self.assertTrue(plays[0]['any_errors_fatal'])
         self.assertEqual(set(plays[0]['tasks'][0]) - {'name', 'become'}, {'ultra_upgrade_worker_drain'})
+        self.assertEqual(plays[1]['hosts'], 'bridge')
 
     def test_worker_detection_uses_executable_prefix_not_broker_option_values(self):
         broker = [b'/opt/ultra-ansible/releases/fixture/ultra-install', b'ansible-controller', b'--executable',

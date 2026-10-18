@@ -4,6 +4,9 @@
 приёмка перечислены в [Ansible TODO](../TODO.md). Реализация команды не означает
 подтверждённую production-приёмку.
 
+Ограничения переустановки non-DB узлов и восстановления неполного upgrade-журнала
+описаны в [границах recovery non-DB](rebuild-non-db.md).
+
 [Наглядное объяснение Ansible](ansible-explained.html) показывает путь задания,
 границы ответственности, обновление и откат.
 
@@ -35,6 +38,58 @@ upgrade сверяет их только с receipt-управляемым пу�
 обновляется в службе, `deployment.controller_directory` и `backup.artifact_paths`.
 Следующее поколение копий содержит runtime активной версии; чужая идентичность
 блокирует изменение. Источник: [контракт восстановления контроллера](../deploy/ansible/roles/release/tasks/backup-identity.yml).
+
+## Offline preflight переустановки non-DB узлов
+
+`ultra-install rebuild-non-db preflight` принимает приватный envelope наблюдений,
+исходный manual journal, канонический config и candidate manifest. Это законченный
+этап проверки формы входов и сохранения заблокированного evidence record;
+исполнения переустановки и разблокировки deploy эта команда не предоставляет.
+Единственный допустимый результат для структурно корректных входов — JSON
+`state=blocked-unverified` и ненулевой exit code. Поля `fleet_verified`,
+`primary_verified`, `execution_supported` и `gate_released` всегда равны `false`.
+Действия `execute`, `resume`, `complete` и `force` отклоняются.
+
+Аргументы: `preflight --proof <absolute-0600-envelope> --original-journal
+<absolute-0600-operation.json> --config <absolute-0600-install.config> --manifest
+<absolute-manifest.json> --state-dir <separate-existing-0700-directory>`.
+Используй отдельный пустой каталог, не каталог действующего journal. Команда
+читает файлы локально, не читает `.env`/SSH keys и не обращается к сети.
+Исходный `operation.json`, config, manifest и envelope не изменяются.
+
+Контракт `ultra-rebuild-non-db-preflight-v1` задан типами в
+[rebuild_non_db_proof.go](../cmd/ultra-install/rebuild_non_db_proof.go).
+Envelope содержит base64 payload и подпись длиной 64 байта, но текущий контракт
+не связывает signer с доверенным collector. Подпись и заявления внутри payload
+не проверены независимыми наблюдениями: подходящая форма не доказывает полноту
+fleet, остановку workers или идентичность primary. Прикладной публичный ключ
+рядом с proof не принимается как trust root.
+
+Проверка формы требует свежие наблюдения в пределах срока envelope не более
+300 секунд, complete/pagination claims с точным количеством targets, однозначные
+instance/SSH identities, один bridge и exits, отдельный primary с system identifier,
+DB OID, migration/DSN bindings, отсутствие writers и сохранённую авторизацию доступа.
+План ограничен точными стадиями `rebuild-exits`, `rebuild-bridge`, `activate-bot`
+и соответствующими non-DB targets; это предлагаемые стадии, а не исполнимые
+playbooks. DB import/restore, schema/role/slot/pg_hba и изменение авторизации
+primary в этом контракте отсутствуют. Неизвестные/повторные JSON fields и null
+вместо обязательных значений отклоняются.
+
+Приватный `rebuild-preflight.json` сохраняет unverified envelope и привязки
+к хешам входов. Публикация синхронизируется на диск и не перезаписывает файл;
+повтор с теми же байтами допустим, изменение входов и неизвестные checkpoints
+(включая остаток прерванной публикации) блокируют повтор. Это evidence record,
+не completion receipt, lifecycle reservation или разрешение продолжить manual deploy.
+Для новых наблюдений нужен отдельный каталог; старые records сохраняются.
+
+Read-only collector использует существующий paginated `Vultr.Instances` и
+отклоняет неизвестные, отсутствующие, нетегированные или неоднозначно сопоставленные
+узлы одного account. Он пока не подключён к CLI credentials и не доказывает
+полноту исторического fleet или владение статическими узлами других providers.
+Для исполнения остаются обязательными live independent observations через
+provider API и pinned SSH, привязка полномочий collector, перенос controller fence,
+одинаковая scope validation в installer/controller и DB-excluded executor.
+До их реализации существующие forward-only/adoption guards продолжают действовать.
 
 ## Канонические входы
 
@@ -957,6 +1012,22 @@ bridge как baseline, также недоступен; для dedicated DB и�
 должно быть подтверждённо доставлено на текущий независимый узел: свежая
 локальная копия и прежний статус `independent` сами по себе недостаточны.
 Проверки после активации требуют данных новее watermark этой попытки.
+
+Recovery reconcile сохраняет приватный `reconcile-progress.json` с порядком
+вызовов, их точными запросами и каталогами immutable attempts. После timeout
+или перезапуска он проверяет завершённые receipts и возобновляет тот же pending
+request до dispatch более ранних фаз. Изменённые входы остаются конфликтом;
+до любых изменений узлов он проверяет все Ansible attempts, включая legacy
+attempts без progress journal; попытка без точного соответствия журналу блокирует
+запуск. Успешные receipts при replay не считаются свежей проверкой здоровья:
+перед `ready` monitor и peer-доступ проверяются заново, а `health_start` сохраняет
+порядок, если reconcile прерывается во время этих проверок. Успешный полный
+проход удаляет progress journal. Не удаляй attempts или receipts для ручного
+обхода gate. Прерванный attempt, созданный до появления progress journal, нельзя
+безопасно продолжить по догадке: он остаётся заблокированным и требует отдельного
+восстановления исходного контекста. Один reconcile ограничен 480 секундами,
+Ansible child — 450 секундами, systemd unit — 540 секундами; при отмене дочерний
+installer получает время записать interrupted receipt.
 
 Восстановление использует те же роли и проверенное зашифрованное поколение.
 Прежний primary изолируют до активации нового. Расшифрованный staging не

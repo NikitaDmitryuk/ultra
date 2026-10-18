@@ -2259,11 +2259,15 @@ def collect_recovery_attestation(repo, root, config, state_root, bootstrap_name,
         if is_forward:
             arguments += [forward['remote_attempt'], forward['forward_journal_sha256']]
         command = transport + [shlex.join(['python3','-I','-c',REMOTE_RECOVERY_ATTEST,*arguments])]
-        remote = subprocess.run(command,cwd=repo,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
-                                check=False,timeout=60)
-        require(remote.returncode == 0 and len(remote.stdout)<=262144, 'recovery_attestation_remote_failed')
-        # Never emit raw transport output before schema validation.
-        result = validate_recovery_attestation_remote(json.loads(remote.stdout), h)
+        phase = 'forward_predecessor' if is_forward else 'remote_attestation'
+        try:
+            remote = subprocess.run(command,cwd=repo,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                                    check=False,timeout=60)
+            require(remote.returncode == 0 and len(remote.stdout)<=262144, 'remote_attestation_failed')
+            # Never emit raw transport output before schema validation.
+            result = validate_recovery_attestation_remote(json.loads(remote.stdout), h)
+        except Exception:
+            raise DeployError('recovery_attestation_remote_failed_phase_' + phase) from None
         return {'schema':1,'local':local,'remote':result}
 
 
