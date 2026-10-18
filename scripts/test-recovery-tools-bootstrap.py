@@ -3,6 +3,7 @@
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -271,6 +272,60 @@ class BootstrapFixture(unittest.TestCase):
             info.st_uid = 54321
             with self.assertRaisesRegex(ValueError, 'private_file_required'):
                 bootstrap.ssh_bytes(path)
+
+    def test_inventory_accepts_private_executable_immutable_generation(self):
+        active = self.root / 'active'
+        generation = active / 'releases' / 'v2.3.0'
+        generation.mkdir(parents=True, mode=0o700)
+        manifest = active / 'release-manifest.json'
+        manifest.write_text(json.dumps({'version': 'v2.3.0'}))
+        manifest.chmod(0o600)
+        for name in bootstrap.TOOLS:
+            path = generation / name
+            path.write_bytes(('installed ' + name).encode())
+            path.chmod(0o755)
+        nodes = [{'id': 'fixture', 'address': '192.0.2.1',
+                  'known_hosts': str(self.root / 'known_hosts')}]
+        known_hosts = self.root / 'known_hosts'
+        known_hosts.write_text('fixture-key\n')
+        known_hosts.chmod(0o600)
+        identity = self.root / 'identity'
+        identity.write_text('fixture-identity\n')
+        identity.chmod(0o600)
+        config_path = self.root / 'reconcile.json'
+        config_path.write_text(json.dumps({'database': 'ultra', 'bundle_dir': str(active),
+                                           'vultr_state_dir': str(self.root),
+                                           'ssh_identity_file': str(identity)}))
+        config_path.chmod(0o600)
+        config = config_path.read_bytes()
+
+        reconcile = SimpleNamespace(discover=lambda value: [],
+                                    desired_nodes=lambda value, rows: (nodes, set()))
+        original_lstat = Path.lstat
+        original_private_bytes = bootstrap.private_bytes
+
+        def lstat(path):
+            info = original_lstat(path)
+            if path == generation:
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=0)
+            return info
+
+        def private_bytes(path, *args, **kwargs):
+            if path == '/etc/ultra-recovery/reconcile.json':
+                path = config_path
+            return original_private_bytes(path, *args, **kwargs)
+
+        with patch.object(bootstrap, 'ACTIVE', active), patch.object(bootstrap, 'ROOT', self.root), \
+                patch.object(bootstrap.Path, 'lstat', lstat), \
+                patch.object(bootstrap.pwd, 'getpwnam', return_value=SimpleNamespace(pw_name='ultra-relay',
+                                                                                     pw_uid=os.geteuid())), \
+                patch.dict('sys.modules', {'reconcile': reconcile}):
+            with patch.object(bootstrap, 'private_bytes', side_effect=private_bytes) as read:
+                result = bootstrap.inventory()
+        self.assertEqual(set(result['tool_hashes']), set(bootstrap.TOOLS))
+        self.assertEqual(result['previous_manifest']['version'], 'v2.3.0')
+        self.assertTrue(all(call.kwargs.get('executable') is True
+                            for call in read.call_args_list if Path(call.args[0]).parent == generation))
 
 
 if __name__ == '__main__':

@@ -152,7 +152,8 @@ def inventory():
     info = generation.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
         raise ValueError('bootstrap_old_generation_unsafe')
-    old = {name: digest(private_bytes(generation / name)) for name in TOOLS}
+    # Installed recovery tools are executables (0755); reject writes by group/world.
+    old = {name: digest(private_bytes(generation / name, executable=True)) for name in TOOLS}
     sys.path.insert(0, str(ACTIVE))
     import reconcile
     config = json.loads(private_bytes('/etc/ultra-recovery/reconcile.json'))
