@@ -8,6 +8,7 @@ import os
 import re
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import tarfile
 import hashlib
@@ -22,6 +23,357 @@ SPEC = importlib.util.spec_from_file_location('manual_deploy', Path(__file__).wi
 D = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(D)
 SUBSCRIPTION_PROBE_INPUT = D.subscription_probe_input
+
+
+
+class RecoveryStateAttestation(unittest.TestCase):
+    """Local fixtures only; no production SSH, installer or Ansible."""
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.h = D.recovery_attestation_helpers()
+        self.sentinel = '-----BEGIN OPENSSH PRIVATE KEY-----secret-sentinel'
+        self.original = '00000000-0000-4000-8000-000000000001'
+
+    def write(self, name, value):
+        path = self.root/name
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+        return path
+
+    def stage(self, name='activate'):
+        envelope = {'schema_version':1, 'operation':'upgrade', 'request_sha256':'a'*64,
+                    'state':'succeeded', 'code':'', 'result':{'verified':True, 'identity':self.sentinel}}
+        for filename in ('job.json', 'receipt.json'):
+            self.write(name+'/'+filename, envelope)
+        self.write(name+'/request.json', {'identity':self.sentinel,
+            'inventory':{'identity':self.sentinel},
+            'variables':{'ultra_lifecycle_id':self.original,
+                         'ultra_recovery_bootstrap_candidate':'b'*64, 'identity':self.sentinel}})
+        return self.root/name
+
+    def test_projection_never_buffers_decodes_hashes_or_emits_identity_values(self):
+        stage = self.stage()
+        original_loads = json.loads
+        def decode(raw, *args, **kwargs):
+            self.assertNotIn('secret-sentinel', str(raw))
+            self.assertNotIn('PRIVATE KEY', str(raw))
+            return original_loads(raw, *args, **kwargs)
+        real_read = os.read
+        def read(fd, count):
+            self.assertEqual(count, 1)
+            return real_read(fd, count)
+        with patch.object(json, 'loads', side_effect=decode), patch.object(os, 'read', side_effect=read), \
+             patch.object(hashlib, 'sha256', side_effect=AssertionError('mixed JSON must not be hashed')):
+            result = self.h['attest_stage'](stage)
+        encoded = json.dumps(result)
+        self.assertNotIn('identity', encoded)
+        self.assertNotIn('PRIVATE KEY', encoded)
+        self.assertNotIn('secret-sentinel', encoded)
+        self.assertIs(result['receipt']['result.verified'], True)
+        self.assertEqual(result['request_metadata']['variables.ultra_lifecycle_id'], self.original)
+        self.assertFalse(result['request_digest_recomputed'])
+
+    def test_reconcile_status_accepts_group_readable_mode(self):
+        path = self.write('recovery-reconcile-status.json',
+                          {'state':'ready','independent':True,'updated_at':1792315565})
+        path.chmod(0o640)
+        result = self.h['attest_optional'](path,
+            {('state',),('independent',),('updated_at',)}, modes=(0o640,))
+        self.assertEqual(result['state'], 'ready')
+        self.assertEqual(result['updated_at'], 1792315565)
+
+    def test_recovery_health_projects_backup_and_reconcile_contracts(self):
+        now = int(time.time())
+        backup = self.write('recovery/last-success.json', {
+            'source':'bridge','snapshot_at':now,'completed_at':now,'dump_verified':True,
+            'backup_sha256':'a'*64,'artifact_sha256':'b'*64,'delivered_target_ids':['private-target']})
+        independent = self.write('relay/recovery-status.json',
+                                 {'snapshot_at':now,'independent':True,'targets':['private-target']})
+        reconcile = self.write('relay/recovery-reconcile-status.json',
+                               {'state':'ready','updated_at':now,'independent':True,'primary':'private-primary'})
+        independent.chmod(0o640)
+        reconcile.chmod(0o640)
+        result = self.h['attest_recovery_health'](backup.parent, independent.parent, now)
+        self.assertEqual(result['backup'], {'state':'succeeded','independent':True,
+                                           'snapshot_at':now,'fresh':True})
+        self.assertEqual(result['reconcile'], {'state':'ready','updated_at':now,
+                                             'independent':True,'fresh':True})
+        self.assertNotIn('private-target', json.dumps(result))
+        self.assertNotIn('private-primary', json.dumps(result))
+
+    def test_recovery_health_does_not_treat_backup_receipt_as_independent_or_fresh(self):
+        now = int(time.time())
+        backup = self.write('recovery/last-success.json', {
+            'source':'bridge','snapshot_at':now-600,'completed_at':now-590,'dump_verified':True,
+            'backup_sha256':'a'*64,'artifact_sha256':'b'*64})
+        independent = self.write('relay/recovery-status.json',
+                                 {'snapshot_at':now,'independent':True})
+        independent.chmod(0o640)
+        result = self.h['attest_recovery_health'](backup.parent, independent.parent, now)
+        self.assertFalse(result['backup']['fresh'])
+        self.assertFalse(result['backup']['independent'])
+
+    def test_recovery_health_preserves_allowlisted_reconcile_failure_cause(self):
+        now = int(time.time())
+        reconcile = self.write('relay/recovery-reconcile-status.json', {
+            'state':'error','code':'reconcile_unavailable','stage':'backup','updated_at':now-300})
+        reconcile.chmod(0o640)
+        result = self.h['attest_recovery_health'](self.root/'recovery', reconcile.parent, now)
+        self.assertEqual(result['reconcile'], {'state':'error','code':'reconcile_unavailable',
+                                               'stage':'backup','updated_at':now-300,'fresh':False})
+
+    def test_rejects_symlink_file_and_parent(self):
+        path = self.write('source.json', {'phase':'applying'})
+        (self.root/'link.json').symlink_to(path)
+        (self.root/'parent').symlink_to(self.root, target_is_directory=True)
+        for candidate in (self.root/'link.json', self.root/'parent/source.json'):
+            with self.subTest(path=candidate), self.assertRaises((OSError, ValueError)):
+                self.h['attest_project'](candidate, {('phase',)})
+
+    def test_rejects_oversized_wrong_owner_hardlinks_modes_and_types(self):
+        path = self.write('file.json', {'phase':'applying'})
+        with patch.object(os, 'geteuid', return_value=os.geteuid()+1000), self.assertRaises(ValueError):
+            self.h['attest_project'](path, {('phase',)})
+        path.chmod(0o644)
+        with self.assertRaises(ValueError):
+            self.h['attest_project'](path, {('phase',)})
+        path.chmod(0o600)
+        os.link(path, self.root/'hardlink.json')
+        with self.assertRaises(ValueError):
+            self.h['attest_project'](path, {('phase',)})
+        (self.root/'hardlink.json').unlink()
+        with path.open('wb') as stream:
+            stream.truncate(4194305)
+        with self.assertRaises(ValueError):
+            self.h['attest_project'](path, {('phase',)})
+        fifo = self.root/'fifo'
+        os.mkfifo(fifo, 0o600)
+        with self.assertRaises(ValueError):
+            self.h['attest_project'](fifo, {('phase',)})
+
+    def test_changed_file_during_read_is_rejected(self):
+        path = self.write('change.json', {'phase':'applying'})
+        with self.assertRaises(ValueError):
+            with self.h['attest_open'](path):
+                path.write_text('{}')
+
+    def test_bad_json_duplicate_keys_and_depth_rejected(self):
+        path = self.write('invalid.json', {})
+        for raw in ('{"phase":"applying","phase":"released"}', '{"identity":"bad\\q"}',
+                    '{"identity":['*60+'0'+']}'*60, '{"identity":true} trailing'):
+            path.write_text(raw)
+            with self.subTest(raw=raw[:40]), self.assertRaises((ValueError, RecursionError)):
+                self.h['attest_project'](path, {('phase',)})
+
+    def test_lifecycle_reports_owner_and_retirement_without_replacing_it(self):
+        path = self.write('state/lifecycle.json', {'id':self.original,'phase':'applying','identity':self.sentinel})
+        self.write('state/lifecycle-retired.json', {'version':1,'ids':[self.original]})
+        before = path.read_bytes()
+        result = self.h['attest_lifecycle'](path.parent, self.original)
+        self.assertEqual(result, {'phase':'applying','original_owner_matches':True,'original_retired':True})
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse(self.h['attest_lifecycle'](path.parent, '00000000-0000-4000-8000-000000000002')['original_owner_matches'])
+
+    def test_completion_directory_does_not_imply_verified(self):
+        stage = self.root/'completion-proof-123'
+        stage.mkdir(mode=0o700)
+        result = self.h['attest_stage'](stage)
+        self.assertEqual(result['receipt'], {'evidence':'absent'})
+        self.assertNotIn('verified', json.dumps(result))
+
+    def test_selected_key_like_value_rejected_before_output(self):
+        stage = self.stage()
+        self.write('activate/receipt.json', {'state':self.sentinel})
+        with self.assertRaises(ValueError):
+            self.h['attest_stage'](stage)
+
+    def test_remote_program_only_reads_and_locks_no_census_or_mutator(self):
+        self.assertNotIn('subprocess', D.REMOTE_RECOVERY_ATTEST)
+        self.assertNotIn('/proc', D.REMOTE_RECOVERY_ATTEST)
+        self.assertNotIn('O_CREAT', D.REMOTE_RECOVERY_ATTEST)
+        self.assertNotIn('os.write', D.REMOTE_RECOVERY_ATTEST)
+        self.assertIn("state/'operator/infrastructure.lock'", D.REMOTE_RECOVERY_ATTEST)
+        self.assertIn("state/'infrastructure.lock'", D.REMOTE_RECOVERY_ATTEST)
+        self.assertIn("state/'operator-inputs/manual-deploy.lock'", D.REMOTE_RECOVERY_ATTEST)
+
+    def test_cli_dispatches_before_build_checks_and_rejects_mutating_options(self):
+        argv = ['manual-deploy.py','--attest-recovery-state','--attestation-bootstrap',
+                'recovery-tools-bootstrap-operation-fixture','--attestation-candidate','a'*64]
+        with patch.object(os.environ, 'get', side_effect=lambda key, default=None: default), \
+             patch.object(D, 'collect_recovery_attestation', return_value={'schema':1}) as collect, \
+             patch.object(D, 'run', side_effect=AssertionError('no build/git checks')), \
+             patch.object(sys, 'argv', argv), contextlib.redirect_stdout(io.StringIO()) as out:
+            D.main()
+        self.assertEqual(json.loads(out.getvalue()), {'schema':1})
+        collect.assert_called_once()
+        for extra in ('--forward-only','--retry-failed','--build-only','--continue-forward-only'):
+            with self.subTest(extra=extra), patch.object(sys, 'argv', argv+[extra]), \
+                 self.assertRaisesRegex(D.DeployError,'recovery_attestation_arguments_invalid'):
+                D.main()
+
+    def collector_fixture(self):
+        config = self.write('install.config', {})
+        raw = config.read_bytes()
+        commit = 'a'*40
+        version = 'v0.0.'+str(int(commit,16))
+        manifest = self.write('manual/'+version+'/release-manifest.json', {})
+        manifest.chmod(0o400)
+        self.write('manual/operation.json', {'schema':1,'commit':commit,'version':version,
+            'manifest_sha256':D.sha(manifest.read_bytes()),'config_sha256':D.sha(raw),
+            'stage':'upgrade','mutator_dispatched':True})
+        self.write('state/upgrade-'+version+'/operator-plan.json', {})
+        self.write('state/upgrade-'+version+'/activate/request.json',
+                   {'variables':{'ultra_lifecycle_id':self.original},'identity':self.sentinel})
+        for lock in ('manual/deploy.lock','.install.config.manual-deploy.lock',
+                     'state/operator/infrastructure.lock','state/infrastructure.lock'):
+            self.write(lock, {})
+        stage = self.h['attest_stage'](self.root/'absent')
+        result = {'schema':1,'lifecycle':{'evidence':'absent'},'upgrade_activate':stage,
+                  'bootstrap_inventory':stage,'bootstrap_phases':{},'worker_census':'not_performed',
+                  'predecessor_causality_proven':False,'backup':{'evidence':'absent'},
+                  'reconcile':{'evidence':'absent'}}
+        return config, version, result
+
+    def collect(self, config):
+        return D.collect_recovery_attestation(self.root,self.root/'manual',config,self.root/'state',
+                   'recovery-tools-bootstrap-operation-fixture','b'*64)
+
+    def test_collector_uses_exact_pinned_transport_and_leaves_inputs_unchanged(self):
+        config, version, remote = self.collector_fixture()
+        before = {str(p):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        transport = ['ssh','-F','/dev/null','-o','StrictHostKeyChecking=yes','root@192.0.2.1']
+        with patch.dict(os.environ, {'ULTRA_OPERATOR_INVENTORY':''}), \
+             patch.object(D,'operator_transport',return_value=(transport,'binding')), \
+             patch.object(subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=json.dumps(remote).encode())) as run:
+            output = self.collect(config)
+        self.assertEqual(run.call_args.args[0][:-1],transport)
+        self.assertIn('python3 -I -c',run.call_args.args[0][-1])
+        self.assertEqual(run.call_args.kwargs['stderr'],subprocess.DEVNULL)
+        self.assertEqual(output['local']['original_lifecycle_id'],self.original)
+        self.assertNotIn('secret-sentinel',json.dumps(output))
+        self.assertEqual(before,{str(p):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+
+    def test_missing_original_id_is_a_blocker_before_ssh(self):
+        config, version, remote = self.collector_fixture()
+        (self.root/'state'/('upgrade-'+version)/'activate/request.json').unlink()
+        with patch.dict(os.environ, {'ULTRA_OPERATOR_INVENTORY':''}), \
+             patch.object(D,'operator_transport',return_value=(['ssh'],'binding')), \
+             patch.object(subprocess,'run',side_effect=AssertionError('no SSH without original evidence')), \
+             self.assertRaisesRegex(D.DeployError,'recovery_attestation_original_id_missing'):
+            self.collect(config)
+
+    def forward_fixture(self):
+        config, version, remote = self.collector_fixture()
+        journal = self.root/'manual/operation.json'
+        current = json.loads(journal.read_bytes())
+        commit = 'c'*40
+        old_version = 'v0.0.'+str(int(commit,16))
+        manifest = self.write('remote-manifest.json', {})
+        staged = self.write('remote-config.json', {})
+        proof = {'schema':1,'commit':commit,'version':old_version,'stage':'upgrade',
+                 'mutator_dispatched':True,'remote_attempt':'d'*64,
+                 'manifest_sha256':D.sha(manifest.read_bytes()),
+                 'staged_config_sha256':D.sha(staged.read_bytes())}
+        archive = self.write('manual/operation.forward-only-abandoned-1.json', proof)
+        proof_sha = D.sha(archive.read_bytes())
+        current.update({'forward_only':True,'forward_journal_sha256':proof_sha,
+                        'remote_attempt':'e'*64,'staged_config_sha256':'f'*64})
+        self.write('manual/operation.json', current)
+        inputs = 'state/operator-inputs/manual-'+current['commit']+'-'+current['remote_attempt']
+        remote_proof = self.write(inputs+'/forward-operation.json', proof)
+        old_inputs = 'state/operator-inputs/manual-'+commit+'-'+proof['remote_attempt']
+        self.write(old_inputs+'/release/release-manifest.json', {})
+        self.write(old_inputs+'/install.config', {})
+        remote_path = '/var/lib/ultra-ansible/upgrade-'+old_version
+        original = str(D.uuid.UUID(bytes=hashlib.sha256(remote_path.encode()).digest()[:16],version=4))
+        request = self.write('state/upgrade-'+old_version+'/activate/request.json', {
+            'variables':{'ultra_lifecycle_id':original,
+                         'ultra_release_manifest_sha256':proof['manifest_sha256']},
+            'identity':self.sentinel})
+        # The candidate never activated and has no local operator cache.
+        shutil.rmtree(self.root/'state'/('upgrade-'+version))
+        return config, current, remote, remote_proof, request, original
+
+    def test_forward_collector_uses_exact_proof_without_local_activation_or_plan(self):
+        config, current, remote, proof, request, original = self.forward_fixture()
+        with patch.dict(os.environ, {'ULTRA_OPERATOR_INVENTORY':''}), \
+             patch.object(D,'operator_transport',return_value=(['ssh'],'binding')), \
+             patch.object(subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=json.dumps(remote).encode())) as run:
+            output = self.collect(config)
+        self.assertEqual(output['local']['operator_plan'], {'evidence':'absent'})
+        self.assertEqual(output['local']['original_lifecycle_id_source'],'remote_predecessor_request')
+        self.assertNotIn('original_lifecycle_id',output['local'])
+        self.assertIn(current['remote_attempt'],run.call_args.args[0][-1])
+        self.assertIn(current['forward_journal_sha256'],run.call_args.args[0][-1])
+        self.assertFalse(output['remote']['predecessor_causality_proven'])
+
+    def test_forward_collector_rejects_missing_or_changed_local_proof_before_ssh(self):
+        config, current, remote, proof, request, original = self.forward_fixture()
+        archive = self.root/'manual/operation.forward-only-abandoned-1.json'
+        for missing in (False, True):
+            if missing:
+                archive.unlink()
+            else:
+                archive.write_text('{}')
+            with self.subTest(missing=missing), \
+                 patch.dict(os.environ, {'ULTRA_OPERATOR_INVENTORY':''}), \
+                 patch.object(D,'operator_transport',return_value=(['ssh'],'binding')), \
+                 patch.object(subprocess,'run',side_effect=AssertionError('no SSH')), \
+                 self.assertRaisesRegex(D.DeployError,'manual_forward_continuation_proof_changed'):
+                self.collect(config)
+
+    def test_remote_forward_original_projects_exact_predecessor_without_hashing_request(self):
+        config, current, remote, proof, request, original = self.forward_fixture()
+        digest = self.h['attest_digest']
+        def safe_digest(path, **kwargs):
+            self.assertNotEqual(Path(path),request)
+            return digest(path, **kwargs)
+        with patch.dict(self.h, {'attest_digest':safe_digest}):
+            operation, observed = self.h['attest_forward_original'](self.root/'state',
+                current['commit'],current['version'],current['remote_attempt'],current['forward_journal_sha256'])
+        self.assertEqual(operation,request.parent.parent)
+        self.assertEqual(observed,original)
+
+    def test_remote_forward_original_rejects_missing_and_mismatched_evidence(self):
+        config, current, remote, proof, request, original = self.forward_fixture()
+        paths = (proof, request)
+        for path in paths:
+            raw = path.read_bytes()
+            for missing in (False, True):
+                if missing:
+                    path.unlink()
+                else:
+                    path.write_text('{}')
+                with self.subTest(path=path.name,missing=missing), self.assertRaises((ValueError,FileNotFoundError)):
+                    self.h['attest_forward_original'](self.root/'state',current['commit'],current['version'],
+                        current['remote_attempt'],current['forward_journal_sha256'])
+                path.write_bytes(raw)
+
+    def test_remote_forward_original_rejects_changed_uuid_or_manifest(self):
+        config, current, remote, proof, request, original = self.forward_fixture()
+        raw = json.loads(request.read_bytes())
+        for key, value in (('ultra_lifecycle_id',self.original),('ultra_release_manifest_sha256','0'*64)):
+            modified = json.loads(json.dumps(raw))
+            modified['variables'][key] = value
+            request.write_text(json.dumps(modified))
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.h['attest_forward_original'](self.root/'state',current['commit'],current['version'],
+                    current['remote_attempt'],current['forward_journal_sha256'])
+
+    def test_unexpected_remote_identity_is_rejected(self):
+        config, version, remote = self.collector_fixture()
+        remote['identity'] = self.sentinel
+        with self.assertRaises(ValueError):
+            D.validate_recovery_attestation_remote(remote,self.h)
+
+    def test_shared_operator_lock_excludes_collector(self):
+        config, version, remote = self.collector_fixture()
+        with D.existing_recovery_lock(self.root/'state/operator/infrastructure.lock'), \
+             self.assertRaises(BlockingIOError):
+            self.collect(config)
 
 
 class LocalPreflightRecovery(unittest.TestCase):

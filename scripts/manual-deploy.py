@@ -1850,6 +1850,408 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
     return receipt
 
 
+
+# Shared by the diagnostic collector and its fixed remote Python program.
+# No raw mixed request/receipt/inventory is ever buffered or hashed.
+ATTESTATION_READER = r'''
+import contextlib,fcntl,hashlib,json,os,re,stat,time,uuid
+from pathlib import Path
+LIMIT=4194304
+def attest_need(ok):
+    if not ok: raise ValueError('recovery_attestation_invalid')
+def attest_signature(info):
+    return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_nlink,
+            info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+@contextlib.contextmanager
+def attest_open(path, directory=False, modes=(0o600,)):
+    path=Path(path)
+    attest_need(path.is_absolute() and str(path)==os.path.normpath(str(path)))
+    fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:-1]:
+            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            os.close(fd);fd=child
+            parent=os.fstat(fd)
+            attest_need(not parent.st_mode & 0o022 or parent.st_mode & stat.S_ISVTX)
+        leaf=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|
+                     (os.O_DIRECTORY if directory else 0),dir_fd=fd)
+        try:
+            before=os.fstat(leaf)
+            attest_need(before.st_uid==os.geteuid() and
+                        (stat.S_ISDIR(before.st_mode) and stat.S_IMODE(before.st_mode)==0o700 if directory else
+                         stat.S_ISREG(before.st_mode) and before.st_nlink==1 and
+                         stat.S_IMODE(before.st_mode) in modes and before.st_size<=LIMIT))
+            yield leaf
+            attest_need(attest_signature(before)==attest_signature(os.fstat(leaf))==
+                        attest_signature(os.stat(path.name,dir_fd=fd,follow_symlinks=False)))
+        finally: os.close(leaf)
+    finally: os.close(fd)
+def attest_digest(path, modes=(0o600,)):
+    with attest_open(path,modes=modes) as fd:
+        digest=hashlib.sha256();count=0
+        while True:
+            block=os.read(fd,65536)
+            if not block: return digest.hexdigest()
+            count+=len(block);attest_need(count<=LIMIT);digest.update(block)
+def attest_project(path, fields, modes=(0o600,)):
+    """A bounded JSON SAX projection. Unselected strings are never accumulated.
+
+    Read a single byte at a time from an unbuffered descriptor, including skipped
+    identity values. No read-ahead buffer, object decoder, raw digest or exception
+    includes those values. Keys and explicitly selected scalar tokens are bounded.
+    """
+    with attest_open(path,modes=modes) as fd:
+        char=b'';count=0;nodes=0;out={}
+        def advance():
+            nonlocal char,count
+            char=os.read(fd,1);count+=len(char);attest_need(count<=LIMIT)
+        def whitespace():
+            while char and char in b' \t\r\n': advance()
+        def string(keep):
+            attest_need(char==b'"');advance();parts=[];length=0
+            while char!=b'"':
+                attest_need(char and char[0]>=32)
+                value=char
+                if char==b'\\':
+                    advance();attest_need(char in (b'"',b'\\',b'/',b'b',b'f',b'n',b'r',b't',b'u'))
+                    value+=char
+                    if char==b'u':
+                        for _ in range(4):
+                            advance();attest_need(char and char in b'0123456789abcdefABCDEF');value+=char
+                if keep:
+                    length+=len(value);attest_need(length<=256);parts.append(value)
+                advance()
+            advance()
+            return json.loads(b'"'+b''.join(parts)+b'"') if keep else None
+        def value(path,depth=0):
+            nonlocal nodes
+            nodes+=1;attest_need(depth<=48 and nodes<=100000);whitespace()
+            selected=path in fields
+            if char==b'{':
+                advance();whitespace();seen=set()
+                if char==b'}': advance();return
+                while True:
+                    key=string(True);attest_need(key not in seen);seen.add(key)
+                    whitespace();attest_need(char==b':');advance()
+                    # Discard unknown paths early; never select a nested identity.
+                    child=path+(key,) if any(p[:len(path)+1]==path+(key,) for p in fields) else ('!skip',)
+                    value(child,depth+1);whitespace()
+                    if char==b'}': advance();break
+                    attest_need(char==b',');advance();whitespace()
+            elif char==b'[':
+                advance();whitespace()
+                if char==b']': advance();return
+                index=0
+                while True:
+                    value(path+('*',),depth+1);index+=1;attest_need(index<=32768);whitespace()
+                    if char==b']': advance();break
+                    attest_need(char==b',');advance()
+            else:
+                if char==b'"': result=string(selected)
+                else:
+                    token=[]
+                    while char and char not in b' \t\r\n,]}':
+                        attest_need(char in b'-+.0123456789eEtruefalsn')
+                        token.append(char);attest_need(len(token)<=64);advance()
+                    raw=b''.join(token);attest_need(raw)
+                    result=json.loads(raw)
+                    attest_need(not isinstance(result,(dict,list,str)))
+                if selected:
+                    if '*' in path: out.setdefault('.'.join(path),[]).append(result)
+                    else: out['.'.join(path)]=result
+        advance();value(());whitespace();attest_need(not char)
+        return out
+def attest_optional(path, fields, modes=(0o600,)):
+    try: return attest_project(path,fields,modes=modes)
+    except FileNotFoundError: return {'evidence':'absent'}
+def attest_safe_scalar(value, kind):
+    if kind=='digest': return isinstance(value,str) and re.fullmatch('[a-f0-9]{64}',value)
+    if kind=='uuid': return isinstance(value,str) and re.fullmatch('[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}',value)
+    if kind=='bool': return type(value) is bool
+    if kind=='integer': return type(value) is int and 0<=value<=2**63-1
+    if kind=='state': return value in ('applying','checking','released','pending','running','succeeded','failed','ready','error','completed')
+    if kind=='code': return value=='' or isinstance(value,str) and re.fullmatch('[a-z][a-z0-9_]{0,79}',value)
+    if kind=='operation': return value in ('upgrade','bootstrap-recovery-inspect','bootstrap-recovery-tools','lifecycle')
+    return False
+def attest_clean(values, kinds):
+    clean={}
+    for key,value in values.items():
+        attest_need(key in kinds and attest_safe_scalar(value,kinds[key]));clean[key]=value
+    return clean
+def attest_lifecycle(state, original):
+    values=attest_optional(state/'lifecycle.json',{('id',),('phase',)})
+    if values.get('evidence')=='absent': return values
+    attest_need(set(values)=={'id','phase'})
+    attest_clean(values,{'id':'uuid','phase':'state'})
+    retired=attest_optional(state/'lifecycle-retired.json',{('version',),('ids','*')})
+    if retired.get('evidence')=='absent': membership=False
+    else:
+        attest_need(retired.get('version')==1)
+        ids=retired.get('ids.*',[])
+        attest_need(all(attest_safe_scalar(item,'uuid') for item in ids))
+        membership=original in ids
+    return {'phase':values['phase'],'original_owner_matches':values['id']==original,
+            'original_retired':membership}
+def attest_stage(stage):
+    kinds={'schema_version':'integer','operation':'operation','request_sha256':'digest',
+           'state':'state','code':'code','result.verified':'bool'}
+    fields={tuple(key.split('.')) for key in kinds}
+    answer={}
+    for name in ('job','receipt'):
+        values=attest_optional(stage/(name+'.json'),fields)
+        answer[name]=values if values.get('evidence')=='absent' else attest_clean(values,kinds)
+    variables={'ultra_release_manifest_sha256':'digest','ultra_topology_sha256':'digest',
+               'ultra_recovery_bootstrap_baseline':'digest','ultra_recovery_bootstrap_topology':'digest',
+               'ultra_recovery_bootstrap_candidate':'digest','ultra_lifecycle_id':'uuid'}
+    selected=attest_optional(stage/'request.json',{('variables',key) for key in variables})
+    answer['request_metadata']=selected if selected.get('evidence')=='absent' else attest_clean(
+        selected,{'variables.'+key:kind for key,kind in variables.items()})
+    # Envelope digests are reported claims; never hash a key-bearing request.
+    answer['request_digest_recomputed']=False
+    return answer
+def attest_recovery_health(recovery_root, relay_root, now=None):
+    now=time.time() if now is None else now
+    backup=attest_optional(recovery_root/'last-success.json',{
+        ('source',),('snapshot_at',),('completed_at',),('dump_verified',),
+        ('backup_sha256',),('artifact_sha256',)})
+    if backup.get('evidence')=='absent': backup_result=backup
+    else:
+        source=backup.get('source');snapshot=backup.get('snapshot_at')
+        verified=(source=='bridge' and type(snapshot) is int and
+                  type(backup.get('completed_at')) is int and
+                  backup.get('dump_verified') is True and
+                  attest_safe_scalar(backup.get('backup_sha256'),'digest') and
+                  attest_safe_scalar(backup.get('artifact_sha256'),'digest'))
+        independent_status=attest_optional(relay_root/'recovery-status.json',{
+            ('independent',),('snapshot_at',)},modes=(0o640,))
+        independent=(independent_status.get('independent') is True and
+                     independent_status.get('snapshot_at')==snapshot)
+        backup_result={'state':'succeeded' if verified else 'error',
+                       'independent':independent,'snapshot_at':snapshot if type(snapshot) is int else 0,
+                       'fresh':type(snapshot) is int and 0<=now-snapshot<=300}
+    reconcile=attest_optional(relay_root/'recovery-reconcile-status.json',{
+        ('state',),('code',),('stage',),('updated_at',),('independent',)},modes=(0o640,))
+    if reconcile.get('evidence')!='absent':
+        reconcile=attest_clean(reconcile,{'state':'state','code':'code','stage':'code',
+                                          'updated_at':'integer','independent':'bool'})
+        reconcile['fresh']=0<=now-reconcile.get('updated_at',0)<=180
+    return {'backup':backup_result,'reconcile':reconcile}
+def attest_forward_original(state,commit,version,attempt,proof_sha):
+    # This proof and the staged config are non-secret journals/configuration.
+    # Mixed activation requests are projected only, never decoded or hashed.
+    attest_need(attest_safe_scalar(attempt,'digest') and attest_safe_scalar(proof_sha,'digest'))
+    path=state/'operator-inputs'/('manual-'+commit+'-'+attempt)/'forward-operation.json'
+    attest_need(attest_digest(path)==proof_sha)
+    keys=('schema','commit','version','stage','mutator_dispatched','remote_attempt',
+          'manifest_sha256','staged_config_sha256')
+    proof=attest_project(path,{(key,) for key in keys})
+    attest_need(attest_digest(path)==proof_sha)
+    old_commit=proof.get('commit','');old_version=proof.get('version','')
+    attest_need(proof.get('schema')==1 and proof.get('stage')=='upgrade' and
+                proof.get('mutator_dispatched') is True and
+                isinstance(old_commit,str) and re.fullmatch('[a-f0-9]{40}',old_commit) and
+                old_commit!=commit and old_version=='v0.0.'+str(int(old_commit,16)) and
+                all(attest_safe_scalar(proof.get(key),'digest') for key in
+                    ('remote_attempt','manifest_sha256','staged_config_sha256')))
+    inputs=state/'operator-inputs'/('manual-'+old_commit+'-'+proof['remote_attempt'])
+    attest_need(attest_digest(inputs/'release/release-manifest.json')==proof['manifest_sha256'] and
+                attest_digest(inputs/'install.config')==proof['staged_config_sha256'])
+    operation=state/('upgrade-'+old_version)
+    metadata=attest_project(operation/'activate/request.json',
+        {('variables','ultra_lifecycle_id'),('variables','ultra_release_manifest_sha256')})
+    original=metadata.get('variables.ultra_lifecycle_id')
+    # The producer derives lifecycle identity from the canonical remote path.
+    remote_path='/var/lib/ultra-ansible/upgrade-'+old_version
+    import uuid
+    expected=str(uuid.UUID(bytes=hashlib.sha256(remote_path.encode()).digest()[:16],version=4))
+    attest_need(original==expected and
+                metadata.get('variables.ultra_release_manifest_sha256')==proof['manifest_sha256'])
+    return operation,original
+
+def attest_remote(state, upgrade, bootstrap, candidate, original):
+    answer={'schema':1,'lifecycle':attest_lifecycle(state,original),
+            'upgrade_activate':attest_stage(upgrade/'activate'),
+            'bootstrap_inventory':attest_stage(bootstrap/'inventory'),
+            'bootstrap_phases':{},'worker_census':'not_performed',
+            'predecessor_causality_proven':False}
+    root=bootstrap/'candidates'/candidate
+    with attest_open(root,True) as fd:
+        names=os.listdir(fd);attest_need(len(names)<=256)
+    phases=['fence','seed','apply','verify','resume']+sorted(
+        name for name in names if re.fullmatch('completion-proof-[0-9]+',name))
+    for phase in phases: answer['bootstrap_phases'][phase]=attest_stage(root/phase)
+    health=attest_recovery_health(Path('/var/lib/ultra-recovery'),Path('/var/lib/ultra-relay'))
+    answer.update(health)
+    return answer
+'''
+
+REMOTE_RECOVERY_ATTEST = ATTESTATION_READER + r'''
+import signal,sys
+signal.alarm(45)
+try:
+    args=sys.argv[1:]
+    attest_need(len(args) in (5,7))
+    commit,version,bootstrap_name,candidate,original=args[:5]
+    forward=len(args)==7
+    attest_need(os.geteuid()==0 and re.fullmatch('[a-f0-9]{40}',commit) and
+                version=='v0.0.'+str(int(commit,16)) and
+                re.fullmatch('recovery-tools-bootstrap-operation-[a-zA-Z0-9-]{1,100}',bootstrap_name) and
+                attest_safe_scalar(candidate,'digest') and
+                (original=='' if forward else attest_safe_scalar(original,'uuid')))
+    state=Path('/var/lib/ultra-ansible')
+    with contextlib.ExitStack() as stack:
+        for path in (state/'operator-inputs/manual-deploy.lock',state/'operator/infrastructure.lock',state/'infrastructure.lock'):
+            fd=stack.enter_context(attest_open(path))
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        upgrade=state/('upgrade-'+version)
+        if forward:
+            upgrade,original=attest_forward_original(state,commit,version,*args[5:])
+        result=attest_remote(state,upgrade,state/bootstrap_name,candidate,original)
+        print(json.dumps(result,sort_keys=True))
+except Exception:
+    print('recovery_attestation_failed',file=sys.stderr);sys.exit(1)
+'''
+
+
+def recovery_attestation_helpers():
+    scope = {}
+    exec(ATTESTATION_READER, scope)
+    return scope
+
+
+def validate_recovery_attestation_remote(result, helpers):
+    """Reject unexpected remote output before returning anything to the operator."""
+    need = helpers['attest_need']
+    clean = helpers['attest_clean']
+    need(isinstance(result, dict) and set(result) == {'schema', 'lifecycle', 'upgrade_activate',
+         'bootstrap_inventory', 'bootstrap_phases', 'worker_census', 'predecessor_causality_proven',
+         'backup', 'reconcile'} and result['schema'] == 1 and result['worker_census'] == 'not_performed'
+         and result['predecessor_causality_proven'] is False)
+    lifecycle = result['lifecycle']
+    if lifecycle != {'evidence':'absent'}:
+        clean(lifecycle, {'phase':'state', 'original_owner_matches':'bool', 'original_retired':'bool'})
+    phases = result['bootstrap_phases']
+    need(isinstance(phases, dict) and len(phases) <= 256 and all(
+        key in ('fence','seed','apply','verify','resume') or re.fullmatch('completion-proof-[0-9]+',key)
+        for key in phases))
+    for stage in [result['upgrade_activate'], result['bootstrap_inventory'], *phases.values()]:
+        need(isinstance(stage, dict) and set(stage) == {'job','receipt','request_metadata','request_digest_recomputed'}
+             and stage['request_digest_recomputed'] is False)
+        for label in ('job','receipt','request_metadata'):
+            values = stage[label]
+            if values == {'evidence':'absent'}:
+                continue
+            if label == 'request_metadata':
+                kinds = {'variables.'+key:'digest' for key in ('ultra_release_manifest_sha256',
+                    'ultra_topology_sha256','ultra_recovery_bootstrap_baseline',
+                    'ultra_recovery_bootstrap_topology','ultra_recovery_bootstrap_candidate')}
+                kinds['variables.ultra_lifecycle_id'] = 'uuid'
+            else:
+                kinds = {'schema_version':'integer','operation':'operation','request_sha256':'digest',
+                         'state':'state','code':'code','result.verified':'bool'}
+            clean(values, kinds)
+    for label, stamp in (('backup','snapshot_at'), ('reconcile','updated_at')):
+        if result[label] != {'evidence':'absent'}:
+            kinds={'state':'state','independent':'bool',stamp:'integer','fresh':'bool'}
+            if label=='reconcile': kinds.update({'code':'code','stage':'code'})
+            clean(result[label],kinds)
+    return result
+
+
+def load_forward_predecessor_proof(root, record, reader=private_file):
+    """Select the exact retained production journal used by forward continuation."""
+    digest = record.get('forward_journal_sha256', '')
+    require(isinstance(digest, str) and re.fullmatch('[a-f0-9]{64}', digest),
+            'manual_forward_continuation_proof_changed')
+    proofs = [reader(path) for path in root.glob('operation.forward-only-abandoned-*.json')]
+    matches = {raw for raw in proofs if sha(raw) == digest}
+    require(len(matches) == 1, 'manual_forward_continuation_proof_changed')
+    raw = next(iter(matches))
+    predecessor = json.loads(raw)
+    validate_dispatched_manual_operation(predecessor)
+    require(predecessor['commit'] != record['commit'], 'manual_forward_continuation_proof_changed')
+    return raw, predecessor
+
+
+
+def collect_recovery_attestation(repo, root, config, state_root, bootstrap_name, candidate):
+    """Diagnostics only: existing locks, pinned SSH, no journal/config writes."""
+    h = recovery_attestation_helpers()
+    require(re.fullmatch('recovery-tools-bootstrap-operation-[a-zA-Z0-9-]{1,100}', bootstrap_name or '') and
+            re.fullmatch('[a-f0-9]{64}', candidate or ''), 'recovery_attestation_arguments_invalid')
+    with contextlib.ExitStack() as stack:
+        for path in (root/'deploy.lock', canonical_config_lock(config),
+                     state_root/'operator/infrastructure.lock', state_root/'infrastructure.lock'):
+            fd = stack.enter_context(h['attest_open'](path))
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        journal = root/'operation.json'
+        fields = {'schema':'integer', 'commit':'commit', 'version':'version', 'manifest_sha256':'digest',
+                  'config_sha256':'digest','stage':'state','mutator_dispatched':'bool'}
+        record = h['attest_project'](journal, {(key,) for key in fields})
+        require(record.get('schema') == 1 and re.fullmatch('[a-f0-9]{40}',record.get('commit','')) and
+                record.get('version') == 'v0.0.'+str(int(record['commit'],16)) and
+                h['attest_safe_scalar'](record.get('manifest_sha256'),'digest') and
+                record.get('stage')=='upgrade' and record.get('mutator_dispatched') is True,
+                'recovery_attestation_journal_invalid')
+        # Canonical config is an explicitly non-secret file. Identity *references*
+        # are passed to SSH; generated inventory sources are forbidden here.
+        require(not os.environ.get('ULTRA_OPERATOR_INVENTORY'), 'recovery_attestation_inventory_forbidden')
+        current = canonical_file(config)
+        transport, _ = operator_transport(None, current)
+        operation = state_root/('upgrade-'+record['version'])
+        forward = h['attest_project'](journal, {('forward_only',),('forward_journal_sha256',),
+                                               ('remote_attempt',),('staged_config_sha256',)})
+        require('forward_only' not in forward or type(forward['forward_only']) is bool,
+                'recovery_attestation_journal_invalid')
+        is_forward = forward.get('forward_only') is True
+        original = ''
+        if is_forward:
+            validate_dispatched_manual_operation({**record, **forward})
+            def read_proof(path):
+                # Archived journals are non-secret; retain the diagnostic
+                # reader's path, ownership, mode and stable-descriptor checks.
+                with h['attest_open'](path) as fd:
+                    with os.fdopen(os.dup(fd), 'rb') as stream:
+                        return stream.read(4 * 1024 * 1024 + 1)
+            load_forward_predecessor_proof(root, {**record, **forward}, reader=read_proof)
+        else:
+            try:
+                activation = h['attest_project'](operation/'activate/request.json', {('variables','ultra_lifecycle_id')})
+            except FileNotFoundError:
+                raise DeployError('recovery_attestation_original_id_missing') from None
+            original = activation.get('variables.ultra_lifecycle_id')
+            require(h['attest_safe_scalar'](original, 'uuid'), 'recovery_attestation_original_id_missing')
+        manifest_sha = h['attest_digest'](root/record['version']/'release-manifest.json', modes=(0o400,0o600))
+        require(manifest_sha==record['manifest_sha256'], 'recovery_attestation_manifest_changed')
+        require(h['attest_safe_scalar'](record.get('config_sha256'),'digest') and
+                sha(current)==record['config_sha256'], 'recovery_attestation_config_changed')
+        local = {'journal_sha256':h['attest_digest'](journal),
+                 'config_sha256':h['attest_digest'](config), 'manifest_sha256':manifest_sha}
+        if is_forward:
+            # A remote operation need not leave any local operator cache.
+            # Absence is diagnostic evidence, never permission to reconstruct it.
+            try:
+                local['operator_plan_sha256'] = h['attest_digest'](operation/'operator-plan.json')
+            except FileNotFoundError:
+                local['operator_plan'] = {'evidence':'absent'}
+            local['original_lifecycle_id_source'] = 'remote_predecessor_request'
+            local['forward_journal_sha256'] = forward['forward_journal_sha256']
+        else:
+            local.update({'operator_plan_sha256':h['attest_digest'](operation/'operator-plan.json'),
+                          'original_lifecycle_id':original,
+                          'lifecycle':h['attest_lifecycle'](state_root,original)})
+        arguments = [record['commit'],record['version'],bootstrap_name,candidate,original]
+        if is_forward:
+            arguments += [forward['remote_attempt'], forward['forward_journal_sha256']]
+        command = transport + [shlex.join(['python3','-I','-c',REMOTE_RECOVERY_ATTEST,*arguments])]
+        remote = subprocess.run(command,cwd=repo,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                                check=False,timeout=60)
+        require(remote.returncode == 0 and len(remote.stdout)<=262144, 'recovery_attestation_remote_failed')
+        # Never emit raw transport output before schema validation.
+        result = validate_recovery_attestation_remote(json.loads(remote.stdout), h)
+        return {'schema':1,'local':local,'remote':result}
+
+
 # Read-only compatibility attestation recovers only a missing input digest.
 # The installer still revalidates the frozen plan and exact operation, then
 # obtains the broker lease and fleet drain evidence before authorizing mutation.
@@ -2268,17 +2670,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
                 existing_record.get('staged_config_sha256') == sha(projected_upgrade_config(current, existing_record.get('config_projection'))) and
                 existing_record.get('remote_attempt') == remote_attempt(projected_upgrade_config(current, existing_record.get('config_projection')), existing_record['version']),
                 'manual_forward_continuation_inputs_changed')
-        digest = existing_record.get('forward_journal_sha256', '')
-        require(isinstance(digest, str) and re.fullmatch('[a-f0-9]{64}', digest),
-                'manual_forward_continuation_proof_changed')
-        proofs = [private_file(path) for path in root.glob('operation.forward-only-abandoned-*.json')]
-        matches = [raw for raw in proofs if sha(raw) == digest]
-        unique_matches = set(matches)
-        require(len(unique_matches) == 1, 'manual_forward_continuation_proof_changed')
-        continuation_proof = next(iter(unique_matches))
-        predecessor = json.loads(continuation_proof)
-        validate_dispatched_manual_operation(predecessor)
-        require(predecessor['commit'] != commit, 'manual_forward_continuation_proof_changed')
+        continuation_proof, predecessor = load_forward_predecessor_proof(root, existing_record)
         backup_name = existing_record.get('backup', '')
         require(re.fullmatch(r'install\.config\.before-' + re.escape(existing_record['version']) + r'-[0-9]+', backup_name),
                 'manual_backup_identity_invalid')
@@ -2637,7 +3029,28 @@ def main():
     parser.add_argument('--journal-sha256')
     parser.add_argument('--backup-sha256')
     parser.add_argument('--config-sha256')
+    parser.add_argument('--attest-recovery-state', action='store_true', help='read-only local and pinned-SSH recovery evidence; never resumes an operation')
+    parser.add_argument('--attestation-bootstrap', help='exact retained recovery-tools-bootstrap-operation directory basename')
+    parser.add_argument('--attestation-candidate', help='exact bootstrap candidate manifest SHA256')
     arguments = parser.parse_args()
+    if arguments.attest_recovery_state:
+        require(not any((arguments.build_only, arguments.retry_failed, arguments.forward_only,
+                         arguments.continue_forward_only, arguments.subscription_probe_env_file,
+                         arguments.archive_reimaged_adoption, arguments.recover_local_preflight,
+                         arguments.recovery_installer, arguments.acknowledge_former_hosts_reimaged,
+                         arguments.archive_reason, arguments.journal_sha256, arguments.backup_sha256,
+                         arguments.config_sha256)) and os.environ.get('ADOPT', '0') == '0',
+                'recovery_attestation_arguments_invalid')
+        require(not os.environ.get('XDG_CACHE_HOME') or os.environ['XDG_CACHE_HOME'] == str(Path.home()/'.cache'),
+                'recovery_attestation_cache_override_forbidden')
+        repo = Path(__file__).resolve().parents[1]
+        config = Path(os.path.abspath(arguments.config)) if arguments.config else repo/'install.config'
+        result = collect_recovery_attestation(repo, repo/'dist/manual', config,
+            Path.home()/'.cache/ultra-ansible', arguments.attestation_bootstrap, arguments.attestation_candidate)
+        print(json.dumps(result, sort_keys=True))
+        return
+    require(not arguments.attestation_bootstrap and not arguments.attestation_candidate,
+            'recovery_attestation_arguments_invalid')
     archive_fields = (arguments.acknowledge_former_hosts_reimaged, arguments.archive_reason,
                       arguments.journal_sha256, arguments.backup_sha256, arguments.config_sha256)
     require(arguments.archive_reimaged_adoption or arguments.recover_local_preflight or not any(archive_fields), 'manual_archive_arguments_invalid')

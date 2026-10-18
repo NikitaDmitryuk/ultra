@@ -19,6 +19,25 @@ ID = '11111111-1111-4111-8111-111111111111'
 
 
 class ReconcileTests(unittest.TestCase):
+    def test_service_deadline_preserves_lifecycle_lock_retry_margin(self):
+        import ast
+        import re
+        recovery = Path(__file__).parent
+        unit = (recovery / 'ultra-recovery-reconcile.service').read_text()
+        match = re.search(r'^TimeoutStartSec=(\d+)$', unit, re.MULTILINE)
+        self.assertIsNotNone(match)
+        service_timeout = int(match.group(1))
+        # Lifecycle waits for a running reconcile before taking the shared
+        # infrastructure lock. Extending this service requires revisiting that
+        # contract rather than comparing it with one controller invocation.
+        lifecycle = ast.parse((recovery.parent / 'ansible/library/ultra_lifecycle.py').read_text())
+        retry_seconds = next(ast.literal_eval(node.value) for node in lifecycle.body
+                             if isinstance(node, ast.Assign) and any(
+                                 isinstance(target, ast.Name) and target.id == 'LIFECYCLE_LOCK_RETRY_SECONDS'
+                                 for target in node.targets))
+        self.assertEqual(service_timeout, 540)
+        self.assertGreaterEqual(retry_seconds - service_timeout, 60)
+
     def test_timer_late_activation_has_independent_start_anchor(self):
         import configparser
         timer=configparser.ConfigParser()
