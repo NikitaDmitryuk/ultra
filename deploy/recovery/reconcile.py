@@ -276,6 +276,150 @@ def write_reconcile_progress(journal):
                                  'health_start': journal.get('health_start')})
 
 
+def ansible_diagnostic_root():
+    # Must match controller.SafeJournal.default_root(); never trust a path from
+    # an attempt receipt or allow private request data to choose this root.
+    return Path('/var/log/ultra-ansible' if os.geteuid() == 0 else
+                '/tmp/ultra-ansible-diagnostics-' + str(os.geteuid()))
+
+
+def ansible_failure_summary(attempt, interrupted=False, started_ns=0):
+    """Project only validated source coordinates from the controller sidecar."""
+    events = {'controller_start', 'controller_succeeded', 'controller_failed',
+              'controller_timeout', 'controller_interrupted', 'task_start',
+              'task_ok', 'task_skipped', 'task_failed', 'task_unreachable',
+              'task_retry', 'logging_degraded'}
+    allowed = {'schema_version', 'event', 'time_ns', 'operation', 'task', 'host',
+               'truncated', 'censored', 'duration_ms', 'changed', 'skipped', 'rc',
+               'detail', 'code', 'ignored'}
+
+    def checked_directory(path):
+        if not path.is_absolute() or path.resolve() != path:
+            raise ValueError('unsafe diagnostic directory')
+        info = path.stat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise ValueError('unsafe diagnostic directory')
+
+    def read_event(directory_fd, name):
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                     dir_fd=directory_fd)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                    or info.st_size > 4096):
+                raise ValueError('unsafe diagnostic file')
+            raw = stream.read(4097)
+        if len(raw) > 4096:
+            raise ValueError('oversized diagnostic')
+        def unique_object(pairs):
+            result = {}
+            for key, item in pairs:
+                if key in result:
+                    raise ValueError('duplicate diagnostic key')
+                result[key] = item
+            return result
+        def invalid_number(_value):
+            raise ValueError('invalid diagnostic number')
+        value = json.loads(raw, object_pairs_hook=unique_object, parse_constant=invalid_number)
+        if (not isinstance(value, dict) or set(value) - allowed
+                or type(value.get('schema_version')) is not int or value['schema_version'] != 1
+                or value.get('event') not in events
+                or type(value.get('time_ns')) is not int or not 0 < value['time_ns'] <= time.time_ns()
+                or value.get('operation', 'reconcile') != 'reconcile'):
+            raise ValueError('invalid diagnostic schema')
+        for key in ('truncated', 'censored', 'changed', 'skipped', 'ignored'):
+            if key in value and type(value[key]) is not bool:
+                raise ValueError('invalid diagnostic flag')
+        if 'duration_ms' in value and (type(value['duration_ms']) is not int or value['duration_ms'] < 0):
+            raise ValueError('invalid diagnostic duration')
+        if 'rc' in value and (type(value['rc']) is not int or not -255 <= value['rc'] <= 255):
+            raise ValueError('invalid diagnostic rc')
+        for key in ('code', 'detail'):
+            if key in value and (not isinstance(value[key], str)
+                                 or not re.fullmatch(r'[a-z_]{1,96}', value[key])):
+                raise ValueError('invalid diagnostic enum')
+
+        if 'host' in value and (not isinstance(value['host'], str) or not (
+                value['host'] in {'bridge', 'exit', 'database', 'receiver', 'localhost', ''}
+                or re.fullmatch(r'[a-f0-9]{16}', value['host']))):
+            raise ValueError('invalid diagnostic host')
+        task = value.get('task', {})
+        if not isinstance(task, dict) or set(task) - {'source', 'line', 'action'}:
+            raise ValueError('invalid diagnostic task')
+        if task:
+            source = task.get('source')
+            if (not isinstance(source, str) or
+                    not re.fullmatch(r'(?:roles|playbooks)/[A-Za-z0-9_./-]{1,240}\.yml', source)
+                    or any(part in ('', '.', '..') for part in source.split('/'))
+                    or type(task.get('line')) is not int or not 1 <= task['line'] <= 100000
+                    or ('action' in task and (not isinstance(task['action'], str) or
+                        not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]{0,95}', task['action'])))):
+                raise ValueError('invalid diagnostic source')
+        # code/detail are deliberately not projected: future controller enums
+        # must never turn arbitrary module strings into published diagnostics.
+        return value
+
+    try:
+        root = ansible_diagnostic_root()
+        checked_directory(root)
+        if root.resolve().is_relative_to(attempt.resolve()):
+            return {}
+        prefix = hashlib.sha256(str(attempt.absolute()).encode()).hexdigest() + '-'
+        selected = None
+        with os.scandir(root) as entries:
+            # Controller retention allows at most 128 sessions plus its lock.
+            for index, entry in enumerate(entries):
+                if index >= 129:
+                    return {}
+                if not re.fullmatch(re.escape(prefix) + r'[a-f0-9]{32}', entry.name):
+                    continue
+                session = root / entry.name
+                checked_directory(session)
+                fd = os.open(session, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    current = read_event(fd, 'current.json')
+                    if current.get('operation') != 'reconcile' or current['time_ns'] < started_ns:
+                        continue
+                    try:
+                        first = read_event(fd, 'first-failure.json')
+                    except FileNotFoundError:
+                        first = None
+                    if first is not None and (first['event'] not in ('task_failed', 'task_unreachable')
+                                              or first.get('ignored', False)
+                                              or not started_ns <= first['time_ns'] <= current['time_ns']):
+                        return {}
+                    if selected is not None:
+                        return {}  # Multiple sessions cannot be attributed safely.
+                    selected = (current, first)
+                finally:
+                    os.close(fd)
+        if selected is None:
+            return {}
+        current, first = selected
+        value = first or current
+        cancelled = interrupted or current['event'] in ('controller_timeout', 'controller_interrupted')
+        return {'phase': value['event'], 'host': value.get('host'),
+                'task': value.get('task', {}),
+                'rc': None if cancelled or value.get('censored', False) else value.get('rc')}
+    except (OSError, ValueError, TypeError, RecursionError):
+        # Missing, partial or unsafe diagnostics never mask the actual failure.
+        return {}
+
+
+def record_ansible_failure(directory, attempt, reason_code, receipt_code='unavailable', interrupted=False, started_ns=0):
+    try:
+        atomic_json(directory / 'last-failure.json', {
+            'attempt': attempt.name, 'reason_code': reason_code,
+            'receipt_code': receipt_code if receipt_code in
+                ('ansible_failed', 'execution_failed', 'interrupted') else 'unavailable',
+            'updated_at': int(time.time()),
+            **ansible_failure_summary(attempt, interrupted=interrupted, started_ns=started_ns)})
+    except OSError:
+        pass  # Diagnostic storage must not replace cancellation/failure handling.
+
+
 def ansible_apply(config, node, variables):
     global _deferring_budget
     variables = dict(variables, ultra_lock_directory=config.get('controller_state_dir', '/var/lib/ultra-ansible'))
@@ -354,6 +498,7 @@ def ansible_apply(config, node, variables):
     atomic_json(directory / 'variables.json', variables)
     executable = config.get('installer_binary', '/usr/local/bin/ultra-install')
     process = None
+    started_ns = time.time_ns()
     _deferring_budget = True
     try:
         process = subprocess.Popen([executable, 'ansible-run', '--operation', 'reconcile',
@@ -375,20 +520,26 @@ def ansible_apply(config, node, variables):
             signal.setitimer(signal.ITIMER_REAL, 0)
         # SIGTERM lets ultra-install cancel its isolated controller, which kills
         # the Ansible session and persists an interrupted receipt before exiting.
+        reason = ('ansible_child_timeout' if isinstance(error, subprocess.TimeoutExpired)
+                  else error.code if isinstance(error, ReconcileBlocked) else 'ansible_interrupted')
         try:
-            process.terminate()
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=CHILD_STOP_SECONDS)
-        except subprocess.TimeoutExpired:
-            process.kill()
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
             try:
                 process.wait(timeout=CHILD_STOP_SECONDS)
             except subprocess.TimeoutExpired:
-                raise ReconcileBlocked('ansible_cancel_timeout', attempt.name) from None
+                process.kill()
+                try:
+                    process.wait(timeout=CHILD_STOP_SECONDS)
+                except subprocess.TimeoutExpired:
+                    reason = 'ansible_cancel_timeout'
+                    raise ReconcileBlocked(reason, attempt.name) from None
+        finally:
+            record_ansible_failure(directory, attempt, reason, 'interrupted', interrupted=True, started_ns=started_ns)
         if isinstance(error, subprocess.TimeoutExpired):
-            raise ReconcileBlocked('ansible_child_timeout', attempt.name) from None
+            raise ReconcileBlocked(reason, attempt.name) from None
         if isinstance(error, ReconcileBlocked):
             error.attempt = attempt.name
         raise
@@ -399,15 +550,13 @@ def ansible_apply(config, node, variables):
     except (OSError, ValueError, TypeError):
         raise ReconcileBlocked('ansible_receipt_unavailable', attempt.name) from None
     if receipt.get('state') not in ('succeeded', 'failed'):
+        record_ansible_failure(directory, attempt, 'ansible_attempt_pending',
+                               receipt.get('code'), interrupted=True, started_ns=started_ns)
         raise ReconcileBlocked('ansible_attempt_pending', attempt.name)
     if returncode or receipt['state'] != 'succeeded':
         # Safe correlation survives optional-receiver fallback; raw Ansible
         # output and private inputs never enter the published controller status.
-        code = receipt.get('code')
-        atomic_json(directory / 'last-failure.json', {
-            'attempt': attempt.name, 'reason_code': 'ansible_receipt_failed',
-            'receipt_code': code if code in ('ansible_failed', 'execution_failed', 'interrupted') else 'unavailable',
-            'updated_at': int(time.time())})
+        record_ansible_failure(directory, attempt, 'ansible_receipt_failed', receipt.get('code'), started_ns=started_ns)
         raise ValueError('ansible_reconcile_failed')
     return True
 
