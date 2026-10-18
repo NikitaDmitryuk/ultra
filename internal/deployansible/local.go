@@ -35,6 +35,11 @@ func WithOperationLock(ctx context.Context, directory string) (context.Context, 
 	if err != nil || !info.IsDir() || !ownedByProcess(info) || info.Mode().Perm()&0077 != 0 {
 		return ctx, nil, errors.New("private operation lock directory required")
 	}
+	admission, fenceErr := recoveryAdmission(directory)
+	if fenceErr != nil {
+		return ctx, nil, fenceErr
+	}
+	defer admission()
 	lock, err := controllerLock(filepath.Join(directory, "infrastructure.lock"))
 	if err != nil {
 		return ctx, nil, err
@@ -313,6 +318,15 @@ func runLocal(
 	if err != nil || !lockInfo.IsDir() || !ownedByProcess(lockInfo) || lockInfo.Mode().Perm()&0077 != 0 {
 		return Receipt{}, errors.New("private operation lock directory required")
 	}
+	if lease, ok := ctx.Value(operationLeaseKey{}).(*operationLease); ok {
+		lease.run.Lock()
+		defer lease.run.Unlock()
+	}
+	admission, fenceErr := recoveryAdmission(lockDirectory)
+	if fenceErr != nil {
+		return Receipt{}, fenceErr
+	}
+	defer admission()
 	unlocked, _ := ctx.Value(readinessProbeKey{}).(bool)
 	if operation == "wait-upgrade-readiness" && !unlocked {
 		return Receipt{}, errors.New("readiness_probe_requires_dedicated_entrypoint")
@@ -325,8 +339,6 @@ func runLocal(
 			return Receipt{}, errors.New("readiness_probe_requires_unleased_context")
 		}
 	} else if lease, ok := ctx.Value(operationLeaseKey{}).(*operationLease); ok {
-		lease.run.Lock()
-		defer lease.run.Unlock()
 		if !lease.active.Load() || lease.directory != lockDirectory {
 			return Receipt{}, errors.New("operation lease directory mismatch")
 		}
@@ -337,6 +349,7 @@ func runLocal(
 		}
 		defer lock.Close() //nolint:errcheck
 	}
+	admission() // The infrastructure lease now tracks this admitted stage.
 	raw, err := json.Marshal(map[string]any{"inventory": inventory, "variables": variables})
 	if err != nil {
 		return Receipt{}, err

@@ -228,6 +228,11 @@ func Execute(ctx context.Context, directory, python, executable string) (Result,
 	if !filepath.IsAbs(directory) || !filepath.IsAbs(python) || !filepath.IsAbs(executable) {
 		return Result{}, errors.New("absolute executor paths required")
 	}
+	releaseRecovery, fenceErr := recoveryExecutionAdmission(ctx, filepath.Dir(directory))
+	if fenceErr != nil {
+		return Result{}, fenceErr
+	}
+	defer releaseRecovery()
 	bundle := filepath.Join(directory, "bundle")
 	command := exec.CommandContext(
 		ctx,

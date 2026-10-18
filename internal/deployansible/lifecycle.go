@@ -57,6 +57,11 @@ func openLifecycleGate(directory string) (*lifecycleGate, error) {
 	if g.retired[g.current.ID] && g.current.Phase == "checking" {
 		return nil, errors.New("invalid retired lifecycle phase")
 	}
+	if admission, fenceErr := recoveryAdmission(directory); fenceErr != nil {
+		return g, nil // Durable recovery also fences startup reconciliation.
+	} else {
+		admission()
+	}
 	if h := g.handoff; h != nil && g.current.ID == h.OldID {
 		if g.current.Phase != "applying" || g.retired[h.NewID] {
 			return nil, errors.New("invalid pending lifecycle handoff")
@@ -89,6 +94,11 @@ func (g *lifecycleGate) close() {
 func (g *lifecycleGate) blocked() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	admission, err := recoveryAdmission(g.directory)
+	if err != nil {
+		return true
+	}
+	defer admission()
 	return g.current.Phase == "applying" || g.current.Phase == "checking"
 }
 func (g *lifecycleGate) save(next lifecycleState) error {
@@ -198,6 +208,11 @@ func (g *lifecycleGate) saveRetired() error {
 func (g *lifecycleGate) retire(id string) Response {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	admission, err := recoveryAdmission(g.directory)
+	if err != nil {
+		return Response{Code: "recovery_fenced"}
+	}
+	defer admission()
 	if !jobID.MatchString(id) {
 		return Response{Code: "invalid_operation_id"}
 	}
@@ -240,6 +255,11 @@ func (g *lifecycleGate) transition(id, phase string) Response {
 func (g *lifecycleGate) transitionWithLock(id, phase string, existing *os.File, resume ...bool) Response {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	admission, err := recoveryAdmission(g.directory)
+	if err != nil {
+		return Response{Code: "recovery_fenced"}
+	}
+	defer admission()
 	if !jobID.MatchString(id) {
 		return Response{Code: "invalid_operation_id"}
 	}
@@ -296,6 +316,11 @@ func (g *lifecycleGate) transitionWithLock(id, phase string, existing *os.File, 
 func (g *lifecycleGate) jobLock(operation string) (*os.File, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	admission, err := recoveryAdmission(g.directory)
+	if err != nil {
+		return nil, err
+	}
+	defer admission()
 	if g.current.Phase == "applying" || (g.current.Phase == "checking" && operation == "configure-exit") {
 		return nil, errors.New("lifecycle busy")
 	}
@@ -307,6 +332,11 @@ func (g *lifecycleGate) jobLock(operation string) (*os.File, error) {
 func (g *lifecycleGate) attach(id string) Response {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	admission, err := recoveryAdmission(g.directory)
+	if err != nil {
+		return Response{Code: "recovery_fenced"}
+	}
+	defer admission()
 	if g.retired[id] {
 		return Response{Code: "lifecycle_retired"}
 	}
@@ -392,6 +422,11 @@ func (c Client) Lifecycle(ctx context.Context, id, phase string) error {
 func (g *lifecycleGate) phase() string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	admission, err := recoveryAdmission(g.directory)
+	if err != nil {
+		return "recovery_fenced"
+	}
+	defer admission()
 	if g.current.Phase == "" {
 		return "released"
 	}
@@ -403,7 +438,7 @@ func (c Client) TopologyFrozen(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	switch r.State {
-	case "applying", "checking":
+	case "applying", "checking", "recovery_fenced":
 		return true, nil
 	case "released":
 		return false, nil
@@ -463,6 +498,11 @@ func (c Client) RetireLifecycle(ctx context.Context, id string) error {
 func (g *lifecycleGate) supersede(oldID, newID string, existing *os.File) Response {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	admission, err := recoveryAdmission(g.directory)
+	if err != nil {
+		return Response{Code: "recovery_fenced"}
+	}
+	defer admission()
 	if !jobID.MatchString(oldID) || !jobID.MatchString(newID) || oldID == newID {
 		return Response{Code: "invalid_operation_id"}
 	}

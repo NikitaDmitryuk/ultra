@@ -4,6 +4,24 @@
 Он не разрешает переустановку или продолжение manual deploy. Текущий интерфейс
 описан в [автоматизации](automation.md#offline-preflight-переустановки-non-db-узлов).
 
+## Текущее состояние admission fence
+
+Broker принимает подписанный recovery request и оставляет admissions закрытым.
+Свободный `infrastructure.lock` не доказывает остановку controller/Ansible:
+standalone Go-оператор может погибнуть, пока дочерний controller продолжает
+работу. Поэтому импорт возвращает
+`recovery_independent_quiescence_required`, не выдаёт `drained`, а
+completion/release отключены (`recovery_completion_unsupported`). Fence остаётся
+закрытым и после рестарта broker, включая старые `completed` записи. Это
+admission-only ограничение, а не готовый протокол переустановки; для release
+нужен независимый verifier локальных и удалённых executor-ов, связанный с fence.
+
+Регрессия `TestRecoveryFenceOrphanedExecutorCannotProveDrain` запускает настоящий
+Go `Execute`, убивает его wrapper и подтверждает, что осиротевший controller ещё
+может записать mutation witness, тогда как fence отказывает drain/completion.
+См. [реализацию fence](../internal/deployansible/rebuild_fence.go) и
+[тест](../internal/deployansible/rebuild_fence_test.go).
+
 ## Отсутствующие доказательства прерванного upgrade
 
 Forward-only получает исторический fleet из точных байтов

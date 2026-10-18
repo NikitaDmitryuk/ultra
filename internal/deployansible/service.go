@@ -21,13 +21,15 @@ import (
 // Client submits jobs to a root-owned systemd worker. The worker survives relay restarts.
 type Client struct{ Socket string }
 type Message struct {
-	leaseInputs []*os.File
-	Action      string       `json:"action"`
-	ID          string       `json:"id"`
-	NextID      string       `json:"next_id,omitempty"`
-	Binary      string       `json:"binary,omitempty"`
-	Request     *ExitRequest `json:"request,omitempty"`
-	NodeID      string       `json:"node_id,omitempty"`
+	leaseInputs        []*os.File
+	Action             string                         `json:"action"`
+	ID                 string                         `json:"id"`
+	NextID             string                         `json:"next_id,omitempty"`
+	Binary             string                         `json:"binary,omitempty"`
+	Request            *ExitRequest                   `json:"request,omitempty"`
+	NodeID             string                         `json:"node_id,omitempty"`
+	RecoveryFence      *SignedRecoveryFenceRequest    `json:"recovery_fence,omitempty"`
+	RecoveryCompletion *SignedRecoveryFenceCompletion `json:"recovery_completion,omitempty"`
 }
 type Response struct {
 	leaseOutputs []*os.File
@@ -260,7 +262,11 @@ func Serve(ctx context.Context, socket, state, python, executable string, allowe
 				if lockErr != nil {
 					continue // Another lifecycle operation owns infrastructure; keep the job queued.
 				}
-				_, runErr := Execute(ctx, directory, python, executable)
+				lease := &operationLease{directory: state, file: operationLock}
+				lease.active.Store(true)
+				jobContext := context.WithValue(ctx, operationLeaseKey{}, lease)
+				_, runErr := Execute(jobContext, directory, python, executable)
+				lease.active.Store(false)
 				_ = operationLock.Close()
 				if runErr != nil && ctx.Err() == nil {
 					if _, receiptErr := os.Stat(filepath.Join(directory, "receipt.json")); os.IsNotExist(receiptErr) {
@@ -320,6 +326,18 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 		len(inputs) != 0 {
 		return Response{Code: "unexpected_submitted_inputs"}
 	}
+	if message.Action == "recovery-fence-import" || message.Action == "recovery-fence-complete" {
+		if uid != 0 {
+			return Response{Code: "controller_access_denied"}
+		}
+		if message.Action == "recovery-fence-import" && message.RecoveryFence != nil && message.RecoveryCompletion == nil {
+			return gate.importRecoveryFence(*message.RecoveryFence)
+		}
+		if message.Action == "recovery-fence-complete" && message.RecoveryCompletion != nil && message.RecoveryFence == nil {
+			return gate.completeRecoveryFence(*message.RecoveryCompletion)
+		}
+		return Response{Code: "invalid_recovery_request"}
+	}
 	if message.Action == "lifecycle-status" {
 		return Response{State: gate.phase()}
 	}
@@ -361,6 +379,13 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 			existing = inputs[0]
 		}
 		return gate.transitionWithLock(message.ID, phase, existing, message.Action == "lease-resume")
+	}
+	if message.Action == "submit" {
+		admission, fenceErr := recoveryAdmission(state)
+		if fenceErr != nil {
+			return Response{Code: "recovery_fenced"}
+		}
+		defer admission()
 	}
 	if message.Action == "submit" && gate.blocked() {
 		return Response{Code: "lifecycle_busy"}
