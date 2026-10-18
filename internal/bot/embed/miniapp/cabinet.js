@@ -226,26 +226,35 @@ async function self() {
       5000,
     );
 }
+let locationRefreshTimer;
 async function locations() {
-  const data = await api("/api/self/exits");
-  const effective = data.exits.find((e) => e.id === data.effective_exit_id);
-  const exitLabel = (e) =>
-    e
-      ? `${esc(e.display_name)}${quotaKindLabel(e) ? ` <span class="badge">${esc(quotaKindLabel(e))}</span>` : ""}`
-      : "Нет подтверждённого маршрута";
-  document.querySelector("#locations").innerHTML =
-    `<p class="eyebrow">МАРШРУТИЗАЦИЯ</p><h2>Автоматический выход</h2><p class="muted">Профиль «Автоматически» выбирает доступный сервер и возвращается к основному после восстановления.</p><p>${esc(applicationLabel(data.application))}</p>${data.route_reason ? `<p class="muted">${esc(routeReasonLabel(data.route_reason))}</p>` : ""}<p>Подтверждённый выход: <strong>${exitLabel(effective)}</strong></p><details><summary>Как работают профили</summary><small>Профиль страны предпочитает её сервер. При отказе или исчерпании лимита он переключается на другой исправный выход, только если на нём осталась ваша квота. После восстановления возвращается к предпочтительной стране.</small>${(data.profiles || []).length ? "<h3>Маршруты профилей Happ</h3>" : ""}${(data.profiles || []).map((p) => {
-      const route = data.exits.find((e) => e.id === p.effective_exit_id);
-      return `<p>${esc(p.name)} → ${route ? exitLabel(route) : "Маршрут недоступен"}</p>`;
-    }).join("")}<small>Кабинет не видит, какой профиль включён на устройстве.</small></details>`;
-  if (data.application && data.application.state !== "applied") {
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(
-      () => locations().catch((e) => notice(e.message)),
-      5000,
-    );
+  clearTimeout(locationRefreshTimer);
+  const target = document.querySelector("#locations");
+  const version = viewVersion;
+  if (!target) return;
+  try {
+    const data = await api("/api/self/exits");
+    if (version !== viewVersion || document.querySelector("#locations") !== target)
+      return;
+    const summary = target.querySelector("summary");
+    const detailsOpen = target.querySelector("details")?.open;
+    const preserveFocus = summary === document.activeElement;
+    target.innerHTML = routingHTML(data);
+    if (detailsOpen) target.querySelector("details").open = true;
+    if (preserveFocus) target.querySelector("summary")?.focus({ preventScroll: true });
+  } finally {
+    if (version === viewVersion && document.querySelector("#locations") === target)
+      locationRefreshTimer = setTimeout(() => {
+        if (version !== viewVersion || document.querySelector("#locations") !== target)
+          return;
+        locations().catch(() => {
+          const status = target.querySelector("#route-refresh-status");
+          if (status) status.textContent = "Обновление задерживается. Повторяем автоматически.";
+        });
+      }, 10000);
   }
 }
+
 function instructions() {
   modal(
     '<h2>Подключить устройство</h2><label for="device">Ваша система</label><select id="device"><option>iPhone / iPad</option><option>Android</option><option>macOS</option><option>Windows</option><option>Linux</option></select><ol><li>Установите Happ из официального источника.</li><li>Нажмите «Подключить Happ» в личном кабинете.</li><li>Подтвердите импорт и включите VPN.</li></ol><p>Если импорт не открылся, скопируйте подписку и добавьте её в Happ вручную. На своих устройствах используйте одну подписку.</p><a href="https://www.happ.su/" target="_blank" rel="noopener noreferrer">Официальный сайт Happ</a>',

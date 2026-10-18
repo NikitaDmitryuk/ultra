@@ -370,6 +370,16 @@ result.chmod(0o600)
 			}
 		})
 	}
+	for _, action := range []string{"prepare", "activate", "adopt", "retire-experiment"} {
+		if !localRetryOperation("ingress", map[string]any{"ultra_ingress_action": action}) {
+			t.Fatalf("ingress retry not enabled: %s", action)
+		}
+	}
+	for _, action := range []string{"experiment", "rollback", "stage", "status", "notice"} {
+		if localRetryOperation("ingress", map[string]any{"ultra_ingress_action": action}) {
+			t.Fatalf("unauthorized ingress retry: %s", action)
+		}
+	}
 	for _, operation := range []string{"upgrade", "restore", "upgrade-runtime", "upgrade-domain", "upgrade-dns-migration", "rollback"} {
 		if localRetryOperation(
 			operation,

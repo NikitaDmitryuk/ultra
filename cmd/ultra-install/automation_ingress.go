@@ -57,7 +57,7 @@ func ansibleIngressOperation(
 	if p.Automation == nil || p.Automation.Ingress == nil {
 		return nil
 	}
-	if action != "prepare" && action != "stage" && action != "activate" && action != "rollback" && action != "experiment" &&
+	if action != "prepare" && action != "stage" && action != "activate" && action != "rollback" && action != "retire-experiment" &&
 		action != "status" &&
 		action != "notice" &&
 		action != "adopt" {
@@ -128,6 +128,8 @@ func ansibleIngressOperation(
 		_, err = deployansible.RunLocalRetryFailedPinned(ctx, "ingress", inventory, variables, directory, source, python, executable)
 	} else if retry {
 		_, err = deployansible.RunLocalRetryFailed(ctx, "ingress", inventory, variables, directory, python, executable)
+	} else if action == "retire-experiment" {
+		_, err = deployansible.RunLocalRetryFailed(ctx, "ingress", inventory, variables, directory, python, executable)
 	} else {
 		_, err = deployansible.RunLocal(ctx, "ingress", inventory, variables, directory, python, executable)
 	}
@@ -185,6 +187,9 @@ func uniqueIngressDomains(values ...string) []string {
 }
 
 func applyConfiguredIngress(file, action string) error {
+	if action == "experiment" {
+		return errors.New("experimental ingress is retired")
+	}
 	p, err := installplan.LoadConfig(file)
 	if err != nil {
 		return err

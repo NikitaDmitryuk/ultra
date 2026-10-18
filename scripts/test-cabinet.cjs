@@ -46,6 +46,7 @@ function page(self, responses) {
         dataset: {},
         classList: { toggle() {} },
         setAttribute() {},
+        focus() { this.focused = true; },
         querySelector(selector) {
           return el(selector);
         },
@@ -93,6 +94,7 @@ function page(self, responses) {
       },
     },
     document: {
+      activeElement: null,
       querySelector: el,
       getElementById: (id) => el("#" + id),
       querySelectorAll() {
@@ -114,6 +116,7 @@ function page(self, responses) {
     fetch: async (path, options) => {
       calls.push({ path, options });
       if (!(path in responses)) throw new Error("unexpected request " + path);
+      if (responses[path] instanceof Error) throw responses[path];
       return { ok: true, status: 200, json: async () => responses[path] };
     },
   });
@@ -753,7 +756,7 @@ test("ready server separates operation, tunnel health and billing", async () => 
   );
 });
 
-test("automatic route displays confirmed exit without a country selector", async () => {
+test("automatic route highlights the selected exit without a country selector", async () => {
   const route = {
     selected_exit_id: "atl",
     effective_exit_id: "ams",
@@ -772,12 +775,14 @@ test("automatic route displays confirmed exit without a country selector", async
   await flush();
   const html = p.el("#locations").innerHTML;
   assert.match(html, /Ошибка применения/);
-	assert.match(html, /Подтверждённый выход: <strong>Нидерланды/);
+	assert.match(html, /data-route-exit="ams"/);
+	assert.match(html, /Нидерланды.*Авто · ожидает применения/);
 	assert.match(html, /Нидерланды.*Отдельная квота/);
-	assert.match(html, /США → США.*Общая квота/);
+	assert.match(html, /США.*Общая квота/);
+	assert.doesNotMatch(html, /США\s*→\s*США/);
 	assert.ok(!html.includes("Vultr"));
-  assert.match(html, /только если на нём осталась ваша квота/);
-  assert.match(html, /возвращается к предпочтительной стране/);
+  assert.match(html, /доступной вам квотой/);
+  assert.match(html, /возвращается к основному после восстановления/);
   assert.ok(!html.includes('id="preferred"'));
   assert.ok(!html.includes('id="save-location"'));
   assert.ok(
@@ -817,7 +822,7 @@ test("subscription ingress cannot be deleted or replaced from server card", asyn
   assert.ok(!html.includes("data-replace="));
 });
 
-test("ingress diagnostics distinguishes main and experiment and escapes server strings", async () => {
+test("ingress diagnostics hides obsolete experiments and escapes primary strings", async () => {
   const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
   await flush();
   p.context.states = [
@@ -826,10 +831,56 @@ test("ingress diagnostics distinguishes main and experiment and escapes server s
   ];
   const html = vm.runInContext("ingressHealthHTML(states)", p.context);
   assert.match(html, /Основной вход/);
-  assert.match(html, /Экспериментальный вход/);
-  assert.match(html, /Недоступен/);
-  assert.ok(!html.includes("<script>"));
-  assert.ok(html.includes("&lt;script&gt;"));
+  assert.doesNotMatch(html, /Экспериментальный вход/);
+  assert.doesNotMatch(html, /<script>|unsafe/);
+  p.context.states = [
+    { id: "primary", ready: false, phase: "<script>unsafe</script>" },
+  ];
+  const unsafePrimary = vm.runInContext("ingressHealthHTML(states)", p.context);
+  assert.match(unsafePrimary, /Недоступен/);
+  assert.ok(!unsafePrimary.includes("<script>"));
+  assert.ok(unsafePrimary.includes("&lt;script&gt;"));
+});
+
+test("routing map follows live exits and keeps its explanation open during refresh", async () => {
+  const p = page(true, {
+    "/api/self": { registered: false, is_admin: false },
+    "/api/self/exits": {
+      exits: [{ id: "old", display_name: "Old exit", reachable: true }],
+      effective_exit_id: "old",
+      application: { state: "applied" },
+    },
+  });
+  await flush();
+  p.context.viewVersion = 5;
+  await vm.runInContext("locations()", p.context);
+  const target = p.el("#locations");
+  assert.match(target.innerHTML, /data-route-exit="old"/);
+  assert.match(target.innerHTML, /Ваше устройство/);
+  assert.match(target.innerHTML, /Bridge/);
+  assert.doesNotMatch(target.innerHTML, /США\s*→\s*США/);
+
+  target.querySelector("details").open = true;
+  p.context.document.activeElement = target.querySelector("summary");
+  p.responses["/api/self/exits"] = {
+    exits: [
+      { id: "new", display_name: "New exit", reachable: true },
+      { id: "backup", display_name: "Backup", reachable: false },
+      { id: "spare", display_name: "Spare", reachable: true },
+    ],
+    effective_exit_id: "new",
+    application: { state: "applied" },
+  };
+  p.timers.at(-1).callback();
+  await flush();
+  assert.doesNotMatch(target.innerHTML, /data-route-exit="old"/);
+  assert.match(target.innerHTML, /data-route-exit="new"/);
+  assert.match(target.innerHTML, /data-route-exit="backup"/);
+  assert.match(target.innerHTML, /data-route-exit="spare"/);
+  assert.match(target.innerHTML, /Туннель доступен/);
+  assert.match(target.innerHTML, /Туннель недоступен/);
+  assert.equal(target.querySelector("details").open, true);
+  assert.equal(target.querySelector("summary").focused, true);
 });
 
 test("diagnostics identifies the separate primary PostgreSQL server from standby status", async () => {
@@ -849,10 +900,24 @@ test("diagnostics identifies the separate primary PostgreSQL server from standby
   });
   await flush();
   await vm.runInContext("diagnostics()", p.context);
-  const html = p.el("#network-health").innerHTML;
+  let html = p.el("#network-health").innerHTML;
   assert.match(html, /Primary PostgreSQL · database/);
   assert.match(html, /Отдельный сервер · источник наблюдения standby/);
-  assert.match(html, /Доступен/);
+  let primaryRow = html
+    .split(/(?=<div class="route-row">)/)
+    .find((row) => row.includes("Primary PostgreSQL"));
+  assert.ok(primaryRow);
+  assert.match(primaryRow, /Доступен/);
+
+  p.responses["/api/cloud/replicas"] = new Error("primary unavailable");
+  await vm.runInContext("diagnostics()", p.context);
+  html = p.el("#network-health").innerHTML;
+  primaryRow = html
+    .split(/(?=<div class="route-row">)/)
+    .find((row) => row.includes("Primary PostgreSQL"));
+  assert.ok(primaryRow);
+  assert.match(primaryRow, /Состояние неизвестно/);
+  assert.doesNotMatch(primaryRow, /Доступен/);
 });
 
 test("overview brings monthly history and config ranking into the main cabinet", async () => {

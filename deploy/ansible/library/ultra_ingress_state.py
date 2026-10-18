@@ -134,7 +134,6 @@ def candidate(before, plan, action):
     result = dict(before)
     result['primary_xhttp'] = profile
     result['gateway_vless_port'] = int(plan['gateway_port'])
-    result['experimental_profile_file'] = '/etc/ultra-relay/experimental-profile.json'
     if action != 'stage':
         result['legacy_public_enabled'] = False
         result.pop('public_xhttp_tls', None)

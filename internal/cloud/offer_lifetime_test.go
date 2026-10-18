@@ -90,7 +90,8 @@ func TestConfirmedOfferRevalidatesBeforeAndAfterPreparation(t *testing.T) {
 					t.Fatalf("changed offer accepted: %v", err)
 				}
 				saved, _ := s.Store.Get(ctx, op.ID)
-				if saved.State != "failed" || saved.Phase != "prepare" || api.creates != 0 || provisioner.prepared != btoi(stage == "prepare") {
+				if saved.State != "failed" || saved.Phase != "prepare" || api.creates != 0 ||
+					provisioner.prepared != btoi(stage == "prepare") {
 					t.Fatalf("purchase escaped revalidation: op=%+v creates=%d prepared=%d", saved, api.creates, provisioner.prepared)
 				}
 			})

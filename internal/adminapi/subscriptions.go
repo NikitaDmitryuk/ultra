@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
@@ -131,17 +130,6 @@ func (s *Server) renderSubscription(w http.ResponseWriter, r *http.Request, id s
 			w.Header()[key] = append([]string(nil), values...)
 		}
 	}
-	var experiment *config.ExperimentalProfile
-	if specFile := s.spec.ExperimentalProfileFile; specFile != "" && transport == "" && preview == "" {
-		if permissions, ok := s.Subscriptions.(interface {
-			IsAdminOwner(context.Context, string) (bool, error)
-		}); ok {
-			allowed, err := permissions.IsAdminOwner(r.Context(), id)
-			if err == nil && allowed {
-				experiment, _ = config.LoadExperimentalProfile(specFile)
-			}
-		}
-	}
 	if format == "happ" {
 		profiles, err := subscriptionHapp(exportSpec, u, nodes, health)
 		if preview == "reserve-test" {
@@ -150,11 +138,6 @@ func (s *Server) renderSubscription(w http.ResponseWriter, r *http.Request, id s
 		if err != nil {
 			http.Error(w, "configuration unavailable", http.StatusServiceUnavailable)
 			return
-		}
-		if experiment != nil {
-			exp := config.BuildExperimentalExport(s.spec, u, experiment)
-			profile := experimentalHapp(exp, "Эксперимент · XHTTP TLS")
-			profiles = append(profiles, profile)
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_ = json.NewEncoder(w).Encode(profiles)
@@ -165,31 +148,8 @@ func (s *Server) renderSubscription(w http.ResponseWriter, r *http.Request, id s
 		http.Error(w, "configuration unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if experiment != nil {
-		exp := config.BuildExperimentalExport(s.spec, u, experiment)
-		uris = append(uris, labelSubscriptionURI(exp.VLESSURI, "Эксперимент · XHTTP TLS"))
-	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(strings.Join(uris, "\n") + "\n"))
-}
-
-func labelSubscriptionURI(raw, name string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return raw
-	}
-	u.Fragment = name
-	return u.String()
-}
-func experimentalHapp(exp *config.ClientExport, name string) map[string]any {
-	exp.XRayOutboundJSON["tag"] = "proxy"
-	return map[string]any{"remarks": name, "log": map[string]any{"loglevel": "warning"},
-		"inbounds": []any{
-			map[string]any{"listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": map[string]any{"udp": true}},
-		},
-		"outbounds": []any{
-			exp.XRayOutboundJSON,
-		}, "routing": map[string]any{"rules": []any{map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"}}}}
 }
 
 // Only authorised acceptance requests enter this bounded diagnostic. No request

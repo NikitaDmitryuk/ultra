@@ -21,7 +21,7 @@ import (
 // Ingress changes reuse the existing SSH transport and preserve the remote application state.
 func runIngressCommand(args []string) {
 	flags := flag.NewFlagSet("ultra-install ingress", flag.ExitOnError)
-	action := flags.String("action", "status", "stage, activate, experiment, rollback, notice or status")
+	action := flags.String("action", "status", "stage, activate, retire-experiment, rollback, notice or status")
 	planFile := flags.String("plan", "", "public ingress plan JSON")
 	canonical := flags.String("config", "", "canonical deployment configuration, exclusive with manual targets/plan")
 	host := flags.String("host", "", "bridge SSH host")
@@ -37,6 +37,9 @@ func runIngressCommand(args []string) {
 		exitOnErr("configured Ansible ingress", applyConfiguredIngress(*canonical, *action))
 		return
 	}
+	if *action == "retire-experiment" {
+		exitOnErr("ingress config", fmt.Errorf("retire-experiment requires canonical install.config"))
+	}
 	if *host == "" || *planFile == "" || *identity == "" || !filepath.IsAbs(*knownHosts) {
 		exitOnErr("ingress inputs", fmt.Errorf("host, plan, identity and absolute verified known-hosts required"))
 	}
@@ -44,7 +47,7 @@ func runIngressCommand(args []string) {
 		exitOnErr("ingress binary", fmt.Errorf("install a compatible pinned release with upgrade before changing ingress"))
 	}
 	switch *action {
-	case "stage", "activate", "experiment", "rollback", "status", "notice":
+	case "stage", "activate", "retire-experiment", "rollback", "status", "notice":
 	default:
 		exitOnErr("ingress action", fmt.Errorf("invalid ingress action"))
 	}

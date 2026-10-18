@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"strconv"
 	"time"
-
-	"github.com/NikitaDmitryuk/ultra/internal/config"
 )
 
 type ingressStatus struct {
@@ -54,43 +52,7 @@ func (s *Server) publicIngressStatus(ctx context.Context) []ingressStatus {
 		}
 		result = append(result, state)
 	}
-	if s.spec.ExperimentalProfileFile != "" {
-		state := ingressStatus{ID: "experimental", Phase: "descriptor", CheckedAt: time.Now().UTC()}
-		if p, err := config.LoadExperimentalProfile(s.spec.ExperimentalProfileFile); err == nil {
-			if primary := s.spec.PrimaryXHTTP; primary != nil && p.Host == primary.Host && p.Endpoint.Port == primary.Port &&
-				p.Endpoint.ServerName == primary.ServerName {
-				state = result[0]
-				state.ID = "experimental"
-				state.Published = true
-				state.Phase = "primary_candidate"
-				result = append(result, state)
-				return result
-			}
 
-			state.Published = true
-			state.Phase = "transport_process"
-			req, _ := http.NewRequestWithContext(ctx, "GET", "http://127.0.0.1:"+strconv.Itoa(p.StatusPort)+"/ready", nil)
-			resp, err := (&http.Client{Timeout: time.Second}).Do(req)
-			if err == nil {
-				var payload struct {
-					Ready               bool      `json:"ready"`
-					CertificateNotAfter time.Time `json:"certificate_not_after"`
-					Reload              any       `json:"reload"`
-				}
-				e := json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&payload)
-				_ = resp.Body.Close()
-				if e == nil && resp.StatusCode == 200 {
-					state.Ready = payload.Ready
-					state.CertificateNotAfter = payload.CertificateNotAfter
-					state.Reload = payload.Reload
-					if state.Ready {
-						state.Phase = "server_path_ready"
-					}
-				}
-			}
-		}
-		result = append(result, state)
-	}
 	return result
 }
 

@@ -174,6 +174,14 @@ func RunLocalRetryFailed(
 }
 
 func localRetryOperation(operation string, variables map[string]any) bool {
+	if operation == "ingress" {
+		switch variables["ultra_ingress_action"] {
+		case "prepare", "activate", "adopt", "retire-experiment":
+			return true
+		default:
+			return false
+		}
+	}
 	if bootstrapRetryOperation(operation) {
 		return true
 	}

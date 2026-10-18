@@ -127,7 +127,7 @@ preserved = {'role': 'bridge', 'public_host': 'edge.example.com',
                                'port': 443, 'path': '/connect', 'backend_port': 18080,
                                'mode': 'packet-up', 'fingerprint': 'firefox', 'published': True}}
 activated = state.candidate(preserved, plan, 'activate')
-assert activated['experimental_profile_file'] != preserved['experimental_profile_file']
+assert activated['experimental_profile_file'] == preserved['experimental_profile_file']
 assert activated['legacy_public_enabled'] is False
 assert 'public_xhttp_tls' not in activated
 assert state.candidate(preserved, plan, 'adopt') == preserved
@@ -438,7 +438,7 @@ retirement_check = next(index for index, task in enumerate(bridge_tasks)
                         if task.get('name') == 'Verify subscription and tunnel payload after old aliases are retired')
 assert bridge_tasks[retirement_check]['ultra_cutover_probe']['path'] == "{{ ingress_retirement.target_path | default('') }}"
 assert bridge_tasks[marker_write]['ansible.builtin.copy']['dest'] == '{{ ultra_ingress_transaction }}/acceptance.json'
-assert ingress_playbook[0]['tasks'][0]['when'] == "ultra_ingress_action not in ['adopt', 'accept', 'retire']"
+assert ingress_playbook[0]['tasks'][0]['when'] == "ultra_ingress_action not in ['adopt', 'accept', 'retire', 'retire-experiment', 'experiment']"
 retention_plan = bridge_tasks[0]['ansible.builtin.set_fact']['ingress_retention_plan']
 assert "'subscription_domain': ultra_subscription_domain" in retention_plan
 finalize_source = (source.with_name('ultra_cutover_finalize.py')).read_text()

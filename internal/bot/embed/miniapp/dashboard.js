@@ -316,6 +316,20 @@ async function configDetail(user) {
   await load();
 }
 
+function routingHTML(data) {
+  const exits = Array.isArray(data.exits) ? data.exits : [];
+  const effective = exits.find((exit) => exit.id === data.effective_exit_id);
+  const applied = data.application?.state === "applied";
+  const branches = exits.map((exit) => {
+    const active = effective?.id === exit.id;
+    const label = active
+      ? applied ? "Авто · текущий выход" : "Авто · ожидает применения"
+      : exit.reachable ? "Туннель доступен" : "Туннель недоступен";
+    return `<li class="routing-exit${active ? " is-active" : ""}" data-route-exit="${esc(exit.id)}"><span class="routing-node"><strong>${esc(exit.display_name || exit.country_name || "Выход")}</strong>${exit.city ? `<small>${esc(exit.city)}</small>` : ""}<small class="${active && applied ? "good" : !exit.reachable ? "wait" : "muted"}">${label}</small>${quotaKindLabel(exit) ? `<span class="badge">${esc(quotaKindLabel(exit))}</span>` : ""}</span></li>`;
+  }).join("");
+  return `<p class="eyebrow">МАРШРУТИЗАЦИЯ</p><h2>Схема подключения</h2><p class="muted">Серверный маршрут профиля «Автоматически».</p><div class="routing-map" aria-label="Устройство подключается к Bridge, затем к одному из выходов"><div class="routing-source"><span class="routing-node"><strong>Ваше устройство</strong><small>Happ</small></span><span class="routing-arrow" aria-hidden="true">↓</span><span class="routing-node"><strong>Bridge</strong><small>VPN-вход</small></span></div>${branches ? `<ul class="routing-exits" aria-label="Выходы VPN">${branches}</ul>` : '<p class="empty-state">Выходов пока нет</p>'}</div><p class="${applied && effective ? "good" : "wait"}">${esc(applicationLabel(data.application))}</p>${!effective ? '<p class="wait">Нет подтверждённого выхода. Трафик VPN не проходит.</p>' : ""}${data.route_reason ? `<p class="muted">${esc(routeReasonLabel(data.route_reason))}</p>` : ""}<small id="route-refresh-status">Схема обновляется автоматически.</small><details><summary>Как выбирается выход</summary><p>Профиль «Автоматически» выбирает доступный сервер и возвращается к основному после восстановления. Профиль страны предпочитает её сервер и может переключиться на другой исправный выход с доступной вам квотой.</p><small>Кабинет не видит, какой профиль включён в Happ. Доступность туннеля не гарантирует остаток квоты.</small></details>`;
+}
+
 function ingressHealthHTML(ingresses) {
   const phases = {
     public_tls: "Публичный TLS",
@@ -326,9 +340,10 @@ function ingressHealthHTML(ingresses) {
     transport_process: "Транспортный процесс",
   };
   return ingresses
+    .filter((i) => i.id === "primary")
     .map(
       (i) =>
-        `<div class="route-row"><span>${i.id === "primary" ? "Основной вход" : "Экспериментальный вход"}<small>${esc(phases[i.phase] || i.phase)}${i.certificate_not_after ? " · сертификат до " + esc(dateLabel(i.certificate_not_after)) : ""}</small></span><span class="badge ${i.ready ? "good" : "wait"}">${i.ready ? "Готов" : "Недоступен"}</span></div>`,
+        `<div class="route-row"><span>Основной вход<small>${esc(phases[i.phase] || i.phase)}${i.certificate_not_after ? " · сертификат до " + esc(dateLabel(i.certificate_not_after)) : ""}</small></span><span class="badge ${i.ready ? "good" : "wait"}">${i.ready ? "Готов" : "Недоступен"}</span></div>`,
     )
     .join("");
 }

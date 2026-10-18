@@ -30,8 +30,11 @@ container = 'ultra-pg-monitor-' + uuid.uuid4().hex[:12]
 
 
 def docker(*args, stdin=None, check=True):
-    return subprocess.run(['docker', *args], input=stdin, text=True,
-                          capture_output=True, check=check)
+    result = subprocess.run(['docker', *args], input=stdin, text=True,
+                            capture_output=True, check=False)
+    if check and result.returncode:
+        raise AssertionError(f'docker command failed ({result.returncode}): {result.stderr.strip()}')
+    return result
 
 
 def query(sql_text, role='postgres', port='5432', check=True, database='postgres'):
@@ -55,12 +58,21 @@ def wait_state(expected):
 try:
     docker('run', '--detach', '--rm', '--pull=never', '--network', 'none', '--name', container,
            '-e', 'POSTGRES_PASSWORD=fixture-password', 'postgres:16')
+    previous_start = None
+    stable_start_checks = 0
     for _ in range(80):
-        if query('SELECT 1', check=False).returncode == 0:
-            break
+        result = query('SELECT pg_postmaster_start_time()', check=False)
+        start = result.stdout.strip() if result.returncode == 0 else None
+        if start and start == previous_start:
+            stable_start_checks += 1
+            if stable_start_checks >= 12:
+                break
+        else:
+            previous_start = start
+            stable_start_checks = 0
         time.sleep(.25)
     else:
-        raise AssertionError('fixture PostgreSQL did not start')
+        raise AssertionError('fixture PostgreSQL did not reach a stable server process')
     query("CREATE ROLE fixture_app LOGIN; CREATE ROLE fixture_other LOGIN; "
           "CREATE ROLE ultra_replication LOGIN REPLICATION PASSWORD 'fixture-replication';")
     query(sql)

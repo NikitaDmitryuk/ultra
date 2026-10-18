@@ -7,7 +7,7 @@
     - name: Configure forwarding ingress
       ansible.builtin.include_role:
         name: forward_ingress
-      when: ultra_ingress_action not in ['adopt', 'accept', 'retire']
+      when: ultra_ingress_action not in ['adopt', 'accept', 'retire', 'retire-experiment', 'experiment']
     - name: Verify preserved forwarding ingress
       ansible.builtin.include_role:
         name: forward_ingress
@@ -166,6 +166,52 @@
         name: ingress
         tasks_from: adopt
       when: ultra_ingress_action == 'adopt'
+    - name: Validate legacy experimental ownership and recovery metadata
+      ultra_retire_experiment:
+        phase: prepare
+      no_log: true
+      when: ultra_ingress_action == 'retire-experiment'
+    - name: Unpublish only receipt-owned experimental descriptor
+      ultra_owned_file:
+        path: /etc/ultra-relay/experimental-profile.json
+        receipt: /var/lib/ultra-ingress/managed.json
+        state: absent
+      no_log: true
+      when: ultra_ingress_action == 'retire-experiment'
+    - name: Require persisted subscription cache refreshed after unpublication
+      ultra_retire_experiment:
+        phase: verify
+      register: ingress_experiment_retirement
+      until: ingress_experiment_retirement is succeeded
+      retries: 20
+      delay: 3
+      no_log: true
+      when: ultra_ingress_action == 'retire-experiment'
+    - name: Inspect retained experimental unit before stopping
+      ansible.builtin.stat:
+        path: /etc/systemd/system/ultra-experimental.service
+      register: ingress_experiment_unit
+      when: ultra_ingress_action == 'retire-experiment'
+    - name: Stop retired experimental service only after publication proof
+      ansible.builtin.systemd_service:
+        name: ultra-experimental.service
+        state: stopped
+        enabled: false
+      when:
+        - ultra_ingress_action == 'retire-experiment'
+        - ingress_experiment_unit.stat.exists | default(false)
+    - name: Remove only verified receipt-owned experimental runtime files
+      ultra_owned_file:
+        path: "{{ item }}"
+        receipt: /var/lib/ultra-ingress/managed.json
+        state: absent
+      loop: "{{ ingress_experiment_retirement.files | default([]) }}"
+      no_log: true
+      when: ultra_ingress_action == 'retire-experiment'
+    - name: Reload service definitions after experimental retirement
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: ultra_ingress_action == 'retire-experiment'
     - name: Configure isolated experimental transport
       ansible.builtin.include_role:
         name: ingress_experiment

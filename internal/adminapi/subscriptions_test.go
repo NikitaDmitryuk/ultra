@@ -165,7 +165,7 @@ func (s *adminSubscriptions) IsAdminOwner(context.Context, string) (bool, error)
 	return s.allowed, s.err
 }
 
-func TestExperimentUsesOwnerPermissionsAndLiveDescriptor(t *testing.T) {
+func TestRetiredExperimentNeverIssuedWithLegacyDescriptor(t *testing.T) {
 	users := newFakeUserManager()
 	spec := &config.Spec{Role: config.RoleBridge, DevMode: true, PublicHost: "localhost", VLESSPort: 443}
 	s, err := NewServer("127.0.0.1:0", "secret", users, nil, spec, nil, nil, nil, nil, nil)
@@ -199,26 +199,17 @@ func TestExperimentUsesOwnerPermissionsAndLiveDescriptor(t *testing.T) {
 		}
 		return w.Body.String()
 	}
-	if strings.Contains(request("?admin=true"), "experiment.example") {
-		t.Fatal("query bypass")
+	for _, allowed := range []bool{false, true} {
+		permissions.allowed = allowed
+		for _, query := range []string{"", "?admin=true", "?format=happ"} {
+			body := request(query)
+			if strings.Contains(body, "experiment.example") || strings.Contains(body, "Эксперимент") {
+				t.Fatalf("retired profile issued for %q", query)
+			}
+		}
 	}
-	permissions.allowed = true
-	if !strings.Contains(request(""), "experiment.example:5543") {
-		t.Fatal("admin experiment missing")
-	}
-	descriptor.Endpoint.Port = 5544
-	write()
-	if !strings.Contains(request(""), "experiment.example:5544") {
-		t.Fatal("descriptor cached")
-	}
-	permissions.allowed = false
-	if strings.Contains(request(""), "experiment.example") {
-		t.Fatal("removed admin retained profile")
-	}
-	permissions.allowed = true
-	permissions.err = errors.New("unavailable")
-	if strings.Contains(request(""), "experiment.example") {
-		t.Fatal("permissions failed open")
+	if states := s.publicIngressStatus(context.Background()); len(states) != 0 {
+		t.Fatalf("retired ingress remains in diagnostics: %+v", states)
 	}
 }
 
