@@ -3,11 +3,14 @@ package deployansible
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReadinessProbeDoesNotAcquireSharedInfrastructureLock(t *testing.T) {
@@ -71,6 +74,144 @@ output.chmod(0o600)
 	)
 	if err == nil {
 		t.Fatal("strict inspection escaped shared lock")
+	}
+}
+
+func TestReadinessProbeCancellationBeforeAttempt(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := WaitUpgradeReadiness(ctx, nil, root, "/usr/bin/python3", "/usr/bin/true",
+		"11111111-2222-3333-4444-555555555555", false, "")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestReadinessProbeCancellationDuringAttemptStopsRetries(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python unavailable")
+	}
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runner := filepath.Join(root, "slow")
+	started := filepath.Join(root, "started")
+	calls := filepath.Join(root, "calls")
+	script := "#!" + python + "\n" + `import pathlib,sys,time
+root=pathlib.Path(__file__).parent
+calls=root/'calls'
+calls.write_text(str(int(calls.read_text())+1) if calls.exists() else '1')
+(root/'started').write_text('started')
+time.sleep(30)
+`
+	if err := os.WriteFile(runner, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- WaitUpgradeReadiness(ctx, map[string]any{}, root, python, runner,
+			"11111111-2222-3333-4444-555555555555", false, "")
+	}()
+	deadline := time.NewTimer(5 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		select {
+		case err := <-result:
+			t.Fatalf("readiness probe returned before runner started: %v", err)
+		case <-deadline.C:
+			t.Fatal("timed out waiting for runner start marker")
+		case <-ticker.C:
+		}
+	}
+	cancel()
+	err = <-result
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+	if got, readErr := os.ReadFile(calls); readErr != nil || string(got) != "1" {
+		t.Fatalf("runner invocation count=%q, error=%v", got, readErr)
+	}
+}
+
+func TestReadinessProbeRetriesTransientFailuresWithFreshStages(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python unavailable")
+	}
+	for _, tc := range []struct {
+		name                string
+		failures, wantCalls int
+		code                string
+	}{
+		{name: "transient then success", failures: 1, wantCalls: 2, code: "ssh_banner_timeout"},
+		{name: "exhaustion", failures: 3, wantCalls: 3, code: "ssh_connection_reset"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Chmod(root, 0700); err != nil {
+				t.Fatal(err)
+			}
+			operation := filepath.Join(root, "operation")
+			if err := os.Mkdir(operation, 0700); err != nil {
+				t.Fatal(err)
+			}
+			runner := filepath.Join(root, "runner")
+			program := "#!" + python + "\n" + `import json,pathlib,sys
+job=pathlib.Path(sys.argv[-1][1:]).parent
+request=json.loads((job/'request.json').read_text())
+root=pathlib.Path(request['variables']['ultra_lock_directory'])
+count=root/'calls'
+n=int(count.read_text())+1 if count.exists() else 1
+count.write_text(str(n))
+with (root/'stages').open('a') as f: f.write(str(job)+'\n')
+if n <= ` + strconv.Itoa(tc.failures) + `:
+ (job/'diagnostic.json').write_text(json.dumps({'stage':'Read readiness','node':'bridge','code':'` + tc.code + `'}))
+ (job/'diagnostic.json').chmod(0o600)
+ sys.exit(2)
+out=job/'result.json'; out.write_text(json.dumps({'verified':True,'ready':True})); out.chmod(0o600)
+`
+			if err := os.WriteFile(runner, []byte(program), 0700); err != nil {
+				t.Fatal(err)
+			}
+			err := WaitUpgradeReadiness(context.Background(), map[string]any{}, root, python, runner,
+				"11111111-2222-3333-4444-555555555555", false, operation)
+			if (err == nil) != (tc.wantCalls == 2) {
+				t.Fatalf("error=%v", err)
+			}
+			count, _ := os.ReadFile(filepath.Join(root, "calls"))
+			if string(count) != strconv.Itoa(tc.wantCalls) {
+				t.Fatalf("calls=%q", count)
+			}
+			stages, _ := os.ReadFile(filepath.Join(root, "stages"))
+			lines := strings.Split(strings.TrimSpace(string(stages)), "\n")
+			if len(lines) != tc.wantCalls {
+				t.Fatalf("stages=%q", stages)
+			}
+			seen := map[string]bool{}
+			for _, path := range lines {
+				if seen[path] {
+					t.Fatalf("stage reused: %s", path)
+				}
+				seen[path] = true
+			}
+			files, _ := filepath.Glob(filepath.Join(operation, "readiness-diagnostic-*.json"))
+			if len(files) != tc.failures {
+				t.Fatalf("diagnostics=%v", files)
+			}
+		})
 	}
 }
 

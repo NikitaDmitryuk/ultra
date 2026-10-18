@@ -32,6 +32,7 @@ func runAutomationCommand(action string, args []string) {
 	jobDirectory := fs.String("job-dir", "", "persistent private Ansible upgrade directory")
 	python := fs.String("python", "/usr/bin/python3", "controller Python")
 	ansible := fs.String("ansible-playbook", "", "pinned Ansible executable; otherwise resolve exact release runtime")
+	secretsSource := fs.String("secrets-source", "canonical", "canonical or installed-runtime secret inputs (upgrade only)")
 	_ = fs.Parse(args)
 	if fs.NArg() > 0 {
 		exitOnErr("upgrade arguments", errors.New("positional arguments are not supported"))
@@ -41,6 +42,11 @@ func runAutomationCommand(action string, args []string) {
 		*configPath = "install.config"
 	}
 	p := readDeploymentOrExit(*plan, *configPath)
+	if action != "upgrade" && *secretsSource != "canonical" {
+		exitOnErr("secrets source", errors.New("secrets_source_upgrade_required"))
+		return
+	}
+	exitOnErr("secrets source", selectPlanSecrets(p, *secretsSource))
 	if action == "upgrade" {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
@@ -137,6 +143,7 @@ func runOperatorUpgradeCommand(args []string) {
 	jobDirectory := fs.String("job-dir", "", "persistent private Ansible upgrade directory")
 	python := fs.String("python", "/usr/bin/python3", "controller Python")
 	ansible := fs.String("ansible-playbook", "", "pinned Ansible executable; otherwise resolve exact release runtime")
+	secretsSource := fs.String("secrets-source", "canonical", "canonical or installed-runtime secret inputs")
 	_ = fs.Parse(args)
 	if fs.NArg() > 0 || *configPath == "" || *releaseDir == "" || *version == "" ||
 		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(*sourceCommit) ||
@@ -159,6 +166,7 @@ func runOperatorUpgradeCommand(args []string) {
 		return
 	}
 	p := readDeploymentOrExit("", *configPath)
+	exitOnErr("operator upgrade secrets", selectPlanSecrets(p, *secretsSource))
 	if p.Automation == nil || p.Automation.Version != *version {
 		exitOnErr("operator upgrade config verification", errors.New("candidate version does not match canonical config"))
 		return

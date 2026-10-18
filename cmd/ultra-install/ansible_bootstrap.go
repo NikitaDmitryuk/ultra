@@ -554,7 +554,7 @@ func prepareBootstrapVariables(
 		if err != nil {
 			return err
 		}
-		secrets, err := installplan.ReadSecretsFile(p.SecretsEnvFile())
+		secrets, err := installplan.ReadPlanSecrets(p)
 		if err != nil {
 			return err
 		}

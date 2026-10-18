@@ -416,6 +416,21 @@ ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \
 ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 ```
 
+Для обновления установленного bridge staged `doctor` и `operator-upgrade` используют
+явный `--secrets-source=installed-runtime`. Режим разрешён только root после проверки
+установленной идентичности bridge. Bot token берётся из `/etc/ultra-relay/bot.env`,
+общий Vultr API key — из `/var/lib/ultra-relay/automation/vultr-api-key`; права,
+владельцы и стабильность файлов проверяются до чтения. Режим связывается с операцией
+для повторного запуска. Канонический файл и сериализованный план не изменяются,
+локальный `.env` в staged-каталог не переносится. Обычный CLI без этого режима
+использует канонический источник секретов.
+
+Для `/var/lib/ultra-relay` допустимы 0700 и 0755 при штатных владельце и группе:
+служба relay задаёт `StateDirectory` без `StateDirectoryMode`, поэтому systemd может
+восстановить 0755 при старте. Исключение относится только к каталогу состояния;
+`automation` и `/etc/ultra-relay` остаются 0700, файлы секретов — 0600.
+Проверка чтения должна учитывать этот контракт systemd.
+
 Для незавершённого upgrade-журнала, созданного до перехода на прямое SSH к bridge,
 явное восстановление сначала сверяет прежнюю transport-привязку и выполняет новую
 read-only аттестацию bridge по его текущему pin. Если в прежней привязке использовались
@@ -493,9 +508,15 @@ preflight для поддерживаемого retry, но не снимает 
 публичных recovery-наблюдений без lifecycle reservation и infrastructure lock,
 чтобы reconcile мог обновить их. Проверка читает два JSON-файла readiness и
 защищённый root-owned lifecycle journal,
-без DB discovery, топологии и ключей. Повторяется только точный
-`fresh_independent_backup_required`; остальные ошибки завершаются сразу. Общее
-дедлайн повторов по монотонным часам — 600 секунд с учётом времени проверок;
+без DB discovery, топологии и ключей. Ожидание recovery-наблюдений повторяется только
+для `fresh_independent_backup_required`. Отдельно `status` и read-only readiness probe
+повторяют до трёх подключений при фиксированных транспортных кодах
+`ssh_banner_timeout`, `ssh_connect_timeout` и `ssh_connection_reset`. Каждая попытка
+использует новый временный stage; отмена останавливает ожидание и следующие попытки.
+Ошибки host-key pins, аутентификации, задач и неизвестные ошибки не повторяются.
+Этот механизм не повторяет mutating `RunLocal` или `operator-upgrade`: потеря ответа
+после отправки изменений требует отдельного recovery-протокола. Внутри `state.py`
+ожидание recovery-наблюдений ограничено 600 секундами по монотонным часам с учётом времени проверок;
 controller ограничивает всё Ansible-задание с transport до 700 секунд, вызывающий
 процесс — до 780 секунд плюс до 5 секунд на остановку дочернего процесса. Задание
 сохраняет `no_log`, временный результат удаляется. При ошибке Ansible рядом с
@@ -517,6 +538,34 @@ controller job может продолжать работу. Чужой active l
 доказывает. Retry и forward-only операции, способные
 уже удерживать reservation, сохраняют отдельный recovery-протокол и это ожидание
 не выполняют.
+Для поддерживаемой legacy-версии локального wrapper предусмотрен
+`--recover-local-preflight`. Он применим, когда wrapper записал отправку `upgrade`,
+но сохранённая старая операция содержит только полные preflight-артефакты и не
+дошла до запуска постоянных стадий. Пример отдельного вызова:
+
+```sh
+python3 scripts/manual-deploy.py --recover-local-preflight \
+  --config /absolute/path/to/install.config \
+  --recovery-installer /secure/operator/ultra-install \
+  --journal-sha256 <expected-journal-sha256> \
+  --backup-sha256 <expected-previous-config-sha256> \
+  --config-sha256 <expected-canonical-config-sha256>
+```
+
+Recovery связывает исходный журнал, предыдущий и текущий config, старый release
+с его executable/assets и точный Go plan digest. Исходный operator cache вычисляется
+по проверенному локальному пути; произвольный `job-dir` здесь не принимается.
+Wrapper удерживает исходные locks до устойчивой архивации, а installer проверяет
+унаследованные descriptors этих locks при построении proof. Любая
+постоянная stage, неизвестный или неполный файл, смена inode проверяемых входов,
+живой конфликтующий процесс или противоречие текущего bridge блокируют recovery.
+Основание допуска — публикация и fsync постоянной metadata до запуска child
+process и сохранение этой metadata штатным retention. Протокол предполагает
+сохранность доверенного локального состояния; признаки его удаления или подмены
+не допускаются. Исходный журнал сохраняется целиком с proof, канонический config
+остаётся прежним. После успешного recovery выполняется обычная новая выкладка;
+её readiness и остальные проверки сохраняются.
+
 Для неудачной `--forward-only` операции есть
 отдельный явный `scripts/manual-deploy.py --continue-forward-only --config
 /absolute/path/to/install.config`. Он сохраняет digest исходного production-журнала
@@ -858,6 +907,36 @@ API и Telegram запрещаются до запуска восстановл�
 Инструкции: [recovery](../deploy/recovery/README.md),
 [полное восстановление](../deploy/recovery/RESTORE.md),
 [перенос bridge](bridge-migration.md).
+
+### Восстановление инструментов перед обновлением
+
+Если установленный collector не может создать свежую копию, отдельная команда
+`recovery-tools-bootstrap` обновляет только recovery-инструменты до обычной проверки
+готовности. Команду выполняет root на подтверждённом bridge с тем же каноническим
+планом и проверенным комплектом кандидата:
+
+```bash
+ultra-install recovery-tools-bootstrap --config /secure/install.config \
+  --release-dir /secure/releases/vX.Y.Z --version vX.Y.Z \
+  --candidate-sha256 "$MANIFEST_SHA256" --manual-consumers-excluded
+```
+
+SHA-256 относится к `release-manifest.json`; проверяются также размеры и хеши assets.
+Версия кандидата должна отличаться от установленной. Для следующего кандидата
+сохраняй тот же `--job-dir`: поля версии и каталога релиза связываются отдельно,
+а топология и политика доступа остаются замороженными. Исходный fallback сохраняется
+и при изменении bytes инструментов между кандидатами.
+Флаг подтверждает исключение параллельных ручных root-команд capture/restore/import
+на время операции. Автоматические потребители останавливаются под долговечным
+maintenance gate. На bridge заменяется согласованный набор collector и restore,
+на замороженных receivers — только collector. Старое установленное поколение и
+manifest сохраняются; прежние bytes удерживаются для штатного upgrade.
+
+При отказе сохраняй `--job-dir` и повторяй явно с `--retry-failed`: незавершённое
+обслуживание оставляет gate закрытым. Успешный bootstrap не подтверждает readiness:
+после него необходимы настоящий backup, доставка независимому узлу, reconcile
+и обычная проверка готовности. Источник: [CLI](../cmd/ultra-install/recovery_tools_bootstrap.go)
+и [host checkpoint](../deploy/ansible/library/ultra_recovery_tools_bootstrap.py).
 
 ## Зависимости и проверки
 

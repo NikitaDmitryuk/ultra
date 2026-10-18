@@ -164,7 +164,7 @@ func applyDomainCutover(p *installplan.InstallPlan, configFile, subscription, vp
 	if bridgeIP == nil || bridgeIP.To4() == nil {
 		return errors.New("cutover bridge address must be explicit IPv4")
 	}
-	secrets, err := installplan.ReadSecretsFile(p.SecretsEnvFile())
+	secrets, err := installplan.ReadPlanSecrets(p)
 	if err != nil {
 		return errors.New("canonical cutover secrets unavailable")
 	}

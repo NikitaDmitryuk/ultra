@@ -578,6 +578,9 @@ func ansibleUpgrade(
 	if enforcement != nil {
 		variables["ultra_controller_enforcement_spec"] = enforcement
 	}
+	if planSecretsSource(p) != "canonical" {
+		variables["ultra_secrets_source"] = planSecretsSource(p)
+	}
 	frozenInventory, err := json.Marshal(inventory)
 	if err != nil {
 		return err

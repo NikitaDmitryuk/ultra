@@ -350,14 +350,24 @@ func operatorPlanDigest(p *installplan.InstallPlan, releaseDir string) (string, 
 	return hex.EncodeToString(sum[:]), nil
 }
 func freezeOperatorPlan(directory string, p *installplan.InstallPlan, releaseDir string) error {
+	if !validSecretsSource(p.SecretSource) {
+		return errors.New("secrets_source_invalid")
+	}
 	hash, err := operatorPlanDigest(p, releaseDir)
 	if err != nil {
 		return err
 	}
-	raw, _ := json.Marshal(map[string]string{"plan_sha256": hash})
+	identity := map[string]string{"plan_sha256": hash}
+	if planSecretsSource(p) != "canonical" {
+		identity["secrets_source"] = planSecretsSource(p)
+	}
+	raw, _ := json.Marshal(identity)
 	return writeUpgradeInput(filepath.Join(directory, "operator-plan.json"), raw)
 }
 func matchOperatorPlan(directory string, p *installplan.InstallPlan, releaseDir string) error {
+	if !validSecretsSource(p.SecretSource) {
+		return errors.New("secrets_source_invalid")
+	}
 	hash, err := operatorPlanDigest(p, releaseDir)
 	if err != nil {
 		return err
@@ -370,6 +380,16 @@ func matchOperatorPlan(directory string, p *installplan.InstallPlan, releaseDir 
 	var identity map[string]string
 	if err != nil || json.Unmarshal(raw, &identity) != nil || identity["plan_sha256"] != hash {
 		return errors.New("operator_retention_completed_plan_changed")
+	}
+	storedSource := identity["secrets_source"]
+	if !validSecretsSource(storedSource) || len(identity) > 2 || (len(identity) == 2 && storedSource == "") {
+		return errors.New("secrets_source_invalid")
+	}
+	if storedSource == "" {
+		storedSource = "canonical"
+	}
+	if storedSource != planSecretsSource(p) {
+		return errors.New("secrets_source_changed")
 	}
 	return nil
 }

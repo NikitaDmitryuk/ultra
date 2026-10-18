@@ -5,7 +5,10 @@ import "time"
 const CurrentSchemaVersion = 2
 
 type InstallPlan struct {
-	ControllerLocalTarget string `json:"-"`
+	// Secret resolution is per invocation and never part of a deployment plan.
+	SecretResolver        func() (map[string]string, error) `json:"-"`
+	SecretSource          string                            `json:"-"`
+	ControllerLocalTarget string                            `json:"-"`
 	// Native execution location is attested and frozen by the operator process, never config.
 	ControllerLocal *bool             `json:"-"`
 	SourceValues    map[string]string `json:"-"`

@@ -16,6 +16,14 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 callback = module.CallbackModule()
 
+
+def read_diagnostic(target, result):
+    if not target.exists():
+        raise AssertionError(
+            f"diagnostic not produced; rc={result.returncode}; stdout={result.stdout!r}; stderr={result.stderr!r}"
+        )
+    return json.loads(target.read_text())
+
 identity_source = ROOT / 'deploy/ansible/library/ultra_dump_exit_identity.py'
 identity_spec = importlib.util.spec_from_file_location('ultra_dump_exit_identity', identity_source)
 identity = importlib.util.module_from_spec(identity_spec)
@@ -68,6 +76,39 @@ with tempfile.TemporaryDirectory(prefix='ultra-ansible-diagnostic-') as director
     saved = json.loads(target.read_text())
     assert 'detail' not in saved and 'do-not-log' not in target.read_text(), saved
 
+with tempfile.TemporaryDirectory(prefix='ultra-ansible-diagnostic-') as directory:
+    target = Path(directory) / 'diagnostic.json'
+    os.environ['ULTRA_ANSIBLE_DIAGNOSTIC_FILE'] = str(target)
+    try:
+        result = SimpleNamespace(_task=SimpleNamespace(name='ordinary task', action='command'),
+                                 _host=SimpleNamespace(name='bridge'),
+                                 _result={'msg': 'Timeout during banner exchange',
+                                          'ultra_safe_failure_code': 'ssh_banner_timeout'})
+        callback.v2_runner_on_failed(result)
+    finally:
+        os.environ.pop('ULTRA_ANSIBLE_DIAGNOSTIC_FILE', None)
+    assert json.loads(target.read_text())['code'] == 'task_failed'
+
+for message, expected in [
+        ('Timeout during banner exchange private-host.example:22', 'ssh_banner_timeout'),
+        ('Connection timed out private-host.example:22', 'ssh_connect_timeout'),
+        ('Connection reset by peer private-host.example:22', 'ssh_connection_reset'),
+        ('Timeout during banner exchange; Permission denied (publickey)', 'ssh_authentication_failed'),
+        ('Connection timed out; Host key verification failed', 'ssh_pin_mismatch'),
+        ('connect to host private-host.example:22: Network is unreachable', 'host_unreachable')]:
+    with tempfile.TemporaryDirectory(prefix='ultra-ansible-diagnostic-') as directory:
+        target = Path(directory) / 'diagnostic.json'
+        os.environ['ULTRA_ANSIBLE_DIAGNOSTIC_FILE'] = str(target)
+        try:
+            result = SimpleNamespace(_task=SimpleNamespace(name='SSH probe', action='command'),
+                                     _host=SimpleNamespace(name='bridge'), _result={'msg': message})
+            callback.v2_runner_on_unreachable(result)
+        finally:
+            os.environ.pop('ULTRA_ANSIBLE_DIAGNOSTIC_FILE', None)
+        saved_text = target.read_text()
+        assert json.loads(saved_text)['code'] == expected, saved_text
+        assert 'private-host' not in saved_text and 'Network is unreachable' not in saved_text, saved_text
+
 ansible_playbook = shutil.which('ansible-playbook')
 assert ansible_playbook, 'ansible-playbook is required for the no_log callback regression'
 with tempfile.TemporaryDirectory(prefix='ultra-ansible-redacted-args-') as directory:
@@ -91,8 +132,13 @@ with tempfile.TemporaryDirectory(prefix='ultra-ansible-redacted-args-') as direc
         '        route: uuid-probe-value\n'
     )
     target = root / 'diagnostic.json'
+    local_scratch, remote_scratch = root / 'local-tmp', root / 'remote-tmp'
+    local_scratch.mkdir()
+    remote_scratch.mkdir()
     env = os.environ.copy()
     env.update({
+        'ANSIBLE_LOCAL_TEMP': str(local_scratch),
+        'ANSIBLE_REMOTE_TEMP': str(remote_scratch),
         'ANSIBLE_LIBRARY': str(library),
         'ANSIBLE_CALLBACK_PLUGINS': str(ROOT / 'deploy/ansible/callback_plugins'),
         'ANSIBLE_CALLBACKS_ENABLED': 'safe_result',
@@ -101,7 +147,7 @@ with tempfile.TemporaryDirectory(prefix='ultra-ansible-redacted-args-') as direc
     })
     result = subprocess.run([ansible_playbook, '-i', 'localhost,', str(root / 'play.yml')],
                             env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    saved = json.loads(target.read_text())
+    saved = read_diagnostic(target, result)
     output = result.stdout + result.stderr
     assert result.returncode != 0, result.stdout
     assert saved == {'stage': 'probe safe failure', 'node': 'localhost', 'code': 'task_failed',
@@ -129,9 +175,13 @@ with tempfile.TemporaryDirectory(prefix='ultra-ansible-ingress-diagnostic-') as 
         '        hostname: private-name.example.com\n'
     )
     target = root / 'diagnostic.json'
+    local_scratch, remote_scratch = root / 'local-tmp', root / 'remote-tmp'
+    local_scratch.mkdir()
+    remote_scratch.mkdir()
     env = os.environ.copy()
     env.update({
-        'ANSIBLE_LOCAL_TEMP': directory,
+        'ANSIBLE_LOCAL_TEMP': str(local_scratch),
+        'ANSIBLE_REMOTE_TEMP': str(remote_scratch),
         'ANSIBLE_LIBRARY': str(library),
         'ANSIBLE_CALLBACK_PLUGINS': str(ROOT / 'deploy/ansible/callback_plugins'),
         'ANSIBLE_CALLBACKS_ENABLED': 'safe_result',
@@ -140,7 +190,7 @@ with tempfile.TemporaryDirectory(prefix='ultra-ansible-ingress-diagnostic-') as 
     })
     result = subprocess.run([ansible_playbook, '-vvv', '-i', 'localhost,', str(root / 'play.yml')],
                             env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    saved = json.loads(target.read_text())
+    saved = read_diagnostic(target, result)
     output = result.stdout + result.stderr
     assert result.returncode != 0, result.stdout
     assert saved == {'stage': 'verify ingress TLS', 'node': 'localhost',

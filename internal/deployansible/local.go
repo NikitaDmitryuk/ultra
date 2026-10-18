@@ -81,38 +81,60 @@ func WaitUpgradeReadiness(
 	}
 	ctx, cancel := context.WithTimeout(ctx, 780*time.Second)
 	defer cancel()
-	temporary, err := os.MkdirTemp("", "ultra-readiness-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(temporary) //nolint:errcheck
 	ctx = context.WithValue(ctx, readinessProbeKey{}, true)
-	receipt, err := RunLocal(
-		ctx,
-		"wait-upgrade-readiness",
-		inventory,
-		map[string]any{
-			"ultra_lock_directory":                lockDirectory,
-			"ultra_readiness_lifecycle_id":        lifecycleID,
-			"ultra_readiness_reservation_pending": pending,
-		},
-		filepath.Join(temporary, "probe"),
-		python,
-		executable,
-	)
-	if err != nil {
-		if diagnosticDirectory != "" {
-			if diagnosticErr := persistReadinessDiagnostic(diagnosticDirectory, receipt.Diagnostic); diagnosticErr != nil {
-				return errors.Join(err, errors.New("readiness_diagnostic_persist_failed"))
-			}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		return err
+		temporary, err := os.MkdirTemp("", "ultra-readiness-")
+		if err != nil {
+			return err
+		}
+		receipt, runErr := RunLocal(ctx, "wait-upgrade-readiness", inventory,
+			map[string]any{
+				"ultra_lock_directory":                lockDirectory,
+				"ultra_readiness_lifecycle_id":        lifecycleID,
+				"ultra_readiness_reservation_pending": pending,
+			}, filepath.Join(temporary, "probe"), python, executable)
+		_ = os.RemoveAll(temporary)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if runErr != nil {
+			lastErr = runErr
+			if diagnosticDirectory != "" {
+				if diagnosticErr := persistReadinessDiagnostic(diagnosticDirectory, receipt.Diagnostic); diagnosticErr != nil {
+					return errors.Join(runErr, errors.New("readiness_diagnostic_persist_failed"))
+				}
+			}
+			if !transientSSHDiagnostic(receipt.Diagnostic.Code) || attempt == 2 {
+				return runErr
+			}
+		} else {
+			if receipt.Result.Values["verified"] != true || ((pending || receipt.Result.Values["ready"] != true) &&
+				(receipt.Result.Values["reservation_id"] != lifecycleID || receipt.Result.Values["reservation_phase"] != "applying")) {
+				return errors.New("upgrade_readiness_probe_unverified")
+			}
+			return nil
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
-	if receipt.Result.Values["verified"] != true || ((pending || receipt.Result.Values["ready"] != true) &&
-		(receipt.Result.Values["reservation_id"] != lifecycleID || receipt.Result.Values["reservation_phase"] != "applying")) {
-		return errors.New("upgrade_readiness_probe_unverified")
+	return lastErr
+}
+
+func transientSSHDiagnostic(code string) bool {
+	switch code {
+	case "ssh_banner_timeout", "ssh_connect_timeout", "ssh_connection_reset":
+		return true
 	}
-	return nil
+	return false
 }
 
 // persistReadinessDiagnostic retains only the fixed callback fields after a
@@ -222,6 +244,8 @@ func runLocal(
 	source string,
 ) (Receipt, error) {
 	allowed := map[string]bool{
+		"bootstrap-recovery-inspect":   true,
+		"bootstrap-recovery-tools":     true,
 		"wait-upgrade-readiness":       true,
 		"bootstrap-forward-broker":     true,
 		"contain-upgrade":              true,

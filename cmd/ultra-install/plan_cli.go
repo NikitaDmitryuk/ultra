@@ -49,6 +49,10 @@ func handlePlanSubcommand(args []string) bool {
 		runAutomationCommand(args[0], args[1:])
 	case "operator-upgrade":
 		runOperatorUpgradeCommand(args[1:])
+	case "local-preflight-proof":
+		runLocalPreflightProof(args[1:])
+	case "recovery-tools-bootstrap":
+		runRecoveryToolsBootstrapCommand(args[1:])
 	case "domain-cutover":
 		runDomainCutoverCommand(args[1:])
 	case "backend-domain":
@@ -97,9 +101,11 @@ func runDoctorCommand(args []string) {
 	format := fs.String("format", "human", "human or json")
 	network := fs.Bool("network", false, "run DNS/TCP checks")
 	envRoot := fs.String("env-root", ".", "root for relative bot env path")
+	secretsSource := fs.String("secrets-source", "canonical", "canonical or installed-runtime secret inputs")
 	_ = fs.Parse(args)
 
 	p := readDeploymentOrExit(*planPath, *configPath)
+	exitOnErr("doctor secrets", selectPlanSecrets(p, *secretsSource))
 	opts := installplan.DoctorOptions{EnvRoot: *envRoot}
 	if *network {
 		opts = installplan.NetworkDoctorOptions(3 * time.Second)

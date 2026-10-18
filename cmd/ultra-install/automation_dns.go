@@ -16,7 +16,7 @@ func prepareAnsibleDNS(p *installplan.InstallPlan, variables map[string]any) err
 	if p.Automation.Ingress == nil || p.Automation.Ingress.ForwardHost != "" {
 		return errors.New("managed DNS requires direct bridge ingress")
 	}
-	secrets, err := installplan.ReadSecretsFile(p.SecretsEnvFile())
+	secrets, err := installplan.ReadPlanSecrets(p)
 	if err != nil {
 		return err
 	}

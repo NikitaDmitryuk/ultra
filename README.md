@@ -236,7 +236,10 @@ ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 bridge может продолжаться. `ultra-install status` показывает готовность сервисов,
 но не доказывает завершение старого удалённого задания и не снимает блокировку
 выкладки. Для dispatched `upgrade` есть отдельный поддерживаемый `--forward-only`
-с явным preflight. Для dispatched `adoption_apply` текущий wrapper блокирует retry:
+с явным preflight. Проверенную legacy-попытку локального wrapper, остановившуюся
+до постоянных стадий, можно архивировать отдельным `--recover-local-preflight`
+после проверки точных входов и исходных locks; канонический config сохраняется.
+Для dispatched `adoption_apply` текущий wrapper блокирует retry:
 до появления протокола fencing всех источников dispatch и host-bound подтверждения
 drain на frozen target set не меняйте config, не удаляйте журнал и не запускайте
 другой commit.

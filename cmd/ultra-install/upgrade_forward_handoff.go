@@ -67,14 +67,15 @@ func discoverForwardOldOperation(proof forwardUpgradeJournal, stateRoot string) 
 		return result, fail
 	}
 	var journal struct {
-		Schema      int    `json:"schema"`
-		Commit      string `json:"commit"`
-		Version     string `json:"version"`
-		Attempt     string `json:"remote_attempt"`
-		Stage       string `json:"stage"`
-		Dispatched  bool   `json:"mutator_dispatched"`
-		ManifestSHA string `json:"manifest_sha256"`
-		ConfigSHA   string `json:"staged_config_sha256"`
+		Schema        int                  `json:"schema"`
+		Commit        string               `json:"commit"`
+		Version       string               `json:"version"`
+		Attempt       string               `json:"remote_attempt"`
+		Stage         string               `json:"stage"`
+		Dispatched    bool                 `json:"mutator_dispatched"`
+		ManifestSHA   string               `json:"manifest_sha256"`
+		ConfigSHA     string               `json:"staged_config_sha256"`
+		SecretsSource journalSecretsSource `json:"secrets_source"`
 	}
 	if json.Unmarshal(raw, &journal) != nil || journal.Schema != 1 || !journal.Dispatched || journal.Stage != "upgrade" ||
 		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(journal.Commit) || !digest.MatchString(journal.Attempt) ||
@@ -96,6 +97,9 @@ func discoverForwardOldOperation(proof forwardUpgradeJournal, stateRoot string) 
 		return result, fail
 	}
 	plan, err := installplan.LoadConfig(config)
+	if err == nil {
+		err = bindVerificationSecretsSource(plan, string(journal.SecretsSource))
+	}
 	release := filepath.Join(input, "release")
 	if err != nil || installplan.ValidatePlan(plan) != nil || plan.Automation == nil || plan.Automation.Version != journal.Version ||
 		plan.Automation.ReleaseDir != release ||

@@ -23,6 +23,268 @@ SPEC.loader.exec_module(D)
 SUBSCRIPTION_PROBE_INPUT = D.subscription_probe_input
 
 
+class LocalPreflightRecovery(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.repo = Path(self.temp.name)
+        self.root = self.repo / 'manual'; self.root.mkdir(mode=0o700)
+        self.state = self.repo / 'state'; self.state.mkdir(mode=0o700)
+        (self.state/'operator').mkdir(mode=0o700)
+        self.config = self.repo/'install.config'
+        self.version = 'v0.0.'+str(int(D.LOCAL_PREFLIGHT_COMMIT,16))
+        self.release = self.root/self.version; self.release.mkdir(mode=0o700)
+        self.operation = self.state/('upgrade-'+self.version); self.operation.mkdir(mode=0o700)
+        for name in ('execution-mode.json','operator-plan.json','runtime-use.json','readiness-diagnostic-123.json'):
+            D.atomic_write(self.operation/name,b'{}')
+        D.atomic_write(self.release/'release-manifest.json',b'{}')
+        self.previous = b'INSTALL_SCHEMA_VERSION=2\n'
+        self.current = D.config_candidate(self.previous,self.version,self.release)
+        D.atomic_write(self.config,self.current)
+        self.backup = self.root/('install.config.before-'+self.version+'-123')
+        D.atomic_write(self.backup,self.previous)
+        self.record = {'schema':1,'commit':D.LOCAL_PREFLIGHT_COMMIT,'version':self.version,'adopt':False,
+                       'backup':self.backup.name,'previous_sha256':D.sha(self.previous),'config_sha256':D.sha(self.current),
+                       'stage':'upgrade','mutator_dispatched':True,'transport_binding':None,'manifest_sha256':None,
+                       'remote_attempt':None,'probe_sha256':'','forward_only':False,'forward_journal_sha256':''}
+        self.journal=self.root/'operation.json'; self.save()
+        for path in (self.root/'deploy.lock', D.canonical_config_lock(self.config),
+                     self.state/'operator/infrastructure.lock',self.state/'infrastructure.lock'):
+            D.atomic_write(path,b'')
+        self.helper=self.repo/'proof-helper'
+        self.helper.write_text('''#!/usr/bin/python3
+import json,sys
+a=dict(zip(sys.argv[2::2],sys.argv[3::2]))
+n=a['--nonce']
+print(json.dumps({'schema':1,'nonce':n,'config_sha256':a['--config-sha256'],
+ 'manifest_sha256':a['--manifest-sha256'],'pre_mutation':True}),flush=True)
+if sys.stdin.readline().strip()!='ack '+n: sys.exit(1)
+print('acknowledged '+n,flush=True)
+''')
+        self.helper.chmod(0o700)
+
+    def save(self):
+        self.raw=json.dumps(self.record).encode(); D.atomic_write(self.journal,self.raw)
+
+    def bridge(self, command, *args, **kwargs):
+        import shlex
+        argv=shlex.split(command[-1])
+        return json.dumps({'schema':1,'nonce':argv[-2],'version':argv[-1],'contradictions':False,
+                           'boot_sha256':'a'*64,'process_count':20})
+
+    def recover(self, **changes):
+        args=dict(repo=self.repo,root=self.root,config=self.config,installer=self.helper,
+                  journal_sha=D.sha(self.raw),backup_sha=D.sha(self.previous),config_sha=D.sha(self.current),state_root=self.state)
+        args.update(changes)
+        with D.existing_recovery_lock(self.root/'deploy.lock'), D.existing_recovery_lock(D.canonical_config_lock(self.config)), \
+                patch.object(D,'local_recovery_census',return_value=20), \
+                patch.object(D,'operator_transport',return_value=(['ssh','fixture'],'c'*64)), \
+                patch.object(D,'collect_local_preflight_bridge',side_effect=self.bridge):
+            return D.recover_local_preflight(**args)
+
+    def test_archive_preserves_exact_inputs_and_is_idempotent(self):
+        archive=self.recover()
+        self.assertFalse(self.journal.exists())
+        self.assertEqual((archive/'operation.json').read_bytes(),self.raw)
+        self.assertEqual(self.config.read_bytes(),self.current)
+        self.assertEqual(self.backup.read_bytes(),self.previous)
+        receipt=json.loads((archive/'receipt.json').read_bytes())
+        self.assertEqual(receipt['kind'],'local-preflight-no-mutator-dispatch')
+        self.assertEqual(receipt['collection_transport_binding'],'c'*64)
+        self.assertIsNone(json.loads((archive/'operation.json').read_bytes())['remote_attempt'])
+        self.assertEqual(self.recover(),archive)
+
+    def test_original_locks_refuse_recovery(self):
+        for path in (self.root/'deploy.lock',D.canonical_config_lock(self.config),
+                     self.state/'operator/infrastructure.lock',self.state/'infrastructure.lock'):
+            with self.subTest(path=path),D.existing_recovery_lock(path),self.assertRaises(BlockingIOError):
+                self.recover()
+        self.assertEqual(self.journal.read_bytes(),self.raw)
+
+    def test_extra_mutating_incomplete_or_unknown_stage_rejected(self):
+        for name in ('activate','inspect','lifecycle-applying-123','enforce','resume','completed.json','unknown','.prepare'):
+            with self.subTest(stage=name):
+                path=self.operation/name;path.mkdir(mode=0o700)
+                with self.assertRaisesRegex(D.DeployError,'local_preflight_stage_inventory_invalid'):
+                    self.recover()
+                path.rmdir()
+        self.assertTrue(self.journal.exists())
+
+    def test_surviving_mutating_child_keeps_its_durable_stage(self):
+        # command.Run can outlive its controller, but preparation preceded it.
+        (self.operation/'activate').mkdir(mode=0o700)
+        child=subprocess.Popen(['/usr/bin/sleep','30'])
+        try:
+            with self.assertRaisesRegex(D.DeployError,'local_preflight_stage_inventory_invalid'):
+                self.recover()
+            self.assertIsNone(child.poll())
+        finally:
+            child.terminate();child.wait()
+
+    def test_replaced_inode_with_identical_bytes_rejected(self):
+        original=self.bridge
+        def replaced(*args,**kwargs):
+            path=self.operation/'operator-plan.json'
+            D.atomic_write(path,path.read_bytes())
+            return original(*args,**kwargs)
+        self.bridge=replaced
+        with self.assertRaisesRegex(D.DeployError,'local_preflight_input_changed'):
+            self.recover()
+        self.assertEqual(self.journal.read_bytes(),self.raw)
+
+    def test_dead_helper_before_ack_refuses_archive(self):
+        self.helper.write_text(self.helper.read_text().split('if sys.stdin')[0])
+        original=self.bridge
+        def delay(*args,**kwargs):
+            time.sleep(.1)
+            return original(*args,**kwargs)
+        self.bridge=delay
+        with self.assertRaisesRegex(D.DeployError,'local_preflight_helper_unavailable'):
+            self.recover()
+        self.assertTrue(self.journal.exists())
+
+    def test_archive_crash_before_rename_can_retry(self):
+        with patch.object(D,'recovery_rename_exclusive',side_effect=OSError('simulated crash')):
+            with self.assertRaises(OSError):self.recover()
+        self.assertTrue(self.journal.exists())
+        archive=self.recover()
+        self.assertEqual((archive/'operation.json').read_bytes(),self.raw)
+
+    def test_archive_crash_after_rename_is_idempotent(self):
+        rename=D.recovery_rename_exclusive
+        def crash(*args):
+            rename(*args)
+            raise OSError('simulated death after atomic rename')
+        with patch.object(D,'recovery_rename_exclusive',side_effect=crash):
+            with self.assertRaises(OSError):self.recover()
+        self.assertFalse(self.journal.exists())
+        archive=self.recover()
+        self.assertEqual((archive/'operation.json').read_bytes(),self.raw)
+
+    def test_bridge_contradiction_and_changed_config_refuse(self):
+        original=self.bridge
+        def contradiction(*args,**kwargs):
+            proof=json.loads(original(*args,**kwargs));proof['contradictions']=True
+            return json.dumps(proof)
+        self.bridge=contradiction
+        with self.assertRaisesRegex(D.DeployError,'local_preflight_bridge_proof_invalid'):self.recover()
+        self.bridge=original
+        D.atomic_write(self.config,self.current+b'# changed\n')
+        with self.assertRaisesRegex(D.DeployError,'local_preflight_exact_inputs_required'):self.recover()
+
+    def test_input_snapshot_rejects_symlink_and_census_permission_errors(self):
+        pins=D.RecoveryInputs()
+        try:
+            pins.retain(self.config)
+            replacement=self.repo/'replacement';replacement.write_bytes(self.current)
+            os.replace(replacement,self.config)
+            with self.assertRaisesRegex(D.DeployError,'local_preflight_input_changed'):pins.unchanged()
+        finally:pins.close()
+        with patch.object(Path,'read_text',side_effect=PermissionError('opaque proc')):
+            with self.assertRaisesRegex(D.DeployError,'local_preflight_process_uncertain'):D.local_recovery_census()
+
+    def census_fixture(self):
+        proc=self.repo/'proc'
+        for name in ('1','999','self'):(proc/name).mkdir(parents=True)
+        (proc/'1/comm').write_text('systemd\n')
+        (proc/'1/status').write_text('NSpid:\t1\n')
+        (proc/'self/status').write_text('NSpid:\t999\n')
+        (proc/'self/mountinfo').write_text('1 0 0:1 / /proc rw - proc proc rw\n')
+        for pid in ('1','999'):
+            (proc/pid/'stat').write_text(pid+' (fixture) '+' '.join(['S']+['0']*18+['123']))
+            (proc/pid/'cmdline').write_bytes(b'/usr/bin/python3\0')
+        scope={'os':os,'need':lambda value:D.require(value,'namespace_rejected')}
+        exec(D.RECOVERY_PROCESS_CENSUS,scope)
+        return proc,scope['census']
+
+    def test_census_accepts_exact_namespace_without_privileged_readlink(self):
+        proc,census=self.census_fixture()
+        with patch.object(os,'readlink',side_effect=PermissionError('ptrace denied')) as readlink:
+            self.assertEqual(census(proc,999),2)
+            readlink.assert_not_called()
+
+    def test_census_rejects_unknown_namespace(self):
+        proc,census=self.census_fixture()
+        for status in ('NSpid:\t999\t1000\n','NSpid:\t998\n','NSpid:\tinvalid\n','Name:\tpython3\n'):
+            with self.subTest(self_status=status):
+                (proc/'self/status').write_text(status)
+                with self.assertRaises((D.DeployError,StopIteration)):
+                    census(proc,999)
+        (proc/'self/status').write_text('NSpid:\t999\n')
+        for status in ('NSpid:\t2\n','NSpid:\t1\t2\n','NSpid:\tinvalid\n','Name:\tsystemd\n'):
+            with self.subTest(pid1_status=status):
+                (proc/'1/status').write_text(status)
+                with self.assertRaises((D.DeployError,StopIteration)):
+                    census(proc,999)
+
+    def test_census_rejects_unreadable_process_records(self):
+        proc,census=self.census_fixture()
+        read_bytes=Path.read_bytes
+        for name in ('stat','cmdline'):
+            target=proc/'1'/name
+            def guarded(path):
+                if path==target:raise PermissionError('opaque process')
+                return read_bytes(path)
+            with self.subTest(record=name),patch.object(Path,'read_bytes',guarded):
+                with self.assertRaises(PermissionError):census(proc,999)
+
+    def test_census_rejects_conflicting_installer_and_ansible(self):
+        proc,census=self.census_fixture()
+        for command in (b'/usr/bin/ultra-install\0',b'/usr/bin/ansible-playbook\0'):
+            with self.subTest(command=command):
+                (proc/'1/cmdline').write_bytes(command)
+                with self.assertRaisesRegex(D.DeployError,'namespace_rejected'):
+                    census(proc,999)
+
+    def test_helper_timeout_is_fail_closed(self):
+        process=SimpleNamespace(stdout=io.BytesIO())
+        with patch.object(D.select,'select',return_value=([],[],[])):
+            with self.assertRaisesRegex(D.DeployError,'local_preflight_helper_unavailable'):
+                D.recovery_helper_line(process)
+
+    def test_archive_directory_entry_is_durable_before_journal_rename(self):
+        events=[]
+        write=D.atomic_write;sync=os.fsync;rename=D.recovery_rename_exclusive
+        def writing(path,*args,**kwargs):
+            result=write(path,*args,**kwargs)
+            if path.name in ('receipt.json','metadata.json'):events.append(path.name+' durable')
+            return result
+        def syncing(fd):
+            target=Path(os.readlink('/proc/self/fd/'+str(fd)))
+            if target==self.root:events.append('root fsync')
+            elif target.name.startswith('operation.local-preflight-'):events.append('archive fsync')
+            return sync(fd)
+        def renaming(*args):
+            events.append('rename')
+            return rename(*args)
+        with patch.object(D,'atomic_write',side_effect=writing),patch.object(os,'fsync',side_effect=syncing), \
+                patch.object(D,'recovery_rename_exclusive',side_effect=renaming):
+            self.recover()
+        receipt=events.index('receipt.json durable');metadata=events.index('metadata.json durable')
+        first_root=events.index('root fsync');move=events.index('rename')
+        self.assertLess(receipt,metadata);self.assertLess(metadata,first_root);self.assertLess(first_root,move)
+        self.assertEqual(events[move+1:],['archive fsync','root fsync'])
+
+    def test_hanging_remote_proof_is_killed_and_cannot_archive(self):
+        collector=D.collect_local_preflight_bridge
+        pidfile=self.repo/'hung-probe-pid'
+        program='import os,pathlib,time;pathlib.Path('+repr(str(pidfile))+').write_text(str(os.getpid()));time.sleep(30)'
+        def hanging(*args,**kwargs):
+            return collector([D.sys.executable,'-c',program],self.repo,timeout=.2)
+        self.bridge=hanging
+        with self.assertRaisesRegex(D.DeployError,'local_preflight_bridge_timeout'):
+            self.recover()
+        self.assertTrue(self.journal.exists())
+        self.assertFalse(list(self.root.glob('operation.local-preflight-*')))
+        self.assertEqual(self.config.read_bytes(),self.current)
+        pid=int(pidfile.read_text())
+        with self.assertRaises(ProcessLookupError):os.kill(pid,0)
+        # Both old local execution locks were released on the error path.
+        with D.existing_recovery_lock(self.state/'operator/infrastructure.lock'), \
+                D.existing_recovery_lock(self.state/'infrastructure.lock'):
+            pass
+
+
 
 class ReimagedAdoptionArchive(unittest.TestCase):
     def setUp(self):
@@ -236,6 +498,16 @@ class ReimagedAdoptionArchive(unittest.TestCase):
 
 
 class ManualDeploy(unittest.TestCase):
+    def test_legacy_source_remains_canonical_and_fresh_upgrade_selects_runtime(self):
+        legacy = {'commit': 'a' * 40, 'version': 'v0.0.1'}
+        self.assertEqual(D.deployment_secrets_source(legacy, ['ssh'], False, legacy['commit'], legacy['version']), 'canonical')
+        self.assertEqual(D.deployment_secrets_source(legacy, ['ssh'], False, 'b' * 40, 'v0.0.2'), 'installed-runtime')
+        self.assertEqual(D.deployment_secrets_source({}, ['ssh'], True, legacy['commit'], legacy['version']), 'canonical')
+        runtime = dict(legacy, secrets_source='installed-runtime')
+        self.assertEqual(D.deployment_secrets_source(runtime, ['ssh'], False, legacy['commit'], legacy['version']), 'installed-runtime')
+        with self.assertRaisesRegex(D.DeployError, 'manual_secrets_source_invalid'):
+            D.deployment_secrets_source(runtime, None, False, legacy['commit'], legacy['version'])
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -827,6 +1099,33 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
         bundle.chmod(0o700)  # allow fixture cleanup
         self.assertGreaterEqual(len(validations), 3)
         self.assertFalse(list(self.root.glob('.source-*')))
+
+    def test_build_uses_private_scratch_only_without_explicit_tmpdir_and_cleans_it(self):
+        for configured in (None, '', '/operator/explicit/tmp'):
+            with self.subTest(tmpdir=configured):
+                if self.bundle.exists():
+                    self.bundle.chmod(0o700)
+                    shutil.rmtree(self.bundle)
+                seen=[]
+                def runner(command,cwd,stage,capture=False,env=None):
+                    if stage=='source_clone':Path(command[-1]).mkdir()
+                    if stage=='release_build':
+                        seen.append(env['TMPDIR'])
+                        if configured:
+                            self.assertEqual(env['TMPDIR'],configured)
+                        else:
+                            path=Path(env['TMPDIR'])
+                            self.assertTrue(path.is_absolute())
+                            self.assertEqual(path.parent,self.root)
+                            self.assertEqual(path.stat().st_mode & 0o777,0o700)
+                        raise D.DeployError('fixture_build_failure')
+                environment={} if configured is None else {'TMPDIR':configured}
+                with patch.object(D,'prepare_runtime_environment',return_value=environment),patch.object(D,'run',runner):
+                    with self.assertRaisesRegex(D.DeployError,'fixture_build_failure'):
+                        D.build_candidate(self.repo,self.root,self.commit,self.version)
+                self.assertEqual(len(seen),1)
+                if not configured:self.assertFalse(Path(seen[0]).exists())
+                self.assertFalse(list(self.root.glob('.build-tmp-*')))
 
 
 class NativeDeploy(unittest.TestCase):
@@ -1808,6 +2107,37 @@ class NativeDeploy(unittest.TestCase):
 
 
 class RemoteProgram(unittest.TestCase):
+    def test_installed_runtime_source_bound_to_doctor_and_upgrade(self):
+        marker = ('secrets-source.json', b'{"secrets_source":"installed-runtime"}')
+        staged = self.execute('stage', self.archive(mutate=lambda entries: entries + [marker]))
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        self.assertFalse((self.root / '.env').exists())
+        self.assertFalse((self.root / 'stage.env').exists())
+        for action in ('doctor', 'upgrade'):
+            result = self.execute('run', None, self.architecture, action)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads(self.result.read_bytes())
+            self.assertEqual(args.count('--secrets-source'), 1)
+            self.assertEqual(args[args.index('--secrets-source') + 1], 'installed-runtime')
+            self.assertEqual(args[args.index('--config') + 1], str(self.root / 'install.config'))
+            self.assertEqual(args[0], 'doctor' if action == 'doctor' else 'operator-upgrade')
+        changed = self.execute('stage', self.archive())
+        self.assertNotEqual(changed.returncode, 0)
+        self.assertIn(b'manual_secrets_source_changed', changed.stderr)
+
+    def test_runtime_source_rejects_adoption_and_invalid_selectors(self):
+        marker = ('secrets-source.json', b'{"secrets_source":"installed-runtime"}')
+        staged = self.execute('stage', self.archive(mutate=lambda entries: entries + [marker]))
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        for action in ('adoption_check', 'adoption_apply'):
+            result = self.execute('run', None, self.architecture, action)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b'manual_secrets_source_action_invalid', result.stderr)
+        D.atomic_write(self.root / 'secrets-source.json', b'{"secrets_source":"arbitrary-source"}')
+        result = self.execute('run', None, self.architecture, 'doctor')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'manual_secrets_source_invalid', result.stderr)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

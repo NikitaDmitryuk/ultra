@@ -1,0 +1,45 @@
+---
+- name: Stage authenticated immutable fallback bytes before repair
+  when: ultra_recovery_bootstrap_phase == 'seed'
+  block:
+    - name: Create private baseline staging directory
+      ansible.builtin.file:
+        path: "{{ item.baseline_source | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop: "{{ ultra_recovery_files }}"
+    - name: Copy authenticated old generation bytes without replacing old releases
+      ansible.builtin.copy:
+        src: "{{ item.baseline_controller_source }}"
+        dest: "{{ item.baseline_source }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ ultra_recovery_files }}"
+- name: Checkpoint fence fallback or verification using the fixed root module
+  ultra_recovery_tools_bootstrap:
+    phase: "{{ ultra_recovery_bootstrap_phase }}"
+    spec:
+      bridge: "{{ inventory_hostname in groups['bridge'] }}"
+      baseline: "{{ ultra_recovery_bootstrap_baseline }}"
+      topology: "{{ ultra_recovery_bootstrap_topology }}"
+      candidate: "{{ ultra_recovery_bootstrap_candidate }}"
+      version: "{{ ultra_release_version }}"
+      tools: "{{ ultra_recovery_files }}"
+  when: ultra_recovery_bootstrap_phase != 'apply'
+- name: Require durable consumer fence immediately before replacement
+  ultra_recovery_tools_bootstrap:
+    phase: normalize
+    spec:
+      bridge: "{{ inventory_hostname in groups['bridge'] }}"
+      baseline: "{{ ultra_recovery_bootstrap_baseline }}"
+      topology: "{{ ultra_recovery_bootstrap_topology }}"
+      candidate: "{{ ultra_recovery_bootstrap_candidate }}"
+      version: "{{ ultra_release_version }}"
+      tools: "{{ ultra_recovery_files }}"
+  when: ultra_recovery_bootstrap_phase == 'apply'
+- name: Replace only the selected coherent repair tools through the normal release contract
+  ansible.builtin.include_tasks: tools.yml
+  when: ultra_recovery_bootstrap_phase == 'apply'

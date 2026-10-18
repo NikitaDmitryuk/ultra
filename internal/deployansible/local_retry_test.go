@@ -198,7 +198,11 @@ job=pathlib.Path(sys.argv[-1][1:]).parent
 count=job/'calls'
 n=int(count.read_text())+1 if count.exists() else 1
 count.write_text(str(n))
-if n==1:sys.exit(1)
+if n==1:
+ diagnostic=job/'diagnostic.json'
+ diagnostic.write_text(json.dumps({'stage':'bootstrap','node':'bridge','code':'ssh_banner_timeout'}))
+ diagnostic.chmod(0o600)
+ sys.exit(1)
 result=job/'result.json'
 result.write_text(json.dumps({'verified':True}))
 result.chmod(0o600)
@@ -212,10 +216,18 @@ result.chmod(0o600)
 	if _, err = RunLocal(ctx, "bootstrap", inventory, vars, directory, python, executable); err == nil {
 		t.Fatal("initial failure missing")
 	}
+	calls, _ := os.ReadFile(filepath.Join(directory, "calls"))
+	if string(calls) != "1" {
+		t.Fatalf("initial invocation count = %s, want 1", calls)
+	}
 	bundle := filepath.Join(directory, "bundle", "controller.py")
 	original, _ := os.ReadFile(bundle)
 	if _, err = RunLocal(ctx, "bootstrap", inventory, vars, directory, python, executable); err == nil {
 		t.Fatal("ordinary invocation retried failure")
+	}
+	calls, _ = os.ReadFile(filepath.Join(directory, "calls"))
+	if string(calls) != "1" {
+		t.Fatalf("ordinary invocation retried transient SSH failure: calls=%s", calls)
 	}
 	if _, err = RunLocalRetryFailed(context.Background(), "bootstrap", inventory, vars, directory, python, executable); err == nil {
 		t.Fatal("retry without lease accepted")
@@ -243,7 +255,7 @@ result.chmod(0o600)
 			t.Fatal(err)
 		}
 	}
-	calls, _ := os.ReadFile(filepath.Join(directory, "calls"))
+	calls, _ = os.ReadFile(filepath.Join(directory, "calls"))
 	if string(calls) != "2" {
 		t.Fatalf("unexpected execution count %s", calls)
 	}

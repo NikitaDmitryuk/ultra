@@ -67,10 +67,13 @@ class CallbackModule(CallbackBase):
         # Classify known failures without persisting the possibly sensitive message.
         text = result._result.get('msg', '')
         code = 'host_unreachable'
-        for fragment, candidate in [('Connection refused', 'ssh_connection_refused'),
+        for fragment, candidate in [('Host key verification failed', 'ssh_pin_mismatch'),
                                     ('Permission denied', 'ssh_authentication_failed'),
+                                    ('Timeout during banner exchange', 'ssh_banner_timeout'),
+                                    ('Connection refused', 'ssh_connection_refused'),
+                                    ('Connection timed out', 'ssh_connect_timeout'),
+                                    ('Connection reset by peer', 'ssh_connection_reset'),
                                     ('too long for Unix domain socket', 'ssh_control_path_too_long'),
-                                    ('Host key verification failed', 'ssh_pin_mismatch'),
                                     ('Failed to create temporary directory', 'ssh_temporary_directory_failed')]:
             if fragment in text:
                 code = candidate

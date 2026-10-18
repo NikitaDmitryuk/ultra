@@ -8,6 +8,23 @@ import (
 	"strings"
 )
 
+// ReadPlanSecrets never falls back to canonical inputs when a resolver is selected.
+// Return a fresh map so one consumer cannot change another consumer's inputs.
+func ReadPlanSecrets(p *InstallPlan) (map[string]string, error) {
+	if p.SecretResolver == nil {
+		return ReadSecretsFile(p.SecretsEnvFile())
+	}
+	values, err := p.SecretResolver()
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result, nil
+}
+
 func (p *InstallPlan) SecretsEnvFile() string {
 	if p == nil {
 		return ""

@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import select
 import shlex
 import shutil
 import stat
@@ -28,6 +29,366 @@ from urllib.parse import urlsplit
 
 class DeployError(Exception):
     pass
+
+
+LOCAL_PREFLIGHT_COMMIT = '00ec0b85988a641e73779db7a6f63a3ab8eb980f'
+
+
+class RecoveryInputs:
+    """Keep actual file descriptions and directory identities through publication.
+
+    These are present-tense observations, never invented historical inode pins.
+    The original private owner metadata remains the historical trust boundary.
+    """
+    def __init__(self):
+        self.files = []
+
+    def retain(self, path, directory=False):
+        path = Path(path)
+        require(path.is_absolute() and all(not p.is_symlink() for p in (path, *path.parents)),
+                'local_preflight_symlink_forbidden')
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_DIRECTORY if directory else 0))
+        try:
+            info = os.fstat(fd)
+            require(info.st_uid == os.geteuid() and
+                    (stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) in (0o500, 0o700) if directory else
+                     stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and not info.st_mode & 0o077),
+                    'local_preflight_private_input_required')
+            value = tuple(sorted(os.listdir(fd))) if directory else self.digest(fd)
+            self.files.append((path, fd, info, value, directory))
+            fd = None
+            return value
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    @staticmethod
+    def digest(fd):
+        os.lseek(fd, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                return digest.hexdigest()
+            digest.update(block)
+
+    def unchanged(self):
+        for path, fd, before, value, directory in self.files:
+            now = path.lstat()
+            held = os.fstat(fd)
+            require((now.st_dev, now.st_ino, now.st_mode, now.st_uid, now.st_nlink, now.st_size, now.st_mtime_ns, now.st_ctime_ns) ==
+                    (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_nlink, before.st_size, before.st_mtime_ns, before.st_ctime_ns) and
+                    (held.st_dev, held.st_ino) == (now.st_dev, now.st_ino) and
+                    (tuple(sorted(os.listdir(fd))) if directory else self.digest(fd)) == value,
+                    'local_preflight_input_changed')
+
+    def close(self):
+        for _, fd, _, _, _ in self.files:
+            os.close(fd)
+        self.files = []
+
+
+# Census is supplemental rejection only. The authorization is the audited
+# durable-before-exec stage protocol and its authenticated complete inventory.
+RECOVERY_PROCESS_CENSUS = r'''
+def census(proc, own, broker=None):
+    need((proc/'1/comm').read_text().strip()=='systemd')
+    # NSpid is relative to this procfs mount; namespace symlinks require
+    # ptrace access to root-owned PID 1 even on the ordinary host namespace.
+    need(next(x for x in (proc/'self/status').read_text().splitlines() if x.startswith('NSpid:')).split()==['NSpid:',str(own)])
+    need(next(x for x in (proc/'1/status').read_text().splitlines() if x.startswith('NSpid:')).split()==['NSpid:','1'])
+    mount=next(x for x in (proc/'self/mountinfo').read_text().splitlines() if x.split()[4]=='/proc')
+    need(' - proc ' in mount and 'hidepid=' not in mount)
+    count=0
+    for entry in proc.iterdir():
+        if not entry.name.isdigit(): continue
+        count+=1;need(count<=32768)
+        try:
+            before=(entry/'stat').read_bytes()
+            raw=(entry/'cmdline').read_bytes()
+            after=(entry/'stat').read_bytes()
+        except FileNotFoundError: continue
+        need(len(raw)<=65536 and len(before)<=4096 and len(after)<=4096)
+        need(before.rsplit(b')',1)[1].split()[19]==after.rsplit(b')',1)[1].split()[19])
+        if int(entry.name)==own: continue
+        argv=raw.rstrip(b'\0').split(b'\0')
+        if broker and int(entry.name)==broker:
+            need(len(argv)==4 and argv[1:3]==[b'ansible-controller',b'--executable'])
+            need(argv[0].startswith(b'/opt/ultra-ansible/releases/') and argv[0].endswith(b'/ultra-install'))
+            need(argv[3]==argv[0].rsplit(b'/',1)[0]+b'/venv/bin/ansible-playbook')
+            need((entry/'status').read_text().split('Uid:',1)[1].splitlines()[0].split()==['0','0','0','0'])
+            continue
+        for value in argv:
+            name=value.rsplit(b'/',1)[-1]
+            need(not (name.startswith(b'ultra-install') or name in (b'ansible-playbook',b'manual-deploy.py') or
+                      b'AnsiballZ_' in value or b'/ansible-tmp-' in value))
+    return count
+'''
+
+
+REMOTE_LOCAL_PREFLIGHT_PROOF = r'''
+import fcntl,hashlib,json,os,signal,stat,subprocess,sys
+from pathlib import Path
+signal.alarm(40)
+def need(value):
+    if not value: raise ValueError('local_preflight_bridge_contradiction')
+def private(path,directory=False):
+    need(all(not p.is_symlink() for p in (path,*path.parents)))
+    info=path.lstat()
+    need(info.st_uid==0 and (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)))
+    need(not info.st_mode & 0o077)
+    return info
+nonce,version=sys.argv[1:]
+need(os.geteuid()==0)
+root=Path('/var/lib/ultra-ansible');private(root,True)
+path=root/'infrastructure.lock';private(path)
+fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+need(not (root/('upgrade-'+version)).exists() and not (root/('upgrade-'+version)).is_symlink())
+journal=root/'lifecycle.json'
+if journal.exists() or journal.is_symlink():
+    private(journal)
+    state=json.loads(journal.read_bytes())
+    need(state.get('phase')=='released')
+code=subprocess.run(['systemctl','show','--property=MainPID','--property=ActiveState','--value',
+                     'ultra-ansible-controller.service'],capture_output=True,check=False,timeout=10)
+need(code.returncode==0)
+values=code.stdout.decode().splitlines()
+need(len(values)==2)
+pid=next((int(x) for x in values if x.isdigit()),0)
+active=next((x for x in values if not x.isdigit()),'')
+need(active in ('active','inactive') and ((active=='active')==(pid>0)))
+''' + RECOVERY_PROCESS_CENSUS + r'''
+count=census(Path('/proc'),os.getpid(),pid or None)
+print(json.dumps({'schema':1,'nonce':nonce,'version':version,'contradictions':False,
+                  'boot_sha256':hashlib.sha256(Path('/proc/sys/kernel/random/boot_id').read_bytes()).hexdigest(),
+                  'process_count':count}))
+'''
+
+
+def local_recovery_census():
+    scope = {'os': os, 'need': lambda value: require(value, 'local_preflight_process_uncertain')}
+    exec(RECOVERY_PROCESS_CENSUS, scope)
+    try:
+        return scope['census'](Path('/proc'), os.getpid())
+    except (OSError, ValueError, KeyError, IndexError, StopIteration):
+        raise DeployError('local_preflight_process_uncertain') from None
+
+
+@contextlib.contextmanager
+def existing_recovery_lock(path):
+    require(all(not p.is_symlink() for p in (path, *path.parents)), 'local_preflight_symlink_forbidden')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
+                stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1 and
+                os.path.samestat(info, path.lstat()), 'local_preflight_lock_invalid')
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def recovery_helper_line(process, timeout=30):
+    ready, _, _ = select.select([process.stdout], [], [], timeout)
+    require(ready, 'local_preflight_helper_unavailable')
+    line = process.stdout.readline(65537)
+    require(line and len(line) <= 65536, 'local_preflight_helper_unavailable')
+    return line.decode().strip()
+
+
+def collect_local_preflight_bridge(command, repo, timeout=55):
+    # subprocess.run kills and reaps the direct, non-multiplexed SSH child on
+    # timeout. The remote read-only collector has its own shorter alarm so it
+    # also releases its OFD if the SSH connection disappears.
+    try:
+        result = subprocess.run(command, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise DeployError('local_preflight_bridge_timeout') from None
+    require(result.returncode == 0, 'local_preflight_bridge_failed_exit_' + str(result.returncode))
+    return result.stdout.decode().strip()
+
+
+def recover_local_preflight(repo, root, config, installer, journal_sha, backup_sha, config_sha, state_root):
+    """Archive only the audited local-controller attempt that never left readiness.
+
+    Caller holds the original wrapper deployment and canonical-config locks.
+    The old operator and infrastructure OFDs remain owned here through fsync.
+    """
+    require(all(isinstance(x, str) and re.fullmatch('[a-f0-9]{64}', x) for x in
+                (journal_sha, backup_sha, config_sha)), 'local_preflight_explicit_pins_required')
+    journal = root / 'operation.json'
+    archive = root / ('operation.local-preflight-' + journal_sha)
+    if not journal.exists() and not journal.is_symlink():
+        # Crash after durable rename: verify the complete archived transaction.
+        require(all(not p.is_symlink() for p in (archive, *archive.parents)) and
+                archive.stat().st_uid == os.geteuid() and stat.S_IMODE(archive.stat().st_mode) == 0o700 and
+                {p.name for p in archive.iterdir()} == {'operation.json','receipt.json','metadata.json'},
+                'local_preflight_archive_changed')
+        raw = private_file(archive / 'operation.json')
+        receipt_raw = private_file(archive / 'receipt.json')
+        metadata = json.loads(private_file(archive / 'metadata.json'))
+        archived_record = json.loads(raw)
+        backup_name = archived_record.get('backup', '')
+        require(isinstance(backup_name, str) and re.fullmatch('install.config.before-v0\\.0\\.[0-9]+-[0-9]+', backup_name),
+                'local_preflight_archive_changed')
+        require(sha(raw) == journal_sha and sha(canonical_file(config)) == config_sha and
+                sha(private_file(root / backup_name)) == backup_sha and
+                metadata == {'schema': 1, 'journal_sha256': journal_sha, 'backup_sha256': backup_sha,
+                             'config_sha256': config_sha, 'receipt_sha256': sha(receipt_raw)} and
+                json.loads(receipt_raw).get('journal_sha256') == journal_sha,
+                'local_preflight_archive_changed')
+        return archive
+    pins = RecoveryInputs()
+    process = None
+    try:
+        pins.retain(root, directory=True)
+        # Creating the archive changes this directory's inventory; retain its
+        # identity separately below and remove only its inventory observation.
+        root_observation = pins.files.pop()
+        pins.retain(state_root, directory=True)
+        state_observation = pins.files.pop()
+        for path in (config, journal):
+            pins.retain(path)
+        for path in (root / 'deploy.lock', canonical_config_lock(config)):
+            pins.retain(path)
+        raw = private_file(journal)
+        record = json.loads(raw)
+        require(sha(raw) == journal_sha and type(record.get('schema')) is int and record.get('schema') == 1 and record.get('adopt') is False and
+                record.get('stage') == 'upgrade' and record.get('mutator_dispatched') is True and
+                record.get('commit') == LOCAL_PREFLIGHT_COMMIT and
+                record.get('version') == 'v0.0.' + str(int(LOCAL_PREFLIGHT_COMMIT, 16)) and
+                all(record.get(k) is None for k in ('remote_attempt', 'manifest_sha256', 'transport_binding')) and
+                record.get('forward_only') is False and record.get('forward_journal_sha256') == '' and
+                'staged_config_sha256' not in record and
+                set(record) == {'schema','commit','version','adopt','backup','previous_sha256','config_sha256','stage',
+                                'mutator_dispatched','transport_binding','manifest_sha256','remote_attempt','probe_sha256',
+                                'forward_only','forward_journal_sha256'}, 'local_preflight_journal_class_invalid')
+        require(isinstance(record['backup'], str) and re.fullmatch(
+            'install.config.before-' + re.escape(record['version']) + '-[0-9]+', record['backup']),
+            'local_preflight_backup_invalid')
+        backup = root / record['backup']
+        pins.retain(backup)
+        current = canonical_file(config)
+        prior = private_file(backup)
+        release = root / record['version']
+        require(sha(current) == config_sha == record['config_sha256'] and
+                sha(prior) == backup_sha == record['previous_sha256'] and
+                config_candidate(prior, record['version'], release) == current, 'local_preflight_exact_inputs_required')
+        validate_config_policy(current)
+        pins.retain(release, directory=True)
+        for path in release.iterdir():
+            pins.retain(path)
+        manifest_sha = sha((release / 'release-manifest.json').read_bytes())
+        operation = state_root / ('upgrade-' + record['version'])
+        operation_names = pins.retain(operation, directory=True)
+        require(len(operation_names) == 4 and
+                {'execution-mode.json','operator-plan.json','runtime-use.json'} < set(operation_names) and
+                len([name for name in operation_names if re.fullmatch('readiness-diagnostic-[0-9]+\\.json', name)]) == 1,
+                'local_preflight_stage_inventory_invalid')
+        for path in operation.iterdir():
+            pins.retain(path)
+        # These names are the exact old withBootstrapOperatorLock and
+        # withFrozenLifecycleLock paths. Existing inodes only; never recreate.
+        operator_lock = state_root / 'operator/infrastructure.lock'
+        infra_lock = state_root / 'infrastructure.lock'
+        pins.retain(state_root / 'operator', directory=True)
+        for path in (operator_lock, infra_lock):
+            pins.retain(path)
+        with contextlib.ExitStack() as stack:
+            lock_fds = [stack.enter_context(existing_recovery_lock(path)) for path in (operator_lock, infra_lock)]
+            pins.unchanged()
+            local_recovery_census()
+            transport, binding = operator_transport(os.environ.get('ULTRA_OPERATOR_INVENTORY'), current)
+            nonce = sha(os.urandom(32))
+            command = [str(installer), 'local-preflight-proof', '--config', str(config), '--release-dir', str(release),
+                       '--job-dir', str(operation), '--manifest-sha256', manifest_sha, '--config-sha256', config_sha,
+                       '--nonce', nonce, '--operator-lock-fd', str(lock_fds[0]), '--infrastructure-lock-fd', str(lock_fds[1])]
+            process = subprocess.Popen(command, cwd=repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL, pass_fds=tuple(lock_fds))
+            proof = json.loads(recovery_helper_line(process))
+            require(proof == {'schema':1, 'nonce':nonce, 'config_sha256':config_sha,
+                              'manifest_sha256':manifest_sha, 'pre_mutation':True}, 'local_preflight_helper_proof_invalid')
+            bridge_raw = collect_local_preflight_bridge(transport + [shlex.join(
+                ['python3','-I','-c',REMOTE_LOCAL_PREFLIGHT_PROOF,nonce,record['version']])], repo)
+            bridge = json.loads(bridge_raw)
+            require(bridge.get('schema') == 1 and bridge.get('nonce') == nonce and
+                    bridge.get('version') == record['version'] and bridge.get('contradictions') is False and
+                    isinstance(bridge.get('boot_sha256'), str) and re.fullmatch('[a-f0-9]{64}', bridge['boot_sha256']) and
+                    type(bridge.get('process_count')) is int and bridge['process_count'] > 0,
+                    'local_preflight_bridge_proof_invalid')
+            pins.unchanged()
+            require(process.poll() is None, 'local_preflight_helper_unavailable')
+            process.stdin.write(('ack ' + nonce + '\n').encode()); process.stdin.flush()
+            require(recovery_helper_line(process) == 'acknowledged ' + nonce,
+                    'local_preflight_helper_ack_invalid')
+            try:
+                require(process.wait(timeout=10) == 0, 'local_preflight_helper_failed')
+            except subprocess.TimeoutExpired:
+                raise DeployError('local_preflight_helper_timeout') from None
+            local_recovery_census()
+            pins.unchanged()
+            for path, fd, info, _, _ in (root_observation, state_observation):
+                require(os.path.samestat(path.stat(), os.fstat(fd)) and (path.stat().st_dev,path.stat().st_ino)==
+                        (info.st_dev,info.st_ino), 'local_preflight_root_replaced')
+            require(tuple(sorted(os.listdir(state_observation[1]))) == state_observation[3],
+                    'local_preflight_state_root_changed')
+            receipt = {'schema':1, 'kind':'local-preflight-no-mutator-dispatch', 'journal_sha256':journal_sha,
+                       'config_sha256':config_sha,'backup_sha256':backup_sha,'manifest_sha256':manifest_sha,
+                       'helper':proof,'bridge':bridge,'collection_transport_binding':binding}
+            receipt_raw = (json.dumps(receipt,sort_keys=True,separators=(',',':'))+'\n').encode()
+            if archive.exists():
+                require(not archive.is_symlink() and {p.name for p in archive.iterdir()} <= {'receipt.json','metadata.json'},
+                        'local_preflight_archive_conflict')
+            else:
+                archive.mkdir(mode=0o700)
+            atomic_write(archive / 'receipt.json', receipt_raw)
+            atomic_write(archive / 'metadata.json', json.dumps({'schema':1,'journal_sha256':journal_sha,
+                         'config_sha256':config_sha,'backup_sha256':backup_sha,'receipt_sha256':sha(receipt_raw)},sort_keys=True).encode())
+            pins.unchanged()
+            # Commit the new archive directory entry before removing the only
+            # active journal name. File/child-directory fsync is insufficient.
+            os.fsync(root_observation[1])
+            recovery_rename_exclusive('operation.json', root_observation[1], 'operation.json',
+                             stack.enter_context(open_directory(archive)))
+            archive_fd = os.open(archive, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try: os.fsync(archive_fd)
+            finally: os.close(archive_fd)
+            os.fsync(root_observation[1])
+        return archive
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            process.stdin.close()
+            process.stdout.close()
+        pins.close()
+        for value in ('root_observation', 'state_observation'):
+            observation = locals().get(value)
+            if observation is not None:
+                os.close(observation[1])
+
+
+@contextlib.contextmanager
+def open_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def recovery_rename_exclusive(source, source_fd, target, target_fd):
+    libc = ctypes.CDLL(None, use_errno=True)
+    rename = getattr(libc, 'renameat2', None)
+    require(rename is not None, 'local_preflight_atomic_rename_unavailable')
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    if rename(source_fd, os.fsencode(source), target_fd, os.fsencode(target), 1) != 0:
+        raise OSError(ctypes.get_errno(), 'local_preflight_atomic_rename_failed')
 
 
 def require(condition, code):
@@ -430,7 +791,13 @@ def build_candidate(repo, root, commit, version):
             verify_bundle(source, bundle, commit, version)
             return bundle
         environment = prepare_runtime_environment(repo, source)
-        run(['make', 'release-dist'], source, 'release_build', env=environment)
+        # Some /tmp mounts prohibit executable Go build helpers. Use only our
+        # private scratch directory when the operator did not select TMPDIR.
+        with contextlib.ExitStack() as scratch:
+            if not environment.get('TMPDIR'):
+                temporary_build = scratch.enter_context(tempfile.TemporaryDirectory(prefix='.build-tmp-', dir=root))
+                environment['TMPDIR'] = str(Path(temporary_build).resolve())
+            run(['make', 'release-dist'], source, 'release_build', env=environment)
         run(['bash', 'scripts/build-release-manifest.sh', 'dist', version], source, 'manifest_build')
         verify_bundle(source, source / 'dist', commit, version)
         pending = Path(tempfile.mkdtemp(prefix='.candidate-', dir=root))
@@ -915,7 +1282,9 @@ def verify(directory):
         need(len(data)==row['size'] and digest(data)==row['sha256'])
     need({x.name for x in (directory/'release').iterdir()}==names|{'release-manifest.json'})
     top={x.name for x in directory.iterdir()}
-    need(top - {'baseline','subscription-probe-url','subscription-probe.sha256','forward-operation.json','forward-prior-operation.json'} == {'release','install.config'})
+    need(top - {'baseline','subscription-probe-url','subscription-probe.sha256','forward-operation.json','forward-prior-operation.json','secrets-source.json'} == {'release','install.config'})
+    if 'secrets-source.json' in top:
+        need(read(directory/'secrets-source.json')==b'{"secrets_source":"installed-runtime"}', 'manual_secrets_source_invalid')
     need(('subscription-probe.sha256' in top)==bool(probe_sha))
     if probe_sha:
         need(read(directory/'subscription-probe.sha256')==probe_sha.encode())
@@ -1239,6 +1608,9 @@ elif mode=='stage':
                     for row in m['assets']:
                         n=row['name'];need(re.fullmatch('[A-Za-z0-9_.-]+',n) and n not in ['.','..','release-manifest.json'] and n not in rows)
                         rows[n]=row
+                elif name=='secrets-source.json':
+                    need(member.size==len(b'{"secrets_source":"installed-runtime"}'))
+                    raw=None
                 elif name in ('subscription-probe-url','subscription-probe.sha256'):
                     need(bool(probe_sha) and member.size<=4096)
                     raw=None
@@ -1274,6 +1646,7 @@ elif mode=='stage':
         if any(name.startswith('baseline/') for name in seen):
             need({'baseline/descriptor.json','baseline/operator-journal.json'} <= seen)
             expected |= {'baseline/descriptor.json','baseline/operator-journal.json'}
+        if 'secrets-source.json' in seen: expected.add('secrets-source.json')
         if probe_sha: expected |= {'subscription-probe-url','subscription-probe.sha256'}
         if forward_journal_sha: expected.add('forward-operation.json')
         if prior_journal_sha: expected.add('forward-prior-operation.json')
@@ -1282,6 +1655,8 @@ elif mode=='stage':
         for directory in [pending/'release',pending]:
             fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
         if root.exists() or root.is_symlink():
+            need((root/'secrets-source.json').exists()==(pending/'secrets-source.json').exists(),
+                 'manual_secrets_source_changed')
             requested_forward_sha=forward_journal_sha
             if requested_forward_sha and not (root/'forward-operation.json').exists():
                 forward_journal_sha=''
@@ -1330,6 +1705,9 @@ elif mode=='run':
               '--source-commit',commit,'--version',version,'--manifest-sha256',manifest_sha,
               '--config-sha256',config_sha] + (['--retry-failed'] if retry_failed else []),
           'status':['status']}[action]
+    if (root/'secrets-source.json').exists():
+        need(action in ['doctor','upgrade','status'], 'manual_secrets_source_action_invalid')
+        if action in ['doctor','upgrade']: args += ['--secrets-source','installed-runtime']
     if action=='upgrade' and forward_only:
         args += ['--job-dir', '/var/lib/ultra-ansible/upgrade-'+version,
                  '--forward-only', '--forward-journal-file', str(root/'forward-operation.json'),
@@ -1382,7 +1760,7 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
             entry.size = len(config)
             archive.addfile(entry, io.BytesIO(config))
             for name, data in sorted((extra_files or {}).items()):
-                require(name in ('baseline/descriptor.json', 'baseline/operator-journal.json', 'subscription-probe-url', 'subscription-probe.sha256', 'forward-operation.json', 'forward-prior-operation.json'), 'private_archive_path_invalid')
+                require(name in ('baseline/descriptor.json', 'baseline/operator-journal.json', 'subscription-probe-url', 'subscription-probe.sha256', 'forward-operation.json', 'forward-prior-operation.json', 'secrets-source.json'), 'private_archive_path_invalid')
                 entry = tarfile.TarInfo(name)
                 entry.size = len(data)
                 archive.addfile(entry, io.BytesIO(data))
@@ -1733,6 +2111,16 @@ def restore_forward_preflight(root, journal, record, config):
     return old
 
 
+def deployment_secrets_source(record, transport, adopt, commit, version):
+    # Absent legacy selectors always retain canonical inputs for the same attempt.
+    source = 'installed-runtime' if transport and not adopt else 'canonical'
+    if record and record.get('commit') == commit and record.get('version') == version:
+        source = record.get('secrets_source', 'canonical')
+    require(source in ('canonical', 'installed-runtime') and
+            (source == 'canonical' or (transport and not adopt)), 'manual_secrets_source_invalid')
+    return source
+
+
 def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_failed=False, probe_env_file=None, forward_only=False, continue_forward_only=False):
     architecture = {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(platform.machine())
     require(platform.system() == 'Linux' and architecture, 'operator_requires_linux_amd64_or_arm64')
@@ -1769,6 +2157,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     validate_config_policy(current)
     operator_inventory = os.environ.get('ULTRA_OPERATOR_INVENTORY')
     transport, transport_binding = operator_transport(operator_inventory, current) if operator_requested() else (None, None)
+    secrets_source = deployment_secrets_source(existing_record, transport, adopt, commit, version)
     recovery_binding = transport_binding
     recovery_record = existing_record if continue_forward_only else abandoned_record
     needs_legacy_attestation = abandoned_record is not None and 'staged_config_sha256' not in abandoned_record
@@ -1967,6 +2356,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         require(same_candidate or continuation_receipt.get('operation_absent') is not True,
                 'manual_forward_continuation_missing_prior_candidate')
 
+    if secrets_source == 'installed-runtime':
+        baseline_files['secrets-source.json'] = b'{"secrets_source":"installed-runtime"}'
     record = existing_record
     try:
         if journal.exists() and (not forward_only or same_candidate):
@@ -2004,7 +2395,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
                       'backup': backup.name, 'previous_sha256': sha(current), 'config_sha256': sha(new), 'stage': 'prepared', 'mutator_dispatched': False,
                       'transport_binding': transport_binding, 'manifest_sha256': manifest_sha, 'remote_attempt': attempt,
                       'probe_sha256': probe_sha, 'forward_only': bool(forward_only),
-                      'forward_journal_sha256': forward_journal_sha}
+                      'forward_journal_sha256': forward_journal_sha, 'secrets_source': secrets_source}
             if continue_forward_only:
                 record['forward_retry_history'] = history.name
                 record['forward_retry_history_sha256'] = sha(private_file(history))
@@ -2146,6 +2537,8 @@ def main():
     parser.add_argument('--continue-forward-only', action='store_true', help='continue a failed forward-only deployment before handoff, retaining its original predecessor proof')
     parser.add_argument('--subscription-probe-env-file', help='private local env file; read only ULTRA_SUBSCRIPTION_PROBE_URL (default: .env beside canonical config)')
     parser.add_argument('--archive-reimaged-adoption', action='store_true', help='archive obsolete adoption journal locally after every former target was wiped/reimaged')
+    parser.add_argument('--recover-local-preflight', action='store_true', help='prove audited local upgrade never dispatched a production mutator, then archive its journal')
+    parser.add_argument('--recovery-installer', help='absolute path to current verified installer with local-preflight-proof support')
     parser.add_argument('--acknowledge-former-hosts-reimaged', action='store_true')
     parser.add_argument('--archive-reason')
     parser.add_argument('--journal-sha256')
@@ -2154,7 +2547,31 @@ def main():
     arguments = parser.parse_args()
     archive_fields = (arguments.acknowledge_former_hosts_reimaged, arguments.archive_reason,
                       arguments.journal_sha256, arguments.backup_sha256, arguments.config_sha256)
-    require(arguments.archive_reimaged_adoption or not any(archive_fields), 'manual_archive_arguments_invalid')
+    require(arguments.archive_reimaged_adoption or arguments.recover_local_preflight or not any(archive_fields), 'manual_archive_arguments_invalid')
+    require(arguments.recover_local_preflight or not arguments.recovery_installer,
+            'local_preflight_arguments_invalid')
+    if arguments.recover_local_preflight:
+        require(not any((arguments.archive_reimaged_adoption, arguments.build_only, arguments.retry_failed,
+                         arguments.forward_only, arguments.continue_forward_only, arguments.subscription_probe_env_file,
+                         arguments.archive_reason, arguments.acknowledge_former_hosts_reimaged)) and
+                os.environ.get('ADOPT', '0') == '0' and arguments.recovery_installer,
+                'local_preflight_arguments_invalid')
+        repo = Path(__file__).resolve().parents[1]
+        config = Path(os.path.abspath(arguments.config)) if arguments.config else repo / 'install.config'
+        root = repo / 'dist/manual'
+        # The audited wrapper supplied no --job-dir. Support only its observed
+        # default cache, refusing an environment override rather than guessing
+        # which state root belonged to the historical operation.
+        require(not os.environ.get('XDG_CACHE_HOME') or os.environ['XDG_CACHE_HOME'] == str(Path.home()/'.cache'),
+                'local_preflight_cache_override_forbidden')
+        state_root = Path.home() / '.cache/ultra-ansible'
+        installer = Path(arguments.recovery_installer)
+        require(installer.is_absolute(), 'local_preflight_absolute_paths_required')
+        with existing_recovery_lock(root / 'deploy.lock'), existing_recovery_lock(canonical_config_lock(config)):
+            recover_local_preflight(repo, root, config, installer, arguments.journal_sha256,
+                                    arguments.backup_sha256, arguments.config_sha256, state_root)
+        print('manual-deploy: local pre-readiness operation archived; canonical config preserved', flush=True)
+        return
     if arguments.archive_reimaged_adoption:
         require(not any((arguments.build_only, arguments.retry_failed, arguments.forward_only,
                          arguments.continue_forward_only, arguments.subscription_probe_env_file)) and

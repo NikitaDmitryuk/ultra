@@ -84,6 +84,8 @@ func RetryFrozenBootstrap(ctx context.Context, directory, python, executable str
 func bootstrapRetryOperation(operation string) bool {
 	switch operation {
 	case "bootstrap",
+		"bootstrap-recovery-inspect",
+		"bootstrap-recovery-tools",
 		"bootstrap-postgres",
 		"bootstrap-exit",
 		"bootstrap-bridge",

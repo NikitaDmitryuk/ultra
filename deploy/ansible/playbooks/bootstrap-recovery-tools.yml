@@ -1,0 +1,17 @@
+---
+- name: Fence every frozen recovery reader before replacing any file
+  hosts: bridge:exits
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Execute the fixed durable recovery bootstrap phase
+      ansible.builtin.include_tasks: ../roles/release/tasks/recovery-bootstrap.yml
+- name: Record the completed recovery bootstrap phase
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Record exact phase verification without claiming backup readiness
+      ansible.builtin.copy:
+        content: '{"verified":true}'
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"

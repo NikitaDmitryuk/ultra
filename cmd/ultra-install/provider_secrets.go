@@ -45,7 +45,10 @@ func prepareComputeProviderSecret(p *installplan.InstallPlan, directory string) 
 }
 
 func readProviderSecretValues(p *installplan.InstallPlan) (map[string]string, error) {
-	values, err := installplan.ReadSecretsFile(p.SecretsEnvFile())
+	values, err := installplan.ReadPlanSecrets(p)
+	if p.SecretResolver != nil {
+		return values, err
+	}
 	if err != nil && !os.IsNotExist(err) {
 		return nil, errors.New("canonical secrets unavailable")
 	}

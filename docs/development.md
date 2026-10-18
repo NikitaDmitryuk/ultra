@@ -17,6 +17,7 @@
 | Ansible upgrade с DNS/domain/runtime effects | `python3 scripts/test-ansible-dns-migration.py`, `test-ansible-upgrade-domain.py`, `test-ansible-upgrade-runtime.py`, `test-ansible-runtime-effects.py`, `test-ansible-accepted-resume.py`, operation mapping и syntax check закреплённым Ansible runtime |
 | Блокировка продления managed tunnel TLS и приватный checkpoint | `python3 scripts/test-managed-tls-fence.py`; тот же набор включён в `go test ./cmd/ultra-install` и использует только синтетические hosts и локальный тестовый CA |
 | Forward-only lifecycle recovery / broker bootstrap | `go test ./cmd/ultra-install ./internal/deployansible`; `python3 scripts/test-manual-deploy.py`; `python3 scripts/test-forward-broker-guard.py`; operation mapping, release retention и syntax check `bootstrap-forward-broker.yml` |
+| Восстановление recovery-инструментов перед readiness | `python3 scripts/test-recovery-tools-bootstrap.py`; Go-тесты `TestRecoveryBootstrap`; operation mapping и syntax check `bootstrap-recovery-inspect.yml`, `bootstrap-recovery-tools.yml`; crash/resume, fallback и завершённый replay |
 | Совместимость controller при retirement floor | `python3 scripts/test-controller-enforcement.py`; `python3 scripts/test-ansible-release-contracts.py`; focused Go tests `TestUpgradeEnforcement`, `TestEnforcementPreflightRetention`, `TestControllerEnforcementProtocol`; syntax check `inspect-upgrade.yml` |
 | SQL, репозитории, миграции | Генерация SQLC при изменении схемы/запросов; `go test ./internal/db` с отдельной тестовой БД |
 | Встроенные web-ресурсы или установочные скрипты | Тесты затронутого Go-пакета, пересборка соответствующего бинарника; для UI — `make test-ui` (Node.js 22+) и проверка затронутого сценария в браузере |
@@ -31,6 +32,18 @@ Ansible-валидации и SSH-интеграции, Nginx, Mini App/release-
 отдельно со своим PostgreSQL 16, чтобы не ждать завершения обычных тестов. Локальную проверку без БД
 можно выполнить как `env -u DATABASE_URL make test`, чтобы не использовать случайно
 унаследованный DSN. Пропущенную DB-интеграцию явно указывай в результате.
+
+Если сборке нужен большой `GOTMPDIR` на диске, а проверки installer используют
+короткие deadlines и множество `fsync`, компилируй пакеты через `go test -c`,
+затем запускай каждый бинарник из каталога его пакета с удалённым из окружения
+`GOTMPDIR` и `TMPDIR` на быстром временном разделе. `testing.TempDir()` в используемом
+Go учитывает `GOTMPDIR`: смена только `TMPDIR` не переносит fixtures. Медленная
+подготовка immutable tree может исчерпать deadline ещё до запуска controller;
+проверь этот этап перед изменением тайм-аутов приложения.
+При `disk quota exceeded` проверяй пользовательскую квоту, а не только `df`:
+общая свободная ёмкость не гарантирует доступное место для текущего UID.
+Освобождай только подтверждённые генерируемые кеши без активных пользователей;
+для отдельного Go build cache используй `GOCACHE=<проверенный-каталог> go clean -cache`.
 
 Перед каждым коммитом запусти `make format`, проверь получившийся diff, затем `make lint`.
 Форматирование обязательно, а не best-effort: `goimports`, `gofmt`, `golines` и
