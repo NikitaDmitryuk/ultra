@@ -14,10 +14,10 @@ spec.loader.exec_module(controller)
 
 class OperationMappingTests(unittest.TestCase):
     def test_every_operation_resolves_to_one_existing_implementation(self):
-        self.assertEqual(len(controller.OPERATIONS), 46)
+        self.assertEqual(len(controller.OPERATIONS), 48)
         self.assertEqual(set(controller.PLAYBOOKS), controller.OPERATIONS)
         selected = {controller.operation_playbook(op) for op in controller.OPERATIONS}
-        self.assertEqual(len(selected), 44)
+        self.assertEqual(len(selected), 46)
         retired = {'adopt-replica-tunnels.yml', 'replica.yml', 'stop-replica.yml', 'bridge-migrate.yml', 'bridge-migrate-inspect.yml', 'bridge-migrate-fence.yml', 'bridge-migrate-probe.yml', 'bridge-migrate-rollback-peers.yml'}
         self.assertEqual(selected, {path.name for path in (SOURCE / 'playbooks').glob('*.yml')})
         for op in retired:
@@ -33,6 +33,10 @@ class OperationMappingTests(unittest.TestCase):
         self.assertIn('reserve-rolledback-bootstrap', controller.LOCAL_OPERATIONS)
         self.assertIn('retain-artifacts', controller.LOCAL_OPERATIONS)
         self.assertIn('restore-database', controller.LOCAL_OPERATIONS)
+        for operation in ('bootstrap-recovery-inspect', 'bootstrap-recovery-tools'):
+            self.assertIn(operation, controller.LOCAL_OPERATIONS)
+            self.assertEqual(controller.operation_playbook(operation), operation + '.yml')
+        self.assertEqual(controller.OPERATIONS - controller.LOCAL_OPERATIONS, {'configure-exit'})
         for operation in ('bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge'):
             self.assertIn(operation, controller.LOCAL_OPERATIONS)
         self.assertNotIn('configure-exit', controller.LOCAL_OPERATIONS)
