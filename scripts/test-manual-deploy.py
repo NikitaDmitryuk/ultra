@@ -850,6 +850,34 @@ class ReimagedAdoptionArchive(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), self.current)
 
 
+class ForwardContinuationAttestationRetry(unittest.TestCase):
+    def test_retries_exit_255_then_returns_success(self):
+        responses = [D.DeployError('forward_continuation_attestation_failed_exit_255'), 'receipt']
+        with patch.object(D, 'run', side_effect=responses) as runner, \
+             patch.object(D.time, 'sleep') as sleep:
+            self.assertEqual(D.run_forward_continuation_attestation(['pinned-ssh'], Path('.')), 'receipt')
+        self.assertEqual(runner.call_count, 2)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.2])
+
+    def test_exhausts_three_exit_255_attempts(self):
+        failure = D.DeployError('forward_continuation_attestation_failed_exit_255')
+        with patch.object(D, 'run', side_effect=[failure, failure, failure]) as runner, \
+             patch.object(D.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(D.DeployError, 'failed_exit_255'):
+                D.run_forward_continuation_attestation(['pinned-ssh'], Path('.'))
+        self.assertEqual(runner.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.2, 0.4])
+
+    def test_does_not_retry_other_exit_codes(self):
+        with patch.object(D, 'run', side_effect=D.DeployError(
+                'forward_continuation_attestation_failed_exit_1')) as runner, \
+             patch.object(D.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(D.DeployError, 'failed_exit_1'):
+                D.run_forward_continuation_attestation(['pinned-ssh'], Path('.'))
+        runner.assert_called_once()
+        sleep.assert_not_called()
+
+
 class ManualDeploy(unittest.TestCase):
     def test_legacy_source_remains_canonical_and_fresh_upgrade_selects_runtime(self):
         legacy = {'commit': 'a' * 40, 'version': 'v0.0.1'}

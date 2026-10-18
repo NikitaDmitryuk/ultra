@@ -419,6 +419,17 @@ def run(command, cwd, stage, capture=False, env=None):
     return result.stdout.decode().strip() if capture else None
 
 
+def run_forward_continuation_attestation(command, cwd):
+    """Retry only transient SSH transport failures for the read-only continue probe."""
+    for attempt in range(3):
+        try:
+            return run(command, cwd, 'forward_continuation_attestation', capture=True)
+        except DeployError as error:
+            if str(error) != 'forward_continuation_attestation_failed_exit_255' or attempt == 2:
+                raise
+            time.sleep(0.2 * (attempt + 1))
+
+
 def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
@@ -2784,10 +2795,10 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             chain_args=[commit,version,manifest_sha,sha(staged_config),attempt,
                         prior_journal['commit'],prior_journal['version'],prior_journal['remote_attempt'],
                         prior_journal['manifest_sha256'],prior_journal['staged_config_sha256'],prior_journal_sha]
-        receipt = json.loads(run(remote_command(transport, failed['commit'], failed['version'], failed['manifest_sha256'],
+        receipt = json.loads(run_forward_continuation_attestation(remote_command(transport, failed['commit'], failed['version'], failed['manifest_sha256'],
             failed['staged_config_sha256'], failed['remote_attempt'], 'continue', probe_sha,
             failed['forward_journal_sha256'], failed.get('forward_prior_journal_sha256', ''), *chain_args),
-            repo, 'forward_continuation_attestation', capture=True))
+            repo))
         predecessor = json.loads(continuation_proof)
         state = Path('/var/lib/ultra-ansible') / ('upgrade-' + predecessor['version'])
         old_id = str(uuid.UUID(bytes=hashlib.sha256(str(state).encode()).digest()[:16], version=4))
