@@ -853,27 +853,32 @@ class ReimagedAdoptionArchive(unittest.TestCase):
 class ForwardContinuationAttestationRetry(unittest.TestCase):
     def test_retries_exit_255_then_returns_success(self):
         responses = [D.DeployError('forward_continuation_attestation_failed_exit_255'), 'receipt']
+        command = ['ssh', '-o', 'ConnectTimeout=15', 'python3 -c read-only-probe']
         with patch.object(D, 'run', side_effect=responses) as runner, \
              patch.object(D.time, 'sleep') as sleep:
-            self.assertEqual(D.run_forward_continuation_attestation(['pinned-ssh'], Path('.')), 'receipt')
+            self.assertEqual(D.run_forward_continuation_attestation(command, Path('.')), 'receipt')
         self.assertEqual(runner.call_count, 2)
-        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.2])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2])
+        self.assertEqual(command[2], 'ConnectTimeout=15')
+        self.assertTrue(all(call.args[0][2] == 'ConnectTimeout=30' for call in runner.call_args_list))
 
     def test_exhausts_three_exit_255_attempts(self):
         failure = D.DeployError('forward_continuation_attestation_failed_exit_255')
+        command = ['ssh', '-o', 'ConnectTimeout=15', 'python3 -c read-only-probe']
         with patch.object(D, 'run', side_effect=[failure, failure, failure]) as runner, \
              patch.object(D.time, 'sleep') as sleep:
             with self.assertRaisesRegex(D.DeployError, 'failed_exit_255'):
-                D.run_forward_continuation_attestation(['pinned-ssh'], Path('.'))
+                D.run_forward_continuation_attestation(command, Path('.'))
         self.assertEqual(runner.call_count, 3)
-        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.2, 0.4])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
 
     def test_does_not_retry_other_exit_codes(self):
+        command = ['ssh', '-o', 'ConnectTimeout=15', 'python3 -c read-only-probe']
         with patch.object(D, 'run', side_effect=D.DeployError(
                 'forward_continuation_attestation_failed_exit_1')) as runner, \
              patch.object(D.time, 'sleep') as sleep:
             with self.assertRaisesRegex(D.DeployError, 'failed_exit_1'):
-                D.run_forward_continuation_attestation(['pinned-ssh'], Path('.'))
+                D.run_forward_continuation_attestation(command, Path('.'))
         runner.assert_called_once()
         sleep.assert_not_called()
 

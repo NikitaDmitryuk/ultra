@@ -421,13 +421,17 @@ def run(command, cwd, stage, capture=False, env=None):
 
 def run_forward_continuation_attestation(command, cwd):
     """Retry only transient SSH transport failures for the read-only continue probe."""
+    command = list(command)
+    timeout_options = [index for index, value in enumerate(command[:-1]) if value == 'ConnectTimeout=15']
+    require(len(timeout_options) == 1, 'forward_continuation_attestation_transport_invalid')
+    command[timeout_options[0]] = 'ConnectTimeout=30'
     for attempt in range(3):
         try:
             return run(command, cwd, 'forward_continuation_attestation', capture=True)
         except DeployError as error:
             if str(error) != 'forward_continuation_attestation_failed_exit_255' or attempt == 2:
                 raise
-            time.sleep(0.2 * (attempt + 1))
+            time.sleep(2 * (attempt + 1))
 
 
 def sha(raw):
