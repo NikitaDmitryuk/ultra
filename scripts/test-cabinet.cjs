@@ -54,6 +54,10 @@ function page(self, responses) {
           return [];
         },
         addEventListener() {},
+        async click() {
+          if (this.disabled || typeof this.onclick !== "function") return;
+          return this.onclick({ currentTarget: this, target: this });
+        },
         showModal() {
           this.open = true;
         },
@@ -883,7 +887,7 @@ test("routing map follows live exits and keeps its explanation open during refre
   assert.equal(target.querySelector("summary").focused, true);
 });
 
-test("diagnostics identifies the separate primary PostgreSQL server from standby status", async () => {
+test("diagnostics separates primary database identity from bridge standby observation", async () => {
   const p = page(false, {
     "/api/me": { is_admin: true },
     "/api/members": [],
@@ -897,19 +901,47 @@ test("diagnostics identifies the separate primary PostgreSQL server from standby
         state: "streaming",
       },
     ],
+    "/api/database": {
+      primary_host: "192.0.2.40",
+      configured_host: "127.0.0.1",
+      configured_port: 5432,
+      reachable: true,
+      observed_role: "primary",
+    },
   });
   await flush();
   await vm.runInContext("diagnostics()", p.context);
   let html = p.el("#network-health").innerHTML;
-  assert.match(html, /Primary PostgreSQL · database/);
-  assert.match(html, /Отдельный сервер · источник наблюдения standby/);
+  assert.match(html, /Primary PostgreSQL/);
+  assert.match(html, /Сервер: 192\.0\.2\.40 · проверка через пул приложения/);
   let primaryRow = html
     .split(/(?=<div class="route-row">)/)
     .find((row) => row.includes("Primary PostgreSQL"));
   assert.ok(primaryRow);
-  assert.match(primaryRow, /Доступен/);
+  assert.match(primaryRow, /Доступен · primary/);
+  assert.doesNotMatch(primaryRow, /127\.0\.0\.1/);
+  let standbyRow = html
+    .split(/(?=<div class="route-row">)/)
+    .find((row) => row.includes("Bridge PostgreSQL standby"));
+  assert.ok(standbyRow);
+  assert.match(standbyRow, /streaming/);
+  assert.match(standbyRow, /badge good/);
 
-  p.responses["/api/cloud/replicas"] = new Error("primary unavailable");
+  p.responses["/api/cloud/replicas"] = [
+    { id: "bridge", state: "disconnected" },
+  ];
+  await vm.runInContext("diagnostics()", p.context);
+  standbyRow = p.el("#network-health").innerHTML
+    .split(/(?=<div class="route-row">)/)
+    .find((row) => row.includes("Bridge PostgreSQL standby"));
+  assert.ok(standbyRow);
+  assert.match(standbyRow, /badge bad/);
+  assert.match(standbyRow, /disconnected/);
+
+  p.responses["/api/cloud/replicas"] = [
+    { id: "bridge", state: "streaming" },
+  ];
+  p.responses["/api/database"] = new Error("primary unavailable");
   await vm.runInContext("diagnostics()", p.context);
   html = p.el("#network-health").innerHTML;
   primaryRow = html
@@ -917,7 +949,11 @@ test("diagnostics identifies the separate primary PostgreSQL server from standby
     .find((row) => row.includes("Primary PostgreSQL"));
   assert.ok(primaryRow);
   assert.match(primaryRow, /Состояние неизвестно/);
-  assert.doesNotMatch(primaryRow, /Доступен/);
+  standbyRow = html
+    .split(/(?=<div class="route-row">)/)
+    .find((row) => row.includes("Bridge PostgreSQL standby"));
+  assert.ok(standbyRow);
+  assert.match(standbyRow, /streaming/);
 });
 
 test("overview brings monthly history and config ranking into the main cabinet", async () => {
@@ -973,7 +1009,7 @@ test("archive config cannot export, rotate or enable unsupported access", async 
   ])
     assert.ok(!html.includes(id));
 });
-test("disabling a config confirms and sends DELETE on the first confirmation click", async () => {
+test("disabling a config sends DELETE on the first confirmation click", async () => {
   const p = page(false, {
     "/api/me": { is_admin: true },
     "/api/users/legacy": {},
@@ -986,11 +1022,11 @@ test("disabling a config confirms and sends DELETE on the first confirmation cli
   p.context.configUser = user;
   vm.runInContext("bindConfigControls(configUser)", p.context);
 
-  await p.el("#disable-config").onclick();
+  await p.el("#disable-config").click();
   assert.equal(p.el("#dialog").open, true);
   assert.equal(p.calls.some((call) => call.path === "/api/users/legacy"), false);
 
-  await p.el("#confirm-action").onclick();
+  await p.el("#confirm-action").click();
   assert.equal(
     p.calls.filter(
       (call) => call.path === "/api/users/legacy" && call.options.method === "DELETE",
@@ -998,6 +1034,32 @@ test("disabling a config confirms and sends DELETE on the first confirmation cli
     1,
   );
   assert.equal(p.context.updatedConfig.is_active, false);
+});
+test("enabling a config runs its action on one click without rebinding", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/users/legacy/enable": {},
+  });
+  await flush();
+  const user = { uuid: "legacy", kind: "vless", is_active: false };
+  p.context.configDetail = async (updated) => {
+    p.context.updatedConfig = updated;
+  };
+  p.context.configUser = user;
+  // Bind once, as the rendered config detail does; one user click must suffice.
+  vm.runInContext("bindConfigControls(configUser)", p.context);
+  const enable = p.el("#enable-config");
+  await enable.click();
+  assert.equal(
+    p.calls.filter(
+      (call) =>
+        call.path === "/api/users/legacy/enable" &&
+        call.options.method === "POST",
+    ).length,
+    1,
+  );
+  assert.equal(p.context.updatedConfig.is_active, true);
+  assert.equal(enable.disabled, false);
 });
 test("purge requires typed confirmation and addresses only the selected config", async () => {
   const p = page(false, {

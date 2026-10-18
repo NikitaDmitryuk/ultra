@@ -14,6 +14,14 @@ Mini App получает `/api/cloud/replicas` через администра�
 каждые 10 секунд независимо от операций Vultr. Это одна standby на bridge,
 не список exit и не таблица `node_replication`.
 
+Диагностика primary использует admin-only `/api/database` и relay endpoint
+`/v1/database`. `primary_host` берётся из deployment metadata (`DATABASE_IP`),
+а не выводится из адреса пула: тот может быть `127.0.0.1` на конце SSH-туннеля.
+`reachable` и `observed_role` показывают результат SQL-проверки через пул
+приложения; это не отдельная проверка SSH-доступности физического хоста.
+Старые runtime spec без `primary_host` возвращают `null`, пока metadata не
+появится при следующем render/runtime projection.
+
 Ansible PostgreSQL bootstrap устанавливает в прикладной БД функцию
 `ultra_monitor.bridge_replication_status()`. Схема и функция принадлежат
 `postgres`; `PUBLIC` лишён доступа. Прикладная роль получает только `USAGE`

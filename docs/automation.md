@@ -409,7 +409,11 @@ tracked-дерево должно быть чистым. Главный серв
 узлы выхода трафика. Канонический `install.config` задаёт bridge и статические узлы.
 Операторский SSH подключается напрямую к bridge, а bridge-контроллер открывает Ansible
 SSH-соединения к exit. Exit не используется как jump host для входа оператора на
-bridge. Для helper передайте локальные пути к bridge-ключу и файлу pins:
+bridge. На операторской машине wrapper сам выберет `BRIDGE_SSH_KEY` и
+`ULTRA_AUTOMATION_KNOWN_HOSTS_FILE` из `install.config`, если явные переменные
+не заданы. Если wrapper запускается прямо на bridge в локальном controller-режиме,
+задайте `ULTRA_OPERATOR_LOCAL_CONTROLLER=1`. Явные локальные пути к ключу и файлу
+pins можно передать так:
 
 ```sh
 ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \

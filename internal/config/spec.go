@@ -127,6 +127,9 @@ type DatabaseSpec struct {
 	// DSN is a libpq-compatible connection string, e.g.:
 	// "postgres://ultra:secret@db-host:5432/ultra_db?sslmode=require"
 	DSN string `json:"dsn"`
+	// PrimaryHost is the physical DB host from the deployment plan, not the
+	// connection endpoint (which may be a local tunnel). Empty means unknown.
+	PrimaryHost string `json:"primary_host,omitempty"`
 }
 
 // StatsSpec configures Xray in-process traffic stat collection.

@@ -58,6 +58,9 @@ func configureCloud(
 	}
 	routes := db.NewRouteRepo(database)
 	srv.ReplicationStatus = database.BridgeReplicationStatus
+	srv.DatabaseStatus = func(ctx context.Context) db.DatabaseStatus {
+		return deploymentDatabaseStatus(ctx, database, spec)
+	}
 	store := db.NewCloudRepo(database)
 	srv.CloudOperationHistory = store
 	binary, e := os.Executable()
@@ -101,4 +104,13 @@ func configureCloud(
 	}
 	wg.Add(1)
 	go func() { defer wg.Done(); srv.Cloud.Run(ctx) }()
+}
+
+func deploymentDatabaseStatus(ctx context.Context, database *db.DB, spec *config.Spec) db.DatabaseStatus {
+	status := database.DatabaseStatus(ctx)
+	if spec != nil && spec.Database != nil && spec.Database.PrimaryHost != "" {
+		host := spec.Database.PrimaryHost
+		status.PrimaryHost = &host
+	}
+	return status
 }

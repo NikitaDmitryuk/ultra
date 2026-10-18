@@ -958,6 +958,17 @@ def operator_requested():
                                               'ULTRA_OPERATOR_KNOWN_HOSTS'])
 
 
+def configure_operator_transport(config):
+    if operator_requested() or os.environ.get('ULTRA_OPERATOR_LOCAL_CONTROLLER') == '1':
+        return
+    values = config_values(config)
+    identity = values.get('BRIDGE_SSH_KEY', '')
+    pins = values.get('ULTRA_AUTOMATION_KNOWN_HOSTS_FILE', '')
+    require(identity and pins, 'operator_transport_required')
+    os.environ['ULTRA_OPERATOR_IDENTITY'] = identity
+    os.environ['ULTRA_OPERATOR_KNOWN_HOSTS'] = pins
+
+
 # Executed only through pinned SSH. This helper never reads secret environment files.
 # Stage into a fresh private sibling and rename only after every byte is checked.
 REMOTE_PROGRAM = r'''
@@ -2665,6 +2676,7 @@ def main():
             with lock(canonical_config_lock(config)):
                 current = canonical_file(config)
                 validate_config_policy(current)
+                configure_operator_transport(current)
                 if operator_requested():
                     for executable in ['ssh', 'ssh-keygen']:
                         require(shutil.which(executable), 'missing_prerequisite_' + executable)

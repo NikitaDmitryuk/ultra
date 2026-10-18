@@ -5,9 +5,3 @@ systemctl reload nginx
 if [ "${RENEWED_LINEAGE:-}" = "/etc/letsencrypt/live/{{ ultra_bot_domain }}" ]; then
     systemctl try-restart ultra-bot.service
 fi
-if [ "${RENEWED_LINEAGE:-}" = "/etc/letsencrypt/live/{{ ultra_ingress.domain }}" ] && systemctl is-active --quiet ultra-experimental.service; then
-    install -o ultra-experimental -g ultra-experimental -m 600 "$RENEWED_LINEAGE/fullchain.pem" /etc/ultra-experimental/fullchain.pem
-    install -o ultra-experimental -g ultra-experimental -m 600 "$RENEWED_LINEAGE/privkey.pem" /etc/ultra-experimental/privkey.pem
-    /opt/ultra-experimental/ultra-relay -transport-spec /etc/ultra-experimental/spec.json -check
-    systemctl restart ultra-experimental.service
-fi

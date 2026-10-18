@@ -266,6 +266,10 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 		bridgeSpec.Database = &config.DatabaseSpec{DSN: dbDSN}
 		bridgeSpec.Stats = &config.StatsSpec{CollectIntervalSeconds: 60}
 	}
+	if p.Database.Enabled && bridgeSpec.Database != nil {
+		bridgeSpec.Database.PrimaryHost = p.Database.PrimaryHost
+	}
+
 	if err := bridgeSpec.Validate(); err != nil {
 		return nil, fmt.Errorf("bridge spec: %w", err)
 	}

@@ -358,6 +358,12 @@ func projectRuntimeSpec(
 		runtimeSet(route, "port", bridgeExitPort)
 		owned["exit"] = route
 		owned["admin_listen"] = p.Bridge.AdminListen
+		if p.Database.Enabled && previous.Database != nil {
+			database := runtimeObject(doc, "database")
+			runtimeSet(database, "primary_host", p.Database.PrimaryHost)
+			owned["database"] = database
+		}
+
 		flow := p.Features.VLESSFlow
 		if p.Features.DisableVLESSFlow {
 			flow = "none"

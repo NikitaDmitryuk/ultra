@@ -3468,6 +3468,23 @@ class LegacyForwardAttestation(unittest.TestCase):
 
 
 class PerRoleOperatorIdentity(unittest.TestCase):
+    def test_defaults_to_pinned_bridge_identity_from_config(self):
+        config = b'BRIDGE_SSH_KEY=/secure/bridge-key\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/secure/known_hosts\n'
+        with patch.dict(os.environ, {'ULTRA_OPERATOR_IDENTITY':'', 'ULTRA_OPERATOR_KNOWN_HOSTS':'',
+                                     'ULTRA_OPERATOR_INVENTORY':''}):
+            D.configure_operator_transport(config)
+            self.assertEqual(os.environ['ULTRA_OPERATOR_IDENTITY'], '/secure/bridge-key')
+            self.assertEqual(os.environ['ULTRA_OPERATOR_KNOWN_HOSTS'], '/secure/known_hosts')
+
+    def test_explicit_local_controller_keeps_local_transport_without_operator_selector(self):
+        config = b'BRIDGE_SSH_KEY=/secure/bridge-key\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/secure/known_hosts\n'
+        with patch.dict(os.environ, {'ULTRA_OPERATOR_IDENTITY':'', 'ULTRA_OPERATOR_KNOWN_HOSTS':'',
+                                     'ULTRA_OPERATOR_LOCAL_CONTROLLER':'1',
+                                     'ULTRA_OPERATOR_INVENTORY':''}):
+            D.configure_operator_transport(config)
+            self.assertEqual(os.environ['ULTRA_OPERATOR_IDENTITY'], '')
+            self.assertEqual(os.environ['ULTRA_OPERATOR_KNOWN_HOSTS'], '')
+
     def test_manual_transport_connects_directly_to_bridge(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)

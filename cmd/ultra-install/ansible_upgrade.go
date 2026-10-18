@@ -598,6 +598,12 @@ func ansibleUpgrade(
 	if domainTransaction.Changed {
 		variables["ultra_upgrade_domain_binding"] = domainTransaction.Binding
 	}
+	// Retire the old experiment while its publisher and bot can refresh the
+	// cache. Domain inspection above still has access to legacy port metadata;
+	// runtime snapshots and all binary changes below use the retired baseline.
+	if err = runUpgradeExperimentalRetirement(ctx, inventory, variables, directory, python, executable, retryFailed); err != nil {
+		return err
+	}
 	committedContinuation := retryFailed && upgradeDomainReleaseCommitted(directory)
 	compensationGeneration := 0
 	if retryFailed && p.Features.MainExitDomain != "" && !committedContinuation {

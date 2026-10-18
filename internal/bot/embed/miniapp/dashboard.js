@@ -158,22 +158,42 @@ async function diagnostics() {
     return service();
   });
   button("refresh-diagnostics", diagnostics);
-  const [health, alerts, replicas] = await Promise.allSettled([
+  const [health, alerts, replicas, database] = await Promise.allSettled([
     api("/api/health"),
     api("/api/alerts/recent?limit=10"),
     api("/api/cloud/replicas"),
+    api("/api/database"),
   ]);
   if (version !== viewVersion) return;
   const target = document.querySelector("#network-health");
-  const primaryReachable =
-    replicas.status === "fulfilled" &&
-    Array.isArray(replicas.value) &&
-    replicas.value.some((replica) => replica.source === "primary");
+  const bridgeStandby =
+    replicas.status === "fulfilled" && Array.isArray(replicas.value)
+      ? replicas.value.find((replica) => replica.id === "bridge")
+      : null;
+  const standbyState = bridgeStandby?.state
+    ? esc(bridgeStandby.state)
+    : "Состояние неизвестно";
+  const standbyTone = bridgeStandby?.state === "streaming"
+    ? "good"
+    : bridgeStandby?.state && bridgeStandby.state !== "unknown"
+      ? "bad"
+      : "wait";
+  const primary = database.status === "fulfilled" ? database.value : null;
+  const primaryHost = primary?.primary_host
+    ? esc(primary.primary_host)
+    : "не указан в runtime";
+  const primaryState = primary
+    ? primary.reachable
+      ? primary.observed_role === "primary"
+        ? "Доступен · primary"
+        : `Доступен · роль ${esc(primary.observed_role || "неизвестна")}`
+      : "Нет ответа на SQL-проверку"
+    : "Состояние неизвестно";
   if (health.status === "fulfilled") {
     const h = health.value,
       state = healthSummary(h),
       exits = h.exits?.length ? h.exits : h.exit ? [h.exit] : [];
-    target.innerHTML = `<div class="card"><div class="row wrap"><h2>Состояние сети</h2><span class="badge ${state.tone}">${esc(state.label)}</span></div><small>Проверено: ${esc(dateLabel(h.checked_at))}</small><div class="route-row"><span>Bridge · интернет<small>Задержка ${latencyLabel(h.bridge?.internet_latency_ms)}</small></span><strong class="${h.bridge?.internet_ok ? "good" : "bad"}">${h.bridge?.internet_ok ? "Доступен" : "Недоступен"}</strong></div><div class="route-row"><span>Primary PostgreSQL · database<small>Отдельный сервер · источник наблюдения standby</small></span><span class="badge ${primaryReachable ? "good" : "wait"}">${primaryReachable ? "Доступен" : "Состояние неизвестно"}</span></div>${exits.map((e) => `<div class="route-row"><span>${esc(e.name || e.id)}<small>${e.active ? "Активный выход" : "Резервный выход"} · туннель ${latencyLabel(e.tunnel_latency_ms)} · интернет ${latencyLabel(e.internet_latency_ms)}</small></span><span class="badge ${e.reachable && e.internet_ok ? "good" : "bad"}">${e.reachable && e.internet_ok ? "Доступен" : e.reachable ? "Нет интернета" : "Нет туннеля"}</span></div>`).join("")}${ingressHealthHTML(h.public_ingresses || [])}</div>`;
+    target.innerHTML = `<div class="card"><div class="row wrap"><h2>Состояние сети</h2><span class="badge ${state.tone}">${esc(state.label)}</span></div><small>Проверено: ${esc(dateLabel(h.checked_at))}</small><div class="route-row"><span>Bridge · интернет<small>Задержка ${latencyLabel(h.bridge?.internet_latency_ms)}</small></span><strong class="${h.bridge?.internet_ok ? "good" : "bad"}">${h.bridge?.internet_ok ? "Доступен" : "Недоступен"}</strong></div><div class="route-row"><span>Primary PostgreSQL<small>Сервер: ${primaryHost} · проверка через пул приложения</small></span><span class="badge ${primary?.reachable && primary.observed_role === "primary" ? "good" : "wait"}">${primaryState}</span></div><div class="route-row"><span>Bridge PostgreSQL standby · реплика<small>Физическая реплика primary</small></span><span class="badge ${standbyTone}">${standbyState}</span></div>${exits.map((e) => `<div class="route-row"><span>${esc(e.name || e.id)}<small>${e.active ? "Активный выход" : "Резервный выход"} · туннель ${latencyLabel(e.tunnel_latency_ms)} · интернет ${latencyLabel(e.internet_latency_ms)}</small></span><span class="badge ${e.reachable && e.internet_ok ? "good" : "bad"}">${e.reachable && e.internet_ok ? "Доступен" : e.reachable ? "Нет интернета" : "Нет туннеля"}</span></div>`).join("")}${ingressHealthHTML(h.public_ingresses || [])}</div>`;
   } else {
     target.innerHTML = panelError("Состояние сети", "retry-health");
     button("retry-health", diagnostics);

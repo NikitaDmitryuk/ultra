@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 from pathlib import Path
 import stat
 import time
@@ -31,6 +32,43 @@ def trusted(path, bot=False):
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def discover(root=Path('/')):
+    names = (DESCRIPTOR, JOURNAL) + OWNED
+    if any((root / name.lstrip('/')).exists() or (root / name.lstrip('/')).is_symlink() for name in names):
+        return True
+    receipt = root / 'var/lib/ultra-ingress/managed.json'
+    if receipt.exists() or receipt.is_symlink():
+        return any(name in json.loads(trusted(receipt)) for name in (DESCRIPTOR,) + OWNED)
+    return False
+
+
+def retired_hook(root=Path('/')):
+    name = '/etc/letsencrypt/renewal-hooks/deploy/ultra-ansible'
+    path = root / name.lstrip('/')
+    if not path.exists() and not path.is_symlink():
+        return {}
+    raw = trusted(path)
+    if b'ultra-experimental' not in raw:
+        return {}
+    receipt = json.loads(trusted(root / 'var/lib/ultra-ingress/managed.json'))
+    if receipt.get(name) != sha(raw):
+        raise ValueError('retirement_renewal_hook_unowned')
+    lines = raw.decode().splitlines(keepends=True)
+    start = next((index for index, line in enumerate(lines)
+                  if re.fullmatch(r'if \[ "\$\{RENEWED_LINEAGE:-\}" = "/etc/letsencrypt/live/[a-z0-9.-]+" \] && systemctl is-active --quiet ultra-experimental\.service; then\n', line)), None)
+    expected = [
+        '    install -o ultra-experimental -g ultra-experimental -m 600 "$RENEWED_LINEAGE/fullchain.pem" /etc/ultra-experimental/fullchain.pem\n',
+        '    install -o ultra-experimental -g ultra-experimental -m 600 "$RENEWED_LINEAGE/privkey.pem" /etc/ultra-experimental/privkey.pem\n',
+        '    /opt/ultra-experimental/ultra-relay -transport-spec /etc/ultra-experimental/spec.json -check\n',
+        '    systemctl restart ultra-experimental.service\n', 'fi\n']
+    if start is None or lines[start + 1:start + 6] != expected:
+        raise ValueError('retirement_renewal_hook_unknown')
+    content = ''.join(lines[:start] + lines[start + 6:])
+    if 'ultra-experimental' in content:
+        raise ValueError('retirement_renewal_hook_unknown')
+    return {'path': name, 'content': content}
 
 
 def inspect(phase, root=Path('/')):
@@ -137,13 +175,16 @@ def persist(state, journal, check_mode=False):
 
 
 def main():
-    module = AnsibleModule(argument_spec={'phase': {'type': 'str', 'choices': ['prepare', 'verify'], 'required': True}},
+    module = AnsibleModule(argument_spec={'phase': {'type': 'str', 'choices': ['discover', 'prepare', 'verify'], 'required': True}},
                            supports_check_mode=True)
     try:
+        if module.params['phase'] == 'discover':
+            module.exit_json(changed=False, needed=discover(), hook=retired_hook())
         state = inspect(module.params['phase'])
+        hook = retired_hook()
         journal = Path(JOURNAL)
         changed = persist(state, journal, module.check_mode)
-        module.exit_json(changed=changed, files=list(state['files']))
+        module.exit_json(changed=changed, files=list(state['files']), hook=hook)
     except (OSError, ValueError, KeyError, TypeError):
         module.fail_json(msg='experimental_retirement_proof_failed')
 

@@ -166,18 +166,35 @@
         name: ingress
         tasks_from: adopt
       when: ultra_ingress_action == 'adopt'
+    - name: Discover existing experimental state before optional retirement
+      ultra_retire_experiment:
+        phase: discover
+      register: ingress_experiment_discovery
+      no_log: true
+      when: ultra_ingress_action == 'retire-experiment'
+    - name: Retire obsolete owned renewal branch when no experiment was installed
+      ultra_owned_file:
+        path: "{{ ingress_experiment_discovery.hook.path }}"
+        receipt: /var/lib/ultra-ingress/managed.json
+        content: "{{ ingress_experiment_discovery.hook.content }}"
+        mode: "0755"
+      when:
+        - ultra_ingress_action == 'retire-experiment'
+        - not ingress_experiment_discovery.needed
+        - ingress_experiment_discovery.hook | default({}) | length > 0
+      no_log: true
     - name: Validate legacy experimental ownership and recovery metadata
       ultra_retire_experiment:
         phase: prepare
       no_log: true
-      when: ultra_ingress_action == 'retire-experiment'
+      when: ultra_ingress_action == 'retire-experiment' and ingress_experiment_discovery.needed
     - name: Unpublish only receipt-owned experimental descriptor
       ultra_owned_file:
         path: /etc/ultra-relay/experimental-profile.json
         receipt: /var/lib/ultra-ingress/managed.json
         state: absent
       no_log: true
-      when: ultra_ingress_action == 'retire-experiment'
+      when: ultra_ingress_action == 'retire-experiment' and ingress_experiment_discovery.needed
     - name: Require persisted subscription cache refreshed after unpublication
       ultra_retire_experiment:
         phase: verify
@@ -186,12 +203,23 @@
       retries: 20
       delay: 3
       no_log: true
-      when: ultra_ingress_action == 'retire-experiment'
+      when: ultra_ingress_action == 'retire-experiment' and ingress_experiment_discovery.needed
+    - name: Remove experimental restart from the exact owned renewal hook
+      ultra_owned_file:
+        path: "{{ ingress_experiment_retirement.hook.path }}"
+        receipt: /var/lib/ultra-ingress/managed.json
+        content: "{{ ingress_experiment_retirement.hook.content }}"
+        mode: "0755"
+      when:
+        - ultra_ingress_action == 'retire-experiment'
+        - ingress_experiment_discovery.needed
+        - ingress_experiment_retirement.hook | default({}) | length > 0
+      no_log: true
     - name: Inspect retained experimental unit before stopping
       ansible.builtin.stat:
         path: /etc/systemd/system/ultra-experimental.service
       register: ingress_experiment_unit
-      when: ultra_ingress_action == 'retire-experiment'
+      when: ultra_ingress_action == 'retire-experiment' and ingress_experiment_discovery.needed
     - name: Stop retired experimental service only after publication proof
       ansible.builtin.systemd_service:
         name: ultra-experimental.service
@@ -199,6 +227,7 @@
         enabled: false
       when:
         - ultra_ingress_action == 'retire-experiment'
+        - ingress_experiment_discovery.needed
         - ingress_experiment_unit.stat.exists | default(false)
     - name: Remove only verified receipt-owned experimental runtime files
       ultra_owned_file:
@@ -207,11 +236,11 @@
         state: absent
       loop: "{{ ingress_experiment_retirement.files | default([]) }}"
       no_log: true
-      when: ultra_ingress_action == 'retire-experiment'
+      when: ultra_ingress_action == 'retire-experiment' and ingress_experiment_discovery.needed
     - name: Reload service definitions after experimental retirement
       ansible.builtin.systemd_service:
         daemon_reload: true
-      when: ultra_ingress_action == 'retire-experiment'
+      when: ultra_ingress_action == 'retire-experiment' and ingress_experiment_discovery.needed
     - name: Configure isolated experimental transport
       ansible.builtin.include_role:
         name: ingress_experiment

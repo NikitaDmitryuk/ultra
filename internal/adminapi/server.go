@@ -48,6 +48,7 @@ type Server struct {
 	RuntimeStatus         func() any
 	RouteStatus           func(string) auth.RouteApplication
 	ReplicationStatus     func(context.Context) (any, error)
+	DatabaseStatus        func(context.Context) db.DatabaseStatus
 	Cloud                 *cloud.Service
 	CloudOperationHistory interface {
 		List(context.Context) ([]cloud.Operation, error)
@@ -138,6 +139,7 @@ func (s *Server) decodeAdminJSON(w http.ResponseWriter, r *http.Request, dst any
 func (s *Server) routes() error {
 	s.memberRoutes()
 	s.cloudRoutes()
+	s.databaseRoutes()
 	adminHandler, err := newAdminStaticHandler()
 	if err != nil {
 		return err
