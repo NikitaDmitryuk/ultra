@@ -232,6 +232,10 @@ func runtimeHostLiveFixture(t *testing.T) (runtimeHostStore, runtimeHostRequest)
 }
 func TestRuntimeHostFirstManagedBridgeUpgrade(t *testing.T) {
 	s, r := runtimeHostLiveFixture(t)
+	legacySpec, err := os.ReadFile(s.path(runtimeHostFiles[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(s.path(runtimeHostStateDir)); err != nil {
 		t.Fatal(err)
 	}
@@ -245,8 +249,20 @@ func TestRuntimeHostFirstManagedBridgeUpgrade(t *testing.T) {
 	if _, err := s.transition(r.Transaction, false); err != nil {
 		t.Fatal(err)
 	}
+	var projected config.Spec
+	raw, err := os.ReadFile(s.path(runtimeHostFiles[0]))
+	if err != nil || json.Unmarshal(raw, &projected) != nil || projected.Database.PrimaryHost != r.Database.PrimaryHost {
+		t.Fatal("legacy spec did not receive attested database host")
+	}
+	if !runtimeHostPrimaryHostBackfillOnly(legacySpec, raw, r.Database.PrimaryHost) {
+		t.Fatal("attested database host backfill changed runtime identity")
+	}
 	if _, err := s.transition(r.Transaction, true); err != nil {
 		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(s.path(runtimeHostFiles[0]))
+	if err != nil || !bytes.Equal(raw, legacySpec) {
+		t.Fatal("rollback did not restore legacy spec")
 	}
 }
 func TestRuntimeHostBootstrapMigrationHasZeroWrites(t *testing.T) {

@@ -170,6 +170,37 @@ func runtimeHostInstalledIdentity(raw []byte) (string, error) {
 	}
 	return runtimeHostDigest(identity), nil
 }
+
+// runtimeHostPrimaryHostBackfillOnly accepts the documented metadata backfill
+// without changing hashes used by already-installed attestations.
+func runtimeHostPrimaryHostBackfillOnly(before, candidate []byte, expected string) bool {
+	if expected == "" {
+		return false
+	}
+	var beforeDoc, candidateDoc map[string]json.RawMessage
+	var beforeDB, candidateDB map[string]json.RawMessage
+	if json.Unmarshal(before, &beforeDoc) != nil || json.Unmarshal(candidate, &candidateDoc) != nil ||
+		json.Unmarshal(beforeDoc["database"], &beforeDB) != nil || json.Unmarshal(candidateDoc["database"], &candidateDB) != nil ||
+		beforeDB == nil || candidateDB == nil {
+		return false
+	}
+	if _, exists := beforeDB["primary_host"]; exists {
+		return false
+	}
+	var actual string
+	if json.Unmarshal(candidateDB["primary_host"], &actual) != nil || actual != expected {
+		return false
+	}
+	delete(candidateDB, "primary_host")
+	candidateDoc["database"], _ = json.Marshal(candidateDB)
+	normalized, err := json.Marshal(candidateDoc)
+	if err != nil {
+		return false
+	}
+	beforeIdentity, beforeErr := runtimeHostInstalledIdentity(before)
+	candidateIdentity, candidateErr := runtimeHostInstalledIdentity(normalized)
+	return beforeErr == nil && candidateErr == nil && beforeIdentity == candidateIdentity
+}
 func (s runtimeHostStore) trustedParent(path string) error {
 	for p := filepath.Dir(path); ; p = filepath.Dir(p) {
 		info, err := os.Lstat(p)
@@ -410,7 +441,8 @@ func (s runtimeHostStore) prepare(r runtimeHostRequest) (runtimeHostResult, erro
 			return runtimeHostResult{}, runtimeHostError("projection_failed")
 		}
 		afterIdentity, err := runtimeHostInstalledIdentity(projected.SpecJSON)
-		if err != nil || afterIdentity != installed {
+		if err != nil || (afterIdentity != installed &&
+			!runtimeHostPrimaryHostBackfillOnly(j.Before[0].Data, projected.SpecJSON, r.Database.PrimaryHost)) {
 			return runtimeHostResult{}, runtimeHostError("migration_required")
 		}
 		j.Candidate = append(j.Candidate, j.Before...)

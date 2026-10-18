@@ -167,7 +167,12 @@ func TestVultrDeleteTreatsMissingInstanceAndFirewallAsSuccess(t *testing.T) {
 			t.Fatalf("missing firewall delete: %v", err)
 		}
 	}
-	want := []string{"/v2/instances/missing-instance", "/v2/firewalls/missing-firewall", "/v2/instances/missing-instance", "/v2/firewalls/missing-firewall"}
+	want := []string{
+		"/v2/instances/missing-instance",
+		"/v2/firewalls/missing-firewall",
+		"/v2/instances/missing-instance",
+		"/v2/firewalls/missing-firewall",
+	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("DELETE paths = %v, want %v", paths, want)
 	}

@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -895,6 +896,20 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
         self.assertTrue(record['forward_only'])
         self.assertIn('--forward-only', self.calls[1][1])
 
+    def test_forward_only_staging_failure_restores_dispatched_journal(self):
+        old = {'schema': 1, 'commit': self.commit, 'version': self.version, 'stage': 'upgrade',
+               'mutator_dispatched': True, 'remote_attempt': 'c' * 64,
+               'manifest_sha256': 'd' * 64, 'staged_config_sha256': 'e' * 64}
+        raw = json.dumps(old).encode()
+        D.atomic_write(self.root / 'operation.json', raw)
+        def fail_preflight(command, cwd, stage, **kwargs):
+            if stage == 'doctor':
+                raise D.DeployError('bridge_staging_failed')
+        with self.assertRaisesRegex(D.DeployError, '^bridge_staging_failed$'):
+            self.rollout(forward_only=True, runner=fail_preflight)
+        self.assertEqual(json.loads((self.root / 'operation.json').read_bytes()), old)
+        self.assertEqual(json.loads(next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes()), old)
+
     def test_forward_only_requires_exact_failed_upgrade_and_rejects_conflicts(self):
         with self.assertRaisesRegex(D.DeployError, '^manual_forward_only_requires_dispatched_upgrade$'):
             self.rollout(forward_only=True)
@@ -1150,7 +1165,8 @@ class NativeDeploy(unittest.TestCase):
             'ansible_ssh_common_args': '-F /dev/null -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=' + str(self.pins)},
             'children': {'bridge': {'hosts': {'bridge': {'ansible_host': '192.0.2.10'}}},
                          'exits': {'hosts': {'exit_0': {'ansible_host': '192.0.2.20'}}}}}}
-        self.original += b'BRIDGE_IP=192.0.2.10\nMAIN_EXIT_IP=192.0.2.20\nBRIDGE_SSH_KEY=/tmp/bridge-key\nMAIN_EXIT_SSH_KEY=/tmp/exit-key\nDATABASE_IP=192.0.2.30\nDATABASE_SSH_KEY=/tmp/database-key\nULTRA_AUTOMATION_STATIC_NODES=\'[{"address":"192.0.2.20"}]\'\nSECRETS_ENV_FILE=/etc/ultra-relay/.env\n'
+        self.original += (b'BRIDGE_IP=192.0.2.10\nMAIN_EXIT_IP=192.0.2.20\nBRIDGE_SSH_KEY=/tmp/bridge-key\nMAIN_EXIT_SSH_KEY=/tmp/exit-key\nDATABASE_IP=192.0.2.30\nDATABASE_SSH_KEY=/tmp/database-key\nULTRA_AUTOMATION_STATIC_NODES=\'[{"address":"192.0.2.20"}]\'\nSECRETS_ENV_FILE=/etc/ultra-relay/.env\n' +
+                          b'ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=' + str(self.pins).encode() + b'\n')
         self.config.write_bytes(self.original)
         self.write_inventory()
         self.manifest = json.dumps({'source_commit': self.commit, 'version': self.version, 'assets': []}).encode()
@@ -1246,6 +1262,17 @@ class NativeDeploy(unittest.TestCase):
         with self.assertRaisesRegex(D.DeployError, 'manual_config_projection_invalid'):
             D.projected_upgrade_config(self.original, 'future')
 
+    def test_upgrade_v2_projects_controller_pins_without_changing_operator_config(self):
+        configured = self.original + b'DATABASE_DUMP=/operator/private.dump\n'
+        staged = D.projected_upgrade_config(configured, 'upgrade-v2')
+        self.assertIn(b'ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/etc/ultra-recovery/known_hosts\n', staged)
+        self.assertNotIn(b'DATABASE_DUMP=', staged)
+        self.assertIn(b'ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=' + str(self.pins).encode() + b'\n', configured)
+        with self.assertRaisesRegex(D.DeployError, 'manual_controller_pins_config_required'):
+            D.projected_upgrade_config(b'INSTALL_SCHEMA_VERSION=2\n', 'upgrade-v2')
+        with self.assertRaisesRegex(D.DeployError, 'duplicate_canonical_release_key'):
+            D.projected_upgrade_config(configured + b'ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/other\n', 'upgrade-v2')
+
     def test_projected_prepared_restart_keeps_exact_staged_identity(self):
         self.dump_config()
         def fail(command, cwd, stage, **kwargs):
@@ -1254,7 +1281,7 @@ class NativeDeploy(unittest.TestCase):
         with self.assertRaisesRegex(D.DeployError, 'fixture_failure'):
             self.rollout(runner=fail)
         record = json.loads((self.root / 'operation.json').read_bytes())
-        self.assertEqual(record['config_projection'], 'upgrade-v1')
+        self.assertEqual(record['config_projection'], 'upgrade-v2')
         staged = self.stage_mock.call_args.args[3]
         record.update(stage='prepared', mutator_dispatched=False)
         D.atomic_write(self.root / 'operation.json', json.dumps(record).encode())
@@ -1736,6 +1763,37 @@ class NativeDeploy(unittest.TestCase):
         self.assertEqual(len(list(self.root.glob('operation.forward-only-abandoned-*.json'))), 1)
         self.assertFalse(self.stage_mock.called)
 
+    def test_forward_only_retry_reuses_predecessor_proof_and_remains_continuable(self):
+        old_commit = 'b' * 40
+        old = {'schema': 1, 'commit': old_commit, 'version': 'v0.0.' + str(int(old_commit, 16)),
+               'stage': 'upgrade', 'mutator_dispatched': True, 'remote_attempt': 'c' * 64,
+               'manifest_sha256': 'd' * 64, 'staged_config_sha256': 'e' * 64}
+        D.atomic_write(self.root / 'operation.json', json.dumps(old).encode())
+
+        def fail_preflight(command, cwd, stage, **kwargs):
+            if stage == 'doctor':
+                raise D.DeployError('preflight_failed')
+
+        with self.assertRaisesRegex(D.DeployError, 'preflight_failed'):
+            self.rollout(forward_only=True, runner=fail_preflight)
+        original_proof = next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes()
+        self.assertEqual(json.loads((self.root / 'operation.json').read_bytes()), old)
+
+        def fail_dispatch(command, cwd, stage, **kwargs):
+            if stage == 'upgrade':
+                raise D.DeployError('dispatch_failed')
+
+        with self.assertRaisesRegex(D.DeployError, 'dispatch_failed'):
+            self.rollout(forward_only=True, runner=fail_dispatch)
+        archives = list(self.root.glob('operation.forward-only-abandoned-*.json'))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(archives[0].read_bytes(), original_proof)
+
+        self.rollout(continue_forward_only=True, runner=self.continuation_runner(old))
+        self.assertFalse((self.root / 'operation.json').exists())
+        self.assertEqual([path.read_bytes() for path in self.root.glob('operation.forward-only-abandoned-*.json')],
+                         [original_proof])
+
     def test_continue_forward_only_doctor_failure_retains_retryable_original_journal(self):
         old = self.failed_forward_fixture()
         before = (self.root / 'operation.json').read_bytes()
@@ -2085,7 +2143,7 @@ class NativeDeploy(unittest.TestCase):
             staged = D.config_candidate(config, version, remote_root / 'release', remote_root / 'baseline/descriptor.json')
             return staged, {'baseline/descriptor.json': b'{}', 'baseline/operator-journal.json': b'{}'}
         with patch.object(D, 'stage_upgrade_baseline', side_effect=prepared):
-            first_attempt = D.remote_attempt(baseline_setting, self.version)
+            first_attempt = D.remote_attempt(D.projected_upgrade_config(baseline_setting, 'upgrade-v2'), self.version)
             self.rollout()
             self.assertNotIn(b'ULTRA_UPGRADE_BASELINE_FILE=', self.config.read_bytes())
             first_config = self.stage_mock.call_args.args[3]
@@ -2094,7 +2152,8 @@ class NativeDeploy(unittest.TestCase):
         self.assertEqual(first.args[3], first_config)
         self.assertEqual(second.args[3], first_config)
         with patch.object(D, 'stage_upgrade_baseline', side_effect=prepared):
-            self.assertEqual(D.completed_baseline_replay(self.root, self.config.read_bytes(), self.version, self.commit)[0], first_attempt)
+            self.assertEqual(D.completed_baseline_replay(
+                self.root, self.config.read_bytes(), self.version, self.commit, 'upgrade-v2')[0], first_attempt)
         self.assertEqual(first.args[1], second.args[1])
         self.assertEqual(D.remote_attempt(first.args[3], self.version), D.remote_attempt(second.args[3], self.version))
 
@@ -2247,6 +2306,8 @@ class NativeDeploy(unittest.TestCase):
 
     def test_native_canonical_route_survives_deleted_adopt_directory(self):
         shutil.rmtree(self.operator.parent)
+        self.original = re.sub(rb'^ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=.*\n', b'', self.original, flags=re.MULTILINE)
+        self.config.write_bytes(self.original)
         with patch.dict(os.environ, {'ULTRA_OPERATOR_INVENTORY': '', 'ULTRA_OPERATOR_IDENTITY': str(self.identity),
                                      'ULTRA_OPERATOR_KNOWN_HOSTS': str(self.pins)}):
             self.rollout(adopt=True)
@@ -2260,6 +2321,8 @@ class NativeDeploy(unittest.TestCase):
         self.assertFalse(any('ProxyCommand=' in token for token in transport))
 
     def test_native_canonical_route_requires_both_local_references(self):
+        self.original = re.sub(rb'^ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=.*\n', b'', self.original, flags=re.MULTILINE)
+        self.config.write_bytes(self.original)
         with patch.dict(os.environ, {'ULTRA_OPERATOR_INVENTORY': '', 'ULTRA_OPERATOR_IDENTITY': str(self.identity),
                                      'ULTRA_OPERATOR_KNOWN_HOSTS': ''}):
             with self.assertRaisesRegex(D.DeployError, 'identity_and_pins_required'):

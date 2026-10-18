@@ -98,7 +98,8 @@ func TestLifecycleLoaderAndBootstrapDigestStaySeparate(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh, err := LoadConfig(config)
-	if err != nil || ValidateBootstrapPlan(fresh) != nil || fresh.Secrets.DatabaseDumpFile != archive || len(fresh.Secrets.DatabaseDumpSHA256) != 64 {
+	if err != nil || ValidateBootstrapPlan(fresh) != nil || fresh.Secrets.DatabaseDumpFile != archive ||
+		len(fresh.Secrets.DatabaseDumpSHA256) != 64 {
 		t.Fatalf("bootstrap no longer binds private archive: %v", err)
 	}
 	projected := LifecycleProjection(fresh)

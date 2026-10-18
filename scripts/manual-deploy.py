@@ -614,25 +614,34 @@ def remove_config_key(raw, key):
 def projected_upgrade_config(raw, projection=None):
     # Bootstrap archives stay on the operator. Legacy operations retain their
     # original byte identity unless a fresh operation explicitly binds projection.
-    require(projection in (None, 'upgrade-v1'), 'manual_config_projection_invalid')
+    require(projection in (None, 'upgrade-v1', 'upgrade-v2'), 'manual_config_projection_invalid')
     if projection is None:
         return raw
     lines = []
-    found = False
+    dump_found = False
+    pins_found = False
     for line in raw.decode().splitlines(keepends=True):
         if re.match(r'^\s*DATABASE_DUMP\s*=', line):
-            require(not found, 'duplicate_canonical_release_key')
-            found = True
+            require(not dump_found, 'duplicate_canonical_release_key')
+            dump_found = True
+            continue
+        if projection == 'upgrade-v2' and re.match(r'^\s*ULTRA_AUTOMATION_KNOWN_HOSTS_FILE\s*=', line):
+            require(not pins_found, 'duplicate_canonical_release_key')
+            pins_found = True
+            prefix, newline = re.match(r'^(\s*ULTRA_AUTOMATION_KNOWN_HOSTS_FILE\s*=\s*).*?(\r?\n)?$', line).groups()
+            lines.append(prefix + '/etc/ultra-recovery/known_hosts' + (newline or ''))
             continue
         lines.append(line)
+    if projection == 'upgrade-v2':
+        require(pins_found, 'manual_controller_pins_config_required')
     return ''.join(lines).encode()
 
 
 def deployment_config_projection(record, transport, adopt, commit, version):
-    projection = 'upgrade-v1' if transport and not adopt else None
+    projection = 'upgrade-v2' if transport and not adopt else None
     if record and record.get('commit') == commit and record.get('version') == version:
         projection = record.get('config_projection')
-    require(projection in (None, 'upgrade-v1') and
+    require(projection in (None, 'upgrade-v1', 'upgrade-v2') and
             (projection is None or (transport and not adopt)), 'manual_config_projection_invalid')
     return projection
 
@@ -1956,8 +1965,12 @@ def valid_completed_remote_cleanup(record, commit, version, adopt):
 def abandon_dispatched_manual_operation(root, journal, record):
     """Retain one explicitly abandoned failed upgrade without resuming it."""
     validate_dispatched_manual_operation(record)
-    archived = root / ('operation.forward-only-abandoned-' + str(time.time_ns()) + '.json')
-    atomic_write(archived, json.dumps(record, sort_keys=True).encode())
+    proof = json.dumps(record, sort_keys=True).encode()
+    archived = next((path for path in sorted(root.glob('operation.forward-only-abandoned-*.json'))
+                     if private_file(path) == proof), None)
+    if archived is None:
+        archived = root / ('operation.forward-only-abandoned-' + str(time.time_ns()) + '.json')
+        atomic_write(archived, proof)
     journal.unlink()
     directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -2251,8 +2264,9 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
                 'manual_forward_continuation_proof_changed')
         proofs = [private_file(path) for path in root.glob('operation.forward-only-abandoned-*.json')]
         matches = [raw for raw in proofs if sha(raw) == digest]
-        require(len(matches) == 1, 'manual_forward_continuation_proof_changed')
-        continuation_proof = matches[0]
+        unique_matches = set(matches)
+        require(len(unique_matches) == 1, 'manual_forward_continuation_proof_changed')
+        continuation_proof = next(iter(unique_matches))
         predecessor = json.loads(continuation_proof)
         validate_dispatched_manual_operation(predecessor)
         require(predecessor['commit'] != commit, 'manual_forward_continuation_proof_changed')
@@ -2278,7 +2292,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         # plan only parses/validates policy; unlike doctor it never opens the
         # secrets file. Suppress its output because the plan contains inputs.
         plan_command = [str(bundle / ('ultra-install-linux-' + architecture)), 'plan', '--config', str(config), '--format', 'json']
-        if projection == 'upgrade-v1':
+        if projection in ('upgrade-v1', 'upgrade-v2'):
             plan_command.append('--lifecycle')
         run(plan_command,
             repo, 'canonical_policy')
@@ -2476,7 +2490,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             atomic_write(binding, probe_sha.encode())
         installer = str(bundle / ('ultra-install-linux-' + architecture))
         doctor_command = [installer, 'doctor', '--config', str(config)]
-        if projection == 'upgrade-v1':
+        if projection in ('upgrade-v1', 'upgrade-v2'):
             doctor_command.append('--lifecycle')
         commands = [('doctor', doctor_command)]
         if adopt:
@@ -2486,7 +2500,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             commands += [('upgrade', [installer, 'operator-upgrade', '--config', str(config), '--release-dir', str(bundle),
                                       '--source-commit', commit, '--version', version,
                                       '--manifest-sha256', manifest_sha or sha((bundle / 'release-manifest.json').read_bytes()),
-                                      '--config-sha256', sha(new)] + (['--lifecycle'] if projection == 'upgrade-v1' else []))]
+                                      '--config-sha256', sha(new)] + (['--lifecycle'] if projection in ('upgrade-v1', 'upgrade-v2') else []))]
             if forward_only:
                 commands[-1][1].append('--forward-only')
             if probe_sha:
@@ -2494,7 +2508,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             if retry_failed:
                 commands[-1][1].append('--retry-failed')
         commands += [('status', [installer, 'status', '--config', str(config)] +
-                      (['--lifecycle'] if projection == 'upgrade-v1' else []))]
+                      (['--lifecycle'] if projection in ('upgrade-v1', 'upgrade-v2') else []))]
         if transport:
             require(sha(canonical_file(config)) == record['config_sha256'], 'canonical_config_changed_before_staging')
             if same_candidate:
@@ -2523,7 +2537,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             print('manual-deploy: ' + stage, flush=True)
             if transport:
                 stage_forward_only = forward_only and stage == 'upgrade'
-                remote_stage = 'lifecycle_' + stage if projection == 'upgrade-v1' and stage in ('doctor', 'upgrade', 'status') else stage
+                remote_stage = 'lifecycle_' + stage if projection in ('upgrade-v1', 'upgrade-v2') and stage in ('doctor', 'upgrade', 'status') else stage
                 remote_args = [record['remote_architecture'], remote_stage, '1' if retry_failed else '0',
                                '1' if stage_forward_only else '0', probe_sha,
                                record.get('forward_journal_sha256', '') if forward_only else '']
@@ -2577,6 +2591,10 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
                 # No new mutator was dispatched: restore the failed operation's
                 # recovery journal as well as its canonical config and credential.
                 atomic_write(journal, private_file(history))
+            elif forward_only:
+                # Failed preflight must not discard the dispatched predecessor:
+                # the journal is the local gate against an unsafe fresh upgrade.
+                atomic_write(journal, private_file(archived_journal))
             else:
                 journal.unlink()
                 probe_snapshot.unlink(missing_ok=True)

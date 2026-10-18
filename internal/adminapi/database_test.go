@@ -23,7 +23,13 @@ func TestDatabaseStatusRequiresAdminAndBoundsObservation(t *testing.T) {
 		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 5*time.Second {
 			t.Error("missing bounded SQL observation deadline")
 		}
-		return db.DatabaseStatus{PrimaryHost: &primaryHost, ConfiguredHost: "127.0.0.1", ConfiguredPort: 25432, ObservedRole: "standby", Reachable: true}
+		return db.DatabaseStatus{
+			PrimaryHost:    &primaryHost,
+			ConfiguredHost: "127.0.0.1",
+			ConfiguredPort: 25432,
+			ObservedRole:   "standby",
+			Reachable:      true,
+		}
 	}
 	for _, token := range []string{"", "wrong", "secret"} {
 		r := httptest.NewRequest("GET", "/v1/database", nil)

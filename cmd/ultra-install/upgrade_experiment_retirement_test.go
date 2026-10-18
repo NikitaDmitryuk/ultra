@@ -25,7 +25,10 @@ func TestUpgradeExperimentalRetirementUsesCurrentLeaseAndStableJob(t *testing.T)
 			stage != filepath.Join(directory, "retire-experiment") || python != "python" || executable != "ansible" {
 			t.Fatal("retirement lost current execution/lease binding")
 		}
-		if !reflect.DeepEqual(request, map[string]any{"ultra_lock_directory": "/private/held-lock", "ultra_ingress_action": "retire-experiment"}) {
+		if !reflect.DeepEqual(
+			request,
+			map[string]any{"ultra_lock_directory": "/private/held-lock", "ultra_ingress_action": "retire-experiment"},
+		) {
 			t.Fatal("retirement used desired endpoint metadata", request)
 		}
 		return deployansible.Receipt{}, nil

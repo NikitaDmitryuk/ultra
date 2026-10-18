@@ -31,7 +31,8 @@ func validatePlan(p *InstallPlan, localProjection bool) error {
 	if p == nil {
 		return errors.New("install plan is nil")
 	}
-	if p.LifecycleOnly && (p.Secrets.DatabaseDumpFile != "" || p.Secrets.DatabaseDumpSHA256 != "" || p.SourceValues["DATABASE_DUMP"] != "") {
+	if p.LifecycleOnly &&
+		(p.Secrets.DatabaseDumpFile != "" || p.Secrets.DatabaseDumpSHA256 != "" || p.SourceValues["DATABASE_DUMP"] != "") {
 		return errors.New("lifecycle plan must not contain bootstrap archive inputs")
 	}
 	if p.AdoptRuntime && (!p.FullAutomation() || !p.Bridge.ReuseSpec) {
