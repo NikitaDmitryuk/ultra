@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -199,3 +200,4 @@ with tempfile.TemporaryDirectory(prefix='ultra-ansible-ingress-diagnostic-') as 
     assert 'private-name.example.com' not in target.read_text() and '192.0.2.10' not in target.read_text()
 
 print('Safe Ansible failure diagnostics preserve the first failure and redact module arguments')
+subprocess.run([sys.executable, str(ROOT / 'scripts/test-ansible-event-journal.py')], check=True)

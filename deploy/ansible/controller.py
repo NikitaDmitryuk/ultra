@@ -8,8 +8,224 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess
 import time
+import uuid
+
+
+class SafeJournal:
+    """Private, bounded observations, outside immutable job/receipt trees."""
+    MAX_SESSIONS = 128
+    MAX_BYTES = 1024 * 1024
+    MAX_EVENT = 4096
+    MAX_AGE = 30 * 86400
+    EVENTS = {'controller_start', 'controller_succeeded', 'controller_failed',
+              'controller_timeout', 'controller_interrupted', 'task_start',
+              'task_ok', 'task_skipped', 'task_failed', 'task_unreachable', 'task_retry',
+              'logging_degraded'}
+
+    @staticmethod
+    def default_root():
+        return Path('/var/log/ultra-ansible' if os.geteuid() == 0 else
+                    '/tmp/ultra-ansible-diagnostics-' + str(os.geteuid()))
+
+    @staticmethod
+    def directory(path):
+        path = Path(path)
+        if not path.is_absolute() or path.resolve() != path:
+            raise ValueError('unsafe_diagnostic_directory')
+        info = path.stat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ValueError('unsafe_diagnostic_directory')
+        return path
+
+    @staticmethod
+    def open_private(path, flags):
+        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            os.close(fd)
+            raise ValueError('unsafe_diagnostic_file')
+        return fd
+
+    @classmethod
+    def create(cls, root, job_directory, operation):
+        root = Path(root)
+        if root.resolve().is_relative_to(Path(job_directory).resolve()):
+            raise ValueError('diagnostic_directory_inside_job')
+        root.mkdir(mode=0o700, exist_ok=True)
+        cls.directory(root)
+        lock = cls.open_private(root / 'retention.lock', os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            cls.prune(root)
+            name = hashlib.sha256(str(Path(job_directory).absolute()).encode()).hexdigest() + '-' + uuid.uuid4().hex
+            path = root / name
+            path.mkdir(mode=0o700)
+            journal = cls(path)
+            try:
+                journal.emit('controller_start', operation=operation)
+            except (OSError, ValueError):
+                journal.close()
+                raise
+            return journal
+        finally:
+            os.close(lock)
+
+    @classmethod
+    def prune(cls, root):
+        """Under retention.lock; never unlink an active writer's session."""
+        sessions = []
+        for path in root.iterdir():
+            if not re.fullmatch(r'[a-f0-9]{64}-[a-f0-9]{32}', path.name):
+                continue
+            cls.directory(path)
+            sessions.append((path.stat().st_mtime, path))
+        sessions.sort(key=lambda item: item[0])
+        remaining = len(sessions)
+        for modified, path in sessions:
+            if remaining < cls.MAX_SESSIONS and time.time() - modified <= cls.MAX_AGE:
+                continue
+            fd = cls.open_private(path / 'active.lock', os.O_CREAT | os.O_RDWR)
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                children = list(path.iterdir())
+                if any(child.name not in {'active.lock', 'write.lock', 'events.jsonl', 'current.json',
+                                          'first-failure.json', 'current.next'} for child in children):
+                    continue
+                # Validate all members before deleting any; never follow links.
+                for child in children:
+                    member = cls.open_private(child, os.O_RDONLY)
+                    os.close(member)
+                for child in children:
+                    child.unlink()
+                path.rmdir()
+                remaining -= 1
+            finally:
+                os.close(fd)
+        if remaining >= cls.MAX_SESSIONS:
+            raise ValueError('diagnostic_session_limit')
+
+    def __init__(self, path):
+        self.path = self.directory(path)
+        if not re.fullmatch(r'[a-f0-9]{64}-[a-f0-9]{32}', self.path.name):
+            raise ValueError('unsafe_diagnostic_session')
+        self.active = self.open_private(self.path / 'active.lock', os.O_CREAT | os.O_RDWR)
+        fcntl.flock(self.active, fcntl.LOCK_SH)
+
+    def close(self):
+        if self.active is not None:
+            os.close(self.active)
+            self.active = None
+
+    def repair_tail(self, fd):
+        """Under write.lock, discard only a crash/short-write's unfinished line."""
+        size = os.fstat(fd).st_size
+        if not size:
+            return
+        tail = os.pread(fd, min(size, self.MAX_EVENT), max(0, size - self.MAX_EVENT))
+        if tail.endswith(b'\n'):
+            return
+        boundary = tail.rfind(b'\n')
+        if boundary < 0 and size > self.MAX_EVENT:
+            raise ValueError('invalid_diagnostic_tail')
+        os.ftruncate(fd, size - len(tail) + boundary + 1)
+        os.fsync(fd)
+
+    def emit(self, event, **fields):
+        if event not in self.EVENTS:
+            raise ValueError('unknown_diagnostic_event')
+        # Callers supply only static source metadata and explicitly selected enums.
+        value = {'schema_version': 1, 'event': event, 'time_ns': time.time_ns(), **fields}
+        raw = (json.dumps(value, separators=(',', ':')) + '\n').encode()
+        if len(raw) > self.MAX_EVENT:
+            raise ValueError('diagnostic_event_too_large')
+        lock = self.open_private(self.path / 'write.lock', os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            previous = {}
+            try:
+                fd = self.open_private(self.path / 'current.json', os.O_RDONLY)
+                with os.fdopen(fd) as stream:
+                    previous = json.loads(stream.read(self.MAX_EVENT + 1))
+                if not isinstance(previous, dict):
+                    raise ValueError('invalid_diagnostic_checkpoint')
+            except FileNotFoundError:
+                pass
+            log = self.open_private(self.path / 'events.jsonl', os.O_CREAT | os.O_RDWR | os.O_APPEND)
+            try:
+                self.repair_tail(log)
+                truncated = os.fstat(log).st_size + len(raw) > self.MAX_BYTES
+                if not truncated:
+                    with os.fdopen(log, 'ab', closefd=False) as stream:
+                        stream.write(raw)
+                        stream.flush()
+                        os.fsync(log)
+            finally:
+                os.close(log)
+            checkpoint = dict(value)
+            if 'operation' in previous:
+                checkpoint['operation'] = previous['operation']
+            if 'task' not in checkpoint and 'task' in previous:
+                checkpoint['task'] = previous['task']
+                checkpoint['host'] = previous.get('host', '')
+            checkpoint['truncated'] = truncated or previous.get('truncated', False)
+            self.checkpoint(checkpoint)
+            if event in ('task_failed', 'task_unreachable') and not fields.get('ignored', False):
+                try:
+                    fd = self.open_private(self.path / 'first-failure.json', os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                except FileExistsError:
+                    existing = self.open_private(self.path / 'first-failure.json', os.O_RDONLY)
+                    os.close(existing)
+                else:
+                    with os.fdopen(fd, 'wb') as stream:
+                        stream.write(raw)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+        finally:
+            os.close(lock)
+
+    def checkpoint(self, value):
+        # Never truncate an existing temporary file (including hardlinks).
+        temporary = self.path / 'current.next'
+        try:
+            stale = self.open_private(temporary, os.O_RDONLY)
+        except FileNotFoundError:
+            pass
+        else:
+            os.close(stale)
+            temporary.unlink()
+        fd = self.open_private(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            with os.fdopen(fd, 'w') as stream:
+                json.dump(value, stream, separators=(',', ':'))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path / 'current.json')
+            directory_fd = os.open(self.path, os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def best_effort(self, event, **fields):
+        # Diagnostics must never mask the rollout outcome or prevent worker cleanup.
+        try:
+            if getattr(self, '_degraded', False):
+                self.emit('logging_degraded')
+            self.emit(event, **fields)
+        except (OSError, ValueError):
+            self._degraded = True
+            return False
+        self._degraded = False
+        return True
 
 LOCAL_OPERATIONS = {'bootstrap-recovery-inspect', 'bootstrap-recovery-tools', 'wait-upgrade-readiness', 'bootstrap-forward-broker', 'contain-upgrade', 'drain-upgrade-workers', 'retain-artifacts', 'resume-schedules', 'rollback-adoption', 'reserve-rolledback-bootstrap', 'resume-adoption', 'lifecycle', 'prepare-controller', 'inspect-upgrade', 'preflight-retry', 'status-automation', 'inspect-release-hosts', 'resume-automation', 'configure-bot', 'configure-exit-operator', 'inspect-bootstrap', 'bootstrap', 'bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'bootstrap-automation', 'verify-bootstrap-automation', 'adopt', 'adopt-topology', 'upgrade', 'rollback', 'verify-release', 'commit-release', 'publish-release', 'ingress', 'reconcile', 'restore', 'restore-database', 'restore-peer', 'domain-cutover', 'backend-domain', 'upgrade-dns-migration', 'inspect-upgrade-runtime', 'inspect-upgrade-maintenance', 'upgrade-runtime', 'inspect-upgrade-domains', 'upgrade-domain'}
 OPERATIONS = {'configure-exit'} | LOCAL_OPERATIONS
@@ -99,8 +315,8 @@ def configure_localhost(inventory):
     }
 
 
-def playbook_environment(directory, bundle):
-    return {
+def playbook_environment(directory, bundle, journal=None):
+    environment = {
         'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
         'HOME': str(directory),
         'ANSIBLE_CONFIG': str(Path(bundle) / 'ansible.cfg'),
@@ -113,6 +329,10 @@ def playbook_environment(directory, bundle):
         'PYTHONDONTWRITEBYTECODE': '1',
         'ULTRA_ANSIBLE_DIAGNOSTIC_FILE': str(directory / 'diagnostic.json'),
     }
+    if journal is not None:
+        environment['ULTRA_ANSIBLE_EVENTS_DIR'] = str(journal.path)
+        environment['ULTRA_ANSIBLE_SOURCE_ROOT'] = str(Path(bundle).resolve())
+    return environment
 
 
 def load_private(path, raw=False):
@@ -151,7 +371,7 @@ def run_playbook(arguments, bundle, environment, timeout=900):
         process.wait()
 
 
-def execute(directory, executable, bundle):
+def execute(directory, executable, bundle, diagnostics_root=None):
     directory = Path(directory)
     if directory.is_symlink() or directory.stat().st_mode & 0o077 or directory.stat().st_uid != os.geteuid():
         raise ValueError('private_job_required')
@@ -207,9 +427,11 @@ def execute(directory, executable, bundle):
             return saved  # Explicit retry creates a new attempt, never treats a failure as success.
     result_path = directory / 'result.json'
     result_path.unlink(missing_ok=True)
+    journal = SafeJournal.create(diagnostics_root or SafeJournal.default_root(), directory, job['operation'])
     state = {**job, 'state': 'running', 'started_at': int(time.time())}
     atomic(receipt, state)
-    environment = playbook_environment(directory, bundle)
+    environment = playbook_environment(directory, bundle, journal)
+    observation = 'controller_failed'
     try:
         exit_code = run_playbook([
             str(executable), '-i', str(directory / 'inventory.yml'),
@@ -235,14 +457,21 @@ def execute(directory, executable, bundle):
             if job['operation'] == 'bootstrap-exit' and result.get('exit_host') != variables.get('ultra_bootstrap_exit_host'):
                 raise ValueError('invalid_bootstrap_exit_identity')
             state.update(state='succeeded', result=result)
+            observation = 'controller_succeeded'
     except InterruptedError:
         # Operator/service cancellation is resumable, unlike a terminal timeout.
         # The process group is already gone before this nonterminal receipt.
         state.update(state='running', code='interrupted')
+        observation = 'controller_interrupted'
+    except subprocess.TimeoutExpired:
+        state.update(state='failed', code='execution_failed')
+        observation = 'controller_timeout'
     except (OSError, ValueError, subprocess.SubprocessError):
         state.update(state='failed', code='execution_failed')
     if state['state'] != 'running':
         state['finished_at'] = int(time.time())
+    journal.best_effort(observation)
+    journal.close()
     atomic(receipt, state)
     return state
 
@@ -255,13 +484,14 @@ def main():
     parser.add_argument('--job', required=True)
     parser.add_argument('--bundle', required=True)
     parser.add_argument('--executable', required=True)
+    parser.add_argument('--diagnostics-root', type=Path, default=None)
     args = parser.parse_args()
     directory = Path(args.job)
     fd = os.open(directory / 'execution.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            value = execute(directory, args.executable, args.bundle)
+            value = execute(directory, args.executable, args.bundle, args.diagnostics_root)
         except (ValueError, OSError, KeyError, TypeError):
             raise SystemExit('invalid_job') from None
     raise SystemExit(0 if value['state'] == 'succeeded' else 1)
