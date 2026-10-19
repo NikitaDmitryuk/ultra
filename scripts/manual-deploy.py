@@ -645,19 +645,27 @@ def bot_token_from_env(path):
 
 
 REMOTE_BOT_TOKEN_PROGRAM = 'import re\n' + BOT_TOKEN_PARSER + r'''
-import fcntl,json,os,signal,stat,sys,uuid
+import fcntl,grp,json,os,pwd,signal,stat,sys,uuid
 from pathlib import Path
 signal.alarm(30)
 def need(ok):
     if not ok: raise ValueError('bot_token_bootstrap_rejected')
-def directory(path):
+relay_user=pwd.getpwnam('ultra-relay')
+relay_group=grp.getgrnam('ultra-relay')
+need(relay_user.pw_gid==relay_group.gr_gid)
+relay_uid=relay_user.pw_uid;relay_gid=relay_group.gr_gid
+def directory(path,final_owner=(0,0),allow_root_final=False):
     fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
     try:
-        for part in Path(path).parts[1:]:
+        parts=Path(path).parts[1:]
+        for index,part in enumerate(parts):
             child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
             os.close(fd);fd=child
             info=os.fstat(fd)
-            need(info.st_uid==0 and not info.st_mode&0o022)
+            owner=(info.st_uid,info.st_gid)
+            expected=final_owner if index==len(parts)-1 else (0,0)
+            allowed=(expected,(0,0)) if allow_root_final and index==len(parts)-1 else (expected,)
+            need(owner in allowed and not info.st_mode&0o022)
         return os.dup(fd)
     finally: os.close(fd)
 def private(fd):
@@ -682,10 +690,12 @@ def main():
             etc=directory('/etc')
             try:
                 if create:
-                    try: os.mkdir('ultra-relay',0o700,dir_fd=etc)
+                    try:
+                        os.mkdir('ultra-relay',0o700,dir_fd=etc)
+                        os.chown('ultra-relay',relay_uid,relay_gid,dir_fd=etc,follow_symlinks=False)
                     except FileExistsError: pass
             finally: os.close(etc)
-            return directory('/etc/ultra-relay')
+            return directory('/etc/ultra-relay',(relay_uid,relay_gid),allow_root_final=True)
         def matches_existing(target):
             try: fd=os.open('bot.env',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
             except FileNotFoundError: return False
@@ -695,28 +705,28 @@ def main():
                      stat.S_IMODE(info.st_mode)==0o600 and info.st_size<=1048576)
                 with os.fdopen(fd,'rb',closefd=False) as stream:
                     need(parse_bot_token(bot_token_lines(stream))==token)
-                if info.st_nlink==2:
-                    # Recover a crash after hard-link publication but before
-                    # removing the private temporary name. Only accept the
-                    # single expected root-owned link to this exact inode.
-                    names=[name for name in os.listdir(target) if re.fullmatch(r'\.bot\.env-[0-9a-f]{32}',name)]
-                    linked=[]
-                    for name in names:
-                        other=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
-                        try:
-                            oi=os.fstat(other)
-                            if (oi.st_dev,oi.st_ino)==(info.st_dev,info.st_ino):
-                                linked.append(name)
-                            else:
-                                need(oi.st_uid==0 and stat.S_ISREG(oi.st_mode) and oi.st_nlink==1 and
-                                     stat.S_IMODE(oi.st_mode)==0o600)
-                                raw=os.read(other,1025)
-                                need((b'TELEGRAM_BOT_TOKEN='+token+b'\n').startswith(raw))
-                                os.unlink(name,dir_fd=target)
-                        finally: os.close(other)
-                    need(info.st_nlink==2 and len(linked)==1)
-                    os.unlink(linked[0],dir_fd=target);os.fsync(target)
-                    need(os.fstat(fd).st_nlink==1)
+                # Reconcile crash leftovers whether or not publication already
+                # happened. A linked name must be this exact inode; all other
+                # reserved pending names must contain only the intended prefix.
+                names=[name for name in os.listdir(target) if re.fullmatch(r'\.bot\.env-[0-9a-f]{32}',name)]
+                linked=[];stale=[]
+                for name in names:
+                    other=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
+                    try:
+                        oi=os.fstat(other)
+                        if (oi.st_dev,oi.st_ino)==(info.st_dev,info.st_ino):
+                            linked.append(name)
+                        else:
+                            need(oi.st_uid==0 and stat.S_ISREG(oi.st_mode) and oi.st_nlink==1 and
+                                 stat.S_IMODE(oi.st_mode)==0o600 and oi.st_size<=1024)
+                            raw=os.read(other,1025)
+                            need((b'TELEGRAM_BOT_TOKEN='+token+b'\n').startswith(raw))
+                            stale.append(name)
+                    finally: os.close(other)
+                need((info.st_nlink==1 and not linked) or (info.st_nlink==2 and len(linked)==1))
+                for name in linked+stale: os.unlink(name,dir_fd=target)
+                if linked or stale: os.fsync(target)
+                need(os.fstat(fd).st_nlink==1)
                 return True
             finally: os.close(fd)
         try: target=open_target(False)
@@ -724,25 +734,45 @@ def main():
         if target is not None:
             try:
                 need(stat.S_IMODE(os.fstat(target).st_mode)==0o700)
-                if matches_existing(target): return
+                if matches_existing(target) and (os.fstat(target).st_uid,os.fstat(target).st_gid)==(relay_uid,relay_gid): return
             finally: os.close(target)
         # Existing credentials are read-only and can be reused during a valid
         # forward continuation whose infrastructure lock is intentionally held.
         fd=os.open('infrastructure.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o600,dir_fd=state)
         locks.append(fd);private(fd);fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        # Only after lifecycle admission may a stale root-owned directory from
+        # an interrupted first bootstrap be reconciled to Ansible's relay owner.
+        try: fd=os.open('lifecycle.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=state)
+        except FileNotFoundError: fd=None
+        if fd is not None:
+            try:
+                private(fd)
+                need(json.loads(os.read(fd,1048577)).get('phase')=='released')
+            finally: os.close(fd)
         target=open_target(True)
         try:
             need(stat.S_IMODE(os.fstat(target).st_mode)==0o700)
+            owner=(os.fstat(target).st_uid,os.fstat(target).st_gid)
+            if owner==(0,0) and owner!=(relay_uid,relay_gid):
+                names=os.listdir(target)
+                need(all(name=='bot.env' or re.fullmatch(r'\.bot\.env-[0-9a-f]{32}',name) for name in names))
+                if not matches_existing(target):
+                    # With no published target there is no inode against which
+                    # to reconcile hardlinks. Validate every pending file before
+                    # changing directory ownership or exposing it to the service.
+                    for name in names:
+                        if name=='bot.env': continue
+                        fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
+                        try:
+                            info=os.fstat(fd)
+                            need(info.st_uid==0 and stat.S_ISREG(info.st_mode) and info.st_nlink==1 and
+                                 stat.S_IMODE(info.st_mode)==0o600 and info.st_size<=1024)
+                            raw=os.read(fd,1025)
+                            need((b'TELEGRAM_BOT_TOKEN='+token+b'\n').startswith(raw))
+                        finally: os.close(fd)
+                os.fchown(target,relay_uid,relay_gid);os.fchmod(target,0o700);os.fsync(target)
+            else: need(owner==(relay_uid,relay_gid))
             if matches_existing(target): return
-            # Creation can repair a fresh bridge, but cannot alter a held
-            # lifecycle or silently rotate a running service's identity.
-            try: fd=os.open('lifecycle.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=state)
-            except FileNotFoundError: fd=None
-            if fd is not None:
-                try:
-                    private(fd)
-                    need(json.loads(os.read(fd,1048577)).get('phase')=='released')
-                finally: os.close(fd)
             expected=b'TELEGRAM_BOT_TOKEN='+token+b'\n'
             temporary='.bot.env-'+uuid.uuid4().hex
             # Reuse a complete staging file left by a crash before publication;

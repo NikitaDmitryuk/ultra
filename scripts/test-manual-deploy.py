@@ -111,16 +111,19 @@ class BotTokenBootstrap(unittest.TestCase):
             with self.assertRaisesRegex(D.DeployError, '^bridge_bot_token_timeout$'):
                 D.bootstrap_bridge_bot_token(self.root, ['ssh'], self.token)
 
-    def remote_fixture(self, token=None):
+    def remote_fixture(self, token=None, program=None):
         # Run the actual helper against isolated paths; only root identity and
         # sticky /tmp ancestor admission are adapted for an unprivileged fixture.
-        program = D.REMOTE_BOT_TOKEN_PROGRAM
+        program = D.REMOTE_BOT_TOKEN_PROGRAM if program is None else program
         program = program.replace("'/var/lib/ultra-ansible", repr(str(self.root / 'state'))[:-1])
         program = program.replace("'/etc", repr(str(self.root / 'etc'))[:-1])
+        program = program.replace("relay_user=pwd.getpwnam('ultra-relay')\nrelay_group=grp.getgrnam('ultra-relay')",
+                                  "relay_user=type('User',(),{'pw_uid':os.geteuid(),'pw_gid':os.getegid()})()\nrelay_group=type('Group',(),{'gr_gid':os.getegid()})()")
+        program = program.replace('(0,0)', '(os.geteuid(),os.getegid())')
+        program = program.replace('need(owner in allowed and not info.st_mode&0o022)',
+                                  'need(owner in allowed or (index<len(parts)-1 and (info.st_mode&stat.S_ISVTX or (info.st_uid in (0,os.geteuid()) and not info.st_mode&0o022))))')
         program = program.replace('info.st_uid==0', 'info.st_uid==os.geteuid()')
         program = program.replace('oi.st_uid==0', 'oi.st_uid==os.geteuid()')
-        program = program.replace('info.st_uid==os.geteuid() and not info.st_mode&0o022',
-                                  "info.st_uid in (0,os.geteuid(),os.stat('/').st_uid) and not info.st_mode&0o022")
         program = program.replace('need(os.geteuid()==0)', 'need(True)')
         program = program.replace('not info.st_mode&0o022)', '(not info.st_mode&0o022 or info.st_mode&stat.S_ISVTX))')
         return subprocess.run([sys.executable, '-I', '-c', program], input=self.token if token is None else token,
@@ -138,6 +141,8 @@ class BotTokenBootstrap(unittest.TestCase):
         self.assertEqual(path.read_bytes(), b'TELEGRAM_BOT_TOKEN=' + self.token + b'\n')
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(path.stat().st_nlink, 1)
+        self.assertEqual((path.parent.stat().st_uid, path.parent.stat().st_gid), (os.geteuid(), os.getegid()))
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
         path.write_bytes(b'TELEGRAM_BOT_TOKEN="' + self.token + b'"\nOTHER=ignored\n')
         before = path.stat()
         self.assertEqual(self.remote_fixture().returncode, 0)
@@ -185,17 +190,7 @@ class BotTokenBootstrap(unittest.TestCase):
         program = D.REMOTE_BOT_TOKEN_PROGRAM.replace(
             "os.link(temporary,'bot.env',src_dir_fd=target,dst_dir_fd=target,follow_symlinks=False)",
             "os.link(temporary,'bot.env',src_dir_fd=target,dst_dir_fd=target,follow_symlinks=False);os._exit(23)")
-        replacements = (("'/var/lib/ultra-ansible", repr(str(self.root / 'state'))[:-1]),
-                        ("'/etc", repr(str(self.root / 'etc'))[:-1]),
-                        ('info.st_uid==0', 'info.st_uid==os.geteuid()'),
-                        ('info.st_uid==os.geteuid() and not info.st_mode&0o022',
-                         "info.st_uid in (0,os.geteuid(),os.stat('/').st_uid) and not info.st_mode&0o022"),
-                        ('need(os.geteuid()==0)', 'need(True)'),
-                        ('not info.st_mode&0o022)', '(not info.st_mode&0o022 or info.st_mode&stat.S_ISVTX))'))
-        for old, new in replacements:
-            program = program.replace(old,new)
-        crashed = subprocess.run([sys.executable, '-I', '-c', program], input=self.token,
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        crashed = self.remote_fixture(program=program)
         self.assertEqual(crashed.returncode, 23)
         self.assertEqual(path.stat().st_nlink, 2)
         self.assertEqual(self.remote_fixture().returncode, 0)
