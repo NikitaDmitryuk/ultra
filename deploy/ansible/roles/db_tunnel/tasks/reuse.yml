@@ -89,7 +89,6 @@
     mode: "0600"
   no_log: true
   diff: false
-  notify: Restart ultra database tunnel
 - name: Inspect installed database tunnel private key digest
   ansible.builtin.stat:
     path: /etc/ultra-db-tunnel/id_ed25519

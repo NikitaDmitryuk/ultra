@@ -41,6 +41,15 @@ func retryFixture(t *testing.T) (string, []byte) {
 	return root, receipt
 }
 
+func TestBootstrapRetryOperationAllowsFrozenReadOnlyInspection(t *testing.T) {
+	if !bootstrapRetryOperation("inspect-bootstrap") {
+		t.Fatal("frozen read-only bootstrap inspection cannot be retried")
+	}
+	if bootstrapRetryOperation("inspect-upgrade") || bootstrapRetryOperation("arbitrary") {
+		t.Fatal("non-bootstrap operation entered frozen bootstrap retry allowlist")
+	}
+}
+
 func TestRetryArchivesBeforeAdvancingAndResumesCrashes(t *testing.T) {
 	for _, failAt := range []int{1, 2, 3, 4} {
 		t.Run(string(rune('0'+failAt)), func(t *testing.T) {

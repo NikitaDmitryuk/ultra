@@ -37,7 +37,6 @@
     owner: root
     group: root
     mode: "0600"
-  notify: Restart ultra database tunnel
 - name: Enforce private key permissions
   ansible.builtin.file:
     path: /etc/ultra-db-tunnel/id_ed25519
@@ -53,14 +52,11 @@
     owner: root
     group: root
     mode: "0644"
-  notify: Restart ultra database tunnel
-- name: Activate database tunnel configuration
-  ansible.builtin.meta: flush_handlers
-- name: Ensure database tunnel enabled and running
+- name: Enable and restart database tunnel after installing configuration
   ansible.builtin.systemd_service:
     name: ultra-db-tunnel.service
     enabled: true
-    state: started
+    state: restarted
     daemon_reload: true
 - name: Wait for local PostgreSQL tunnel listener
   ansible.builtin.wait_for:

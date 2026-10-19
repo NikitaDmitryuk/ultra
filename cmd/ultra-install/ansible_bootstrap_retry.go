@@ -124,7 +124,8 @@ func withFrozenBootstrapStageLeaseWith(
 		return deployansible.Receipt{}, errors.New("retry_inputs_invalid")
 	}
 	switch job.Operation {
-	case "bootstrap",
+	case "inspect-bootstrap",
+		"bootstrap",
 		"bootstrap-postgres",
 		"bootstrap-exit",
 		"bootstrap-bridge",
@@ -236,7 +237,52 @@ func withFrozenBootstrapStageLeaseWith(
 	}
 	if !mode.Local {
 		if !mode.Native {
-			return deployansible.Receipt{}, errors.New("retry_remote_lifecycle_attachment_unsupported")
+			if job.Operation != "inspect-bootstrap" {
+				return deployansible.Receipt{}, errors.New("retry_remote_lifecycle_attachment_unsupported")
+			}
+			if err := validateFrozenRemoteInspection(directory, lock, mode, request.Inventory); err != nil {
+				return deployansible.Receipt{}, err
+			}
+			attemptRaw, err := deps.readPrivate(filepath.Join(attempt, "..", "attempt.json"))
+			if err != nil {
+				return deployansible.Receipt{}, err
+			}
+			var activeAttempt struct {
+				Active   string `json:"active"`
+				Complete bool   `json:"complete"`
+			}
+			if json.Unmarshal(attemptRaw, &activeAttempt) != nil || activeAttempt.Active != filepath.Base(attempt) || activeAttempt.Complete {
+				return deployansible.Receipt{}, errors.New("retry_active_attempt_required")
+			}
+			operator, operatorRelease, err := deps.operator(ctx, mode.OperatorDirectory)
+			if err != nil {
+				return deployansible.Receipt{}, err
+			}
+			defer operatorRelease()
+			if err = validateLockedStage(); err != nil {
+				return deployansible.Receipt{}, err
+			}
+			currentMode, err := deps.readPrivate(modePath)
+			if err != nil || !bytes.Equal(currentMode, modeRaw) {
+				return deployansible.Receipt{}, errors.New("retry_frozen_inputs_changed")
+			}
+			locked, release, err := deps.remoteLock(operator, lock)
+			if err != nil {
+				return deployansible.Receipt{}, err
+			}
+			defer release()
+			if err = validateLockedStage(); err != nil {
+				return deployansible.Receipt{}, err
+			}
+			currentMode, err = deps.readPrivate(modePath)
+			if err != nil || !bytes.Equal(currentMode, modeRaw) {
+				return deployansible.Receipt{}, errors.New("retry_frozen_inputs_changed")
+			}
+			currentAttempt, err := deps.readPrivate(filepath.Join(attempt, "..", "attempt.json"))
+			if err != nil || !bytes.Equal(currentAttempt, attemptRaw) {
+				return deployansible.Receipt{}, errors.New("retry_frozen_inputs_changed")
+			}
+			return action(locked)
 		}
 		if lock == bootstrapBrokerLockDirectory {
 			return deployansible.Receipt{}, errors.New("retry_frozen_execution_invalid")
@@ -335,6 +381,37 @@ func withFrozenBootstrapStageLeaseWith(
 		return deployansible.Receipt{}, err
 	}
 	return action(locked)
+}
+
+// A failed initial inspection is read-only and precedes the remote lifecycle
+// reservation. Retry only that frozen stage under its original local locks.
+// Mutating remote bootstrap stages still require broker lifecycle attachment.
+func validateFrozenRemoteInspection(directory, lock string, mode frozenExecution, inventory map[string]any) error {
+	if mode.Local || mode.Native || !filepath.IsAbs(lock) || filepath.Clean(lock) != lock ||
+		filepath.Clean(filepath.Dir(filepath.Dir(filepath.Dir(directory)))) != lock ||
+		filepath.Base(directory) != "inspect" ||
+		!strings.HasPrefix(filepath.Base(filepath.Dir(directory)), "attempt-") ||
+		!strings.HasPrefix(filepath.Base(filepath.Dir(filepath.Dir(directory))), "bootstrap-") ||
+		mode.OperatorDirectory != filepath.Join(lock, "operator") {
+		return errors.New("retry_frozen_execution_invalid")
+	}
+	target := strings.Split(mode.Target, "|")
+	all, _ := inventory["all"].(map[string]any)
+	vars, _ := all["vars"].(map[string]any)
+	children, _ := all["children"].(map[string]any)
+	bridgeGroup, _ := children["bridge"].(map[string]any)
+	hosts, _ := bridgeGroup["hosts"].(map[string]any)
+	bridge, _ := hosts["bridge"].(map[string]any)
+	sshArgs, _ := vars["ansible_ssh_common_args"].(string)
+	if len(target) != 2 || target[0] == "" || target[1] == "" ||
+		bridge["ansible_host"] != target[0] || bridge["ansible_connection"] == "local" ||
+		vars["ultra_inspect_dir"] != filepath.Join(filepath.Dir(directory), "inspection") ||
+		!strings.Contains(sshArgs, "StrictHostKeyChecking=yes") ||
+		!strings.Contains(sshArgs, "UpdateHostKeys=no") ||
+		!strings.Contains(sshArgs, "UserKnownHostsFile=") {
+		return errors.New("retry_frozen_target_invalid")
+	}
+	return nil
 }
 
 func validateBootstrapRetryOperatorDirectory(path string) error {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -197,6 +198,171 @@ func TestFrozenRemoteBootstrapRetryRejectsBeforeLocksOrAction(t *testing.T) {
 				t.Fatalf("unexpected rejection: %v", err)
 			}
 		})
+	}
+}
+
+func TestFrozenRemoteInspectionRetryUsesOriginalLocksAndPinnedTarget(t *testing.T) {
+	root := t.TempDir()
+	planRoot := filepath.Join(root, "bootstrap-plan")
+	attempt := filepath.Join(planRoot, "attempt-frozen")
+	directory := filepath.Join(attempt, "inspect")
+	lock := root
+	operatorDirectory := filepath.Join(lock, "operator")
+	inventory := map[string]any{"all": map[string]any{
+		"vars": map[string]any{
+			"ultra_inspect_dir": filepath.Join(attempt, "inspection"),
+			"ansible_ssh_common_args": "-o StrictHostKeyChecking=yes -o UpdateHostKeys=no " +
+				"-o UserKnownHostsFile=/home/operator/.ssh/known_hosts",
+		},
+		"children": map[string]any{"bridge": map[string]any{"hosts": map[string]any{"bridge": map[string]any{
+			"ansible_host": "bridge.example",
+		}}}},
+	}}
+	request, _ := json.Marshal(map[string]any{
+		"inventory": inventory,
+		"variables": map[string]any{"ultra_lock_directory": lock},
+	})
+	digest := sha256.Sum256(request)
+	hash := hex.EncodeToString(digest[:])
+	job, _ := json.Marshal(map[string]any{
+		"schema_version": 1, "operation": "inspect-bootstrap", "request_sha256": hash, "binary_sha256": hash,
+	})
+	modeRaw, _ := json.Marshal(frozenExecution{
+		Schema: 1, Target: "bridge.example|203.0.113.8", LockDirectory: lock, OperatorDirectory: operatorDirectory,
+	})
+	receipt, _ := json.Marshal(map[string]any{
+		"schema_version": 1, "operation": "inspect-bootstrap", "request_sha256": hash,
+		"binary_sha256": hash, "state": "failed",
+	})
+	attemptState, _ := json.Marshal(map[string]any{"active": filepath.Base(attempt), "complete": false})
+	deps := frozenBootstrapRetryDependencies{
+		readPrivate: func(path string) ([]byte, error) {
+			switch filepath.Base(path) {
+			case "request.json":
+				return request, nil
+			case "job.json":
+				return job, nil
+			case "execution-mode.json":
+				return modeRaw, nil
+			case "receipt.json":
+				return receipt, nil
+			case "attempt.json":
+				return attemptState, nil
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+		operator: func(ctx context.Context, path string) (context.Context, func(), error) {
+			if path != operatorDirectory {
+				t.Fatalf("operator lock = %q", path)
+			}
+			return ctx, func() {}, nil
+		},
+		remoteLock: func(ctx context.Context, path string) (context.Context, func(), error) {
+			if path != lock {
+				t.Fatalf("state lock = %q", path)
+			}
+			return context.WithValue(ctx, retryAttachmentTestKey{}, path), func() {}, nil
+		},
+		attach: func(context.Context, string, string) (context.Context, func(), error) {
+			t.Fatal("read-only remote inspection must not attach broker")
+			return nil, nil, nil
+		},
+		replay: func(ctx context.Context, path, _, _ string) (deployansible.Receipt, error) {
+			if path != directory || ctx.Value(retryAttachmentTestKey{}) != lock {
+				t.Fatal("retry did not retain frozen stage and original state lock")
+			}
+			return deployansible.Receipt{State: "succeeded"}, nil
+		},
+	}
+	receiptResult, err := retryFrozenBootstrapOperatorWith(context.Background(), directory, "python", "ansible", deps)
+	if err != nil || receiptResult.State != "succeeded" {
+		t.Fatalf("frozen remote inspection retry failed: receipt=%#v err=%v", receiptResult, err)
+	}
+}
+
+func TestFrozenRemoteInspectionRetryReplaysFailedFrozenStage(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python unavailable")
+	}
+	root := t.TempDir()
+	if err = os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	operator := filepath.Join(root, "operator")
+	if err = os.Mkdir(operator, 0700); err != nil {
+		t.Fatal(err)
+	}
+	planRoot := filepath.Join(root, "bootstrap-plan")
+	attempt := filepath.Join(planRoot, "attempt-frozen")
+	if err = os.MkdirAll(attempt, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(attempt, "inspect")
+	if err = os.WriteFile(filepath.Join(planRoot, "attempt.json"), []byte(`{"active":"attempt-frozen","complete":false}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	inventory := map[string]any{"all": map[string]any{
+		"vars": map[string]any{
+			"ultra_inspect_dir":       filepath.Join(attempt, "inspection"),
+			"ansible_ssh_common_args": "-o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o UserKnownHostsFile=/tmp/pinned-hosts",
+		},
+		"children": map[string]any{"bridge": map[string]any{"hosts": map[string]any{"bridge": map[string]any{
+			"ansible_host": "bridge.example",
+		}}}},
+	}}
+	variables := map[string]any{"ultra_lock_directory": root}
+	mode, _ := json.Marshal(frozenExecution{
+		Schema: 1, Target: "bridge.example|203.0.113.8", LockDirectory: root, OperatorDirectory: operator,
+	})
+	if err = os.WriteFile(filepath.Join(attempt, "execution-mode.json"), mode, 0600); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(root, "ansible-playbook")
+	source := "#!" + python + `
+import json,pathlib,sys
+job=pathlib.Path(sys.argv[-1][1:]).parent
+count=job/'calls'
+n=int(count.read_text())+1 if count.exists() else 1
+count.write_text(str(n))
+if n == 1: sys.exit(1)
+variables=json.loads((job/'variables.json').read_text())
+result=pathlib.Path(variables['ultra_result_file'])
+result.write_text(json.dumps({'verified': True}))
+result.chmod(0o600)
+inspection=pathlib.Path(json.loads((job/'inventory.json').read_text())['all']['vars']['ultra_inspect_dir'])
+inspection.mkdir(parents=True,exist_ok=True)
+(inspection/'bridge.json').write_text('{}')
+`
+	if err = os.WriteFile(executable, []byte(source), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, release, err := deployansible.WithOperationLock(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = deployansible.RunLocal(ctx, "inspect-bootstrap", inventory, variables, stage, python, executable); err == nil {
+		t.Fatal("initial failure missing")
+	}
+	release()
+	originalRequest, err := os.ReadFile(filepath.Join(stage, "request.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = retryFrozenBootstrapOperator(context.Background(), stage, python, executable); err != nil {
+		t.Fatal("retry frozen remote inspection:", err)
+	}
+	requestAfter, err := os.ReadFile(filepath.Join(stage, "request.json"))
+	if err != nil || string(requestAfter) != string(originalRequest) {
+		t.Fatal("frozen inspection request changed during retry", err)
+	}
+	calls, err := os.ReadFile(filepath.Join(stage, "calls"))
+	if err != nil || string(calls) != "2" {
+		t.Fatalf("inspection replay count = %q, err=%v", calls, err)
+	}
+	if _, err = os.Stat(filepath.Join(stage, "history", "attempt-1.json")); err != nil {
+		t.Fatal("failed receipt was not archived before retry:", err)
 	}
 }
 

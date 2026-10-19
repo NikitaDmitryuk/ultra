@@ -13,9 +13,38 @@ import (
 	ansibleassets "github.com/NikitaDmitryuk/ultra/deploy/ansible"
 )
 
+// bootstrapPostgresAdapterPaths is code-owned: callers cannot add overlay paths.
+var bootstrapPostgresAdapterPaths = [...]string{
+	"controller.py",
+	"playbooks/bootstrap-postgres.yml",
+	"playbooks/bootstrap-exit.yml",
+	"playbooks/bootstrap-bridge.yml",
+	"roles/db_tunnel/tasks/reuse.yml",
+	"roles/db_tunnel/tasks/install.yml",
+}
+
+// BootstrapPostgresAdapterID identifies every source byte overlaid by the adapter.
+// A corrected adapter gets a new linked directory without changing an old proof.
+func BootstrapPostgresAdapterID() (string, error) {
+	return bootstrapPostgresAdapterID(ansibleassets.Bundle.ReadFile)
+}
+
+func bootstrapPostgresAdapterID(readFile func(string) ([]byte, error)) (string, error) {
+	id := sha256.New()
+	for _, name := range bootstrapPostgresAdapterPaths {
+		data, err := readFile(name)
+		if err != nil {
+			return "", err
+		}
+		_, _ = id.Write([]byte(name + "\x00"))
+		_, _ = id.Write(data)
+	}
+	return hex.EncodeToString(id.Sum(nil))[:16], nil
+}
+
 // RunLocalRetryFailedAdaptedBootstrapPostgres creates a linked component anchor
-// from an old bootstrap job. Original roles and all other infrastructure source
-// bytes stay intact; only the supervisor and three fixed component plays change.
+// from an old bootstrap job. Only the supervisor, component plays and the fixed
+// bridge tunnel ordering fix are overlaid; all other original source stays intact.
 // This operator-only API has no caller-selected operation or overlay paths.
 func RunLocalRetryFailedAdaptedBootstrapPostgres(
 	ctx context.Context,
@@ -89,7 +118,7 @@ func verifyOrPrepareAdaptedBootstrapPostgres(inventory, variables map[string]any
 	baseHash := sha256.Sum256(baseRaw)
 	overlay := map[string][]byte{}
 	overlayHashes := map[string]string{}
-	for _, name := range []string{"controller.py", "playbooks/bootstrap-postgres.yml", "playbooks/bootstrap-exit.yml", "playbooks/bootstrap-bridge.yml"} {
+	for _, name := range bootstrapPostgresAdapterPaths {
 		data, readErr := ansibleassets.Bundle.ReadFile(name)
 		if readErr != nil {
 			return readErr

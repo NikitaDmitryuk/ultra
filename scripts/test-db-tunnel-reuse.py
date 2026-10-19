@@ -41,6 +41,28 @@ class TunnelReuseTests(unittest.TestCase):
         self.assertLess(reuse.index(verify), next(i for i, task in enumerate(reuse)
                                                   if task['name'] == 'Install preserved database tunnel private key'))
 
+    def test_restart_only_after_install_even_when_only_private_key_changed(self):
+        generate = yaml.safe_load((ROLE / 'tasks/generate.yml').read_text())
+        reuse = yaml.safe_load((ROLE / 'tasks/reuse.yml').read_text())
+        install = yaml.safe_load((ROLE / 'tasks/install.yml').read_text())
+        for task in generate + reuse + install:
+            self.assertNotIn('notify', task, task['name'])
+            self.assertNotEqual(task.get('ansible.builtin.meta'), 'flush_handlers')
+        self.assertFalse(any('ansible.builtin.systemd_service' in task for task in generate + reuse))
+        services = [(i, task) for i, task in enumerate(install) if 'ansible.builtin.systemd_service' in task]
+        self.assertEqual(len(services), 1)
+        restart_index, restart = services[0]
+        self.assertEqual(restart['ansible.builtin.systemd_service'], {
+            'name': 'ultra-db-tunnel.service', 'enabled': True,
+            'state': 'restarted', 'daemon_reload': True,
+        })
+        self.assertNotIn('when', restart)  # Also runs if only the key changed in generate.
+        for name in ('Install pinned database SSH host keys', 'Enforce private key permissions',
+                     'Install database tunnel systemd unit'):
+            self.assertLess(next(i for i, task in enumerate(install) if task['name'] == name), restart_index)
+        self.assertGreater(next(i for i, task in enumerate(install)
+                                if 'ansible.builtin.wait_for' in task), restart_index)
+
     def test_local_reuse_pins_source_derives_public_and_never_logs_private_material(self):
         with tempfile.TemporaryDirectory(prefix='ultra-tunnel-reuse-') as name:
             directory = Path(name)
@@ -76,7 +98,6 @@ class TunnelReuseTests(unittest.TestCase):
                 'hosts': 'bridge', 'gather_facts': False,
                 'vars': {'ultra_db_tunnel_private_key_source': str(source), 'ultra_db_tunnel_private_key_sha256': digest},
                 'tasks': tasks,
-                'handlers': [{'name': 'Restart ultra database tunnel', 'ansible.builtin.debug': {'msg': 'synthetic restart'}}],
             }], sort_keys=False))
             environment = os.environ.copy()
             environment['ANSIBLE_CONFIG'] = str(ROOT / 'deploy/ansible/ansible.cfg')

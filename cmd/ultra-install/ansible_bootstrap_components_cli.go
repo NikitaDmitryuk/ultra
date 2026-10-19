@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
@@ -11,12 +9,11 @@ import (
 	"path/filepath"
 	"syscall"
 
-	ansibleassets "github.com/NikitaDmitryuk/ultra/deploy/ansible"
 	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 )
 
 // An explicit compatibility operation links new component receipts to an old
-// frozen bootstrap. The old job, source roles and its failure history stay intact.
+// frozen bootstrap. Its original bundle, job and failure history stay intact.
 func runAnsibleBootstrapComponents(args []string) {
 	flags := flag.NewFlagSet("ansible-bootstrap-components", flag.ExitOnError)
 	stage := flags.String("state-dir", "", "original private failed bootstrap stage")
@@ -43,16 +40,11 @@ func resumeBootstrapComponents(ctx context.Context, stage, python, executable st
 	if err = assertBootstrapComponentContinuationLifecycle(ctx, stage, inventory, variables, python, executable); err != nil {
 		return deployansible.Receipt{}, err
 	}
-	id := sha256.New()
-	for _, name := range []string{"controller.py", "playbooks/bootstrap-postgres.yml", "playbooks/bootstrap-exit.yml", "playbooks/bootstrap-bridge.yml"} {
-		data, err := ansibleassets.Bundle.ReadFile(name)
-		if err != nil {
-			return deployansible.Receipt{}, err
-		}
-		_, _ = id.Write([]byte(name + "\x00"))
-		_, _ = id.Write(data)
+	id, err := deployansible.BootstrapPostgresAdapterID()
+	if err != nil {
+		return deployansible.Receipt{}, err
 	}
-	directory := filepath.Join(filepath.Dir(stage), "linked-components-"+hex.EncodeToString(id.Sum(nil))[:16])
+	directory := filepath.Join(filepath.Dir(stage), "linked-components-"+id)
 	if err := ensurePrivateBootstrapDirectory(directory); err != nil {
 		return deployansible.Receipt{}, err
 	}
