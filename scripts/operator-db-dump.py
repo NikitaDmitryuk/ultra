@@ -95,12 +95,16 @@ def main(argv=None):
     try:
         values = config_values(ROOT / 'install.config')
         host = str(ipaddress.ip_address(values.get('DATABASE_IP', '')))
+        bridge = str(ipaddress.ip_address(values.get('BRIDGE_IP', '')))
         database = values.get('DB_NAME', '').strip() or 'ultra_db'
         require(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]*', database), 'DB_NAME must be a literal database name')
         key = Path(values.get('DATABASE_SSH_KEY', '')).expanduser()
         require(key.is_absolute(), 'DATABASE_SSH_KEY must be an absolute operator path')
+        bridge_key = Path(values.get('BRIDGE_SSH_KEY', '')).expanduser()
+        require(bridge_key.is_absolute(), 'BRIDGE_SSH_KEY must be an absolute operator path')
         stage = 'SSH identity preflight'
         local_file(key, private=True)  # Metadata only: SSH opens the key itself.
+        local_file(bridge_key, private=True)
         identity = (args.identity or Path(values.get('ULTRA_OPERATOR_AGE_IDENTITY_FILE', '').strip()
                     or str(Path.home() / '.local/share/ultra/recovery/age-identity.txt'))).expanduser().absolute()
         stage = 'age identity preflight'
@@ -126,13 +130,23 @@ def main(argv=None):
             stage = 'host-key pin'
             matches = run(['ssh-keygen', '-F', host, '-f', str(pinned)], stdout=subprocess.PIPE).stdout
             require(matches.strip(), 'database host-key pin is missing')
+            bridge_matches = run(['ssh-keygen', '-F', bridge, '-f', str(pinned)], stdout=subprocess.PIPE).stdout
+            require(bridge_matches.strip(), 'bridge host-key pin is missing')
             remote = shlex.join(['runuser', '-u', 'postgres', '--', 'pg_dump', '-Fc', '--no-owner', '--no-acl', '--dbname', database])
+            proxy = shlex.join([
+                'ssh', '-F', '/dev/null', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
+                '-o', 'StrictHostKeyChecking=yes', '-o', 'UserKnownHostsFile=' + str(pinned),
+                '-o', 'GlobalKnownHostsFile=/dev/null', '-o', 'UpdateHostKeys=no',
+                '-o', 'VerifyHostKeyDNS=no', '-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none',
+                '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes', '-i', str(bridge_key),
+                '-W', host + ':22', 'root@' + bridge,
+            ])
             ssh = ['ssh', '-F', '/dev/null', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
                    '-o', 'UserKnownHostsFile=' + str(pinned), '-o', 'GlobalKnownHostsFile=/dev/null',
                    '-o', 'UpdateHostKeys=no', '-o', 'VerifyHostKeyDNS=no', '-o', 'IdentitiesOnly=yes',
                    '-o', 'IdentityAgent=none', '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes',
                    '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3',
-                   '-i', str(key), '--', 'root@' + host, remote]
+                   '-o', 'ProxyCommand=' + proxy, '-i', str(key), '--', 'root@' + host, remote]
             encrypted = scratch / 'dump.age'
             stage = 'pg_dump / encryption'
             with encrypted.open('xb') as stream:

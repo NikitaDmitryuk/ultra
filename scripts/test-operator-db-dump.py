@@ -79,6 +79,7 @@ class OperatorDumpTest(unittest.TestCase):
         self.identity.chmod(0o600)
         self.config = self.root / 'install.config'
         self.config.write_text('DATABASE_IP="192.0.2.30" # comment\nDATABASE_SSH_KEY=' +
+                               repr(str(self.key)) + '\nBRIDGE_IP="192.0.2.20"\nBRIDGE_SSH_KEY=' +
                                repr(str(self.key)) + '\nDB_NAME=\'fixture_db\'\nULTRA_AUTOMATION_AGE_RECIPIENT=age1fixture\n')
         self.bin = self.root / 'bin'
         self.bin.mkdir()
@@ -129,9 +130,14 @@ class OperatorDumpTest(unittest.TestCase):
         for option in ('StrictHostKeyChecking=yes', 'GlobalKnownHostsFile=/dev/null', 'UpdateHostKeys=no',
                        'IdentityAgent=none', 'IdentitiesOnly=yes', 'ForwardAgent=no'):
             self.assertIn(option, ssh)
+        proxy = next((option[len('ProxyCommand='):]
+                      for option in ssh if option.startswith('ProxyCommand=')), '')
+        self.assertIn('root@192.0.2.20', proxy)
+        self.assertLess(proxy.index('-W'), proxy.index('root@192.0.2.20'))
+        self.assertIn('192.0.2.30:22', proxy)
         self.assertEqual(ssh[-2], 'root@192.0.2.30')
         self.assertEqual(ssh[-1], 'runuser -u postgres -- pg_dump -Fc --no-owner --no-acl --dbname fixture_db')
-        self.assertNotIn('ProxyJump', ' '.join(ssh))
+        self.assertNotIn('ProxyJump=none', ' '.join(ssh))
         self.assertEqual([name for name, args in commands][-2:], ['age', 'pg_restore'])
         self.assertEqual(len(list(self.output.iterdir())), 2)
 
@@ -145,6 +151,14 @@ class OperatorDumpTest(unittest.TestCase):
 
     def test_no_database_pin_stops_before_ssh(self):
         self.pins.write_text('192.0.2.20 ssh-ed25519 other-key\n')
+        code, _, stderr = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertIn('stage=host-key pin', stderr)
+        self.assertFalse(any(name == 'ssh' for name, _ in self.commands()))
+        self.assert_clean()
+
+    def test_no_bridge_pin_stops_before_ssh(self):
+        self.pins.write_text('192.0.2.30 ssh-ed25519 fixture-key\n')
         code, _, stderr = self.invoke()
         self.assertEqual(code, 1)
         self.assertIn('stage=host-key pin', stderr)
