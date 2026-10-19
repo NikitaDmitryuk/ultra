@@ -1034,6 +1034,45 @@ class RemoteStagingDiagnostics(unittest.TestCase):
         self.assertEqual(self.failure(255, ('ssh: ' + self.sentinel).encode()),
             'bridge_staging_failed: reason=transport_exit exit_code=255')
 
+    def test_ssh_categories_never_expose_mixed_secret_output(self):
+        cases = [
+            ('ssh_host_key_rejected', b'Host key verification failed.'),
+            ('ssh_auth_rejected', b'Permission denied (publickey).'),
+            ('ssh_connect_timeout', b'connect to host example.net port 22: Connection timed out'),
+            ('ssh_connection_refused', b'connect to host example.net port 22: Connection refused'),
+            ('ssh_route_unavailable', b'connect to host example.net port 22: No route to host'),
+            ('ssh_dns_failure', b'Could not resolve hostname example.net: Name or service not known'),
+            ('ssh_handshake_failed', b'Unable to negotiate: no matching key exchange method found.'),
+            ('ssh_connection_closed', b'kex_exchange_identification: Connection closed by remote host'),
+        ]
+        for category, diagnostic in cases:
+            with self.subTest(category=category):
+                stderr = self.sentinel.encode() + b'\n' + diagnostic + b'\n' + self.sentinel.encode()
+                self.assertEqual(self.failure(255, stderr),
+                    'bridge_staging_failed: reason=' + category + ' exit_code=255')
+                # A wrapper exception exit must not inherit SSH classifications.
+                self.assertEqual(self.failure(1, stderr),
+                    'bridge_staging_failed: reason=remote_exit exit_code=1')
+
+    def test_all_fixed_ssh_fragments_map_without_interpolating_values(self):
+        for category, fragments in D.SSH_FAILURE_REASONS:
+            for fragment in fragments:
+                with self.subTest(category=category, fragment=fragment):
+                    self.assertEqual(self.failure(255, self.sentinel.encode() + b': ' + fragment.upper()),
+                        'bridge_staging_failed: reason=' + category + ' exit_code=255')
+
+    def test_unknown_and_truncated_ssh_stderr_use_transport_fallback(self):
+        for stderr, truncated in [
+                (self.sentinel.encode(), False),
+                (b'ultra_stage_failure:remote_input_invalid\n', False),
+                (b'Permission denied (publickey).\n' + self.sentinel.encode(), True),
+                (b'Connection refused', True)]:
+            with self.subTest(stderr=stderr, truncated=truncated):
+                result = subprocess.CompletedProcess([], 255, b'', stderr)
+                result.stderr_truncated = truncated
+                self.assertEqual(D.staging_failure(result),
+                    'bridge_staging_failed: reason=transport_exit exit_code=255')
+
     def test_success_keeps_verified_receipt_and_ignores_stderr(self):
         receipt = {'architecture': 'amd64', 'manifest_sha256': D.sha(self.manifest),
                    'config_sha256': D.sha(self.config),

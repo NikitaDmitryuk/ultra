@@ -1973,13 +1973,37 @@ def run_stage(command, *, cwd, stdin, timeout):
         process.stderr.close()
 
 
+SSH_FAILURE_REASONS = (
+    ('ssh_host_key_rejected', (b'host key verification failed', b'remote host identification has changed')),
+    ('ssh_auth_rejected', (b'permission denied', b'authentication failed', b'too many authentication failures')),
+    ('ssh_connect_timeout', (b'connection timed out', b'operation timed out')),
+    ('ssh_connection_refused', (b'connection refused',)),
+    ('ssh_route_unavailable', (b'no route to host', b'network is unreachable')),
+    ('ssh_dns_failure', (b'could not resolve hostname', b'name or service not known',
+                         b'temporary failure in name resolution')),
+    ('ssh_handshake_failed', (b'no matching key exchange method found', b'no matching host key type found',
+                              b'no matching cipher found', b'key exchange failed',
+                              b'bad protocol version identification', b'protocol mismatch')),
+    ('ssh_connection_closed', (b'connection closed', b'connection reset', b'broken pipe')),
+)
+
+
 def staging_failure(result):
-    # stderr can include credentials, paths or host identifiers. Only the remote
-    # wrapper's entire fixed-format diagnostic is eligible for public output.
+    # stderr can include credentials, paths or host identifiers. Public reasons
+    # are fixed constants, never fragments interpolated from captured output.
     reason = 'transport_exit' if result.returncode == 255 else 'remote_exit'
-    match = re.fullmatch(rb'ultra_stage_failure:([a-z_]+)\n', result.stderr or b'')
-    if not getattr(result, 'stderr_truncated', False) and match and match[1].decode('ascii') in STAGING_FAILURE_REASONS:
-        reason = match[1].decode('ascii')
+    if not getattr(result, 'stderr_truncated', False):
+        stderr = result.stderr or b''
+        if result.returncode == 255:
+            lowered = stderr.lower()
+            for category, fragments in SSH_FAILURE_REASONS:
+                if any(fragment in lowered for fragment in fragments):
+                    reason = category
+                    break
+        else:
+            match = re.fullmatch(rb'ultra_stage_failure:([a-z_]+)\n', stderr)
+            if match and match[1].decode('ascii') in STAGING_FAILURE_REASONS:
+                reason = match[1].decode('ascii')
     return 'bridge_staging_failed: reason=' + reason + ' exit_code=' + str(result.returncode)
 
 
