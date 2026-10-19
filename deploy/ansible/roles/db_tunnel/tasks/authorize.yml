@@ -23,6 +23,8 @@
     system: true
     password_lock: true
     state: present
+  when: ultra_db_tunnel_private_key_source | default('') | length == 0
+
 - name: Restrict database tunnel account home permissions
   ansible.builtin.file:
     path: /var/lib/ultra-db-tunnel
@@ -30,6 +32,8 @@
     owner: ultra-db-tunnel
     group: ultra-db-tunnel
     mode: "0700"
+  when: ultra_db_tunnel_private_key_source | default('') | length == 0
+
 - name: Create dedicated SSH authorization directory
   ansible.builtin.file:
     path: /var/lib/ultra-db-tunnel/.ssh
@@ -37,6 +41,8 @@
     owner: ultra-db-tunnel
     group: ultra-db-tunnel
     mode: "0700"
+  when: ultra_db_tunnel_private_key_source | default('') | length == 0
+
 - name: Install narrowly restricted bridge database tunnel key
   ansible.builtin.copy:
     content: |-
@@ -46,3 +52,4 @@
     group: ultra-db-tunnel
     mode: "0600"
   no_log: true
+  when: ultra_db_tunnel_private_key_source | default('') | length == 0

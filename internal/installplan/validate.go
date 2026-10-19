@@ -32,7 +32,8 @@ func validatePlan(p *InstallPlan, localProjection bool) error {
 		return errors.New("install plan is nil")
 	}
 	if p.LifecycleOnly &&
-		(p.Secrets.DatabaseDumpFile != "" || p.Secrets.DatabaseDumpSHA256 != "" || p.SourceValues["DATABASE_DUMP"] != "") {
+		(p.Secrets.DatabaseDumpFile != "" || p.Secrets.DatabaseDumpSHA256 != "" || p.SourceValues["DATABASE_DUMP"] != "" ||
+			p.Secrets.DatabaseTunnelPrivateKeyFile != "" || p.Secrets.DatabaseTunnelPrivateKeySHA256 != "" || p.SourceValues["DB_TUNNEL_PRIVATE_KEY_FILE"] != "") {
 		return errors.New("lifecycle plan must not contain bootstrap archive inputs")
 	}
 	if p.AdoptRuntime && (!p.FullAutomation() || !p.Bridge.ReuseSpec) {
@@ -54,6 +55,14 @@ func validatePlan(p *InstallPlan, localProjection bool) error {
 // validatePlanRoles is shared with read-only adoption preparation. Callers that
 // deploy a plan must first enforce its schema and complete automation policy.
 func validatePlanRoles(p *InstallPlan) error {
+	if p.Secrets.DatabaseTunnelPrivateKeyFile != "" || p.Secrets.DatabaseTunnelPrivateKeySHA256 != "" {
+		if !p.Database.Enabled {
+			return errors.New("DB_TUNNEL_PRIVATE_KEY_FILE requires a dedicated database")
+		}
+		if err := VerifyDatabaseTunnelPrivateKey(p.Secrets.DatabaseTunnelPrivateKeyFile, p.Secrets.DatabaseTunnelPrivateKeySHA256); err != nil {
+			return err
+		}
+	}
 	if strings.TrimSpace(p.SSH.User) == "" {
 		p.SSH.User = "root"
 	}

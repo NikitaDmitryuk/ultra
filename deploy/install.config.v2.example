@@ -19,6 +19,8 @@ DATABASE_SSH_KEY=/secure/database_ed25519
 # DATABASE_DUMP=/secure/database.dump
 # Reinstalling a bridge with an existing DB: private saved spec from bridge/backup.
 # DB_CREDENTIALS_FILE=/secure/previous-bridge-spec.json
+# Optional preserved, already-authorized Ed25519 tunnel key; strict reuse never writes primary authorized_keys.
+# DB_TUNNEL_PRIVATE_KEY_FILE=/secure/previous-db-tunnel-id_ed25519
 # One-time repair only: if login fails, set the app role password to the planned DSN.
 # Remove after successful deployment; the saved bridge spec then owns the credential.
 # DB_REPAIR_APP_CREDENTIALS=true

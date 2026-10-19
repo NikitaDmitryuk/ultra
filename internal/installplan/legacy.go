@@ -105,9 +105,10 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 			EnvFile:            valueDefault(v, "BOT_ENV_FILE", ".env"),
 		},
 		Secrets: SecretsConfig{
-			DatabaseCredentialsFile: v["DB_CREDENTIALS_FILE"],
-			DatabaseDumpFile:        v["DATABASE_DUMP"],
-			EnvFile:                 valueDefault(v, "BOT_ENV_FILE", ".env"),
+			DatabaseCredentialsFile:      v["DB_CREDENTIALS_FILE"],
+			DatabaseTunnelPrivateKeyFile: v["DB_TUNNEL_PRIVATE_KEY_FILE"],
+			DatabaseDumpFile:             v["DATABASE_DUMP"],
+			EnvFile:                      valueDefault(v, "BOT_ENV_FILE", ".env"),
 		},
 		Verification: Verification{
 			Enabled:           boolValue(v, "VERIFY_AFTER_INSTALL", false),

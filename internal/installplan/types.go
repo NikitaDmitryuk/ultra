@@ -85,10 +85,12 @@ type BotConfig struct {
 }
 
 type SecretsConfig struct {
-	DatabaseDumpFile        string `json:"database_dump_file,omitempty"`
-	DatabaseDumpSHA256      string `json:"database_dump_sha256,omitempty"`
-	DatabaseCredentialsFile string `json:"database_credentials_file,omitempty"`
-	EnvFile                 string `json:"env_file,omitempty"`
+	DatabaseTunnelPrivateKeyFile   string `json:"database_tunnel_private_key_file,omitempty"`
+	DatabaseTunnelPrivateKeySHA256 string `json:"database_tunnel_private_key_sha256,omitempty"`
+	DatabaseDumpFile               string `json:"database_dump_file,omitempty"`
+	DatabaseDumpSHA256             string `json:"database_dump_sha256,omitempty"`
+	DatabaseCredentialsFile        string `json:"database_credentials_file,omitempty"`
+	EnvFile                        string `json:"env_file,omitempty"`
 }
 
 type FeatureConfig struct {

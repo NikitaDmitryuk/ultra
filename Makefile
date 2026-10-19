@@ -193,6 +193,7 @@ test-ansible:
 	python3 scripts/test-ansible-release-contracts.py
 	python3 scripts/test-controller-enforcement.py
 	python3 scripts/test-ansible-db-tunnel-authorization.py
+	python3 scripts/test-db-tunnel-reuse.py
 	python3 scripts/test-ansible-safe-diagnostic.py
 	python3 scripts/test-release-ci.py
 	python3 scripts/test-ansible-owned-file.py

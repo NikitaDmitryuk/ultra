@@ -116,7 +116,7 @@ func CanonicalValuesToPlan(v map[string]string) (*InstallPlan, error) {
 func CanonicalLifecycleValuesToPlan(v map[string]string) (*InstallPlan, error) {
 	values := make(map[string]string, len(v))
 	for key, value := range v {
-		if key != "DATABASE_DUMP" {
+		if key != "DATABASE_DUMP" && key != "DB_TUNNEL_PRIVATE_KEY_FILE" {
 			values[key] = value
 		}
 	}
@@ -134,9 +134,11 @@ func LifecycleProjection(p *InstallPlan) *InstallPlan {
 	projected.LifecycleOnly = true
 	projected.Secrets.DatabaseDumpFile = ""
 	projected.Secrets.DatabaseDumpSHA256 = ""
+	projected.Secrets.DatabaseTunnelPrivateKeyFile = ""
+	projected.Secrets.DatabaseTunnelPrivateKeySHA256 = ""
 	projected.SourceValues = make(map[string]string, len(p.SourceValues))
 	for key, value := range p.SourceValues {
-		if key != "DATABASE_DUMP" {
+		if key != "DATABASE_DUMP" && key != "DB_TUNNEL_PRIVATE_KEY_FILE" {
 			projected.SourceValues[key] = value
 		}
 	}
@@ -168,6 +170,16 @@ func canonicalRoleValuesToPlan(v map[string]string) (*InstallPlan, error) {
 		return nil, errors.New("only install schema 2 is supported")
 	}
 	p := LegacyValuesToPlan(v)
+	if p.Secrets.DatabaseTunnelPrivateKeyFile != "" {
+		if !p.Database.Enabled {
+			return nil, errors.New("DB_TUNNEL_PRIVATE_KEY_FILE requires a dedicated database")
+		}
+		sum, err := DatabaseTunnelPrivateKeyDigest(p.Secrets.DatabaseTunnelPrivateKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		p.Secrets.DatabaseTunnelPrivateKeySHA256 = sum
+	}
 	if p.Secrets.DatabaseDumpFile != "" {
 		sum, err := DatabaseDumpDigest(p.Secrets.DatabaseDumpFile)
 		if err != nil {

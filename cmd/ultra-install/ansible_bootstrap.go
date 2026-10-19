@@ -152,6 +152,13 @@ func bootstrapInventoryWithNativeAttestation(
 		}
 		common["ultra_db_tunnel_host"] = p.Database.PrimaryHost
 		common["ultra_db_tunnel_known_hosts_source"] = pins
+		if path := p.Secrets.DatabaseTunnelPrivateKeyFile; path != "" {
+			if err := installplan.VerifyDatabaseTunnelPrivateKey(path, p.Secrets.DatabaseTunnelPrivateKeySHA256); err != nil {
+				return nil, err
+			}
+			common["ultra_db_tunnel_private_key_source"] = path
+			common["ultra_db_tunnel_private_key_sha256"] = p.Secrets.DatabaseTunnelPrivateKeySHA256
+		}
 
 	}
 	return map[string]any{

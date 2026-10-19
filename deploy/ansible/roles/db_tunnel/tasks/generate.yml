@@ -17,10 +17,14 @@
     owner: root
     group: root
     mode: "0700"
+- name: Restore the explicitly pinned database tunnel identity
+  ansible.builtin.include_tasks: reuse.yml
+  when: ultra_db_tunnel_private_key_source | default('') | length > 0
 - name: Generate dedicated Ed25519 key when absent
   ansible.builtin.command:
     argv: [ssh-keygen, -q, -t, ed25519, -N, "", -C, ultra-db-tunnel, -f, /etc/ultra-db-tunnel/id_ed25519]
     creates: /etc/ultra-db-tunnel/id_ed25519
+  when: ultra_db_tunnel_private_key_source | default('') | length == 0
   no_log: true
 - name: Enforce private key permissions
   ansible.builtin.file:

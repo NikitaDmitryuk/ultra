@@ -21,6 +21,7 @@
 | Восстановление recovery-инструментов перед readiness | `python3 scripts/test-recovery-tools-bootstrap.py`; Go-тесты `TestRecoveryBootstrap`; operation mapping и syntax check `bootstrap-recovery-inspect.yml`, `bootstrap-recovery-tools.yml`; crash/resume, fallback и завершённый replay |
 | Совместимость controller при retirement floor | `python3 scripts/test-controller-enforcement.py`; `python3 scripts/test-ansible-release-contracts.py`; focused Go tests `TestUpgradeEnforcement`, `TestEnforcementPreflightRetention`, `TestControllerEnforcementProtocol`; syntax check `inspect-upgrade.yml` |
 | SQL, репозитории, миграции | Генерация SQLC при изменении схемы/запросов; `go test ./internal/db` с отдельной тестовой БД |
+| Восстановление DB tunnel identity | `env -u DATABASE_URL go test ./internal/installplan ./cmd/ultra-install -run 'DatabaseTunnel|TunnelReuse'`; `python3 scripts/test-db-tunnel-reuse.py`; operation mapping, Ansible syntax check `bootstrap.yml` и `bootstrap-postgres.yml`; `make harness-check` |
 | Встроенные web-ресурсы или установочные скрипты | Тесты затронутого Go-пакета, пересборка соответствующего бинарника; для UI — `make test-ui` (Node.js 22+) и проверка затронутого сценария в браузере |
 
 Сборка бинарников: `make build`, `make build-install`, `make build-bot`.
