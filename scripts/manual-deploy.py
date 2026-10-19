@@ -419,6 +419,13 @@ FORWARD_ATTESTATION_REASONS = {
     'manual_forward_continuation_chain_invalid': 'chain_invalid',
     'manual_forward_continuation_evidence_invalid': 'evidence_invalid',
     'remote_input_invalid': 'input_invalid',
+    'forward_proof_missing': 'forward_proof_missing',
+    'lifecycle_evidence_missing': 'lifecycle_evidence_missing',
+    'predecessor_operation_missing': 'predecessor_operation_missing',
+    'predecessor_activation_evidence_missing': 'predecessor_activation_evidence_missing',
+    'predecessor_candidate_evidence_missing': 'predecessor_candidate_evidence_missing',
+    'handoff_evidence_missing': 'handoff_evidence_missing',
+    'handoff_plan_evidence_missing': 'handoff_plan_evidence_missing',
 }
 
 
@@ -1060,11 +1067,25 @@ probe_sha=(sys.argv[11] if len(sys.argv)>11 else '') if mode=='run' else (sys.ar
 if mode=='continue':
     attestation_phase='remote_setup'
     attestation_reasons=''' + repr(FORWARD_ATTESTATION_REASONS) + r'''
+    def missing_evidence_reason(error):
+        filename=error.filename
+        parts=Path(filename).parts if isinstance(filename,str) else ()
+        if len(parts)>=2 and parts[-2]=='activate' and parts[-1] in ('request.json','job.json','receipt.json'):
+            return 'predecessor_activation_evidence_missing'
+        if parts and parts[-1]=='forward-operation.json': return 'forward_proof_missing'
+        if parts and parts[-1]=='lifecycle.json': return 'lifecycle_evidence_missing'
+        if parts and re.fullmatch(r'upgrade-v0\.0\.[0-9]+',parts[-1]): return 'predecessor_operation_missing'
+        if parts and parts[-1] in ('install.config','release-manifest.json'):
+            return 'predecessor_candidate_evidence_missing'
+        if parts and parts[-1]=='forward-handoff.json': return 'handoff_evidence_missing'
+        if parts and parts[-1] in ('execution-mode.json','operator-plan.json'):
+            return 'handoff_plan_evidence_missing'
+        return 'missing_evidence'
     def attestation_exception(kind,error,traceback):
         reason='unexpected_failure'
         if type(error) is ValueError:
             reason=attestation_reasons.get(str(error),'invalid_evidence')
-        elif isinstance(error,FileNotFoundError): reason='missing_evidence'
+        elif isinstance(error,FileNotFoundError): reason=missing_evidence_reason(error)
         elif isinstance(error,PermissionError): reason='permission_denied'
         elif isinstance(error,BlockingIOError): reason='lock_busy'
         print('ultra_forward_attestation:'+attestation_phase+':'+reason,file=sys.stderr)

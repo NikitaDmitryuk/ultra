@@ -913,17 +913,24 @@ class ForwardContinuationAttestationDiagnostics(unittest.TestCase):
         hook = D.REMOTE_PROGRAM[start:D.REMOTE_PROGRAM.index('forward_journal_sha=', start)]
         for error, reason in [(ValueError('manual_forward_continuation_lifecycle_changed'), 'lifecycle_changed'),
                               (FileNotFoundError('/private/path secret'), 'missing_evidence'),
+                              (FileNotFoundError(2, 'missing', '/private/upgrade-v0.0.123/activate/request.json'),
+                               'predecessor_activation_evidence_missing'),
+                              (FileNotFoundError(2, 'missing', '/private/upgrade-v0.0.123/lifecycle.json'),
+                               'lifecycle_evidence_missing'),
+                              (FileNotFoundError(2, 'missing', '/private/path/forward-operation.json'),
+                               'forward_proof_missing'),
                               (PermissionError('/private/path secret'), 'permission_denied'),
                               (BlockingIOError('secret'), 'lock_busy'),
                               (ValueError('arbitrary secret'), 'invalid_evidence'),
                               (RuntimeError('arbitrary secret'), 'unexpected_failure')]:
-            scope = {'mode': 'continue', 'sys': D.sys}
+            scope = {'mode': 'continue', 'sys': D.sys, 'Path': D.Path, 're': D.re}
             output = io.StringIO()
             with self.subTest(reason=reason), patch.object(D.sys, 'excepthook'), \
                  contextlib.redirect_stderr(output):
                 exec(hook, scope)
                 D.sys.excepthook(type(error), error, None)
             self.assertEqual(output.getvalue(), 'ultra_forward_attestation:remote_setup:' + reason + '\n')
+            self.assertNotIn('/private', output.getvalue())
 
     def test_classified_timeout_keeps_three_attempt_retry_limit(self):
         code = 'forward_continuation_attestation_failed_exit_255_phase_transport_ssh_timeout'
