@@ -865,6 +865,77 @@ class ReimagedAdoptionArchive(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), self.current)
 
 
+class ForwardContinuationAttestationDiagnostics(unittest.TestCase):
+    def failure(self, returncode, stderr):
+        sentinel = b'private-host.example 192.0.2.23 /private/path candidate-secret DB-secret KEY-secret'
+        def process(command, **kwargs):
+            kwargs['stderr'].write(stderr + b'\n' + sentinel)
+            return subprocess.CompletedProcess(command, returncode, stdout=sentinel)
+        output = io.StringIO()
+        with patch.object(D.subprocess, 'run', side_effect=process), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with self.assertRaises(D.DeployError) as raised:
+                D.run(['fixture'], Path('.'), 'forward_continuation_attestation', capture=True)
+        self.assertEqual(output.getvalue(), '')
+        self.assertNotIn('private', str(raised.exception))
+        self.assertNotIn('secret', str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        return str(raised.exception)
+
+    def test_timeout_is_classified_without_exposing_transport_output(self):
+        self.assertEqual(self.failure(255, b'ssh: connect to host private-host.example port 22: Connection timed out'),
+                         'forward_continuation_attestation_failed_exit_255_phase_transport_ssh_timeout')
+
+    def test_other_transport_failures_have_fixed_codes(self):
+        for stderr, reason in [(b'Connection refused', 'ssh_refused'),
+                               (b'No route to host', 'ssh_unreachable'),
+                               (b'Could not resolve hostname secret', 'ssh_dns_failed'),
+                               (b'Host key verification failed', 'ssh_host_key_failed'),
+                               (b'Permission denied (publickey)', 'ssh_auth_failed'),
+                               (b'arbitrary failure data', 'ssh_failed')]:
+            with self.subTest(reason=reason):
+                self.assertEqual(self.failure(255, stderr),
+                                 'forward_continuation_attestation_failed_exit_255_phase_transport_' + reason)
+
+    def test_remote_marker_is_allowlisted_and_arbitrary_output_is_suppressed(self):
+        self.assertEqual(self.failure(1, b'ultra_forward_attestation:remote_verification:lifecycle_changed'),
+                         'forward_continuation_attestation_failed_exit_1_phase_remote_verification_lifecycle_changed')
+        for stderr in [b'Traceback arbitrary private data',
+                       b'ultra_forward_attestation:remote_verification:secret',
+                       b'ultra_forward_attestation:private:missing_evidence',
+                       b'ultra_forward_attestation:remote_verification:lifecycle_changed secret']:
+            with self.subTest(stderr=stderr):
+                self.assertEqual(self.failure(1, stderr),
+                                 'forward_continuation_attestation_failed_exit_1_phase_remote_unknown')
+
+    def test_remote_exception_hook_never_emits_exception_text(self):
+        start = D.REMOTE_PROGRAM.index("if mode=='continue':\n    attestation_phase=")
+        hook = D.REMOTE_PROGRAM[start:D.REMOTE_PROGRAM.index('forward_journal_sha=', start)]
+        for error, reason in [(ValueError('manual_forward_continuation_lifecycle_changed'), 'lifecycle_changed'),
+                              (FileNotFoundError('/private/path secret'), 'missing_evidence'),
+                              (PermissionError('/private/path secret'), 'permission_denied'),
+                              (BlockingIOError('secret'), 'lock_busy'),
+                              (ValueError('arbitrary secret'), 'invalid_evidence'),
+                              (RuntimeError('arbitrary secret'), 'unexpected_failure')]:
+            scope = {'mode': 'continue', 'sys': D.sys}
+            output = io.StringIO()
+            with self.subTest(reason=reason), patch.object(D.sys, 'excepthook'), \
+                 contextlib.redirect_stderr(output):
+                exec(hook, scope)
+                D.sys.excepthook(type(error), error, None)
+            self.assertEqual(output.getvalue(), 'ultra_forward_attestation:remote_setup:' + reason + '\n')
+
+    def test_classified_timeout_keeps_three_attempt_retry_limit(self):
+        code = 'forward_continuation_attestation_failed_exit_255_phase_transport_ssh_timeout'
+        with patch.object(D, 'run', side_effect=D.DeployError(code)) as runner, \
+             patch.object(D.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(D.DeployError, '^' + code + '$'):
+                D.run_forward_continuation_attestation(['ssh', '-o', 'ConnectTimeout=15', 'fixture'], Path('.'))
+        self.assertEqual(runner.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
+
+
+
 class ForwardContinuationAttestationRetry(unittest.TestCase):
     def test_retries_exit_255_then_returns_success(self):
         responses = [D.DeployError('forward_continuation_attestation_failed_exit_255'), 'receipt']
@@ -3081,7 +3152,7 @@ class RemoteProgram(unittest.TestCase):
         with D.lock(self.parent / 'manual-deploy.lock'):
             rejected = self.execute('continue', forward_sha=D.sha(proof), prior_sha=prior_sha)
         self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn(b'BlockingIOError', rejected.stderr)
+        self.assertEqual(rejected.stderr, b'ultra_forward_attestation:remote_setup:lock_busy\n')
         self.assertFalse(self.result.exists())
 
     def test_absent_operation_is_rechecked_before_dispatch_after_attestation(self):

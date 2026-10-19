@@ -684,7 +684,9 @@ process и сохранение этой metadata штатным retention. Пр
 сохранённые handoff/drain и broker-bootstrap receipts при неизменных staged input,
 SSH transport и lifecycle исходной операции в фазе `applying`. Installer
 самостоятельно сверяет подписанный release, frozen plan, предыдущее доказательство,
-stage receipts и отсутствие activation.
+stage receipts и отсутствие activation. Wrapper пишет для этой read-only аттестации
+только фиксированный код ошибки с фазой и типом сбоя SSH; произвольный вывод SSH и
+удалённого Python не попадает в журнал. Повторяются не более трёх SSH-сбоев exit 255.
 
 Для устаревшего локального журнала legacy adoption, когда оператор подтвердил,
 что **все прежние целевые серверы уничтожены или переустановлены**, предусмотрено

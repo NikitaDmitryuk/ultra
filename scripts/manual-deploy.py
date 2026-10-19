@@ -410,12 +410,58 @@ def require_manual_quiescence(record):
             'manual_operation_quiescence_migration_required')
 
 
+FORWARD_ATTESTATION_REASONS = {
+    'manual_forward_continuation_inputs_missing': 'inputs_missing',
+    'manual_forward_continuation_predecessor_invalid': 'predecessor_invalid',
+    'manual_forward_continuation_lifecycle_changed': 'lifecycle_changed',
+    'manual_forward_continuation_handoff_evidence_invalid': 'handoff_evidence_invalid',
+    'manual_forward_continuation_retirement_changed': 'retirement_changed',
+    'manual_forward_continuation_chain_invalid': 'chain_invalid',
+    'manual_forward_continuation_evidence_invalid': 'evidence_invalid',
+    'remote_input_invalid': 'input_invalid',
+}
+
+
+def forward_attestation_failure(stderr, returncode):
+    """Return only fixed codes; transport output is never an error message."""
+    if returncode == 255:
+        for signatures, reason in [
+                ((b'Connection timed out', b'Operation timed out'), 'ssh_timeout'),
+                ((b'Connection refused',), 'ssh_refused'),
+                ((b'No route to host', b'Network is unreachable'), 'ssh_unreachable'),
+                ((b'Could not resolve hostname',), 'ssh_dns_failed'),
+                ((b'Host key verification failed', b'REMOTE HOST IDENTIFICATION HAS CHANGED'), 'ssh_host_key_failed'),
+                ((b'Permission denied',), 'ssh_auth_failed')]:
+            if any(signature in stderr for signature in signatures):
+                return 'phase_transport_' + reason
+        return 'phase_transport_ssh_failed'
+    allowed = set(FORWARD_ATTESTATION_REASONS.values()) | {
+        'missing_evidence', 'permission_denied', 'lock_busy', 'invalid_evidence', 'unexpected_failure'}
+    # Exact, entire-line matching prevents arbitrary exception text being copied.
+    for line in stderr.splitlines():
+        for phase in ('remote_setup', 'remote_verification'):
+            for reason in allowed:
+                if line == ('ultra_forward_attestation:' + phase + ':' + reason).encode():
+                    return 'phase_' + phase + '_' + reason
+    return 'phase_remote_unknown'
+
+
+
 def run(command, cwd, stage, capture=False, env=None):
     # Installer and build tools may include private input values in their errors.
-    # Expose only this wrapper's fixed stage and exit code, never their output.
-    result = subprocess.run(command, cwd=cwd, stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, check=False, env=env)
-    require(result.returncode == 0, stage + '_failed_exit_' + str(result.returncode))
+    # Only the read-only continuation probe has allowlisted failure diagnostics.
+    if stage == 'forward_continuation_attestation':
+        with tempfile.TemporaryFile() as errors:
+            result = subprocess.run(command, cwd=cwd, stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                                    stderr=errors, check=False, env=env)
+            if result.returncode != 0:
+                errors.seek(0)
+                code = forward_attestation_failure(errors.read(65536), result.returncode)
+                raise DeployError(stage + '_failed_exit_' + str(result.returncode) + '_' + code)
+    else:
+        result = subprocess.run(command, cwd=cwd, stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, check=False, env=env)
+        require(result.returncode == 0, stage + '_failed_exit_' + str(result.returncode))
     return result.stdout.decode().strip() if capture else None
 
 
@@ -429,7 +475,9 @@ def run_forward_continuation_attestation(command, cwd):
         try:
             return run(command, cwd, 'forward_continuation_attestation', capture=True)
         except DeployError as error:
-            if str(error) != 'forward_continuation_attestation_failed_exit_255' or attempt == 2:
+            code = str(error)
+            if (code != 'forward_continuation_attestation_failed_exit_255' and
+                    not code.startswith('forward_continuation_attestation_failed_exit_255_phase_')) or attempt == 2:
                 raise
             time.sleep(2 * (attempt + 1))
 
@@ -1009,6 +1057,19 @@ def need(ok, code='remote_input_invalid'):
 def digest(data): return hashlib.sha256(data).hexdigest()
 mode,commit,version,manifest_sha,config_sha,attempt=sys.argv[1:7]
 probe_sha=(sys.argv[11] if len(sys.argv)>11 else '') if mode=='run' else (sys.argv[7] if len(sys.argv)>7 else '')
+if mode=='continue':
+    attestation_phase='remote_setup'
+    attestation_reasons=''' + repr(FORWARD_ATTESTATION_REASONS) + r'''
+    def attestation_exception(kind,error,traceback):
+        reason='unexpected_failure'
+        if type(error) is ValueError:
+            reason=attestation_reasons.get(str(error),'invalid_evidence')
+        elif isinstance(error,FileNotFoundError): reason='missing_evidence'
+        elif isinstance(error,PermissionError): reason='permission_denied'
+        elif isinstance(error,BlockingIOError): reason='lock_busy'
+        print('ultra_forward_attestation:'+attestation_phase+':'+reason,file=sys.stderr)
+    sys.excepthook=attestation_exception
+
 forward_journal_sha=(sys.argv[12] if mode=='run' and len(sys.argv)>12 else
                      (sys.argv[8] if mode in ['stage','cleanup','continue'] and len(sys.argv)>8 else ''))
 prior_journal_sha=(sys.argv[16] if mode=='run' and len(sys.argv)>16 else
@@ -1658,6 +1719,7 @@ def verify_continuation(chain_offset=None):
             'attempt':attempt,'forward_journal_sha256':forward_journal_sha,'lifecycle_id':old_id,
             'prior_candidate':prior_candidate}
 if mode=='continue':
+    attestation_phase='remote_verification'
     print(json.dumps(verify_continuation()))
 elif mode=='stage':
     pending=Path(tempfile.mkdtemp(prefix='.manual-'+commit+'-',dir=parent))
