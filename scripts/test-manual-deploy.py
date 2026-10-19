@@ -980,6 +980,144 @@ class ForwardContinuationAttestationRetry(unittest.TestCase):
         sleep.assert_not_called()
 
 
+class RemoteStagingDiagnostics(unittest.TestCase):
+    """No SSH: mock the transport and execute only the exception hook locally."""
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.repo = Path(self.temporary.name)
+        self.bundle = self.repo / 'bundle'
+        self.bundle.mkdir()
+        self.commit = 'a' * 40
+        self.version = 'v0.0.' + str(int(self.commit, 16))
+        self.config = b'fixture config\n'
+        self.manifest = json.dumps({'assets': []}).encode()
+        (self.bundle / 'release-manifest.json').write_bytes(self.manifest)
+        self.sentinel = 'secret-token@private-host/private/path'
+
+    def stage(self, returncode, stdout=b'', stderr=b''):
+        completed = subprocess.CompletedProcess(['ssh'], returncode, stdout, stderr)
+        with patch.object(D, 'run_stage', return_value=completed) as process:
+            result = D.stage_remote(self.repo, self.repo, self.bundle, self.config,
+                ['ssh', 'fixture'], self.commit, self.version, D.sha(self.manifest))
+        self.assertEqual(process.call_args.kwargs['timeout'], 1800)
+        return result
+
+    def failure(self, returncode, stderr):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with self.assertRaises(D.DeployError) as caught:
+                self.stage(returncode, stderr=stderr)
+        self.assertEqual(output.getvalue(), '')
+        self.assertNotIn(self.sentinel, str(caught.exception))
+        return str(caught.exception)
+
+    def test_known_remote_reason_is_allowlisted(self):
+        for reason in D.STAGING_FAILURE_REASONS:
+            with self.subTest(reason=reason):
+                self.assertEqual(self.failure(1, ('ultra_stage_failure:' + reason + '\n').encode()),
+                    'bridge_staging_failed: reason=' + reason + ' exit_code=1')
+
+    def test_unknown_traceback_and_mixed_stderr_never_leak(self):
+        for stderr in [
+                ('Traceback: ValueError: ' + self.sentinel).encode(),
+                ('ultra_stage_failure:' + self.sentinel + '\n').encode(),
+                b'ultra_stage_failure:unknown_reason\n',
+                b'ultra_stage_failure:remote_input_invalid\n' + self.sentinel.encode(),
+                b'ultra_stage_failure:remote_input_invalid\n\n',
+                b'ultra_stage_failure:remote_input_invalid\xff\n']:
+            with self.subTest(stderr=stderr):
+                self.assertEqual(self.failure(1, stderr),
+                    'bridge_staging_failed: reason=remote_exit exit_code=1')
+
+    def test_ssh_failure_only_exposes_numeric_exit(self):
+        self.assertEqual(self.failure(255, ('ssh: ' + self.sentinel).encode()),
+            'bridge_staging_failed: reason=transport_exit exit_code=255')
+
+    def test_success_keeps_verified_receipt_and_ignores_stderr(self):
+        receipt = {'architecture': 'amd64', 'manifest_sha256': D.sha(self.manifest),
+                   'config_sha256': D.sha(self.config),
+                   'attempt': D.remote_attempt(self.config, self.version)}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            self.assertEqual(self.stage(0, json.dumps(receipt).encode(), self.sentinel.encode()), receipt)
+        self.assertEqual(output.getvalue(), '')
+
+    def test_remote_hook_emits_only_known_value_errors_without_tracebacks(self):
+        # Stop before remote setup, filesystem checks, locks or archive reading.
+        hook = D.REMOTE_PROGRAM.split('\nforward_journal_sha=', 1)[0]
+        for expression, expected in [
+                ("ValueError('manual_secrets_source_changed')", b'ultra_stage_failure:manual_secrets_source_changed\n'),
+                ('ValueError(' + repr(self.sentinel) + ')', b''),
+                ("RuntimeError('remote_input_invalid')", b'')]:
+            with self.subTest(expression=expression):
+                result = subprocess.run([sys.executable, '-I', '-c', hook + '\nraise ' + expression,
+                    'stage', self.commit, self.version, 'b' * 64, 'c' * 64, 'd' * 64],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=10)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, b'')
+                self.assertEqual(result.stderr, expected)
+
+    def capture(self, program, timeout=10):
+        with tempfile.TemporaryFile() as stream:
+            return D.run_stage([sys.executable, '-I', '-c', program],
+                               cwd=self.repo, stdin=stream, timeout=timeout)
+
+    def test_large_concurrent_streams_retain_only_fixed_prefixes(self):
+        # Each stream exceeds a pipe's capacity, so serial draining deadlocks.
+        program = """import os,threading
+def emit(fd, value):
+    for _ in range(1024): os.write(fd, value * 8192)
+worker=threading.Thread(target=emit,args=(2,b'e'));worker.start()
+emit(1,b'o');worker.join()
+"""
+        result = self.capture(program)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b'o' * D.STAGING_STDOUT_LIMIT)
+        self.assertEqual(result.stderr, b'e' * D.STAGING_STDERR_LIMIT)
+        self.assertTrue(result.stdout_truncated)
+        self.assertTrue(result.stderr_truncated)
+
+    def test_marker_beyond_cap_and_truncated_marker_prefix_are_rejected(self):
+        marker = b'ultra_stage_failure:remote_input_invalid\n'
+        # Also reject a captured exact marker if any discarded bytes followed it.
+        for prefix in [b'x' * D.STAGING_STDERR_LIMIT, marker]:
+            program = ('import os,sys;os.write(2,' + repr(prefix) + ');'
+                       'os.write(2,b"x"*65536);os.write(2,' + repr(marker + self.sentinel.encode()) + ');sys.exit(1)')
+            result = self.capture(program)
+            self.assertLessEqual(len(result.stderr), D.STAGING_STDERR_LIMIT)
+            self.assertTrue(result.stderr_truncated)
+            self.assertEqual(D.staging_failure(result),
+                'bridge_staging_failed: reason=remote_exit exit_code=1')
+            self.assertNotIn(self.sentinel, D.staging_failure(result))
+        truncated = subprocess.CompletedProcess([], 1, b'', marker)
+        truncated.stderr_truncated = True
+        self.assertEqual(D.staging_failure(truncated),
+            'bridge_staging_failed: reason=remote_exit exit_code=1')
+
+    def test_bounded_capture_accepts_exact_marker(self):
+        result = self.capture("import os,sys;os.write(2,b'ultra_stage_failure:remote_input_invalid\\n');sys.exit(1)")
+        self.assertFalse(result.stderr_truncated)
+        self.assertEqual(D.staging_failure(result),
+            'bridge_staging_failed: reason=remote_input_invalid exit_code=1')
+
+    def test_truncated_success_receipt_is_rejected(self):
+        result = self.capture('import os;os.write(1,b" "*65536)')
+        self.assertTrue(result.stdout_truncated)
+        with patch.object(D, 'run_stage', return_value=result):
+            with self.assertRaisesRegex(D.DeployError, '^bridge_staging_receipt_invalid$'):
+                D.stage_remote(self.repo, self.repo, self.bundle, self.config,
+                    ['ssh', 'fixture'], self.commit, self.version, D.sha(self.manifest))
+
+    def test_capture_timeout_kills_child_and_wrapper_retains_error(self):
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.capture('import time;time.sleep(30)', timeout=0.1)
+        with patch.object(D, 'run_stage', side_effect=subprocess.TimeoutExpired(['fixture'], 1800)):
+            with self.assertRaisesRegex(D.DeployError, '^bridge_staging_timeout$'):
+                D.stage_remote(self.repo, self.repo, self.bundle, self.config,
+                    ['ssh', 'fixture'], self.commit, self.version, D.sha(self.manifest))
+
+
 class ManualDeploy(unittest.TestCase):
     def test_legacy_source_remains_canonical_and_fresh_upgrade_selects_runtime(self):
         legacy = {'commit': 'a' * 40, 'version': 'v0.0.1'}
@@ -1328,7 +1466,7 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
             return subprocess.CompletedProcess(command, 0, json.dumps({'architecture': 'arm64',
                 'manifest_sha256': D.sha(raw_manifest), 'config_sha256': D.sha(config),
                 'attempt': D.remote_attempt(config, self.version)}).encode())
-        with patch.object(D.subprocess, 'run', process):
+        with patch.object(D, 'run_stage', process):
             receipt = D.stage_remote(self.repo, self.root, self.bundle, config,
                 ['ssh', '-F', '/dev/null', 'root@192.0.2.10'], self.commit, self.version,
                 D.sha(raw_manifest), extras)
@@ -2774,12 +2912,9 @@ class NativeDeploy(unittest.TestCase):
         def timeout(command, **kwargs):
             self.assertEqual(kwargs['timeout'], 1800)
             raise subprocess.TimeoutExpired(command, kwargs['timeout'])
-        fake_subprocess = type('Subprocess', (), {'run': staticmethod(timeout),
-            'TimeoutExpired': subprocess.TimeoutExpired, 'PIPE': subprocess.PIPE,
-            'DEVNULL': subprocess.DEVNULL})
         self.stage.stop()
         try:
-            with patch.object(D, 'subprocess', fake_subprocess):
+            with patch.object(D, 'run_stage', timeout):
                 with self.assertRaisesRegex(D.DeployError, '^bridge_staging_timeout$'):
                     D.stage_remote(self.repo, self.root, self.bundle, self.original,
                         ['ssh', '-F', '/dev/null', 'root@192.0.2.10'], self.commit, self.version, D.sha(raw_manifest))

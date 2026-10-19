@@ -1058,6 +1058,13 @@ def configure_operator_transport(config):
 
 # Executed only through pinned SSH. This helper never reads secret environment files.
 # Stage into a fresh private sibling and rename only after every byte is checked.
+STAGING_FAILURE_REASONS = (
+    'remote_input_invalid',
+    'manual_secrets_source_invalid',
+    'manual_secrets_source_changed',
+    'manual_operation_quiescence_migration_required',
+)
+
 REMOTE_PROGRAM = r'''
 import fcntl,hashlib,json,os,platform,re,shutil,stat,sys,tarfile,tempfile,uuid
 from pathlib import Path
@@ -1065,6 +1072,13 @@ def need(ok, code='remote_input_invalid'):
     if not ok: raise ValueError(code)
 def digest(data): return hashlib.sha256(data).hexdigest()
 mode,commit,version,manifest_sha,config_sha,attempt=sys.argv[1:7]
+if mode=='stage':
+    staging_failure_reasons=''' + repr(STAGING_FAILURE_REASONS) + r'''
+    def staging_exception(kind,error,traceback):
+        # Neither exception messages outside this list nor tracebacks are public.
+        if type(error) is ValueError and str(error) in staging_failure_reasons:
+            print('ultra_stage_failure:'+str(error),file=sys.stderr)
+    sys.excepthook=staging_exception
 probe_sha=(sys.argv[11] if len(sys.argv)>11 else '') if mode=='run' else (sys.argv[7] if len(sys.argv)>7 else '')
 if mode=='continue':
     attestation_phase='remote_setup'
@@ -1913,6 +1927,62 @@ def remote_command(transport, commit, version, manifest_sha, config_sha, attempt
                                   version, manifest_sha, config_sha, attempt, *arguments])]
 
 
+STAGING_STDOUT_LIMIT = 16384
+STAGING_STDERR_LIMIT = 4096
+
+
+def run_stage(command, *, cwd, stdin, timeout):
+    """Drain both pipes, retaining only bounded prefixes in memory."""
+    deadline = time.monotonic() + timeout
+    process = subprocess.Popen(command, cwd=cwd, stdin=stdin,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    buffers = {process.stdout: bytearray(), process.stderr: bytearray()}
+    limits = {process.stdout: STAGING_STDOUT_LIMIT, process.stderr: STAGING_STDERR_LIMIT}
+    truncated = {process.stdout: False, process.stderr: False}
+    pending = set(buffers)
+    try:
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            readable, _, _ = select.select(list(pending), [], [], remaining)
+            for pipe in readable:
+                chunk = os.read(pipe.fileno(), 8192)
+                if not chunk:
+                    pending.remove(pipe)
+                    pipe.close()
+                    continue
+                room = limits[pipe] - len(buffers[pipe])
+                buffers[pipe].extend(chunk[:room])
+                truncated[pipe] |= len(chunk) > room
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, timeout)
+        result = subprocess.CompletedProcess(command, process.wait(timeout=remaining),
+            bytes(buffers[process.stdout]), bytes(buffers[process.stderr]))
+        result.stdout_truncated = truncated[process.stdout]
+        result.stderr_truncated = truncated[process.stderr]
+        return result
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        raise
+    finally:
+        process.stdout.close()
+        process.stderr.close()
+
+
+def staging_failure(result):
+    # stderr can include credentials, paths or host identifiers. Only the remote
+    # wrapper's entire fixed-format diagnostic is eligible for public output.
+    reason = 'transport_exit' if result.returncode == 255 else 'remote_exit'
+    match = re.fullmatch(rb'ultra_stage_failure:([a-z_]+)\n', result.stderr or b'')
+    if not getattr(result, 'stderr_truncated', False) and match and match[1].decode('ascii') in STAGING_FAILURE_REASONS:
+        reason = match[1].decode('ascii')
+    return 'bridge_staging_failed: reason=' + reason + ' exit_code=' + str(result.returncode)
+
+
 def stage_remote(repo, root, bundle, config, transport, commit, version, manifest_sha, extra_files=None):
     # A bounded on-disk stream avoids keeping release binaries in memory.
     with tempfile.TemporaryFile(dir=root) as stream:
@@ -1933,15 +2003,15 @@ def stage_remote(repo, root, bundle, config, transport, commit, version, manifes
         stream.seek(0)
         attempt = remote_attempt(config, version)
         try:
-            result = subprocess.run(remote_command(transport, commit, version, manifest_sha, sha(config), attempt, 'stage',
+            result = run_stage(remote_command(transport, commit, version, manifest_sha, sha(config), attempt, 'stage',
                                                   (extra_files or {}).get('subscription-probe.sha256', b'').decode(),
                                                   sha((extra_files or {}).get('forward-operation.json', b'')) if (extra_files or {}).get('forward-operation.json') else '',
                                                   sha((extra_files or {}).get('forward-prior-operation.json', b'')) if (extra_files or {}).get('forward-prior-operation.json') else ''),
-                                    cwd=repo, stdin=stream, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                    check=False, timeout=1800)
+                               cwd=repo, stdin=stream, timeout=1800)
         except subprocess.TimeoutExpired:
             raise DeployError('bridge_staging_timeout') from None
-    require(result.returncode == 0, 'bridge_staging_failed')
+    require(result.returncode == 0, staging_failure(result))
+    require(not getattr(result, 'stdout_truncated', False), 'bridge_staging_receipt_invalid')
     receipt = json.loads(result.stdout)
     require(receipt.get('architecture') in ['amd64', 'arm64'] and receipt.get('manifest_sha256') == manifest_sha
             and receipt.get('config_sha256') == sha(config) and receipt.get('attempt') == attempt and
