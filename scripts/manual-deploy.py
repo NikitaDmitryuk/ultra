@@ -619,7 +619,28 @@ def parse_bot_token(lines):
 exec(BOT_TOKEN_PARSER)
 
 
-def bot_token_from_env(path):
+def parse_vultr_key(lines):
+    selected = []
+    for line in lines:
+        key, separator, value = line.partition(b'=')
+        if key.strip() == b'ULTRA_VULTR_API_KEY':
+            match = re.fullmatch(rb"[ \t]*(?:([A-Za-z0-9_-]{16,512})|'([A-Za-z0-9_-]{16,512})'|\"([A-Za-z0-9_-]{16,512})\")[ \t]*(?:#[^\r\n]*)?", value)
+            if not separator or not match: raise ValueError('vultr_key_invalid')
+            selected.append(next(value for value in match.groups() if value))
+        elif re.match(rb'(?:export[ \t]+)?ULTRA_VULTR_API_KEY(?:[^A-Za-z0-9_]|$)', line.strip()):
+            raise ValueError('vultr_key_invalid')
+    if len(selected) != 1: raise ValueError('vultr_key_invalid')
+    return selected[0]
+
+
+def vultr_key_from_env(path):
+    try:
+        return bot_token_from_env(path, parser=parse_vultr_key)
+    except DeployError as exc:
+        raise DeployError(str(exc).replace('bot_token_', 'vultr_key_', 1)) from None
+
+
+def bot_token_from_env(path, parser=None):
     """Select only the literal bot token; never source, expand or persist .env."""
     path = Path(path)
     try:
@@ -632,7 +653,7 @@ def bot_token_from_env(path):
                     stat.S_IMODE(before.st_mode) == 0o600 and before.st_nlink == 1 and
                     0 < before.st_size <= 1048576, 'bot_token_private_env_required')
             with os.fdopen(fd, 'rb', closefd=False) as stream:
-                token = parse_bot_token(bot_token_lines(stream))
+                token = (parser or parse_bot_token)(bot_token_lines(stream))
             after = os.fstat(fd)
             require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
                     (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) and
@@ -648,12 +669,16 @@ REMOTE_BOT_TOKEN_PROGRAM = 'import re\n' + BOT_TOKEN_PARSER + r'''
 import fcntl,grp,json,os,pwd,signal,stat,sys,uuid
 from pathlib import Path
 signal.alarm(30)
+provider=False
 def need(ok):
     if not ok: raise ValueError('bot_token_bootstrap_rejected')
 relay_user=pwd.getpwnam('ultra-relay')
 relay_group=grp.getgrnam('ultra-relay')
 need(relay_user.pw_gid==relay_group.gr_gid)
 relay_uid=relay_user.pw_uid;relay_gid=relay_group.gr_gid
+filename='vultr-api-key' if provider else 'bot.env'
+base='/var/lib/ultra-relay' if provider else '/etc'
+file_owner=(relay_uid,relay_gid) if provider else (0,0)
 def directory(path,final_owner=(0,0),allow_root_final=False):
     fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
     try:
@@ -664,6 +689,10 @@ def directory(path,final_owner=(0,0),allow_root_final=False):
             info=os.fstat(fd)
             owner=(info.st_uid,info.st_gid)
             expected=final_owner if index==len(parts)-1 else (0,0)
+            current='/'+'/'.join(parts[:index+1])
+            if provider and current=='/var/lib/ultra-relay':
+                expected=(relay_uid,relay_gid)
+                need(stat.S_IMODE(info.st_mode) in (0o700,0o755))
             allowed=(expected,(0,0)) if allow_root_final and index==len(parts)-1 else (expected,)
             need(owner in allowed and not info.st_mode&0o022)
         return os.dup(fd)
@@ -675,7 +704,8 @@ def private(fd):
 def main():
     need(os.geteuid()==0)
     token=sys.stdin.buffer.read(513)
-    need(len(token)<=512 and re.fullmatch(rb'[0-9]+:[A-Za-z0-9_-]{20,128}',token))
+    need(len(token)<=512 and re.fullmatch(rb'[A-Za-z0-9_-]{16,512}' if provider else rb'[0-9]+:[A-Za-z0-9_-]{20,128}',token))
+    expected=token+b'\n' if provider else b'TELEGRAM_BOT_TOKEN='+token+b'\n'
     state=directory('/var/lib/ultra-ansible')
     locks=[]
     try:
@@ -687,28 +717,52 @@ def main():
             locks.append(fd);private(fd);fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
         finally: os.close(inputs)
         def open_target(create):
-            etc=directory('/etc')
+            if provider:
+                try: parent=directory(base,(relay_uid,relay_gid),allow_root_final=True)
+                except FileNotFoundError:
+                    if not create: raise
+                    parent=directory('/var/lib')
+                    try:
+                        os.mkdir('ultra-relay',0o700,dir_fd=parent)
+                        os.chown('ultra-relay',relay_uid,relay_gid,dir_fd=parent,follow_symlinks=False)
+                        os.fsync(parent)
+                    finally: os.close(parent)
+                    parent=directory(base,(relay_uid,relay_gid))
+                owner=(os.fstat(parent).st_uid,os.fstat(parent).st_gid)
+                if owner!=(relay_uid,relay_gid):
+                    try:
+                        # A crash between mkdir and chown can leave only an
+                        # empty root-owned state parent; never adopt old state.
+                        need(owner==(0,0) and stat.S_IMODE(os.fstat(parent).st_mode)==0o700 and not os.listdir(parent))
+                        if not create: raise FileNotFoundError()
+                        os.fchown(parent,relay_uid,relay_gid);os.fsync(parent)
+                    except BaseException:
+                        os.close(parent);raise
+                child='automation'
+            else:
+                parent=directory(base);child='ultra-relay'
             try:
                 if create:
                     try:
-                        os.mkdir('ultra-relay',0o700,dir_fd=etc)
-                        os.chown('ultra-relay',relay_uid,relay_gid,dir_fd=etc,follow_symlinks=False)
+                        os.mkdir(child,0o700,dir_fd=parent)
+                        os.chown(child,relay_uid,relay_gid,dir_fd=parent,follow_symlinks=False)
+                        os.fsync(parent)
                     except FileExistsError: pass
-            finally: os.close(etc)
-            return directory('/etc/ultra-relay',(relay_uid,relay_gid),allow_root_final=True)
+            finally: os.close(parent)
+            return directory(base+'/'+child,(relay_uid,relay_gid),allow_root_final=True)
         def matches_existing(target):
-            try: fd=os.open('bot.env',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
+            try: fd=os.open(filename,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
             except FileNotFoundError: return False
             try:
                 info=os.fstat(fd)
-                need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink in (1,2) and
-                     stat.S_IMODE(info.st_mode)==0o600 and info.st_size<=1048576)
+                need(stat.S_ISREG(info.st_mode) and (info.st_uid,info.st_gid)==file_owner and info.st_nlink in (1,2) and
+                     stat.S_IMODE(info.st_mode)==0o600 and info.st_size<=(65536 if provider else 1048576))
                 with os.fdopen(fd,'rb',closefd=False) as stream:
-                    need(parse_bot_token(bot_token_lines(stream))==token)
+                    need(stream.read(65537).strip()==token) if provider else need(parse_bot_token(bot_token_lines(stream))==token)
                 # Reconcile crash leftovers whether or not publication already
                 # happened. A linked name must be this exact inode; all other
                 # reserved pending names must contain only the intended prefix.
-                names=[name for name in os.listdir(target) if re.fullmatch(r'\.bot\.env-[0-9a-f]{32}',name)]
+                names=[name for name in os.listdir(target) if re.fullmatch(r'\.'+re.escape(filename)+r'-[0-9a-f]{32}',name)]
                 linked=[];stale=[]
                 for name in names:
                     other=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
@@ -717,10 +771,11 @@ def main():
                         if (oi.st_dev,oi.st_ino)==(info.st_dev,info.st_ino):
                             linked.append(name)
                         else:
-                            need(oi.st_uid==0 and stat.S_ISREG(oi.st_mode) and oi.st_nlink==1 and
+                            if provider and (oi.st_uid,oi.st_gid)==(0,0) and file_owner!=(0,0): return False
+                            need((oi.st_uid,oi.st_gid)==file_owner and stat.S_ISREG(oi.st_mode) and oi.st_nlink==1 and
                                  stat.S_IMODE(oi.st_mode)==0o600 and oi.st_size<=1024)
                             raw=os.read(other,1025)
-                            need((b'TELEGRAM_BOT_TOKEN='+token+b'\n').startswith(raw))
+                            need(expected.startswith(raw))
                             stale.append(name)
                     finally: os.close(other)
                 need((info.st_nlink==1 and not linked) or (info.st_nlink==2 and len(linked)==1))
@@ -752,37 +807,51 @@ def main():
         target=open_target(True)
         try:
             need(stat.S_IMODE(os.fstat(target).st_mode)==0o700)
+            if provider:
+                # Creation precedes fchown. Reconcile that crash window only
+                # after infrastructure/lifecycle admission, never during the
+                # read-only matching-secret fast path.
+                for name in os.listdir(target):
+                    if not re.fullmatch(r'\.'+re.escape(filename)+r'-[0-9a-f]{32}',name): continue
+                    pending_fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
+                    try:
+                        info=os.fstat(pending_fd)
+                        if (info.st_uid,info.st_gid)==file_owner: continue
+                        need((info.st_uid,info.st_gid)==(0,0) and stat.S_ISREG(info.st_mode) and
+                             info.st_nlink==1 and stat.S_IMODE(info.st_mode)==0o600 and info.st_size<=1024)
+                        need(expected.startswith(os.read(pending_fd,1025)))
+                        os.fchown(pending_fd,*file_owner);os.fsync(pending_fd)
+                    finally: os.close(pending_fd)
             owner=(os.fstat(target).st_uid,os.fstat(target).st_gid)
             if owner==(0,0) and owner!=(relay_uid,relay_gid):
                 names=os.listdir(target)
-                need(all(name=='bot.env' or re.fullmatch(r'\.bot\.env-[0-9a-f]{32}',name) for name in names))
+                need(all(name==filename or re.fullmatch(r'\.'+re.escape(filename)+r'-[0-9a-f]{32}',name) for name in names))
                 if not matches_existing(target):
                     # With no published target there is no inode against which
                     # to reconcile hardlinks. Validate every pending file before
                     # changing directory ownership or exposing it to the service.
                     for name in names:
-                        if name=='bot.env': continue
+                        if name==filename: continue
                         fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
                         try:
                             info=os.fstat(fd)
-                            need(info.st_uid==0 and stat.S_ISREG(info.st_mode) and info.st_nlink==1 and
+                            need((info.st_uid,info.st_gid)==file_owner and stat.S_ISREG(info.st_mode) and info.st_nlink==1 and
                                  stat.S_IMODE(info.st_mode)==0o600 and info.st_size<=1024)
                             raw=os.read(fd,1025)
-                            need((b'TELEGRAM_BOT_TOKEN='+token+b'\n').startswith(raw))
+                            need(expected.startswith(raw))
                         finally: os.close(fd)
                 os.fchown(target,relay_uid,relay_gid);os.fchmod(target,0o700);os.fsync(target)
             else: need(owner==(relay_uid,relay_gid))
             if matches_existing(target): return
-            expected=b'TELEGRAM_BOT_TOKEN='+token+b'\n'
-            temporary='.bot.env-'+uuid.uuid4().hex
+            temporary='.'+filename+'-'+uuid.uuid4().hex
             # Reuse a complete staging file left by a crash before publication;
             # discard only a strict prefix of the intended bytes from this reserved
             # private filename, and reject any different content.
-            pending=[name for name in os.listdir(target) if re.fullmatch(r'\.bot\.env-[0-9a-f]{32}',name)]
+            pending=[name for name in os.listdir(target) if re.fullmatch(r'\.'+re.escape(filename)+r'-[0-9a-f]{32}',name)]
             for name in pending:
                 old=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
                 try:
-                    oi=os.fstat(old);need(stat.S_ISREG(oi.st_mode) and oi.st_uid==0 and oi.st_nlink==1 and
+                    oi=os.fstat(old);need(stat.S_ISREG(oi.st_mode) and (oi.st_uid,oi.st_gid)==file_owner and oi.st_nlink==1 and
                                          stat.S_IMODE(oi.st_mode)==0o600 and oi.st_size<=1024)
                     raw=os.read(old,1025)
                     need(expected.startswith(raw))
@@ -798,6 +867,7 @@ def main():
                 for name in pending: os.unlink(name,dir_fd=target)
                 fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=target)
                 try:
+                    os.fchown(fd,*file_owner)
                     with os.fdopen(fd,'wb') as stream:
                         stream.write(expected)
                         stream.flush();os.fsync(stream.fileno())
@@ -806,7 +876,7 @@ def main():
                     except FileNotFoundError: pass
                     raise
             # Atomic no-replace publication, including against other writers.
-            os.link(temporary,'bot.env',src_dir_fd=target,dst_dir_fd=target,follow_symlinks=False)
+            os.link(temporary,filename,src_dir_fd=target,dst_dir_fd=target,follow_symlinks=False)
             os.unlink(temporary,dir_fd=target);os.fsync(target)
         finally: os.close(target)
     finally:
@@ -819,10 +889,20 @@ except Exception:
 '''
 
 
-def bootstrap_bridge_bot_token(repo, transport, token):
+REMOTE_VULTR_KEY_PROGRAM = REMOTE_BOT_TOKEN_PROGRAM.replace('provider=False', 'provider=True', 1)
+
+
+def bootstrap_bridge_vultr_key(repo, transport, token):
+    require(re.fullmatch(rb'[A-Za-z0-9_-]{16,512}', token), 'vultr_key_invalid')
+    return bootstrap_bridge_bot_token(repo, transport, token, provider=True)
+
+
+def bootstrap_bridge_bot_token(repo, transport, token, provider=False):
     """Only stdin carries the secret; bounded captured output is never emitted."""
-    require(len(token) <= 512 and re.fullmatch(rb'[0-9]+:[A-Za-z0-9_-]{20,128}', token),
-            'bot_token_invalid')
+    require(len(token) <= 512 and re.fullmatch(rb'[A-Za-z0-9_-]{16,512}' if provider else rb'[0-9]+:[A-Za-z0-9_-]{20,128}', token),
+            'vultr_key_invalid' if provider else 'bot_token_invalid')
+    program = REMOTE_VULTR_KEY_PROGRAM if provider else REMOTE_BOT_TOKEN_PROGRAM
+    error_prefix = 'bridge_vultr_key' if provider else 'bridge_bot_token'
     read_fd, write_fd = os.pipe()
     try:
         os.write(write_fd, token)
@@ -831,13 +911,13 @@ def bootstrap_bridge_bot_token(repo, transport, token):
         with os.fdopen(read_fd, 'rb') as stream:
             read_fd = None
             try:
-                result = run_stage(transport + [shlex.join(['python3', '-I', '-c', REMOTE_BOT_TOKEN_PROGRAM])],
+                result = run_stage(transport + [shlex.join(['python3', '-I', '-c', program])],
                                    cwd=repo, stdin=stream, timeout=45)
             except subprocess.TimeoutExpired:
-                raise DeployError('bridge_bot_token_timeout') from None
+                raise DeployError(error_prefix + '_timeout') from None
         require(result.returncode == 0 and not result.stdout and not result.stderr and
                 not getattr(result, 'stdout_truncated', False) and not getattr(result, 'stderr_truncated', False),
-                'bridge_bot_token_rejected_reconcile_secret_or_lifecycle')
+                error_prefix + '_rejected_reconcile_secret_or_lifecycle')
     finally:
         if read_fd is not None: os.close(read_fd)
         if write_fd is not None: os.close(write_fd)
@@ -3202,6 +3282,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             return
 
     bot_token = bot_token_from_env(config.parent / '.env') if transport and not adopt else None
+    vultr_key = vultr_key_from_env(config.parent / '.env') if bot_token is not None else None
     probe_raw = None
     if not adopt:
         # Retry the frozen credential without reopening .env. Explicit input
@@ -3380,6 +3461,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             record['staged_config_sha256'] = staged_config_sha
             if bot_token is not None:
                 bootstrap_bridge_bot_token(repo, transport, bot_token)
+                bootstrap_bridge_vultr_key(repo, transport, vultr_key)
         for stage, command in commands:
             if continue_forward_only and not same_candidate and stage == 'upgrade':
                 record['stage'] = 'forward_continuation_preflight'

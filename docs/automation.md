@@ -540,35 +540,39 @@ checkout Go cache; операторский `GOCACHE` не наследуетс�
 использует канонический источник секретов.
 
 При каждой ручной выкладке через SSH (кроме adoption и cleanup уже завершённой
-операции) wrapper отдельно выбирает `TELEGRAM_BOT_TOKEN` из локального `.env` рядом
+операции) wrapper отдельно выбирает `TELEGRAM_BOT_TOKEN` и `ULTRA_VULTR_API_KEY` из локального `.env` рядом
 с canonical `install.config`. Источник обязателен: обычный файл владельца 0600,
 без symlink/hardlink, до 1 MiB. Допускается ровно один literal assignment с
 некавыченным значением или одинарными/двойными кавычками и необязательным комментарием;
 `export`, дубли, shell expansion и отсутствующий ключ отклоняются. Остальные значения
-не интерпретируются. Токен передаётся только через stdin того же pinned SSH,
+не интерпретируются. Каждый секрет передаётся только через stdin того же pinned SSH,
 без аргументов, журналов и release-архива.
 
 После staging, перед `doctor`, изолированный root helper проверяет
-`/etc/ultra-relay/bot.env`: совпадающий токен в безопасном файле 0600 остаётся
+`/etc/ultra-relay/bot.env` и `/var/lib/ultra-relay/automation/vultr-api-key`: совпадающий секрет в безопасном файле 0600 остаётся
 на месте под manual lock, даже если forward continuation удерживает
 infrastructure lock. Отсутствующий файл создаётся атомарно без замещения, с
-владельцем root и правами 0600, только при свободных manual/infrastructure locks
+владельцем root для bot.env и `ultra-relay:ultra-relay` для Vultr key, с правами 0600, только при свободных manual/infrastructure locks
 и отсутствующем либо released lifecycle. Каталог принадлежит `ultra-relay:ultra-relay`
-с правами 0700, как задаёт host role. Пустой root-owned каталог, созданный
-прерванным bootstrap, либо каталог только с совпадающим `bot.env` может быть
+с правами 0700, как задают host/provider roles; `/var/lib/ultra-relay` допускает 0700 или 0755. Пустой root-owned приватный каталог, созданный
+прерванным bootstrap, либо каталог только с совпадающим целевым файлом может быть
 исправлен под infrastructure lock; остальные данные требуют ручной reconciliation.
 При прерывании между публикацией и
 удалением временной hardlink следующий запуск проверяет совпадение inode и
 безопасно удаляет только оставшееся имя; до публикации повторно использует полный
 временный файл или удаляет его строгий префикс ожидаемых байтов.
+Root-owned pending Vultr-файл после прерывания между созданием и сменой владельца
+принимается только под infrastructure lock после проверки released/absent lifecycle,
+обычного файла 0600 с одним hardlink и точного префикса ожидаемого секрета;
+после этого ему назначается владелец relay. Чужой владелец или другое содержимое отклоняются.
 symlink, hardlink и небезопасные владельцы/права отклоняются. Другой существующий
-токен никогда не заменяется: ошибка `bridge_bot_token_rejected_reconcile_secret_or_lifecycle`
+секрет никогда не заменяется: ошибки `bridge_bot_token_rejected_reconcile_secret_or_lifecycle` и `bridge_vultr_key_rejected_reconcile_secret_or_lifecycle`
 требует отдельной санкционированной ротации или reconciliation lifecycle.
 SSH helper ограничен 45 секундами (удалённый процесс — 30); его stdout/stderr
-ограничены и не публикуются. Ошибка блокирует doctor/upgrade. Созданный токен
-остаётся защищённым runtime input и при последующем отказе doctor.
-Эта процедура восстанавливает только bot token; installed identity bridge,
-Vultr key и остальные условия upgrade должны быть подготовлены отдельно.
+ограничены и не публикуются. Ошибка любого bootstrap блокирует doctor/upgrade. Уже созданные
+секреты остаются защищёнными runtime inputs при последующем отказе второго bootstrap или doctor.
+Installed identity bridge и остальные условия upgrade должны быть подготовлены отдельно.
+Bootstrap не ротирует существующие ключи и не вызывает Vultr API.
 
 Для `/var/lib/ultra-relay` допустимы 0700 и 0755 при штатных владельце и группе:
 служба relay задаёт `StateDirectory` без `StateDirectoryMode`, поэтому systemd может

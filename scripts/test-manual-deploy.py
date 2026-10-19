@@ -111,11 +111,13 @@ class BotTokenBootstrap(unittest.TestCase):
             with self.assertRaisesRegex(D.DeployError, '^bridge_bot_token_timeout$'):
                 D.bootstrap_bridge_bot_token(self.root, ['ssh'], self.token)
 
-    def remote_fixture(self, token=None, program=None):
+    def remote_fixture(self, token=None, program=None, distinct_file_owners=False):
         # Run the actual helper against isolated paths; only root identity and
         # sticky /tmp ancestor admission are adapted for an unprivileged fixture.
         program = D.REMOTE_BOT_TOKEN_PROGRAM if program is None else program
         program = program.replace("'/var/lib/ultra-ansible", repr(str(self.root / 'state'))[:-1])
+        program = program.replace("'/var/lib/ultra-relay", repr(str(self.root / 'varlib/ultra-relay'))[:-1])
+        program = program.replace("'/var/lib'", repr(str(self.root / 'varlib')))
         program = program.replace("'/etc", repr(str(self.root / 'etc'))[:-1])
         program = program.replace("relay_user=pwd.getpwnam('ultra-relay')\nrelay_group=grp.getgrnam('ultra-relay')",
                                   "relay_user=type('User',(),{'pw_uid':os.geteuid(),'pw_gid':os.getegid()})()\nrelay_group=type('Group',(),{'gr_gid':os.getegid()})()")
@@ -126,6 +128,32 @@ class BotTokenBootstrap(unittest.TestCase):
         program = program.replace('oi.st_uid==0', 'oi.st_uid==os.geteuid()')
         program = program.replace('need(os.geteuid()==0)', 'need(True)')
         program = program.replace('not info.st_mode&0o022)', '(not info.st_mode&0o022 or info.st_mode&stat.S_ISVTX))')
+        if distinct_file_owners:
+            # Model root versus relay file ownership without privileges. Keep
+            # real directory ownership checks and real file contents/links; an
+            # xattr records only the fixture's synthetic fchown across retries.
+            program = program.replace("file_owner=(relay_uid,relay_gid) if provider else (os.geteuid(),os.getegid())",
+                                      "file_owner=(relay_uid+100,relay_gid+100) if provider else (os.geteuid(),os.getegid())")
+            shim = r'''fixture_fstat=os.fstat
+fixture_fchown=os.fchown
+class FixtureStat:
+    def __init__(self,info,owner): self.info=info;self.st_uid,self.st_gid=owner
+    def __getattr__(self,key): return getattr(self.info,key)
+def fixture_stat(fd):
+    info=fixture_fstat(fd)
+    try: marker=os.getxattr(fd,'user.ultra-fixture-owner')
+    except OSError: return info
+    if marker==b'relay': return FixtureStat(info,file_owner)
+    if marker==b'foreign': return FixtureStat(info,(file_owner[0]+1,file_owner[1]+1))
+    return info
+def fixture_chown(fd,uid,gid):
+    if (uid,gid)==file_owner:
+        os.setxattr(fd,'user.ultra-fixture-owner',b'relay')
+    else: fixture_fchown(fd,uid,gid)
+os.fstat=fixture_stat
+os.fchown=fixture_chown
+'''
+            program = program.replace('def directory(', shim+'def directory(', 1)
         return subprocess.run([sys.executable, '-I', '-c', program], input=self.token if token is None else token,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
 
@@ -188,8 +216,8 @@ class BotTokenBootstrap(unittest.TestCase):
     def test_remote_reconciles_crash_after_atomic_link_publication(self):
         path = self.setup_remote()
         program = D.REMOTE_BOT_TOKEN_PROGRAM.replace(
-            "os.link(temporary,'bot.env',src_dir_fd=target,dst_dir_fd=target,follow_symlinks=False)",
-            "os.link(temporary,'bot.env',src_dir_fd=target,dst_dir_fd=target,follow_symlinks=False);os._exit(23)")
+            "os.link(temporary,filename,src_dir_fd=target,dst_dir_fd=target,follow_symlinks=False)",
+            "os.link(temporary,filename,src_dir_fd=target,dst_dir_fd=target,follow_symlinks=False);os._exit(23)")
         crashed = self.remote_fixture(program=program)
         self.assertEqual(crashed.returncode, 23)
         self.assertEqual(path.stat().st_nlink, 2)
@@ -243,6 +271,159 @@ class BotTokenBootstrap(unittest.TestCase):
         path.parent.symlink_to(path.parent.with_name('other-relay'), target_is_directory=True)
         self.assertNotEqual(self.remote_fixture().returncode, 0)
         self.assertFalse(path.exists())
+
+    vultr_key = b'fixture_vultr_api_key_0123456789'
+
+    def test_vultr_env_selects_only_literal_allowlisted_value(self):
+        self.env.write_bytes(b'IGNORED="$(never-run)"\nULTRA_VULTR_API_KEY="' + self.vultr_key + b'" # fixture\n')
+        self.assertEqual(D.vultr_key_from_env(self.env), self.vultr_key)
+        for raw in (b'OTHER=value', b'export ULTRA_VULTR_API_KEY='+self.vultr_key,
+                    b'ULTRA_VULTR_API_KEY='+self.vultr_key+b'\nULTRA_VULTR_API_KEY='+self.vultr_key,
+                    b'ULTRA_VULTR_API_KEY=$(read-secret)', b'ULTRA_VULTR_API_KEY="unclosed',
+                    b'ULTRA_VULTR_API_KEY='+b'x'*513):
+            self.env.write_bytes(raw)
+            with self.assertRaises(D.DeployError): D.vultr_key_from_env(self.env)
+        self.env.write_bytes(b'ULTRA_VULTR_API_KEY='+self.vultr_key)
+        self.env.chmod(0o644)
+        with self.assertRaises(D.DeployError): D.vultr_key_from_env(self.env)
+
+    def provider_fixture(self, program=None):
+        return self.remote_fixture(self.vultr_key, program or D.REMOTE_VULTR_KEY_PROGRAM)
+
+    def setup_provider(self):
+        self.setup_remote()
+        (self.root / 'varlib').mkdir(mode=0o700)
+        return self.root / 'varlib/ultra-relay/automation/vultr-api-key'
+
+    def test_vultr_transport_stdin_only_and_hidden_failures(self):
+        def run(command, *, cwd, stdin, timeout):
+            self.assertNotIn(self.vultr_key.decode(), repr(command))
+            self.assertEqual(stdin.read(), self.vultr_key)
+            self.assertIn('StrictHostKeyChecking=yes', command)
+            return subprocess.CompletedProcess(command, 0, b'', b'')
+        with patch.object(D, 'run_stage', side_effect=run):
+            D.bootstrap_bridge_vultr_key(self.root, ['ssh', 'StrictHostKeyChecking=yes'], self.vultr_key)
+        with patch.object(D, 'run_stage', return_value=subprocess.CompletedProcess([], 1, self.vultr_key, self.vultr_key)):
+            with self.assertRaisesRegex(D.DeployError, '^bridge_vultr_key_rejected_reconcile_secret_or_lifecycle$'):
+                D.bootstrap_bridge_vultr_key(self.root, ['ssh'], self.vultr_key)
+        with patch.object(D, 'run_stage', side_effect=subprocess.TimeoutExpired(['ssh'],45)):
+            with self.assertRaisesRegex(D.DeployError, '^bridge_vultr_key_timeout$'):
+                D.bootstrap_bridge_vultr_key(self.root, ['ssh'], self.vultr_key)
+
+    def test_vultr_atomic_creation_owner_private_parent_and_read_only_retry(self):
+        path = self.setup_provider()
+        result = self.provider_fixture()
+        self.assertEqual((result.returncode,result.stdout,result.stderr), (0,b'',b''))
+        self.assertEqual(path.read_bytes(), self.vultr_key+b'\n')
+        self.assertEqual((path.stat().st_uid,path.stat().st_gid), (os.geteuid(),os.getegid()))
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        before = path.stat()
+        # StateDirectory may legitimately be 0755; credential parent stays 0700.
+        path.parent.parent.chmod(0o755)
+        with D.lock(self.root / 'state/infrastructure.lock'):
+            self.assertEqual(self.provider_fixture().returncode, 0)
+        self.assertEqual((path.stat().st_ino,path.stat().st_mtime_ns),(before.st_ino,before.st_mtime_ns))
+        path.write_bytes(b'different-provider-key')
+        self.assertNotEqual(self.provider_fixture().returncode, 0)
+        self.assertEqual(path.read_bytes(), b'different-provider-key')
+
+    def test_vultr_lifecycle_and_lock_block_new_secret(self):
+        path = self.setup_provider()
+        journal = self.root / 'state/lifecycle.json'
+        journal.write_text('{"phase":"applying"}');journal.chmod(0o600)
+        self.assertNotEqual(self.provider_fixture().returncode, 0)
+        self.assertFalse(path.exists())
+        journal.write_text('{"phase":"released"}')
+        with D.lock(self.root / 'state/infrastructure.lock'):
+            self.assertNotEqual(self.provider_fixture().returncode, 0)
+        self.assertFalse(path.exists())
+        self.assertEqual(self.provider_fixture().returncode, 0)
+
+    def test_vultr_reconciles_crash_and_partial_staging(self):
+        path = self.setup_provider()
+        program = D.REMOTE_VULTR_KEY_PROGRAM.replace(
+            'os.link(temporary,filename,src_dir_fd=target,dst_dir_fd=target,follow_symlinks=False)',
+            'os.link(temporary,filename,src_dir_fd=target,dst_dir_fd=target,follow_symlinks=False);os._exit(23)')
+        self.assertEqual(self.provider_fixture(program).returncode, 23)
+        self.assertEqual(path.stat().st_nlink, 2)
+        self.assertEqual(self.provider_fixture().returncode, 0)
+        self.assertEqual(path.stat().st_nlink, 1)
+        path.unlink()
+        pending = path.parent / ('.vultr-api-key-'+'a'*32)
+        pending.write_bytes(self.vultr_key[:8]);pending.chmod(0o600)
+        self.assertEqual(self.provider_fixture().returncode, 0)
+        self.assertEqual(path.read_bytes(),self.vultr_key+b'\n')
+        self.assertEqual(list(path.parent.glob('.vultr-api-key-*')),[])
+
+    def test_vultr_retries_crash_between_create_and_fchown_with_distinct_owners(self):
+        path = self.setup_provider()
+        program = D.REMOTE_VULTR_KEY_PROGRAM.replace('os.fchown(fd,*file_owner)',
+                                                    'os._exit(24);os.fchown(fd,*file_owner)')
+        run = lambda source: self.remote_fixture(self.vultr_key, source, distinct_file_owners=True)
+        self.assertEqual(run(program).returncode,24)
+        pending = list(path.parent.glob('.vultr-api-key-*'))
+        self.assertEqual(len(pending),1)
+        self.assertEqual(pending[0].read_bytes(),b'')
+        # The root-owned pre-chown file may be reconciled only under infra lock.
+        with D.lock(self.root / 'state/infrastructure.lock'):
+            self.assertNotEqual(run(D.REMOTE_VULTR_KEY_PROGRAM).returncode,0)
+        self.assertEqual(pending[0].read_bytes(),b'')
+        self.assertEqual(run(D.REMOTE_VULTR_KEY_PROGRAM).returncode,0)
+        self.assertEqual(path.read_bytes(),self.vultr_key+b'\n')
+        self.assertEqual(os.getxattr(path,'user.ultra-fixture-owner'),b'relay')
+        self.assertEqual(list(path.parent.glob('.vultr-api-key-*')),[])
+
+    def test_vultr_matching_secret_root_pending_requires_infrastructure_admission(self):
+        path = self.setup_provider()
+        run = lambda: self.remote_fixture(self.vultr_key,D.REMOTE_VULTR_KEY_PROGRAM,distinct_file_owners=True)
+        self.assertEqual(run().returncode,0)
+        before=path.stat()
+        pending=path.parent / ('.vultr-api-key-'+'d'*32)
+        pending.write_bytes(self.vultr_key[:8]);pending.chmod(0o600)
+        with D.lock(self.root / 'state/infrastructure.lock'):
+            self.assertNotEqual(run().returncode,0)
+        self.assertTrue(pending.exists())
+        self.assertEqual(run().returncode,0)
+        self.assertFalse(pending.exists())
+        self.assertEqual((path.stat().st_ino,path.stat().st_mtime_ns),(before.st_ino,before.st_mtime_ns))
+
+    def test_vultr_root_pending_and_foreign_pending_require_valid_content_and_owner(self):
+        path = self.setup_provider()
+        path.parent.mkdir(parents=True,mode=0o700)
+        pending = path.parent / ('.vultr-api-key-'+'c'*32)
+        pending.write_bytes(b'unrelated material');pending.chmod(0o600)
+        run = lambda: self.remote_fixture(self.vultr_key,D.REMOTE_VULTR_KEY_PROGRAM,distinct_file_owners=True)
+        self.assertNotEqual(run().returncode,0)
+        self.assertEqual(pending.read_bytes(),b'unrelated material')
+        self.assertFalse(path.exists())
+        pending.write_bytes(self.vultr_key[:8])
+        os.setxattr(pending,'user.ultra-fixture-owner',b'foreign')
+        self.assertNotEqual(run().returncode,0)
+        self.assertEqual(pending.read_bytes(),self.vultr_key[:8])
+        os.removexattr(pending,'user.ultra-fixture-owner')
+        self.assertEqual(run().returncode,0)
+        self.assertEqual(path.read_bytes(),self.vultr_key+b'\n')
+
+    def test_vultr_unsafe_metadata_symlink_and_unrelated_pending_are_rejected(self):
+        path = self.setup_provider()
+        self.assertEqual(self.provider_fixture().returncode, 0)
+        path.chmod(0o644)
+        self.assertNotEqual(self.provider_fixture().returncode, 0)
+        path.chmod(0o600)
+        path.parent.chmod(0o755)
+        self.assertNotEqual(self.provider_fixture().returncode, 0)
+        path.parent.chmod(0o700)
+        path.unlink()
+        pending = path.parent / ('.vultr-api-key-'+'b'*32)
+        pending.write_bytes(b'other secret');pending.chmod(0o600)
+        self.assertNotEqual(self.provider_fixture().returncode, 0)
+        self.assertFalse(path.exists())
+        pending.unlink()
+        other=path.parent/'other';other.write_bytes(self.vultr_key+b'\n');other.chmod(0o600)
+        path.symlink_to(other)
+        self.assertNotEqual(self.provider_fixture().returncode, 0)
+        self.assertEqual(other.read_bytes(),self.vultr_key+b'\n')
 
 
 
@@ -2067,6 +2248,12 @@ class NativeDeploy(unittest.TestCase):
         self.bot_reader = patch.object(D, 'bot_token_from_env', return_value=b'123456:' + b'x' * 35)
         self.bot_reader_mock = self.bot_reader.start()
         self.addCleanup(self.bot_reader.stop)
+        self.vultr_reader = patch.object(D, 'vultr_key_from_env', return_value=BotTokenBootstrap.vultr_key)
+        self.vultr_reader_mock = self.vultr_reader.start()
+        self.addCleanup(self.vultr_reader.stop)
+        self.vultr_bootstrap = patch.object(D, 'bootstrap_bridge_vultr_key')
+        self.vultr_bootstrap_mock = self.vultr_bootstrap.start()
+        self.addCleanup(self.vultr_bootstrap.stop)
         self.bot_bootstrap = patch.object(D, 'bootstrap_bridge_bot_token')
         self.bot_bootstrap_mock = self.bot_bootstrap.start()
         self.addCleanup(self.bot_bootstrap.stop)
@@ -2075,14 +2262,25 @@ class NativeDeploy(unittest.TestCase):
         events = []
         self.stage_mock.side_effect = lambda *args: (events.append('staging') or self.staged_receipt(*args))
         self.bot_bootstrap_mock.side_effect = lambda *args: events.append('bot-bootstrap')
+        self.vultr_bootstrap_mock.side_effect = lambda *args: events.append('vultr-bootstrap')
         self.rollout(runner=lambda command, cwd, stage, **kwargs: events.append(stage))
-        self.assertEqual(events, ['canonical_policy', 'staging', 'bot-bootstrap', 'doctor', 'upgrade', 'status'])
+        self.assertEqual(events, ['canonical_policy', 'staging', 'bot-bootstrap', 'vultr-bootstrap', 'doctor', 'upgrade', 'status'])
         self.bot_reader_mock.assert_called_once_with(self.config.parent / '.env')
+        self.vultr_reader_mock.assert_called_once_with(self.config.parent / '.env')
 
     def test_bot_bootstrap_rejection_prevents_doctor_and_mutator(self):
         self.bot_bootstrap_mock.side_effect = D.DeployError('bridge_bot_token_rejected_reconcile_secret_or_lifecycle')
         with self.assertRaisesRegex(D.DeployError, 'bridge_bot_token_rejected'):
             self.rollout()
+        self.assertEqual([stage for stage, _ in self.calls], ['canonical_policy'])
+        self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertFalse((self.root / 'operation.json').exists())
+
+    def test_vultr_bootstrap_rejection_prevents_doctor_and_mutator(self):
+        self.vultr_bootstrap_mock.side_effect = D.DeployError('bridge_vultr_key_rejected_reconcile_secret_or_lifecycle')
+        with self.assertRaisesRegex(D.DeployError, 'bridge_vultr_key_rejected'):
+            self.rollout()
+        self.bot_bootstrap_mock.assert_called_once()
         self.assertEqual([stage for stage, _ in self.calls], ['canonical_policy'])
         self.assertEqual(self.config.read_bytes(), self.original)
         self.assertFalse((self.root / 'operation.json').exists())
