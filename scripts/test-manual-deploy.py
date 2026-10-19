@@ -26,6 +26,231 @@ SUBSCRIPTION_PROBE_INPUT = D.subscription_probe_input
 
 
 
+class BotTokenBootstrap(unittest.TestCase):
+    token = b'123456789:' + b'fixture_token_' * 3
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.env = self.root / '.env'
+        self.env.write_bytes(b'IGNORED="\xff$(do-not-run)"\nTELEGRAM_BOT_TOKEN="' + self.token + b'"\n')
+        self.env.chmod(0o600)
+
+    def test_allowlisted_literal_and_no_shell_expansion(self):
+        self.assertEqual(D.bot_token_from_env(self.env), self.token)
+        self.assertFalse((self.root / 'do-not-run').exists())
+        for value in (b'', b'$(echo token)', b'abc:wrong', b'"unterminated', b'123:' + b'x' * 600):
+            self.env.write_bytes(b'TELEGRAM_BOT_TOKEN=' + value + b'\n')
+            with self.assertRaises(D.DeployError):
+                D.bot_token_from_env(self.env)
+
+    def test_duplicate_export_and_missing_keys_fail_closed(self):
+        for raw in (b'OTHER=value\n', b'export TELEGRAM_BOT_TOKEN=' + self.token,
+                    b'TELEGRAM_BOT_TOKEN=' + self.token + b'\nTELEGRAM_BOT_TOKEN=' + self.token,
+                    b'TELEGRAM_BOT_TOKEN\n', b'TELEGRAM_BOT_TOKEN=' + self.token + b' extra'):
+            self.env.write_bytes(raw)
+            with self.assertRaises(D.DeployError):
+                D.bot_token_from_env(self.env)
+
+    def test_foreign_owner_and_changed_source_are_rejected(self):
+        info = self.env.stat()
+        foreign = SimpleNamespace(st_mode=info.st_mode, st_uid=os.geteuid() + 1,
+                                  st_nlink=1, st_size=info.st_size)
+        with patch.object(D.os, 'fstat', return_value=foreign):
+            with self.assertRaises(D.DeployError):
+                D.bot_token_from_env(self.env)
+        original_parser = D.parse_bot_token
+        def changed(lines):
+            token = original_parser(lines)
+            self.env.write_bytes(b'TELEGRAM_BOT_TOKEN=' + self.token + b'\n# changed\n')
+            return token
+        with patch.object(D, 'parse_bot_token', side_effect=changed):
+            with self.assertRaisesRegex(D.DeployError, 'bot_token_env_changed'):
+                D.bot_token_from_env(self.env)
+
+    def test_private_regular_single_link_owner_and_no_symlink_required(self):
+        self.env.chmod(0o644)
+        with self.assertRaises(D.DeployError):
+            D.bot_token_from_env(self.env)
+        self.env.chmod(0o600)
+        link = self.root / 'link'
+        link.symlink_to(self.env)
+        with self.assertRaises(D.DeployError):
+            D.bot_token_from_env(link)
+        link.unlink()
+        os.link(self.env, link)
+        with self.assertRaises(D.DeployError):
+            D.bot_token_from_env(self.env)
+        link.unlink()
+        fifo = self.root / 'fifo'
+        os.mkfifo(fifo, 0o600)
+        with self.assertRaises(D.DeployError):
+            D.bot_token_from_env(fifo)
+        with self.assertRaises(D.DeployError):
+            D.bot_token_from_env(self.root)
+        self.env.write_bytes(b'x' * 1048577)
+        with self.assertRaises(D.DeployError):
+            D.bot_token_from_env(self.env)
+
+    def test_transport_only_stdin_and_no_remote_output_is_exposed(self):
+        def run(command, *, cwd, stdin, timeout):
+            self.assertNotIn(self.token.decode(), repr(command))
+            self.assertEqual(stdin.read(), self.token)
+            self.assertEqual(timeout, 45)
+            return subprocess.CompletedProcess(command, 0, b'', b'')
+        with patch.object(D, 'run_stage', side_effect=run):
+            D.bootstrap_bridge_bot_token(self.root, ['ssh', '-o', 'StrictHostKeyChecking=yes', 'root@192.0.2.10'], self.token)
+        for result in (subprocess.CompletedProcess([], 1, self.token, self.token),
+                       subprocess.CompletedProcess([], 0, self.token, b'')):
+            with patch.object(D, 'run_stage', return_value=result):
+                with self.assertRaises(D.DeployError) as caught:
+                    D.bootstrap_bridge_bot_token(self.root, ['ssh'], self.token)
+                self.assertNotIn(self.token.decode(), str(caught.exception))
+        with patch.object(D, 'run_stage', side_effect=subprocess.TimeoutExpired(['ssh'], 45)):
+            with self.assertRaisesRegex(D.DeployError, '^bridge_bot_token_timeout$'):
+                D.bootstrap_bridge_bot_token(self.root, ['ssh'], self.token)
+
+    def remote_fixture(self, token=None):
+        # Run the actual helper against isolated paths; only root identity and
+        # sticky /tmp ancestor admission are adapted for an unprivileged fixture.
+        program = D.REMOTE_BOT_TOKEN_PROGRAM
+        program = program.replace("'/var/lib/ultra-ansible", repr(str(self.root / 'state'))[:-1])
+        program = program.replace("'/etc", repr(str(self.root / 'etc'))[:-1])
+        program = program.replace('info.st_uid==0', 'info.st_uid==os.geteuid()')
+        program = program.replace('oi.st_uid==0', 'oi.st_uid==os.geteuid()')
+        program = program.replace('info.st_uid==os.geteuid() and not info.st_mode&0o022',
+                                  "info.st_uid in (0,os.geteuid(),os.stat('/').st_uid) and not info.st_mode&0o022")
+        program = program.replace('need(os.geteuid()==0)', 'need(True)')
+        program = program.replace('not info.st_mode&0o022)', '(not info.st_mode&0o022 or info.st_mode&stat.S_ISVTX))')
+        return subprocess.run([sys.executable, '-I', '-c', program], input=self.token if token is None else token,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+
+    def setup_remote(self):
+        (self.root / 'state/operator-inputs').mkdir(parents=True, mode=0o700)
+        (self.root / 'etc').mkdir(mode=0o700)
+        return self.root / 'etc/ultra-relay/bot.env'
+
+    def test_remote_atomic_creation_and_idempotent_quoted_existing_token(self):
+        path = self.setup_remote()
+        result = self.remote_fixture()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b'', b''))
+        self.assertEqual(path.read_bytes(), b'TELEGRAM_BOT_TOKEN=' + self.token + b'\n')
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.stat().st_nlink, 1)
+        path.write_bytes(b'TELEGRAM_BOT_TOKEN="' + self.token + b'"\nOTHER=ignored\n')
+        before = path.stat()
+        self.assertEqual(self.remote_fixture().returncode, 0)
+        self.assertEqual(path.stat().st_ino, before.st_ino)
+        self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
+        self.assertEqual(list(path.parent.glob('.bot.env-*')), [])
+
+    def test_remote_different_token_unsafe_metadata_and_symlinks_do_not_overwrite(self):
+        path = self.setup_remote()
+        self.assertEqual(self.remote_fixture().returncode, 0)
+        original = path.read_bytes()
+        self.assertNotEqual(self.remote_fixture(b'987:' + b'y' * 35).returncode, 0)
+        self.assertEqual(path.read_bytes(), original)
+        path.chmod(0o644)
+        self.assertNotEqual(self.remote_fixture().returncode, 0)
+        path.chmod(0o600)
+        other = path.parent / 'other'
+        path.rename(other)
+        path.symlink_to(other)
+        self.assertNotEqual(self.remote_fixture().returncode, 0)
+        self.assertEqual(other.read_bytes(), original)
+
+    def test_remote_held_lifecycle_and_busy_infrastructure_lock_block_creation(self):
+        path = self.setup_remote()
+        journal = self.root / 'state/lifecycle.json'
+        journal.write_text('{"phase":"applying"}')
+        journal.chmod(0o600)
+        self.assertNotEqual(self.remote_fixture().returncode, 0)
+        self.assertFalse(path.exists())
+        journal.write_text('{"phase":"released"}')
+        with D.lock(self.root / 'state/infrastructure.lock'):
+            self.assertNotEqual(self.remote_fixture().returncode, 0)
+        self.assertFalse(path.exists())
+        self.assertEqual(self.remote_fixture().returncode, 0)
+
+    def test_remote_matching_token_is_reused_while_infrastructure_lock_is_held(self):
+        path = self.setup_remote()
+        self.assertEqual(self.remote_fixture().returncode, 0)
+        with D.lock(self.root / 'state/infrastructure.lock'):
+            result = self.remote_fixture()
+        self.assertEqual((result.returncode, path.read_bytes()), (0, b'TELEGRAM_BOT_TOKEN=' + self.token + b'\n'))
+
+    def test_remote_reconciles_crash_after_atomic_link_publication(self):
+        path = self.setup_remote()
+        program = D.REMOTE_BOT_TOKEN_PROGRAM.replace(
+            "os.link(temporary,'bot.env',src_dir_fd=target,dst_dir_fd=target,follow_symlinks=False)",
+            "os.link(temporary,'bot.env',src_dir_fd=target,dst_dir_fd=target,follow_symlinks=False);os._exit(23)")
+        replacements = (("'/var/lib/ultra-ansible", repr(str(self.root / 'state'))[:-1]),
+                        ("'/etc", repr(str(self.root / 'etc'))[:-1]),
+                        ('info.st_uid==0', 'info.st_uid==os.geteuid()'),
+                        ('info.st_uid==os.geteuid() and not info.st_mode&0o022',
+                         "info.st_uid in (0,os.geteuid(),os.stat('/').st_uid) and not info.st_mode&0o022"),
+                        ('need(os.geteuid()==0)', 'need(True)'),
+                        ('not info.st_mode&0o022)', '(not info.st_mode&0o022 or info.st_mode&stat.S_ISVTX))'))
+        for old, new in replacements:
+            program = program.replace(old,new)
+        crashed = subprocess.run([sys.executable, '-I', '-c', program], input=self.token,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        self.assertEqual(crashed.returncode, 23)
+        self.assertEqual(path.stat().st_nlink, 2)
+        self.assertEqual(self.remote_fixture().returncode, 0)
+        self.assertEqual(path.stat().st_nlink, 1)
+        self.assertEqual(path.read_bytes(), b'TELEGRAM_BOT_TOKEN=' + self.token + b'\n')
+        self.assertEqual(list(path.parent.glob('.bot.env-*')), [])
+
+    def test_remote_reuses_complete_or_replaces_partial_private_pending_file(self):
+        path = self.setup_remote()
+        path.parent.mkdir(mode=0o700)
+        expected = b'TELEGRAM_BOT_TOKEN=' + self.token + b'\n'
+        complete = path.parent / ('.bot.env-' + 'a' * 32)
+        complete.write_bytes(expected)
+        complete.chmod(0o600)
+        self.assertEqual(self.remote_fixture().returncode, 0)
+        self.assertEqual(path.read_bytes(), expected)
+        self.assertEqual(path.stat().st_nlink, 1)
+        self.assertEqual(list(path.parent.glob('.bot.env-*')), [])
+
+        path.unlink()
+        partial = path.parent / ('.bot.env-' + 'b' * 32)
+        partial.write_bytes(expected[:12])
+        partial.chmod(0o600)
+        self.assertEqual(self.remote_fixture().returncode, 0)
+        self.assertEqual(path.read_bytes(), expected)
+        self.assertEqual(list(path.parent.glob('.bot.env-*')), [])
+
+    def test_remote_rejects_unrelated_pending_private_file(self):
+        path = self.setup_remote()
+        path.parent.mkdir(mode=0o700)
+        pending = path.parent / ('.bot.env-' + 'c' * 32)
+        pending.write_bytes(b'other secret material')
+        pending.chmod(0o600)
+        self.assertNotEqual(self.remote_fixture().returncode, 0)
+        self.assertFalse(path.exists())
+        self.assertEqual(pending.read_bytes(), b'other secret material')
+
+    def test_remote_unsafe_directory_and_duplicate_tokens_fail_closed(self):
+        path = self.setup_remote()
+        self.assertEqual(self.remote_fixture().returncode, 0)
+        path.parent.chmod(0o755)
+        self.assertNotEqual(self.remote_fixture().returncode, 0)
+        path.parent.chmod(0o700)
+        raw = path.read_bytes() * 2
+        path.write_bytes(raw)
+        self.assertNotEqual(self.remote_fixture().returncode, 0)
+        self.assertEqual(path.read_bytes(), raw)
+        path.unlink()
+        path.parent.rename(path.parent.with_name('other-relay'))
+        path.parent.symlink_to(path.parent.with_name('other-relay'), target_is_directory=True)
+        self.assertNotEqual(self.remote_fixture().returncode, 0)
+        self.assertFalse(path.exists())
+
+
+
 class RecoveryStateAttestation(unittest.TestCase):
     """Local fixtures only; no production SSH, installer or Ansible."""
     def setUp(self):
@@ -1844,6 +2069,28 @@ class NativeDeploy(unittest.TestCase):
         self.stage = patch.object(D, 'stage_remote', side_effect=staged_receipt)
         self.stage_mock = self.stage.start()
         self.addCleanup(self.stage.stop)
+        self.bot_reader = patch.object(D, 'bot_token_from_env', return_value=b'123456:' + b'x' * 35)
+        self.bot_reader_mock = self.bot_reader.start()
+        self.addCleanup(self.bot_reader.stop)
+        self.bot_bootstrap = patch.object(D, 'bootstrap_bridge_bot_token')
+        self.bot_bootstrap_mock = self.bot_bootstrap.start()
+        self.addCleanup(self.bot_bootstrap.stop)
+
+    def test_bot_bootstrap_runs_after_staging_before_doctor(self):
+        events = []
+        self.stage_mock.side_effect = lambda *args: (events.append('staging') or self.staged_receipt(*args))
+        self.bot_bootstrap_mock.side_effect = lambda *args: events.append('bot-bootstrap')
+        self.rollout(runner=lambda command, cwd, stage, **kwargs: events.append(stage))
+        self.assertEqual(events, ['canonical_policy', 'staging', 'bot-bootstrap', 'doctor', 'upgrade', 'status'])
+        self.bot_reader_mock.assert_called_once_with(self.config.parent / '.env')
+
+    def test_bot_bootstrap_rejection_prevents_doctor_and_mutator(self):
+        self.bot_bootstrap_mock.side_effect = D.DeployError('bridge_bot_token_rejected_reconcile_secret_or_lifecycle')
+        with self.assertRaisesRegex(D.DeployError, 'bridge_bot_token_rejected'):
+            self.rollout()
+        self.assertEqual([stage for stage, _ in self.calls], ['canonical_policy'])
+        self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertFalse((self.root / 'operation.json').exists())
 
     def write_inventory(self):
         request = json.dumps({'inventory': self.inventory, 'variables': {}}).encode()

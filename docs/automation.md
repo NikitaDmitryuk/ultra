@@ -539,6 +539,34 @@ checkout Go cache; операторский `GOCACHE` не наследуетс�
 локальный `.env` в staged-каталог не переносится. Обычный CLI без этого режима
 использует канонический источник секретов.
 
+При каждой ручной выкладке через SSH (кроме adoption и cleanup уже завершённой
+операции) wrapper отдельно выбирает `TELEGRAM_BOT_TOKEN` из локального `.env` рядом
+с canonical `install.config`. Источник обязателен: обычный файл владельца 0600,
+без symlink/hardlink, до 1 MiB. Допускается ровно один literal assignment с
+некавыченным значением или одинарными/двойными кавычками и необязательным комментарием;
+`export`, дубли, shell expansion и отсутствующий ключ отклоняются. Остальные значения
+не интерпретируются. Токен передаётся только через stdin того же pinned SSH,
+без аргументов, журналов и release-архива.
+
+После staging, перед `doctor`, изолированный root helper проверяет
+`/etc/ultra-relay/bot.env`: совпадающий токен в безопасном файле 0600 остаётся
+на месте под manual lock, даже если forward continuation удерживает
+infrastructure lock. Отсутствующий файл создаётся атомарно без замещения, с
+владельцем root и правами 0600, только при свободных manual/infrastructure locks
+и отсутствующем либо released lifecycle. При прерывании между публикацией и
+удалением временной hardlink следующий запуск проверяет совпадение inode и
+безопасно удаляет только оставшееся имя; до публикации повторно использует полный
+временный файл или удаляет его строгий префикс ожидаемых байтов. Каталог
+`/etc/ultra-relay` должен иметь права 0700;
+symlink, hardlink и небезопасные владельцы/права отклоняются. Другой существующий
+токен никогда не заменяется: ошибка `bridge_bot_token_rejected_reconcile_secret_or_lifecycle`
+требует отдельной санкционированной ротации или reconciliation lifecycle.
+SSH helper ограничен 45 секундами (удалённый процесс — 30); его stdout/stderr
+ограничены и не публикуются. Ошибка блокирует doctor/upgrade. Созданный токен
+остаётся защищённым runtime input и при последующем отказе doctor.
+Эта процедура восстанавливает только bot token; installed identity bridge,
+Vultr key и остальные условия upgrade должны быть подготовлены отдельно.
+
 Для `/var/lib/ultra-relay` допустимы 0700 и 0755 при штатных владельце и группе:
 служба relay задаёт `StateDirectory` без `StateDirectoryMode`, поэтому systemd может
 восстановить 0755 при старте. Исключение относится только к каталогу состояния;
@@ -570,7 +598,7 @@ Hostname URL должен совпадать с текущим публичны�
 `scripts/manual-deploy.py --subscription-probe-env-file /secure/operator/.env`.
 URL не добавляется в `install.config`, аргументы команд или журналы. Его отдельная
 копия 0600 передаётся по pinned SSH для acceptance; весь `.env` не передаётся.
-При отсутствии default `.env`/key обычный upgrade продолжает работу без probe;
+При отсутствии default probe key обычный upgrade продолжает работу без probe;
 upgrade, требующий acceptance, отклоняется installer до изменения runtime.
 Явно указанный отсутствующий файл/key или небезопасный файл отклоняется до
 изменения canonical config.
@@ -598,7 +626,8 @@ inventory не нужен и вручную его создавать не сл�
 и точный canonical `install.config` в
 `/var/lib/ultra-ansible/operator-inputs/manual-<SHA>-<attempt>/release`. В конфигурации
 обновляются только `ULTRA_AUTOMATION_VERSION` и `ULTRA_AUTOMATION_RELEASE_DIR`;
-`.env` и иные секреты не передаются. На bridge выполняются `doctor`, затем
+Полный `.env` в этот комплект не входит; bot token передаётся отдельно через stdin
+перед `doctor`. На bridge выполняются `doctor`, затем
 `operator-upgrade` и `status`. Эта отдельная команда сверяет source commit, SHA-256
 manifest и config, все хеши assets и совпадение собственного исполняемого installer
 с записью manifest; эти значения приходят по pinned SSH transport. Обычная команда

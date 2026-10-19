@@ -590,6 +590,230 @@ def subscription_probe_from_env(path, optional=False):
     return value.encode()
 
 
+# One allowlisted literal grammar shared with the isolated remote helper.
+BOT_TOKEN_PARSER = r'''
+def bot_token_lines(stream):
+    total = 0
+    while True:
+        line = stream.readline(1048577)
+        if not line: return
+        total += len(line)
+        if total > 1048576: raise ValueError('bot_token_invalid')
+        yield line.rstrip(b'\r\n')
+def parse_bot_token(lines):
+    selected = []
+    for line in lines:
+        key, separator, value = line.partition(b'=')
+        if key.strip() == b'TELEGRAM_BOT_TOKEN':
+            if not separator: raise ValueError('bot_token_invalid')
+            match = re.fullmatch(rb"""[ \t]*(?:([0-9]+:[A-Za-z0-9_-]{20,128})|'([0-9]+:[A-Za-z0-9_-]{20,128})'|"([0-9]+:[A-Za-z0-9_-]{20,128})")[ \t]*(?:#[^\r\n]*)?""", value)
+            if not match: raise ValueError('bot_token_invalid')
+            token = next(value for value in match.groups() if value)
+            if len(token) > 512: raise ValueError('bot_token_invalid')
+            selected.append(token)
+        elif re.match(rb'(?:export[ \t]+)?TELEGRAM_BOT_TOKEN(?:[^A-Za-z0-9_]|$)', line.strip()):
+            raise ValueError('bot_token_invalid')
+    if len(selected) != 1: raise ValueError('bot_token_invalid')
+    return selected[0]
+'''
+exec(BOT_TOKEN_PARSER)
+
+
+def bot_token_from_env(path):
+    """Select only the literal bot token; never source, expand or persist .env."""
+    path = Path(path)
+    try:
+        require(path.is_absolute() and all(not p.is_symlink() for p in path.parents),
+                'bot_token_private_env_required')
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            before = os.fstat(fd)
+            require(stat.S_ISREG(before.st_mode) and before.st_uid == os.geteuid() and
+                    stat.S_IMODE(before.st_mode) == 0o600 and before.st_nlink == 1 and
+                    0 < before.st_size <= 1048576, 'bot_token_private_env_required')
+            with os.fdopen(fd, 'rb', closefd=False) as stream:
+                token = parse_bot_token(bot_token_lines(stream))
+            after = os.fstat(fd)
+            require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+                    (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) and
+                    os.path.samestat(after, path.lstat()), 'bot_token_env_changed')
+            return token
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        raise DeployError('bot_token_private_env_invalid') from None
+
+
+REMOTE_BOT_TOKEN_PROGRAM = 'import re\n' + BOT_TOKEN_PARSER + r'''
+import fcntl,json,os,signal,stat,sys,uuid
+from pathlib import Path
+signal.alarm(30)
+def need(ok):
+    if not ok: raise ValueError('bot_token_bootstrap_rejected')
+def directory(path):
+    fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
+    try:
+        for part in Path(path).parts[1:]:
+            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            os.close(fd);fd=child
+            info=os.fstat(fd)
+            need(info.st_uid==0 and not info.st_mode&0o022)
+        return os.dup(fd)
+    finally: os.close(fd)
+def private(fd):
+    info=os.fstat(fd)
+    need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1 and
+         stat.S_IMODE(info.st_mode)==0o600 and info.st_size<=1048576)
+def main():
+    need(os.geteuid()==0)
+    token=sys.stdin.buffer.read(513)
+    need(len(token)<=512 and re.fullmatch(rb'[0-9]+:[A-Za-z0-9_-]{20,128}',token))
+    state=directory('/var/lib/ultra-ansible')
+    locks=[]
+    try:
+        # The existing manual staging lock serializes wrapper operations; the
+        # infrastructure lock also excludes installer lifecycle mutations.
+        inputs=directory('/var/lib/ultra-ansible/operator-inputs')
+        try:
+            fd=os.open('manual-deploy.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o600,dir_fd=inputs)
+            locks.append(fd);private(fd);fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        finally: os.close(inputs)
+        def open_target(create):
+            etc=directory('/etc')
+            try:
+                if create:
+                    try: os.mkdir('ultra-relay',0o700,dir_fd=etc)
+                    except FileExistsError: pass
+            finally: os.close(etc)
+            return directory('/etc/ultra-relay')
+        def matches_existing(target):
+            try: fd=os.open('bot.env',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
+            except FileNotFoundError: return False
+            try:
+                info=os.fstat(fd)
+                need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink in (1,2) and
+                     stat.S_IMODE(info.st_mode)==0o600 and info.st_size<=1048576)
+                with os.fdopen(fd,'rb',closefd=False) as stream:
+                    need(parse_bot_token(bot_token_lines(stream))==token)
+                if info.st_nlink==2:
+                    # Recover a crash after hard-link publication but before
+                    # removing the private temporary name. Only accept the
+                    # single expected root-owned link to this exact inode.
+                    names=[name for name in os.listdir(target) if re.fullmatch(r'\.bot\.env-[0-9a-f]{32}',name)]
+                    linked=[]
+                    for name in names:
+                        other=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
+                        try:
+                            oi=os.fstat(other)
+                            if (oi.st_dev,oi.st_ino)==(info.st_dev,info.st_ino):
+                                linked.append(name)
+                            else:
+                                need(oi.st_uid==0 and stat.S_ISREG(oi.st_mode) and oi.st_nlink==1 and
+                                     stat.S_IMODE(oi.st_mode)==0o600)
+                                raw=os.read(other,1025)
+                                need((b'TELEGRAM_BOT_TOKEN='+token+b'\n').startswith(raw))
+                                os.unlink(name,dir_fd=target)
+                        finally: os.close(other)
+                    need(info.st_nlink==2 and len(linked)==1)
+                    os.unlink(linked[0],dir_fd=target);os.fsync(target)
+                    need(os.fstat(fd).st_nlink==1)
+                return True
+            finally: os.close(fd)
+        try: target=open_target(False)
+        except FileNotFoundError: target=None
+        if target is not None:
+            try:
+                need(stat.S_IMODE(os.fstat(target).st_mode)==0o700)
+                if matches_existing(target): return
+            finally: os.close(target)
+        # Existing credentials are read-only and can be reused during a valid
+        # forward continuation whose infrastructure lock is intentionally held.
+        fd=os.open('infrastructure.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o600,dir_fd=state)
+        locks.append(fd);private(fd);fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        target=open_target(True)
+        try:
+            need(stat.S_IMODE(os.fstat(target).st_mode)==0o700)
+            if matches_existing(target): return
+            # Creation can repair a fresh bridge, but cannot alter a held
+            # lifecycle or silently rotate a running service's identity.
+            try: fd=os.open('lifecycle.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=state)
+            except FileNotFoundError: fd=None
+            if fd is not None:
+                try:
+                    private(fd)
+                    need(json.loads(os.read(fd,1048577)).get('phase')=='released')
+                finally: os.close(fd)
+            expected=b'TELEGRAM_BOT_TOKEN='+token+b'\n'
+            temporary='.bot.env-'+uuid.uuid4().hex
+            # Reuse a complete staging file left by a crash before publication;
+            # discard only a strict prefix of the intended bytes from this reserved
+            # private filename, and reject any different content.
+            pending=[name for name in os.listdir(target) if re.fullmatch(r'\.bot\.env-[0-9a-f]{32}',name)]
+            for name in pending:
+                old=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
+                try:
+                    oi=os.fstat(old);need(stat.S_ISREG(oi.st_mode) and oi.st_uid==0 and oi.st_nlink==1 and
+                                         stat.S_IMODE(oi.st_mode)==0o600 and oi.st_size<=1024)
+                    raw=os.read(old,1025)
+                    need(expected.startswith(raw))
+                    if raw==expected: os.fsync(old)
+                finally: os.close(old)
+            complete=[name for name in pending if os.stat(name,dir_fd=target,follow_symlinks=False).st_size==len(expected)]
+            need(len(complete)<=1)
+            if complete:
+                temporary=complete[0]
+                for name in pending:
+                    if name!=temporary: os.unlink(name,dir_fd=target)
+            else:
+                for name in pending: os.unlink(name,dir_fd=target)
+                fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=target)
+                try:
+                    with os.fdopen(fd,'wb') as stream:
+                        stream.write(expected)
+                        stream.flush();os.fsync(stream.fileno())
+                except BaseException:
+                    try: os.unlink(temporary,dir_fd=target)
+                    except FileNotFoundError: pass
+                    raise
+            # Atomic no-replace publication, including against other writers.
+            os.link(temporary,'bot.env',src_dir_fd=target,dst_dir_fd=target,follow_symlinks=False)
+            os.unlink(temporary,dir_fd=target);os.fsync(target)
+        finally: os.close(target)
+    finally:
+        for fd in locks: os.close(fd)
+        os.close(state)
+try:
+    main()
+except Exception:
+    sys.exit(1)
+'''
+
+
+def bootstrap_bridge_bot_token(repo, transport, token):
+    """Only stdin carries the secret; bounded captured output is never emitted."""
+    require(len(token) <= 512 and re.fullmatch(rb'[0-9]+:[A-Za-z0-9_-]{20,128}', token),
+            'bot_token_invalid')
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, token)
+        os.close(write_fd)
+        write_fd = None
+        with os.fdopen(read_fd, 'rb') as stream:
+            read_fd = None
+            try:
+                result = run_stage(transport + [shlex.join(['python3', '-I', '-c', REMOTE_BOT_TOKEN_PROGRAM])],
+                                   cwd=repo, stdin=stream, timeout=45)
+            except subprocess.TimeoutExpired:
+                raise DeployError('bridge_bot_token_timeout') from None
+        require(result.returncode == 0 and not result.stdout and not result.stderr and
+                not getattr(result, 'stdout_truncated', False) and not getattr(result, 'stderr_truncated', False),
+                'bridge_bot_token_rejected_reconcile_secret_or_lifecycle')
+    finally:
+        if read_fd is not None: os.close(read_fd)
+        if write_fd is not None: os.close(write_fd)
+
+
+
 def atomic_write(path, raw, preserve_mode=False):
     mode = 0o600
     if preserve_mode:
@@ -2947,6 +3171,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             journal.unlink()
             return
 
+    bot_token = bot_token_from_env(config.parent / '.env') if transport and not adopt else None
     probe_raw = None
     if not adopt:
         # Retry the frozen credential without reopening .env. Explicit input
@@ -3123,6 +3348,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             require(record.get('remote_architecture', staged_architecture) == staged_architecture, 'bridge_architecture_changed')
             record['remote_architecture'] = staged_architecture
             record['staged_config_sha256'] = staged_config_sha
+            if bot_token is not None:
+                bootstrap_bridge_bot_token(repo, transport, bot_token)
         for stage, command in commands:
             if continue_forward_only and not same_candidate and stage == 'upgrade':
                 record['stage'] = 'forward_continuation_preflight'
