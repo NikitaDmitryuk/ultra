@@ -24,8 +24,9 @@ var (
 
 // ExitNodeRepo manages exit_nodes rows on the bridge PostgreSQL.
 type ExitNodeRepo struct {
-	db          *DB
-	transaction pgx.Tx
+	retirementDisableID string
+	db                  *DB
+	transaction         pgx.Tx
 }
 
 func NewExitNodeRepo(db *DB) *ExitNodeRepo {

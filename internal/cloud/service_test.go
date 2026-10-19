@@ -66,10 +66,14 @@ type fakeProvider struct {
 	monthly          float64
 	available        bool
 	instances        []Instance
+	lastCreate       CreateRequest
 }
 
 func (p *fakeProvider) Regions(context.Context) ([]Region, error) {
-	return []Region{{ID: "fra", City: "Frankfurt", Country: "DE"}}, nil
+	return []Region{
+		{ID: "fra", City: "Frankfurt", Country: "DE"},
+		{ID: "sao", City: "Sao Paulo", Country: "BR"},
+	}, nil
 }
 func (p *fakeProvider) Plans(context.Context) ([]Plan, error) {
 	return []Plan{{ID: "vc2-1c-1gb", RAM: 1024, CPU: 1, Cost: Cost{Monthly: p.monthly, Hourly: .007}}}, nil
@@ -77,8 +81,9 @@ func (p *fakeProvider) Plans(context.Context) ([]Plan, error) {
 func (p *fakeProvider) Available(context.Context, string, string) (bool, error) {
 	return p.available, nil
 }
-func (p *fakeProvider) Create(context.Context, CreateRequest) (Instance, error) {
+func (p *fakeProvider) Create(_ context.Context, request CreateRequest) (Instance, error) {
 	p.creates++
+	p.lastCreate = request
 	if p.unknown {
 		return Instance{}, ErrUnknownCreation
 	}
@@ -178,6 +183,25 @@ func TestConfirmUsesShortCapacityLock(t *testing.T) {
 	}
 	if store.capacityLocks != 1 || store.workerLocks != 0 {
 		t.Fatalf("wrong lock used: capacity=%d worker=%d", store.capacityLocks, store.workerLocks)
+	}
+}
+
+func TestConfirmCreatesTheSelectedRegion(t *testing.T) {
+	ctx := context.Background()
+	s, api, _ := testService()
+	s.TopologyReady = func(context.Context) error { return nil }
+	offer, err := s.Quote(ctx, 1, "sao", "vc2-1c-1gb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Confirm(ctx, 1, offer.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if api.creates != 1 || api.lastCreate.Region != "sao" || api.lastCreate.Plan != "vc2-1c-1gb" {
+		t.Fatalf("provider request lost selected region: creates=%d request=%+v", api.creates, api.lastCreate)
 	}
 }
 

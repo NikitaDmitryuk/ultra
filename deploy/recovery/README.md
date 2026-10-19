@@ -468,3 +468,30 @@ TCP 22 от конкретного peer IPv4 `/32`. Перенаправлени
 существующий ingress-узел. Полная [процедура восстановления и проверки age-ключа](RESTORE.md)
 описывает fencing, продолжение после прерывания, приватные файлы и критерии готовности.
 Примеры входных данных: [restore.json](restore.example.json) и [fencing](fence.example.json).
+
+## Свежий дамп primary на компьютер оператора
+
+Из корня репозитория запустите `python3 scripts/operator-db-dump.py`.
+Нужны локальные `ssh`, `ssh-keygen`, `age`, `age-keygen` и совместимый с сервером
+`pg_restore`. Утилита читает `DATABASE_IP`, `DATABASE_SSH_KEY`, `DB_NAME` из
+канонического `install.config` (`DB_NAME` по умолчанию `ultra_db`, если отсутствует,
+пуст или содержит только пробелы) и напрямую подключается к DB primary как root
+со строгой проверкой `dist/manual/bootstrap-known_hosts`, затем выполняет
+`runuser -u postgres -- pg_dump -Fc --no-owner --no-acl --dbname <DB_NAME>`.
+Отсутствующий или изменившийся host key останавливает операцию.
+
+Шифрование выполняется локально существующей identity. Путь выбирается в порядке:
+явный `--identity`, необязательный `ULTRA_OPERATOR_AGE_IDENTITY_FILE` в `install.config`,
+затем `~/.local/share/ultra/recovery/age-identity.txt`. Значение config содержит
+только путь, не ключ; manual-deploy может передать эту строку на bridge вместе с
+`install.config`. Файл identity остаётся у оператора и не передаётся.
+Публичный recipient выводится локально из выбранной identity: этот операторский
+дамп шифруется для неё и расшифровывается независимо от server automation recipient
+`ULTRA_AUTOMATION_AGE_RECIPIENT`, совпадение с ним не требуется.
+После полного age decrypt/authentication и `pg_restore --list` зашифрованный
+`primary-db-*.dump.age` атомарно появляется в `dist/manual` с правами `0600`.
+Проверочный plaintext находится только в приватном временном каталоге на
+компьютере оператора и удаляется после проверки, как и partial-файлы при ошибке.
+Код 0 сопровождается абсолютным путём, временем начала снимка UTC, размером и
+SHA-256. Это отдельный логический дамп БД: проверка TOC не заменяет учение
+восстановления и полный независимый recovery-комплект.

@@ -106,9 +106,26 @@ func (c Client) exchange(ctx context.Context, message Message) (Response, error)
 	return response, nil
 }
 
+// ReadinessError exposes only a fixed readiness classification to API consumers.
+type ReadinessError struct {
+	code  string
+	cause error
+}
+
+func (e *ReadinessError) Error() string         { return e.code }
+func (e *ReadinessError) Unwrap() error         { return e.cause }
+func (e *ReadinessError) ReadinessCode() string { return e.code }
+
 func (c Client) Ready(ctx context.Context) error {
-	_, err := c.exchange(ctx, Message{Action: "ready"})
-	return err
+	response, err := c.exchange(ctx, Message{Action: "ready"})
+	if err == nil {
+		return nil
+	}
+	code := "controller_unavailable"
+	if response.Code == "lifecycle_busy" {
+		code = "lifecycle_busy"
+	}
+	return &ReadinessError{code: code, cause: err}
 }
 
 // ConfigurationTerminal reads the durable receipt, including terminal failures

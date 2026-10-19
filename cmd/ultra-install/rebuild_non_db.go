@@ -40,6 +40,9 @@ var errRebuildBlocked = errors.New("rebuild_non_db_preflight_blocked")
 // No execute/resume action is registered. A preflight record cannot become a
 // completion receipt or authorize a broker reservation or ordinary deployment.
 func runRebuildNonDB(args []string, output io.Writer, now time.Time) error {
+	if len(args) > 0 && args[0] == "diagnose" {
+		return diagnoseRebuildNonDB(args[1:], output)
+	}
 	if len(args) == 0 || args[0] != "preflight" {
 		return errors.New("rebuild_non_db_execution_not_supported")
 	}

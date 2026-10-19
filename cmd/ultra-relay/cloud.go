@@ -95,6 +95,7 @@ func configureCloud(
 	quotaAPI = api
 	p.API = api
 	srv.Cloud = &cloud.Service{
+		LockTopology:      srv.LockTopologyMutation,
 		TopologyReady:     controller.Ready,
 		IngressInstanceID: os.Getenv("ULTRA_SUBSCRIPTION_INGRESS_INSTANCE_ID"),
 		API:               api,

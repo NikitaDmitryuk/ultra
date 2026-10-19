@@ -7,6 +7,7 @@ import (
 )
 
 var ErrIngressInUse = errors.New("subscription ingress is in use")
+var ErrLastEnabledExit = errors.New("last enabled exit cannot be removed")
 
 // Provider text is used only for classification and is never retained or returned.
 func providerCode(status int, message string) string {
@@ -37,6 +38,13 @@ func providerCode(status int, message string) string {
 	}
 }
 func ErrorCode(err error) string {
+	var readiness interface{ ReadinessCode() string }
+	if errors.As(err, &readiness) {
+		switch readiness.ReadinessCode() {
+		case "lifecycle_busy", "controller_unavailable":
+			return readiness.ReadinessCode()
+		}
+	}
 	if errors.Is(err, ErrUnknownCreation) {
 		return "creation_requires_reconciliation"
 	}
@@ -76,6 +84,9 @@ func ErrorMessage(code string) string {
 		}
 	}
 	messages := map[string]string{
+		"lifecycle_busy":                   "Контроллер занят установкой или восстановлением инфраструктуры. Дождитесь завершения и повторите действие.",
+		"controller_unavailable":           "Контроллер установки недоступен. Проверьте его службу на bridge и повторите действие.",
+		"route_removal_failed":             "Не удалось отключить маршрут. Проверьте журнал операции и повторите удаление. VPS не удалён и продолжает оплачиваться.",
 		"provider_invalid_request":         "Vultr отклонил формат запроса Ultra. Требуется исправление API-клиента; повторная оплата не поможет.",
 		"provider_timeout":                 "Vultr не ответил вовремя. Проверьте журнал: после отправки покупки сначала сверяется её результат.",
 		"provider_unreachable":             "Не удалось подключиться к API Vultr. Проверьте сеть и DNS исполнителя на bridge.",

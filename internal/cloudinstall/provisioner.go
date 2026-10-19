@@ -745,14 +745,87 @@ func (p *Provisioner) ApplyRoute(ctx context.Context, op *cloud.Operation) error
 	}
 	return p.Refresh(ctx)
 }
+
+// ValidateRetirement refuses infrastructure and the persisted main/fallback exit.
+// The caller additionally requires exact operation and provider ownership identities.
+func (p *Provisioner) ValidateRetirement(ctx context.Context, op *cloud.Operation, instance cloud.Instance) error {
+	if p.DB == nil || p.Bridge == nil || p.Bridge.Database == nil {
+		return cloud.ErrUnavailable
+	}
+	primaryIP := net.ParseIP(p.Bridge.Database.PrimaryHost)
+	if primaryIP == nil || primaryIP.To4() == nil {
+		return cloud.ErrUnavailable
+	}
+	primaryHost := primaryIP.String()
+	target := op.RetirementTarget
+	if target == "" && op.Phase != "retire_unpublish" && op.Phase != "retire_delete" && op.Phase != "retire_cleanup" {
+		target = instance.IP // pre-check callers; service persists it before effects
+	}
+	ip := net.ParseIP(target)
+	if ip == nil || ip.To4() == nil || (instance.IP != "" && !sameRetirementAddress(target, instance.IP)) {
+		return cloud.ErrConflict
+	}
+	if sameRetirementAddress(target, p.BridgeIP) ||
+		sameRetirementAddress(target, p.Bridge.Exit.Address) ||
+		sameRetirementAddress(target, primaryHost) {
+		return cloud.ErrConflict
+	}
+	checked := *op
+	checked.RetirementTarget = target
+	if err := db.NewExitNodeRepo(p.DB).ValidateCloudRetirementTarget(ctx, &checked); err != nil {
+		return err
+	}
+	budgets, err := db.NewQuotaRepo(p.DB).Budgets(ctx)
+	if err != nil {
+		return err
+	}
+	for _, budget := range budgets {
+		if budget.ID == op.ExitID && budget.Fallback {
+			return cloud.ErrConflict
+		}
+	}
+	if op.ExitID == "" {
+		return nil // paid resource has not installed a local exit yet
+	}
+	node, err := db.NewExitNodeRepo(p.DB).Get(ctx, op.ExitID)
+	if errors.Is(err, db.ErrExitNotFound) {
+		return nil // already removed locally; retain provider ownership checks
+	}
+	if err != nil {
+		return err
+	}
+	// A saved delete checkpoint never authorizes deleting a republished node.
+	if (op.Phase == "retire_delete" || op.Phase == "retire_cleanup") && node.Enabled {
+		return cloud.ErrConflict
+	}
+	if sameRetirementAddress(node.Address, p.BridgeIP) ||
+		sameRetirementAddress(node.Address, p.Bridge.Exit.Address) ||
+		sameRetirementAddress(node.Address, primaryHost) ||
+		(instance.IP != "" && !sameRetirementAddress(node.Address, instance.IP)) {
+		return cloud.ErrConflict
+	}
+	return nil
+}
+
+func sameRetirementAddress(a, b string) bool {
+	left, right := net.ParseIP(a), net.ParseIP(b)
+	return left != nil && right != nil && left.Equal(right)
+}
+
 func (p *Provisioner) Unpublish(ctx context.Context, op *cloud.Operation) error {
 	if op.ExitID == "" {
 		return nil
 	}
 	disabled := false
-	if _, e := db.NewExitNodeRepo(p.DB).Update(ctx, op.ExitID, exits.UpdatePatch{Enabled: &disabled}); e != nil &&
-		!errors.Is(e, db.ErrExitNotFound) {
-		return e
+	repo := db.NewExitNodeRepo(p.DB)
+	var err error
+	if op.Phase == "retire_unpublish" {
+		err = repo.DisableCloudRetirement(ctx, op)
+	} else {
+		_, err = repo.Update(ctx, op.ExitID, exits.UpdatePatch{Enabled: &disabled})
+	}
+	if err != nil && !errors.Is(err, db.ErrExitNotFound) {
+		return routeRemovalError(err)
 	}
 	if e := p.Routes.Unpublish(ctx, op.ExitID); e != nil {
 		return e
@@ -762,6 +835,14 @@ func (p *Provisioner) Unpublish(ctx context.Context, op *cloud.Operation) error 
 	}
 	return p.Apply(ctx)
 }
+
+func routeRemovalError(err error) error {
+	if errors.Is(err, db.ErrExitLastEnabled) {
+		return errors.Join(cloud.ErrLastEnabledExit, err)
+	}
+	return err
+}
+
 func (p *Provisioner) Cleanup(ctx context.Context, op *cloud.Operation) error {
 	return p.API.DeleteFirewall(ctx, op.FirewallID)
 }

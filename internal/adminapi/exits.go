@@ -75,6 +75,18 @@ func (s *Server) handleListExits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodes := s.exits.List()
+	deleted, err := s.deletedCloudExits(r.Context())
+	if err != nil {
+		http.Error(w, "cloud history unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	visible := make([]exits.Node, 0, len(nodes))
+	for _, node := range nodes {
+		if !deleted[node.ID] {
+			visible = append(visible, node)
+		}
+	}
+	nodes = visible
 	type item struct {
 		exits.Node
 		Active bool `json:"active"`
@@ -91,9 +103,12 @@ func (s *Server) handleListExits(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if !activeStillEnabled && len(enabled) > 0 {
-		candidate, _ := exits.SelectActive(enabled, nil)
-		activeID = candidate.ID
+	if !activeStillEnabled {
+		activeID = ""
+		if len(enabled) > 0 {
+			candidate, _ := exits.SelectActive(enabled, nil)
+			activeID = candidate.ID
+		}
 	}
 	out := make([]item, 0, len(nodes))
 	for _, n := range nodes {

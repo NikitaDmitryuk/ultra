@@ -57,7 +57,7 @@ func recoveryBootstrapSelection(tools []map[string]any, bridge bool, generation,
 	if bridge {
 		wanted["restore_host.py"], wanted["restore_database.py"] = true, true
 	}
-	selected := make([]map[string]any, 0, len(wanted))
+	selected := make([]map[string]any, 0)
 	for _, original := range tools {
 		name := filepath.Base(original["destination"].(string))
 		if !wanted[name] {
@@ -67,7 +67,7 @@ func recoveryBootstrapSelection(tools []map[string]any, bridge bool, generation,
 		if !ok || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(old) {
 			return nil, errors.New("bootstrap_old_generation_incomplete")
 		}
-		tool := make(map[string]any, len(original)+2)
+		tool := make(map[string]any)
 		for key, value := range original {
 			tool[key] = value
 		}

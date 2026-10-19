@@ -118,6 +118,23 @@ func (s *Server) cloudRoutes() {
 	})
 	s.mux.HandleFunc("POST /v1/cloud/offers", s.cloudOffer)
 	s.mux.HandleFunc("POST /v1/cloud/offers/{id}/confirm", s.cloudConfirm)
+	s.mux.HandleFunc("POST /v1/cloud/retirement", func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireCloud(w) {
+			return
+		}
+		var body struct {
+			Actor   int64                    `json:"actor"`
+			Targets []cloud.RetirementTarget `json:"targets"`
+		}
+		if !s.decodeAdminJSON(w, r, &body) {
+			return
+		}
+		started := time.Now()
+		err := s.Cloud.RetireExits(r.Context(), body.Actor, body.Targets)
+		s.logCloudRequest("retirement", started, err)
+		cloudResult(w, map[string]bool{"completed": err == nil}, err)
+	})
+
 	s.mux.HandleFunc("POST /v1/cloud/operations/{id}/action", s.cloudAction)
 }
 
@@ -129,6 +146,21 @@ func deletedCloudExitIDs(operations []cloud.Operation) map[string]bool {
 		}
 	}
 	return deleted
+}
+
+func (s *Server) deletedCloudExits(ctx context.Context) (map[string]bool, error) {
+	history := s.CloudOperationHistory
+	if history == nil && s.Cloud != nil {
+		history = s.Cloud.Store
+	}
+	if history == nil {
+		return map[string]bool{}, nil
+	}
+	operations, err := history.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return deletedCloudExitIDs(operations), nil
 }
 
 func (s *Server) requireCloud(w http.ResponseWriter) bool {
@@ -222,11 +254,13 @@ func (s *Server) cloudAction(w http.ResponseWriter, r *http.Request) {
 	if !s.decodeAdminJSON(w, r, &body) {
 		return
 	}
+	started := time.Now()
 	e := s.Cloud.Action(r.Context(), body.Actor, r.PathValue("id"), body.Action)
+	s.logCloudRequest("action", started, e)
 	cloudResult(w, map[string]bool{"accepted": e == nil}, e)
 }
 
-// Pre-purchase failures happen before an operation exists, so retain safe diagnostics in journald.
+// Request failures may precede an operation event, so retain only safe diagnostics in journald.
 func (s *Server) logCloudRequest(phase string, started time.Time, err error) {
 	fields := []any{"phase", phase, "duration_ms", time.Since(started).Milliseconds()}
 	if err == nil {

@@ -4,6 +4,38 @@
 Он не разрешает переустановку или продолжение manual deploy. Текущий интерфейс
 описан в [автоматизации](automation.md#offline-preflight-переустановки-non-db-узлов).
 
+Для локального отчёта о требованиях к прерванному forward-only upgrade доступна
+команда:
+
+```sh
+ultra-install rebuild-non-db diagnose --original-journal /absolute/private/operation.json
+```
+
+Она читает только указанный файл с режимом `0600`, проверяет scope
+`schema=1`, `stage=upgrade`, `mutator_dispatched=true`, `forward_only=true` и
+выводит SHA-256 его точных байтов и стабильные коды blockers. Она не собирает
+удалённые доказательства и не проверяет существование связанных артефактов:
+`blocked-evidence-not-collected` означает отсутствие проверки, а не установленное
+отсутствие файлов. Повторный запуск не создаёт checkpoint и не меняет journal
+или lock. Команда заканчивается ошибкой `rebuild_non_db_preflight_blocked`,
+с `evidence_collected=false`, `execution_supported=false`, `gate_released=false`.
+
+Коды требуют точного persisted prior target manifest с predecessor chain,
+независимого local dispatch/mutator и remote mutator quiescence, связанных с
+операцией provider reimage/delete receipts для каждого прежнего target,
+проверенной primary identity вне списка targets, отдельного свежего backup
+digest с primary/config binding, подключения с прежней authorization и
+доверенного completion/retirement протокола. `manifest_sha256` релиза в manual
+journal не является manifest прежних targets. Сам по себе существующий
+зашифрованный dump без независимого receipt и этих привязок не снимает blocker.
+Утверждения `workers_fenced` или `former_targets_reimaged` во входном journal
+не превращаются в доказательства. Даже после фактической переустановки известных
+узлов неполная история оставляет неизвестным исход остальных прежних targets.
+
+Регрессии [диагностики](../cmd/ultra-install/rebuild_non_db_diagnose_test.go)
+проверяют эти границы, повторяемость, неизменность journal/lock, отсутствие
+вывода приватных metadata и отказ operator override.
+
 ## Текущее состояние admission fence
 
 Broker принимает подписанный recovery request и оставляет admissions закрытым.

@@ -55,7 +55,7 @@ func upgradeAcceptedResumeContract(
 // A committed retry must resume the already accepted candidate configuration.
 // Keep that exact contract separate from retry-preflight's additional fields.
 func upgradeRetryResumeContracts(contract map[string]any, committed bool) (map[string]any, map[string]any) {
-	retry := make(map[string]any, len(contract)+1)
+	retry := make(map[string]any)
 	for key, value := range contract {
 		retry[key] = value
 	}
@@ -63,7 +63,7 @@ func upgradeRetryResumeContracts(contract map[string]any, committed bool) (map[s
 	if !committed {
 		return retry, nil
 	}
-	accepted := make(map[string]any, len(contract))
+	accepted := make(map[string]any)
 	for key, value := range contract {
 		accepted[key] = value
 	}

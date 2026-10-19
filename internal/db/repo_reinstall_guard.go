@@ -16,7 +16,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 )
 
-var ErrExitTargetBusy = errors.New("exit target is being reinstalled")
+var ErrExitTargetBusy = errors.New("exit target is reserved for cloud maintenance")
 
 // The namespace prefix keeps address locks separate from fixed topology locks.
 // All ports on a host share one relay spec and service, so the lock owns the IP.
@@ -37,7 +37,18 @@ func (r *ExitNodeRepo) targetMutable(ctx context.Context, addresses ...string) e
 	}
 	rows, err := r.transaction.Query(
 		ctx,
-		`SELECT body->>'reinstall_target' FROM cloud_operations WHERE COALESCE(body->>'reinstall_target','')<>''`,
+		`SELECT body->>'reinstall_target' FROM cloud_operations WHERE COALESCE(body->>'reinstall_target','')<>''
+UNION ALL
+SELECT n.address FROM exit_nodes n JOIN cloud_operations c
+ON n.id::text=COALESCE(NULLIF(c.body->>'exit_id',''), c.id::text)
+WHERE c.body->>'phase' IN ('retire_unpublish','retire_delete','retire_cleanup')
+AND NOT (n.id::text=$1 AND c.body->>'phase'='retire_unpublish' AND c.state='pending')
+UNION ALL
+SELECT c.body->>'retirement_target' FROM cloud_operations c
+WHERE c.body->>'phase' IN ('retire_unpublish','retire_delete','retire_cleanup')
+AND COALESCE(c.body->>'retirement_target','')<>''
+AND NOT (c.id::text=$1 AND c.body->>'phase'='retire_unpublish' AND c.state='pending')`,
+		r.retirementDisableID,
 	)
 	if err != nil {
 		return err
@@ -67,6 +78,35 @@ func (r *ExitNodeRepo) targetMutable(ctx context.Context, addresses ...string) e
 		}
 		if !available {
 			return ErrExitTargetBusy
+		}
+	}
+	return nil
+}
+
+// ValidateCloudRetirementTarget checks every row on the physical host, including
+// disabled rows and different ports. The caller holds the topology mutex before
+// the cloud worker lock, so the check and persisted reservation cannot race CRUD.
+func (r *ExitNodeRepo) ValidateCloudRetirementTarget(ctx context.Context, op *cloud.Operation) error {
+	if op == nil || op.ID == "" || (op.ExitID != "" && op.ExitID != op.ID) {
+		return cloud.ErrConflict
+	}
+	ip := net.ParseIP(op.RetirementTarget)
+	if ip == nil || ip.To4() == nil {
+		return cloud.ErrConflict
+	}
+	nodes, err := r.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		nodeIP := net.ParseIP(node.Address)
+		sameHost := nodeIP != nil && ip.Equal(nodeIP)
+		if node.ID == op.ExitID {
+			if !sameHost || ((op.Phase == "retire_delete" || op.Phase == "retire_cleanup") && node.Enabled) {
+				return cloud.ErrConflict
+			}
+		} else if sameHost || node.ID == op.ID {
+			return cloud.ErrConflict
 		}
 	}
 	return nil
@@ -264,4 +304,29 @@ func (r *ExitNodeRepo) GuardCloudReinstall(
 	retained = true
 	var once sync.Once
 	return func() { once.Do(release) }, nil
+}
+
+// DisableCloudRetirement is the sole mutation allowed by a retirement reservation.
+// The transaction must still observe the exact pending unpublish identity; all
+// external Update calls and terminal tombstones retain the ordinary guard.
+func (r *ExitNodeRepo) DisableCloudRetirement(ctx context.Context, op *cloud.Operation) error {
+	if op == nil || op.ID == "" || op.ExitID != op.ID || op.Phase != "retire_unpublish" || op.State != "pending" || net.ParseIP(op.RetirementTarget) == nil {
+		return cloud.ErrConflict
+	}
+	return r.withMutation(ctx, func(repo *ExitNodeRepo) error {
+		var exact bool
+		if err := repo.transaction.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cloud_operations WHERE id::text=$1 AND state='pending' AND body->>'phase'='retire_unpublish' AND body->>'exit_id'=$1 AND body->>'instance_id'=$2 AND body->>'retirement_target'=$3)`, op.ID, op.InstanceID, op.RetirementTarget).Scan(&exact); err != nil {
+			return err
+		}
+		if !exact {
+			return cloud.ErrConflict
+		}
+		if err := repo.ValidateCloudRetirementTarget(ctx, op); err != nil {
+			return err
+		}
+		repo.retirementDisableID = op.ID
+		disabled := false
+		_, err := repo.update(ctx, op.ExitID, exits.UpdatePatch{Enabled: &disabled})
+		return err
+	})
 }

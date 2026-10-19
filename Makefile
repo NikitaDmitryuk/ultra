@@ -216,6 +216,7 @@ test-ansible:
 	python3 scripts/test-ansible-adoption.py
 	python3 scripts/test-ansible-adoption-tls.py
 	python3 scripts/test-ansible-forward.py
+	python3 scripts/test-ansible-exit-pin-rebind.py
 	ANSIBLE_CONFIG="$(CURDIR)/deploy/ansible/ansible.cfg" ansible-lint --offline deploy/ansible/playbooks deploy/ansible/roles
 
 # Disposable container: real SSH/Ansible with a simulated service manager.

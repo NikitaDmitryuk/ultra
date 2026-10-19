@@ -198,6 +198,47 @@ test("disabled access cannot issue a subscription", async () => {
     p.calls.every((c) => ["/api/self", "/api/self/traffic"].includes(c.path)),
   );
 });
+test("member access control opens confirmation on the first click", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members/42/traffic": { months: [] },
+    "/api/members/42/action": {
+      telegram_id: 42,
+      uuid: "member-key",
+      active: false,
+      pending: false,
+      name: "Member",
+    },
+    "/api/members/42/leak": {},
+  });
+  await flush();
+  p.context.member = {
+    telegram_id: 42,
+    uuid: "member-key",
+    active: true,
+    pending: false,
+    name: "Member",
+  };
+  vm.runInContext("person(member)", p.context);
+
+  await p.el("#toggle-access").click();
+  assert.equal(p.el("#dialog").open, true);
+  assert.equal(
+    p.calls.some((call) => call.path === "/api/members/42/action"),
+    false,
+  );
+
+  await p.el("#confirm-action").click();
+  const actions = p.calls.filter(
+    (call) => call.path === "/api/members/42/action",
+  );
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].options.method, "POST");
+  assert.deepEqual(JSON.parse(actions[0].options.body), {
+    action: "disable",
+    expected_uuid: "member-key",
+  });
+});
 test("Vultr displays server DTO price and replica state", async () => {
   const p = page(false, {
     "/api/me": { is_admin: true },
@@ -831,19 +872,19 @@ test("ingress diagnostics hides obsolete experiments and escapes primary strings
   await flush();
   p.context.states = [
     { id: "primary", ready: true, phase: "server_path_ready" },
-    { id: "experimental", ready: false, phase: "<script>unsafe</script>" },
+    { id: "experimental", ready: false, phase: "<SCRIPT>unsafe</SCRIPT>" },
   ];
   const html = vm.runInContext("ingressHealthHTML(states)", p.context);
   assert.match(html, /Основной вход/);
   assert.doesNotMatch(html, /Экспериментальный вход/);
-  assert.doesNotMatch(html, /<script>|unsafe/);
+  assert.doesNotMatch(html, /<script>|unsafe/i);
   p.context.states = [
-    { id: "primary", ready: false, phase: "<script>unsafe</script>" },
+    { id: "primary", ready: false, phase: "<SCRIPT>unsafe</SCRIPT>" },
   ];
   const unsafePrimary = vm.runInContext("ingressHealthHTML(states)", p.context);
   assert.match(unsafePrimary, /Недоступен/);
-  assert.ok(!unsafePrimary.includes("<script>"));
-  assert.ok(unsafePrimary.includes("&lt;script&gt;"));
+  assert.doesNotMatch(unsafePrimary, /<script>/i);
+  assert.ok(unsafePrimary.includes("&lt;SCRIPT&gt;"));
 });
 
 test("routing map follows live exits and keeps its explanation open during refresh", async () => {
@@ -1009,7 +1050,7 @@ test("archive config cannot export, rotate or enable unsupported access", async 
   ])
     assert.ok(!html.includes(id));
 });
-test("disabling a config sends DELETE on the first confirmation click", async () => {
+test("disabling a config sends DELETE on the first click", async () => {
   const p = page(false, {
     "/api/me": { is_admin: true },
     "/api/users/legacy": {},
@@ -1023,10 +1064,6 @@ test("disabling a config sends DELETE on the first confirmation click", async ()
   vm.runInContext("bindConfigControls(configUser)", p.context);
 
   await p.el("#disable-config").click();
-  assert.equal(p.el("#dialog").open, true);
-  assert.equal(p.calls.some((call) => call.path === "/api/users/legacy"), false);
-
-  await p.el("#confirm-action").click();
   assert.equal(
     p.calls.filter(
       (call) => call.path === "/api/users/legacy" && call.options.method === "DELETE",
