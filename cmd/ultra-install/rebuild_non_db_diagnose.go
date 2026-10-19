@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -8,32 +9,55 @@ import (
 	"path/filepath"
 )
 
-// Diagnosis is a requirements report, never a receipt. It reads only the
-// supplied journal: even well-formed journal bindings prove neither historical
+// Diagnosis is a requirements report, never a receipt. It reads only explicitly
+// supplied local files: even well-formed bindings prove neither historical
 // fleet completeness nor the absence of surviving or newly dispatched workers.
 type rebuildDiagnosis struct {
-	Protocol           string   `json:"protocol"`
-	State              string   `json:"state"`
-	JournalSHA         string   `json:"original_journal_sha256"`
-	GateReleased       bool     `json:"gate_released"`
-	ExecutionSupported bool     `json:"execution_supported"`
-	EvidenceCollected  bool     `json:"evidence_collected"`
-	Blockers           []string `json:"blockers"`
+	Protocol           string                         `json:"protocol"`
+	State              string                         `json:"state"`
+	JournalSHA         string                         `json:"original_journal_sha256"`
+	GateReleased       bool                           `json:"gate_released"`
+	ExecutionSupported bool                           `json:"execution_supported"`
+	EvidenceCollected  bool                           `json:"evidence_collected"`
+	Blockers           []string                       `json:"blockers"`
+	JournalPinMatched  bool                           `json:"journal_pin_matched"`
+	ArtifactsVerified  bool                           `json:"artifacts_verified"`
+	Artifacts          []rebuildDiagnosticArtifact    `json:"unverified_artifacts"`
+	Requirements       []rebuildDiagnosticRequirement `json:"requirements"`
 }
 
 func diagnoseRebuildNonDB(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("rebuild-non-db diagnose", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	journalPath := flags.String("original-journal", "", "forward-only upgrade journal (read only)")
+	expectedSHA := flags.String(
+		"expected-journal-sha256",
+		"",
+		"expected exact journal bytes; required for artifact intake",
+	)
+	var artifacts rebuildDiagnosticInputs
+	flags.Var(
+		&artifacts,
+		"artifact",
+		"unverified local evidence: kind=/absolute/private/file (repeatable)",
+	)
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return errors.New("rebuild_non_db_arguments_invalid")
 	}
 	if !filepath.IsAbs(*journalPath) || filepath.Clean(*journalPath) != *journalPath {
 		return errors.New("rebuild_non_db_paths_invalid")
 	}
+	if (*expectedSHA != "" && !rebuildSHA.MatchString(*expectedSHA)) ||
+		(len(artifacts) > 0 && *expectedSHA == "") {
+		return errors.New("rebuild_non_db_journal_pin_required_or_invalid")
+	}
 	raw, err := readRebuildInput(*journalPath, true)
 	if err != nil {
 		return err
+	}
+	journalSHA := digestSHA256(raw)
+	if *expectedSHA != "" && journalSHA != *expectedSHA {
+		return errors.New("rebuild_non_db_journal_pin_mismatch")
 	}
 	// A map permits existing/future manual journal metadata without treating any
 	// supplied claims as authority; rebuildDecode still rejects duplicate keys.
@@ -52,7 +76,7 @@ func diagnoseRebuildNonDB(args []string, output io.Writer) error {
 	}
 	report := rebuildDiagnosis{
 		Protocol: "ultra-rebuild-non-db-diagnosis-v1", State: "blocked-evidence-not-collected",
-		JournalSHA: digestSHA256(raw),
+		JournalSHA: journalSHA, JournalPinMatched: *expectedSHA != "",
 		Blockers: []string{
 			"exact_persisted_prior_target_manifest_and_predecessor_chain_required",
 			"independent_local_dispatch_and_mutator_quiescence_required",
@@ -63,6 +87,25 @@ func diagnoseRebuildNonDB(args []string, output io.Writer) error {
 			"retained_primary_connectivity_and_authorization_required",
 			"trusted_journal_bound_completion_and_retirement_protocol_required",
 		},
+	}
+	report.Requirements = rebuildDiagnosticRequirements()
+	report.Artifacts, err = collectRebuildDiagnosticArtifacts(
+		artifacts,
+		*journalPath,
+		report.Requirements,
+	)
+	if err != nil {
+		return err
+	}
+	// An intake report binds the same journal before and after reading artifacts.
+	// This detects changes during collection; it is not a dispatcher lease and
+	// does not establish quiescence or authenticate the caller's chosen pin.
+	after, err := readRebuildInput(*journalPath, true)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(raw, after) {
+		return errors.New("rebuild_non_db_journal_changed")
 	}
 	if err := json.NewEncoder(output).Encode(report); err != nil {
 		return err

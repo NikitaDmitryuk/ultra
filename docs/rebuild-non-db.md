@@ -11,7 +11,7 @@
 ultra-install rebuild-non-db diagnose --original-journal /absolute/private/operation.json
 ```
 
-Она читает только указанный файл с режимом `0600`, проверяет scope
+Без дополнительных аргументов она читает только указанный файл с режимом `0600`, проверяет scope
 `schema=1`, `stage=upgrade`, `mutator_dispatched=true`, `forward_only=true` и
 выводит SHA-256 его точных байтов и стабильные коды blockers. Она не собирает
 удалённые доказательства и не проверяет существование связанных артефактов:
@@ -19,6 +19,33 @@ ultra-install rebuild-non-db diagnose --original-journal /absolute/private/opera
 отсутствие файлов. Повторный запуск не создаёт checkpoint и не меняет journal
 или lock. Команда заканчивается ошибкой `rebuild_non_db_preflight_blocked`,
 с `evidence_collected=false`, `execution_supported=false`, `gate_released=false`.
+
+Для привязки к заранее выбранным точным байтам добавь
+`--expected-journal-sha256 <64 lowercase hex>`. Несовпадение SHA прекращает
+диагностику без отчёта. Этот pin задаёт оператор; совпадение не подтверждает
+происхождение журнала. Журнал повторно читается перед выводом: изменение его
+байтов во время сбора также прекращает диагностику. Это не lease dispatch.
+
+`requirements` в JSON связывает каждый blocker с требуемым источником и
+привязками доказательства. Локальный сбор принимает повторяемый аргумент
+`--artifact <kind>=/absolute/private/file` только вместе с journal pin. Допустимы
+`historical-targets`, `local-quiescence`, `remote-quiescence`, `provider-outcomes`,
+`retained-primary`, `independent-backup`, `primary-connectivity` и
+`completion-protocol`. Для нескольких прежних узлов можно передать несколько
+файлов одного kind, максимум 32 файла по 1 MiB. Каждый файл должен быть обычным,
+принадлежать текущему UID, иметь `0600` и единственную hardlink; symlink, включая
+родительские каталоги, запрещены. Пути должны быть различными и не совпадать с
+путём журнала. Не передавай приватные ключи, DSN, `.env` или сами backups:
+предназначены только сохранённые публичные observations/receipts без секретов.
+
+`unverified_artifacts` содержит только выбранный оператором kind, SHA-256 точных
+байтов и размер; пути и содержимое в вывод не попадают. Содержание и подписи
+артефактов не проверяются. `verified=false` для каждого файла,
+`artifacts_verified=false` и все исходные blockers сохраняются даже при наличии
+файлов всех категорий. Повторный сбор тех же байтов даёт одинаковый отчёт
+независимо от порядка аргументов; checkpoint не создаётся. Сохранённый JSON
+позволяет сверить конкретный набор входов, но не является completion receipt,
+доказательством quiescence или разрешением архивировать journal.
 
 Коды требуют точного persisted prior target manifest с predecessor chain,
 независимого local dispatch/mutator и remote mutator quiescence, связанных с
