@@ -2254,6 +2254,9 @@ class NativeDeploy(unittest.TestCase):
         self.vultr_bootstrap = patch.object(D, 'bootstrap_bridge_vultr_key')
         self.vultr_bootstrap_mock = self.vultr_bootstrap.start()
         self.addCleanup(self.vultr_bootstrap.stop)
+        self.pins_bootstrap = patch.object(D, 'bootstrap_bridge_known_hosts')
+        self.pins_bootstrap_mock = self.pins_bootstrap.start()
+        self.addCleanup(self.pins_bootstrap.stop)
         self.bot_bootstrap = patch.object(D, 'bootstrap_bridge_bot_token')
         self.bot_bootstrap_mock = self.bot_bootstrap.start()
         self.addCleanup(self.bot_bootstrap.stop)
@@ -2261,12 +2264,21 @@ class NativeDeploy(unittest.TestCase):
     def test_bot_bootstrap_runs_after_staging_before_doctor(self):
         events = []
         self.stage_mock.side_effect = lambda *args: (events.append('staging') or self.staged_receipt(*args))
+        self.pins_bootstrap_mock.side_effect = lambda *args: events.append('pins-bootstrap')
         self.bot_bootstrap_mock.side_effect = lambda *args: events.append('bot-bootstrap')
         self.vultr_bootstrap_mock.side_effect = lambda *args: events.append('vultr-bootstrap')
         self.rollout(runner=lambda command, cwd, stage, **kwargs: events.append(stage))
-        self.assertEqual(events, ['canonical_policy', 'staging', 'bot-bootstrap', 'vultr-bootstrap', 'doctor', 'upgrade', 'status'])
+        self.assertEqual(events, ['canonical_policy', 'staging', 'pins-bootstrap', 'bot-bootstrap', 'vultr-bootstrap', 'doctor', 'upgrade', 'status'])
         self.bot_reader_mock.assert_called_once_with(self.config.parent / '.env')
         self.vultr_reader_mock.assert_called_once_with(self.config.parent / '.env')
+
+    def test_pins_bootstrap_failure_prevents_doctor_and_mutator(self):
+        self.pins_bootstrap_mock.side_effect = D.DeployError('bridge_known_hosts_timeout')
+        with self.assertRaisesRegex(D.DeployError, 'bridge_known_hosts_timeout'):
+            self.rollout()
+        self.assertEqual([stage for stage, _ in self.calls], ['canonical_policy'])
+        self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertFalse((self.root / 'operation.json').exists())
 
     def test_bot_bootstrap_rejection_prevents_doctor_and_mutator(self):
         self.bot_bootstrap_mock.side_effect = D.DeployError('bridge_bot_token_rejected_reconcile_secret_or_lifecycle')
@@ -4706,6 +4718,108 @@ class PerRoleOperatorIdentity(unittest.TestCase):
                    'DB_REPLICA', 'DB_SSH_USER', 'EXIT2_NAME', 'EXIT2_DIAL', 'EXIT2_PRIORITY'):
             with self.subTest(key=key), self.assertRaisesRegex(D.DeployError, '^operator_legacy_config_key_forbidden$'):
                 D.config_values((key + '=192.0.2.10\n').encode())
+
+
+class KnownHostsBootstrap(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / 'state'
+        self.etc = self.root / 'etc'
+        self.state.mkdir(mode=0o700); self.etc.mkdir(mode=0o700)
+        self.commit = 'a' * 40
+        self.attempt = 'b' * 64
+        inputs = self.state / 'operator-inputs'
+        inputs.mkdir(mode=0o700)
+        D.atomic_write(inputs / 'manual-deploy.lock', b'')
+        operation = inputs / ('manual-' + self.commit + '-' + self.attempt)
+        operation.mkdir(mode=0o700)
+        release = operation / 'release'; release.mkdir(mode=0o700)
+        D.atomic_write(operation / 'install.config', b'fixture config')
+        D.atomic_write(release / 'release-manifest.json', b'fixture manifest')
+        self.raw = b'192.0.2.1 ssh-ed25519 AAAAFIXTURE\n'
+        self.args = [self.commit, self.attempt, D.sha(b'fixture config'), D.sha(b'fixture manifest'), D.sha(self.raw), 'c' * 64]
+        self.program = D.REMOTE_KNOWN_HOSTS_PROGRAM.replace('/var/lib/ultra-ansible', str(self.state)).replace('/etc', str(self.etc))
+        # Only fixture ownership is mapped to the unprivileged test account.
+        self.program = self.program.replace('os.geteuid()==0', 'True').replace('(info.st_uid,info.st_gid)==(0,0)', '(info.st_uid,info.st_gid) in [(0,0),(65534,65534),(os.geteuid(),os.getegid())]').replace('os.fchown(fd,0,0)', 'os.fchown(fd,os.geteuid(),os.getegid())').replace('and not info.st_mode&0o022', "and (part=='tmp' or not info.st_mode&0o022)")
+
+    def run_remote(self, raw=None, args=None):
+        return subprocess.run([sys.executable, '-I', '-c', self.program, *(args or self.args)],
+                              input=self.raw if raw is None else raw, capture_output=True, timeout=5)
+
+    def test_atomic_install_and_exact_replay(self):
+        for _ in range(2):
+            result = self.run_remote()
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0,b'',b''))
+        target = self.etc / 'ultra-recovery'
+        self.assertEqual((target / 'known_hosts').read_bytes(), self.raw)
+        self.assertEqual((target / 'known_hosts').stat().st_mode & 0o777, 0o600)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+        self.assertEqual([p.name for p in target.iterdir()], ['known_hosts'])
+
+    def test_operation_digest_and_pins_digest_fail_closed(self):
+        for index in (1,2,3,4):
+            args = list(self.args); args[index] = 'd' * 64
+            self.assertEqual(self.run_remote(args=args).returncode, 1)
+            self.assertFalse((self.etc / 'ultra-recovery').exists())
+        self.assertEqual(self.run_remote(raw=b'changed').returncode, 1)
+        self.assertEqual(self.run_remote(raw=b'x' * (D.KNOWN_HOSTS_LIMIT + 1)).returncode, 1)
+
+    def test_existing_mismatch_symlink_and_lifecycle_block(self):
+        target = self.etc / 'ultra-recovery'; target.mkdir(mode=0o700)
+        pins = target / 'known_hosts'; D.atomic_write(pins,b'other trusted pins')
+        self.assertEqual(self.run_remote().returncode,1)
+        self.assertEqual(pins.read_bytes(), b'other trusted pins')
+        pins.unlink(); pins.symlink_to(self.root / 'missing')
+        self.assertEqual(self.run_remote().returncode,1)
+        pins.unlink()
+        D.atomic_write(self.state / 'lifecycle.json', b'{"phase":"applying"}')
+        self.assertEqual(self.run_remote().returncode,1)
+        self.assertFalse(pins.exists())
+
+    def test_interrupted_pending_prefix_is_recoverable_only_when_bound(self):
+        target = self.etc / 'ultra-recovery'; target.mkdir(mode=0o700)
+        pending = target / ('.known_hosts-' + D.sha(':'.join(self.args).encode()))
+        D.atomic_write(pending,b'wrong')
+        self.assertEqual(self.run_remote().returncode,1)
+        self.assertEqual(pending.read_bytes(),b'wrong')
+        D.atomic_write(pending,self.raw[:5])
+        self.assertEqual(self.run_remote().returncode,0)
+        self.assertFalse(pending.exists())
+
+    def test_unsafe_parent_modes_and_symlinks_block(self):
+        target = self.etc / 'ultra-recovery'
+        target.symlink_to(self.root / 'missing')
+        self.assertEqual(self.run_remote().returncode,1)
+        target.unlink(); target.mkdir(mode=0o755)
+        self.assertEqual(self.run_remote().returncode,1)
+        target.chmod(0o700)
+        self.assertEqual(self.run_remote().returncode,0)
+        pins = target / 'known_hosts'; pins.chmod(0o644)
+        self.assertEqual(self.run_remote().returncode,1)
+
+    def test_operator_input_is_bounded_private_and_transport_output_hidden(self):
+        path = self.root / 'pins'; D.atomic_write(path,self.raw)
+        transport = ['ssh','-o','UserKnownHostsFile=' + str(path),'root@192.0.2.1']
+        def run(command, **kwargs):
+            self.assertEqual(kwargs['stdin'].read(),self.raw)
+            self.assertNotIn(self.raw.decode(),repr(command))
+            self.assertEqual(kwargs['timeout'],45)
+            return subprocess.CompletedProcess(command,0,b'',b'')
+        with patch.object(D,'run_stage',side_effect=run):
+            D.bootstrap_bridge_known_hosts(self.root,transport,self.args[4],*self.args[:2],*self.args[2:4],self.args[5])
+        for output in [subprocess.CompletedProcess([],1,b'SENSITIVE',b'SENSITIVE'), subprocess.CompletedProcess([],0,b'SENSITIVE',b'')]:
+            with patch.object(D,'run_stage',return_value=output), self.assertRaisesRegex(D.DeployError,'^bridge_known_hosts_rejected_reconcile_pins_or_lifecycle$'):
+                D.bootstrap_bridge_known_hosts(self.root,transport,self.args[4],*self.args[:2],*self.args[2:4],self.args[5])
+        with patch.object(D,'run_stage',side_effect=subprocess.TimeoutExpired([],45)), self.assertRaisesRegex(D.DeployError,'^bridge_known_hosts_timeout$'):
+            D.bootstrap_bridge_known_hosts(self.root,transport,self.args[4],*self.args[:2],*self.args[2:4],self.args[5])
+        with self.assertRaisesRegex(D.DeployError,'manual_operation_pins_changed'):
+            D.bootstrap_bridge_known_hosts(self.root,transport,'d'*64,*self.args[:2],*self.args[2:4],self.args[5])
+        path.chmod(0o644)
+        with self.assertRaises(D.DeployError): D.operator_pins(path)
+        path.chmod(0o600); path.write_bytes(b'x'*(D.KNOWN_HOSTS_LIMIT+1))
+        with self.assertRaises(D.DeployError): D.operator_pins(path)
 
 
 if __name__ == '__main__':

@@ -924,6 +924,147 @@ def bootstrap_bridge_bot_token(repo, transport, token, provider=False):
 
 
 
+KNOWN_HOSTS_LIMIT = 1024 * 1024
+
+
+def operator_pins(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and before.st_uid == os.geteuid() and
+                before.st_nlink == 1 and stat.S_IMODE(before.st_mode) == 0o600 and
+                0 < before.st_size <= KNOWN_HOSTS_LIMIT, 'operator_pins_private_bounded_required')
+        raw = os.read(fd, KNOWN_HOSTS_LIMIT + 1)
+        identity = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                                 info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        require(len(raw) == before.st_size and identity(os.fstat(fd)) == identity(before) and
+                identity(os.stat(path, follow_symlinks=False)) == identity(before), 'operator_pins_changed')
+        return raw
+    finally:
+        os.close(fd)
+
+
+REMOTE_KNOWN_HOSTS_PROGRAM = r'''
+import fcntl,hashlib,json,os,re,signal,stat,sys
+signal.alarm(30)
+def need(ok):
+    if not ok: raise ValueError('known_hosts_bootstrap_rejected')
+def digest(raw): return hashlib.sha256(raw).hexdigest()
+def directory(path,private=False):
+    fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
+    try:
+        for part in path.strip('/').split('/'):
+            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            os.close(fd);fd=child;info=os.fstat(fd)
+            need((info.st_uid,info.st_gid)==(0,0) and not info.st_mode&0o022)
+        if private: need(stat.S_IMODE(info.st_mode)==0o700)
+        return os.dup(fd)
+    finally: os.close(fd)
+def read(parent,name,limit=1048576):
+    fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+    try:
+        info=os.fstat(fd)
+        need(stat.S_ISREG(info.st_mode) and (info.st_uid,info.st_gid)==(0,0) and
+             info.st_nlink==1 and stat.S_IMODE(info.st_mode)==0o600 and info.st_size<=limit)
+        raw=os.read(fd,limit+1)
+        need(len(raw)==info.st_size and os.fstat(fd).st_mtime_ns==info.st_mtime_ns and os.fstat(fd).st_ctime_ns==info.st_ctime_ns)
+        return raw
+    finally: os.close(fd)
+def main():
+    need(os.geteuid()==0 and len(sys.argv)==7)
+    commit,attempt,config_sha,manifest_sha,pins_sha,binding=sys.argv[1:]
+    need(re.fullmatch('[a-f0-9]{40}',commit) and all(re.fullmatch('[a-f0-9]{64}',x) for x in [attempt,config_sha,manifest_sha,pins_sha,binding]))
+    raw=sys.stdin.buffer.read(1048577)
+    need(0<len(raw)<=1048576 and digest(raw)==pins_sha)
+    state=directory('/var/lib/ultra-ansible',True)
+    inputs=directory('/var/lib/ultra-ansible/operator-inputs',True)
+    locks=[]
+    try:
+        fd=os.open('manual-deploy.lock',os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=inputs)
+        locks.append(fd)
+        info=os.fstat(fd)
+        need(stat.S_ISREG(info.st_mode) and (info.st_uid,info.st_gid)==(0,0) and info.st_nlink==1 and stat.S_IMODE(info.st_mode)==0o600)
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        operation=directory('/var/lib/ultra-ansible/operator-inputs/manual-'+commit+'-'+attempt,True)
+        try:
+            need(digest(read(operation,'install.config'))==config_sha)
+            release=directory('/var/lib/ultra-ansible/operator-inputs/manual-'+commit+'-'+attempt+'/release',True)
+            try: need(digest(read(release,'release-manifest.json'))==manifest_sha)
+            finally: os.close(release)
+        finally: os.close(operation)
+        etc=directory('/etc')
+        try:
+            try: target=directory('/etc/ultra-recovery',True)
+            except FileNotFoundError: target=None
+            if target is not None:
+                try:
+                    try: existing=read(target,'known_hosts')
+                    except FileNotFoundError: existing=None
+                    if existing is not None:
+                        need(existing==raw)
+                        return
+                finally: os.close(target)
+            fd=os.open('infrastructure.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o600,dir_fd=state)
+            locks.append(fd);info=os.fstat(fd)
+            need(stat.S_ISREG(info.st_mode) and (info.st_uid,info.st_gid)==(0,0) and info.st_nlink==1 and stat.S_IMODE(info.st_mode)==0o600)
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            try: lifecycle=read(state,'lifecycle.json')
+            except FileNotFoundError: lifecycle=None
+            need(lifecycle is None or json.loads(lifecycle).get('phase')=='released')
+            try: os.mkdir('ultra-recovery',0o700,dir_fd=etc);os.fsync(etc)
+            except FileExistsError: pass
+            target=directory('/etc/ultra-recovery',True)
+            try:
+                # Reserved pending name binds both the operation and the exact pins.
+                pending='.known_hosts-'+digest((':'.join(sys.argv[1:])).encode())
+                try:
+                    fd=os.open(pending,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=target)
+                except FileExistsError:
+                    need(raw.startswith(read(target,pending)))
+                    fd=os.open(pending,os.O_WRONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=target)
+                try:
+                    os.fchown(fd,0,0);os.fchmod(fd,0o600)
+                    os.ftruncate(fd,0)
+                    with os.fdopen(fd,'wb',closefd=False) as stream:
+                        stream.write(raw);stream.flush();os.fsync(fd)
+                finally: os.close(fd)
+                need(read(target,pending)==raw)
+                # No lifecycle actor can write here under the held infrastructure lock.
+                try: existing=read(target,'known_hosts')
+                except FileNotFoundError: existing=None
+                need(existing is None or existing==raw)
+                os.replace(pending,'known_hosts',src_dir_fd=target,dst_dir_fd=target)
+                os.fsync(target)
+            finally: os.close(target)
+        finally: os.close(etc)
+    finally:
+        for fd in locks: os.close(fd)
+        os.close(inputs);os.close(state)
+try: main()
+except BaseException:
+    sys.exit(1)
+'''
+
+
+def bootstrap_bridge_known_hosts(repo, transport, pins_sha, commit, attempt, config_sha, manifest_sha, binding):
+    paths = [arg.split('=', 1)[1] for arg in transport if arg.startswith('UserKnownHostsFile=')]
+    require(len(paths) == 1, 'operator_explicit_pins_required')
+    raw = operator_pins(paths[0])
+    require(sha(raw) == pins_sha, 'manual_operation_pins_changed')
+    # TemporaryFile avoids pipe capacity deadlocks for the bounded input.
+    with tempfile.TemporaryFile() as stream:
+        stream.write(raw);stream.seek(0)
+        command = transport + [shlex.join(['python3', '-I', '-c', REMOTE_KNOWN_HOSTS_PROGRAM,
+                                         commit, attempt, config_sha, manifest_sha, pins_sha, binding])]
+        try:
+            result = run_stage(command, cwd=repo, stdin=stream, timeout=45)
+        except subprocess.TimeoutExpired:
+            raise DeployError('bridge_known_hosts_timeout') from None
+    require(result.returncode == 0 and not result.stdout and not result.stderr and
+            not getattr(result, 'stdout_truncated', False) and not getattr(result, 'stderr_truncated', False),
+            'bridge_known_hosts_rejected_reconcile_pins_or_lifecycle')
+
+
 def atomic_write(path, raw, preserve_mode=False):
     mode = 0o600
     if preserve_mode:
@@ -1285,7 +1426,7 @@ def config_values(raw, allow_legacy_keys=False):
     return values
 
 
-def operator_transport(path, config, legacy_binding=False):
+def operator_transport(path, config, legacy_binding=False, pins_snapshot=None):
     values = config_values(config)
     bridge_address = values.get('BRIDGE_IP')
     main_exit_address = values.get('MAIN_EXIT_IP')
@@ -1349,7 +1490,7 @@ def operator_transport(path, config, legacy_binding=False):
                 and len(pins) == 1, 'operator_explicit_pins_required')
         pin_path = Path(pins[0])
         require(pin_path.is_absolute(), 'operator_pins_absolute_required')
-        pins_sha = sha(private_file(pin_path))
+        pins_sha = sha(operator_pins(pin_path))
         probe = subprocess.run(['ssh-keygen', '-F', address, '-f', str(pin_path)],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         require(probe.returncode == 0, 'operator_endpoint_pin_missing')
@@ -1364,6 +1505,8 @@ def operator_transport(path, config, legacy_binding=False):
 
     target, destination, target_identity = endpoint(bridge)
     target.append(destination)
+    if pins_snapshot is not None:
+        pins_snapshot['sha256'] = target_identity['pins_sha256']
     material = {'source_sha256': source_binding, 'target': target_identity}
     if legacy_binding:
         # Compatibility evidence only: validate the exact old fingerprint, but
@@ -3166,7 +3309,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     current = canonical_file(config)
     validate_config_policy(current)
     operator_inventory = os.environ.get('ULTRA_OPERATOR_INVENTORY')
-    transport, transport_binding = operator_transport(operator_inventory, current) if operator_requested() else (None, None)
+    pins_snapshot = {}
+    transport, transport_binding = operator_transport(operator_inventory, current, pins_snapshot=pins_snapshot) if operator_requested() else (None, None)
     secrets_source = deployment_secrets_source(existing_record, transport, adopt, commit, version)
     projection = deployment_config_projection(existing_record, transport, adopt, commit, version)
     staged_current = projected_upgrade_config(current, projection)
@@ -3459,6 +3603,9 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
             require(record.get('remote_architecture', staged_architecture) == staged_architecture, 'bridge_architecture_changed')
             record['remote_architecture'] = staged_architecture
             record['staged_config_sha256'] = staged_config_sha
+            if projection == 'upgrade-v2':
+                bootstrap_bridge_known_hosts(repo, transport, pins_snapshot['sha256'], commit, attempt,
+                                             staged_config_sha, manifest_sha, transport_binding)
             if bot_token is not None:
                 bootstrap_bridge_bot_token(repo, transport, bot_token)
                 bootstrap_bridge_vultr_key(repo, transport, vultr_key)
