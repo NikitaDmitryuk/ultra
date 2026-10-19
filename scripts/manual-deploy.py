@@ -422,7 +422,9 @@ FORWARD_ATTESTATION_REASONS = {
     'forward_proof_missing': 'forward_proof_missing',
     'lifecycle_evidence_missing': 'lifecycle_evidence_missing',
     'predecessor_operation_missing': 'predecessor_operation_missing',
-    'predecessor_activation_evidence_missing': 'predecessor_activation_evidence_missing',
+    'predecessor_activation_request_missing': 'predecessor_activation_request_missing',
+    'predecessor_activation_job_missing': 'predecessor_activation_job_missing',
+    'predecessor_activation_receipt_missing': 'predecessor_activation_receipt_missing',
     'predecessor_candidate_evidence_missing': 'predecessor_candidate_evidence_missing',
     'handoff_evidence_missing': 'handoff_evidence_missing',
     'handoff_plan_evidence_missing': 'handoff_plan_evidence_missing',
@@ -1071,7 +1073,7 @@ if mode=='continue':
         filename=error.filename
         parts=Path(filename).parts if isinstance(filename,str) else ()
         if len(parts)>=2 and parts[-2]=='activate' and parts[-1] in ('request.json','job.json','receipt.json'):
-            return 'predecessor_activation_evidence_missing'
+            return 'predecessor_activation_' + parts[-1][:-5] + '_missing'
         if parts and parts[-1]=='forward-operation.json': return 'forward_proof_missing'
         if parts and parts[-1]=='lifecycle.json': return 'lifecycle_evidence_missing'
         if parts and re.fullmatch(r'upgrade-v0\.0\.[0-9]+',parts[-1]): return 'predecessor_operation_missing'
