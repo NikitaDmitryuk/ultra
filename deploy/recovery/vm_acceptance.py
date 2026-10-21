@@ -19,9 +19,9 @@ import time
 from vm_topology_fixture import ssh, payload_targets
 
 
-def run(args, log, timeout=3600):
+def run(args, log, timeout=3600, cwd=None):
     with log.open('ab') as output:
-        result=subprocess.run(args,stdout=output,stderr=subprocess.STDOUT,timeout=timeout)
+        result=subprocess.run(args,stdout=output,stderr=subprocess.STDOUT,timeout=timeout,cwd=cwd)
     if result.returncode:raise ValueError('acceptance_command_failed; inspect private synthetic log')
 
 
@@ -140,7 +140,6 @@ def synthetic_upgrade_config(plan, release, public_key):
         'DB_NAME':database['name'],'DB_USER':database['user'],
         'BOT_ENABLE':bot['enabled'],'BOT_DOMAIN':bot['domain'],'BOT_PORT':bot['port'],
         'SUBSCRIPTION_DOMAIN':bot.get('subscription_domain',bot['domain']),
-        'SECRETS_ENV_FILE':plan['secrets']['env_file'],
         'VPN_DOMAIN':ingress['domain'],'ACME_EMAIL':ingress['email'],
         'PUBLIC_XHTTP_PATH':ingress['path'],
         'BOT_INGRESS_IP':ingress.get('forward_host',''),
@@ -193,7 +192,9 @@ def serial_upgrade(directory, installer, upgrade_release, public_key_file):
     config=directory/'upgrade-install.config'
     config.write_text(synthetic_upgrade_config(plan,{'version':version,'directory':str(next_release)},public_key))
     config.chmod(0o600)
-    run([installer,'upgrade','--config',str(config),'--release-dir',str(next_release)],directory/'upgrade.log')
+    # Resolve canonical .env only inside this private fixture workspace; never
+    # persist a bootstrap plan's secret-file reference in the public policy.
+    run([installer,'upgrade','--config',str(config),'--release-dir',str(next_release)],directory/'upgrade.log',cwd=directory)
     return version
 
 
@@ -233,7 +234,7 @@ def execute(args):
         plan['database'].update(enabled=True, primary_host=topology['nodes']['database'], ssh_user='root', ssh_identity=topology['identity'])
         plan['exits']=[{'name':'NL','ssh_host':topology['nodes']['nl'],'priority':100},{'name':'US','ssh_host':topology['nodes']['us'],'priority':200}]
         plan['bot'].update(domain='vpn.fixture.test')
-        env=directory/'synthetic-bot.env';env.write_text('TELEGRAM_BOT_TOKEN=123456:synthetic_fixture_token_only\nULTRA_RELAY_ADMIN_TOKEN=synthetic_fixture_admin_token_only\n');env.chmod(0o600)
+        env=directory/'.env';env.write_text('TELEGRAM_BOT_TOKEN=123456:synthetic_fixture_token_only\nULTRA_RELAY_ADMIN_TOKEN=synthetic_fixture_admin_token_only\n');env.chmod(0o600)
         cloud=directory/'synthetic-cloud-key';cloud.write_text('synthetic-no-provider-permission');cloud.chmod(0o600)
         plan['secrets']['env_file']=str(env)
         release=json.loads((Path(args.release_dir)/'release-manifest.json').read_text())

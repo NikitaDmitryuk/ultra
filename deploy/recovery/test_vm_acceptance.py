@@ -19,7 +19,8 @@ class SerialUpgrade(unittest.TestCase):
         plan['bridge'].update(address='198.18.0.11',ssh_host='198.18.0.11',public_host='198.18.0.11',ssh_identity=plan['ssh']['identity'])
         plan['database'].update(primary_host='198.18.0.16',ssh_identity=plan['ssh']['identity'])
         plan['bot'].update(domain='vpn.fixture.test',subscription_domain='sync.fixture.test')
-        plan['secrets']['env_file']=str(root/'synthetic-bot.env')
+        plan['secrets']['env_file']=str(root/'bootstrap-only-sensitive-path.env')
+        env=root/'.env';env.write_text('ULTRA_VULTR_API_KEY=synthetic-no-provider-permission\n');env.chmod(0o600)
         plan['exits']=[{'name':'NL','ssh_host':'198.18.0.13','priority':100},{'name':'US','ssh_host':'198.18.0.12','priority':200}]
         plan['automation'].update(bridge_ipv4='198.18.0.11',bridge_url='https://vpn.fixture.test/happ',known_hosts_file=str(root/'known hosts'))
         plan['automation']['static_nodes']=[{'name':e['name'],'address':e['ssh_host'],'provider':'fixture-'+e['name'],'budget':{'monthly_bytes':1000+i,'is_fallback':i==0}} for i,e in enumerate(plan['exits'])]
@@ -53,20 +54,30 @@ class SerialUpgrade(unittest.TestCase):
             with mock.patch.object(vm_acceptance,'run') as run:
                 self.assertEqual(vm_acceptance.serial_upgrade(root,'/fixture/ultra-install',str(release),public),'v2.3.2')
             config=root/'upgrade-install.config'
-            run.assert_called_once_with(['/fixture/ultra-install','upgrade','--config',str(config),'--release-dir',str(release.resolve())],root/'upgrade.log')
+            run.assert_called_once_with(['/fixture/ultra-install','upgrade','--config',str(config),'--release-dir',str(release.resolve())],root/'upgrade.log',cwd=root)
             values={k:json.loads(v) for k,v in (line.split('=',1) for line in config.read_text().splitlines())}
             self.assertEqual(values['ULTRA_RELEASE_MINISIGN_PUBLIC_KEY'],key)
             self.assertEqual(values['ULTRA_AUTOMATION_RELEASE_DIR'],str(release.resolve()))
             self.assertEqual(values['ULTRA_AUTOMATION_VERSION'],'v2.3.2')
             self.assertEqual(values['SUBSCRIPTION_DOMAIN'],'sync.fixture.test')
+            self.assertNotIn('SECRETS_ENV_FILE',values)
+            self.assertNotIn(plan['secrets']['env_file'],config.read_text())
+            self.assertEqual((root/'.env').stat().st_mode & 0o777,0o600)
             for key,field in {'DNS_PROVIDER':'provider','DNS_ZONE':'zone','DNS_TTL':'ttl','DNS_SUBSCRIPTION_NAME':'subscription_name','DNS_VPN_NAME':'vpn_name'}.items():
                 self.assertEqual(values[key],str(plan['automation']['dns'][field]))
             self.assertEqual(json.loads(values['ULTRA_AUTOMATION_STATIC_NODES']),plan['automation']['static_nodes'])
-            for name,expected in {'BRIDGE_IP':plan['bridge']['address'],'DATABASE_IP':plan['database']['primary_host'],'MAIN_EXIT_IP':plan['exits'][0]['ssh_host'],'BOT_INGRESS_IP':plan['automation']['ingress']['forward_host'],'VPN_DOMAIN':plan['automation']['ingress']['domain'],'SECRETS_ENV_FILE':plan['secrets']['env_file'],'BRIDGE_SSH_KEY':plan['ssh']['identity'],'MAIN_EXIT_SSH_KEY':plan['ssh']['identity'],'DATABASE_SSH_KEY':plan['ssh']['identity'],'ULTRA_AUTOMATION_BRIDGE_URL':plan['automation']['bridge_url'],'ULTRA_AUTOMATION_KNOWN_HOSTS_FILE':plan['automation']['known_hosts_file'],'REUSE_BRIDGE_SPEC':'false'}.items():
+            for name,expected in {'BRIDGE_IP':plan['bridge']['address'],'DATABASE_IP':plan['database']['primary_host'],'MAIN_EXIT_IP':plan['exits'][0]['ssh_host'],'BOT_INGRESS_IP':plan['automation']['ingress']['forward_host'],'VPN_DOMAIN':plan['automation']['ingress']['domain'],'BRIDGE_SSH_KEY':plan['ssh']['identity'],'MAIN_EXIT_SSH_KEY':plan['ssh']['identity'],'DATABASE_SSH_KEY':plan['ssh']['identity'],'ULTRA_AUTOMATION_BRIDGE_URL':plan['automation']['bridge_url'],'ULTRA_AUTOMATION_KNOWN_HOSTS_FILE':plan['automation']['known_hosts_file'],'REUSE_BRIDGE_SPEC':'false'}.items():
                 self.assertEqual(values[name],expected,name)
             self.assertEqual(config.stat().st_mode & 0o777,0o600)
             self.assertEqual((root/'install-plan.json').read_bytes(),before)
             self.assertFalse((root/'upgrade-plan.json').exists())
+
+    def test_run_passes_private_workspace_to_subprocess(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            with mock.patch.object(vm_acceptance.subprocess,'run',return_value=mock.Mock(returncode=0)) as run:
+                vm_acceptance.run(['/fixture/ultra-install','upgrade'],root/'upgrade.log',cwd=root)
+            self.assertEqual(run.call_args.kwargs['cwd'],root)
 
     def test_no_latest_or_unbound_release_fallback(self):
         with tempfile.TemporaryDirectory() as temporary:

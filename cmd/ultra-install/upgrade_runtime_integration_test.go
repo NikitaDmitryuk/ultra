@@ -299,16 +299,24 @@ plan=json.loads((root/'deploy/install-plan-v2.example.json').read_text())
 plan['bot'].update(domain='vpn.fixture.test',subscription_domain='sync.fixture.test')
 plan['automation']['dns']={'provider':'vultr','zone':'fixture.test','ttl':300,'subscription_name':'sync','vpn_name':'vpn'}
 plan['automation']['ingress'].update(domain='vpn.fixture.test',forward_host='')
-env=pathlib.Path(sys.argv[2]).with_name('synthetic.env')
+env=pathlib.Path(sys.argv[2]).with_name('.env')
 env.write_text('ULTRA_VULTR_API_KEY=synthetic-no-provider-permission\nTELEGRAM_BOT_TOKEN=fixture-token\n')
 env.chmod(0o600)
-plan['secrets']['env_file']=str(env)
+plan['secrets']['env_file']=str(env.with_name('bootstrap-only-sensitive-path.env'))
 plan['exits']=[{'name':'NL','ssh_host':'192.0.2.20','priority':100},{'name':'US','ssh_host':'192.0.2.30','priority':200}]
 plan['automation']['static_nodes']=[{'name':e['name'],'address':e['ssh_host'],'provider':'fixture-'+e['name'],'budget':{'monthly_bytes':1048576,'is_fallback':i==0}} for i,e in enumerate(plan['exits'])]
 pathlib.Path(sys.argv[2]).write_text(vm_acceptance.synthetic_upgrade_config(plan,{'version':'v2.3.2','directory':'/fixture/release'},'fixture-public-key'))
 `
 	if out, err := exec.Command(python, "-c", script, root, path).CombinedOutput(); err != nil {
 		t.Fatalf("synthetic config: %v: %s", err, out)
+	}
+	// Serial upgrade runs in this same private workspace and uses the canonical
+	// .env default, independently of the bootstrap-only secret-file reference.
+	t.Chdir(filepath.Dir(path))
+	configBytes, err := os.ReadFile(path)
+	if err != nil || bytes.Contains(configBytes, []byte("SECRETS_ENV_FILE")) ||
+		bytes.Contains(configBytes, []byte("bootstrap-only-sensitive-path.env")) {
+		t.Fatalf("canonical config retained a source secret-file reference: %v", err)
 	}
 	load := func(t *testing.T) *installplan.InstallPlan {
 		t.Helper()
@@ -319,6 +327,12 @@ pathlib.Path(sys.argv[2]).write_text(vm_acceptance.synthetic_upgrade_config(plan
 		return p
 	}
 	p := load(t)
+	if p.SecretsEnvFile() != ".env" {
+		t.Fatalf("unexpected lifecycle secrets default: %s", p.SecretsEnvFile())
+	}
+	if info, err := os.Stat(p.SecretsEnvFile()); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("private workspace .env unavailable or unsafe: %v", err)
+	}
 	if err := installplan.ValidatePlan(p); err != nil {
 		t.Fatalf("synthetic canonical plan validation: %v", err)
 	}
