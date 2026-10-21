@@ -200,6 +200,8 @@ test-ansible:
 	python3 scripts/test-ansible-input-types.py
 	python3 scripts/test-relay-environment.py
 	python3 scripts/test-ansible-operation-mapping.py
+	python3 scripts/test-retained-primary-gates.py
+	python3 scripts/test-subscription-key-projection.py
 	python3 scripts/test-recovery-tools-bootstrap.py
 	python3 scripts/test-ansible-dns-migration.py
 	python3 scripts/test-ansible-upgrade-runtime.py

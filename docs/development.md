@@ -13,6 +13,7 @@
 | Состав релиза, manifest или публикация GitHub Release | `python3 scripts/test-release-assets.py`, затем `python3 scripts/test-release-assets.py --dist dist`: реальный комплект должен совпадать с manifest, SHA-256, архитектурами ELF, исходными архивами и закреплёнными offline wheels |
 | Проверяющий инструмент harness | `go test ./tools/harnesscheck`; `make harness-check`; `go vet ./tools/harnesscheck` |
 | Offline rebuild-non-db preflight | `env -u DATABASE_URL go test ./cmd/ultra-install -run '^TestRebuild' -count=1`: strict evidence/scope, неподтверждённое доверие, приватность входов, blocked journal/replay/crash и paginated provider inventory; тесты не подключаются к production |
+| Retained-primary recovery execute | `env -u DATABASE_URL go test ./cmd/ultra-install -run '^TestRetained' -count=1`; `python3 scripts/test-retained-primary-gates.py`; `python3 scripts/test-subscription-key-projection.py`; syntax check `rebuild-retained-primary.yml` закреплённым Ansible runtime. Проверяются orphan/SIGKILL replay, обязательные прежние DB credentials, точная route identity, frozen binding без потери integer precision и hard localhost gates при DB unreachable; production execute этими тестами не запускается |
 | Go-код | Тесты затронутых пакетов, затем `make test`, `make vet`, `make lint` |
 | Конфигурация Xray, маршрутизация, failover | Тесты `./internal/config ./internal/exits ./internal/proxy`; сборка relay |
 | Ansible upgrade с DNS/domain/runtime effects | `python3 scripts/test-ansible-dns-migration.py`, `test-ansible-upgrade-domain.py`, `test-ansible-upgrade-runtime.py`, `test-ansible-runtime-effects.py`, `test-ansible-accepted-resume.py`, operation mapping и syntax check закреплённым Ansible runtime |
@@ -25,6 +26,12 @@
 | Встроенные web-ресурсы или установочные скрипты | Тесты затронутого Go-пакета, пересборка соответствующего бинарника; для UI — `make test-ui` (Node.js 22+) и проверка затронутого сценария в браузере |
 
 Сборка бинарников: `make build`, `make build-install`, `make build-bot`.
+
+`rebuild-retained-primary` реализует отдельный узкий execute, а не продолжение
+`rebuild-non-db preflight`. Admission намеренно одноразовый: existing remote marker
+запрещает повтор даже после successful receipt, пока не выполнена независимая ручная
+reconciliation. Проверки и границы описаны в [rebuild recovery](rebuild-non-db.md).
+
 CI запускает независимые группы Go lint/vet, обычных Go-тестов с PostgreSQL,
 race-тестов с отдельной PostgreSQL, сборки,
 Ansible-валидации и SSH-интеграции, Nginx, Mini App/release-контракта и recovery

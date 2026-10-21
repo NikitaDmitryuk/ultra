@@ -63,8 +63,14 @@ def install(src, dest, root=Path('/'), relay_uid=None, relay_gid=None):
         for parent in (path.parent, *path.parent.parents):
             info = parent.lstat()
             allowed = info.st_uid == os.geteuid()
-            if parent in (root / 'var/lib/ultra-relay', root / 'var/lib/ultra-relay/automation'):
-                allowed = allowed or (info.st_uid == relay_uid and stat.S_IMODE(info.st_mode) == 0o700)
+            if parent == root / 'var/lib/ultra-relay':
+                # systemd StateDirectory recreates the service-owned root as
+                # 0755; the keyring remains behind its private automation dir.
+                allowed = allowed or (info.st_uid == relay_uid and info.st_gid == relay_gid
+                                      and stat.S_IMODE(info.st_mode) in (0o700, 0o755))
+            elif parent == root / 'var/lib/ultra-relay/automation':
+                allowed = allowed or (info.st_uid == relay_uid and info.st_gid == relay_gid
+                                      and stat.S_IMODE(info.st_mode) == 0o700)
             if not stat.S_ISDIR(info.st_mode) or not allowed or info.st_mode & 0o022:
                 raise ValueError('subscription_keys_parent_untrusted')
             if parent == root:

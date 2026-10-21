@@ -275,6 +275,7 @@ func runLocal(
 		"bootstrap-postgres":           true,
 		"bootstrap-exit":               true,
 		"bootstrap-bridge":             true,
+		"rebuild-retained-primary":     true,
 		"bootstrap-automation":         true,
 		"verify-bootstrap-automation":  true,
 		"adopt":                        true,

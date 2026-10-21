@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('subscription_keys', ROOT / 'deploy/ansible/library/ultra_subscription_keys.py')
@@ -67,6 +68,40 @@ class ProjectionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'key_id_conflict'):
                 self.install(root)
             self.assertEqual(target.read_bytes(), raw)
+
+    def test_only_canonical_service_owned_state_root_accepts_systemd_mode(self):
+        for variant in ['root700', 'root755', 'root750', 'root770', 'wrong owner', 'wrong group', 'automation755', 'root symlink']:
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source, target = self.fixture(root)
+                state, automation = root / 'var/lib/ultra-relay', target.parent
+                state.chmod(0o700 if variant == 'root700' else 0o755)
+                if variant == 'root750': state.chmod(0o750)
+                if variant == 'root770': state.chmod(0o770)
+                if variant == 'automation755': automation.chmod(0o755)
+                if variant == 'root symlink':
+                    state.rename(state.with_name('other-state'))
+                    state.symlink_to(state.with_name('other-state'), target_is_directory=True)
+                service_uid, service_gid = os.geteuid() + 100, os.getegid() + 100
+                original = Path.lstat
+
+                def observed(path, *args, **kwargs):
+                    value = original(path, *args, **kwargs)
+                    if path in (state, automation):
+                        fields = list(value)
+                        fields[4] = service_uid + (1 if variant == 'wrong owner' and path == state else 0)
+                        fields[5] = service_gid + (1 if variant == 'wrong group' and path == state else 0)
+                        return os.stat_result(fields)
+                    return value
+
+                with patch.object(Path, 'lstat', observed), patch.object(keys.os, 'fchown'):
+                    if variant in ['root700', 'root755']:
+                        self.assertTrue(keys.install(keys.SOURCE, keys.DESTINATION, root, service_uid, service_gid))
+                        self.assertEqual(target.read_bytes(), source.read_bytes())
+                        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'parent_untrusted'):
+                            keys.install(keys.SOURCE, keys.DESTINATION, root, service_uid, service_gid)
 
     def test_unsafe_sources_and_destinations_fail_closed(self):
         for mutation in ('source mode', 'source symlink', 'source hardlink', 'target mode', 'target symlink', 'duplicate ID'):

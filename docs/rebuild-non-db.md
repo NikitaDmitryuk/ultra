@@ -4,6 +4,134 @@
 Он не разрешает переустановку или продолжение manual deploy. Текущий интерфейс
 описан в [автоматизации](automation.md#offline-preflight-переустановки-non-db-узлов).
 
+## Исполнимое восстановление с сохранённым primary
+
+Отдельная команда `ultra-install rebuild-retained-primary` устанавливает приложения
+на уже переустановленные bridge и один постоянный exit. Она не вызывает provider
+reimage/delete, не продолжает прежнюю операцию и не архивирует её journal.
+Это узкий операторский путь: `--accept-reimaged-fleet` явно подтверждает выполненное
+оператором удаление прежних dynamic exits и переустановку известных non-DB узлов;
+команда не доказывает полноту исторического fleet. Полный broker recovery ниже
+по-прежнему требует независимого census и completion-протокола.
+
+Обязательные абсолютные аргументы: `--config`, `--manifest`, `--original-journal`,
+новый приватный `--state-dir`, `--backup`, `--backup-sha256`, `--python`,
+`--executable`. Режим `--prepare-only` проверяет входы и сохраняет приватный
+`prepared-input.json`, не меняя production и не резервируя admission.
+
+Перед render требуются `DB_CREDENTIALS_FILE` с прежним saved bridge spec
+(обычный файл оператора, 0600, без symlink) и сохранённая авторизованная tunnel
+identity. DSN должен содержать прежний пароль и совпадать с configured DB name/user
+и loopback tunnel endpoint. Случайный password fallback запрещён; rendered DSN
+повторно сравнивается с сохранённым. Backup должен быть свежим (до 30 минут),
+совпадать с указанным digest, успешно проходить age authentication и чтение
+`pg_restore`; полноценное тестовое восстановление этим не подтверждается.
+
+Primary исключён из mutation inventory по точной host identity. Его Ansible-задачи
+выполняют только read-only SQL. Отдельный localhost gate перед каждой mutation play
+требует успешную проверку DB: unreachable, отсутствующий результат и устаревший
+success marker блокируют роли. Candidate migration list должен точно совпадать с
+применённым списком; это предотвращает pending migrations при старте relay, но
+обычные runtime app writes после запуска продолжаются. До и после проверяются
+cluster system ID, database OID, schema и уникальная enabled main route с прежним
+address/port/UUID/pin. PostgreSQL provisioning/import/authorization не выполняются.
+
+### Одноразовый admission и остановка после сбоя
+
+Execute сначала read-only проверяет отсутствие
+`/var/lib/ultra-ansible/retained-primary-admission.json` на обоих non-DB узлах.
+Затем под remote locks атомарно создаёт его через `O_EXCL`, fsync файла и каталога.
+Binding включает уникальный nonce попытки. Persistent root-owned systemd drop-ins
+закрывают controller/reconcile admission после reboot и ручного `systemctl start`.
+Primary не получает этот fence и не перезапускается.
+
+Любой существующий marker запрещает **все** следующие execute, включая ту же
+привязку, новый state-dir, неуспешную попытку и successful Ansible receipt.
+SSH-held locks недостаточны: SIGKILL runner может освободить их раньше завершения
+оставшегося Ansible process tree. Автоматического terminal/drain verifier и снятия
+marker нет. Даже успешный запуск оставляет admission закрытым; повторная установка
+требует отдельной явной ручной reconciliation с независимой проверкой оставшихся
+executor-ов. Не удаляй marker или прежние proof/journal для обхода этой проверки.
+Частичный claim только одного узла также требует reconciliation.
+
+Закрытый controller admission оставляет relay/VPN, bot и Mini App web работающими,
+но блокирует новые provisioning/configuration jobs для cloud exits и DB replicas.
+Каталог и quote могут читаться независимо; новый offer confirm проверяет
+`TopologyReady` и при недоступном controller возвращает `controller_unavailable`
+до provider create. Повторный confirm уже существующей операции может вернуть
+её прежнее состояние. Доступность web и main-exit VPN не подтверждает исправность
+Vultr create/replica management; для этого после безопасной reconciliation нужна
+отдельная проверка нового offer/create. Controller не следует включать до разбора
+незавершённых прежних операций.
+
+Источники provisioning boundary: [cloud service](../internal/cloud/service.go),
+[controller readiness](../internal/deployansible/service.go),
+[runtime wiring](../cmd/ultra-relay/cloud.go).
+
+### Reconciliation successful execute и открытие controller
+
+`ultra-install retained-primary-reconcile inspect` проверяет сохранённый successful
+execute без повторного запуска Ansible. Нужны абсолютные `--state-dir` прежней
+попытки, `--config`, `--manifest`, `--original-journal` с **исходными байтами** и
+`--receipt` для нового файла в существующем каталоге `0700`. Команда использует
+закреплённый SSH из config; локально сохраняется отдельное доказательство, на узлах
+inspect только читает состояние и удерживает существующие admission locks.
+
+Admission marker связан с `prepared-input.json.FenceEvidenceSHA256`, а result —
+с SHA-256 полного prepared input; это разные digest. Поддержаны две известные
+сериализации input: исходные compact JSON bytes с порядком полей вложенных typed
+структур и текущая нормализация map. Saved request binding обязан совпасть с одним
+из этих digest и с result. Request сравнивается семантически без потери больших
+целых чисел; duplicate keys и неизвестные верхние поля отклоняются. Проверяются
+оба binding, исходный request, successful receipt/result и полный inventory
+`bundle.retention.json`. Отсутствующие исторические Python/Ansible binaries и
+финальный `retained-primary-receipt.json` не требуют повторной установки:
+reconciliation заново проверяет текущее состояние и не дописывает историю wrapper.
+
+Под локальным operator lock и remote infrastructure/manual locks обоих non-DB
+узлов проверяются точные root-owned fences, released lifecycle, отсутствие
+незавершённых prepared controller jobs и executor процессов, active services и
+TLS bot/main-exit. Primary/route проверяются read-only заново; `pending/unknown`
+cloud operations блокируют открытие. Общий broker recovery fence/anchor также
+блокирует этот узкий путь: его completion-протокол команда не подменяет.
+
+После inspect оператор запускает `activate-controller` с теми же аргументами и
+отдельным `--receipt`: все проверки выполняются заново. Только controller получает
+root-owned authorization, имя которого содержит hash нового evidence, и отдельный
+systemd condition. Прежний admission JSON, original journal, execute и fences
+reconcile service/timer сохраняются; общий `retained-primary-admission-open` не
+создаётся. Controller запускается, проверяется его socket readiness и включается
+при загрузке. EOF до explicit activation оставляет controller закрытым. Ошибка
+после start останавливает controller и восстанавливает его admission drop-in.
+После аварийного завершения повтор разрешён только при остановленном controller,
+совпадающем authorization и повторно прошедших свежих проверках; действующий
+controller команда не останавливает ради повторной проверки.
+
+Флаг `--configure-cloud-runtime` допустим только для `activate-controller` и
+добавляет узкое восстановление provider runtime после controller readiness.
+Используется существующий dedicated API key; отдельная fleet SSH identity
+создаётся только при отсутствии и не заимствует DB tunnel identity. До открытия
+controller проверяются ownership, permissions, keypair и existing provider
+drop-in; после runtime stage relay перезапускается. Команда не обращается к Vultr
+API и не создаёт VPS. Новый cloud offer/create/delete проверяется отдельно.
+
+Перед runtime mutations и повторно непосредственно перед restart проверяются
+root-owned relay unit и фактический ExecStart, а также SHA-256 binary на диске.
+Допустим только relay asset исходного manifest, уже связанного с successful
+recovery request и проверенным retained schema; unit должен совпасть с template
+из исходного sealed bundle. Здоровый старый процесс не разрешает запуск другого
+staged binary с возможными pending migrations.
+
+Источники: [CLI и проверки артефактов](../cmd/ultra-install/retained_reconcile.go),
+[remote admission](../cmd/ultra-install/retained_reconcile_remote.go),
+[negative/crash/replay tests](../cmd/ultra-install/retained_reconcile_test.go).
+
+Источники: [CLI и durable fence](../cmd/ultra-install/rebuild_retained_cli.go),
+[executor](../cmd/ultra-install/rebuild_non_db_execute.go),
+[playbook](../deploy/ansible/playbooks/rebuild-retained-primary.yml),
+[crash/replay и credential tests](../cmd/ultra-install/rebuild_retained_cli_test.go),
+[DB gate tests](../scripts/test-retained-primary-gates.py).
+
 Для локального отчёта о требованиях к прерванному forward-only upgrade доступна
 команда:
 
@@ -106,10 +234,11 @@ upgrade и не протокол сохранения отдельного prima
 [archive](../scripts/manual-deploy.py),
 [проверки отсутствующих доказательств](../cmd/ultra-install/upgrade_forward_missing_evidence_test.go).
 
-## Требования к будущему исполнимому протоколу
+## Требования к полному broker recovery-протоколу
 
 Если исторические доказательства недоступны, нужен отдельный протокол recovery.
-Следующие требования описывают границу его реализации; готовой команды пока нет.
+Следующие требования описывают полный управляемый протокол с историческим census,
+provider mutation и retirement; узкая операторская команда выше его не заменяет.
 
 1. Доверенный collector независимо собирает полный исторический и текущий fleet
    через все provider accounts и pinned SSH. Исчезнувшие узлы требуют provider

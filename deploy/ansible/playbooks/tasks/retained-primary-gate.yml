@@ -1,0 +1,15 @@
+---
+# Every recovery mutation play imports this gate as pre_tasks. Delegation keeps
+# it runnable when the protected database host was removed as unreachable.
+- name: Require successful retained-primary read-only verification on localhost
+  ansible.builtin.assert:
+    that:
+      - hostvars['database'].retained_primary_before is defined
+      - not (hostvars['database'].retained_primary_before.unreachable | default(false) | bool)
+      - not (hostvars['database'].retained_primary_before.failed | default(false) | bool)
+      - hostvars['database'].retained_primary_before.rc | default(-1) | int == 0
+      - hostvars['database'].retained_primary_readonly_verified | default(false) | bool
+    fail_msg: retained_primary_readonly_verification_required
+  delegate_to: localhost
+  become: false
+  no_log: true

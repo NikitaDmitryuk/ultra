@@ -23,6 +23,10 @@ func handlePlanSubcommand(args []string) bool {
 		return true
 	}
 	switch args[0] {
+	case "retained-primary-reconcile":
+		exitOnErr("retained primary reconciliation", runRetainedReconcile(args[1:], os.Stdout))
+	case "rebuild-retained-primary":
+		exitOnErr("retained primary recovery", runRetainedPrimaryCommand(args[1:]))
 	case "rebuild-non-db":
 		exitOnErr("rebuild non-DB preflight", runRebuildNonDB(args[1:], os.Stdout, time.Now()))
 	case "config-values":

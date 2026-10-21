@@ -23,6 +23,9 @@ class AdoptionTLSTests(unittest.TestCase):
             # The topology module has separate DB integration tests. Stub only its
             # action here; retain the production task and every actual TLS guard.
             for task in tasks:
+                imported = task.get('ansible.builtin.import_tasks')
+                if imported and not Path(imported).is_absolute():
+                    task['ansible.builtin.import_tasks'] = str(ROOT / 'deploy/ansible/playbooks' / imported)
                 if 'ultra_adopt_topology' in task:
                     del task['ultra_adopt_topology']
                     task['ansible.builtin.assert'] = {'that': [True]}

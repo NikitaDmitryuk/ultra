@@ -12,7 +12,7 @@
     owner: root
     group: root
     mode: "0600"
-    diff: false
+  diff: false
   no_log: true
 - name: Ensure relay automation directory exists
   ansible.builtin.file:
@@ -40,7 +40,7 @@
     owner: root
     group: root
     mode: "0644"
-    diff: false
+  diff: false
   no_log: true
 - name: Load the subscription keyring drop-in into systemd
   ansible.builtin.systemd_service:
