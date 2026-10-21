@@ -198,39 +198,3 @@ def peer(config, directory, endpoint, plan):
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1900)
     if result.returncode:
         raise ValueError('pinned_remote_action_failed')
-
-
-def project_peer_inputs(config, directory, nodes):
-    from restore_common import stage_manifests, sha
-    state, _ = stage_manifests(directory / 'stage')
-    result = []
-    for node in nodes:
-        endpoints = {}
-        for name in ('identity', 'known_hosts'):
-            relative = 'state/' + node[name].lstrip('/')
-            if '..' in Path(relative).parts or relative not in state['files']:
-                raise ValueError('restored_peer_credential_missing')
-            source = directory / 'stage' / relative
-            if source.is_symlink() or sha(source) != state['files'][relative]['sha256']:
-                raise ValueError('restored_peer_credential_changed')
-            endpoints[name] = str(source)
-        endpoints['host'] = 'root@' + node['address']
-        result.append(peer_inputs(config, endpoints, node['plan']))
-    return result
-
-
-def reseed_peers(config, directory, nodes):
-    inputs = project_peer_inputs(config, directory, nodes)
-    for value in inputs:
-        attempt = directory / ('peer-' + str(uuid.uuid4()))
-        attempt.mkdir(mode=0o700)
-        atomic_json(attempt / 'inventory.json', value['inventory'])
-        atomic_json(attempt / 'variables.json', value['variables'])
-        completed = subprocess.run([os.environ.get('ULTRA_INSTALL_BINARY', '/usr/local/bin/ultra-install'),
-                                    'ansible-run', '--operation', 'restore-peer',
-                                    '--inventory', str(attempt / 'inventory.json'),
-                                    '--variables', str(attempt / 'variables.json'),
-                                    '--state-dir', str(attempt / 'operation'), *runtime_arguments(config)],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1900)
-        if completed.returncode:
-            raise ValueError('pinned_remote_action_failed')

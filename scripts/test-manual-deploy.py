@@ -2001,11 +2001,10 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
         self.assertEqual(self.config.read_bytes(), self.original)
         self.assertEqual(self.config.stat().st_mode & 0o777, 0o644)
 
-    def test_explicit_adoption_compares_then_applies_without_redundant_upgrade(self):
-        self.rollout(adopt=True)
-        self.assertEqual([stage for stage, _ in self.calls], ['doctor', 'adoption_check', 'adoption_apply', 'status'])
-        self.assertIn('--adopt-runtime', self.calls[1][1])
-        self.assertIn('--adopt-runtime', self.calls[2][1])
+    def test_explicit_fresh_adoption_is_rejected_without_remote_actions(self):
+        with self.assertRaisesRegex(D.DeployError, '^fresh_adoption_unsupported$'):
+            self.rollout(adopt=True)
+        self.assertEqual(self.calls, [])
 
     def test_preflight_failure_restores_previous_config(self):
         for failing in ['doctor', 'adoption_check']:
@@ -2141,6 +2140,23 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
             with self.assertRaisesRegex(D.DeployError, 'tracked_tree_dirty'):
                 D.main()
         self.assertEqual(run.call_count, 1)
+
+    def test_fresh_adoption_fails_before_candidate_build(self):
+        def reject_while_locked(*args):
+            with self.assertRaisesRegex(D.DeployError, 'already_running'):
+                with D.lock(self.repo / 'dist/manual/deploy.lock'):
+                    self.fail('adoption checked before acquiring the deployment lock')
+            return False
+        with patch.object(D, '__file__', str(self.repo / 'scripts/manual-deploy.py')), \
+             patch.object(D.shutil, 'which', return_value='/fixture'), \
+             patch.object(D.sys, 'argv', ['manual-deploy.py']), \
+             patch.dict(os.environ, {'ADOPT': '1'}), \
+             patch.object(D, 'run', side_effect=['', self.commit]), \
+             patch.object(D, 'valid_completed_remote_cleanup', side_effect=reject_while_locked), \
+             patch.object(D, 'build_candidate') as build:
+            with self.assertRaisesRegex(D.DeployError, '^fresh_adoption_unsupported$'):
+                D.main()
+            build.assert_not_called()
 
     def test_bundle_identity_mismatch_fails_before_loading_contract(self):
         manifest = {'version': 'v9.9.9', 'source_commit': self.commit}
@@ -2367,8 +2383,7 @@ class NativeDeploy(unittest.TestCase):
 
     def test_dump_projection_is_upgrade_only_and_rejects_unknown_policy(self):
         self.dump_config()
-        self.rollout(adopt=True)
-        self.assertIn(b'DATABASE_DUMP=', self.stage_mock.call_args.args[3])
+        self.assertIn(b'DATABASE_DUMP=', self.config.read_bytes())
         self.assertEqual(D.projected_upgrade_config(self.original), self.original)
         with self.assertRaisesRegex(D.DeployError, 'manual_config_projection_invalid'):
             D.projected_upgrade_config(self.original, 'future')
@@ -2468,24 +2483,11 @@ class NativeDeploy(unittest.TestCase):
                 self.root, completed + b'OTHER_POLICY=changed\n', self.version, self.commit, 'upgrade-v1'))
 
 
-    def test_native_contract_and_server_canonical_path(self):
-        self.rollout(adopt=True)
-        expected = '/var/lib/ultra-ansible/operator-inputs/manual-' + self.commit + '-' + D.remote_attempt(self.original, self.version) + '/release'
-        self.assertIn(expected.encode(), self.config.read_bytes())
-        self.assertNotIn(str(self.bundle).encode(), self.config.read_bytes())
-        self.assertEqual([s for s, _ in self.calls], ['canonical_policy', 'doctor', 'adoption_check', 'adoption_apply', 'status'])
-        self.assertEqual(self.calls[0][1][1:3], ['plan', '--config'])
-        for stage, command in self.calls[1:]:
-            self.assertEqual(command[:3], ['ssh', '-F', '/dev/null'])
-            self.assertEqual(command[-2], 'root@192.0.2.10')
-            self.assertFalse(any('ProxyCommand=' in token for token in command))
-            remote = D.shlex.split(command[-1])
-            self.assertEqual(remote[:3], ['python3', '-I', '-c'])
-            self.assertEqual(remote[4:11], ['run', self.commit, self.version, D.sha(self.manifest), D.sha(self.stage_mock.call_args.args[3]), D.remote_attempt(self.original, self.version), 'arm64'])
-            self.assertEqual(remote[11], stage)
-            self.assertEqual(remote[12], '0')
-        self.assertIn("'--bridge-native'", D.REMOTE_PROGRAM)
-        self.assertIn("'upgrade':['operator-upgrade'", D.REMOTE_PROGRAM)
+    def test_native_fresh_adoption_is_rejected_before_staging(self):
+        with self.assertRaisesRegex(D.DeployError, '^fresh_adoption_unsupported$'):
+            self.rollout(adopt=True)
+        self.stage_mock.assert_not_called()
+        self.assertEqual(self.config.read_bytes(), self.original)
 
     def test_native_retry_failed_is_bound_to_upgrade_handoff(self):
         self.rollout(retry_failed=True)
@@ -3236,12 +3238,12 @@ class NativeDeploy(unittest.TestCase):
     def test_native_interrupted_staging_is_retryable_without_dispatch(self):
         self.stage_mock.side_effect = D.DeployError('bridge_staging_failed')
         with self.assertRaisesRegex(D.DeployError, 'bridge_staging_failed'):
-            self.rollout(adopt=True)
+            self.rollout()
         self.assertFalse((self.root / 'operation.json').exists())
         self.assertEqual(self.config.read_bytes(), self.original)
         self.assertEqual([s for s, _ in self.calls], ['canonical_policy'])
         self.stage_mock.side_effect = self.staged_receipt
-        self.rollout(adopt=True)
+        self.rollout()
         self.assertEqual(next(self.root.glob('install.config.before-*')).read_bytes(), self.original)
 
     def test_native_same_commit_replay_keeps_remote_attempt_after_baseline_cleanup(self):
@@ -3412,21 +3414,16 @@ class NativeDeploy(unittest.TestCase):
         finally:
             self.stage.start()
 
-    def test_native_canonical_route_survives_deleted_adopt_directory(self):
+    def test_native_upgrade_requires_controller_pins_after_deleted_adopt_directory(self):
         shutil.rmtree(self.operator.parent)
         self.original = re.sub(rb'^ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=.*\n', b'', self.original, flags=re.MULTILINE)
         self.config.write_bytes(self.original)
         with patch.dict(os.environ, {'ULTRA_OPERATOR_INVENTORY': '', 'ULTRA_OPERATOR_IDENTITY': str(self.identity),
                                      'ULTRA_OPERATOR_KNOWN_HOSTS': str(self.pins)}):
-            self.rollout(adopt=True)
-        staged = self.stage_mock.call_args.args[3]
-        self.assertEqual(staged, self.config.read_bytes())
-        self.assertNotIn(str(self.identity).encode(), staged)
-        self.assertNotIn(str(self.pins).encode(), staged)
-        self.assertEqual([s for s, _ in self.calls], ['canonical_policy', 'doctor', 'adoption_check', 'adoption_apply', 'status'])
-        transport = self.stage_mock.call_args.args[4]
-        self.assertEqual(transport[-1], 'root@192.0.2.10')
-        self.assertFalse(any('ProxyCommand=' in token for token in transport))
+            with self.assertRaisesRegex(D.DeployError, '^manual_controller_pins_config_required$'):
+                self.rollout()
+        self.stage_mock.assert_not_called()
+        self.assertEqual(self.config.read_bytes(), self.original)
 
     def test_native_canonical_route_requires_both_local_references(self):
         self.original = re.sub(rb'^ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=.*\n', b'', self.original, flags=re.MULTILINE)
@@ -3440,15 +3437,15 @@ class NativeDeploy(unittest.TestCase):
 
     def test_native_read_only_failure_then_config_correction_changes_attempt(self):
         def reject(command, cwd, stage, **kwargs):
-            if stage == 'adoption_check':
-                raise D.DeployError('adoption_check_failed_exit_1')
-        with self.assertRaisesRegex(D.DeployError, 'adoption_check_failed_exit_1'):
-            self.rollout(adopt=True, runner=reject)
+            if stage == 'doctor':
+                raise D.DeployError('doctor_failed_exit_1')
+        with self.assertRaisesRegex(D.DeployError, 'doctor_failed_exit_1'):
+            self.rollout(runner=reject)
         first_config = self.stage_mock.call_args.args[3]
         self.assertEqual(self.config.read_bytes(), self.original)
         self.assertFalse((self.root / 'operation.json').exists())
         self.config.write_bytes(self.original + b'CORRECTED_POLICY=1\n')
-        self.rollout(adopt=True)
+        self.rollout()
         corrected = self.stage_mock.call_args.args[3]
         self.assertNotEqual(D.config_values(first_config)['ULTRA_AUTOMATION_RELEASE_DIR'],
                             D.config_values(corrected)['ULTRA_AUTOMATION_RELEASE_DIR'])

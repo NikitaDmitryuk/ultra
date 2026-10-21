@@ -137,26 +137,6 @@ class RestoreContracts(unittest.TestCase):
         before=common.plan_id(checked,'c'*64)
         checked['migration_identity']=dict(identity,target_machine_id='d'*32)
         self.assertNotEqual(before,common.plan_id(checked,'c'*64))
-
-    def test_peer_projection_is_pure_and_checks_authenticated_credentials(self):
-        import restore_ansible as adapter
-        identity=self.root/'stage/state/etc/ultra-recovery/key'
-        identity.parent.mkdir(parents=True);identity.write_bytes(b'synthetic key')
-        pins=identity.with_name('pins');pins.write_bytes(b'synthetic pins')
-        manifest={'files':{'state/etc/ultra-recovery/key':{'sha256':common.sha(identity)},
-                           'state/etc/ultra-recovery/pins':{'sha256':common.sha(pins)}}}
-        nodes=[{'identity':'/etc/ultra-recovery/key','known_hosts':'/etc/ultra-recovery/pins',
-                'address':'198.18.0.12','plan':{'action':'reseed'}}]
-        with mock.patch.object(common,'stage_manifests',return_value=(manifest,{})), mock.patch.object(adapter.subprocess,'run') as execute:
-            values=adapter.project_peer_inputs({'isolated_peer_addresses':['198.18.0.12']},self.root,nodes)
-            self.assertEqual(values[0]['variables']['ultra_peer_plan']['action'],'reseed')
-            execute.assert_not_called()
-            with self.assertRaisesRegex(ValueError,'isolated_restore_production_peer_forbidden'):
-                adapter.project_peer_inputs({'isolated_peer_addresses':[]},self.root,nodes)
-            identity.write_bytes(b'changed')
-            with self.assertRaisesRegex(ValueError,'restored_peer_credential_changed'):
-                adapter.project_peer_inputs({},self.root,nodes)
-
     def test_activate_reloads_nginx_after_start_and_on_completed_resume(self):
         target=host.Host(self.root, {'restore_id':'a'*64, 'fence':{}, 'target_host':'fixture', 'old_bridge_address':'192.0.2.1'})
         with mock.patch.object(host, 'stage_manifests', return_value=({}, {})), mock.patch.object(host, 'restore_certbot_lineages'), mock.patch.object(host, 'restore_units'), mock.patch.object(target, 'override'), mock.patch.object(target, 'wait_runtime'), mock.patch.object(host, 'AUTOMATION_UNITS', ()), mock.patch.object(host, 'run') as run:

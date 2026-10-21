@@ -167,8 +167,6 @@ def _execute(config, diagnostic):
             diagnostic.stage = phase
             plan['fence'] = current_fence(config)
             result = restore_ansible.phase(config, directory, plan, phase, archive)
-            if phase == 'peer_reseed':
-                restore_ansible.reseed_peers(config, directory, result.get('reseed_nodes', []))
             receipt.update({key: value for key, value in result.items() if key != 'reseed_nodes'})
             atomic_json(receipt_path, receipt)
             print(json.dumps({'phase': phase, 'complete': True}), flush=True)

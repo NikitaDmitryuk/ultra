@@ -2,20 +2,16 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 )
 
 var rebuildTestNow = time.Unix(1800000000, 0)
@@ -259,86 +255,6 @@ func TestRebuildStateFailsClosedOnCrashUnknownAndConcurrency(t *testing.T) {
 	}
 	if err := persistBlockedRebuild(root, []byte("record")); err == nil {
 		t.Fatal("concurrent writer admitted")
-	}
-}
-
-type rebuildTestTransport func(*http.Request) (*http.Response, error)
-
-func (f rebuildTestTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	return f(request)
-}
-
-func TestRebuildProviderCollectorConsumesAllPagesAndRejectsUnknown(t *testing.T) {
-	mapping := []rebuildInstanceMapping{{ID: "bridge", InstanceID: "b", Role: "bridge", Address: "192.0.2.1", OwnerTag: "owned"},
-		{ID: "exit", InstanceID: "e", Role: "exit", Address: "192.0.2.2", OwnerTag: "owned"},
-		{ID: "database", InstanceID: "p", Role: "primary", Address: "192.0.2.3", OwnerTag: "owned"}}
-	for _, scenario := range []string{"complete", "unknown", "untagged", "missing", "duplicate", "address-drift", "provider-failure", "cursor-cycle"} {
-		t.Run(scenario, func(t *testing.T) {
-			calls := 0
-			provider := cloud.NewVultr("synthetic-test-key")
-			provider.HTTP = &http.Client{Transport: rebuildTestTransport(func(request *http.Request) (*http.Response, error) {
-				calls++
-				if request.Method != "GET" || request.URL.Path != "/v2/instances" || request.URL.Query().Get("per_page") != "500" {
-					t.Fatal("non-inventory or mutating request", request.Method, request.URL.Path)
-				}
-				if scenario == "provider-failure" {
-					return nil, errors.New("synthetic failure")
-				}
-				page := mapping[:1]
-				next := "page-two"
-				if calls > 1 {
-					if request.URL.Query().Get("cursor") != "page-two" {
-						t.Fatal("cursor missing")
-					}
-					page, next = mapping[1:], ""
-				}
-				instances := []cloud.Instance{}
-				for _, entry := range page {
-					instances = append(
-						instances,
-						cloud.Instance{
-							ID:           entry.InstanceID,
-							IP:           entry.Address,
-							Tags:         []string{"owned"},
-							Status:       "active",
-							ServerStatus: "ok",
-							PowerStatus:  "running",
-						},
-					)
-				}
-				if calls > 1 {
-					switch scenario {
-					case "unknown":
-						instances = append(instances, cloud.Instance{ID: "unknown"})
-					case "untagged":
-						instances[0].Tags = nil
-					case "missing":
-						instances = instances[:1]
-					case "duplicate":
-						instances[1] = instances[0]
-					case "address-drift":
-						instances[0].IP = "192.0.2.99"
-					case "cursor-cycle":
-						next = "page-two"
-					}
-				}
-				raw, err := json.Marshal(
-					map[string]any{"instances": instances, "meta": map[string]any{"links": map[string]string{"next": next}}},
-				)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(raw)), Header: http.Header{}}, nil
-			})}
-			instances, err := collectRebuildProviderInventory(context.Background(), provider, mapping)
-			if scenario == "complete" {
-				if err != nil || len(instances) != 3 || calls != 2 {
-					t.Fatalf("pagination failed: count=%d calls=%d err=%v", len(instances), calls, err)
-				}
-			} else if err == nil {
-				t.Fatal("unsafe inventory accepted", scenario)
-			}
-		})
 	}
 }
 

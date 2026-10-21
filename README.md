@@ -217,20 +217,13 @@ ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 комплект и обновлённый канонический `install.config` в
 `/var/lib/ultra-ansible/operator-inputs/manual-<SHA>-<attempt>/release`. Файл `.env` и другие
 секреты не копируются. Успешная команда выполняет `doctor`, затем `upgrade` и
-`status`; в режиме adoption вместо upgrade запускаются read-only сравнение,
-`apply` и `status`. Теги, публикацию GitHub Release и фоновые обновления команда
-не создаёт.
+`status`. Теги, публикацию GitHub Release и фоновые обновления команда
+не создаёт. Новое принятие существующего runtime через `ADOPT=1` не поддерживается:
+обычный путь для действующего парка — upgrade. Старые adoption-журналы и точные
+rollback/retry артефакты сохраняют отдельные процедуры восстановления; не удаляйте
+их и не запускайте поверх них новую операцию.
 
-Для первой выкладки поверх уже работающего runtime включайте adoption только явно:
-
-```sh
-ADOPT=1 ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \
-ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
-```
-
-Это выполняет `doctor`, `adopt --check --adopt-runtime --bridge-native`,
-`apply --adopt-runtime --bridge-native` и `status`. Без `ADOPT=1` принятие
-не запускается. Ошибка подготовки или read-only сравнения до отправки mutator
+Ошибка подготовки или read-only сравнения до отправки mutator
 восстанавливает предыдущий локальный config и удаляет журнал. После отправки
 изменяющей команды при ошибке config и приватный журнал сохраняются: задание на
 bridge может продолжаться. `ultra-install status` показывает готовность сервисов,

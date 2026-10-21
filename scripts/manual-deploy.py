@@ -1235,23 +1235,8 @@ def stage_upgrade_baseline(config, version, remote_root):
             journal.get('manifest_sha256') == descriptor.get('manifest_sha256'),
             'upgrade_baseline_journal_invalid')
     require_manual_quiescence(journal)
-    try:
-        manifest = json.loads(manifest_raw)
-    except (ValueError, UnicodeDecodeError):
-        raise DeployError('upgrade_baseline_manifest_invalid') from None
-    require(manifest.get('source_commit') == journal['commit'] and manifest.get('version') == journal.get('version') and
-            isinstance(manifest.get('assets'), list) and len(manifest['assets']) == 14,
-            'upgrade_baseline_manifest_unbound')
-    old_release = Path('/var/lib/ultra-ansible/operator-inputs') / (
-        'manual-' + journal['commit'] + '-' + journal['remote_attempt']) / 'release'
-    staged_journal = remote_root / 'baseline' / 'operator-journal.json'
-    staged_descriptor = remote_root / 'baseline' / 'descriptor.json'
-    descriptor['journal'] = str(staged_journal)
-    descriptor['manifest'] = str(old_release / 'release-manifest.json')
-    staged_raw = (json.dumps(descriptor, sort_keys=True, separators=(',', ':')) + '\n').encode()
-    remote_config = config_candidate(config, version, remote_root / 'release', staged_descriptor)
-    return remote_config, {'baseline/descriptor.json': staged_raw,
-                           'baseline/operator-journal.json': journal_raw}
+    # Legacy descriptors remain readable, but no new baseline dispatch is supported.
+    raise DeployError('upgrade_baseline_dispatch_unsupported')
 
 
 def completed_baseline_replay(root, config, version, commit, projection=None):
@@ -3284,11 +3269,11 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     if continue_forward_only:
         require(not adopt and not retry_failed and not forward_only and probe_env_file is None,
                 'manual_forward_continuation_arguments_invalid')
+    if adopt:
+        require(valid_completed_remote_cleanup(existing_record, commit, version, True), 'fresh_adoption_unsupported')
     if continue_forward_only and existing_record.get('forward_only') is True and existing_record.get('mutator_dispatched') is False:
         existing_record = restore_forward_preflight(root, journal, existing_record, config)
     if continue_forward_only:
-        require(not adopt and not retry_failed and not forward_only and probe_env_file is None,
-                'manual_forward_continuation_arguments_invalid')
         validate_dispatched_manual_operation(existing_record)
         require(existing_record.get('forward_only') is True, 'manual_forward_continuation_requires_forward_operation')
         forward_only = True
@@ -3802,6 +3787,10 @@ def main():
     require(not root.is_symlink() and root.stat().st_uid == os.geteuid() and
             stat.S_IMODE(root.stat().st_mode) == 0o700, 'manual_state_requires_owned_0700')
     with lock(root / 'deploy.lock'):
+        if os.environ.get('ADOPT') == '1' and not arguments.build_only:
+            previous_path = root / 'operation.json'
+            previous = json.loads(private_file(previous_path)) if previous_path.exists() or previous_path.is_symlink() else {}
+            require(valid_completed_remote_cleanup(previous, commit, version, True), 'fresh_adoption_unsupported')
         bundle = build_candidate(repo, root, commit, version)
         print('manual-deploy: verified ' + version, flush=True)
         if not arguments.build_only:
