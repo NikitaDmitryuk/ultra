@@ -229,6 +229,14 @@ func (s *Service) Confirm(ctx context.Context, actor int64, id string) (Operatio
 		return Operation{}, e
 	}
 	defer unlock()
+	// A concurrent confirmation may have reserved this offer while we waited.
+	// Return its identity before checking capacity, including the last free slot.
+	if op, err := s.Store.Get(ctx, id); err == nil {
+		if op.Offer.Actor != actor {
+			return Operation{}, ErrConflict
+		}
+		return op, nil
+	}
 	if occupied, e := s.capacity(ctx); e != nil {
 		return Operation{}, e
 	} else if occupied >= MaxServers {
@@ -293,6 +301,11 @@ func (s *Service) Action(ctx context.Context, actor int64, id, action string) er
 		op.State = "cancelled"
 		op.Charged = false
 	case "delete":
+		// Replayed requests must never resurrect a tombstone or rewind a saved
+		// destructive phase after the provider resource has already disappeared.
+		if op.State == "deleted" {
+			return nil
+		}
 		if s.IsIngress(op) {
 			return ErrIngressInUse
 		}
@@ -310,8 +323,12 @@ func (s *Service) Action(ctx context.Context, actor int64, id, action string) er
 				return err
 			}
 		}
+		if op.Phase != "unpublish" && op.Phase != "delete" && op.Phase != "cleanup" {
+			op.Phase = "unpublish"
+		} else if op.State == "pending" {
+			return nil
+		}
 		op.State = "pending"
-		op.Phase = "unpublish"
 		op.Error = ""
 		op.ErrorMessage = ""
 		op.HTTPStatus = 0
