@@ -103,11 +103,13 @@ func TestLocalPreflightInheritedLockRejectsDifferentOpenDescription(t *testing.T
 	if err = syscall.Flock(int(first.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
-	second, err := os.Open(path)
+	// The verifier owns and closes this descriptor; do not leave an os.File
+	// finalizer that could later close a reused descriptor in another test.
+	second, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if verifyLocalRecoveryLock(int(second.Fd()), path) == nil {
+	if verifyLocalRecoveryLock(second, path) == nil {
 		t.Fatal("live original lock accepted")
 	}
 	fd, err := syscall.Dup(int(first.Fd()))
