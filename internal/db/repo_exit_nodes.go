@@ -215,7 +215,7 @@ func (r *ExitNodeRepo) mergeBootstrapEntry(ctx context.Context, e exits.Bootstra
 	if r.transaction == nil {
 		return r.withMutation(ctx, func(repo *ExitNodeRepo) error { return repo.mergeBootstrapEntry(ctx, e) })
 	}
-	if err := r.targetMutable(ctx, e.Address); err != nil {
+	if err := r.targetMutable(ctx, "", e.Address); err != nil {
 		return err
 	}
 	name := strings.TrimSpace(e.Name)
@@ -236,6 +236,9 @@ func (r *ExitNodeRepo) mergeBootstrapEntry(ctx context.Context, e exits.Bootstra
 	if address != "" && e.Port > 0 {
 		id, err := r.db.Queries.FindExitNodeByAddressPort(ctx, sqlc.FindExitNodeByAddressPortParams{Address: address, Port: int32(e.Port)})
 		if err == nil {
+			if err := r.targetMutable(ctx, fromPGUUID(id), address); err != nil {
+				return err
+			}
 			return r.db.Queries.MergeExitByAddressPort(ctx, sqlc.MergeExitByAddressPortParams{
 				ID:        id,
 				Name:      name,
@@ -258,6 +261,9 @@ func (r *ExitNodeRepo) mergeBootstrapEntry(ctx context.Context, e exits.Bootstra
 	if tunnelUUID != "" {
 		id, err := r.db.Queries.FindExitNodeByTunnelUUID(ctx, tunnelUUID)
 		if err == nil {
+			if err := r.targetMutable(ctx, fromPGUUID(id), address); err != nil {
+				return err
+			}
 			return r.db.Queries.MergeExitByTunnelUUID(ctx, sqlc.MergeExitByTunnelUUIDParams{
 				ID:        id,
 				Name:      name,
@@ -314,7 +320,7 @@ func (r *ExitNodeRepo) add(ctx context.Context, p exits.AddParams) (exits.Node, 
 	if address == "" || p.Port <= 0 || p.Port > 65535 {
 		return exits.Node{}, errors.New("exit address and port required")
 	}
-	if err := r.targetMutable(ctx, address); err != nil {
+	if err := r.targetMutable(ctx, strings.TrimSpace(p.ID), address); err != nil {
 		return exits.Node{}, err
 	}
 	tunnelUUID := strings.TrimSpace(p.TunnelUUID)
@@ -406,7 +412,7 @@ func (r *ExitNodeRepo) update(ctx context.Context, id string, patch exits.Update
 		}
 	}
 	port := cur.Port
-	if err := r.targetMutable(ctx, cur.Address, address); err != nil {
+	if err := r.targetMutable(ctx, cur.ID, cur.Address, address); err != nil {
 		return exits.Node{}, err
 	}
 	if patch.Port != nil {
@@ -500,7 +506,7 @@ func (r *ExitNodeRepo) delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if err := r.targetMutable(ctx, cur.Address); err != nil {
+	if err := r.targetMutable(ctx, cur.ID, cur.Address); err != nil {
 		return err
 	}
 	if cur.Enabled {

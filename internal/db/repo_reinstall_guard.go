@@ -14,6 +14,7 @@ import (
 
 	"github.com/NikitaDmitryuk/ultra/internal/cloud"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
+	"github.com/google/uuid"
 )
 
 var ErrExitTargetBusy = errors.New("exit target is reserved for cloud maintenance")
@@ -31,9 +32,27 @@ func exitTargetLock(address string) int64 {
 
 // Mutation callers hold the short topology mutex first. A shared transaction
 // lock allows unrelated mutations while excluding a host-wide remote reinstall.
-func (r *ExitNodeRepo) targetMutable(ctx context.Context, addresses ...string) error {
+func (r *ExitNodeRepo) targetMutable(ctx context.Context, id string, addresses ...string) error {
 	if r.transaction == nil {
 		return errors.New("exit topology transaction required")
+	}
+	// Completed ordinary deletion releases the physical address, but its exact
+	// operation/exit identity must never be reused, even at another address.
+	if id != "" {
+		parsed, err := uuid.Parse(id)
+		if err != nil {
+			return err
+		}
+		id = parsed.String()
+	}
+	var tombstone bool
+	if err := r.transaction.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cloud_operations c
+WHERE c.state='deleted' AND c.body->>'phase' IN ('delete','cleanup')
+AND $1<>'' AND (c.id::text=$1 OR c.body->>'exit_id'=$1))`, id).Scan(&tombstone); err != nil {
+		return err
+	}
+	if tombstone {
+		return ErrExitTargetBusy
 	}
 	rows, err := r.transaction.Query(
 		ctx,
@@ -42,10 +61,12 @@ UNION ALL
 SELECT n.address FROM exit_nodes n JOIN cloud_operations c
 ON n.id::text=COALESCE(NULLIF(c.body->>'exit_id',''), c.id::text)
 WHERE c.body->>'phase' IN ('retire_unpublish','retire_delete','retire_cleanup','delete','cleanup')
+AND NOT (c.state='deleted' AND c.body->>'phase' IN ('delete','cleanup'))
 AND NOT (n.id::text=$1 AND c.body->>'phase'='retire_unpublish' AND c.state='pending')
 UNION ALL
 SELECT c.body->>'retirement_target' FROM cloud_operations c
 WHERE c.body->>'phase' IN ('retire_unpublish','retire_delete','retire_cleanup','delete','cleanup')
+AND NOT (c.state='deleted' AND c.body->>'phase' IN ('delete','cleanup'))
 AND COALESCE(c.body->>'retirement_target','')<>''
 AND NOT (c.id::text=$1 AND c.body->>'phase'='retire_unpublish' AND c.state='pending')`,
 		r.retirementDisableID,
@@ -87,6 +108,20 @@ AND NOT (c.id::text=$1 AND c.body->>'phase'='retire_unpublish' AND c.state='pend
 // disabled rows and different ports. The caller holds the topology mutex before
 // the cloud worker lock, so the check and persisted reservation cannot race CRUD.
 func (r *ExitNodeRepo) ValidateCloudRetirementTarget(ctx context.Context, op *cloud.Operation) error {
+	return r.validateCloudDeletionTarget(ctx, op, false)
+}
+
+// ValidateCloudDeleteTarget permits ordinary deletion beside disabled historical
+// exits only when a completed ordinary deletion proves a distinct VPS identity.
+// Explicit retirement intentionally retains its stricter alias policy.
+func (r *ExitNodeRepo) ValidateCloudDeleteTarget(ctx context.Context, op *cloud.Operation) error {
+	if op == nil || (op.Phase != "unpublish" && op.Phase != "delete" && op.Phase != "cleanup") {
+		return cloud.ErrConflict
+	}
+	return r.validateCloudDeletionTarget(ctx, op, true)
+}
+
+func (r *ExitNodeRepo) validateCloudDeletionTarget(ctx context.Context, op *cloud.Operation, ordinary bool) error {
 	if op == nil || op.ID == "" || (op.ExitID != "" && op.ExitID != op.ID) {
 		return cloud.ErrConflict
 	}
@@ -102,10 +137,25 @@ func (r *ExitNodeRepo) ValidateCloudRetirementTarget(ctx context.Context, op *cl
 		nodeIP := net.ParseIP(node.Address)
 		sameHost := nodeIP != nil && ip.Equal(nodeIP)
 		if node.ID == op.ExitID {
-			if !sameHost || ((op.Phase == "retire_delete" || op.Phase == "retire_cleanup") && node.Enabled) {
+			if !sameHost ||
+				((op.Phase == "retire_delete" || op.Phase == "retire_cleanup" || op.Phase == "delete" || op.Phase == "cleanup") && node.Enabled) {
 				return cloud.ErrConflict
 			}
 		} else if sameHost || node.ID == op.ID {
+			if ordinary && sameHost && !node.Enabled && node.ID != op.ID && op.InstanceID != "" {
+				var historical bool
+				if err := r.db.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cloud_operations c
+WHERE c.state='deleted' AND c.body->>'phase' IN ('delete','cleanup')
+AND c.id::text=$1 AND COALESCE(NULLIF(c.body->>'exit_id',''), c.id::text)=$1
+AND c.id::text<>$2 AND COALESCE(c.body->>'instance_id','')<>'' AND c.body->>'instance_id'<>$3
+AND COALESCE(c.body->>'reinstall_target','')=''
+AND (COALESCE(c.body->>'retirement_target','')='' OR c.body->>'retirement_target'=$4))`, node.ID, op.ID, op.InstanceID, ip.String()).Scan(&historical); err != nil {
+					return err
+				}
+				if historical {
+					continue
+				}
+			}
 			return cloud.ErrConflict
 		}
 	}

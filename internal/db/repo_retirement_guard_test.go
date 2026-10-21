@@ -31,13 +31,15 @@ func TestRetirementReservationProtectsFailedAndDeletedExit(t *testing.T) {
 				if err := repo.Delete(ctx, node.ID); !errors.Is(err, ErrExitTargetBusy) {
 					t.Fatalf("delete escaped reservation: %v", err)
 				}
-				if _, err := repo.Add(ctx, exits.AddParams{Name: "alias", Address: node.Address, Port: node.Port + 1}); !errors.Is(
-					err,
-					ErrExitTargetBusy,
-				) {
+				_, err := repo.Add(ctx, exits.AddParams{Name: "alias", Address: node.Address, Port: node.Port + 1})
+				if state == "deleted" && (phase == "delete" || phase == "cleanup") {
+					if err != nil {
+						t.Fatalf("completed ordinary deletion retained address: %v", err)
+					}
+				} else if !errors.Is(err, ErrExitTargetBusy) {
 					t.Fatalf("alias escaped reservation: %v", err)
 				}
-				err := repo.DisableCloudRetirement(ctx, &op)
+				err = repo.DisableCloudRetirement(ctx, &op)
 				if state == "pending" && phase == "retire_unpublish" {
 					if err != nil {
 						t.Fatalf("internal disable failed: %v", err)

@@ -749,6 +749,10 @@ func (p *Provisioner) ApplyRoute(ctx context.Context, op *cloud.Operation) error
 // ValidateRetirement refuses infrastructure and the persisted main/fallback exit.
 // The caller additionally requires exact operation and provider ownership identities.
 func (p *Provisioner) ValidateRetirement(ctx context.Context, op *cloud.Operation, instance cloud.Instance) error {
+	return p.validateDeletion(ctx, op, instance, false)
+}
+
+func (p *Provisioner) validateDeletion(ctx context.Context, op *cloud.Operation, instance cloud.Instance, ordinary bool) error {
 	if p.DB == nil || p.Bridge == nil || p.Bridge.Database == nil {
 		return cloud.ErrUnavailable
 	}
@@ -772,8 +776,15 @@ func (p *Provisioner) ValidateRetirement(ctx context.Context, op *cloud.Operatio
 	}
 	checked := *op
 	checked.RetirementTarget = target
-	if err := db.NewExitNodeRepo(p.DB).ValidateCloudRetirementTarget(ctx, &checked); err != nil {
-		return err
+	repo := db.NewExitNodeRepo(p.DB)
+	var validationErr error
+	if ordinary {
+		validationErr = repo.ValidateCloudDeleteTarget(ctx, &checked)
+	} else {
+		validationErr = repo.ValidateCloudRetirementTarget(ctx, &checked)
+	}
+	if validationErr != nil {
+		return validationErr
 	}
 	budgets, err := db.NewQuotaRepo(p.DB).Budgets(ctx)
 	if err != nil {
@@ -795,7 +806,7 @@ func (p *Provisioner) ValidateRetirement(ctx context.Context, op *cloud.Operatio
 		return err
 	}
 	// A saved delete checkpoint never authorizes deleting a republished node.
-	if (op.Phase == "retire_delete" || op.Phase == "retire_cleanup") && node.Enabled {
+	if (op.Phase == "retire_delete" || op.Phase == "retire_cleanup" || op.Phase == "delete" || op.Phase == "cleanup") && node.Enabled {
 		return cloud.ErrConflict
 	}
 	if sameRetirementAddress(node.Address, p.BridgeIP) ||
@@ -838,18 +849,12 @@ func (p *Provisioner) ValidateDelete(ctx context.Context, op *cloud.Operation) e
 			return nil // no provider machine and no published route
 		}
 	}
-	checked := *op
 	switch op.Phase {
-	case "unpublish":
-		checked.Phase = "retire_unpublish"
-	case "delete":
-		checked.Phase = "retire_delete"
-	case "cleanup":
-		checked.Phase = "retire_cleanup"
+	case "unpublish", "delete", "cleanup":
 	default:
 		return cloud.ErrConflict
 	}
-	return p.ValidateRetirement(ctx, &checked, instance)
+	return p.validateDeletion(ctx, op, instance, true)
 }
 
 func (p *Provisioner) Unpublish(ctx context.Context, op *cloud.Operation) error {
