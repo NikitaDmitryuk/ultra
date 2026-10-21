@@ -144,8 +144,9 @@ func (p *fakeProvisioner) ApplyRoute(ctx context.Context, _ *Operation) error {
 	p.applyEffects++
 	return nil
 }
-func (p *fakeProvisioner) Unpublish(context.Context, *Operation) error { p.unpublished++; return nil }
-func (p *fakeProvisioner) Cleanup(context.Context, *Operation) error   { return nil }
+func (p *fakeProvisioner) Unpublish(context.Context, *Operation) error      { p.unpublished++; return nil }
+func (p *fakeProvisioner) ValidateDelete(context.Context, *Operation) error { return nil }
+func (p *fakeProvisioner) Cleanup(context.Context, *Operation) error        { return nil }
 func testService() (*Service, *fakeProvider, *fakeProvisioner) {
 	api := &fakeProvider{monthly: 5, available: true}
 	p := &fakeProvisioner{}

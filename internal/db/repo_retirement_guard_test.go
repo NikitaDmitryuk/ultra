@@ -12,7 +12,7 @@ import (
 
 func TestRetirementReservationProtectsFailedAndDeletedExit(t *testing.T) {
 	for _, state := range []string{"pending", "failed", "deleted"} {
-		for _, phase := range []string{"retire_unpublish", "retire_delete", "retire_cleanup"} {
+		for _, phase := range []string{"retire_unpublish", "retire_delete", "retire_cleanup", "delete", "cleanup"} {
 			t.Run(state+"/"+phase, func(t *testing.T) {
 				database, repo, op, node, _ := reinstallGuardFixture(t)
 				ctx := context.Background()

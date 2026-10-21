@@ -41,11 +41,11 @@ func (r *ExitNodeRepo) targetMutable(ctx context.Context, addresses ...string) e
 UNION ALL
 SELECT n.address FROM exit_nodes n JOIN cloud_operations c
 ON n.id::text=COALESCE(NULLIF(c.body->>'exit_id',''), c.id::text)
-WHERE c.body->>'phase' IN ('retire_unpublish','retire_delete','retire_cleanup')
+WHERE c.body->>'phase' IN ('retire_unpublish','retire_delete','retire_cleanup','delete','cleanup')
 AND NOT (n.id::text=$1 AND c.body->>'phase'='retire_unpublish' AND c.state='pending')
 UNION ALL
 SELECT c.body->>'retirement_target' FROM cloud_operations c
-WHERE c.body->>'phase' IN ('retire_unpublish','retire_delete','retire_cleanup')
+WHERE c.body->>'phase' IN ('retire_unpublish','retire_delete','retire_cleanup','delete','cleanup')
 AND COALESCE(c.body->>'retirement_target','')<>''
 AND NOT (c.id::text=$1 AND c.body->>'phase'='retire_unpublish' AND c.state='pending')`,
 		r.retirementDisableID,

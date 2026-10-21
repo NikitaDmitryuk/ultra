@@ -74,6 +74,7 @@ type Provisioner interface {
 	Publish(context.Context, *Operation) error
 	ApplyRoute(context.Context, *Operation) error
 	Unpublish(context.Context, *Operation) error
+	ValidateDelete(context.Context, *Operation) error
 	Cleanup(context.Context, *Operation) error
 }
 type Service struct {
@@ -299,6 +300,9 @@ func (s *Service) Action(ctx context.Context, actor int64, id, action string) er
 			return ErrConflict
 		}
 		op.State = "cancelled"
+		if op.FirewallID != "" {
+			op.State, op.Phase = "pending", "cancel_cleanup"
+		}
 		op.Charged = false
 	case "delete":
 		// Replayed requests must never resurrect a tombstone or rewind a saved
@@ -430,6 +434,16 @@ func (s *Service) fail(ctx context.Context, op Operation, code string, e error) 
 	return e
 }
 func (s *Service) advance(ctx context.Context, op Operation) error {
+	if op.Phase == "cancel_cleanup" {
+		if op.InstanceID != "" || op.Charged || s.Provisioner == nil {
+			return s.fail(ctx, op, "resource_cleanup_failed", ErrConflict)
+		}
+		if err := s.Provisioner.Cleanup(ctx, &op); err != nil {
+			return s.fail(ctx, op, "resource_cleanup_failed", err)
+		}
+		op.State = "cancelled"
+		return s.Store.Save(ctx, op)
+	}
 	if isRetirementPhase(op.Phase) {
 		return s.advanceRetirement(ctx, op)
 	}
@@ -567,16 +581,25 @@ func (s *Service) advance(ctx context.Context, op Operation) error {
 		op.State = "ready"
 		op.Phase = "ready"
 	case "unpublish":
+		if err := s.Provisioner.ValidateDelete(ctx, &op); err != nil {
+			return s.fail(ctx, op, "deletion_protected", err)
+		}
 		if e := s.Provisioner.Unpublish(ctx, &op); e != nil {
 			return s.fail(ctx, op, "route_removal_failed", e)
 		}
 		op.Phase = "delete"
 	case "delete":
+		if err := s.Provisioner.ValidateDelete(ctx, &op); err != nil {
+			return s.fail(ctx, op, "deletion_protected", err)
+		}
 		if e := s.API.Delete(ctx, op.InstanceID); e != nil {
 			return s.fail(ctx, op, "server_deletion_failed", e)
 		}
 		op.Phase = "cleanup"
 	case "cleanup":
+		if err := s.Provisioner.ValidateDelete(ctx, &op); err != nil {
+			return s.fail(ctx, op, "deletion_protected", err)
+		}
 		if e := s.Provisioner.Cleanup(ctx, &op); e != nil {
 			return s.fail(ctx, op, "resource_cleanup_failed", e)
 		}
@@ -792,23 +815,44 @@ func (s *Service) capacity(ctx context.Context) (int, error) {
 	if e != nil {
 		return 0, e
 	}
-	occupied := 0
-	known := map[string]bool{}
-	tags := map[string]bool{}
-	for _, op := range ops {
-		if op.State != "deleted" && op.State != "cancelled" {
-			occupied++
-			known[op.InstanceID] = true
-			tags["ultra-operation-"+op.ID] = true
-		}
-	}
+	physical := map[string]Instance{}
 	for _, instance := range instances {
-		accounted := known[instance.ID]
-		for _, tag := range instance.Tags {
-			accounted = accounted || tags[tag]
+		if instance.ID == "" {
+			return 0, ErrConflict
 		}
-		if !accounted {
+		physical[instance.ID] = instance
+	}
+	occupied := len(physical)
+	claimed := map[string]bool{}
+	for _, op := range ops {
+		if op.State == "deleted" || op.State == "cancelled" {
+			continue
+		}
+		matched := ""
+		if _, exists := physical[op.InstanceID]; exists && !claimed[op.InstanceID] {
+			matched = op.InstanceID
+		} else if op.InstanceID == "" {
+			for id, instance := range physical {
+				if claimed[id] {
+					continue
+				}
+				for _, tag := range instance.Tags {
+					if tag == "ultra-operation-"+op.ID {
+						matched = id
+						break
+					}
+				}
+				if matched != "" {
+					break
+				}
+			}
+		}
+		if matched == "" {
 			occupied++
+		} else {
+			// A reservation accounts for at most one physical machine, even
+			// when an ambiguous creation produced several with the same tag.
+			claimed[matched] = true
 		}
 	}
 	return occupied, nil

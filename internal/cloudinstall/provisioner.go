@@ -812,6 +812,46 @@ func sameRetirementAddress(a, b string) bool {
 	return left != nil && right != nil && left.Equal(right)
 }
 
+// ValidateDelete shares the retirement host checks with ordinary UI deletion.
+// Older checkpoints may lack the saved address; recover it only from the exact
+// provider instance or the still-reserved exit row before validating all aliases.
+func (p *Provisioner) ValidateDelete(ctx context.Context, op *cloud.Operation) error {
+	instance, err := p.API.Get(ctx, op.InstanceID)
+	var api cloud.APIError
+	missing := errors.As(err, &api) && api.Status == 404
+	if err != nil && !missing {
+		return err
+	}
+	if op.RetirementTarget == "" {
+		op.RetirementTarget = instance.IP
+		if missing && op.ExitID != "" {
+			node, err := db.NewExitNodeRepo(p.DB).Get(ctx, op.ExitID)
+			if err != nil && !errors.Is(err, db.ErrExitNotFound) {
+				return err
+			}
+			op.RetirementTarget = node.Address
+		}
+	}
+	if missing {
+		instance = cloud.Instance{ID: op.InstanceID, IP: op.RetirementTarget}
+		if op.ExitID == "" && op.RetirementTarget == "" {
+			return nil // no provider machine and no published route
+		}
+	}
+	checked := *op
+	switch op.Phase {
+	case "unpublish":
+		checked.Phase = "retire_unpublish"
+	case "delete":
+		checked.Phase = "retire_delete"
+	case "cleanup":
+		checked.Phase = "retire_cleanup"
+	default:
+		return cloud.ErrConflict
+	}
+	return p.ValidateRetirement(ctx, &checked, instance)
+}
+
 func (p *Provisioner) Unpublish(ctx context.Context, op *cloud.Operation) error {
 	if op.ExitID == "" {
 		return nil
