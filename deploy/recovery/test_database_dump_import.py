@@ -28,7 +28,7 @@ class ImportTests(unittest.TestCase):
     def fake_call(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
         if argv[0] == 'psql':
-            value = '123456:42' if 'pg_control_system' in argv[-1] else '0'
+            value = '123456:42' if 'pg_control_system' in argv[-1] else '' if argv[-1] == importer.MARKER_SQL else '0'
             return type('Result', (), {'stdout': value})()
         return type('Result', (), {'stdout': ''})()
 
@@ -37,14 +37,15 @@ class ImportTests(unittest.TestCase):
         result = importer.run({'archive': str(self.archive), 'database': 'ultra', 'user': 'ultra', 'sha256': digest},
                               environ={'PGPASSWORD': 'secret'}, call=self.fake_call)
         self.assertEqual(result['size'], len(b'synthetic archive bytes'))
-        self.assertEqual([call[0][0] for call in self.calls], ['pg_restore', 'psql', 'psql', 'pg_restore'])
-        restore = self.calls[-1][0]
+        self.assertEqual([call[0][0] for call in self.calls], ['pg_restore', 'psql', 'psql', 'psql', 'pg_restore', 'psql'])
+        restore = self.calls[-2][0]
         self.assertIn('--exit-on-error', restore)
         self.assertIn('--no-owner', restore)
         self.assertIn('--no-acl', restore)
-        self.assertIn('--single-transaction', restore)
-        self.assertEqual([kwargs['timeout'] for _, kwargs in self.calls], [60, 60, 60, 600])
-        self.assertEqual([kwargs['env']['PGPASSWORD'] for _, kwargs in self.calls], ['secret'] * 4)
+        self.assertIn('--single-transaction', self.calls[-1][0])
+        self.assertIn('--file=-', self.calls[-1][0])
+        self.assertEqual([kwargs['timeout'] for _, kwargs in self.calls], [60, 60, 60, 60, 600, 600])
+        self.assertEqual([kwargs['env']['PGPASSWORD'] for _, kwargs in self.calls], ['secret'] * 6)
 
     def test_rejects_nonempty_database_without_restore(self):
         def nonempty(argv, **kwargs):
@@ -54,7 +55,7 @@ class ImportTests(unittest.TestCase):
         digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
         with self.assertRaisesRegex(ValueError, 'target_database_not_empty'):
             importer.run({'archive': str(self.archive), 'database': 'ultra', 'user': 'ultra', 'sha256': digest}, call=nonempty)
-        self.assertEqual([call[0][0] for call in self.calls], ['pg_restore', 'psql', 'psql'])
+        self.assertEqual([call[0][0] for call in self.calls], ['pg_restore', 'psql', 'psql', 'psql'])
 
     def test_matching_receipt_allows_safe_retry_without_restore(self):
         digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
@@ -66,7 +67,40 @@ class ImportTests(unittest.TestCase):
             return type('Result', (), {'stdout': value})()
         result = importer.run({'archive': str(self.archive), 'database': 'ultra', 'user': 'ultra', 'sha256': digest}, call=existing)
         self.assertTrue(result['already_imported'])
-        self.assertEqual([call[0][0] for call in self.calls], ['pg_restore', 'psql', 'psql'])
+        self.assertEqual([call[0][0] for call in self.calls], ['pg_restore', 'psql', 'psql', 'psql'])
+
+    def test_retry_recovers_commit_ack_and_receipt_failures_from_database(self):
+        digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        plan = {'archive': str(self.archive), 'database': 'ultra', 'user': 'ultra', 'sha256': digest}
+        evidence = {'database': 'ultra', 'database_oid': '42', 'sha256': digest, 'system_identifier': '123456', 'user': 'ultra'}
+        for failure in ('commit_ack', 'receipt'):
+            with self.subTest(failure=failure):
+                self.receipt.unlink(missing_ok=True)
+                committed = []
+                def call(argv, **kwargs):
+                    if argv[0] == 'pg_restore':
+                        if '--file=-' in argv:
+                            kwargs['stdout'].write(b'SELECT 1;\n')
+                        return type('Result', (), {'stdout': ''})()
+                    if '--file=-' in argv:
+                        committed.append(True)
+                        if failure == 'commit_ack':
+                            raise subprocess.TimeoutExpired('psql', 600)
+                        return type('Result', (), {'stdout': ''})()
+                    statement = argv[-1]
+                    value = ('123456:42' if 'pg_control_system' in statement else
+                             importer.marker(evidence) if statement == importer.MARKER_SQL and committed else
+                             '' if statement == importer.MARKER_SQL else '1' if committed else '0')
+                    return type('Result', (), {'stdout': value})()
+                with mock.patch.object(importer, 'atomic_receipt', side_effect=OSError('fixture disk fault')):
+                    with self.assertRaises((OSError, subprocess.TimeoutExpired)):
+                        importer.run(plan, call=call)
+                self.assertFalse(self.receipt.exists())
+                self.assertTrue(importer.run(plan, call=call)['already_imported'])
+                self.assertEqual(len(committed), 1)
+                self.assertEqual(json.loads(self.receipt.read_text()), evidence)
+                with mock.patch.object(importer.shutil, 'which', return_value='/usr/bin/fixture'):
+                    self.assertFalse(importer.preflight(plan, call=call, cluster_state='online')['fresh_database_target'])
 
     def test_rejects_oversized_archive_before_subprocess(self):
         with mock.patch.object(importer, 'MAX_ARCHIVE_BYTES', 2):
@@ -93,7 +127,7 @@ class ImportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'target_database_not_empty'):
                 importer.preflight({'archive': str(self.archive), 'database': 'ultra', 'user': 'ultra', 'sha256': digest},
                                    call=inspect, cluster_state='online')
-        self.assertEqual([item[0][0] for item in self.calls], ['pg_restore', 'runuser', 'runuser', 'runuser'])
+        self.assertEqual([item[0][0] for item in self.calls], ['pg_restore', 'runuser', 'runuser', 'runuser', 'runuser'])
         self.assertIn('postgres', self.calls[1][0])
 
     def test_preflight_fails_closed_for_unavailable_existing_cluster(self):

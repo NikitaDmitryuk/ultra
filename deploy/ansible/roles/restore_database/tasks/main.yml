@@ -41,7 +41,7 @@
     owner: root
     group: root
     mode: "0600"
-  loop: [restore_database.py, restore_common.py, recovery.py]
+  loop: [restore_database.py, import_protocol.py, restore_common.py, recovery.py]
 - name: Transfer authenticated database generation
   ansible.builtin.copy:
     src: "{{ ultra_restore_stage_archive }}"

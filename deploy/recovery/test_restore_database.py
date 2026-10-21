@@ -43,6 +43,7 @@ class DedicatedDatabaseRestoreTests(unittest.TestCase):
     def test_restore_only_imports_into_empty_database_with_atomic_transaction(self):
         def sql(statement, database='postgres'):
             if 'pg_control_system' in statement: return '1000001:16384'
+            if statement == restore_database.MARKER_SQL: return ''
             if 'server_version_num' in statement: return '16'
             if 'pg_is_in_recovery' in statement: return 'f'
             if 'pg_database WHERE NOT datistemplate' in statement: return '0'
@@ -51,25 +52,11 @@ class DedicatedDatabaseRestoreTests(unittest.TestCase):
             if 'FROM pg_tables' in statement: return '0'
             if 'max(version)' in statement: return '12'
             raise AssertionError(statement)
-        imported = []
-        def restore_run(argv, **kwargs):
-            if argv[0] == 'pg_restore':
-                return b'1; TABLE public.users\n'
-            self.assertEqual(argv[:5], ['runuser', '-u', 'postgres', '--', 'pg_restore'])
-            self.assertNotIn(str(self.directory / 'database.dump'), argv)
-            stream = kwargs['stdin']
-            self.assertEqual(stat.S_IMODE(self.directory.stat().st_mode), 0o700)
-            self.assertEqual(stat.S_IMODE(Path(stream.name).stat().st_mode), 0o600)
-            imported.append(stream.read())
-            return b''
-        with mock.patch.object(restore_database, 'sql', side_effect=sql), \
-                mock.patch.object(restore_database, 'run', side_effect=restore_run) as run:
+        with mock.patch.object(restore_database, 'sql', side_effect=sql), mock.patch.object(restore_database, 'run', return_value='1; TABLE public.users'), mock.patch.object(restore_database, 'import_transaction') as transaction:
             result = restore_database.restore(self.directory, self.plan)
-        self.assertEqual(imported, [self.dump])
         self.assertEqual(result, {'verified': True, 'database': 'ultra_db', 'schema': 12})
-        argv = run.call_args.args[0]
-        self.assertIn('--single-transaction', argv)
-        self.assertIn('--role=ultra_app', argv)
+        self.assertEqual(transaction.call_args.kwargs['role'], 'ultra_app')
+        self.assertEqual(transaction.call_args.kwargs['schema_bounds'], (10, 20))
         self.assertTrue((self.directory / 'database-result.json').exists())
 
     def test_private_dump_descriptor_is_readable_by_restore_subprocess(self):
@@ -89,6 +76,7 @@ class DedicatedDatabaseRestoreTests(unittest.TestCase):
         identity = {'value': '1000001:16384'}
         def sql(statement, database='postgres'):
             if 'pg_control_system' in statement: return identity['value']
+            if statement == restore_database.MARKER_SQL: return ''
             if 'server_version_num' in statement: return '16'
             if 'pg_is_in_recovery' in statement: return 'f'
             if 'pg_database WHERE NOT datistemplate' in statement: return '0'
@@ -97,12 +85,10 @@ class DedicatedDatabaseRestoreTests(unittest.TestCase):
             if 'FROM pg_tables' in statement: return '1' if imported else '0'
             if 'max(version)' in statement: return '12'
             raise AssertionError(statement)
-        def restore_run(argv, **kwargs):
-            if argv[0] == 'pg_restore': return '1; TABLE public.users'
-            imported.append(kwargs['stdin'].read())
-            return ''
+        def transaction(*args, **kwargs):
+            imported.append(self.dump)
         with mock.patch.object(restore_database, 'sql', side_effect=sql), \
-                mock.patch.object(restore_database, 'run', side_effect=restore_run), \
+                mock.patch.object(restore_database, 'run', return_value='1; TABLE public.users'), mock.patch.object(restore_database, 'import_transaction', side_effect=transaction), \
                 mock.patch.object(restore_database.shutil, 'which', return_value=None):
             self.assertTrue(restore_database.check(self.directory, self.plan)['empty'])
             self.assertTrue(restore_database.restore(self.directory, self.plan)['verified'])
@@ -118,6 +104,66 @@ class DedicatedDatabaseRestoreTests(unittest.TestCase):
             changed = dict(self.plan, database_host='192.0.2.31')
             with self.assertRaisesRegex(ValueError, 'restore_database_receipt_conflict'):
                 restore_database.check(self.directory, changed)
+
+    def test_retry_recovers_commit_schema_and_receipt_crash_gaps(self):
+        for failure in ('commit_ack', 'schema_query', 'receipt'):
+            with self.subTest(failure=failure):
+                receipt = self.directory / 'database-result.json'
+                receipt.unlink(missing_ok=True)
+                (self.directory / 'database-import.started').unlink(missing_ok=True)
+                committed = []
+                identity = {'system_identifier': '1000001', 'database_oid': '16384'}
+                evidence = restore_database.import_evidence(self.plan, 'ultra_db', identity)
+                def sql(statement, database='postgres'):
+                    if 'pg_control_system' in statement: return '1000001:16384'
+                    if statement == restore_database.MARKER_SQL: return restore_database.marker(evidence) if committed else ''
+                    if 'server_version_num' in statement: return '16'
+                    if 'pg_is_in_recovery' in statement: return 'f'
+                    if 'pg_database WHERE NOT datistemplate' in statement: return '0'
+                    if 'FROM pg_roles' in statement: return '1'
+                    if 'pg_get_userbyid' in statement: return 'ultra_app'
+                    if 'FROM pg_tables' in statement: return '1' if committed else '0'
+                    if 'max(version)' in statement:
+                        if failure == 'schema_query' and len(committed) == 1:
+                            committed.append('query_failed')
+                            raise OSError('fixture lost connection')
+                        return '12'
+                    raise AssertionError(statement)
+                def transaction(*args, **kwargs):
+                    committed.append(True)
+                    if failure == 'commit_ack':
+                        raise OSError('fixture lost commit ack')
+                original_receipt = restore_database.atomic_receipt
+                def write_receipt(path, data):
+                    if Path(path) == receipt and failure == 'receipt':
+                        raise OSError('fixture disk fault')
+                    original_receipt(path, data)
+                with mock.patch.object(restore_database, 'sql', side_effect=sql), mock.patch.object(restore_database, 'run', return_value='1; TABLE public.users'), mock.patch.object(restore_database, 'import_transaction', side_effect=transaction) as importing:
+                    with mock.patch.object(restore_database, 'atomic_receipt', side_effect=write_receipt):
+                        with self.assertRaises(OSError):
+                            restore_database.restore(self.directory, self.plan)
+                    self.assertFalse(receipt.exists())
+                    self.assertTrue(restore_database.check(self.directory, self.plan)['resumed'])
+                    self.assertTrue(restore_database.restore(self.directory, self.plan)['resumed'])
+                    self.assertEqual(importing.call_count, 1)
+                    self.assertEqual(json.loads(receipt.read_text())['database_identity'], identity)
+
+    def test_foreign_nonempty_database_with_intent_is_rejected(self):
+        restore_database.atomic_receipt(self.directory / 'database-import.started', {})
+        def sql(statement, database='postgres'):
+            if 'pg_control_system' in statement: return '1000001:16384'
+            if statement == restore_database.MARKER_SQL: return 'foreign'
+            if 'server_version_num' in statement: return '16'
+            if 'pg_is_in_recovery' in statement: return 'f'
+            if 'pg_database WHERE NOT datistemplate' in statement: return '0'
+            if 'FROM pg_roles' in statement: return '1'
+            if 'pg_get_userbyid' in statement: return 'ultra_app'
+            if 'FROM pg_tables' in statement: return '1'
+            raise AssertionError(statement)
+        with mock.patch.object(restore_database, 'sql', side_effect=sql), mock.patch.object(restore_database, 'import_transaction') as importing:
+            with self.assertRaisesRegex(ValueError, 'dedicated_database_not_empty'):
+                restore_database.restore(self.directory, self.plan)
+            importing.assert_not_called()
 
     def test_interrupted_extraction_reuses_only_verified_private_dump(self):
         args = (self.archive, self.directory, self.plan['stage_sha256'], self.plan['dump_sha256'])
@@ -161,6 +207,7 @@ class DedicatedDatabaseRestoreTests(unittest.TestCase):
     def test_populated_database_is_never_overwritten(self):
         def sql(statement, database='postgres'):
             if 'pg_control_system' in statement: return '1000001:16384'
+            if statement == restore_database.MARKER_SQL: return ''
             if 'server_version_num' in statement: return '16'
             if 'pg_is_in_recovery' in statement: return 'f'
             if 'pg_database WHERE NOT datistemplate' in statement: return '0'
@@ -177,6 +224,7 @@ class DedicatedDatabaseRestoreTests(unittest.TestCase):
         self.plan['stage_sha256'] = '0' * 64
         def sql(statement, database='postgres'):
             if 'pg_control_system' in statement: return '1000001:16384'
+            if statement == restore_database.MARKER_SQL: return ''
             if 'server_version_num' in statement: return '16'
             if 'pg_is_in_recovery' in statement: return 'f'
             if 'pg_database WHERE NOT datistemplate' in statement: return '0'

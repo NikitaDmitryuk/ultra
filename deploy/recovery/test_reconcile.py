@@ -368,6 +368,37 @@ class ReconcileTests(unittest.TestCase):
                 self.assertEqual(json.loads((attempt / 'receipt.json').read_text())['state'], 'running')
 
 
+    def test_terminal_generation_after_health_failure_accepts_changed_quota(self):
+        reconcile.atomic_json(self.root / 'last-success.json', {'backup_sha256': '1' * 64, 'snapshot_at': time.time()})
+        for name in ('client', 'token', 'probe'):
+            path = self.root / name
+            path.write_bytes(b'fixture')
+            path.chmod(0o600)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(reconcile, 'discover', return_value=[]))
+            stack.enter_context(mock.patch.object(reconcile, 'cloud_private_file'))
+            stack.enter_context(mock.patch.object(reconcile, 'create'))
+            stack.enter_context(mock.patch.object(reconcile, 'validate_delivery'))
+            stack.enter_context(mock.patch.object(reconcile, 'refresh_monitor_profile', side_effect=[100, 99]))
+            stack.enter_context(mock.patch.object(reconcile, 'monitor_ready', side_effect=[ValueError('transient health'), None]))
+            stack.enter_context(mock.patch.object(reconcile, 'ensure_heartbeat_key', return_value=(b'fixture', b'public')))
+            controller = stack.enter_context(mock.patch.object(reconcile.subprocess, 'Popen', side_effect=self.ansible_process))
+            with self.assertRaisesRegex(ValueError, 'reconciliation unavailable'):
+                reconcile.reconcile(self.config)
+            progress = Path(self.config['state_dir']) / 'reconcile-progress.json'
+            old = json.loads(progress.read_text())
+            before = controller.call_count
+            self.assertGreater(len(old['calls']), 0)
+            state = reconcile.reconcile(self.config)
+            self.assertEqual(state['primary'], 'NL')
+            self.assertGreater(controller.call_count, before)
+            self.assertFalse(progress.exists())
+            self.assertEqual(json.loads(Path(self.config['status_file']).read_text())['state'], 'ready')
+            # Attempts remain immutable and readable after generation retirement.
+            for call in old['calls']:
+                attempt = Path(self.config['state_dir']) / 'ansible' / call['node'] / call['attempt']
+                self.assertEqual(json.loads((attempt / 'receipt.json').read_text())['state'], 'succeeded')
+
     def test_full_reconcile_resumes_late_frozen_attempt(self):
         for crash, phase in ((False, 'primary'), (True, 'primary'), (False, 'retire'), (True, 'retire')):
             with self.subTest(crash=crash, phase=phase):

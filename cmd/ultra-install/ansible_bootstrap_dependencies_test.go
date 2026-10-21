@@ -541,6 +541,21 @@ func TestBootstrapDumpHelperIsEmbeddedAndFrozenOutsideCheckout(t *testing.T) {
 	if info.Mode().Perm() != 0600 {
 		t.Fatal("helper not private")
 	}
+	protocol := filepath.Join(filepath.Dir(helper), "import_protocol.py")
+	if info, err := os.Stat(protocol); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatal("import protocol dependency missing or not private", err)
+	}
+	command := exec.Command(
+		"python3",
+		"-I",
+		"-B",
+		"-c",
+		"import sys; sys.path.insert(0,sys.argv[1]); import database_dump_import",
+		filepath.Dir(helper),
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("staged import helper cannot load its dependencies: %v: %s", err, output)
+	}
 	if vars["ultra_database_import_sha256"] != p.Secrets.DatabaseDumpSHA256 {
 		t.Fatal("dump digest not frozen")
 	}

@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import tarfile
+from import_protocol import MARKER_SQL, atomic_receipt, import_transaction, marker
 
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024  # Transport, including tar/gzip overhead.
 MAX_STATE_BYTES = 512 * 1024 * 1024
@@ -138,25 +139,43 @@ def database_identity(name):
     return {'system_identifier': cluster, 'database_oid': oid}
 
 
+def import_evidence(plan, name, identity):
+    return {'plan_sha256': hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+            'database': name, 'database_identity': identity, 'dump_sha256': plan['dump_sha256']}
+
+
 def completed_restore(directory, plan, name, stage_path):
     receipt = Path(directory) / 'database-result.json'
-    if not receipt.exists() and not receipt.is_symlink():
+    started = Path(directory) / 'database-import.started'
+    if not receipt.exists() and not receipt.is_symlink() and not started.exists():
         return None
-    plan_hash = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    saved = json.loads(private_file(receipt, 4096).read_text())
-    if (saved.get('plan_sha256') != plan_hash or saved.get('database') != name
-            or saved.get('verified') is not True or type(saved.get('schema')) is not int
-            or not plan['schema_min'] <= saved['schema'] <= plan['schema_max']):
-        raise ValueError('restore_database_receipt_conflict')
-    if saved.get('database_identity') != database_identity(name):
-        raise ValueError('restored_database_identity_changed')
+    identity = database_identity(name)
+    evidence = import_evidence(plan, name, identity)
+    saved = None
+    if receipt.exists() or receipt.is_symlink():
+        saved = json.loads(private_file(receipt, 4096).read_text())
+        if (saved.get('plan_sha256') != evidence['plan_sha256'] or saved.get('database') != name
+                or saved.get('verified') is not True or type(saved.get('schema')) is not int
+                or not plan['schema_min'] <= saved['schema'] <= plan['schema_max']):
+            raise ValueError('restore_database_receipt_conflict')
+        if saved.get('database_identity') != identity:
+            raise ValueError('restored_database_identity_changed')
+    # An intent never authorizes a populated target. Exact completed filesystem
+    # receipts retain their pre-protocol contract; missing receipts need the DB
+    # evidence committed atomically with the imported contents.
+    if saved is None and sql(MARKER_SQL, name) != marker(evidence):
+        return None
     if digest(stage_path) != plan['stage_sha256']:
         raise ValueError('restore_stage_digest_mismatch')
     if sql("SELECT count(*) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')", name) == '0':
         raise ValueError('restored_database_contents_missing')
-    if sql('SELECT max(version) FROM schema_migrations', name) != str(saved['schema']):
+    schema = sql('SELECT max(version) FROM schema_migrations', name)
+    if not schema.isdigit() or not plan['schema_min'] <= int(schema) <= plan['schema_max']:
         raise ValueError('restored_database_schema_changed')
-    return {'verified': True, 'database': name, 'schema': saved['schema'], 'resumed': True}
+    if saved is not None and saved.get('schema') != int(schema):
+        raise ValueError('restored_database_schema_changed')
+    atomic_receipt(receipt, dict(evidence, schema=int(schema), verified=True))
+    return {'verified': True, 'database': name, 'schema': int(schema), 'resumed': True}
 
 
 def check(directory, plan):
@@ -193,7 +212,6 @@ def restore(directory, plan):
     require_root()
     name, user, stage_path = validate_plan(directory, plan)
     directory = Path(directory)
-    plan_hash = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     receipt = directory / 'database-result.json'
     lock_path = directory / 'database.lock'
     with lock_path.open('a') as lock:
@@ -215,24 +233,22 @@ def restore(directory, plan):
             raise ValueError('dedicated_database_not_empty')
         identity = database_identity(name)
         dump = extract_dump(stage_path, directory, plan['stage_sha256'], plan['dump_sha256'])
-        # Root opens the verified private dump before runuser changes identity.
-        # PostgreSQL reads the inherited descriptor without traversing staging.
-        with dump.open('rb') as stream:
-            run(['runuser', '-u', 'postgres', '--', 'pg_restore', '--exit-on-error', '--single-transaction',
-                 '--no-owner', '--no-acl', '--role=' + user, '-d', name], timeout=600, stdin=stream)
+        evidence = import_evidence(plan, name, identity)
+        if sql(MARKER_SQL, name):
+            raise ValueError('restore_database_comment_conflict')
+        atomic_receipt(directory / 'database-import.started', evidence)
+        # Root opens the verified private archive; PostgreSQL inherits only the
+        # generated SQL descriptor, never access to the private staging tree.
+        import_transaction(dump, name, evidence,
+                           ['runuser', '-u', 'postgres', '--', 'psql', '-Xq', '-v', 'ON_ERROR_STOP=1', '-d', name],
+                           role=user, schema_bounds=(plan['schema_min'], plan['schema_max']))
         schema = sql('SELECT max(version) FROM schema_migrations', name)
         if not schema.isdigit() or not plan['schema_min'] <= int(schema) <= plan['schema_max']:
             raise ValueError('restored_database_schema_missing')
         if database_identity(name) != identity:
             raise ValueError('restored_database_identity_changed')
-        result = {'plan_sha256': plan_hash, 'database': name, 'schema': int(schema), 'database_identity': identity, 'verified': True}
-        temporary = receipt.with_suffix('.pending')
-        with temporary.open('x') as stream:
-            os.chmod(temporary, 0o600)
-            json.dump(result, stream, sort_keys=True)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, receipt)
+        result = dict(evidence, schema=int(schema), verified=True)
+        atomic_receipt(receipt, result)
         return {'verified': True, 'database': name, 'schema': int(schema)}
 
 

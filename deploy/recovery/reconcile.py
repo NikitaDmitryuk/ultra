@@ -907,6 +907,31 @@ def reconcile(config):
                 if attempt.parent.name in pending_nodes:
                     raise ReconcileBlocked('ansible_multiple_pending')
                 pending_nodes.add(attempt.parent.name)
+            # Completed controller generations have no unresolved dispatch to
+            # resume. Health can fail after every attempt became terminal; the
+            # next pass must use current quota/topology rather than compare new
+            # inputs against those old immutable requests forever. Missing or
+            # queued attempts remain unresolved, including crashes before launch.
+            terminal = bool(calls) and not pending_nodes
+            for call in calls:
+                attempt = directory / 'ansible' / call['node'] / call['attempt']
+                if not attempt.exists() or not (attempt / 'receipt.json').exists():
+                    terminal = False
+                    break
+                saved = read_config(private(attempt / 'request.json'))
+                job = read_config(private(attempt / 'job.json'))
+                receipt = read_config(private(attempt / 'receipt.json'))
+                if saved != call['request'] or job.get('operation') != 'reconcile':
+                    raise ReconcileBlocked('ansible_pending_conflict', attempt.name)
+                if receipt.get('state') not in ('succeeded', 'failed'):
+                    terminal = False
+                    break
+            if terminal:
+                # Keep immutable attempt evidence; only retire the orchestration
+                # cursor after the global pending scan proved it safe.
+                saved_progress = {'calls': []}
+                calls = []
+                atomic_json(progress, saved_progress)
             journal = {'path': progress, 'calls': calls, 'cursor': 0,
                        'baseline': saved_progress.get('baseline'), 'health_start': saved_progress.get('health_start')}
             if journal['health_start'] is not None and (type(journal['health_start']) is not int or not 0 <= journal['health_start'] <= len(calls)):

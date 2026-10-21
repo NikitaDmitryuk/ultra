@@ -28,11 +28,12 @@
       no_log: true
     - name: Install database archive import helper
       ansible.builtin.copy:
-        src: "{{ ultra_database_import_script_directory }}/database_dump_import.py"
-        dest: /var/lib/ultra-db-import/database_dump_import.py
+        src: "{{ ultra_database_import_script_directory }}/{{ item }}"
+        dest: "/var/lib/ultra-db-import/{{ item }}"
         owner: root
         group: root
         mode: "0700"
+      loop: [database_dump_import.py, import_protocol.py]
     - name: Validate and import archive into the empty dedicated database
       ansible.builtin.command:
         argv: [python3, /var/lib/ultra-db-import/database_dump_import.py]

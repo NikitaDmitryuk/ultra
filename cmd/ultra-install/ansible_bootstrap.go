@@ -535,12 +535,14 @@ func prepareBootstrapVariables(
 			if err := os.MkdirAll(scripts, 0700); err != nil {
 				return err
 			}
-			helper, err := recoveryassets.Scripts.ReadFile("database_dump_import.py")
-			if err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(scripts, "database_dump_import.py"), helper, 0600); err != nil {
-				return err
+			for _, name := range []string{"database_dump_import.py", "import_protocol.py"} {
+				helper, err := recoveryassets.Scripts.ReadFile(name)
+				if err != nil {
+					return err
+				}
+				if err := os.WriteFile(filepath.Join(scripts, name), helper, 0600); err != nil {
+					return err
+				}
 			}
 			dbvars["ultra_database_import_dump"] = archive
 			dbvars["ultra_database_import_sha256"] = p.Secrets.DatabaseDumpSHA256

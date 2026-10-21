@@ -9,13 +9,21 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
+from import_protocol import MARKER_SQL, atomic_receipt, import_transaction, marker
 
 MAX_ARCHIVE_BYTES = 8 * 1024 * 1024 * 1024
 QUERY_TIMEOUT_SECONDS = 60
 RESTORE_TIMEOUT_SECONDS = 600
 IDENT = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 RECEIPT = Path("/var/lib/ultra-db-import-state/receipt.json")
+
+
+def legacy_receipt_matches(expected):
+    # Completed pre-protocol imports already have exact durable file evidence.
+    try:
+        return json.loads(RECEIPT.read_text()) == expected
+    except (OSError, ValueError):
+        return False
 
 
 def archive_digest(path):
@@ -110,11 +118,7 @@ def preflight(plan, call=subprocess.run, cluster_state=None):
     receipt = {"sha256": digest, "database": database, "user": user,
                "system_identifier": identity.split(":", 1)[0],
                "database_oid": identity.split(":", 1)[1]}
-    try:
-        recorded = json.loads(RECEIPT.read_text())
-    except (OSError, ValueError):
-        raise ValueError("target_database_not_empty") from None
-    if recorded != receipt:
+    if peer_psql(database, MARKER_SQL).stdout.strip() != marker(receipt) and not legacy_receipt_matches(receipt):
         raise ValueError("target_database_not_empty")
     return {"size": size, "sha256": digest, "fresh_database_target": False}
 
@@ -141,33 +145,20 @@ def run(plan, environ=None, call=subprocess.run):
                  "SELECT CASE WHEN (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%')=0 AND (SELECT count(*) FROM pg_namespace WHERE nspname NOT IN ('pg_catalog','information_schema','public') AND nspname NOT LIKE 'pg_toast%')=0 THEN 0 ELSE 1 END"],
                 check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, env=env, timeout=QUERY_TIMEOUT_SECONDS)
+    psql = ["psql", "--no-psqlrc", "--no-password", "--host", "127.0.0.1",
+            "--username", user, "--dbname", database, "--set", "ON_ERROR_STOP=1"]
+    observed_marker = call(psql + ["--tuples-only", "--no-align", "--command", MARKER_SQL],
+                           check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           text=True, env=env, timeout=QUERY_TIMEOUT_SECONDS).stdout.strip()
     if probe.stdout.strip() != "0":
-        try:
-            recorded = json.loads(RECEIPT.read_text())
-        except (OSError, ValueError):
-            raise ValueError("target_database_not_empty") from None
-        if recorded != receipt:
+        if observed_marker != marker(receipt) and not legacy_receipt_matches(receipt):
             raise ValueError("target_database_not_empty")
+        atomic_receipt(RECEIPT, receipt)
         return {"size": size, "sha256": digest, "already_imported": True}
-    call(["pg_restore", "--exit-on-error", "--single-transaction", "--no-owner", "--no-acl", "--dbname", database,
-          "--username", user, "--host", "127.0.0.1", str(archive)], check=True,
-         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
-         timeout=RESTORE_TIMEOUT_SECONDS)
-    receipt_path = RECEIPT
-    receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=".receipt-", dir=receipt_path.parent)
-    try:
-        with os.fdopen(fd, "w") as stream:
-            json.dump(receipt, stream, sort_keys=True, separators=(",", ":"))
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, receipt_path)
-    finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+    if observed_marker:
+        raise ValueError("target_database_comment_conflict")
+    import_transaction(archive, database, receipt, psql, call=call, env=env)
+    atomic_receipt(RECEIPT, receipt)
     return {"size": size, "sha256": digest, "already_imported": False}
 
 
