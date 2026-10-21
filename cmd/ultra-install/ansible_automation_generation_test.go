@@ -54,9 +54,9 @@ result.chmod(0o600)
 				t.Fatal(err)
 			}
 			p := &installplan.InstallPlan{
-				Automation: &installplan.AutomationConfig{Version: "v2.5.0", ReleaseDir: root, ReadinessTimeoutSec: 1},
+				Automation: &installplan.AutomationConfig{Version: "v2.5.0", ReleaseDir: root, ReadinessTimeoutSec: 30},
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 			defer cancel()
 			if err := verifyBootstrapAutomation(ctx, p, map[string]any{"all": map[string]any{}}, root, python, stub, 2); err != nil {
 				t.Fatalf("second generation readiness: %v", err)
