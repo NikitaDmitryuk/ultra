@@ -269,3 +269,47 @@ func TestSelfSubscriptionFailureLogsStatusWithoutUpstreamBody(t *testing.T) {
 		t.Fatalf("log exposed upstream or bot secret: %q", logged)
 	}
 }
+
+func TestMiniAppMonthlyTrafficUnavailable(t *testing.T) {
+	for _, path := range []string{"/api/users", "/api/stats"} {
+		for _, unavailable := range []bool{false, true} {
+			t.Run(path+"/unavailable="+strconv.FormatBool(unavailable), func(t *testing.T) {
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/v1/users":
+						_, _ = io.WriteString(w, `[{"uuid":"test-user"}]`)
+					case "/v1/traffic/monthly":
+						if unavailable {
+							http.Error(w, "unavailable", http.StatusServiceUnavailable)
+							return
+						}
+						_, _ = io.WriteString(w, `[{"UserUUID":"test-user","UplinkBytes":11,"DownlinkBytes":22}]`)
+					case "/v1/traffic/last-seen":
+						_, _ = io.WriteString(w, `[]`)
+					default:
+						t.Errorf("unexpected upstream path %s", r.URL.Path)
+						http.NotFound(w, r)
+					}
+				}))
+				defer upstream.Close()
+				b := &Bot{botToken: "test-token", adminRepo: &fakeAdminLister{}, adminAPIURL: upstream.URL,
+					log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+				mux := http.NewServeMux()
+				b.registerMiniAppRoutes(mux)
+				req := httptest.NewRequest(http.MethodGet, path, nil)
+				req.Header.Set(initDataHeader, signedInitData(t, b.botToken, 123))
+				response := httptest.NewRecorder()
+				mux.ServeHTTP(response, req)
+				if unavailable {
+					if response.Code != http.StatusBadGateway || strings.Contains(response.Body.String(), "total_bytes") {
+						t.Fatalf("traffic failure became successful usage: status=%d body=%s", response.Code, response.Body.String())
+					}
+					return
+				}
+				if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `:33`) {
+					t.Fatalf("monthly usage missing: status=%d body=%s", response.Code, response.Body.String())
+				}
+			})
+		}
+	}
+}

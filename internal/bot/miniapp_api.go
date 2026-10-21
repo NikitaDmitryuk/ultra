@@ -151,7 +151,8 @@ func (b *Bot) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	traffic, err := b.adminGet(r.Context(), "/v1/traffic/monthly")
 	if err != nil {
 		b.log.Error("admin GET /v1/traffic/monthly", "err", err)
-		traffic = []byte("[]")
+		http.Error(w, "traffic unavailable", http.StatusBadGateway)
+		return
 	}
 	lastSeen, err := b.adminGet(r.Context(), "/v1/traffic/last-seen")
 	if err != nil {
@@ -596,7 +597,8 @@ func (b *Bot) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	traffic, err := b.adminGet(r.Context(), "/v1/traffic/monthly")
 	if err != nil {
-		traffic = []byte("[]")
+		http.Error(w, "traffic unavailable", http.StatusBadGateway)
+		return
 	}
 
 	var userList []map[string]any

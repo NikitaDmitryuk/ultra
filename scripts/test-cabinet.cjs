@@ -341,7 +341,7 @@ test("Vultr status polling updates the existing card without replacing its price
       return selector === "[data-op-status]" ? status : details;
     },
   };
-  p.el("#app").querySelectorAll = (selector) =>
+  p.el("#cloud-operations").querySelectorAll = (selector) =>
     selector === "[data-op-card]" ? [card] : [];
   p.responses["/api/cloud/operations"] = [
     { ...op, state: "unknown", phase: "verify", charged: true },
@@ -360,7 +360,7 @@ test("Vultr status polling updates the existing card without replacing its price
   assert.equal(detailsWrites, 1);
 });
 
-test("Vultr create and delete refresh preserve cards and remove stale exits", async () => {
+test("Vultr polling inserts new cards and manual refresh preserves existing cards", async () => {
   const makeOp = (id, state = "pending") => ({
     id,
     offer: {
@@ -376,10 +376,12 @@ test("Vultr create and delete refresh preserve cards and remove stale exits", as
   const keepStatus = { className: "", textContent: "Создание сервера" };
   const keepDetails = { innerHTML: "" };
   const keepPrice = { textContent: "$5/месяц" };
+  const openLog = { open: true, textContent: "Existing event" };
   const keepCard = {
     dataset: { opCard: "keep" },
     hidden: false,
     price: keepPrice,
+    log: openLog,
     querySelector(selector) {
       return selector === "[data-op-status]" ? keepStatus : keepDetails;
     },
@@ -444,7 +446,7 @@ test("Vultr create and delete refresh preserve cards and remove stale exits", as
     makeOp("new"),
     makeOp("delete", "deleted"),
   ];
-  await vm.runInContext("service(true)", p.context);
+  await vm.runInContext("refreshOperationCards(viewVersion)", p.context);
 
   assert.equal(p.el("#app").innerHTML, originalView);
   assert.equal(keepCard.removed, undefined);
@@ -455,7 +457,10 @@ test("Vultr create and delete refresh preserve cards and remove stale exits", as
   assert.doesNotMatch(p.el("#server-capacity").innerHTML, /Removed server/);
   assert.match(p.el("#server-capacity").innerHTML, /Active server/);
 
-  await vm.runInContext("refreshOperationCards(viewVersion)", p.context);
+  await vm.runInContext("service(true)", p.context);
+  assert.equal(keepCard.log, openLog);
+  assert.equal(keepCard.log.open, true);
+  assert.equal(addedCards.filter((card) => card.dataset.opCard === "new").length, 1);
   assert.doesNotMatch(p.el("#server-capacity").innerHTML, /Removed server/);
 
   p.context.ops = operations;
@@ -1289,4 +1294,54 @@ test("legacy exit replication states cannot claim bridge configuration", async (
   const html = vm.runInContext('bridgeReplicasHTML([{name:"Bridge",state:"not_configured"}])', p.context);
   assert.match(html, /Состояние копии неизвестно/);
   assert.doesNotMatch(html, /Ещё не настроена/);
+});
+
+
+test("cached subscription revalidates UUID and shares simultaneous issuance", async () => {
+  const p = page(true, {
+    "/api/self": { registered: true, member: { uuid: "old", active: true } },
+    "/api/self/exits": { exits: [], profiles: [] },
+    "/api/self/subscription": { url: "https://example.com/old", import_url: "https://example.com/old-import" },
+  });
+  await flush();
+  await p.el("#copy-sub").onclick();
+  p.responses["/api/self"].member.uuid = "new";
+  p.responses["/api/self/subscription"] = { url: "https://example.com/new", import_url: "https://example.com/new-import" };
+  await Promise.all([p.el("#copy-sub").onclick(), p.el("#connect").onclick()]);
+  assert.deepEqual(p.copied, ["https://example.com/old", "https://example.com/new"]);
+  assert.deepEqual(p.opened, ["https://example.com/new-import"]);
+  assert.equal(p.calls.filter((c) => c.path === "/api/self/subscription").length, 2);
+  p.responses["/api/self"].member.active = false;
+  await p.el("#copy-sub").onclick();
+  assert.equal(p.copied.length, 2);
+});
+
+test("pending person polls completion and ignores responses after navigation", async () => {
+  const member = { telegram_id: 42, uuid: "old", name: "Member", active: true, pending: true };
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [member],
+    "/api/members/42/traffic": { months: [] },
+  });
+  await flush();
+  p.context.member = member;
+  vm.runInContext("person(member)", p.context);
+  p.responses["/api/members"] = [{ ...member, uuid: "new", pending: false }];
+  const timer = p.timers.at(-1);
+  await timer.callback();
+  assert.doesNotMatch(p.el("#app").innerHTML, /Подтверждаем|Применяется/);
+  assert.match(p.el("#app").innerHTML, /Доступ разрешён/);
+  assert.equal(p.timers.at(-1), timer);
+
+  vm.runInContext("person(member)", p.context);
+  const staleTimer = p.timers.at(-1);
+  const inFlight = staleTimer.callback();
+  await vm.runInContext("people()", p.context);
+  const html = p.el("#app").innerHTML;
+  await inFlight;
+  assert.equal(p.el("#app").innerHTML, html);
+  assert.match(html, /people-list/);
+  const calls = p.calls.length;
+  await staleTimer.callback();
+  assert.equal(p.calls.length, calls);
 });

@@ -355,9 +355,6 @@ function ingressHealthHTML(ingresses) {
     public_tls: "Публичный TLS",
     local_backend: "Локальный обработчик",
     server_path_ready: "Серверный маршрут готов",
-    descriptor: "Конфигурация подготовлена",
-    primary_candidate: "Кандидат на основной вход",
-    transport_process: "Транспортный процесс",
   };
   return ingresses
     .filter((i) => i.id === "primary")

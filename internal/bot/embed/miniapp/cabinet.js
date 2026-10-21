@@ -183,20 +183,30 @@ async function self() {
     ),
   );
   async function getSubscription() {
-    if (!subscription) {
-      if (!subscriptionRequest) {
-        subscriptionRequest = api("/api/self/subscription", "POST", {}).then(
-          (result) => {
-            subscription = result;
-            return result;
-          },
-        ).finally(() => {
-          subscriptionRequest = null;
-        });
-      }
-      await subscriptionRequest;
+    if (!subscriptionRequest) {
+      const request = (async () => {
+        if (subscription) {
+          const state = await api("/api/self");
+          const owner = state.member;
+          if (!state.registered || !owner?.active || owner.pending) {
+            subscription = null;
+            throw new Error("Доступ изменился. Обновите кабинет.");
+          }
+          if (subscriptionOwner !== owner.uuid) {
+            subscription = null;
+            subscriptionOwner = owner.uuid;
+          }
+        }
+        if (!subscription)
+          subscription = await api("/api/self/subscription", "POST", {});
+        return subscription;
+      })();
+      subscriptionRequest = request;
+      request.finally(() => {
+        if (subscriptionRequest === request) subscriptionRequest = null;
+      }).catch(() => {});
     }
-    return subscription;
+    return subscriptionRequest;
   }
   button("connect", async () => {
     const result = await getSubscription();
@@ -342,6 +352,24 @@ function person(m) {
       () => act("reset"),
     ),
   );
+  if (m.pending) {
+    const version = viewVersion;
+    const poll = async () => {
+      if (version !== viewVersion || currentPerson !== m.telegram_id) return;
+      try {
+        const members = await api("/api/members");
+        if (version !== viewVersion || currentPerson !== m.telegram_id) return;
+        const updated = members.find((member) => member.telegram_id === m.telegram_id);
+        if (updated) {
+          person(updated);
+          return;
+        }
+      } catch {}
+      if (version === viewVersion && currentPerson === m.telegram_id)
+        refreshTimer = setTimeout(poll, 5000);
+    };
+    refreshTimer = setTimeout(poll, 5000);
+  }
 }
 async function invites() {
   const version = ++viewVersion;
@@ -432,6 +460,7 @@ const phases = {
   unpublish: "Отключение маршрута",
   delete: "Удаление VPS",
   cleanup: "Очистка ресурсов",
+  cancel_cleanup: "Очистка ресурсов после отмены",
 };
 function operationCardHTML(o, capacity) {
   return `<div class="card" data-op-card="${esc(o.id)}"><div class="row"><h2>${esc(o.offer.region.city)}</h2><span class="badge ${o.state === "ready" ? "good" : o.state === "failed" || o.state === "unknown" ? "bad" : "wait"}" data-op-status>${esc(serverStateLabel(o, capacity))}</span></div><p>${esc(o.offer.plan.id)} · $${o.offer.price.monthly_cost}/месяц</p><div data-op-details>${cloudOperationDetailsHTML(o)}</div><button class="btn secondary" data-events="${esc(o.id)}">Журнал операции</button></div>`;
@@ -1000,33 +1029,10 @@ async function refreshOperationCards(version) {
       api("/api/cloud/quotas").catch(() => null),
     ]);
     if (version !== viewVersion || currentTab !== "service") return;
-    const cards = new Map(
-      [...app.querySelectorAll("[data-op-card]")].map((card) => [
-        card.dataset.opCard,
-        card,
-      ]),
-    );
-    for (const op of ops) {
-      const card = cards.get(op.id);
-      if (!card) continue;
-      if (op.state === "deleted" || op.state === "cancelled") {
-        card.hidden = true;
-        continue;
-      }
-      card.hidden = false;
-      const status = card.querySelector("[data-op-status]");
-      if (status) {
-        const className = `badge ${op.state === "ready" ? "good" : op.state === "failed" || op.state === "unknown" ? "bad" : "wait"}`;
-        const text = serverStateLabel(op, capacity);
-        if (status.className !== className) status.className = className;
-        if (status.textContent !== text) status.textContent = text;
-      }
-      const details = card.querySelector("[data-op-details]");
-      if (details) {
-        const html = cloudOperationDetailsHTML(op);
-        if (details.innerHTML !== html) details.innerHTML = html;
-      }
-    }
+    const operations = app.querySelector("#cloud-operations");
+    if (!operations) return;
+    reconcileCloudOperations(operations, ops, false, capacity);
+    button("create-server", () => serverOffer(""));
     if (capacity) {
       const capacitySection = app.querySelector("#server-capacity");
       if (capacitySection)
