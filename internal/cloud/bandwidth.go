@@ -5,6 +5,8 @@ import (
 	"math"
 	"net/url"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/quota"
 )
 
 // AccountBandwidth is the confirmed accrued account-wide pool, in bytes.
@@ -12,16 +14,6 @@ type AccountBandwidth struct {
 	Accrued   int64
 	Used      int64
 	Remaining int64
-}
-
-const (
-	VultrSafeBudgetNumerator   = 4
-	VultrSafeBudgetDenominator = 5
-)
-
-func vultrSafeBandwidthBudget(capacity int64) int64 {
-	return capacity/VultrSafeBudgetDenominator*VultrSafeBudgetNumerator +
-		capacity%VultrSafeBudgetDenominator*VultrSafeBudgetNumerator/VultrSafeBudgetDenominator
 }
 
 func (v *Vultr) AccountBandwidth(ctx context.Context) (AccountBandwidth, error) {
@@ -55,7 +47,7 @@ func (v *Vultr) AccountBandwidth(ctx context.Context) (AccountBandwidth, error) 
 		}
 		capacity += *credit * 1_000_000_000
 	}
-	safe := vultrSafeBandwidthBudget(capacity)
+	safe := quota.SafeBudget(capacity)
 	return AccountBandwidth{Accrued: capacity, Used: int64(used), Remaining: max(0, safe-int64(used))}, nil
 }
 

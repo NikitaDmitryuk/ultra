@@ -58,8 +58,6 @@ func ErrorCode(err error) string {
 	switch {
 	case errors.Is(err, ErrIngressInUse):
 		return "ingress_in_use"
-	case errors.Is(err, ErrUnknownCreation):
-		return "creation_requires_reconciliation"
 	case errors.Is(err, ErrLimit):
 		return "capacity_limit"
 	case errors.Is(err, ErrPriceChanged):
