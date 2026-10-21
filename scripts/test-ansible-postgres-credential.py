@@ -52,7 +52,11 @@ try:
            '-e', 'POSTGRES_PASSWORD=fixture-superuser',
            '-e', 'POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256', 'postgres:16')
     for _ in range(60):
-        if docker('exec', container, 'psql', '-U', 'postgres', '-Atc', 'SELECT 1', check=False).returncode == 0:
+        # The image's temporary initialization server accepts Unix sockets, then
+        # stops. TCP becomes available only on the final PostgreSQL server.
+        if docker('exec', '-e', 'PGPASSWORD=fixture-superuser', container,
+                  'psql', '--no-password', '-h', '127.0.0.1', '-U', 'postgres',
+                  '-Atc', 'SELECT 1', check=False).returncode == 0:
             break
         time.sleep(0.25)
     else:
