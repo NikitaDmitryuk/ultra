@@ -112,7 +112,7 @@ func runRetainedPrimaryRebuild(ctx context.Context, in retainedPrimaryRebuildInp
 	if err != nil || identity != in.Primary {
 		return errors.New("retained_primary_identity_changed")
 	}
-	vars := make(map[string]any, len(in.Variables)+5)
+	vars := make(map[string]any, len(in.Variables))
 	for key, value := range in.Variables {
 		vars[key] = value
 	}
