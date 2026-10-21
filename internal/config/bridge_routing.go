@@ -41,41 +41,23 @@ func injectUserExitRules(rules []any, defaultExitTag string, userExitTags map[st
 	if len(userExitTags) == 0 {
 		return rules
 	}
-	var userRules []any
-	for _, r := range rules {
-		m, ok := r.(map[string]any)
-		if !ok || m["outboundTag"] != defaultExitTag {
-			continue
-		}
-		for _, user := range slices.Sorted(maps.Keys(userExitTags)) {
-			tag := userExitTags[user]
-			if tag == "" || tag == defaultExitTag {
-				continue
+	users := slices.Sorted(maps.Keys(userExitTags))
+	out := make([]any, 0, len(rules))
+	for _, rule := range rules {
+		if source, ok := rule.(map[string]any); ok && source["outboundTag"] == defaultExitTag {
+			for _, user := range users {
+				tag := userExitTags[user]
+				if tag == "" || tag == defaultExitTag {
+					continue
+				}
+				copyRule := maps.Clone(source)
+				copyRule["user"] = []string{user}
+				copyRule["outboundTag"] = tag
+				out = append(out, copyRule)
 			}
-			cp := make(map[string]any, len(m)+1)
-			for k, v := range m {
-				cp[k] = v
-			}
-			cp["user"] = []string{user}
-			cp["outboundTag"] = tag
-			userRules = append(userRules, cp)
 		}
+		out = append(out, rule)
 	}
-	if len(userRules) == 0 {
-		return rules
-	}
-	insertAt := len(rules)
-	for i, r := range rules {
-		m, ok := r.(map[string]any)
-		if ok && m["outboundTag"] == defaultExitTag {
-			insertAt = i
-			break
-		}
-	}
-	out := make([]any, 0, len(rules)+len(userRules))
-	out = append(out, rules[:insertAt]...)
-	out = append(out, userRules...)
-	out = append(out, rules[insertAt:]...)
 	return out
 }
 
