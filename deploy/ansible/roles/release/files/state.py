@@ -30,18 +30,23 @@ def database_query(database, query):
 
 def runtime_node_proofs(database, nodes):
     """Bind only public tunnel digests to the already inspected DB topology."""
-    query = "SELECT COALESCE(json_agg(json_build_object('id',id::text,'address',address,'tunnel_uuid',tunnel_uuid,'pin',pinned_peer_cert_sha256)), '[]'::json) FROM exit_nodes WHERE enabled"
+    query = "SELECT COALESCE(json_agg(json_build_object('id',id::text,'address',address,'tunnel_uuid',tunnel_uuid,'pin',pinned_peer_cert_sha256,'enabled',enabled)), '[]'::json) FROM exit_nodes"
     result = database_query(database, query)
     if len(result.stdout) > 65536:
         raise ValueError('runtime_identity_unavailable')
     rows = json.loads(result.stdout)
-    if not isinstance(rows, list) or len(rows) != len(nodes):
+    if not isinstance(rows, list):
         raise ValueError('runtime_topology_changed')
     indexed = {row['id']: row for row in rows}
     if len(indexed) != len(rows):
         raise ValueError('runtime_topology_changed')
+    node_ids = {node['id'] for node in nodes}
+    if any(row.get('enabled') is True and row['id'] not in node_ids for row in rows):
+        raise ValueError('runtime_topology_changed')
     for node in nodes:
         row = indexed.get(node['id'], {})
+        if not row or (node.get('managed') and row.get('enabled') is not True):
+            raise ValueError('runtime_topology_changed')
         tunnel = row.get('tunnel_uuid', '')
         pin = row.get('pin', '')
         if (row.get('address') != node['address'] or not re.fullmatch(r'[0-9a-fA-F-]{36}', tunnel)

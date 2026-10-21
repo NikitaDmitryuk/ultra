@@ -13,6 +13,7 @@ import types
 import unittest
 import yaml
 from jinja2 import Environment
+from jinja2.nativetypes import NativeEnvironment
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -410,6 +411,119 @@ class Contracts(unittest.TestCase):
         self.assertLess(stop, restore, 'stop the failed new relay before replacing its executable')
         self.assertIn('ansible.builtin.fail', rescue[-1], 'local rescue must still trigger fleet rollback')
         self.assertEqual(rescue[-1]['ansible.builtin.fail']['msg'], "{{ 'release_forward_only_activation_failed' if (ultra_forward_only | default(false) | bool) else 'release_activation_failed' }}")
+
+    def test_binary_rollback_replays_restart_intent_after_copy_interruption(self):
+        tasks = yaml.safe_load((ROOT / 'deploy/ansible/roles/release/tasks/rollback.yml').read_text())
+        environment = NativeEnvironment()
+        environment.tests['ansible.builtin.match'] = lambda value, pattern: re.match(pattern, value) is not None
+        old, candidate = b'compatible fallback', b'candidate executable'
+        digest = hashlib.sha256(old).hexdigest()
+        manifest = {'capabilities': ['service-access-v1', 'provider-pool-quota-v1'],
+                    'database_schema_min': 24, 'database_schema_max': 25,
+                    'assets': [{'name': 'ultra-bot-linux-amd64', 'sha256': digest, 'size': len(old)}]}
+
+        class Interrupted(Exception):
+            pass
+
+        # Execute the actual YAML control flow with filesystem-backed stat/copy
+        # and a service fixture. Every invocation gets fresh facts, as on replay.
+        for initially_active in (True, False):
+            for fail_during_restart in (False, True):
+                with self.subTest(active=initially_active, restart_failure=fail_during_restart), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    active = root / 'usr/local/bin/ultra-bot'
+                    saved = root / 'var/lib/ultra-ansible/releases/v9.0.0/ultra-bot.previous'
+                    active.parent.mkdir(parents=True)
+                    saved.parent.mkdir(parents=True)
+                    active.write_bytes(candidate)
+                    saved.write_bytes(old)
+                    service = {'active': initially_active, 'executable': candidate, 'restarts': 0}
+
+                    def execute(interrupt=False, wrong_process=False, invalid_pid=False, inactive_process=False):
+                        facts = {'release_component': 'ultra-bot', 'ultra_architecture': 'amd64',
+                                 'ultra_release_version': 'v9.0.0', 'ultra_previous_manifest': manifest,
+                                 'ultra_release_manifest': manifest}
+                        def render(value):
+                            if isinstance(value, str):
+                                return environment.from_string(value).render(facts)
+                            if isinstance(value, dict):
+                                return {key: render(item) for key, item in value.items()}
+                            return value
+                        def visit(sequence):
+                            for task in sequence:
+                                condition = task.get('when')
+                                if condition and not environment.compile_expression(condition)(facts):
+                                    continue
+                                if 'block' in task:
+                                    visit(task['block'])
+                                    continue
+                                module = next(key for key in task if key.startswith('ansible.builtin.'))
+                                params = render(task[module])
+                                if module.endswith('.set_fact'):
+                                    facts.update(params)
+                                elif module.endswith('.assert'):
+                                    conditions = params['that']
+                                    if isinstance(conditions, str):
+                                        conditions = [conditions]
+                                    self.assertTrue(all(environment.compile_expression(item)(facts) for item in conditions), task['name'])
+                                elif module.endswith('.stat'):
+                                    path = root / params['path'].lstrip('/')
+                                    data = {'exists': path.exists()}
+                                    if path.exists():
+                                        data.update(isreg=path.is_file(), islnk=path.is_symlink(), uid=0,
+                                                    mode='0600', size=path.stat().st_size,
+                                                    checksum=hashlib.sha256(path.read_bytes()).hexdigest())
+                                    if params['path'].startswith('/proc/'):
+                                        self.assertTrue(params['follow'])
+                                        self.assertEqual(params['checksum_algorithm'], 'sha256')
+                                        data = {'isreg': True, 'checksum': hashlib.sha256(service['executable']).hexdigest()}
+                                    facts[task['register']] = {'stat': data}
+                                elif module.endswith('.command'):
+                                    self.assertEqual(params['argv'][0], 'systemctl')
+                                    output = ('0' if invalid_pid else '123') if '--property=MainPID' in params['argv'] else ('active' if service['active'] else 'inactive')
+                                    facts[task['register']] = {'stdout': output}
+                                elif module.endswith('.copy'):
+                                    dest = root / params['dest'].lstrip('/')
+                                    dest.write_bytes((root / params['src'].lstrip('/')).read_bytes()
+                                                     if 'src' in params else params['content'].encode())
+                                    if interrupt and 'src' in params and not fail_during_restart:
+                                        raise Interrupted('after copy before restart')
+                                elif module.endswith('.systemd_service'):
+                                    service['restarts'] += 1
+                                    service['active'] = False
+                                    if interrupt and fail_during_restart:
+                                        raise Interrupted('restart failed after stopping candidate')
+                                    service.update(active=not inactive_process, executable=candidate if wrong_process else active.read_bytes())
+                                elif module.endswith('.file'):
+                                    (root / params['path'].lstrip('/')).unlink(missing_ok=True)
+                                else:
+                                    self.fail('unhandled rollback module: ' + module)
+                        visit(tasks)
+
+                    if initially_active or not fail_during_restart:
+                        with self.assertRaises(Interrupted):
+                            execute(interrupt=True)
+                    else:
+                        execute(interrupt=True)
+                    self.assertEqual(active.read_bytes(), old)
+                    if initially_active:
+                        self.assertEqual(service['executable'], candidate)
+                    pending_before_replay = list(root.glob('var/lib/ultra-ansible/*.rollback-restart'))
+                    if initially_active:
+                        for failure in ({'wrong_process': True}, {'invalid_pid': True}, {'inactive_process': True}):
+                            with self.assertRaises(AssertionError):
+                                execute(**failure)
+                            self.assertTrue(list(root.glob('var/lib/ultra-ansible/*.rollback-restart')),
+                                            'failed process proof cleared restart intent')
+                    execute()
+                    self.assertFalse(list(root.glob('var/lib/ultra-ansible/*.rollback-restart')))
+                    self.assertEqual(service['active'], initially_active)
+                    if initially_active:
+                        self.assertEqual(service['executable'], old, 'replay accepted fallback bytes while candidate remained active')
+                        self.assertTrue(pending_before_replay, 'restart intent was not preserved across interruption')
+                        self.assertEqual(service['restarts'], 5 if fail_during_restart else 4)
+                    else:
+                        self.assertEqual(service['restarts'], 0, 'rollback started an originally stopped bot')
 
     def test_mixed_baseline_roles_use_frozen_per_host_and_relay_only_emergency(self):
         root = ROOT / 'deploy/ansible/roles/release/tasks'

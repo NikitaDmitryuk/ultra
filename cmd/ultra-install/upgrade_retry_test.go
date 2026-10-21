@@ -1090,7 +1090,7 @@ func TestReleaseRollbackFinalizesExactBotStateAfterBinaryRestore(t *testing.T) {
 	enabled := strings.Index(source, "Restore prior enabled state and external effects after executable restoration")
 	activity := strings.Index(source, "Restore prior bot activity as the final release compensation")
 	result := strings.Index(source, "Save the verified operation result")
-	if restore < 0 || start < restore || enabled < start || activity < enabled || result < activity {
+	if restore < 0 || start >= 0 || enabled < restore || activity < enabled || result < activity {
 		t.Fatal("binary rollback can override exact bot compensation")
 	}
 	if !strings.Contains(source[activity:result], "action: accept-rollback") {

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('upgrade_runtime_state', ROOT / 'deploy/ansible/roles/release/files/state.py')
@@ -18,7 +19,7 @@ class RuntimeUpgradeContracts(unittest.TestCase):
     def test_bridge_returns_only_tunnel_digest_and_pin(self):
         tunnel = '11111111-1111-1111-1111-111111111111'
         node = {'id': '22222222-2222-2222-2222-222222222222', 'address': '192.0.2.2'}
-        rows = [{'id': node['id'], 'address': node['address'], 'tunnel_uuid': tunnel, 'pin': 'a' * 64}]
+        rows = [{'id': node['id'], 'address': node['address'], 'tunnel_uuid': tunnel, 'pin': 'a' * 64, 'enabled': True}]
         with patch.object(state, 'database_query', return_value=SimpleNamespace(stdout=json.dumps(rows).encode())):
             state.runtime_node_proofs('fixture', [node])
         self.assertEqual(node['tunnel_identity_digest'], hashlib.sha256(tunnel.encode()).hexdigest())
@@ -28,11 +29,48 @@ class RuntimeUpgradeContracts(unittest.TestCase):
 
     def test_proof_rejects_changed_target_duplicate_or_extra_members(self):
         node = {'id': '22222222-2222-2222-2222-222222222222', 'address': '192.0.2.2'}
-        row = {'id': node['id'], 'address': '192.0.2.9', 'tunnel_uuid': '11111111-1111-1111-1111-111111111111', 'pin': ''}
+        row = {'id': node['id'], 'address': '192.0.2.9', 'tunnel_uuid': '11111111-1111-1111-1111-111111111111', 'pin': '', 'enabled': True}
         for rows in ([row], [row, row], []):
             with patch.object(state, 'database_query', return_value=SimpleNamespace(stdout=json.dumps(rows).encode())):
                 with self.assertRaises(ValueError):
                     state.runtime_node_proofs('fixture', [dict(node)])
+
+    def test_disabled_static_exit_remains_in_upgrade_topology(self):
+        node = {'id': '22222222-2222-2222-2222-222222222222', 'address': '192.0.2.2', 'managed': False}
+        row = {'id': node['id'], 'address': node['address'], 'tunnel_uuid': '11111111-1111-1111-1111-111111111111',
+               'pin': '', 'enabled': False}
+        with patch.object(state, 'database_query', return_value=SimpleNamespace(stdout=json.dumps([row]).encode())):
+            state.runtime_node_proofs('fixture', [node])
+        self.assertIn('tunnel_identity_digest', node)
+
+    def test_disabled_managed_or_uninventoried_enabled_exit_is_rejected(self):
+        node = {'id': '22222222-2222-2222-2222-222222222222', 'address': '192.0.2.2', 'managed': True}
+        tunnel = '11111111-1111-1111-1111-111111111111'
+        disabled_managed = {'id': node['id'], 'address': node['address'], 'tunnel_uuid': tunnel, 'pin': '', 'enabled': False}
+        extra_enabled = {'id': '33333333-3333-3333-3333-333333333333', 'address': '192.0.2.3',
+                         'tunnel_uuid': tunnel, 'pin': '', 'enabled': True}
+        for rows in ([disabled_managed], [dict(disabled_managed, enabled=True), extra_enabled]):
+            with patch.object(state, 'database_query', return_value=SimpleNamespace(stdout=json.dumps(rows).encode())):
+                with self.assertRaises(ValueError):
+                    state.runtime_node_proofs('fixture', [dict(node)])
+
+    def test_modern_rollback_restores_bot_activity_from_frozen_effects(self):
+        plays = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/rollback.yml').read_text())
+        preflight = plays[0]['tasks']
+        guard = next(task for task in preflight if task['name'] == 'Require frozen bot activity evidence before modern rollback')
+        self.assertIn('ultra_runtime_effect_inputs is defined', guard['ansible.builtin.assert']['that'])
+        self.assertIn('inventory_hostname in ultra_runtime_effect_inputs', guard['ansible.builtin.assert']['that'])
+        bridge = next(play for play in plays if play['hosts'] == 'bridge' and
+                      any('ultra_runtime_effects' in task for task in play['tasks']))
+        tasks = bridge['tasks']
+        self.assertFalse(any(task.get('ansible.builtin.systemd_service', {}).get('name') == 'ultra-bot.service'
+                             and task.get('ansible.builtin.systemd_service', {}).get('state') in ('started', 'restarted')
+                             for task in tasks))
+        accept = next(index for index, task in enumerate(tasks)
+                      if task.get('ultra_runtime_effects', {}).get('action') == 'accept-rollback')
+        restore = next(index for index, task in enumerate(tasks)
+                       if task.get('ultra_runtime_effects', {}).get('action') == 'rollback')
+        self.assertLess(restore, accept)
 
     def test_fixed_transport_validates_hash_before_host_execution(self):
         probe = (ROOT / 'deploy/ansible/playbooks/inspect-upgrade-runtime.yml').read_text()

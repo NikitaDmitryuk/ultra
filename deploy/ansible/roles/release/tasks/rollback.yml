@@ -41,6 +41,39 @@
     checksum_algorithm: sha256
     follow: false
   register: release_rollback_active
+- name: Inspect pending restored service activation
+  ansible.builtin.stat:
+    path: "/var/lib/ultra-ansible/{{ ultra_release_version }}-{{ release_component }}-{{ release_rollback_asset.sha256 }}.rollback-restart"
+    follow: false
+  register: release_rollback_restart
+- name: Require an owned private restart intent
+  ansible.builtin.assert:
+    that:
+      - not release_rollback_restart.stat.exists or release_rollback_restart.stat.isreg | default(false)
+      - not release_rollback_restart.stat.exists or not release_rollback_restart.stat.islnk | default(false)
+      - not release_rollback_restart.stat.exists or release_rollback_restart.stat.uid == 0
+      - not release_rollback_restart.stat.exists or release_rollback_restart.stat.mode == '0600'
+- name: Read the current service activity before restoring code
+  ansible.builtin.command:
+    argv: [systemctl, show, "{{ release_component }}.service", --property=ActiveState, --value]
+  changed_when: false
+  register: release_rollback_service
+- name: Require stable service activity before restoring code
+  ansible.builtin.assert:
+    that: release_rollback_service.stdout in ['active', 'inactive', 'failed']
+- name: Remember whether restored code still needs activation
+  ansible.builtin.set_fact:
+    release_rollback_restart_required: "{{ release_rollback_restart.stat.exists or release_rollback_service.stdout == 'active' }}"
+# Keep intent outside the sealed immutable fallback tree. It must precede copy:
+# an interrupted restart can leave both fallback bytes and an inactive service.
+- name: Persist restart intent before replacing active executable bytes
+  ansible.builtin.copy:
+    content: "{{ release_rollback_asset.sha256 }}\n"
+    dest: "/var/lib/ultra-ansible/{{ ultra_release_version }}-{{ release_component }}-{{ release_rollback_asset.sha256 }}.rollback-restart"
+    owner: root
+    group: root
+    mode: "0600"
+  when: release_rollback_restart_required and not release_rollback_restart.stat.exists
 - name: Restore compatible code if activation happened
   when: release_rollback_active.stat.checksum | default('') != release_rollback_asset.sha256
   block:
@@ -64,10 +97,6 @@
         owner: root
         group: root
         mode: "0755"
-    - name: Restart the restored component
-      ansible.builtin.systemd_service:
-        name: "{{ release_component }}.service"
-        state: restarted
 - name: Verify exact restored bytes even when the fallback was already installed
   ansible.builtin.stat:
     path: "/usr/local/bin/{{ release_component }}"
@@ -81,3 +110,47 @@
       - not release_rollback_verified.stat.islnk | default(false)
       - release_rollback_verified.stat.checksum == release_rollback_asset.sha256
       - release_rollback_verified.stat.size | int == release_rollback_asset.size | int
+- name: Restart the restored component while restart intent is pending
+  ansible.builtin.systemd_service:
+    name: "{{ release_component }}.service"
+    state: restarted
+  when: release_rollback_restart_required
+- name: Prove the restored component is executing the fallback
+  when: release_rollback_restart_required
+  block:
+    - name: Read the restored service process identity
+      ansible.builtin.command:
+        argv: [systemctl, show, "{{ release_component }}.service", --property=MainPID, --value]
+      changed_when: false
+      register: release_rollback_pid
+    - name: Require a nonzero restored service process
+      ansible.builtin.assert:
+        that: release_rollback_pid.stdout is ansible.builtin.match('^[1-9][0-9]*$')
+    - name: Inspect the executable held by the restored process
+      ansible.builtin.stat:
+        path: "/proc/{{ release_rollback_pid.stdout }}/exe"
+        follow: true
+        checksum_algorithm: sha256
+      register: release_rollback_process
+    - name: Recheck the restored service process identity
+      ansible.builtin.command:
+        argv: [systemctl, show, "{{ release_component }}.service", --property=MainPID, --value]
+      changed_when: false
+      register: release_rollback_pid_verified
+    - name: Read the restored service activity
+      ansible.builtin.command:
+        argv: [systemctl, show, "{{ release_component }}.service", --property=ActiveState, --value]
+      changed_when: false
+      register: release_rollback_activity_verified
+    - name: Require the active fallback process before acknowledging restart
+      ansible.builtin.assert:
+        that:
+          - release_rollback_activity_verified.stdout == 'active'
+          - release_rollback_pid_verified.stdout == release_rollback_pid.stdout
+          - release_rollback_process.stat.isreg | default(false)
+          - release_rollback_process.stat.checksum | default('') == release_rollback_asset.sha256
+- name: Clear restart intent only after successful restored activation
+  ansible.builtin.file:
+    path: "/var/lib/ultra-ansible/{{ ultra_release_version }}-{{ release_component }}-{{ release_rollback_asset.sha256 }}.rollback-restart"
+    state: absent
+  when: release_rollback_restart_required

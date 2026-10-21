@@ -16,6 +16,14 @@
         initial_runtime_request_json: "{{ ultra_legacy_initial_runtime_request_json | default('') }}"
       register: legacy_rollback_barrier
       when: ultra_legacy_bridge_maintenance | default(false) | bool
+    - name: Require frozen bot activity evidence before modern rollback
+      ansible.builtin.assert:
+        that:
+          - ultra_runtime_effect_inputs is defined
+          - inventory_hostname in ultra_runtime_effect_inputs
+      when:
+        - not (ultra_legacy_bridge_maintenance | default(false) | bool)
+        - not (legacy_rollback_barrier.untouched | default(false) | bool)
 - name: Restore compatible exits from the frozen topology
   hosts: exits
   gather_facts: false
@@ -89,13 +97,6 @@
         legacy_sha256: "{{ ultra_legacy_bridge_sha256 }}"
         phase: restore-services
       when: (ultra_legacy_bridge_maintenance | default(false) | bool) and (not (hostvars['bridge'].legacy_rollback_barrier.untouched | default(false) | bool))
-    - name: Start the bot only after restored relay readiness
-      ansible.builtin.systemd_service:
-        name: ultra-bot.service
-        state: started
-      when:
-        - not (ultra_legacy_bridge_maintenance | default(false) | bool)
-        - not (hostvars['bridge'].legacy_rollback_barrier.untouched | default(false) | bool)
     - name: Read the exact runtime effect rollback binding after executable restoration
       ultra_runtime_effects:
         action: status
