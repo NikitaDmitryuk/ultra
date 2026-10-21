@@ -1824,6 +1824,36 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
         self.assertIn('--config-sha256', self.calls[1][1])
         self.assertFalse((self.root / 'operation.json').exists())
 
+    def test_status_failure_retries_only_read_only_status(self):
+        def fail_status(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'status':
+                raise D.DeployError('status_temporarily_unavailable')
+
+        with self.assertRaisesRegex(D.DeployError, '^status_temporarily_unavailable$'):
+            self.rollout(runner=fail_status)
+        pending = json.loads((self.root / 'operation.json').read_bytes())
+        self.assertEqual(pending['stage'], 'status')
+        self.assertTrue(pending['mutator_dispatched'])
+        self.calls.clear()
+        self.rollout()
+        self.assertEqual([stage for stage, _ in self.calls], ['status'])
+        self.assertFalse((self.root / 'operation.json').exists())
+
+    def test_status_replay_rejects_changed_canonical_candidate_before_commands(self):
+        def fail_status(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'status':
+                raise D.DeployError('status_temporarily_unavailable')
+
+        with self.assertRaisesRegex(D.DeployError, '^status_temporarily_unavailable$'):
+            self.rollout(runner=fail_status)
+        self.config.write_bytes(self.config.read_bytes() + b'CHANGED_AFTER_UPGRADE=true\n')
+        self.calls.clear()
+        with self.assertRaisesRegex(D.DeployError, '^manual_status_replay_inputs_changed$'):
+            self.rollout()
+        self.assertEqual(self.calls, [])
+
     def test_success_removes_one_time_baseline_setting_and_preserves_readable_mode(self):
         self.config.chmod(0o644)
         self.config.write_bytes(self.original + b'ULTRA_UPGRADE_BASELINE_FILE=/private/baseline.json\n')
@@ -1969,6 +1999,33 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
             self.rollout(forward_only=True, runner=fail_preflight)
         self.assertEqual(json.loads((self.root / 'operation.json').read_bytes()), old)
         self.assertEqual(json.loads(next(self.root.glob('operation.forward-only-abandoned-*.json')).read_bytes()), old)
+
+    def test_forward_only_journal_replacement_keeps_predecessor_until_atomic_publish(self):
+        old = {'schema': 1, 'commit': self.commit, 'version': self.version, 'stage': 'upgrade',
+               'mutator_dispatched': True, 'remote_attempt': 'c' * 64,
+               'manifest_sha256': 'd' * 64, 'staged_config_sha256': 'e' * 64}
+        raw = json.dumps(old).encode()
+        journal = self.root / 'operation.json'
+        D.atomic_write(journal, raw)
+        real_write = D.atomic_write
+
+        def fail_replacement(path, contents, **kwargs):
+            if path == journal and json.loads(contents).get('forward_only') is True:
+                self.assertEqual(journal.read_bytes(), raw, 'predecessor journal must remain until replacement')
+                raise OSError('forward_journal_publish_interrupted')
+            return real_write(path, contents, **kwargs)
+
+        with patch.object(D, 'atomic_write', side_effect=fail_replacement):
+            with self.assertRaisesRegex(OSError, '^forward_journal_publish_interrupted$'):
+                self.rollout(forward_only=True)
+        self.assertEqual(journal.read_bytes(), raw)
+        archived = list(self.root.glob('operation.forward-only-abandoned-*.json'))
+        self.assertEqual(len(archived), 1)
+        proof = json.loads(archived[0].read_bytes())
+        self.assertEqual(proof['commit'], old['commit'])
+        self.assertTrue(proof['mutator_dispatched'])
+        self.assertEqual(proof['stage'], 'upgrade')
+        self.assertEqual(self.config.read_bytes(), self.original)
 
     def test_forward_only_requires_exact_failed_upgrade_and_rejects_conflicts(self):
         with self.assertRaisesRegex(D.DeployError, '^manual_forward_only_requires_dispatched_upgrade$'):
@@ -2331,6 +2388,38 @@ class NativeDeploy(unittest.TestCase):
             result = D.attest_legacy_manual_operation(
                 self.repo, record, ['ssh'], record['transport_binding'], self.config.read_bytes())
         self.assertEqual(result, record)
+
+    def test_status_replay_skips_remote_staging_and_preserves_status_stage(self):
+        self.dump_config()
+
+        def fail_status(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'status':
+                raise D.DeployError('status_temporarily_unavailable')
+
+        with self.assertRaisesRegex(D.DeployError, '^status_temporarily_unavailable$'):
+            self.rollout(runner=fail_status)
+        pending = json.loads((self.root / 'operation.json').read_bytes())
+        self.assertEqual(pending['stage'], 'status')
+        self.stage_mock.reset_mock()
+        self.bot_bootstrap_mock.reset_mock()
+        self.vultr_bootstrap_mock.reset_mock()
+        self.pins_bootstrap_mock.reset_mock()
+        self.calls.clear()
+
+        with self.assertRaisesRegex(D.DeployError, '^status_temporarily_unavailable$'):
+            self.rollout(runner=fail_status)
+        self.stage_mock.assert_not_called()
+        self.bot_bootstrap_mock.assert_not_called()
+        self.vultr_bootstrap_mock.assert_not_called()
+        self.pins_bootstrap_mock.assert_not_called()
+        self.assertEqual([stage for stage, _ in self.calls], ['canonical_policy', 'status'])
+        self.assertEqual(json.loads((self.root / 'operation.json').read_bytes())['stage'], 'status')
+
+        self.calls.clear()
+        self.rollout()
+        self.assertEqual([stage for stage, _ in self.calls], ['canonical_policy', 'status'])
+        self.assertFalse((self.root / 'operation.json').exists())
 
 
     def test_dump_continuation_to_new_head_projects_new_candidate(self):

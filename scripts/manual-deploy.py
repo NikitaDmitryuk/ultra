@@ -410,6 +410,23 @@ def require_manual_quiescence(record):
             'manual_operation_quiescence_migration_required')
 
 
+def manual_status_replay_candidate(record):
+    """Recognize only a complete journal shape for read-only status replay."""
+    if not (isinstance(record, dict) and record.get('schema') == 1 and
+            record.get('stage') == 'status' and record.get('mutator_dispatched') is True and
+            record.get('adopt') is False and
+            isinstance(record.get('commit'), str) and isinstance(record.get('version'), str) and
+            isinstance(record.get('backup'), str) and
+            re.fullmatch(r'[a-f0-9]{40}', record.get('commit', '')) and
+            re.fullmatch(r'v0\.0\.(0|[1-9][0-9]*)', record.get('version', '')) and
+            record.get('version') == 'v0.0.' + str(int(record['commit'], 16)) and
+            re.fullmatch(r'install\.config\.before-' + re.escape(record['version']) + r'-[0-9]+', record.get('backup', '')) and
+            all(isinstance(record.get(key), str) and re.fullmatch('[a-f0-9]{64}', record[key])
+                for key in ('previous_sha256', 'config_sha256'))):
+        return False
+    return True
+
+
 FORWARD_ATTESTATION_REASONS = {
     'manual_forward_continuation_inputs_missing': 'inputs_missing',
     'manual_forward_continuation_predecessor_invalid': 'predecessor_invalid',
@@ -3034,7 +3051,12 @@ def valid_completed_remote_cleanup(record, commit, version, adopt):
 
 
 def abandon_dispatched_manual_operation(root, journal, record):
-    """Retain one explicitly abandoned failed upgrade without resuming it."""
+    """Archive an explicitly abandoned upgrade while its journal remains active.
+
+    The caller publishes the replacement journal atomically after its backup
+    and frozen inputs are durable. Keeping this journal until then makes a
+    crash or write failure fail closed instead of opening the operation gate.
+    """
     validate_dispatched_manual_operation(record)
     proof = json.dumps(record, sort_keys=True).encode()
     archived = next((path for path in sorted(root.glob('operation.forward-only-abandoned-*.json'))
@@ -3042,12 +3064,6 @@ def abandon_dispatched_manual_operation(root, journal, record):
     if archived is None:
         archived = root / ('operation.forward-only-abandoned-' + str(time.time_ns()) + '.json')
         atomic_write(archived, proof)
-    journal.unlink()
-    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
     return archived
 
 
@@ -3265,6 +3281,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     journal = root / 'operation.json'
     existing_record = json.loads(private_file(journal)) if journal.exists() or journal.is_symlink() else {}
     abandoned_record = None
+    status_replay_candidate = manual_status_replay_candidate(existing_record)
     config = Path(config_path) if config_path else repo / 'install.config'
     if continue_forward_only:
         require(not adopt and not retry_failed and not forward_only and probe_env_file is None,
@@ -3290,7 +3307,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
         if not valid_completed_remote_cleanup(existing_record, commit, version, adopt):
             require(existing_record.get('forward_only') is not True,
                     'manual_forward_operation_requires_explicit_continuation')
-            require_manual_quiescence(existing_record)
+            if not status_replay_candidate:
+                require_manual_quiescence(existing_record)
     current = canonical_file(config)
     validate_config_policy(current)
     operator_inventory = os.environ.get('ULTRA_OPERATOR_INVENTORY')
@@ -3373,6 +3391,15 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     backup = root / ('install.config.before-' + version + '-' + str(time.time_ns()))
     new = config_candidate(current, version, remote_release if transport else bundle)
     staged_config = projected_upgrade_config(new, projection)
+    if status_replay_candidate:
+        require(not adopt and not retry_failed and not forward_only and not continue_forward_only and
+                existing_record.get('commit') == commit and existing_record.get('version') == version and
+                existing_record.get('adopt') is False and existing_record.get('transport_binding') == transport_binding and
+                existing_record.get('manifest_sha256') == manifest_sha and
+                existing_record.get('remote_attempt') == attempt and
+                existing_record.get('config_sha256') == sha(new) and
+                (not transport or existing_record.get('staged_config_sha256') == sha(staged_config)),
+                'manual_status_replay_inputs_changed')
     if same_candidate:
         require(new == current, 'manual_forward_continuation_inputs_changed')
     baseline_files = {}
@@ -3573,25 +3600,39 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
                 commands[-1][1].append('--retry-failed')
         commands += [('status', [installer, 'status', '--config', str(config)] +
                       (['--lifecycle'] if projection in ('upgrade-v1', 'upgrade-v2') else []))]
+        if status_replay_candidate:
+            # The upgrade returned successfully before the journal entered the
+            # status stage. Only repeat this read-only acceptance probe; never
+            # redispatch the server mutation from a status failure.
+            commands = [command for command in commands if command[0] == 'status']
         if transport:
             require(sha(canonical_file(config)) == record['config_sha256'], 'canonical_config_changed_before_staging')
-            if same_candidate:
+            if status_replay_candidate:
+                staged_architecture = record.get('remote_architecture')
+                staged_config_sha = record.get('staged_config_sha256')
+                require(staged_architecture in ('amd64', 'arm64') and
+                        staged_config_sha == sha(staged_config), 'manual_status_replay_staging_evidence_invalid')
+            elif same_candidate:
                 staged_receipt = continuation_receipt
+                staged_architecture = staged_receipt.get('architecture')
+                staged_config_sha = sha(staged_config)
+                require(staged_receipt.get('config_sha256') == staged_config_sha and staged_receipt.get('manifest_sha256') == manifest_sha and
+                        staged_receipt.get('attempt') == attempt, 'bridge_staging_receipt_invalid')
             else:
                 record['stage'] = 'bridge_staging'
                 atomic_write(journal, json.dumps(record).encode())
                 staged_receipt = stage_remote(repo, root, bundle, staged_config, transport, commit, version, manifest_sha, baseline_files)
-            staged_architecture = staged_receipt.get('architecture')
-            staged_config_sha = sha(staged_config)
-            require(staged_receipt.get('config_sha256') == staged_config_sha and staged_receipt.get('manifest_sha256') == manifest_sha and
-                    staged_receipt.get('attempt') == attempt, 'bridge_staging_receipt_invalid')
+                staged_architecture = staged_receipt.get('architecture')
+                staged_config_sha = sha(staged_config)
+                require(staged_receipt.get('config_sha256') == staged_config_sha and staged_receipt.get('manifest_sha256') == manifest_sha and
+                        staged_receipt.get('attempt') == attempt, 'bridge_staging_receipt_invalid')
             require(record.get('remote_architecture', staged_architecture) == staged_architecture, 'bridge_architecture_changed')
             record['remote_architecture'] = staged_architecture
             record['staged_config_sha256'] = staged_config_sha
-            if projection == 'upgrade-v2':
+            if not status_replay_candidate and projection == 'upgrade-v2':
                 bootstrap_bridge_known_hosts(repo, transport, pins_snapshot['sha256'], commit, attempt,
                                              staged_config_sha, manifest_sha, transport_binding)
-            if bot_token is not None:
+            if not status_replay_candidate and bot_token is not None:
                 bootstrap_bridge_bot_token(repo, transport, bot_token)
                 bootstrap_bridge_vultr_key(repo, transport, vultr_key)
         for stage, command in commands:
@@ -3647,7 +3688,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
                 raise
         # Read-only adoption comparison cannot have dispatched a mutating job.
         # After apply/upgrade dispatch, keep exact canonical inputs for recovery.
-        if not record.get('mutator_dispatched', False) and record['stage'] in ('bridge_staging', 'doctor', 'adoption_check') and sha(canonical_file(config)) == record['config_sha256']:
+        if not record.get('mutator_dispatched', False) and record.get('stage') in ('bridge_staging', 'doctor', 'adoption_check') and sha(canonical_file(config)) == record['config_sha256']:
             if transport and probe_sha:
                 try:
                     run(remote_command(transport, commit, version, manifest_sha, sha(staged_config), attempt,

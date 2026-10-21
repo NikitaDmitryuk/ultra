@@ -827,18 +827,8 @@ broker. При отсутствующих, неоднозначных или п�
 остаётся закрытым в `applying`; этот путь не восстанавливает неизвестный relay и не
 меняет БД.
 `RETRY_FAILED=1` не разрешает использовать failed candidate как predecessor.
-Для принятия уже работающего runtime используйте
-явный запуск:
-
-```sh
-ADOPT=1 ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \
-ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
-```
-
-Он выполняет `doctor`, `adopt --check --adopt-runtime --bridge-native`,
-`apply --adopt-runtime --bridge-native` и `status`; без `ADOPT=1` adoption не
-запускается. Отдельного фонового или автоматического обновления этот механизм не
-устанавливает.
+Новый `ADOPT=1` путь снят с поддержки: действующий парк обновляется через
+проверенный upgrade, а bootstrap предназначен для установки новой конфигурации.
 
 До запуска изменяющего задания ошибки staging, `doctor` и read-only adoption
 сравнения восстанавливают прежний локальный config и очищают журнал новой операции.
@@ -853,8 +843,11 @@ ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 текущий wrapper продолжить не умеет: он блокирует retry, пока отдельный протокол не
 сделает fencing всех источников dispatch и host-bound подтверждение drain на frozen
 target set. Для такого журнала не восстанавливайте config вручную, не удаляйте
-журнал и не запускайте другой commit; одного `status` недостаточно. Канонический
-`install.config` должен оставаться обычным файлом владельца с правами 0600.
+журнал и не запускайте другой commit; одного `status` недостаточно. Если upgrade
+вернул успех и wrapper уже записал `stage=status`, повтор запускает только read-only
+проверку `status` для того же commit и config, не повторяя upgrade. Ошибка самого
+upgrade остаётся заблокированной до отдельного recovery. Канонический `install.config`
+должен оставаться обычным файлом владельца с правами 0600.
 Группам и другим пользователям запрещена запись.
 
 `make deploy-build` только собирает и проверяет кандидата без изменения config и
