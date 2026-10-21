@@ -136,6 +136,8 @@ jobs:
         run: python3 -m pip install 'ansible-core==2.20.0' 'ansible-lint==26.10.0'
       - name: Validate Ansible roles
         run: make test-ansible
+      - name: Operator deployment and recovery regression tests
+        run: make test-operator
   ansible-integration:
     name: Ansible SSH and offline runtime
     runs-on: ubuntu-latest
@@ -170,6 +172,9 @@ jobs:
           docker pull postgres:16
           python3 scripts/test-ansible-postgres-monitor.py
           python3 scripts/test-ansible-postgres-replica-slot.py
+          python3 scripts/test-ansible-postgres-credential.py
+      - name: Verify atomic imports with PostgreSQL 16
+        run: python3 scripts/test-import-protocol-pg.py
   nginx:
     name: Primary XHTTP with actual Nginx
     runs-on: ubuntu-latest

@@ -68,7 +68,9 @@ try:
     assert old_verifier.startswith('md5'), 'fixture did not create a legacy MD5 verifier'
     sql(render(provision, values))
     assert not login(password), 'provisioning unexpectedly changed an existing credential'
-    assert login('prior-attempt'), 'existing database credential was not preserved'
+    # SCRAM-only HBA cannot authenticate an unchanged MD5 verifier. The exact
+    # verifier comparison below establishes preservation without assuming login.
+    assert not login('prior-attempt'), 'SCRAM-only HBA accepted an MD5 verifier'
     assert sql("SELECT rolpassword FROM pg_authid WHERE rolname='ultra_fixture'") == old_verifier
     sql(render(repair, values))
     assert login(password), 'explicit credential reconciliation did not repair the role'

@@ -36,6 +36,16 @@ assert 'postgres' in jobs['go-race']['services']
 assert 'DATABASE_URL' in jobs['go-race']['env']
 race_commands = '\n'.join(step.get('run', '') for step in jobs['go-race']['steps'])
 assert 'make test-race' in race_commands
+operator_commands = '\n'.join(step.get('run', '') for step in jobs['ansible-validation']['steps'])
+assert 'make test-operator' in operator_commands
+makefile = (Path(__file__).resolve().parents[1] / 'Makefile').read_text()
+assert 'test-operator: test-manual-deploy' in makefile
+operator_target = makefile.split('test-operator: test-manual-deploy\n', 1)[1].split('\n\n', 1)[0]
+for suite in ('test-forward-broker-guard.py', 'test-operator-db-dump.py', 'test-recover-bootstrap-dns.py'):
+    assert 'python3 scripts/' + suite in operator_target, suite
+integration_commands = '\n'.join(step.get('run', '') for step in jobs['ansible-integration']['steps'])
+assert 'test-ansible-postgres-credential.py' in integration_commands
+assert 'test-import-protocol-pg.py' in integration_commands
 command = gate['steps'][0]['run']
 for state in ('success', 'failure', 'cancelled', 'skipped'):
     needs = {name: {'result': 'success'} for name in gate['needs']}

@@ -161,10 +161,7 @@ build-bench:
 .PHONY: test-ui
 test-ui:
 	python3 scripts/test-mobile-bootstrap.py
-	python3 scripts/test-ansible-release-contracts.py
-	python3 scripts/test-controller-enforcement.py
 	python3 scripts/test-database-preservation.py
-	python3 scripts/test-ansible-upgrade-baseline.py
 	python3 scripts/test-verify-miniapp.py
 	python3 scripts/test-ingress-ssh.py
 	python3 scripts/test-bridge-subscription.py
@@ -236,3 +233,10 @@ deploy-build:
 
 test-manual-deploy:
 	python3 scripts/test-manual-deploy.py
+
+# Offline operator/recovery scripts are explicitly gated; Docker checks stay separate.
+.PHONY: test-operator
+test-operator: test-manual-deploy
+	python3 scripts/test-forward-broker-guard.py
+	python3 scripts/test-operator-db-dump.py
+	python3 scripts/test-recover-bootstrap-dns.py

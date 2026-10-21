@@ -12,7 +12,7 @@
 | Только инструкции или документация | `make harness-check`; содержательная сверка с источниками |
 | Состав релиза, manifest или публикация GitHub Release | `python3 scripts/test-release-assets.py`, затем `python3 scripts/test-release-assets.py --dist dist`: реальный комплект должен совпадать с manifest, SHA-256, архитектурами ELF, исходными архивами и закреплёнными offline wheels |
 | Проверяющий инструмент harness | `go test ./tools/harnesscheck`; `make harness-check`; `go vet ./tools/harnesscheck` |
-| Offline rebuild-non-db preflight | `env -u DATABASE_URL go test ./cmd/ultra-install -run '^TestRebuild' -count=1`: strict evidence/scope, неподтверждённое доверие, приватность входов, blocked journal/replay/crash и paginated provider inventory; тесты не подключаются к production |
+| Offline rebuild-non-db preflight | `env -u DATABASE_URL go test ./cmd/ultra-install -run '^TestRebuild' -count=1`: strict evidence/scope, неподтверждённое доверие, приватность входов, blocked journal/replay/crash; тесты не подключаются к production |
 | Retained-primary recovery execute | `env -u DATABASE_URL go test ./cmd/ultra-install -run '^TestRetained' -count=1`; `python3 scripts/test-retained-primary-gates.py`; `python3 scripts/test-subscription-key-projection.py`; syntax check `rebuild-retained-primary.yml` закреплённым Ansible runtime. Проверяются orphan/SIGKILL replay, обязательные прежние DB credentials, точная route identity, frozen binding без потери integer precision и hard localhost gates при DB unreachable; production execute этими тестами не запускается |
 | Go-код | Тесты затронутых пакетов, затем `make test`, `make vet`, `make lint` |
 | Конфигурация Xray, маршрутизация, failover | Тесты `./internal/config ./internal/exits ./internal/proxy`; сборка relay |
@@ -41,6 +41,13 @@ Ansible-валидации и SSH-интеграции, Nginx, Mini App/release-
 отдельно со своим PostgreSQL 16, чтобы не ждать завершения обычных тестов. Локальную проверку без БД
 можно выполнить как `env -u DATABASE_URL make test`, чтобы не использовать случайно
 унаследованный DSN. Пропущенную DB-интеграцию явно указывай в результате.
+
+`make test-operator` объединяет offline-регрессии manual deploy, forward broker,
+operator DB dump и восстановления DNS; этот target обязателен в Ansible CI.
+Проверка PostgreSQL credential repair отдельно выполняется на PostgreSQL 16 в
+SSH integration job; тот же job запускает атомарный import protocol в отдельном
+PostgreSQL 16 контейнере без сети. `test-ui` не повторяет release/controller проверки из
+`test-ansible`; общий gate требует обе группы.
 
 Если сборке нужен большой `GOTMPDIR` на диске, а проверки installer используют
 короткие deadlines и множество `fsync`, компилируй пакеты через `go test -c`,
