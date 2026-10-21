@@ -265,6 +265,16 @@ func TestAutomationReleasePreflightRejectsIncompleteAndModified(t *testing.T) {
 	if err := preflightAutomation(p); err != nil {
 		t.Fatal(err)
 	}
+	p.Automation.ReleaseDir = filepath.Join(dir, "missing-remote-path")
+	statusPlan, err := statusPlanWithRelease(p, dir)
+	if err != nil || statusPlan.Automation.ReleaseDir != dir || p.Automation.ReleaseDir == dir {
+		t.Fatalf("status override changed canonical plan or failed: %v", err)
+	}
+	p.Automation.Version = "v9.9.9"
+	if _, err := statusPlanWithRelease(p, dir); err == nil {
+		t.Fatal("status accepted another release version")
+	}
+	p.Automation.Version, p.Automation.ReleaseDir = "v1.2.3", dir
 	manifest["assets"] = assets[:len(assets)-1]
 	write()
 	if preflightAutomation(p) == nil {

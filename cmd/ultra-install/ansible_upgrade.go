@@ -560,6 +560,7 @@ func ansibleUpgrade(
 	}
 	variables := map[string]any{
 		"ultra_lock_directory":            lockDirectory,
+		"ultra_bot_enabled":               p.Bot.Enabled,
 		"ultra_upgrade_observed_at":       inspection.ObservedAt,
 		"ultra_release_manifest":          manifest,
 		"ultra_release_manifest_sha256":   manifestSHA,

@@ -196,8 +196,9 @@
       vars:
         release_component: ultra-bot
         release_preserve_stopped: >-
-          {{ ultra_legacy_bridge_maintenance | default(false) | bool and
-             not (legacy_maintenance_checkpoint.bot_active | default(true) | bool) }}
+          {{ not (ultra_bot_enabled | default(true) | bool) or
+             (ultra_legacy_bridge_maintenance | default(false) | bool and
+              not (legacy_maintenance_checkpoint.bot_active | default(true) | bool)) }}
     - name: Refresh verified bridge recovery tools
       ansible.builtin.include_role:
         name: release

@@ -33,6 +33,21 @@ with patch.dict(sys.modules, {'ansible': types.ModuleType('ansible'), 'ansible.m
 
 
 class Contracts(unittest.TestCase):
+    def test_disabled_bot_is_not_started_during_modern_binary_activation(self):
+        plays = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/upgrade.yml').read_text())
+        bot = next(task for play in plays for task in play.get('tasks', [])
+                   if task.get('vars', {}).get('release_component') == 'ultra-bot')
+        role = yaml.safe_load((ROOT / 'deploy/ansible/roles/release/tasks/main.yml').read_text())
+        block = next(task['block'] for task in role if 'block' in task)
+        start = next(task for task in block if task['name'] == 'Activate the updated service')
+        environment = Environment()
+        environment.filters['bool'] = bool
+        for desired in (False, True):
+            variables = {'ultra_bot_enabled': desired, 'ultra_legacy_bridge_maintenance': False}
+            preserve = environment.from_string(bot['vars']['release_preserve_stopped']).render(**variables) == 'True'
+            allowed = environment.compile_expression(start['when'])(release_preserve_stopped=preserve)
+            self.assertEqual(allowed, desired)
+
     def test_readiness_wait_exact_errors_and_deadline_include_attempt_time(self):
         for failure in (ValueError('fresh_independent_backup_required: private'),
                         ValueError('state_unavailable'), OSError('fresh_independent_backup_required')):

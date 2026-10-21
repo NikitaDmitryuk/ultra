@@ -118,6 +118,9 @@ func runAutomationCommand(action string, args []string) {
 		return
 	}
 	if action == "status" {
+		var err error
+		p, err = statusPlanWithRelease(p, *releaseDir)
+		exitOnErr("status release", err)
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 		exitOnErr("Ansible status", ansibleAutomationStatus(ctx, p, *python, *ansible))

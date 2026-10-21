@@ -13,6 +13,22 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
+func statusPlanWithRelease(p *installplan.InstallPlan, directory string) (*installplan.InstallPlan, error) {
+	if directory == "" {
+		return p, nil
+	}
+	if p.Automation == nil {
+		return nil, errors.New("status_release_requires_automation")
+	}
+	if _, err := verifyAutomationRelease(directory, p.Automation.Version); err != nil {
+		return nil, err
+	}
+	copyPlan, automation := *p, *p.Automation
+	automation.ReleaseDir = directory
+	copyPlan.Automation = &automation
+	return &copyPlan, nil
+}
+
 func ansibleAutomationStatus(ctx context.Context, p *installplan.InstallPlan, python, executable string) error {
 	return retryAutomationStatus(ctx, func(ctx context.Context) error {
 		return ansibleAutomationStatusAttempt(ctx, p, python, executable)
