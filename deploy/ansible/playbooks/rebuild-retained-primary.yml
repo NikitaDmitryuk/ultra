@@ -1,0 +1,241 @@
+---
+# This operation is admitted only by the retained-primary recovery executor.
+# Database tasks are read-only observations; no postgres provisioning/import is included.
+- name: Verify exact retained-primary recovery scope before mutation
+  hosts: localhost
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Require one bridge and one permanent exit with a separate primary
+      ansible.builtin.assert:
+        that:
+          - groups['bridge'] == ['bridge']
+          - groups['exits'] == ['exit_0']
+          - groups['databases'] == ['database']
+          - groups.get('forward_ingress', []) | length == 0
+          - hostvars['database'].ansible_host != hostvars['bridge'].ansible_host
+          - hostvars['database'].ansible_host != hostvars['exit_0'].ansible_host
+          - ultra_retained_primary.system_identifier is match('^[1-9][0-9]+$')
+          - ultra_retained_primary.database is match('^[A-Za-z0-9_-]+$')
+          - ultra_retained_primary.database_oid | int > 0
+          - ultra_retained_primary.migrations_sha256 is match('^[a-f0-9]{64}$')
+          - ultra_retained_recovery_binding_sha256 is match('^[a-f0-9]{64}$')
+          - ultra_postgres is not defined
+          - ultra_database_import_dump | default('') | length == 0
+          - ultra_db_tunnel_private_key_source is defined
+          - ultra_db_tunnel_private_key_sha256 is match('^[a-f0-9]{64}$')
+          - not (ultra_preserve_runtime | bool)
+      no_log: true
+- name: Observe retained primary before activating applications
+  hosts: databases
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Read cluster database and migration identities without schema mutation
+      ansible.builtin.command:
+        argv:
+          - "runuser"
+          - "-u"
+          - "postgres"
+          - "--"
+          - "psql"
+          - "--no-psqlrc"
+          - "--set"
+          - "ON_ERROR_STOP=1"
+          - "--tuples-only"
+          - "--no-align"
+          - "--dbname"
+          - "{{ ultra_retained_primary.database }}"
+        stdin: |
+          BEGIN READ ONLY;
+          SELECT json_build_object('system_identifier', (SELECT system_identifier::text FROM pg_control_system()),
+            'database', current_database(), 'database_oid', (SELECT oid::bigint FROM pg_database WHERE datname = current_database()),
+            'primary', NOT pg_is_in_recovery(), 'migration_versions',
+            COALESCE(string_agg(version::text, ',' ORDER BY version), ''))
+            FROM public.schema_migrations;
+          ROLLBACK;
+      environment:
+        PGOPTIONS: -c default_transaction_read_only=on
+      changed_when: false
+      register: retained_primary_before
+      no_log: true
+    - name: Require exact primary identity and unchanged schema before mutation
+      ansible.builtin.assert:
+        that:
+          - (retained_primary_before.stdout_lines | select('match', '^\{') | first | from_json).primary
+          - (retained_primary_before.stdout_lines | select('match', '^\{') | first | from_json).system_identifier == ultra_retained_primary.system_identifier
+          - (retained_primary_before.stdout_lines | select('match', '^\{') | first | from_json).database == ultra_retained_primary.database
+          - (retained_primary_before.stdout_lines | select('match', '^\{') | first | from_json).database_oid == ultra_retained_primary.database_oid
+          - >-
+            (retained_primary_before.stdout_lines | select('match', '^\{') | first | from_json).migration_versions ==
+            ultra_retained_candidate_migration_versions
+          - >-
+            ((retained_primary_before.stdout_lines | select('match', '^\{') | first | from_json).migration_versions | hash('sha256')) ==
+            ultra_retained_primary.migrations_sha256
+      no_log: true
+    - name: Record successful exact read-only primary verification
+      ansible.builtin.set_fact:
+        retained_primary_readonly_verified: true
+- name: Restore the already authorized application tunnel on bridge
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Gate retained-primary recovery before any mutation
+      ansible.builtin.import_tasks: tasks/retained-primary-gate.yml
+      when: ultra_retained_recovery_binding_sha256 is defined
+  roles:
+    - postgres_client
+    - role: db_tunnel
+      db_tunnel_ultra_stage: generate
+    - role: db_tunnel
+      db_tunnel_ultra_stage: install
+- name: Reconcile the dedicated exit DNS before HTTP-01 issuance
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Gate retained-primary recovery before any mutation
+      ansible.builtin.import_tasks: tasks/retained-primary-gate.yml
+      when: ultra_retained_recovery_binding_sha256 is defined
+  roles:
+    - role: dns
+      when: ultra_dns_desired is defined and 'tunnel' in ultra_dns_desired
+- name: Configure the permanent exit from the fixed embedded component
+  ansible.builtin.import_playbook: bootstrap-exit.yml
+- name: Bind the observed permanent exit certificate to bridge routes
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Gate retained-primary recovery before any mutation
+      ansible.builtin.import_tasks: tasks/retained-primary-gate.yml
+      when: ultra_retained_recovery_binding_sha256 is defined
+  tasks:
+    - name: Preserve CA tunnel authentication without distributing leaf pins
+      ansible.builtin.set_fact:
+        ultra_bootstrap_pins: {}
+      when: ultra_spec.tunnel_tls_provision == 'acme_letsencrypt'
+    - name: Require an observed exit identity
+      ansible.builtin.assert:
+        that:
+          - hostvars['exit_0'].relay_fingerprint.stdout is defined
+      when: ultra_spec.tunnel_tls_provision != 'acme_letsencrypt'
+      no_log: true
+    - name: Use the actual newly installed exit certificate
+      ansible.builtin.set_fact:
+        ultra_bootstrap_pins: "{{ {'exit_0': (hostvars['exit_0'].relay_fingerprint.stdout.split('=')[-1] | replace(':', '') | lower)} }}"
+      no_log: true
+      when: ultra_spec.tunnel_tls_provision != 'acme_letsencrypt'
+- name: Configure bridge from the fixed embedded component
+  ansible.builtin.import_playbook: bootstrap-bridge.yml
+- name: Prepare owned HTTPS ingress
+  ansible.builtin.import_playbook: ingress.yml
+  vars:
+    ultra_ingress_action: prepare
+- name: Activate the prepared owned HTTPS ingress
+  ansible.builtin.import_playbook: ingress.yml
+  vars:
+    ultra_ingress_action: activate
+- name: Configure bot after ingress certificates are ready
+  ansible.builtin.import_playbook: configure-bot.yml
+- name: Confirm main exit service after activation
+  hosts: exits
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Require the permanent exit relay to be active
+      ansible.builtin.command:
+        argv: [systemctl, is-active, --quiet, ultra-relay.service]
+      changed_when: false
+    - name: Require the permanent exit tunnel listener
+      ansible.builtin.wait_for:
+        host: "{{ hostvars['exit_0'].ansible_host }}"
+        port: "{{ ultra_spec.vless_port }}"
+        timeout: 30
+      delegate_to: bridge
+- name: Verify bridge application readiness with authenticated probes
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Gate retained-primary recovery before any mutation
+      ansible.builtin.import_tasks: tasks/retained-primary-gate.yml
+      when: ultra_retained_recovery_binding_sha256 is defined
+  tasks:
+    - name: Require relay routes to be loaded successfully
+      ultra_ingress_probe:
+        kind: relay
+      register: retained_relay_health
+      until: retained_relay_health.ready | default(false)
+      retries: 30
+      delay: 2
+      no_log: true
+    - name: Require bot HTTPS endpoint and certificate verification
+      ultra_ingress_probe:
+        kind: bot
+      register: retained_bot_health
+      until: retained_bot_health.ready | default(false)
+      retries: 30
+      delay: 2
+      no_log: true
+- name: Recheck retained primary after application activation
+  hosts: databases
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Verify the same primary database and migrations remain present
+      ansible.builtin.command:
+        argv:
+          - "runuser"
+          - "-u"
+          - "postgres"
+          - "--"
+          - "psql"
+          - "--no-psqlrc"
+          - "--set"
+          - "ON_ERROR_STOP=1"
+          - "--tuples-only"
+          - "--no-align"
+          - "--dbname"
+          - "{{ ultra_retained_primary.database }}"
+        stdin: |
+          BEGIN READ ONLY;
+          SELECT json_build_object('system_identifier', (SELECT system_identifier::text FROM pg_control_system()),
+            'database', current_database(), 'database_oid', (SELECT oid::bigint FROM pg_database WHERE datname = current_database()),
+            'primary', NOT pg_is_in_recovery(), 'migration_versions',
+            COALESCE(string_agg(version::text, ',' ORDER BY version), ''))
+            FROM public.schema_migrations;
+          ROLLBACK;
+      environment:
+        PGOPTIONS: -c default_transaction_read_only=on
+      changed_when: false
+      register: retained_primary_after
+      no_log: true
+    - name: Reject changed primary or schema
+      ansible.builtin.assert:
+        that:
+          - retained_primary_after.stdout == retained_primary_before.stdout
+      no_log: true
+- name: Publish operation health result only after every check
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Require successful before and after primary results before publishing recovery
+      ansible.builtin.assert:
+        that:
+          - hostvars['database'].retained_primary_readonly_verified | default(false) | bool
+          - hostvars['database'].retained_primary_after is defined
+          - not (hostvars['database'].retained_primary_after.unreachable | default(false) | bool)
+          - not (hostvars['database'].retained_primary_after.failed | default(false) | bool)
+          - hostvars['database'].retained_primary_after.rc | default(-1) | int == 0
+          - hostvars['database'].retained_primary_after.stdout == hostvars['database'].retained_primary_before.stdout
+      no_log: true
+    - name: Save the fully verified retained-primary operation result
+      ansible.builtin.copy:
+        content: >-
+          {{ {'verified': true, 'retained_primary_verified': true, 'relay_ready': true, 'bot_ready': true, 'main_exit_ready': true,
+          'recovery_binding_sha256': ultra_retained_recovery_binding_sha256} | to_json(preprocess_unsafe=False) }}
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      no_log: true

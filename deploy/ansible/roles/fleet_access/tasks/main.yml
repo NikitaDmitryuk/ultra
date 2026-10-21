@@ -1,0 +1,6 @@
+---
+- name: Require an explicit fleet SSH access stage
+  ansible.builtin.assert:
+    that: fleet_access_ultra_stage | default('') in ['generate', 'authorize']
+- name: Apply selected fleet SSH access stage
+  ansible.builtin.include_tasks: "{{ fleet_access_ultra_stage }}.yml"

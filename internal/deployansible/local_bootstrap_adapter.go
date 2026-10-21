@@ -13,11 +13,44 @@ import (
 	ansibleassets "github.com/NikitaDmitryuk/ultra/deploy/ansible"
 )
 
+// bootstrapPostgresAdapterPaths is code-owned: callers cannot add overlay paths.
+var bootstrapPostgresAdapterPaths = [...]string{
+	"controller.py",
+	"playbooks/bootstrap-postgres.yml",
+	"playbooks/bootstrap-exit.yml",
+	"playbooks/bootstrap-bridge.yml",
+	"roles/db_tunnel/tasks/reuse.yml",
+	"roles/db_tunnel/tasks/install.yml",
+}
+
+// BootstrapPostgresAdapterID identifies every source byte overlaid by the adapter.
+// A corrected adapter gets a new linked directory without changing an old proof.
+func BootstrapPostgresAdapterID() (string, error) {
+	return bootstrapPostgresAdapterID(ansibleassets.Bundle.ReadFile)
+}
+
+func bootstrapPostgresAdapterID(readFile func(string) ([]byte, error)) (string, error) {
+	id := sha256.New()
+	for _, name := range bootstrapPostgresAdapterPaths {
+		data, err := readFile(name)
+		if err != nil {
+			return "", err
+		}
+		_, _ = id.Write([]byte(name + "\x00"))
+		_, _ = id.Write(data)
+	}
+	return hex.EncodeToString(id.Sum(nil))[:16], nil
+}
+
 // RunLocalRetryFailedAdaptedBootstrapPostgres creates a linked component anchor
-// from an old bootstrap job. Original roles and all other infrastructure source
-// bytes stay intact; only the supervisor and three fixed component plays change.
+// from an old bootstrap job. Only the supervisor, component plays and the fixed
+// bridge tunnel ordering fix are overlaid; all other original source stays intact.
 // This operator-only API has no caller-selected operation or overlay paths.
-func RunLocalRetryFailedAdaptedBootstrapPostgres(ctx context.Context, inventory, variables map[string]any, directory, source, python, executable string) (Receipt, error) {
+func RunLocalRetryFailedAdaptedBootstrapPostgres(
+	ctx context.Context,
+	inventory, variables map[string]any,
+	directory, source, python, executable string,
+) (Receipt, error) {
 	lease, ok := ctx.Value(operationLeaseKey{}).(*operationLease)
 	if !ok {
 		return Receipt{}, errors.New("retry requires operation lease")
@@ -69,7 +102,8 @@ func verifyOrPrepareAdaptedBootstrapPostgres(inventory, variables map[string]any
 	}
 	frozenRaw, _ := json.Marshal(frozen.Inventory)
 	nextRaw, _ := json.Marshal(inventory)
-	if frozen.Inventory == nil || !bytes.Equal(frozenRaw, nextRaw) || frozen.Variables["ultra_lock_directory"] != variables["ultra_lock_directory"] {
+	if frozen.Inventory == nil || !bytes.Equal(frozenRaw, nextRaw) ||
+		frozen.Variables["ultra_lock_directory"] != variables["ultra_lock_directory"] {
 		return errors.New("bootstrap_adapter_frozen_inventory_changed")
 	}
 	baseExport, err := pinnedBootstrapExporter(source, directory, "bootstrap-postgres", request)
@@ -84,7 +118,7 @@ func verifyOrPrepareAdaptedBootstrapPostgres(inventory, variables map[string]any
 	baseHash := sha256.Sum256(baseRaw)
 	overlay := map[string][]byte{}
 	overlayHashes := map[string]string{}
-	for _, name := range []string{"controller.py", "playbooks/bootstrap-postgres.yml", "playbooks/bootstrap-exit.yml", "playbooks/bootstrap-bridge.yml"} {
+	for _, name := range bootstrapPostgresAdapterPaths {
 		data, readErr := ansibleassets.Bundle.ReadFile(name)
 		if readErr != nil {
 			return readErr
@@ -96,7 +130,15 @@ func verifyOrPrepareAdaptedBootstrapPostgres(inventory, variables map[string]any
 	}
 	overlayRaw, _ := json.Marshal(overlayHashes)
 	overlayHash := sha256.Sum256(overlayRaw)
-	proof, _ := json.Marshal(map[string]any{"schema": 1, "parent_source": source, "parent_request_sha256": job["request_sha256"], "parent_bundle_sha256": hex.EncodeToString(baseHash[:]), "adapter_sha256": hex.EncodeToString(overlayHash[:])})
+	proof, _ := json.Marshal(
+		map[string]any{
+			"schema":                1,
+			"parent_source":         source,
+			"parent_request_sha256": job["request_sha256"],
+			"parent_bundle_sha256":  hex.EncodeToString(baseHash[:]),
+			"adapter_sha256":        hex.EncodeToString(overlayHash[:]),
+		},
+	)
 	if _, statErr := os.Lstat(directory); statErr == nil {
 		saved, readErr := readRetryPrivate(filepath.Join(directory, "bundle.adapter.json"))
 		if readErr != nil || !bytes.Equal(saved, proof) {

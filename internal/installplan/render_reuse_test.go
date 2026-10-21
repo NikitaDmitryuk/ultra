@@ -13,12 +13,77 @@ import (
 
 func adoptionRenderFixture() (*InstallPlan, RenderOptions) {
 	const identity = "11111111-1111-1111-1111-111111111111"
-	p := &InstallPlan{SchemaVersion: 1, Bridge: BridgeConfig{SSHHost: "192.0.2.1", ReuseSpec: true}, Exits: []ExitNode{{Name: "primary", SSHHost: "192.0.2.2", DialAddr: "exit.example.com", Port: 9443}}}
-	bridge := &config.Spec{SchemaVersion: config.CurrentSpecSchemaVersion, Role: config.RoleBridge, MimicPreset: "steamlike", VLESSPort: 7443, PublicHost: "vpn.example.com", GeoAssetsDir: "/srv/ultra/geo", Reality: config.RealitySpec{PrivateKey: "fixture-private", PublicKey: "fixture-public", Dest: "example.com:443", ServerNames: []string{"example.com"}}, Exit: config.ExitTunnelSpec{Address: "exit.example.com", Port: 9443, TunnelUUID: identity, PinnedPeerCertSHA256: "fixture-pin"}, SplithttpPath: "/installed", SplithttpHost: "example.com", TunnelTransport: config.TunnelTransportGRPC, AntiCensor: &config.AntiCensorSpec{Profile: "stealth", SplitHTTPPadding: "100-1000", SplitHTTPMaxChunkKB: 64, DisableDOH: true}, BotTelegramProxy: &config.BotTelegramProxySpec{Enabled: true, Port: 10819}, ExitCertPaths: config.CertPaths{CertFile: "/srv/ultra/bridge.pem", KeyFile: "/srv/ultra/bridge.key"}, Database: &config.DatabaseSpec{DSN: "postgres://fixture:fixture@127.0.0.1:5432/fixture?sslmode=disable"}}
-	exit := &config.Spec{SchemaVersion: config.CurrentSpecSchemaVersion, Role: config.RoleExit, MimicPreset: "steamlike", VLESSPort: 9443, Exit: config.ExitTunnelSpec{TunnelUUID: identity}, SplithttpPath: "/installed", SplithttpHost: "example.com", TunnelTransport: config.TunnelTransportGRPC, ExitCertPaths: config.CertPaths{CertFile: "/etc/ultra-relay/fullchain.pem", KeyFile: "/etc/ultra-relay/privkey.pem"}, AntiCensor: &config.AntiCensorSpec{Profile: "stealth", WARPProxy: true, WARPProxyPort: 40123}}
+	p := &InstallPlan{
+		SchemaVersion: CurrentSchemaVersion,
+		Bridge:        BridgeConfig{SSHHost: "192.0.2.1", ReuseSpec: true},
+		Exits:         []ExitNode{{Name: "primary", SSHHost: "192.0.2.2", DialAddr: "exit.example.com", Port: 9443}},
+	}
+	completePlanFixture(p)
+	bridge := &config.Spec{
+		SchemaVersion: config.CurrentSpecSchemaVersion,
+		Role:          config.RoleBridge,
+		MimicPreset:   "steamlike",
+		VLESSPort:     7443,
+		PublicHost:    "vpn.example.com",
+		GeoAssetsDir:  "/srv/ultra/geo",
+		Reality: config.RealitySpec{
+			PrivateKey:  "fixture-private",
+			PublicKey:   "fixture-public",
+			Dest:        "example.com:443",
+			ServerNames: []string{"example.com"},
+		},
+		Exit: config.ExitTunnelSpec{
+			Address:              "exit.example.com",
+			Port:                 9443,
+			TunnelUUID:           identity,
+			PinnedPeerCertSHA256: "fixture-pin",
+		},
+		SplithttpPath:   "/installed",
+		SplithttpHost:   "example.com",
+		TunnelTransport: config.TunnelTransportGRPC,
+		AntiCensor: &config.AntiCensorSpec{
+			Profile:             "stealth",
+			SplitHTTPPadding:    "100-1000",
+			SplitHTTPMaxChunkKB: 64,
+			DisableDOH:          true,
+		},
+		BotTelegramProxy: &config.BotTelegramProxySpec{Enabled: true, Port: 10819},
+		ExitCertPaths:    config.CertPaths{CertFile: "/srv/ultra/bridge.pem", KeyFile: "/srv/ultra/bridge.key"},
+		Database:         &config.DatabaseSpec{DSN: "postgres://fixture:fixture@127.0.0.1:5432/fixture?sslmode=disable"},
+	}
+	exit := &config.Spec{
+		SchemaVersion:   config.CurrentSpecSchemaVersion,
+		Role:            config.RoleExit,
+		MimicPreset:     "steamlike",
+		VLESSPort:       9443,
+		Exit:            config.ExitTunnelSpec{TunnelUUID: identity},
+		SplithttpPath:   "/installed",
+		SplithttpHost:   "example.com",
+		TunnelTransport: config.TunnelTransportGRPC,
+		ExitCertPaths:   config.CertPaths{CertFile: "/etc/ultra-relay/fullchain.pem", KeyFile: "/etc/ultra-relay/privkey.pem"},
+		AntiCensor:      &config.AntiCensorSpec{Profile: "stealth", WARPProxy: true, WARPProxyPort: 40123},
+	}
 	bridgeJSON, _ := json.Marshal(bridge)
 	exitJSON, _ := json.Marshal(exit)
-	return p, RenderOptions{ExistingBridgeJSON: bridgeJSON, ExistingExitJSON: map[string][]byte{"primary": exitJSON}, PreserveRuntime: true, ExistingBridge: bridge, ExistingExits: map[string]*config.Spec{"primary": exit}, ExistingAdminToken: "fixture-admin", PriorBootstrap: []exits.BootstrapEntry{{Name: "primary", Address: "exit.example.com", Port: 9443, TunnelUUID: identity, Priority: 250, Enabled: exits.BootstrapEnabledPtr(false), PinnedPeerCertSHA256: "fixture-pin"}}}
+	return p, RenderOptions{
+		ExistingBridgeJSON: bridgeJSON,
+		ExistingExitJSON:   map[string][]byte{"primary": exitJSON},
+		PreserveRuntime:    true,
+		ExistingBridge:     bridge,
+		ExistingExits:      map[string]*config.Spec{"primary": exit},
+		ExistingAdminToken: "fixture-admin",
+		PriorBootstrap: []exits.BootstrapEntry{
+			{
+				Name:                 "primary",
+				Address:              "exit.example.com",
+				Port:                 9443,
+				TunnelUUID:           identity,
+				Priority:             250,
+				Enabled:              exits.BootstrapEnabledPtr(false),
+				PinnedPeerCertSHA256: "fixture-pin",
+			},
+		},
+	}
 }
 
 func TestRenderAdoptionPreservesReviewedRuntime(t *testing.T) {
@@ -38,7 +103,8 @@ func TestRenderAdoptionPreservesReviewedRuntime(t *testing.T) {
 	if !reflect.DeepEqual(ds.Bootstrap, opts.PriorBootstrap) {
 		t.Fatal("adoption changed exit topology, priority, enabled state or certificate pin")
 	}
-	if ds.AdminToken != opts.ExistingAdminToken || ds.TunnelUUIDs["primary"] != opts.PriorBootstrap[0].TunnelUUID || ds.PostgresConfig != nil {
+	if ds.AdminToken != opts.ExistingAdminToken || ds.TunnelUUIDs["primary"] != opts.PriorBootstrap[0].TunnelUUID ||
+		ds.PostgresConfig != nil {
 		t.Fatal("adoption generated or reprovisioned identity")
 	}
 	if ds.DBDSN != opts.ExistingBridge.Database.DSN {
@@ -100,7 +166,10 @@ func TestRenderAdoptionRejectsUnprovedTopology(t *testing.T) {
 		{"static identity mismatch", func(_ *InstallPlan, o *RenderOptions) {
 			o.ExistingExits["primary"].Exit.TunnelUUID = "22222222-2222-2222-2222-222222222222"
 		}},
-		{"requested identity mismatch", func(p *InstallPlan, _ *RenderOptions) { p.Exits[0].TunnelUUID = "22222222-2222-2222-2222-222222222222" }},
+		{
+			"requested identity mismatch",
+			func(p *InstallPlan, _ *RenderOptions) { p.Exits[0].TunnelUUID = "22222222-2222-2222-2222-222222222222" },
+		},
 		{"static address mismatch", func(p *InstallPlan, _ *RenderOptions) { p.Exits[0].DialAddr = "other.example.com" }},
 		{"static port mismatch", func(_ *InstallPlan, o *RenderOptions) { o.ExistingExits["primary"].VLESSPort = 9444 }},
 	}
@@ -119,7 +188,13 @@ func TestRenderAdoptionRejectsUnprovedTopology(t *testing.T) {
 
 func TestRenderAdoptionPreservesActiveDynamicExit(t *testing.T) {
 	p, opts := adoptionRenderFixture()
-	dynamic := exits.BootstrapEntry{Name: "dynamic", Address: "dynamic.example.com", Port: 8443, TunnelUUID: "22222222-2222-2222-2222-222222222222", Priority: 75}
+	dynamic := exits.BootstrapEntry{
+		Name:       "dynamic",
+		Address:    "dynamic.example.com",
+		Port:       8443,
+		TunnelUUID: "22222222-2222-2222-2222-222222222222",
+		Priority:   75,
+	}
 	opts.PriorBootstrap = append(opts.PriorBootstrap, dynamic)
 	opts.ExistingBridge.Exit = config.ExitTunnelSpec{Address: dynamic.Address, Port: dynamic.Port, TunnelUUID: dynamic.TunnelUUID}
 	opts.ExistingBridgeJSON, _ = json.Marshal(opts.ExistingBridge)
@@ -139,11 +214,17 @@ func TestRenderAdoptionOptInRetainsNormalRenderSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ds.BridgeSpecObject.VLESSPort != 443 || ds.ExitSpecObjects["primary"].TunnelTransport != config.TunnelTransportSplitHTTP || ds.BridgeEnv == "" {
+	if ds.BridgeSpecObject.VLESSPort != 443 || ds.ExitSpecObjects["primary"].TunnelTransport != config.TunnelTransportSplitHTTP ||
+		ds.BridgeEnv == "" {
 		t.Fatal("ordinary reuse no longer renders plan defaults")
 	}
 	p.Bridge.ReuseSpec = false
 	p.Bridge.RealityDest = "example.com:443"
+	p.Bot.Enabled = true
+	p.Bot.Domain = "sync.example.com"
+	p.Database.Enabled = true
+	p.Database.PrimaryHost = "192.0.2.40"
+	p.Automation.Ingress = &AutomationIngress{Domain: "edge.example.com", Email: "owner@example.com", Path: "/connect"}
 	ds, err = RenderDesiredStateWithOptions(p, RenderOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -198,7 +279,8 @@ func TestRenderAdoptionPreservesOriginalJSONRouting(t *testing.T) {
 	if err = json.Unmarshal(ds.BridgeSpec, &afterSpec); err != nil {
 		t.Fatal(err)
 	}
-	if afterSpec.GeoipDirectTags == nil || afterSpec.GeositeDirectTags == nil || afterSpec.DomainDirect == nil || afterSpec.ProbeURLs == nil {
+	if afterSpec.GeoipDirectTags == nil || afterSpec.GeositeDirectTags == nil || afterSpec.DomainDirect == nil ||
+		afterSpec.ProbeURLs == nil {
 		t.Fatal("adoption lost explicit empty arrays")
 	}
 	if afterSpec.RuDirectTLDRegex == nil || *afterSpec.RuDirectTLDRegex {

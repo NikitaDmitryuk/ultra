@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -10,11 +9,15 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/exits"
 )
 
 func TestFullBodyProbe(t *testing.T) {
 	for _, size := range []int{16384, 65536, 65537} {
-		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(strings.Repeat("x", size))) }))
+		server := httptest.NewTLSServer(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(strings.Repeat("x", size))) }),
+		)
 		result := checkBody(context.Background(), server.Client(), server.URL)
 		if result.OK != (size == 65536) {
 			t.Fatalf("size %d: %+v", size, result)
@@ -22,7 +25,8 @@ func TestFullBodyProbe(t *testing.T) {
 		if size != 65536 && result.Error != "body_size" {
 			t.Fatal("missing body-size diagnosis", result)
 		}
-		if untrusted := checkBody(context.Background(), http.DefaultClient, server.URL); untrusted.OK || untrusted.Error != "tls_handshake_failed" {
+		if untrusted := checkBody(context.Background(), http.DefaultClient, server.URL); untrusted.OK ||
+			untrusted.Error != "tls_handshake_failed" {
 			t.Fatal("accepted untrusted cert")
 		}
 		server.Close()
@@ -53,7 +57,9 @@ func TestProbeClassifiesTLSHandshakeTimeout(t *testing.T) {
 }
 
 func TestProbeClassifiesHTTPStatus(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
+	server := httptest.NewTLSServer(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }),
+	)
 	defer server.Close()
 	result := checkBody(context.Background(), server.Client(), server.URL)
 	if result.OK || result.Error != "http_status" {

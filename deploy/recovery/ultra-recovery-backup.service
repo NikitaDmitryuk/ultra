@@ -1,6 +1,6 @@
 [Unit]
 Description=Encrypted ultra recovery generations
-After=postgresql.service network-online.target
+After=network-online.target
 Wants=network-online.target
 
 [Service]

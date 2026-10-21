@@ -33,7 +33,9 @@ func TestStaticBudgetInitializationPreservesUsageAndRejectsChanges(t *testing.T)
 	}
 	var limit int64
 	var blocked bool
-	if err = d.Pool.QueryRow(ctx, `SELECT limit_bytes,blocked FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, monitor.UUID, id).Scan(&limit, &blocked); err != nil || blocked || limit != 5<<30 {
+	if err = d.Pool.QueryRow(ctx, `SELECT limit_bytes,blocked FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, monitor.UUID, id).Scan(&limit, &blocked); err != nil ||
+		blocked ||
+		limit != 5<<30 {
 		t.Fatal("fresh monitor not provisioned", limit, blocked, err)
 	}
 	owner := uuid.NewString()
@@ -77,7 +79,10 @@ func TestStaticBudgetBatchRollsBackOnUnknownExit(t *testing.T) {
 	if _, err := d.Pool.Exec(ctx, `INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid) VALUES($1,'fixture','198.18.0.11',24443,$2)`, id, uuid.NewString()); err != nil {
 		t.Fatal(err)
 	}
-	nodes := []StaticBudgetNode{{Address: "198.18.0.11", Budget: &StaticBudget{MonthlyBytes: 100 << 30}}, {Address: "198.18.0.12", Budget: &StaticBudget{MonthlyBytes: 100 << 30}}}
+	nodes := []StaticBudgetNode{
+		{Address: "198.18.0.11", Budget: &StaticBudget{MonthlyBytes: 100 << 30}},
+		{Address: "198.18.0.12", Budget: &StaticBudget{MonthlyBytes: 100 << 30}},
+	}
 	if err := NewQuotaRepo(d).EnsureStaticBudgets(ctx, nodes); err == nil {
 		t.Fatal("unknown exit accepted")
 	}

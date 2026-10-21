@@ -118,7 +118,13 @@ func main() {
 	b.StartSubscriptionCacheWorker(ctx)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
-	srv := &http.Server{Handler: b.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 35 * time.Second, WriteTimeout: 35 * time.Second, IdleTimeout: 90 * time.Second}
+	srv := &http.Server{
+		Handler:           b.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       35 * time.Second,
+		WriteTimeout:      35 * time.Second,
+		IdleTimeout:       90 * time.Second,
+	}
 	serverErrors := make(chan error, 3)
 
 	switch {
@@ -155,7 +161,14 @@ func main() {
 		}
 		// HTTP-01 ACME challenge on port 80 (must be reachable from the internet).
 		go func() {
-			acmeSrv := &http.Server{Addr: ":80", Handler: m.HTTPHandler(nil), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second}
+			acmeSrv := &http.Server{
+				Addr:              ":80",
+				Handler:           m.HTTPHandler(nil),
+				ReadHeaderTimeout: 5 * time.Second,
+				ReadTimeout:       15 * time.Second,
+				WriteTimeout:      15 * time.Second,
+				IdleTimeout:       30 * time.Second,
+			}
 			defer func() { _ = acmeSrv.Close() }()
 			log.Info("starting ACME HTTP-01 server", "addr", ":80")
 			if err := acmeSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

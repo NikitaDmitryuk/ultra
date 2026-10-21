@@ -20,14 +20,20 @@ import (
 )
 
 func TestExperimentalGatewayTLSAuthAccountingAndRestart(t *testing.T) {
-	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, strings.Repeat("x", 65536)) }))
+	destination := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, strings.Repeat("x", 65536)) }),
+	)
 	defer destination.Close()
 	cert, key := testCertificate(t)
 	user := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", Name: "test", IsActive: true, Kind: "vless"}
 	spec := bridgeSpecForAntiCensorTest()
 	spec.SplitRouting = BoolPtr(false)
 	spec.LegacyPublicEnabled = BoolPtr(false)
-	spec.PrimaryXHTTP = &PrimaryXHTTPIngress{Host: "127.0.0.1", BackendPort: freePort(t), PublicXHTTPTLSSpec: PublicXHTTPTLSSpec{Port: 443, ServerName: "example.com", Path: "/primary"}}
+	spec.PrimaryXHTTP = &PrimaryXHTTPIngress{
+		Host:               "127.0.0.1",
+		BackendPort:        freePort(t),
+		PublicXHTTPTLSSpec: PublicXHTTPTLSSpec{Port: 443, ServerName: "example.com", Path: "/primary"},
+	}
 	spec.GatewayVLESSPort = freePort(t)
 	spec.Stats = &StatsSpec{APIListen: net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t)))}
 	spec.Database = &DatabaseSpec{}
@@ -50,7 +56,21 @@ func TestExperimentalGatewayTLSAuthAccountingAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = main.Close() }()
-	gatewaySpec := &ExperimentalTransportSpec{BackendPort: spec.GatewayVLESSPort, Profile: ExperimentalProfile{Host: "127.0.0.1", StatusPort: freePort(t), Endpoint: PublicXHTTPTLSSpec{Port: freePort(t), ServerName: "example.com", CertificateFile: cert, KeyFile: key, Path: "/experiment", Mode: "stream-up"}}}
+	gatewaySpec := &ExperimentalTransportSpec{
+		BackendPort: spec.GatewayVLESSPort,
+		Profile: ExperimentalProfile{
+			Host:       "127.0.0.1",
+			StatusPort: freePort(t),
+			Endpoint: PublicXHTTPTLSSpec{
+				Port:            freePort(t),
+				ServerName:      "example.com",
+				CertificateFile: cert,
+				KeyFile:         key,
+				Path:            "/experiment",
+				Mode:            "stream-up",
+			},
+		},
+	}
 	raw, err := BuildExperimentalGateway(gatewaySpec)
 	if err != nil {
 		t.Fatal(err)

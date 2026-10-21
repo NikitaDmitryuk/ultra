@@ -25,17 +25,10 @@ function bindConfigControls(user) {
   const path = "/api/users/" + encodeURIComponent(user.uuid);
   button("rename-config", () => editConfigName(user));
   button("export-config", () => exportConfig(user));
-  button("disable-config", () =>
-    confirm(
-      "Отключить конфиг?",
-      "Устройства с этим ключом перестанут подключаться. История останется.",
-      "Отключить",
-      async () => {
-        await api(path, "DELETE");
-        await configDetail({ ...user, is_active: false });
-      },
-    ),
-  );
+  button("disable-config", async () => {
+    await api(path, "DELETE");
+    await configDetail({ ...user, is_active: false });
+  });
   button("enable-config", async () => {
     await api(path + "/enable", "POST");
     await configDetail({ ...user, is_active: true });

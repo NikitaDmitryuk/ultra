@@ -1,0 +1,25 @@
+---
+- name: Prove abandoned upgrade workers are gone on every frozen host
+  hosts: all:!localhost
+  gather_facts: false
+  any_errors_fatal: true
+  strategy: linear
+  tasks:
+    - name: Census processes without changing services or topology
+      ultra_upgrade_worker_drain:
+        old_id: "{{ ultra_forward_old_id }}"
+        new_id: "{{ ultra_lifecycle_id }}"
+        local_controller: "{{ inventory_hostname == 'bridge' }}"
+      become: true
+- name: Confirm the entire frozen fleet completed the census
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Record verified drain under the old lease
+      ansible.builtin.copy:
+        content: "{{ {'verified': true, 'old_id': ultra_forward_old_id, 'new_id': ultra_lifecycle_id} | to_json(preprocess_unsafe=False) }}"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false

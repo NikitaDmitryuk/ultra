@@ -23,13 +23,16 @@ func (b *Bot) validateClosedGroup(ctx context.Context, id int64) (string, error)
 		Title    string `json:"title"`
 		Username string `json:"username"`
 	}
-	if id >= 0 || b.telegramJSON(ctx, "getChat", map[string]any{"chat_id": id}, &chat) != nil || (chat.Type != "group" && chat.Type != "supergroup") || chat.Username != "" {
+	if id >= 0 || b.telegramJSON(ctx, "getChat", map[string]any{"chat_id": id}, &chat) != nil ||
+		(chat.Type != "group" && chat.Type != "supergroup") ||
+		chat.Username != "" {
 		return "", errors.New("closed group unavailable")
 	}
 	var member struct {
 		Status string `json:"status"`
 	}
-	if b.telegramJSON(ctx, "getChatMember", map[string]any{"chat_id": id, "user_id": b.telegramSelf().ID}, &member) != nil || member.Status != "administrator" {
+	if b.telegramJSON(ctx, "getChatMember", map[string]any{"chat_id": id, "user_id": b.telegramSelf().ID}, &member) != nil ||
+		member.Status != "administrator" {
 		return "", errors.New("bot administrator required")
 	}
 	return chat.Title, nil
@@ -37,7 +40,12 @@ func (b *Bot) validateClosedGroup(ctx context.Context, id int64) (string, error)
 func (b *Bot) handleGroupShared(ctx context.Context, msg *tgbotapi.Message, shared sharedGroup) {
 	allowed, e := b.adminRepo.IsAdmin(ctx, msg.From.ID)
 	if e != nil {
-		_ = b.telegramJSON(ctx, "sendMessage", map[string]any{"chat_id": msg.Chat.ID, "text": "Сервис временно недоступен. Попробуйте ещё раз."}, nil)
+		_ = b.telegramJSON(
+			ctx,
+			"sendMessage",
+			map[string]any{"chat_id": msg.Chat.ID, "text": "Сервис временно недоступен. Попробуйте ещё раз."},
+			nil,
+		)
 		return
 	}
 	if !allowed {
@@ -67,7 +75,23 @@ func (b *Bot) handleGroupShared(ctx context.Context, msg *tgbotapi.Message, shar
 	if !ok || current.ID != p.ID {
 		return
 	}
-	_ = b.telegramJSON(ctx, "sendMessage", map[string]any{"chat_id": msg.Chat.ID, "text": fmt.Sprintf("Разрешить регистрацию участникам группы «%s»? Уже выданный VPN-доступ сохранится, в том числе после выхода из группы.", title), "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "Подключить эту группу", "callback_data": fmt.Sprintf("group_confirm:%d", p.ID)}}}}}, nil)
+	_ = b.telegramJSON(
+		ctx,
+		"sendMessage",
+		map[string]any{
+			"chat_id": msg.Chat.ID,
+			"text": fmt.Sprintf(
+				"Разрешить регистрацию участникам группы «%s»? Уже выданный VPN-доступ сохранится, в том числе после выхода из группы.",
+				title,
+			),
+			"reply_markup": map[string]any{
+				"inline_keyboard": [][]any{
+					{map[string]any{"text": "Подключить эту группу", "callback_data": fmt.Sprintf("group_confirm:%d", p.ID)}},
+				},
+			},
+		},
+		nil,
+	)
 }
 func (b *Bot) confirmGroupSelection(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	id, e := strconv.ParseInt(strings.TrimPrefix(cb.Data, "group_confirm:"), 10, 32)
@@ -94,7 +118,13 @@ func (b *Bot) confirmGroupSelection(ctx context.Context, cb *tgbotapi.CallbackQu
 		return
 	}
 	var result db.VPNGroup
-	_, e = b.relayJSON(c, "PUT", "/v1/enrollment/group", map[string]any{"chat_id": p.Target, "title": title, "enabled": true, "actor": cb.From.ID}, &result)
+	_, e = b.relayJSON(
+		c,
+		"PUT",
+		"/v1/enrollment/group",
+		map[string]any{"chat_id": p.Target, "title": title, "enabled": true, "actor": cb.From.ID},
+		&result,
+	)
 	if e != nil {
 		b.reply(cb.From.ID, "Не удалось сохранить группу. Повторите выбор.")
 		return
@@ -103,5 +133,17 @@ func (b *Bot) confirmGroupSelection(ctx context.Context, cb *tgbotapi.CallbackQu
 }
 
 func groupPickerRights() map[string]bool {
-	return map[string]bool{"is_anonymous": false, "can_manage_chat": true, "can_delete_messages": false, "can_manage_video_chats": false, "can_restrict_members": false, "can_promote_members": false, "can_change_info": false, "can_invite_users": false, "can_post_stories": false, "can_edit_stories": false, "can_delete_stories": false}
+	return map[string]bool{
+		"is_anonymous":           false,
+		"can_manage_chat":        true,
+		"can_delete_messages":    false,
+		"can_manage_video_chats": false,
+		"can_restrict_members":   false,
+		"can_promote_members":    false,
+		"can_change_info":        false,
+		"can_invite_users":       false,
+		"can_post_stories":       false,
+		"can_edit_stories":       false,
+		"can_delete_stories":     false,
+	}
 }

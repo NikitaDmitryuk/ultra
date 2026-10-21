@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type retiredOperatorObservation struct {
@@ -19,15 +20,19 @@ type retiredOperatorObservation struct {
 	WinnerReceiptSHA string `json:"winning_receipt_sha256"`
 }
 type operatorObservation struct {
-	operation      string
-	state          string
-	code           string
-	verified       bool
-	requestSHA     string
-	receiptSHA     string
-	version        string
-	manifestSHA    string
-	manifestSource string
+	operation           string
+	state               string
+	code                string
+	verified            bool
+	floorAbsent         bool
+	requestSHA          string
+	receiptSHA          string
+	version             string
+	manifestSHA         string
+	manifestSource      string
+	enforcementScope    string
+	enforcementVerified bool
+	inventorySHA        string
 }
 
 func readOperatorObservation(stage string) (operatorObservation, error) {
@@ -57,7 +62,9 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 		Code   string `json:"code"`
 		Hash   string `json:"request_sha256"`
 		Result struct {
-			Verified bool `json:"verified"`
+			Verified    bool           `json:"verified"`
+			FloorAbsent bool           `json:"controller_enforcement_floor_absent"`
+			Enforcement map[string]any `json:"controller_enforcement_proof"`
 		} `json:"result"`
 	}
 	var request struct {
@@ -66,7 +73,7 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 	if err := read("job.json", &job); err != nil {
 		return result, err
 	}
-	if job.Operation != "verify-release" && job.Operation != "verify-bootstrap-automation" {
+	if job.Operation != "verify-release" && job.Operation != "verify-bootstrap-automation" && job.Operation != "inspect-upgrade" {
 		return result, errors.New("operator_retention_observation_kind_invalid")
 	}
 	if err := read("receipt.json", &receipt); err != nil {
@@ -74,6 +81,43 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 	}
 	if err := read("request.json", &request); err != nil {
 		return result, err
+	}
+	if job.Operation == "inspect-upgrade" {
+		var exact map[string]json.RawMessage
+		if err := read("request.json", &exact); err != nil {
+			return result, err
+		}
+		lock, lockOK := request.Variables["ultra_lock_directory"].(string)
+		var inventory map[string]json.RawMessage
+		if operatorPrivate(stage, true) != nil || !strings.HasPrefix(filepath.Base(stage), "controller-preflight-") {
+			return result, errors.New("operator_retention_preflight_invalid")
+		}
+		if len(exact) != 2 || exact["inventory"] == nil || exact["variables"] == nil ||
+			json.Unmarshal(exact["inventory"], &inventory) != nil ||
+			inventory == nil {
+			return result, errors.New("operator_retention_preflight_invalid")
+		}
+		if (len(request.Variables) != 2 && len(request.Variables) != 3) || !lockOK || lock == "" ||
+			request.Variables["ultra_controller_enforcement_preflight_only"] != true {
+			return result, errors.New("operator_retention_preflight_invalid")
+		}
+		if len(request.Variables) == 3 {
+			spec, ok := request.Variables["ultra_controller_enforcement_spec"].(map[string]any)
+			scope, scopeOK := spec["scope_sha256"].(string)
+			if !ok || len(spec) != 6 || !scopeOK || !validEnforcementSHA(scope) ||
+				spec["operation_id"] != lifecycleID(filepath.Dir(stage)) ||
+				(spec["phase"] != "preflight" && spec["phase"] != "reserved" && spec["phase"] != "completion") {
+				return result, errors.New("operator_retention_preflight_invalid")
+			}
+			result.enforcementScope = scope
+			if len(receipt.Result.Enforcement) != 0 {
+				if validateEnforcementProof(receipt.Result.Enforcement, spec) != nil {
+					return result, errors.New("operator_retention_preflight_invalid")
+				}
+				result.enforcementVerified = true
+			}
+		}
+		result.inventorySHA = digestSHA256(exact["inventory"])
 	}
 	hash, err := sourceSHA(filepath.Join(stage, "request.json"))
 	if err != nil || job.Schema != 1 || job.Hash != hash || receipt.Hash != hash {
@@ -83,7 +127,13 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 	if err != nil {
 		return result, err
 	}
-	result = operatorObservation{operation: job.Operation, state: receipt.State, code: receipt.Code, verified: receipt.Result.Verified, requestSHA: hash, receiptSHA: receiptHash}
+	result.operation = job.Operation
+	result.state = receipt.State
+	result.code = receipt.Code
+	result.verified = receipt.Result.Verified
+	result.floorAbsent = receipt.Result.FloorAbsent
+	result.requestSHA = hash
+	result.receiptSHA = receiptHash
 	if job.Operation == "verify-release" {
 		result.version, _ = request.Variables["ultra_release_version"].(string)
 		result.manifestSHA, _ = request.Variables["ultra_release_manifest_sha256"].(string)
@@ -94,7 +144,19 @@ func readOperatorObservation(stage string) (operatorObservation, error) {
 	return result, nil
 }
 func sameOperatorObservationRelease(left, right operatorObservation) bool {
-	return left.operation == right.operation && left.version != "" && left.version == right.version && left.manifestSHA == right.manifestSHA && left.manifestSource == right.manifestSource
+	if left.operation == "inspect-upgrade" {
+		if right.operation != left.operation {
+			return false
+		}
+		if left.requestSHA == right.requestSHA && right.floorAbsent {
+			return true
+		}
+		return right.enforcementVerified && left.enforcementScope != "" &&
+			left.enforcementScope == right.enforcementScope && left.inventorySHA == right.inventorySHA
+	}
+	return left.operation == right.operation && left.version != "" && left.version == right.version &&
+		left.manifestSHA == right.manifestSHA &&
+		left.manifestSource == right.manifestSource
 }
 func retiredOperatorObservationValid(directory, stage string) bool {
 	path := filepath.Join(stage, "observation.retired.json")
@@ -106,7 +168,8 @@ func retiredOperatorObservationValid(directory, stage string) bool {
 		return false
 	}
 	var proof retiredOperatorObservation
-	if json.Unmarshal(raw, &proof) != nil || proof.Schema != 1 || proof.OperationID != lifecycleID(directory) || proof.Stage != stage || proof.Winner == stage {
+	if json.Unmarshal(raw, &proof) != nil || proof.Schema != 1 || proof.OperationID != lifecycleID(directory) || proof.Stage != stage ||
+		proof.Winner == stage {
 		return false
 	}
 	relative, err := filepath.Rel(directory, proof.Winner)
@@ -114,16 +177,25 @@ func retiredOperatorObservationValid(directory, stage string) bool {
 		return false
 	}
 	original, err := readOperatorObservation(stage)
-	if err != nil || original.state != "running" || original.code != "interrupted" || original.requestSHA != proof.RequestSHA || original.receiptSHA != proof.ReceiptSHA {
+	if err != nil || original.state != "running" || original.code != "interrupted" || original.requestSHA != proof.RequestSHA ||
+		original.receiptSHA != proof.ReceiptSHA {
+		return false
+	}
+	if original.operation == "inspect-upgrade" &&
+		(filepath.Dir(stage) != directory || filepath.Dir(proof.Winner) != directory || operatorPrivate(directory, true) != nil) {
 		return false
 	}
 	winner, err := readOperatorObservation(proof.Winner)
-	return err == nil && winner.state == "succeeded" && winner.verified && winner.requestSHA == proof.WinnerRequestSHA && winner.receiptSHA == proof.WinnerReceiptSHA && sameOperatorObservationRelease(original, winner)
+	return err == nil && winner.state == "succeeded" && winner.verified && winner.requestSHA == proof.WinnerRequestSHA &&
+		winner.receiptSHA == proof.WinnerReceiptSHA &&
+		sameOperatorObservationRelease(original, winner)
 }
 
 // controller.py writes interrupted only after killing and waiting for the entire
 // child process group. A later successful same-release observation supersedes
-// that cancelled check; mutators and unauthenticated running jobs are never retired.
+// that cancelled check. Controller preflight additionally requires the exact
+// same inventory and lock request, with an explicit absent-floor acknowledgement.
+// Mutators and unauthenticated running jobs are never retired.
 func retireInterruptedOperatorObservations(directory, kind string, manifest *automationRelease, manifestSHA string) error {
 	expectedOperation := "verify-release"
 	if kind == "bootstrap" {
@@ -134,7 +206,8 @@ func retireInterruptedOperatorObservations(directory, kind string, manifest *aut
 		if walkErr != nil {
 			return walkErr
 		}
-		if entry.IsDir() && (entry.Name() == "bundle" || entry.Name() == "recovery-bundle" || entry.Name() == "ansible-tmp" || entry.Name() == "__pycache__") {
+		if entry.IsDir() &&
+			(entry.Name() == "bundle" || entry.Name() == "recovery-bundle" || entry.Name() == "ansible-tmp" || entry.Name() == "__pycache__") {
 			return filepath.SkipDir
 		}
 		if entry.Name() != "job.json" {
@@ -145,12 +218,15 @@ func retireInterruptedOperatorObservations(directory, kind string, manifest *aut
 			return nil
 		}
 		if observation.operation != expectedOperation || observation.version != manifest.Version {
+			if kind != "upgrade" || observation.operation != "inspect-upgrade" || filepath.Dir(filepath.Dir(path)) != directory ||
+				operatorPrivate(directory, true) != nil {
+				return nil
+			}
+		}
+		if observation.operation == "verify-release" && observation.manifestSHA != manifestSHA {
 			return nil
 		}
-		if expectedOperation == "verify-release" && observation.manifestSHA != manifestSHA {
-			return nil
-		}
-		if expectedOperation == "verify-bootstrap-automation" {
+		if observation.operation == "verify-bootstrap-automation" {
 			hash, err := sourceSHA(observation.manifestSource)
 			if err != nil || hash != manifestSHA {
 				return nil
@@ -173,7 +249,16 @@ func retireInterruptedOperatorObservations(directory, kind string, manifest *aut
 			if winner.state != "succeeded" || !winner.verified || !sameOperatorObservationRelease(original, winner) {
 				continue
 			}
-			proof := retiredOperatorObservation{1, lifecycleID(directory), stage, original.requestSHA, original.receiptSHA, winnerStage, winner.requestSHA, winner.receiptSHA}
+			proof := retiredOperatorObservation{
+				1,
+				lifecycleID(directory),
+				stage,
+				original.requestSHA,
+				original.receiptSHA,
+				winnerStage,
+				winner.requestSHA,
+				winner.receiptSHA,
+			}
 			raw, _ := json.Marshal(proof)
 			if err := writeUpgradeInput(filepath.Join(stage, "observation.retired.json"), raw); err != nil {
 				return err

@@ -21,7 +21,7 @@ import (
 // Ingress changes reuse the existing SSH transport and preserve the remote application state.
 func runIngressCommand(args []string) {
 	flags := flag.NewFlagSet("ultra-install ingress", flag.ExitOnError)
-	action := flags.String("action", "status", "stage, activate, experiment, rollback, notice or status")
+	action := flags.String("action", "status", "stage, activate, retire-experiment, rollback, notice or status")
 	planFile := flags.String("plan", "", "public ingress plan JSON")
 	canonical := flags.String("config", "", "canonical deployment configuration, exclusive with manual targets/plan")
 	host := flags.String("host", "", "bridge SSH host")
@@ -37,6 +37,9 @@ func runIngressCommand(args []string) {
 		exitOnErr("configured Ansible ingress", applyConfiguredIngress(*canonical, *action))
 		return
 	}
+	if *action == "retire-experiment" {
+		exitOnErr("ingress config", fmt.Errorf("retire-experiment requires canonical install.config"))
+	}
 	if *host == "" || *planFile == "" || *identity == "" || !filepath.IsAbs(*knownHosts) {
 		exitOnErr("ingress inputs", fmt.Errorf("host, plan, identity and absolute verified known-hosts required"))
 	}
@@ -44,7 +47,7 @@ func runIngressCommand(args []string) {
 		exitOnErr("ingress binary", fmt.Errorf("install a compatible pinned release with upgrade before changing ingress"))
 	}
 	switch *action {
-	case "stage", "activate", "experiment", "rollback", "status", "notice":
+	case "stage", "activate", "retire-experiment", "rollback", "status", "notice":
 	default:
 		exitOnErr("ingress action", fmt.Errorf("invalid ingress action"))
 	}
@@ -55,7 +58,10 @@ func runIngressCommand(args []string) {
 	}
 	var settings map[string]any
 	exitOnErr("ingress plan", json.Unmarshal(raw, &settings))
-	p := &installplan.InstallPlan{SSH: installplan.SSHConfig{User: *user, Identity: *identity}, Bridge: installplan.BridgeConfig{SSHHost: *host, Address: *host, RemoteDir: "/etc/ultra-relay"}}
+	p := &installplan.InstallPlan{
+		SSH:    installplan.SSHConfig{User: *user, Identity: *identity},
+		Bridge: installplan.BridgeConfig{SSHHost: *host, Address: *host, RemoteDir: "/etc/ultra-relay"},
+	}
 	stateRoot, err := bootstrapStateRoot()
 	exitOnErr("ingress state", err)
 	exitOnErr("private ingress state", ensurePrivateBootstrapDirectory(stateRoot))
@@ -106,7 +112,19 @@ func runIngressCommand(args []string) {
 	}
 	domain, _ := settings["domain"].(string)
 	email, _ := settings["email"].(string)
-	variables := map[string]any{"ultra_lock_directory": lockDirectory, "ultra_ingress": settings, "ultra_ingress_action": *action, "ultra_ingress_transaction": "/var/lib/ultra-ingress/ansible-" + hex.EncodeToString(sum[:]) + "-" + filepath.Base(directory), "ultra_ingress_domains": uniqueIngressDomains(domain, botDomain), "ultra_ingress_email": email, "ultra_bot_domain": botDomain, "ultra_bot_port": botPort, "ultra_subscription_enabled": false, "ultra_subscription_domain": botDomain, "ultra_bridge_ipv4": "127.0.0.1"}
+	variables := map[string]any{
+		"ultra_lock_directory":       lockDirectory,
+		"ultra_ingress":              settings,
+		"ultra_ingress_action":       *action,
+		"ultra_ingress_transaction":  "/var/lib/ultra-ingress/ansible-" + hex.EncodeToString(sum[:]) + "-" + filepath.Base(directory),
+		"ultra_ingress_domains":      uniqueIngressDomains(domain, botDomain),
+		"ultra_ingress_email":        email,
+		"ultra_bot_domain":           botDomain,
+		"ultra_bot_port":             botPort,
+		"ultra_subscription_enabled": false,
+		"ultra_subscription_domain":  botDomain,
+		"ultra_bridge_ipv4":          "127.0.0.1",
+	}
 	_, err = deployansible.RunLocal(ctx, "ingress", inventory, variables, filepath.Join(directory, "apply"), python, executable)
 	exitOnErr("Ansible ingress "+*action, err)
 	if *action != "status" {

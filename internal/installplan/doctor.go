@@ -32,7 +32,7 @@ func Doctor(ctx context.Context, p *InstallPlan, opts DoctorOptions) DoctorRepor
 	}
 	checkSSH := opts.CheckSSH
 	if checkSSH != nil {
-		if !checkSSH(p.SSH.User, p.Bridge.SSHHost, p.SSH.Identity) {
+		if !checkSSH(p.SSH.User, p.Bridge.SSHHost, p.BridgeSSHIdentity()) {
 			issues = append(
 				issues,
 				Issue{
@@ -44,7 +44,7 @@ func Doctor(ctx context.Context, p *InstallPlan, opts DoctorOptions) DoctorRepor
 			)
 		}
 		for _, ex := range p.Exits {
-			if !checkSSH(p.SSH.User, ex.SSHHost, p.SSH.Identity) {
+			if !checkSSH(p.SSH.User, ex.SSHHost, p.ExitSSHIdentity(ex)) {
 				issues = append(
 					issues,
 					Issue{
@@ -62,7 +62,17 @@ func Doctor(ctx context.Context, p *InstallPlan, opts DoctorOptions) DoctorRepor
 		}
 	}
 	if p.Bot.Enabled {
-		if err := checkBotToken(p.SecretsEnvFile(), opts.EnvRoot); err != nil {
+		var tokenErr error
+		if p.SecretResolver != nil {
+			values, err := ReadPlanSecrets(p)
+			tokenErr = err
+			if err == nil && strings.TrimSpace(values["TELEGRAM_BOT_TOKEN"]) == "" {
+				tokenErr = errors.New("installed_runtime_bot_token_missing")
+			}
+		} else {
+			tokenErr = checkBotToken(p.SecretsEnvFile(), opts.EnvRoot)
+		}
+		if err := tokenErr; err != nil {
 			issues = append(issues, Issue{Severity: SeverityError, Code: CodeMissingBotToken, Node: "bot", Message: err.Error()})
 		}
 		if opts.LookupHost != nil {

@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import uuid
 
 QUERY = """BEGIN READ ONLY;
@@ -116,7 +117,12 @@ def probe(database, expected=''):
     config = json.loads(trusted_read('/etc/ultra-recovery/reconcile.json', 1048576))
     if not re.fullmatch(r'[A-Za-z0-9_-]+', database) or config['database'] != database:
         raise ValueError('adoption_topology_database_conflict')
-    result = subprocess.run(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database, '-c', QUERY], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8)
+    sys.path.insert(0, '/opt/ultra-recovery')
+    import db_connection
+    parsed = db_connection.dsn_from_runtime(database)
+    with db_connection.pgpass('/var/lib/ultra-recovery', parsed) as environment:
+        result = subprocess.run(db_connection.connection_args(parsed, database, 'psql') + ['-XAtq', '-v', 'ON_ERROR_STOP=1', '-c', QUERY], env=environment,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8)
     if result.returncode or len(result.stdout) > 1048576:
         raise ValueError('adoption_topology_unavailable')
     value = topology(config, json.loads(result.stdout))

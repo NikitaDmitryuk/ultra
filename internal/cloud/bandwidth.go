@@ -4,11 +4,12 @@ import (
 	"context"
 	"math"
 	"net/url"
-
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/quota"
 )
 
-// AccountBandwidth is the accrued account-wide pool, in decimal bytes.
+// AccountBandwidth is the confirmed accrued account-wide pool, in bytes.
 type AccountBandwidth struct {
 	Accrued   int64
 	Used      int64
@@ -20,9 +21,9 @@ func (v *Vultr) AccountBandwidth(ctx context.Context) (AccountBandwidth, error) 
 		Bandwidth struct {
 			Current *struct {
 				Out       *float64 `json:"gb_out"`
-				Instance  *float64 `json:"instance_bandwidth_credits"`
-				Free      *float64 `json:"free_bandwidth_credits"`
-				Purchased *float64 `json:"purchased_bandwidth_credits"`
+				Instance  *int64   `json:"instance_bandwidth_credits"`
+				Free      *int64   `json:"free_bandwidth_credits"`
+				Purchased *int64   `json:"purchased_bandwidth_credits"`
 			} `json:"current_month_to_date"`
 		} `json:"bandwidth"`
 	}
@@ -30,16 +31,24 @@ func (v *Vultr) AccountBandwidth(ctx context.Context) (AccountBandwidth, error) 
 		return AccountBandwidth{}, e
 	}
 	c := response.Bandwidth.Current
-	if c == nil || c.Out == nil || c.Instance == nil || c.Free == nil || c.Purchased == nil || *c.Out < 0 || *c.Instance < 0 || *c.Free < 0 || *c.Purchased < 0 {
+	if c == nil || c.Out == nil || *c.Out < 0 {
 		return AccountBandwidth{}, ErrUnavailable
 	}
-	credits := (*c.Instance + *c.Free + *c.Purchased) * 1e9
 	used := *c.Out * 1e9
-	amount := credits*0.8 - used
-	if math.IsNaN(credits) || math.IsInf(credits, 0) || credits >= float64(math.MaxInt64) || math.IsNaN(used) || math.IsInf(used, 0) || used >= float64(math.MaxInt64) {
+	if math.IsNaN(used) || math.IsInf(used, 0) || used >= float64(math.MaxInt64) {
 		return AccountBandwidth{}, ErrUnavailable
 	}
-	return AccountBandwidth{Accrued: int64(credits), Used: int64(used), Remaining: max(0, int64(amount))}, nil
+	// Current credits already include hourly instance accrual and purchased
+	// bandwidth. Inventory and projected credits cannot establish today's pool.
+	var capacity int64
+	for _, credit := range []*int64{c.Instance, c.Free, c.Purchased} {
+		if credit == nil || *credit < 0 || *credit > (math.MaxInt64-capacity)/1_000_000_000 {
+			return AccountBandwidth{}, ErrUnavailable
+		}
+		capacity += *credit * 1_000_000_000
+	}
+	safe := quota.SafeBudget(capacity)
+	return AccountBandwidth{Accrued: capacity, Used: int64(used), Remaining: max(0, safe-int64(used))}, nil
 }
 
 // AccountRemaining retains the read-only API used by account diagnostics.

@@ -4,34 +4,12 @@
     that:
       - ultra_postgres.name is match('^[a-z_][a-z0-9_]*$')
       - ultra_postgres.user is match('^[a-z_][a-z0-9_]*$')
-      - ultra_postgres.repl_user is match('^[a-z_][a-z0-9_]*$')
   no_log: true
-- name: Read PostgreSQL host distribution
-  ansible.builtin.setup:
-    gather_subset: [distribution]
-- name: Require supported primary platform
-  ansible.builtin.assert:
-    that:
-      - ansible_facts.distribution in ['Ubuntu', 'Debian']
-- name: Install PostgreSQL repository certificate dependency
-  ansible.builtin.apt:
-    name: ca-certificates
-    state: present
-    update_cache: true
-    cache_valid_time: 3600
-- name: Install PostgreSQL repository signing key
-  ansible.builtin.get_url:
-    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
-    dest: /usr/share/keyrings/ultra-postgresql.asc
-    mode: "0644"
-- name: Configure official PostgreSQL repository
-  ansible.builtin.apt_repository:
-    repo: "deb [signed-by=/usr/share/keyrings/ultra-postgresql.asc] https://apt.postgresql.org/pub/repos/apt {{ ansible_facts.distribution_release }}-pgdg main"
-    filename: ultra-postgresql
-    state: present
+- name: Configure PostgreSQL package repository
+  ansible.builtin.import_tasks: repository.yml
 - name: Install PostgreSQL 16
   ansible.builtin.apt:
-    name: [postgresql-16, postgresql-contrib-16]
+    name: postgresql-16
     state: present
     update_cache: true
     cache_valid_time: 3600
@@ -43,39 +21,129 @@
 - name: Configure bounded primary WAL and UTC
   ansible.builtin.lineinfile:
     path: /etc/postgresql/16/main/postgresql.conf
-    regexp: '^#?\s*{{ item.key }}\s*='
+    regexp: "^#?\\s*{{ item.key }}\\s*="
     line: "{{ item.key }} = {{ item.value }}"
   loop:
-    - {key: timezone, value: "'UTC'"}
-    - {key: log_timezone, value: "'UTC'"}
-    - {key: wal_level, value: replica}
-    - {key: max_wal_senders, value: "10"}
-    - {key: max_replication_slots, value: "10"}
-    - {key: max_slot_wal_keep_size, value: "'1GB'"}
-    - {key: listen_addresses, value: "'127.0.0.1'"}
+    - { key: timezone, value: "'UTC'" }
+    - { key: log_timezone, value: "'UTC'" }
+    - { key: listen_addresses, value: "'127.0.0.1'" }
+    - { key: wal_level, value: replica }
+    - { key: max_wal_senders, value: '4' }
+    - { key: max_replication_slots, value: '2' }
+    - { key: max_slot_wal_keep_size, value: "'1GB'" }
   notify: Restart PostgreSQL
-- name: Install authenticated application and replication access
+- name: Install authenticated application application access
   ansible.builtin.blockinfile:
     path: /etc/postgresql/16/main/pg_hba.conf
     marker: "# {mark} ultra-managed-loopback"
     block: |
       host {{ ultra_postgres.name }} {{ ultra_postgres.user }} 127.0.0.1/32 scram-sha-256
-      host replication {{ ultra_postgres.repl_user }} 127.0.0.1/32 scram-sha-256
   notify: Restart PostgreSQL
-- name: Provision missing database roles without rotating existing credentials
+- name: Provision missing database roles using the saved application credential
   ansible.builtin.command:
     argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only]
     stdin: |
+      SET password_encryption = 'scram-sha-256';
       SELECT format('CREATE ROLE %I LOGIN PASSWORD %L',
         '{{ ultra_postgres.user }}', '{{ ultra_postgres.password | replace("'", "''") }}')
         WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ ultra_postgres.user }}') \gexec
-      SELECT format('CREATE ROLE %I REPLICATION LOGIN PASSWORD %L',
-        '{{ ultra_postgres.repl_user }}', '{{ ultra_postgres.repl_password | replace("'", "''") }}')
-        WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ ultra_postgres.repl_user }}') \gexec
       SELECT format('CREATE DATABASE %I OWNER %I', '{{ ultra_postgres.name }}', '{{ ultra_postgres.user }}')
         WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '{{ ultra_postgres.name }}') \gexec
   register: postgres_create
   changed_when: "'CREATE' in postgres_create.stdout"
   no_log: true
+- name: Authorize cluster identity observation in the application database
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --dbname, "{{ ultra_postgres.name }}"]
+    stdin: |
+      SELECT format('GRANT EXECUTE ON FUNCTION pg_control_system() TO %I', '{{ ultra_postgres.user }}') \gexec
+  changed_when: false
+  no_log: true
+- name: Configure bridge physical replication
+  ansible.builtin.import_tasks: replication.yml
+  when: ultra_postgres.replication_password is defined
 - name: Apply PostgreSQL settings
   ansible.builtin.meta: flush_handlers
+- name: Check PostgreSQL loopback readiness before verifying application credentials
+  ansible.builtin.command:
+    argv: [pg_isready, -h, 127.0.0.1, -p, "5432"]
+  register: postgres_application_server_ready
+  changed_when: false
+  no_log: true
+- name: Require PostgreSQL loopback readiness
+  ansible.builtin.assert:
+    that:
+      - postgres_application_server_ready.rc == 0
+    fail_msg: PostgreSQL is unavailable on the configured database host.
+- name: Verify application login before bridge activation
+  ansible.builtin.command:
+    argv:
+      - /usr/lib/postgresql/16/bin/psql
+      - --no-psqlrc
+      - --no-password
+      - --host
+      - 127.0.0.1
+      - --username
+      - "{{ ultra_postgres.user }}"
+      - --dbname
+      - "{{ ultra_postgres.name }}"
+      - --tuples-only
+      - --command
+      - SELECT 1
+  environment:
+    PGPASSWORD: "{{ ultra_postgres.password }}"
+    PGCONNECT_TIMEOUT: "5"
+  changed_when: false
+  failed_when: false
+  register: postgres_application_login
+  no_log: true
+- name: Reconcile the existing application credential when explicitly trusted
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only]
+    stdin: |
+      SET password_encryption = 'scram-sha-256';
+      SELECT format('ALTER ROLE %I LOGIN PASSWORD %L',
+        '{{ ultra_postgres.user }}', '{{ ultra_postgres.password | replace("'", "''") }}')
+        WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ ultra_postgres.user }}') \gexec
+  register: postgres_application_credential_repair
+  changed_when: true
+  when:
+    - postgres_application_login.rc != 0
+    - ultra_postgres.reconcile_app_password | default(false) | bool
+  no_log: true
+- name: Verify reconciled application login before bridge activation
+  ansible.builtin.command:
+    argv:
+      - /usr/lib/postgresql/16/bin/psql
+      - --no-psqlrc
+      - --no-password
+      - --host
+      - 127.0.0.1
+      - --username
+      - "{{ ultra_postgres.user }}"
+      - --dbname
+      - "{{ ultra_postgres.name }}"
+      - --tuples-only
+      - --command
+      - SELECT 1
+  environment:
+    PGPASSWORD: "{{ ultra_postgres.password }}"
+    PGCONNECT_TIMEOUT: "5"
+  register: postgres_application_login_repaired
+  changed_when: false
+  failed_when: false
+  when:
+    - postgres_application_login.rc != 0
+    - ultra_postgres.reconcile_app_password | default(false) | bool
+  no_log: true
+- name: Require verified application database login
+  ansible.builtin.assert:
+    that:
+      - >-
+        postgres_application_login.rc == 0 or
+        (ultra_postgres.reconcile_app_password | default(false) | bool and
+        postgres_application_login_repaired.rc | default(1) == 0)
+    fail_msg: >-
+      Application login to the existing database failed. Supply DB_CREDENTIALS_FILE
+      with the saved bridge spec, or explicitly set DB_REPAIR_APP_CREDENTIALS=true
+      to reconcile this application's role.

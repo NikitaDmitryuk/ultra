@@ -1,0 +1,66 @@
+---
+- name: Wait for standby recovery and active streaming receiver
+  ansible.builtin.command:
+    argv:
+      - "runuser"
+      - "-u"
+      - "postgres"
+      - "--"
+      - "/usr/lib/postgresql/16/bin/psql"
+      - "--no-psqlrc"
+      - "--no-password"
+      - "--host"
+      - "/run/ultra-postgres-replica"
+      - "--port"
+      - "5433"
+      - "--dbname"
+      - "postgres"
+      - "--tuples-only"
+      - "--no-align"
+      - "--command"
+      - "SELECT pg_is_in_recovery() AND EXISTS (SELECT 1 FROM pg_stat_wal_receiver WHERE status = 'streaming')"
+  register: postgres_replica_streaming
+  changed_when: false
+  until: postgres_replica_streaming.rc == 0 and postgres_replica_streaming.stdout | trim == 't'
+  retries: 30
+  delay: 2
+- name: Emit durable primary WAL marker for replay verification
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only, --no-align]
+    stdin: |
+      CHECKPOINT;
+      SELECT pg_current_wal_flush_lsn();
+  delegate_to: database
+  register: postgres_replica_marker_lsn
+  changed_when: false
+- name: Require valid WAL marker
+  ansible.builtin.assert:
+    that: postgres_replica_marker_lsn.stdout_lines[-1] is match('^[0-9A-F]+/[0-9A-F]+$')
+- name: Require replay of primary WAL marker within bounded deadline
+  ansible.builtin.command:
+    argv:
+      - "runuser"
+      - "-u"
+      - "postgres"
+      - "--"
+      - "/usr/lib/postgresql/16/bin/psql"
+      - "--no-psqlrc"
+      - "--no-password"
+      - "--host"
+      - "/run/ultra-postgres-replica"
+      - "--port"
+      - "5433"
+      - "--dbname"
+      - "postgres"
+      - "--tuples-only"
+      - "--no-align"
+      - "--command"
+      - >-
+        SELECT pg_is_in_recovery()
+        AND pg_last_wal_replay_lsn() >= '{{ postgres_replica_marker_lsn.stdout_lines[-1] }}'::pg_lsn
+        AND EXISTS (SELECT 1 FROM pg_stat_wal_receiver WHERE status = 'streaming')
+  register: postgres_replica_replayed
+  changed_when: false
+  until: postgres_replica_replayed.rc == 0 and postgres_replica_replayed.stdout | trim == 't'
+  retries: 30
+  delay: 2

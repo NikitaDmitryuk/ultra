@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/db"
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionkey"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -235,8 +237,14 @@ func (s *Server) memberSubscription(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
+	if s.Members.Subscriptions == nil || !s.Members.Subscriptions.Ready() {
+		s.logMemberSubscriptionFailure(subscriptionFailureReason(subscriptionkey.ErrUnavailable))
+		http.Error(w, "operation unavailable; retry", http.StatusServiceUnavailable)
+		return
+	}
 	m, e := s.Members.Repo.Get(r.Context(), id)
 	if e != nil {
+		s.logMemberSubscriptionFailure(subscriptionFailureReason(e))
 		memberJSON(w, nil, e)
 		return
 	}
@@ -244,8 +252,31 @@ func (s *Server) memberSubscription(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "access unavailable", http.StatusConflict)
 		return
 	}
-	token, e := s.Members.Subscriptions.GetOrCreate(r.Context(), m.UUID)
-	memberJSON(w, map[string]string{"token": token}, e)
+	token, rotated, e := s.Members.Subscriptions.GetOrReissue(r.Context(), m.UUID)
+	if e != nil {
+		s.logMemberSubscriptionFailure(subscriptionFailureReason(e))
+	}
+	memberJSON(w, map[string]any{"token": token, "rotated": rotated}, e)
+}
+
+// subscriptionFailureReason returns a fixed, non-sensitive category for logs.
+func subscriptionFailureReason(err error) string {
+	switch {
+	case errors.Is(err, subscriptionkey.ErrUnavailable):
+		return "key_unavailable"
+	case errors.Is(err, db.ErrLegacySubscription):
+		return "legacy_credential"
+	case errors.Is(err, pgx.ErrNoRows):
+		return "member_not_found_or_inactive"
+	default:
+		return "storage_or_issuance_failure"
+	}
+}
+
+func (s *Server) logMemberSubscriptionFailure(reason string) {
+	if s.log != nil {
+		s.log.Warn("member subscription issuance failed", slog.String("reason", reason))
+	}
 }
 
 func (s *Server) memberTraffic(w http.ResponseWriter, r *http.Request) {

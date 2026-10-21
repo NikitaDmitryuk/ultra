@@ -1,0 +1,18 @@
+---
+- name: Configure supported PostgreSQL client package repository
+  ansible.builtin.include_role:
+    name: postgres
+    tasks_from: repository
+- name: Install PostgreSQL 16 client without a database server
+  ansible.builtin.apt:
+    name: postgresql-client-16
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+- name: Verify selected PostgreSQL client versions before recovery configuration
+  ansible.builtin.command:
+    argv: ["{{ item }}", --version]
+  loop: [psql, pg_dump]
+  register: postgres_client_version
+  changed_when: false
+  failed_when: "postgres_client_version.stdout is not search('\\(PostgreSQL\\) 16\\.')"

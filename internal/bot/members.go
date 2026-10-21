@@ -35,7 +35,9 @@ func (b *Bot) relayJSON(ctx context.Context, method, path string, input, output 
 	}
 	req.Header.Set("Authorization", "Bearer "+b.adminAPIToken)
 	req.Header.Set("Content-Type", "application/json")
-	response, e := (&http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+	response, e := (&http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(
+		req,
+	)
 	if e != nil {
 		return 0, errors.New("relay unavailable")
 	}
@@ -149,7 +151,13 @@ func (b *Bot) handleMemberStart(ctx context.Context, msg *tgbotapi.Message, toke
 		}
 	}
 	var result db.Member
-	_, e := b.relayJSON(ctx, "POST", "/v1/members/enroll", map[string]any{"telegram_id": msg.From.ID, "name": tgDisplayName(msg.From), "source": source, "token": proof, "chat_id": chatID}, &result)
+	_, e := b.relayJSON(
+		ctx,
+		"POST",
+		"/v1/members/enroll",
+		map[string]any{"telegram_id": msg.From.ID, "name": tgDisplayName(msg.From), "source": source, "token": proof, "chat_id": chatID},
+		&result,
+	)
 	if e != nil {
 		b.reply(msg.Chat.ID, "Приглашение недоступно или сервис временно не отвечает. Попробуйте ещё раз.")
 		return
@@ -241,15 +249,18 @@ func (b *Bot) selfSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var result struct {
-		Token string `json:"token"`
+		Token   string `json:"token"`
+		Rotated bool   `json:"rotated"`
 	}
 	status, e := b.relayJSON(r.Context(), "POST", fmt.Sprintf("/v1/members/%d/subscription", u.ID), nil, &result)
 	if e != nil {
+		b.log.Warn("subscription issuance unavailable", "upstream_status", status)
 		memberHTTPError(w, status)
 		return
 	}
 	base, e := url.Parse(b.miniAppURL)
 	if e != nil || base.Scheme != "https" || base.Host == "" {
+		b.log.Warn("subscription issuance unavailable", "reason", "public_origin_invalid")
 		memberHTTPError(w, 503)
 		return
 	}
@@ -260,7 +271,7 @@ func (b *Bot) selfSubscription(w http.ResponseWriter, r *http.Request) {
 	subscription := base.String()
 	base.Path = "/happ"
 	base.Fragment = result.Token
-	jsonOK(w, map[string]string{"url": subscription, "import_url": base.String()})
+	jsonOK(w, map[string]any{"url": subscription, "import_url": base.String(), "rotated": result.Rotated})
 }
 func (b *Bot) selfExits(w http.ResponseWriter, r *http.Request) {
 	u, ok := b.selfAuth(w, r)
@@ -444,12 +455,22 @@ func (b *Bot) adminGroup(w http.ResponseWriter, r *http.Request) {
 		var chat struct {
 			InviteLink string `json:"invite_link"`
 		}
-		if b.telegramJSON(c, "getChat", map[string]any{"chat_id": group.ChatID}, &chat) == nil && strings.HasPrefix(chat.InviteLink, "https://t.me/") {
+		if b.telegramJSON(c, "getChat", map[string]any{"chat_id": group.ChatID}, &chat) == nil &&
+			strings.HasPrefix(chat.InviteLink, "https://t.me/") {
 			groupURL = chat.InviteLink
 		}
 		cancel()
 	}
-	jsonOK(w, map[string]any{"chat_id": group.ChatID, "title": group.Title, "enabled": group.Enabled, "group_url": groupURL, "url": "https://t.me/" + b.telegramSelf().UserName + "?start=vpn_g_" + group.Code})
+	jsonOK(
+		w,
+		map[string]any{
+			"chat_id":   group.ChatID,
+			"title":     group.Title,
+			"enabled":   group.Enabled,
+			"group_url": groupURL,
+			"url":       "https://t.me/" + b.telegramSelf().UserName + "?start=vpn_g_" + group.Code,
+		},
+	)
 }
 
 func (b *Bot) adminMemberTraffic(w http.ResponseWriter, r *http.Request) {

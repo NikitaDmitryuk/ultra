@@ -33,7 +33,8 @@ function page(self, responses) {
   const elements = new Map(),
     calls = [],
     copied = [],
-    opened = [];
+    opened = [],
+    timers = [];
   function el(id) {
     if (!elements.has(id))
       elements.set(id, {
@@ -45,6 +46,7 @@ function page(self, responses) {
         dataset: {},
         classList: { toggle() {} },
         setAttribute() {},
+        focus() { this.focused = true; },
         querySelector(selector) {
           return el(selector);
         },
@@ -52,6 +54,10 @@ function page(self, responses) {
           return [];
         },
         addEventListener() {},
+        async click() {
+          if (this.disabled || typeof this.onclick !== "function") return;
+          return this.onclick({ currentTarget: this, target: this });
+        },
         showModal() {
           this.open = true;
         },
@@ -92,6 +98,7 @@ function page(self, responses) {
       },
     },
     document: {
+      activeElement: null,
       querySelector: el,
       getElementById: (id) => el("#" + id),
       querySelectorAll() {
@@ -105,18 +112,20 @@ function page(self, responses) {
         },
       },
     },
-    setTimeout() {
-      return 1;
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay, cancelled: false });
+      return timers.length;
     },
-    clearTimeout() {},
+    clearTimeout(id) { if (timers[id - 1]) timers[id - 1].cancelled = true; },
     fetch: async (path, options) => {
       calls.push({ path, options });
       if (!(path in responses)) throw new Error("unexpected request " + path);
+      if (responses[path] instanceof Error) throw responses[path];
       return { ok: true, status: 200, json: async () => responses[path] };
     },
   });
   vm.runInContext(source, context);
-  return { context, el, calls, copied, opened };
+  return { context, el, calls, copied, opened, responses, timers };
 }
 test("personal cabinet reuses subscription and opens HTTPS import without admin APIs", async () => {
   const p = page(true, {
@@ -155,6 +164,25 @@ test("personal cabinet reuses subscription and opens HTTPS import without admin 
   assert.ok(p.calls.every((c) => c.path.startsWith("/api/self")));
   assert.ok(p.calls.every((c) => c.options.cache === "no-store"));
 });
+
+test("subscription recovery tells the user the previous URL was invalidated", async () => {
+  const p = page(true, {
+    "/api/self": {
+      registered: true,
+      member: { uuid: "owner", active: true, pending: false },
+    },
+    "/api/self/exits": { exits: [], profiles: [] },
+    "/api/self/subscription": {
+      url: "https://vpn.example/sub/new",
+      import_url: "https://vpn.example/happ#new",
+      rotated: true,
+    },
+  });
+  await flush();
+  await p.el("#copy-sub").onclick();
+  assert.deepEqual(p.copied, ["https://vpn.example/sub/new"]);
+  assert.match(p.el("#notice").textContent, /Старая ссылка подписки отозвана/);
+});
 test("disabled access cannot issue a subscription", async () => {
   const p = page(true, {
     "/api/self": {
@@ -169,6 +197,47 @@ test("disabled access cannot issue a subscription", async () => {
   assert.ok(
     p.calls.every((c) => ["/api/self", "/api/self/traffic"].includes(c.path)),
   );
+});
+test("member access control opens confirmation on the first click", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members/42/traffic": { months: [] },
+    "/api/members/42/action": {
+      telegram_id: 42,
+      uuid: "member-key",
+      active: false,
+      pending: false,
+      name: "Member",
+    },
+    "/api/members/42/leak": {},
+  });
+  await flush();
+  p.context.member = {
+    telegram_id: 42,
+    uuid: "member-key",
+    active: true,
+    pending: false,
+    name: "Member",
+  };
+  vm.runInContext("person(member)", p.context);
+
+  await p.el("#toggle-access").click();
+  assert.equal(p.el("#dialog").open, true);
+  assert.equal(
+    p.calls.some((call) => call.path === "/api/members/42/action"),
+    false,
+  );
+
+  await p.el("#confirm-action").click();
+  const actions = p.calls.filter(
+    (call) => call.path === "/api/members/42/action",
+  );
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].options.method, "POST");
+  assert.deepEqual(JSON.parse(actions[0].options.body), {
+    action: "disable",
+    expected_uuid: "member-key",
+  });
 });
 test("Vultr displays server DTO price and replica state", async () => {
   const p = page(false, {
@@ -190,10 +259,12 @@ test("Vultr displays server DTO price and replica state", async () => {
     ],
     "/api/cloud/replicas": [
       {
-        name: "Amsterdam",
+        id: "bridge",
+        name: "Bridge PostgreSQL standby",
         state: "streaming",
-        free_bytes: 10 * 1073741824,
-        required_bytes: 5 * 1073741824,
+        source: "primary",
+        replay_lag_bytes: 0,
+        checked_at: "2026-01-01T12:00:00Z",
       },
     ],
   });
@@ -203,6 +274,231 @@ test("Vultr displays server DTO price and replica state", async () => {
   assert.ok(!p.el("#app").innerHTML.includes("$undefined"));
   assert.ok(p.el("#app").innerHTML.includes("Копия обновляется"));
   assert.ok(!p.el("#app").innerHTML.includes("Добавить узел вручную"));
+});
+
+test("deleted Vultr exits are removed from server list even if quota DTO is stale", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/cloud/operations": [
+      { id: "old-op", exit_id: "old-exit", state: "deleted" },
+    ],
+    "/api/cloud/quotas": {
+      nodes: [
+        { id: "old-exit", name: "Удалённый сервер", enabled: false },
+        { id: "active-exit", name: "Действующий сервер", enabled: true },
+      ],
+      budgets: [],
+    },
+    "/api/cloud/replicas": [],
+  });
+  await flush();
+  await vm.runInContext("service()", p.context);
+  const html = p.el("#app").innerHTML;
+  assert.ok(!html.includes("Удалённый сервер"));
+  assert.ok(html.includes("Действующий сервер"));
+});
+
+test("Vultr status polling updates the existing card without replacing its price", async () => {
+  const op = {
+    id: "op",
+    offer: {
+      region: { city: "Frankfurt" },
+      plan: { id: "vc2-1c-1gb" },
+      price: { monthly_cost: 5, hourly_cost: 0.007 },
+    },
+    state: "pending",
+    phase: "create",
+    charged: false,
+  };
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/cloud/operations": [op],
+    "/api/cloud/quotas": { nodes: [], budgets: [] },
+    "/api/cloud/replicas": [],
+  });
+  await flush();
+  vm.runInContext('currentTab = "service"', p.context);
+  await vm.runInContext("service()", p.context);
+  const html = p.el("#app").innerHTML;
+  const status = { className: "", textContent: "" };
+  let detailsHTML = "";
+  let detailsWrites = 0;
+  const details = {
+    get innerHTML() {
+      return detailsHTML;
+    },
+    set innerHTML(value) {
+      detailsWrites++;
+      detailsHTML = value;
+    },
+  };
+  const card = {
+    dataset: { opCard: "op" },
+    hidden: false,
+    querySelector(selector) {
+      return selector === "[data-op-status]" ? status : details;
+    },
+  };
+  p.el("#cloud-operations").querySelectorAll = (selector) =>
+    selector === "[data-op-card]" ? [card] : [];
+  p.responses["/api/cloud/operations"] = [
+    { ...op, state: "unknown", phase: "verify", charged: true },
+  ];
+
+  await vm.runInContext(
+    "refreshOperationCards(viewVersion)",
+    p.context,
+  );
+
+  assert.equal(p.el("#app").innerHTML, html);
+  assert.ok(html.includes("$5/месяц"));
+  assert.equal(status.textContent, "Результат создания проверяется");
+  assert.match(details.innerHTML, /Оплата продолжается/);
+  await vm.runInContext("refreshOperationCards(viewVersion)", p.context);
+  assert.equal(detailsWrites, 1);
+});
+
+test("Vultr polling inserts new cards and manual refresh preserves existing cards", async () => {
+  const makeOp = (id, state = "pending") => ({
+    id,
+    offer: {
+      region: { city: "Frankfurt" },
+      plan: { id: "vc2-1c-1gb" },
+      price: { monthly_cost: 5, hourly_cost: 0.007 },
+    },
+    state,
+    exit_id: id === "delete" ? "removed-exit" : undefined,
+    phase: "create",
+    charged: false,
+  });
+  const keepStatus = { className: "", textContent: "Создание сервера" };
+  const keepDetails = { innerHTML: "" };
+  const keepPrice = { textContent: "$5/месяц" };
+  const openLog = { open: true, textContent: "Existing event" };
+  const keepCard = {
+    dataset: { opCard: "keep" },
+    hidden: false,
+    price: keepPrice,
+    log: openLog,
+    querySelector(selector) {
+      return selector === "[data-op-status]" ? keepStatus : keepDetails;
+    },
+    remove() {
+      this.removed = true;
+    },
+  };
+  const deletedCard = {
+    dataset: { opCard: "delete" },
+    remove() {
+      this.removed = true;
+    },
+  };
+  const addedCards = [];
+  const operations = {
+    innerHTML: "",
+    querySelectorAll() {
+      return [keepCard, deletedCard, ...addedCards].filter((card) => !card.removed);
+    },
+    querySelector(selector) {
+      if (selector === "#create-server") return { remove() {} };
+      return null;
+    },
+    insertAdjacentHTML(position, html) {
+      this.innerHTML += html;
+      const match = html.match(/data-op-card="([^"]+)"/);
+      if (match) {
+        addedCards.push({
+          dataset: { opCard: match[1] },
+          remove() {
+            this.removed = true;
+          },
+          querySelector() {
+            return { className: "", textContent: "", innerHTML: "" };
+          },
+        });
+      }
+    },
+  };
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/cloud/operations": [makeOp("keep"), makeOp("delete")],
+    "/api/cloud/quotas": {
+      nodes: [
+        { id: "removed-exit", name: "Removed server", enabled: true, ready: true },
+        { id: "live-exit", name: "Active server", enabled: true, ready: true },
+      ],
+      budgets: [],
+    },
+    "/api/cloud/replicas": [],
+  });
+  await flush();
+  vm.runInContext('currentTab = "service"', p.context);
+  await vm.runInContext("service()", p.context);
+  const originalView = p.el("#app").innerHTML;
+  p.el("#app").querySelector = (selector) =>
+    selector === "#cloud-operations" ? operations : p.el(selector);
+
+  p.responses["/api/cloud/operations"] = [
+    makeOp("keep", "unknown"),
+    makeOp("new"),
+    makeOp("delete", "deleted"),
+  ];
+  await vm.runInContext("refreshOperationCards(viewVersion)", p.context);
+
+  assert.equal(p.el("#app").innerHTML, originalView);
+  assert.equal(keepCard.removed, undefined);
+  assert.equal(keepCard.price, keepPrice);
+  assert.equal(keepStatus.textContent, "Результат создания проверяется");
+  assert.equal(deletedCard.removed, true);
+  assert.ok(addedCards.some((card) => card.dataset.opCard === "new"));
+  assert.doesNotMatch(p.el("#server-capacity").innerHTML, /Removed server/);
+  assert.match(p.el("#server-capacity").innerHTML, /Active server/);
+
+  await vm.runInContext("service(true)", p.context);
+  assert.equal(keepCard.log, openLog);
+  assert.equal(keepCard.log.open, true);
+  assert.equal(addedCards.filter((card) => card.dataset.opCard === "new").length, 1);
+  assert.doesNotMatch(p.el("#server-capacity").innerHTML, /Removed server/);
+
+  p.context.ops = operations;
+  vm.runInContext("reconcileCloudOperations(ops, [], true, null)", p.context);
+  assert.equal(keepCard.removed, undefined);
+  assert.equal(keepCard.price, keepPrice);
+  assert.match(operations.innerHTML, /data-cloud-unavailable/);
+});
+
+test("reinstall is offered only for a failed staged cloud identity", async () => {
+  const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
+  await flush();
+  for (const [change, allowed] of [
+    [{}, true],
+    [{ state: "ready" }, false],
+    [{ phase: "install" }, false],
+    [{ exit_id: "other" }, false],
+    [{ serves_subscription_ingress: true }, false],
+  ]) {
+    p.context.recovery = { id: "op", exit_id: "op", instance_id: "vm", state: "failed", phase: "verify", ...change };
+    const html = vm.runInContext("cloudOperationDetailsHTML(recovery)", p.context);
+    assert.equal(html.includes('data-action="reinstall"'), allowed);
+  }
+});
+
+test("route continuation exposes only failed stages", async () => {
+  const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
+  await flush();
+  const failed = { id: "op", state: "failed", phase: "apply", error: "route_application_timeout" };
+  p.context.failed = failed;
+  const failedHTML = vm.runInContext("cloudOperationDetailsHTML(failed)", p.context);
+  assert.match(failedHTML, /data-action="retry"/);
+  assert.match(failedHTML, /Продолжить этап/);
+  assert.equal(vm.runInContext("phases.apply", p.context), "Применение маршрута на bridge");
+  const unknown = { id: "op", state: "unknown", phase: "creating" };
+  p.context.unknown = unknown;
+  const unknownHTML = vm.runInContext("cloudOperationDetailsHTML(unknown)", p.context);
+  assert.ok(!unknownHTML.includes('data-action="retry"'));
 });
 
 test("traffic activity is separate from permission and does not imply online", async () => {
@@ -471,16 +767,16 @@ test("ready server separates operation, tunnel health and billing", async () => 
   };
   p.context.capacity = {
     nodes: [{ id: "atl", name: "Атланта", enabled: true, ready: true }],
-    budgets: [],
+    budgets: [{ exit_id: "atl", source: "vultr", monthly_bytes: 3000000000000 }],
   };
   assert.equal(
     vm.runInContext("serverStateLabel(o,capacity)", p.context),
     "Серверная проверка HTTPS прошла",
   );
-  assert.match(
-    vm.runInContext("serverCapacityHTML(capacity)", p.context),
-    /Серверная проверка HTTPS прошла/,
-  );
+  const capacityHTML = vm.runInContext("serverCapacityHTML(capacity)", p.context);
+  assert.match(capacityHTML, /Серверная проверка HTTPS прошла/);
+  assert.match(capacityHTML, /Начисленный пул Vultr \(справочно\)/);
+  assert.match(capacityHTML, /общие для всех выходов Vultr/);
   assert.equal(
     vm.runInContext("serverBillingLabel(o)", p.context),
     "Оплата продолжается",
@@ -510,7 +806,7 @@ test("ready server separates operation, tunnel health and billing", async () => 
   );
 });
 
-test("automatic route displays confirmed exit without a country selector", async () => {
+test("automatic route highlights the selected exit without a country selector", async () => {
   const route = {
     selected_exit_id: "atl",
     effective_exit_id: "ams",
@@ -529,12 +825,14 @@ test("automatic route displays confirmed exit without a country selector", async
   await flush();
   const html = p.el("#locations").innerHTML;
   assert.match(html, /Ошибка применения/);
-	assert.match(html, /Подтверждённый выход: <strong>Нидерланды/);
+	assert.match(html, /data-route-exit="ams"/);
+	assert.match(html, /Нидерланды.*Авто · ожидает применения/);
 	assert.match(html, /Нидерланды.*Отдельная квота/);
-	assert.match(html, /США → США.*Общая квота/);
+	assert.match(html, /США.*Общая квота/);
+	assert.doesNotMatch(html, /США\s*→\s*США/);
 	assert.ok(!html.includes("Vultr"));
-  assert.match(html, /только если на нём осталась ваша квота/);
-  assert.match(html, /возвращается к предпочтительной стране/);
+  assert.match(html, /доступной вам квотой/);
+  assert.match(html, /возвращается к основному после восстановления/);
   assert.ok(!html.includes('id="preferred"'));
   assert.ok(!html.includes('id="save-location"'));
   assert.ok(
@@ -574,19 +872,134 @@ test("subscription ingress cannot be deleted or replaced from server card", asyn
   assert.ok(!html.includes("data-replace="));
 });
 
-test("ingress diagnostics distinguishes main and experiment and escapes server strings", async () => {
+test("ingress diagnostics hides obsolete experiments and escapes primary strings", async () => {
   const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
   await flush();
   p.context.states = [
     { id: "primary", ready: true, phase: "server_path_ready" },
-    { id: "experimental", ready: false, phase: "<script>unsafe</script>" },
+    { id: "experimental", ready: false, phase: "<SCRIPT>unsafe</SCRIPT>" },
   ];
   const html = vm.runInContext("ingressHealthHTML(states)", p.context);
   assert.match(html, /Основной вход/);
-  assert.match(html, /Экспериментальный вход/);
-  assert.match(html, /Недоступен/);
-  assert.ok(!html.includes("<script>"));
-  assert.ok(html.includes("&lt;script&gt;"));
+  assert.doesNotMatch(html, /Экспериментальный вход/);
+  assert.doesNotMatch(html, /<script>|unsafe/i);
+  p.context.states = [
+    { id: "primary", ready: false, phase: "<SCRIPT>unsafe</SCRIPT>" },
+  ];
+  const unsafePrimary = vm.runInContext("ingressHealthHTML(states)", p.context);
+  assert.match(unsafePrimary, /Недоступен/);
+  assert.doesNotMatch(unsafePrimary, /<script>/i);
+  assert.ok(unsafePrimary.includes("&lt;SCRIPT&gt;"));
+});
+
+test("routing map follows live exits and keeps its explanation open during refresh", async () => {
+  const p = page(true, {
+    "/api/self": { registered: false, is_admin: false },
+    "/api/self/exits": {
+      exits: [{ id: "old", display_name: "Old exit", reachable: true }],
+      effective_exit_id: "old",
+      application: { state: "applied" },
+    },
+  });
+  await flush();
+  p.context.viewVersion = 5;
+  await vm.runInContext("locations()", p.context);
+  const target = p.el("#locations");
+  assert.match(target.innerHTML, /data-route-exit="old"/);
+  assert.match(target.innerHTML, /Ваше устройство/);
+  assert.match(target.innerHTML, /Bridge/);
+  assert.doesNotMatch(target.innerHTML, /США\s*→\s*США/);
+
+  target.querySelector("details").open = true;
+  p.context.document.activeElement = target.querySelector("summary");
+  p.responses["/api/self/exits"] = {
+    exits: [
+      { id: "new", display_name: "New exit", reachable: true },
+      { id: "backup", display_name: "Backup", reachable: false },
+      { id: "spare", display_name: "Spare", reachable: true },
+    ],
+    effective_exit_id: "new",
+    application: { state: "applied" },
+  };
+  p.timers.at(-1).callback();
+  await flush();
+  assert.doesNotMatch(target.innerHTML, /data-route-exit="old"/);
+  assert.match(target.innerHTML, /data-route-exit="new"/);
+  assert.match(target.innerHTML, /data-route-exit="backup"/);
+  assert.match(target.innerHTML, /data-route-exit="spare"/);
+  assert.match(target.innerHTML, /Туннель доступен/);
+  assert.match(target.innerHTML, /Туннель недоступен/);
+  assert.equal(target.querySelector("details").open, true);
+  assert.equal(target.querySelector("summary").focused, true);
+});
+
+test("diagnostics separates primary database identity from bridge standby observation", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/health": { bridge: { internet_ok: true }, exits: [] },
+    "/api/alerts/recent?limit=10": [],
+    "/api/cloud/replicas": [
+      {
+        id: "bridge",
+        name: "Bridge PostgreSQL standby",
+        source: "primary",
+        state: "streaming",
+      },
+    ],
+    "/api/database": {
+      primary_host: "192.0.2.40",
+      configured_host: "127.0.0.1",
+      configured_port: 5432,
+      reachable: true,
+      observed_role: "primary",
+    },
+  });
+  await flush();
+  await vm.runInContext("diagnostics()", p.context);
+  let html = p.el("#network-health").innerHTML;
+  assert.match(html, /Primary PostgreSQL/);
+  assert.match(html, /Сервер: 192\.0\.2\.40 · проверка через пул приложения/);
+  let primaryRow = html
+    .split(/(?=<div class="route-row">)/)
+    .find((row) => row.includes("Primary PostgreSQL"));
+  assert.ok(primaryRow);
+  assert.match(primaryRow, /Доступен · primary/);
+  assert.doesNotMatch(primaryRow, /127\.0\.0\.1/);
+  let standbyRow = html
+    .split(/(?=<div class="route-row">)/)
+    .find((row) => row.includes("Bridge PostgreSQL standby"));
+  assert.ok(standbyRow);
+  assert.match(standbyRow, /streaming/);
+  assert.match(standbyRow, /badge good/);
+
+  p.responses["/api/cloud/replicas"] = [
+    { id: "bridge", state: "disconnected" },
+  ];
+  await vm.runInContext("diagnostics()", p.context);
+  standbyRow = p.el("#network-health").innerHTML
+    .split(/(?=<div class="route-row">)/)
+    .find((row) => row.includes("Bridge PostgreSQL standby"));
+  assert.ok(standbyRow);
+  assert.match(standbyRow, /badge bad/);
+  assert.match(standbyRow, /disconnected/);
+
+  p.responses["/api/cloud/replicas"] = [
+    { id: "bridge", state: "streaming" },
+  ];
+  p.responses["/api/database"] = new Error("primary unavailable");
+  await vm.runInContext("diagnostics()", p.context);
+  html = p.el("#network-health").innerHTML;
+  primaryRow = html
+    .split(/(?=<div class="route-row">)/)
+    .find((row) => row.includes("Primary PostgreSQL"));
+  assert.ok(primaryRow);
+  assert.match(primaryRow, /Состояние неизвестно/);
+  standbyRow = html
+    .split(/(?=<div class="route-row">)/)
+    .find((row) => row.includes("Bridge PostgreSQL standby"));
+  assert.ok(standbyRow);
+  assert.match(standbyRow, /streaming/);
 });
 
 test("overview brings monthly history and config ranking into the main cabinet", async () => {
@@ -641,6 +1054,54 @@ test("archive config cannot export, rotate or enable unsupported access", async 
     "issue-config-sub",
   ])
     assert.ok(!html.includes(id));
+});
+test("disabling a config sends DELETE on the first click", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/users/legacy": {},
+  });
+  await flush();
+  const user = { uuid: "legacy", kind: "vless", is_active: true };
+  p.context.configDetail = async (updated) => {
+    p.context.updatedConfig = updated;
+  };
+  p.context.configUser = user;
+  vm.runInContext("bindConfigControls(configUser)", p.context);
+
+  await p.el("#disable-config").click();
+  assert.equal(
+    p.calls.filter(
+      (call) => call.path === "/api/users/legacy" && call.options.method === "DELETE",
+    ).length,
+    1,
+  );
+  assert.equal(p.context.updatedConfig.is_active, false);
+});
+test("enabling a config runs its action on one click without rebinding", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/users/legacy/enable": {},
+  });
+  await flush();
+  const user = { uuid: "legacy", kind: "vless", is_active: false };
+  p.context.configDetail = async (updated) => {
+    p.context.updatedConfig = updated;
+  };
+  p.context.configUser = user;
+  // Bind once, as the rendered config detail does; one user click must suffice.
+  vm.runInContext("bindConfigControls(configUser)", p.context);
+  const enable = p.el("#enable-config");
+  await enable.click();
+  assert.equal(
+    p.calls.filter(
+      (call) =>
+        call.path === "/api/users/legacy/enable" &&
+        call.options.method === "POST",
+    ).length,
+    1,
+  );
+  assert.equal(p.context.updatedConfig.is_active, true);
+  assert.equal(enable.disabled, false);
 });
 test("purge requires typed confirmation and addresses only the selected config", async () => {
   const p = page(false, {
@@ -759,8 +1220,8 @@ test("shared quota stays whole across route and period filters beside separate r
     vm.runInContext(`renderTrafficChart(document.querySelector("#person-traffic"),chart,${expression})`, p.context);
     const html = p.el("#person-traffic").innerHTML;
 	assert.equal((html.match(/data-quota-kind="shared"/g) || []).length, 1);
-	for (const text of ["900 Б", "200 Б", "700 Б", "99 Б", "Резерв &lt;тест&gt;", "Последние подтверждённые данные", "Общая квота", "UTC", "Ручной резерв"]) assert.ok(html.includes(text), text);
-	assert.ok(!html.includes("Vultr"));
+	for (const text of ["900 Б", "200 Б", "700 Б", "99 Б", "Резерв &lt;тест&gt;", "Последние подтверждённые данные", "Общая квота", "Личный предел — 25% от безопасного общего пула Vultr после 20% резерва", "UTC", "Ручной резерв"]) assert.ok(html.includes(text), text);
+	assert.ok(html.includes("безопасного общего пула Vultr"));
     assert.ok(!html.includes("Invalid Date"));
   }
 });
@@ -793,4 +1254,94 @@ test("legacy traffic responses keep per-exit limits and empty quotas render noth
   assert.ok(html.includes("55 Б"));
   assert.ok(!html.includes("Общий трафик Vultr"));
   assert.equal(vm.runInContext("trafficQuotasHTML({})", p.context), "");
+});
+
+test("bridge standby uses dedicated topology and refreshes independently of operations", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [],
+    "/api/cloud/operations": [],
+    "/api/cloud/replicas": [{ id: "bridge", name: "Bridge PostgreSQL standby", source: "primary", state: "streaming", replay_lag_bytes: 0, checked_at: "2026-01-01T00:00:00Z" }],
+  });
+  await flush();
+  await vm.runInContext("service()", p.context);
+  const html = p.el("#app").innerHTML;
+  assert.match(html, /Основная БД на отдельном database/);
+  assert.match(html, /standby-копия на bridge/);
+  assert.match(html, /Наблюдение с primary/);
+  assert.match(html, /отставание WAL: 0 байт/);
+  assert.doesNotMatch(html, /Основная БД на bridge|Свободное место|Ещё не настроена/);
+  const timer = p.timers.findLast((t) => t.delay === 10000 && !t.cancelled);
+  assert.ok(timer, "standby refresh is required even with no cloud operations");
+  p.responses["/api/cloud/replicas"] = [{ name: "Bridge PostgreSQL standby", state: "disconnected" }];
+  await timer.callback();
+  assert.match(p.el("#bridge-replicas").innerHTML, /Нет потока репликации/);
+  assert.doesNotMatch(p.el("#bridge-replicas").innerHTML, /Копия обновляется/);
+  delete p.responses["/api/cloud/replicas"];
+  const retry = p.timers.findLast((t) => t.delay === 10000 && !t.cancelled);
+  await retry.callback();
+  assert.match(p.el("#bridge-replicas").innerHTML, /временно недоступно/);
+  const next = p.timers.findLast((t) => t.delay === 10000 && !t.cancelled);
+  vm.runInContext("viewVersion++", p.context);
+  const requests = p.calls.length;
+  await next.callback();
+  assert.equal(p.calls.length, requests, "stale view must not keep polling standby");
+});
+
+test("legacy exit replication states cannot claim bridge configuration", async () => {
+  const p = page(false, { "/api/me": { is_admin: true }, "/api/members": [] });
+  await flush();
+  const html = vm.runInContext('bridgeReplicasHTML([{name:"Bridge",state:"not_configured"}])', p.context);
+  assert.match(html, /Состояние копии неизвестно/);
+  assert.doesNotMatch(html, /Ещё не настроена/);
+});
+
+
+test("cached subscription revalidates UUID and shares simultaneous issuance", async () => {
+  const p = page(true, {
+    "/api/self": { registered: true, member: { uuid: "old", active: true } },
+    "/api/self/exits": { exits: [], profiles: [] },
+    "/api/self/subscription": { url: "https://example.com/old", import_url: "https://example.com/old-import" },
+  });
+  await flush();
+  await p.el("#copy-sub").onclick();
+  p.responses["/api/self"].member.uuid = "new";
+  p.responses["/api/self/subscription"] = { url: "https://example.com/new", import_url: "https://example.com/new-import" };
+  await Promise.all([p.el("#copy-sub").onclick(), p.el("#connect").onclick()]);
+  assert.deepEqual(p.copied, ["https://example.com/old", "https://example.com/new"]);
+  assert.deepEqual(p.opened, ["https://example.com/new-import"]);
+  assert.equal(p.calls.filter((c) => c.path === "/api/self/subscription").length, 2);
+  p.responses["/api/self"].member.active = false;
+  await p.el("#copy-sub").onclick();
+  assert.equal(p.copied.length, 2);
+});
+
+test("pending person polls completion and ignores responses after navigation", async () => {
+  const member = { telegram_id: 42, uuid: "old", name: "Member", active: true, pending: true };
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/members": [member],
+    "/api/members/42/traffic": { months: [] },
+  });
+  await flush();
+  p.context.member = member;
+  vm.runInContext("person(member)", p.context);
+  p.responses["/api/members"] = [{ ...member, uuid: "new", pending: false }];
+  const timer = p.timers.at(-1);
+  await timer.callback();
+  assert.doesNotMatch(p.el("#app").innerHTML, /Подтверждаем|Применяется/);
+  assert.match(p.el("#app").innerHTML, /Доступ разрешён/);
+  assert.equal(p.timers.at(-1), timer);
+
+  vm.runInContext("person(member)", p.context);
+  const staleTimer = p.timers.at(-1);
+  const inFlight = staleTimer.callback();
+  await vm.runInContext("people()", p.context);
+  const html = p.el("#app").innerHTML;
+  await inFlight;
+  assert.equal(p.el("#app").innerHTML, html);
+  assert.match(html, /people-list/);
+  const calls = p.calls.length;
+  await staleTimer.callback();
+  assert.equal(p.calls.length, calls);
 });

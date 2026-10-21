@@ -32,7 +32,8 @@ func (b *Bot) registerMiniAppRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /happ", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+		w.Header().
+			Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		page, _ := miniappFS.ReadFile("embed/miniapp/happ.html")
 		_, _ = w.Write(page)
@@ -150,7 +151,8 @@ func (b *Bot) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	traffic, err := b.adminGet(r.Context(), "/v1/traffic/monthly")
 	if err != nil {
 		b.log.Error("admin GET /v1/traffic/monthly", "err", err)
-		traffic = []byte("[]")
+		http.Error(w, "traffic unavailable", http.StatusBadGateway)
+		return
 	}
 	lastSeen, err := b.adminGet(r.Context(), "/v1/traffic/last-seen")
 	if err != nil {
@@ -595,7 +597,8 @@ func (b *Bot) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	traffic, err := b.adminGet(r.Context(), "/v1/traffic/monthly")
 	if err != nil {
-		traffic = []byte("[]")
+		http.Error(w, "traffic unavailable", http.StatusBadGateway)
+		return
 	}
 
 	var userList []map[string]any

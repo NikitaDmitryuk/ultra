@@ -51,7 +51,9 @@ func resolveAnsibleRuntime(ctx context.Context, p *installplan.InstallPlan, stat
 }
 
 func preparePinnedAnsibleRuntime(ctx context.Context, stateRoot, archive, expectedSHA string) (string, error) {
-	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") || !filepath.IsAbs(archive) || !filepath.IsAbs(stateRoot) || len(expectedSHA) != 64 {
+	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") || !filepath.IsAbs(archive) ||
+		!filepath.IsAbs(stateRoot) ||
+		len(expectedSHA) != 64 {
 		return "", errors.New("unsupported offline recovery runtime input")
 	}
 	info, statErr := os.Lstat(archive)
@@ -85,7 +87,12 @@ func preparePinnedAnsibleRuntime(ctx context.Context, stateRoot, archive, expect
 		}
 		return "", errors.New("committed Ansible runtime is incomplete")
 	}
-	version := exec.CommandContext(ctx, "/usr/bin/python3", "-c", "import sys;sys.exit(0 if (3,12) <= sys.version_info[:2] <= (3,14) else 1)")
+	version := exec.CommandContext(
+		ctx,
+		"/usr/bin/python3",
+		"-c",
+		"import sys;sys.exit(0 if (3,12) <= sys.version_info[:2] <= (3,14) else 1)",
+	)
 	if version.Run() != nil {
 		return "", errors.New("offline Ansible requires Python 3.12 through 3.14")
 	}
@@ -98,9 +105,9 @@ func preparePinnedAnsibleRuntime(ctx context.Context, stateRoot, archive, expect
 	}
 	run := func(program string, args ...string) error {
 		command := exec.CommandContext(ctx, program, args...)
-		command.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=" + directory}
-		if command.Run() != nil {
-			return errors.New("offline Ansible runtime preparation failed")
+		command.Env = offlineRuntimeEnvironment(directory)
+		if err := command.Run(); err != nil {
+			return fmt.Errorf("offline Ansible runtime preparation failed: %w", err)
 		}
 		return nil
 	}
@@ -140,6 +147,14 @@ func installedRuntimeMatches(executable, marker, sha string) bool {
 	return err == nil && strings.TrimSpace(string(data)) == sha
 }
 
+func offlineRuntimeEnvironment(home string) []string {
+	return []string{
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"HOME=" + home,
+		"TMPDIR=" + os.TempDir(),
+	}
+}
+
 func extractRuntime(source, directory string) error {
 	file, err := os.Open(source)
 	if err != nil {
@@ -172,7 +187,8 @@ func extractRuntime(source, directory string) error {
 			}
 			continue
 		}
-		valid := name == "requirements.lock" || (strings.HasPrefix(name, "wheels/") && strings.HasSuffix(name, ".whl") && filepath.Base(name) == strings.TrimPrefix(name, "wheels/"))
+		valid := name == "requirements.lock" ||
+			(strings.HasPrefix(name, "wheels/") && strings.HasSuffix(name, ".whl") && filepath.Base(name) == strings.TrimPrefix(name, "wheels/"))
 		if !valid || header.Typeflag != tar.TypeReg || header.Size <= 0 || header.Size > 64<<20 {
 			return errors.New("invalid offline runtime member")
 		}

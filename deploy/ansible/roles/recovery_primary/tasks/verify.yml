@@ -1,5 +1,5 @@
 ---
-- name: Read one fresh independent copy and replica readiness observation
+- name: Read one fresh independent backup and controller observation
   ansible.builtin.command:
     argv: [python3, /opt/ultra-recovery/recovery_status.py, --not-before, "{{ ultra_automation_activated_at | string }}"]
   register: recovery_primary_status

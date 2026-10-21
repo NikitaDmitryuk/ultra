@@ -3,7 +3,7 @@
   ansible.builtin.meta: flush_handlers
 - name: Record current guarded configuration attempt time
   ansible.builtin.command:
-    argv: [date, '+%s']
+    argv: [date, "+%s"]
   register: recovery_primary_started
   changed_when: false
 - name: Create private bootstrap staging and recovery directories
@@ -37,6 +37,17 @@
   ansible.builtin.copy:
     src: "{{ ultra_automation_planner_source }}"
     dest: /var/lib/ultra-automation/bootstrap/bootstrap_plan.py
+    mode: "0600"
+- name: Select the authenticated dedicated database tunnel helper
+  ansible.builtin.set_fact:
+    recovery_primary_db_connection_tool: "{{ ultra_automation_tools | selectattr('destination', 'equalto', '/opt/ultra-recovery/db_connection.py') | list }}"
+- name: Require the dedicated database tunnel helper in the verified release
+  ansible.builtin.assert:
+    that: recovery_primary_db_connection_tool | length == 1
+- name: Stage dedicated database tunnel helper beside the planner
+  ansible.builtin.copy:
+    src: "{{ recovery_primary_db_connection_tool[0].source }}"
+    dest: /var/lib/ultra-automation/bootstrap/db_connection.py
     mode: "0600"
 - name: Inspect existing receiver generations before pausing timers
   ansible.builtin.command:
@@ -182,6 +193,13 @@
     src: "{{ ultra_install_source }}"
     dest: /usr/local/bin/ultra-install
     mode: "0755"
+- name: Ensure relay automation credential directory exists
+  ansible.builtin.file:
+    path: /var/lib/ultra-relay/automation
+    state: directory
+    owner: ultra-relay
+    group: ultra-relay
+    mode: "0700"
 - name: Install provider key in relay-private canonical location
   ansible.builtin.copy:
     src: "{{ ultra_automation_cloud_source }}"
@@ -193,10 +211,12 @@
   no_log: true
 - name: Install optional DNS API key privately
   ansible.builtin.copy:
-    src: "{{ ultra_automation_dns_source }}"
+    src: "{{ ultra_automation_cloud_source }}"
     dest: /etc/ultra-recovery/dns-api-key
     mode: "0600"
-  when: ultra_automation_dns_source | default('') | length > 0
+  when:
+    - ultra_automation_configuration.dns is defined
+    - ultra_automation_cloud_source | default('') | length > 0
   no_log: true
 - name: Create relay service drop-in directory
   ansible.builtin.file:
@@ -239,7 +259,7 @@
   no_log: true
 - name: Preserve existing heartbeat identity
   ansible.builtin.command:
-    argv: [ssh-keygen, -q, -t, ed25519, -N, '', -f, /var/lib/ultra-recovery-reconcile/heartbeat_ed25519]
+    argv: [ssh-keygen, -q, -t, ed25519, -N, "", -f, /var/lib/ultra-recovery-reconcile/heartbeat_ed25519]
     creates: /var/lib/ultra-recovery-reconcile/heartbeat_ed25519
 - name: Derive heartbeat public key from actual private identity
   ansible.builtin.command:

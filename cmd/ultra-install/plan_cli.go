@@ -23,6 +23,12 @@ func handlePlanSubcommand(args []string) bool {
 		return true
 	}
 	switch args[0] {
+	case "retained-primary-reconcile":
+		exitOnErr("retained primary reconciliation", runRetainedReconcile(args[1:], os.Stdout))
+	case "rebuild-retained-primary":
+		exitOnErr("retained primary recovery", runRetainedPrimaryCommand(args[1:]))
+	case "rebuild-non-db":
+		exitOnErr("rebuild non-DB preflight", runRebuildNonDB(args[1:], os.Stdout, time.Now()))
 	case "config-values":
 		runConfigValuesCommand(args[1:])
 	case "bridge-migrate":
@@ -31,6 +37,8 @@ func handlePlanSubcommand(args []string) bool {
 		runDeploymentConfigRewrite(args[1:])
 	case "release-probe":
 		runReleaseProbeCommand(args[1:])
+	case "runtime-probe":
+		runRuntimeProbeCommand(args[1:])
 	case "ansible-lease":
 		runAnsibleLease(args[1:])
 	case "ansible-run":
@@ -45,6 +53,12 @@ func handlePlanSubcommand(args []string) bool {
 		runAnsibleExit(args[1:])
 	case "bootstrap", "status", "upgrade":
 		runAutomationCommand(args[0], args[1:])
+	case "operator-upgrade":
+		runOperatorUpgradeCommand(args[1:])
+	case "local-preflight-proof":
+		runLocalPreflightProof(args[1:])
+	case "recovery-tools-bootstrap":
+		runRecoveryToolsBootstrapCommand(args[1:])
 	case "domain-cutover":
 		runDomainCutoverCommand(args[1:])
 	case "backend-domain":
@@ -78,9 +92,14 @@ func runPlanCommand(args []string) {
 	configPath := fs.String("config", "install.config", "canonical install.config path")
 	out := fs.String("out", "", "write install-plan JSON to path")
 	format := fs.String("format", "human", "human or json")
+	lifecycle := fs.Bool("lifecycle", false, "validate an existing deployment without bootstrap archive inputs")
 	_ = fs.Parse(args)
 
-	p, err := installplan.LoadConfig(*configPath)
+	load := installplan.LoadConfig
+	if *lifecycle {
+		load = installplan.LoadLifecycleConfig
+	}
+	p, err := load(*configPath)
 	exitOnErr("plan", err)
 	exitOnErr("plan validate", installplan.ValidatePlan(p))
 	writePlanOutput(p, *out, *format)
@@ -93,9 +112,12 @@ func runDoctorCommand(args []string) {
 	format := fs.String("format", "human", "human or json")
 	network := fs.Bool("network", false, "run DNS/TCP checks")
 	envRoot := fs.String("env-root", ".", "root for relative bot env path")
+	secretsSource := fs.String("secrets-source", "canonical", "canonical or installed-runtime secret inputs")
+	lifecycle := fs.Bool("lifecycle", false, "check an existing deployment without bootstrap archive inputs")
 	_ = fs.Parse(args)
 
-	p := readDeploymentOrExit(*planPath, *configPath)
+	p := readDeploymentForOperationOrExit(*planPath, *configPath, *lifecycle)
+	exitOnErr("doctor secrets", selectPlanSecrets(p, *secretsSource))
 	opts := installplan.DoctorOptions{EnvRoot: *envRoot}
 	if *network {
 		opts = installplan.NetworkDoctorOptions(3 * time.Second)
@@ -228,6 +250,10 @@ func runApplyRemoteCommand(args []string) {
 }
 
 func readPlanOrExit(path string) *installplan.InstallPlan {
+	return readPlanForOperationOrExit(path, false)
+}
+
+func readPlanForOperationOrExit(path string, lifecycle bool) *installplan.InstallPlan {
 	if strings.TrimSpace(path) == "" {
 		fmt.Fprintln(os.Stderr, "-plan is required")
 		os.Exit(2)
@@ -236,7 +262,12 @@ func readPlanOrExit(path string) *installplan.InstallPlan {
 	exitOnErr("read plan", err)
 	var p installplan.InstallPlan
 	exitOnErr("parse plan", json.Unmarshal(data, &p))
-	exitOnErr("validate plan", installplan.ValidatePlan(&p))
+	if lifecycle {
+		p = *installplan.LifecycleProjection(&p)
+		exitOnErr("validate plan", installplan.ValidatePlan(&p))
+	} else {
+		exitOnErr("validate plan", installplan.ValidateBootstrapPlan(&p))
+	}
 	return &p
 }
 
@@ -312,14 +343,30 @@ func exitOnErr(prefix string, err error) {
 }
 
 func readDeploymentOrExit(planPath, configPath string) *installplan.InstallPlan {
+	return readDeploymentForOperationOrExit(planPath, configPath, false)
+}
+
+func readLifecycleDeploymentOrExit(planPath, configPath string) *installplan.InstallPlan {
+	return readDeploymentForOperationOrExit(planPath, configPath, true)
+}
+
+func readDeploymentForOperationOrExit(planPath, configPath string, lifecycle bool) *installplan.InstallPlan {
 	if configPath == "" {
-		return readPlanOrExit(planPath)
+		return readPlanForOperationOrExit(planPath, lifecycle)
 	}
 	if planPath != "" {
 		exitOnErr("deployment input", fmt.Errorf("--config and --plan are mutually exclusive"))
 	}
-	p, err := installplan.LoadConfig(configPath)
+	load := installplan.LoadConfig
+	if lifecycle {
+		load = installplan.LoadLifecycleConfig
+	}
+	p, err := load(configPath)
 	exitOnErr("read canonical deployment", err)
-	exitOnErr("validate canonical deployment", installplan.ValidatePlan(p))
+	if lifecycle {
+		exitOnErr("validate canonical deployment", installplan.ValidatePlan(p))
+	} else {
+		exitOnErr("validate canonical deployment", installplan.ValidateBootstrapPlan(p))
+	}
 	return p
 }

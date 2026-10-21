@@ -41,7 +41,11 @@ func TestSubscriptionQuotaProxyAndStaleCache(t *testing.T) {
 	}
 	entries := map[string]cachedSubscription{}
 	for _, format := range []string{"uri", "happ"} {
-		entries[subscriptionCacheKey(token, "format="+format)] = cachedSubscription{Body: []byte("confirmed " + format), Headers: metadata, ConfirmedAt: confirmed}
+		entries[subscriptionCacheKey(token, "format="+format)] = cachedSubscription{
+			Body:        []byte("confirmed " + format),
+			Headers:     metadata,
+			ConfirmedAt: confirmed,
+		}
 	}
 	if err := b.subscriptionCache.replace(entries); err != nil {
 		t.Fatal(err)
@@ -63,7 +67,8 @@ func TestSubscriptionQuotaProxyAndStaleCache(t *testing.T) {
 	broken = true
 	for _, format := range []string{"uri", "happ"} {
 		w = request(format)
-		if w.Code != 200 || w.Body.String() != "confirmed "+format || w.Header().Get("X-Ultra-Quota-Freshness") != "stale" || w.Header().Get("Vary") != "User-Agent" {
+		if w.Code != 200 || w.Body.String() != "confirmed "+format || w.Header().Get("X-Ultra-Quota-Freshness") != "stale" ||
+			w.Header().Get("Vary") != "User-Agent" {
 			t.Fatal("fallback failed", w.Code, w.Body.String(), w.Header())
 		}
 		for key, value := range metadata {
@@ -72,7 +77,8 @@ func TestSubscriptionQuotaProxyAndStaleCache(t *testing.T) {
 			}
 		}
 		msg, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(w.Header().Get("announce"), "base64:"))
-		if err != nil || !strings.Contains(string(msg), "устарели") || strings.Contains(string(msg), "Vultr") || !strings.Contains(string(msg), confirmed.Format(time.RFC3339)) {
+		if err != nil || !strings.Contains(string(msg), "устарели") || strings.Contains(string(msg), "Vultr") ||
+			!strings.Contains(string(msg), confirmed.Format(time.RFC3339)) {
 			t.Fatal("missing stale announcement", string(msg), err)
 		}
 	}
@@ -105,7 +111,9 @@ func TestStaleQuotaDoesNotRenewAtMonthBoundary(t *testing.T) {
 	h.Set("X-Ultra-Quota-Resets-At", "2026-11-01T00:00:00Z")
 	h.Set("X-Ultra-Quota-State", "exhausted")
 	subscriptionmeta.MarkStale(h, time.Date(2026, 10, 31, 23, 59, 0, 0, time.UTC))
-	if h.Get("subscription-userinfo") != "upload=0; download=1000; total=1000" || h.Get("X-Ultra-Quota-Period") != "2026-10" || h.Get("X-Ultra-Quota-Resets-At") != "2026-11-01T00:00:00Z" || h.Get("X-Ultra-Quota-State") != "exhausted" {
+	if h.Get("subscription-userinfo") != "upload=0; download=1000; total=1000" || h.Get("X-Ultra-Quota-Period") != "2026-10" ||
+		h.Get("X-Ultra-Quota-Resets-At") != "2026-11-01T00:00:00Z" ||
+		h.Get("X-Ultra-Quota-State") != "exhausted" {
 		t.Fatal("cache renewed quota", h)
 	}
 }

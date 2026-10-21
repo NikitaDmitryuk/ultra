@@ -2,8 +2,9 @@ package main
 
 import (
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/config"
 	"path"
+
+	"github.com/NikitaDmitryuk/ultra/internal/config"
 )
 
 func buildExitSpecJSON(

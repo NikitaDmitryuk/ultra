@@ -5,6 +5,7 @@ from pathlib import Path
 import hashlib
 import importlib.util
 import json
+import sys
 import os
 import re
 import tempfile
@@ -18,6 +19,17 @@ import ipaddress
 import uuid
 
 FILES = ['/usr/local/bin/ultra-relay', '/etc/ultra-relay/spec.json', '/etc/ultra-relay/environment', '/etc/systemd/system/ultra-relay.service']
+
+
+def database_query(module, database, query):
+    # Credentials stay in a private temporary passfile on the bridge.
+    sys.path.insert(0, '/opt/ultra-recovery')
+    import db_connection
+    parsed = db_connection.dsn_from_runtime(database)
+    with db_connection.pgpass('/var/lib/ultra-recovery', parsed) as environment:
+        result = subprocess.run(db_connection.connection_args(parsed, database, 'psql') + ['-XAtq', '-v', 'ON_ERROR_STOP=1', '-c', query],
+                                env=environment, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=8)
+        return result.returncode, result.stdout, ''
 
 
 def digest(path):
@@ -187,8 +199,7 @@ def main():
             database = saved['database']
             if not re.fullmatch(r'[A-Za-z0-9_-]+', database):
                 raise ValueError('adoption_database_invalid')
-            code, schema, _ = module.run_command(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database,
-                                                '-c', "SELECT COALESCE(max(version),0)::text || ':' || count(*)::text FROM schema_migrations"])
+            code, schema, _ = database_query(module, database, "SELECT COALESCE(max(version),0)::text || ':' || count(*)::text FROM schema_migrations")
             maximum, count = map(int, schema.strip().split(':'))
             if code or count != maximum or maximum <= 0 or not emergency['database_schema_min'] <= maximum <= emergency['database_schema_max']:
                 raise ValueError('adoption_emergency_schema_invalid')
@@ -274,8 +285,7 @@ def main():
         database = config['database']
         if not re.fullmatch(r'[A-Za-z0-9_-]+', database):
             raise ValueError('adoption_database_invalid')
-        code, schema, _ = module.run_command(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database,
-                                            '-c', "SELECT COALESCE(max(version),0)::text || ':' || count(*)::text FROM schema_migrations"])
+        code, schema, _ = database_query(module, database, "SELECT COALESCE(max(version),0)::text || ':' || count(*)::text FROM schema_migrations")
         maximum, count = map(int, schema.strip().split(':'))
         if code or count != maximum or maximum <= 0 or not emergency['database_schema_min'] <= maximum <= emergency['database_schema_max']:
             raise ValueError('adoption_emergency_schema_invalid')

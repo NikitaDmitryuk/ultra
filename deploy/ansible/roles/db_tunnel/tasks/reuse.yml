@@ -1,0 +1,126 @@
+---
+- name: Require pinned private database tunnel source
+  ansible.builtin.assert:
+    that:
+      - ultra_db_tunnel_private_key_source is string
+      - ultra_db_tunnel_private_key_source is match('^/')
+      - "'..' not in ultra_db_tunnel_private_key_source.split('/')"
+      - ultra_db_tunnel_private_key_sha256 | default('') is match('^[a-f0-9]{64}$')
+      - "'database' in hostvars"
+    fail_msg: Preserved database tunnel identity requires a pinned private source and primary inventory.
+- name: Inspect preserved database tunnel key on controller
+  ansible.builtin.stat:
+    path: "{{ ultra_db_tunnel_private_key_source }}"
+    follow: false
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: db_tunnel_reuse_source
+  no_log: true
+- name: Require unchanged private regular database tunnel key
+  ansible.builtin.assert:
+    that:
+      - db_tunnel_reuse_source.stat.isreg | default(false)
+      - not (db_tunnel_reuse_source.stat.islnk | default(true))
+      - db_tunnel_reuse_source.stat.mode | default('') in ['0400', '0600']
+      - db_tunnel_reuse_source.stat.size | default(0) > 0
+      - db_tunnel_reuse_source.stat.size | default(0) <= 65536
+      - db_tunnel_reuse_source.stat.checksum | default('') == ultra_db_tunnel_private_key_sha256
+    fail_msg: Preserved database tunnel key changed or has unsafe permissions.
+  no_log: true
+- name: Derive preserved public key on controller
+  ansible.builtin.command:
+    argv: [ssh-keygen, -y, -P, "", -f, "{{ ultra_db_tunnel_private_key_source }}"]
+  delegate_to: localhost
+  become: false
+  register: db_tunnel_reuse_public_source
+  changed_when: false
+  no_log: true
+- name: Require an unencrypted Ed25519 tunnel identity
+  ansible.builtin.assert:
+    that:
+      - "db_tunnel_reuse_public_source.stdout is match('^ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: .*)?$')"
+    fail_msg: Preserved database tunnel key must be an unencrypted Ed25519 identity.
+  no_log: true
+- name: Verify preserved identity is already narrowly authorized on primary
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import os, pwd, shlex, stat, sys
+        key = sys.stdin.read().strip().split()
+        if len(key) < 2 or key[0] != 'ssh-ed25519':
+            sys.exit('invalid_preserved_tunnel_public_key')
+        account = pwd.getpwnam('ultra-db-tunnel')
+        path = '/var/lib/ultra-db-tunnel/.ssh/authorized_keys'
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd) as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid != account.pw_uid or info.st_size > 65536:
+                sys.exit('unsafe_database_tunnel_authorization')
+            lines = source.read().splitlines()
+        expected = ['restrict,port-forwarding,permitopen=127.0.0.1:5432', 'ssh-ed25519', key[1]]
+        authorizations = []
+        for line in lines:
+            if not line.strip() or line.lstrip().startswith('#'):
+                continue
+            try:
+                parts = shlex.split(line)
+            except ValueError:
+                sys.exit('invalid_database_tunnel_authorization')
+            for index, token in enumerate(parts[:-1]):
+                if token == expected[1] and parts[index + 1] == key[1]:
+                    authorizations.append(parts[:index + 2])
+                    break
+        if authorizations != [expected]:
+            sys.exit('preserved_database_tunnel_identity_not_uniquely_restricted')
+    stdin: "{{ db_tunnel_reuse_public_source.stdout | trim }}"
+  delegate_to: database
+  become: "{{ hostvars['database'].ansible_become | default(false) }}"
+  changed_when: false
+  no_log: true
+- name: Install preserved database tunnel private key
+  ansible.builtin.copy:
+    src: "{{ ultra_db_tunnel_private_key_source }}"
+    dest: /etc/ultra-db-tunnel/id_ed25519
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+- name: Inspect installed database tunnel private key digest
+  ansible.builtin.stat:
+    path: /etc/ultra-db-tunnel/id_ed25519
+    follow: false
+    checksum_algorithm: sha256
+  register: db_tunnel_reuse_installed
+  no_log: true
+- name: Require installed identity to match the frozen source
+  ansible.builtin.assert:
+    that:
+      - db_tunnel_reuse_installed.stat.isreg | default(false)
+      - not (db_tunnel_reuse_installed.stat.islnk | default(true))
+      - db_tunnel_reuse_installed.stat.checksum | default('') == ultra_db_tunnel_private_key_sha256
+  no_log: true
+- name: Derive preserved public key from installed private identity
+  ansible.builtin.command:
+    argv: [ssh-keygen, -y, -P, "", -f, /etc/ultra-db-tunnel/id_ed25519]
+  register: db_tunnel_reuse_public
+  changed_when: false
+  no_log: true
+- name: Require an unencrypted Ed25519 tunnel identity
+  ansible.builtin.assert:
+    that:
+      - "db_tunnel_reuse_public.stdout is match('^ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: .*)?$')"
+      - db_tunnel_reuse_public.stdout.split()[:2] == db_tunnel_reuse_public_source.stdout.split()[:2]
+  no_log: true
+- name: Replace public companion with the derived tunnel public key
+  ansible.builtin.copy:
+    content: "{{ db_tunnel_reuse_public.stdout | trim }}\n"
+    dest: /etc/ultra-db-tunnel/id_ed25519.pub
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false

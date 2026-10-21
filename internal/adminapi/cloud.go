@@ -37,6 +37,28 @@ func (s *Server) cloudRoutes() {
 			memberJSON(w, nil, e)
 			return
 		}
+		operations := s.CloudOperationHistory
+		if operations == nil && s.Cloud != nil {
+			operations = s.Cloud.Store
+		}
+		deleted := map[string]bool{}
+		if operations != nil {
+			ops, err := operations.List(r.Context())
+			if err != nil {
+				memberJSON(w, nil, err)
+				return
+			}
+			deleted = deletedCloudExitIDs(ops)
+			if len(deleted) > 0 {
+				activeBudgets := budgets[:0]
+				for _, budget := range budgets {
+					if !deleted[budget.ID] {
+						activeBudgets = append(activeBudgets, budget)
+					}
+				}
+				budgets = activeBudgets
+			}
+		}
 		type node struct {
 			ID      string `json:"id"`
 			Name    string `json:"name"`
@@ -47,6 +69,9 @@ func (s *Server) cloudRoutes() {
 		nodes := []node{}
 		if s.exits != nil {
 			for _, n := range s.exits.List() {
+				if deleted[n.ID] {
+					continue
+				}
 				name := n.DisplayName
 				if name == "" {
 					name = n.City
@@ -72,11 +97,14 @@ func (s *Server) cloudRoutes() {
 		}{budgets, nodes}, nil)
 	})
 	s.mux.HandleFunc("GET /v1/cloud/replicas", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		if s.ReplicationStatus == nil {
 			http.Error(w, "replication unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		v, e := s.ReplicationStatus(r.Context())
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		v, e := s.ReplicationStatus(ctx)
 		cloudResult(w, v, e)
 	})
 	s.mux.HandleFunc("GET /v1/cloud/catalog", s.cloudCatalog)
@@ -90,8 +118,51 @@ func (s *Server) cloudRoutes() {
 	})
 	s.mux.HandleFunc("POST /v1/cloud/offers", s.cloudOffer)
 	s.mux.HandleFunc("POST /v1/cloud/offers/{id}/confirm", s.cloudConfirm)
+	s.mux.HandleFunc("POST /v1/cloud/retirement", func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireCloud(w) {
+			return
+		}
+		var body struct {
+			Actor   int64                    `json:"actor"`
+			Targets []cloud.RetirementTarget `json:"targets"`
+		}
+		if !s.decodeAdminJSON(w, r, &body) {
+			return
+		}
+		started := time.Now()
+		err := s.Cloud.RetireExits(r.Context(), body.Actor, body.Targets)
+		s.logCloudRequest("retirement", started, err)
+		cloudResult(w, map[string]bool{"completed": err == nil}, err)
+	})
+
 	s.mux.HandleFunc("POST /v1/cloud/operations/{id}/action", s.cloudAction)
 }
+
+func deletedCloudExitIDs(operations []cloud.Operation) map[string]bool {
+	deleted := map[string]bool{}
+	for _, operation := range operations {
+		if operation.State == "deleted" && operation.ExitID != "" {
+			deleted[operation.ExitID] = true
+		}
+	}
+	return deleted
+}
+
+func (s *Server) deletedCloudExits(ctx context.Context) (map[string]bool, error) {
+	history := s.CloudOperationHistory
+	if history == nil && s.Cloud != nil {
+		history = s.Cloud.Store
+	}
+	if history == nil {
+		return map[string]bool{}, nil
+	}
+	operations, err := history.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return deletedCloudExitIDs(operations), nil
+}
+
 func (s *Server) requireCloud(w http.ResponseWriter) bool {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.Cloud == nil {
@@ -104,7 +175,10 @@ func cloudResult(w http.ResponseWriter, value any, e error) {
 	if e != nil {
 		status := 503
 		switch {
-		case errors.Is(e, cloud.ErrIngressInUse), errors.Is(e, cloud.ErrLimit), errors.Is(e, cloud.ErrConflict), errors.Is(e, cloud.ErrPriceChanged):
+		case errors.Is(e, cloud.ErrIngressInUse),
+			errors.Is(e, cloud.ErrLimit),
+			errors.Is(e, cloud.ErrConflict),
+			errors.Is(e, cloud.ErrPriceChanged):
 			status = 409
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -180,11 +254,13 @@ func (s *Server) cloudAction(w http.ResponseWriter, r *http.Request) {
 	if !s.decodeAdminJSON(w, r, &body) {
 		return
 	}
+	started := time.Now()
 	e := s.Cloud.Action(r.Context(), body.Actor, r.PathValue("id"), body.Action)
+	s.logCloudRequest("action", started, e)
 	cloudResult(w, map[string]bool{"accepted": e == nil}, e)
 }
 
-// Pre-purchase failures happen before an operation exists, so retain safe diagnostics in journald.
+// Request failures may precede an operation event, so retain only safe diagnostics in journald.
 func (s *Server) logCloudRequest(phase string, started time.Time, err error) {
 	fields := []any{"phase", phase, "duration_ms", time.Since(started).Milliseconds()}
 	if err == nil {

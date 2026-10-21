@@ -42,7 +42,12 @@ if operation=='bootstrap':sys.exit(1)
 result=pathlib.Path(variables['ultra_result_file']);result.write_text(json.dumps({'verified':True}));result.chmod(0o600)
 `
 	if failRollback {
-		source = strings.Replace(source, "if operation=='bootstrap':sys.exit(1)", "if operation in ('bootstrap','rollback-adoption'):sys.exit(1)", 1)
+		source = strings.Replace(
+			source,
+			"if operation=='bootstrap':sys.exit(1)",
+			"if operation in ('bootstrap','rollback-adoption'):sys.exit(1)",
+			1,
+		)
 	}
 	if err = os.WriteFile(stub, []byte(source), 0700); err != nil {
 		t.Fatal(err)

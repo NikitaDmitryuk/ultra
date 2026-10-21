@@ -1,8 +1,11 @@
 ---
+- name: Select the frozen host rollback manifest
+  ansible.builtin.set_fact:
+    release_previous_manifest: "{{ ultra_host_previous_manifest | default(ultra_previous_manifest) }}"
 - name: Identify the verified compatible rollback component
   ansible.builtin.set_fact:
     release_retention_expected: >-
-      {{ {'ultra-relay.previous': (ultra_previous_manifest.assets |
+      {{ {'ultra-relay.previous': ((ultra_previous_relay_manifest | default(release_previous_manifest)).assets |
       selectattr('name', 'equalto', 'ultra-relay-linux-' + ultra_architecture) | first).sha256} }}
 - name: Include preserved compatible tools in the complete rollback inventory
   ansible.builtin.set_fact:
@@ -13,7 +16,7 @@
   ansible.builtin.set_fact:
     release_retention_bridge_expected:
       ultra-bot.previous: >-
-        {{ (ultra_previous_manifest.assets |
+        {{ (release_previous_manifest.assets |
         selectattr('name', 'equalto', 'ultra-bot-linux-' + ultra_architecture) | first).sha256 }}
       ultra-install: "{{ ultra_install_sha256 }}"
       manifest.previous: "{{ ultra_previous_manifest_sha256 }}"
@@ -75,9 +78,9 @@
       {{ ['/var/lib/ultra-ansible/releases/' + ultra_release_version] +
       ([ultra_controller_directory, ultra_previous_controller_directory,
       '/opt/ultra-recovery/releases/' + ultra_release_version,
-      '/opt/ultra-recovery/releases/' + ultra_previous_manifest.version]
+      '/opt/ultra-recovery/releases/' + release_previous_manifest.version]
       if inventory_hostname in groups['bridge'] else []) }}
-    versions: "{{ [ultra_release_version, ultra_previous_manifest.version] }}"
+    versions: "{{ [ultra_release_version, release_previous_manifest.version] }}"
     auto_policy: "{{ '/etc/ultra-ansible/auto-upgrade.json' if inventory_hostname in groups['bridge'] else omit }}"
     backup_policy: "{{ '/etc/ultra-recovery/backup.json' if inventory_hostname in groups['bridge'] else omit }}"
   register: release_retention_plan

@@ -4,12 +4,13 @@ package runtimestate
 
 import (
 	"errors"
-	"github.com/google/uuid"
-	bolt "go.etcd.io/bbolt"
 	"os"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	bolt "go.etcd.io/bbolt"
 )
 
 // Redirect this test's open database descriptor to /dev/full after mapping the
@@ -28,11 +29,15 @@ func TestKernelENOSPCPreservesJournalAndPreventsReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var file *os.File
-	database, err := bolt.Open(path, 0600, &bolt.Options{Timeout: time.Second, OpenFile: func(name string, flag int, mode os.FileMode) (*os.File, error) {
-		var e error
-		file, e = os.OpenFile(name, flag, mode)
-		return file, e
-	}})
+	database, err := bolt.Open(
+		path,
+		0600,
+		&bolt.Options{Timeout: time.Second, OpenFile: func(name string, flag int, mode os.FileMode) (*os.File, error) {
+			var e error
+			file, e = os.OpenFile(name, flag, mode)
+			return file, e
+		}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

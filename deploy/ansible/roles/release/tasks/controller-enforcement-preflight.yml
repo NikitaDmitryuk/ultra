@@ -1,0 +1,92 @@
+---
+- name: Inspect the persistent controller enforcement floor without changing it
+  ansible.builtin.stat:
+    path: /var/lib/ultra-ansible/lifecycle-retired.json
+    follow: false
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  register: release_enforcement_floor
+- name: Require a regular private floor when present
+  ansible.builtin.assert:
+    that:
+      - release_enforcement_floor.stat.exists is defined
+      - not (release_enforcement_floor.stat.islnk | default(false))
+      - not release_enforcement_floor.stat.exists or (release_enforcement_floor.stat.isreg | default(false))
+- name: Record an absent floor
+  ansible.builtin.set_fact:
+    release_controller_enforcement_result:
+      verified: true
+      controller_enforcement_floor_absent: true
+  when: not release_enforcement_floor.stat.exists
+- name: Verify exact enforcing brokers when a retirement floor exists
+  when: release_enforcement_floor.stat.exists
+  block:
+    - name: Require an operation and release bound enforcement request
+      ansible.builtin.assert:
+        that:
+          - ultra_controller_enforcement_spec is defined
+          - ultra_controller_enforcement_spec.phase in ['preflight', 'reserved', 'completion']
+    - name: Read only the bridge architecture
+      ansible.builtin.command:
+        argv: [/usr/bin/uname, -m]
+      changed_when: false
+      register: release_enforcement_platform
+    - name: Select the manifest bound native broker artifact
+      ansible.builtin.set_fact:
+        release_enforcement_architecture: >-
+          {{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[release_enforcement_platform.stdout | trim] }}
+    - name: Revalidate a retained operation proof
+      ultra_controller_enforcement:
+        action: verify
+        operation_id: "{{ ultra_controller_enforcement_spec.operation_id }}"
+        scope_sha256: "{{ ultra_controller_enforcement_spec.scope_sha256 }}"
+        manifest_sha256: "{{ ultra_controller_enforcement_spec.manifest_sha256 }}"
+        candidate: "{{ ultra_controller_enforcement_spec.candidates[release_enforcement_architecture].identity }}"
+        proof: "{{ ultra_controller_enforcement_spec.proof }}"
+        phase: "{{ ultra_controller_enforcement_spec.phase }}"
+      register: release_enforcement_revalidated
+      when: ultra_controller_enforcement_spec.proof | length > 0
+    - name: Probe candidate and rollback brokers before reservation
+      when: ultra_controller_enforcement_spec.proof | length == 0
+      block:
+        - name: Require first proof before any production reservation
+          ansible.builtin.assert:
+            that: ultra_controller_enforcement_spec.phase == 'preflight'
+        - name: Create an isolated scratch directory
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: ultra-controller-enforcement-
+          register: release_enforcement_scratch
+        - name: Copy only the manifest bound candidate into scratch
+          ansible.builtin.copy:
+            src: "{{ ultra_controller_enforcement_spec.candidates[release_enforcement_architecture].source }}"
+            dest: "{{ release_enforcement_scratch.path }}/ultra-install"
+            mode: '0700'
+            owner: root
+            group: root
+        - name: Exercise isolated broker enforcement without production jobs
+          ultra_controller_enforcement:
+            action: probe
+            operation_id: "{{ ultra_controller_enforcement_spec.operation_id }}"
+            scope_sha256: "{{ ultra_controller_enforcement_spec.scope_sha256 }}"
+            manifest_sha256: "{{ ultra_controller_enforcement_spec.manifest_sha256 }}"
+            candidate: "{{ ultra_controller_enforcement_spec.candidates[release_enforcement_architecture].identity }}"
+            candidate_executable: "{{ release_enforcement_scratch.path }}/ultra-install"
+          register: release_enforcement_probed
+      always:
+        - name: Remove only this probe scratch directory
+          ansible.builtin.file:
+            path: "{{ release_enforcement_scratch.path }}"
+            state: absent
+          when: release_enforcement_scratch is defined and release_enforcement_scratch.path is defined
+    - name: Record the verified operation proof
+      ansible.builtin.set_fact:
+        release_controller_enforcement_result:
+          verified: true
+          controller_enforcement_floor_absent: false
+          controller_enforcement_completion_ready: "{{ release_enforcement_revalidated.completion_ready | default(false) }}"
+          controller_enforcement_proof: >-
+            {{ release_enforcement_revalidated.proof
+               if ultra_controller_enforcement_spec.proof | length > 0
+               else release_enforcement_probed.proof }}

@@ -42,16 +42,46 @@ func testAutoFailoverTransport(t *testing.T, transport TunnelTransport) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := &Spec{Role: RoleBridge, ListenAddress: "127.0.0.1", PublicHost: "127.0.0.1", VLESSPort: freePort(t), DevMode: true, SplitRouting: BoolPtr(false), TunnelTransport: transport, TunnelTLSProvision: TunnelTLSSelfSigned, SplithttpPath: "/failover", SplithttpHost: "example.com", SplitHTTPTLS: SplitHTTPTLSSpec{ServerName: "example.com"}}
+	spec := &Spec{
+		Role:               RoleBridge,
+		ListenAddress:      "127.0.0.1",
+		PublicHost:         "127.0.0.1",
+		VLESSPort:          freePort(t),
+		DevMode:            true,
+		SplitRouting:       BoolPtr(false),
+		TunnelTransport:    transport,
+		TunnelTLSProvision: TunnelTLSSelfSigned,
+		SplithttpPath:      "/failover",
+		SplithttpHost:      "example.com",
+		SplitHTTPTLS:       SplitHTTPTLSSpec{ServerName: "example.com"},
+	}
 	nodes := []exits.Node{
-		{ID: "primary", Address: "127.0.0.1", Port: freePort(t), TunnelUUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", PinnedPeerCertSHA256: hex.EncodeToString(pin[:]), Enabled: true, Priority: 100},
-		{ID: "reserve", Address: "127.0.0.1", Port: freePort(t), TunnelUUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ef", PinnedPeerCertSHA256: hex.EncodeToString(pin[:]), Enabled: true, Priority: 200},
+		{
+			ID:                   "primary",
+			Address:              "127.0.0.1",
+			Port:                 freePort(t),
+			TunnelUUID:           "2784871e-d8a9-4e1f-b831-3d86aa8653ee",
+			PinnedPeerCertSHA256: hex.EncodeToString(pin[:]),
+			Enabled:              true,
+			Priority:             100,
+		},
+		{
+			ID:                   "reserve",
+			Address:              "127.0.0.1",
+			Port:                 freePort(t),
+			TunnelUUID:           "2784871e-d8a9-4e1f-b831-3d86aa8653ef",
+			PinnedPeerCertSHA256: hex.EncodeToString(pin[:]),
+			Enabled:              true,
+			Priority:             200,
+		},
 	}
 	var exitRunners [2]proxy.Runner
 	var exitConfigs [2][]byte
 	for i, n := range nodes {
 		payload := strings.Repeat(string(rune('a'+i)), 65536)
-		destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, payload) }))
+		destination := httptest.NewServer(
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, payload) }),
+		)
 		defer destination.Close()
 		exitSpec := *spec
 		exitSpec.Role = RoleExit
@@ -79,7 +109,12 @@ func testAutoFailoverTransport(t *testing.T, transport TunnelTransport) {
 		defer func() { _ = exitRunners[i].Close() }()
 	}
 	primary := nodes[0].ID
-	owner := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653f0", Kind: "vless", PreferredExitID: &primary, Routes: []auth.RouteCredential{{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653f1", ExitID: &primary, Published: true}}}
+	owner := auth.User{
+		UUID:            "2784871e-d8a9-4e1f-b831-3d86aa8653f0",
+		Kind:            "vless",
+		PreferredExitID: &primary,
+		Routes:          []auth.RouteCredential{{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653f1", ExitID: &primary, Published: true}},
+	}
 	var bridge proxy.Runner
 	defer func() { _ = bridge.Close() }()
 	selector := exits.NewSelector(func(ctx context.Context, n exits.Node) exits.Health {

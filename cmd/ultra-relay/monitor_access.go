@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -89,11 +90,11 @@ func ensureMonitorAccess(ctx context.Context, spec *config.Spec, output, chatOut
 		return e
 	}
 	if chatOutput != "" {
-		var admin string
-		if e = database.Pool.QueryRow(ctx, `SELECT telegram_id::text FROM bot_admins ORDER BY added_at,telegram_id LIMIT 1`).Scan(&admin); e != nil {
+		admin, err := db.NewBotAdminRepo(database).FirstAdmin(ctx)
+		if err != nil {
 			return errors.New("monitor admin recipient unavailable")
 		}
-		if e = privateMonitorWrite(chatOutput, []byte(admin+"\n")); e != nil {
+		if e = privateMonitorWrite(chatOutput, []byte(strconv.FormatInt(admin.TelegramID, 10)+"\n")); e != nil {
 			return e
 		}
 	}
@@ -101,8 +102,8 @@ func ensureMonitorAccess(ctx context.Context, spec *config.Spec, output, chatOut
 	if e != nil {
 		return e
 	}
-	var available bool
-	if e = database.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_exit_quotas q JOIN exit_nodes x ON x.id=q.exit_id WHERE q.user_uuid=$1 AND NOT q.blocked AND x.enabled)`, user.UUID).Scan(&available); e != nil {
+	available, e := db.NewQuotaRepo(database).HasAvailableExit(ctx, user.UUID)
+	if e != nil {
 		return e
 	}
 	fmt.Printf("{\"monitor_access\":\"ready\",\"quota_available\":%t}\n", available)

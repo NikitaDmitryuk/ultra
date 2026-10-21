@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -38,6 +39,15 @@ func retryFixture(t *testing.T) (string, []byte) {
 		t.Fatal(err)
 	}
 	return root, receipt
+}
+
+func TestBootstrapRetryOperationAllowsFrozenReadOnlyInspection(t *testing.T) {
+	if !bootstrapRetryOperation("inspect-bootstrap") {
+		t.Fatal("frozen read-only bootstrap inspection cannot be retried")
+	}
+	if bootstrapRetryOperation("inspect-upgrade") || bootstrapRetryOperation("arbitrary") {
+		t.Fatal("non-bootstrap operation entered frozen bootstrap retry allowlist")
+	}
 }
 
 func TestRetryArchivesBeforeAdvancingAndResumesCrashes(t *testing.T) {
@@ -75,12 +85,69 @@ func TestRetryArchivesBeforeAdvancingAndResumesCrashes(t *testing.T) {
 	}
 }
 
+func TestRetryArchivesDiagnosticAndClearsItForEachAttempt(t *testing.T) {
+	root, _ := retryFixture(t)
+	first := []byte(`{"stage":"first failure"}`)
+	diagnosticPath := filepath.Join(root, "diagnostic.json")
+	if err := os.WriteFile(diagnosticPath, first, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := retryFailedLocalAttempt(root); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(filepath.Join(root, "history", "diagnostic-attempt-1.json"))
+	if err != nil || !bytes.Equal(saved, first) {
+		t.Fatal("first attempt diagnostic was not preserved")
+	}
+	if _, err = os.Lstat(diagnosticPath); !os.IsNotExist(err) {
+		t.Fatal("stale diagnostic survived retry")
+	}
+
+	jobPath := filepath.Join(root, "job.json")
+	jobRaw, err := os.ReadFile(jobPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job map[string]any
+	if err = json.Unmarshal(jobRaw, &job); err != nil {
+		t.Fatal(err)
+	}
+	job["attempt"] = float64(2)
+	jobRaw, _ = json.Marshal(job)
+	if err = os.WriteFile(jobPath, jobRaw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	job["attempt"] = float64(2)
+	job["state"] = "failed"
+	job["code"] = "playbook_failed"
+	receiptRaw, _ := json.Marshal(job)
+	if err = os.WriteFile(filepath.Join(root, "receipt.json"), receiptRaw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	second := []byte(`{"stage":"second failure"}`)
+	if err = os.WriteFile(diagnosticPath, second, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = retryFailedLocalAttempt(root); err != nil {
+		t.Fatal(err)
+	}
+	saved, err = os.ReadFile(filepath.Join(root, "history", "diagnostic-attempt-2.json"))
+	if err != nil || !bytes.Equal(saved, second) {
+		t.Fatal("second attempt diagnostic was not preserved")
+	}
+}
+
 func TestRetryRejectsConflictWithoutErasingFailure(t *testing.T) {
 	cases := map[string]func(string){
 		"changed request": func(root string) { _ = os.WriteFile(filepath.Join(root, "request.json"), []byte("{}"), 0600) },
 		"history collision": func(root string) {
 			_ = os.Mkdir(filepath.Join(root, "history"), 0700)
 			_ = os.WriteFile(filepath.Join(root, "history", "attempt-1.json"), []byte("{}"), 0600)
+		},
+		"diagnostic history collision": func(root string) {
+			_ = os.Mkdir(filepath.Join(root, "history"), 0700)
+			_ = os.WriteFile(filepath.Join(root, "history", "diagnostic-attempt-1.json"), []byte("{}"), 0600)
+			_ = os.WriteFile(filepath.Join(root, "diagnostic.json"), []byte(`{"stage":"failure"}`), 0600)
 		},
 		"job advanced without archive": func(root string) {
 			data, _ := os.ReadFile(filepath.Join(root, "job.json"))
@@ -140,7 +207,11 @@ job=pathlib.Path(sys.argv[-1][1:]).parent
 count=job/'calls'
 n=int(count.read_text())+1 if count.exists() else 1
 count.write_text(str(n))
-if n==1:sys.exit(1)
+if n==1:
+ diagnostic=job/'diagnostic.json'
+ diagnostic.write_text(json.dumps({'stage':'bootstrap','node':'bridge','code':'ssh_banner_timeout'}))
+ diagnostic.chmod(0o600)
+ sys.exit(1)
 result=job/'result.json'
 result.write_text(json.dumps({'verified':True}))
 result.chmod(0o600)
@@ -154,10 +225,18 @@ result.chmod(0o600)
 	if _, err = RunLocal(ctx, "bootstrap", inventory, vars, directory, python, executable); err == nil {
 		t.Fatal("initial failure missing")
 	}
+	calls, _ := os.ReadFile(filepath.Join(directory, "calls"))
+	if string(calls) != "1" {
+		t.Fatalf("initial invocation count = %s, want 1", calls)
+	}
 	bundle := filepath.Join(directory, "bundle", "controller.py")
 	original, _ := os.ReadFile(bundle)
 	if _, err = RunLocal(ctx, "bootstrap", inventory, vars, directory, python, executable); err == nil {
 		t.Fatal("ordinary invocation retried failure")
+	}
+	calls, _ = os.ReadFile(filepath.Join(directory, "calls"))
+	if string(calls) != "1" {
+		t.Fatalf("ordinary invocation retried transient SSH failure: calls=%s", calls)
 	}
 	if _, err = RunLocalRetryFailed(context.Background(), "bootstrap", inventory, vars, directory, python, executable); err == nil {
 		t.Fatal("retry without lease accepted")
@@ -185,7 +264,7 @@ result.chmod(0o600)
 			t.Fatal(err)
 		}
 	}
-	calls, _ := os.ReadFile(filepath.Join(directory, "calls"))
+	calls, _ = os.ReadFile(filepath.Join(directory, "calls"))
 	if string(calls) != "2" {
 		t.Fatalf("unexpected execution count %s", calls)
 	}
@@ -224,6 +303,114 @@ func TestFrozenBootstrapRetryRejectsMissingOrInvalidLock(t *testing.T) {
 		}
 		if _, err := RetryFrozenBootstrapWithLock(context.Background(), root, "/usr/bin/python3", "/bin/false"); err == nil {
 			t.Fatalf("invalid frozen lock accepted: %v", value)
+		}
+	}
+}
+
+func TestUpgradeCompensationRetryExactRequestAndReceipt(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python unavailable")
+	}
+	for _, test := range []struct{ operation, action string }{
+		{"upgrade-runtime", "prepare"}, {"upgrade-runtime", "commit"}, {"upgrade-runtime", "rollback"}, {"upgrade-runtime", "tls-release"},
+		{"rollback", "rollback"},
+		{"upgrade-domain", "apply"}, {"upgrade-domain", "accept"}, {"upgrade-domain", "rollback"}, {"upgrade-domain", "retire"}, {"upgrade-domain", "finalize"},
+		{"upgrade-dns-migration", "prepare"}, {"upgrade-dns-migration", "promote"}, {"upgrade-dns-migration", "retire"}, {"upgrade-dns-migration", "rollback"},
+	} {
+		operation := test.operation
+		t.Run(operation+"/"+test.action, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Chmod(root, 0700); err != nil {
+				t.Fatal(err)
+			}
+			ctx, unlock, err := WithOperationLock(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			executable := filepath.Join(root, "ansible")
+			source := "#!" + python + "\n" + `import json,pathlib,sys
+job=pathlib.Path(sys.argv[-1][1:]).parent
+count=job/'calls'
+n=int(count.read_text())+1 if count.exists() else 1
+count.write_text(str(n))
+if n==1:sys.exit(1)
+result=job/'result.json'
+result.write_text(json.dumps({'verified':True}))
+result.chmod(0o600)
+`
+			if err := os.WriteFile(executable, []byte(source), 0700); err != nil {
+				t.Fatal(err)
+			}
+			variables := map[string]any{
+				"ultra_lock_directory":        root,
+				"ultra_runtime_action":        "rollback",
+				"ultra_runtime_effect_inputs": map[string]string{"bridge": "exact"},
+				"ultra_upgrade_domain_action": "rollback",
+				"ultra_dns_migration_action":  "rollback",
+			}
+			if test.action == "tls-release" {
+				variables["ultra_managed_tunnel_requests"] = map[string]string{"exit_fixture": "exact"}
+				variables["ultra_managed_tunnel_hook_sha256"] = strings.Repeat("a", 64)
+			}
+			variables["ultra_runtime_action"] = test.action
+			variables["ultra_upgrade_domain_action"] = test.action
+			variables["ultra_dns_migration_action"] = test.action
+			stage := filepath.Join(root, "rollback")
+			if _, err := RunLocal(ctx, operation, map[string]any{}, variables, stage, python, executable); err == nil {
+				t.Fatal("missing failed rollback")
+			}
+			original, err := os.ReadFile(filepath.Join(stage, "request.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := RunLocal(ctx, operation, map[string]any{}, variables, stage, python, executable); err == nil {
+				t.Fatal("ordinary replay retried failed rollback")
+			}
+			variables["changed"] = true
+			if _, err := RunLocalRetryFailed(ctx, operation, map[string]any{}, variables, stage, python, executable); err == nil {
+				t.Fatal("changed compensation accepted")
+			}
+			delete(variables, "changed")
+			for range 2 {
+				if _, err := RunLocalRetryFailed(ctx, operation, map[string]any{}, variables, stage, python, executable); err != nil {
+					t.Fatal(err)
+				}
+			}
+			after, err := os.ReadFile(filepath.Join(stage, "request.json"))
+			if err != nil || !bytes.Equal(original, after) {
+				t.Fatal("frozen request changed", err)
+			}
+			calls, _ := os.ReadFile(filepath.Join(stage, "calls"))
+			if string(calls) != "2" {
+				t.Fatalf("executions: %s", calls)
+			}
+			if _, err := os.Stat(filepath.Join(stage, "history", "attempt-1.json")); err != nil {
+				t.Fatal("failed receipt not preserved", err)
+			}
+		})
+	}
+	for _, action := range []string{"prepare", "activate", "adopt", "retire-experiment"} {
+		if !localRetryOperation("ingress", map[string]any{"ultra_ingress_action": action}) {
+			t.Fatalf("ingress retry not enabled: %s", action)
+		}
+	}
+	for _, action := range []string{"experiment", "rollback", "stage", "status", "notice"} {
+		if localRetryOperation("ingress", map[string]any{"ultra_ingress_action": action}) {
+			t.Fatalf("unauthorized ingress retry: %s", action)
+		}
+	}
+	for _, operation := range []string{"upgrade", "restore", "upgrade-runtime", "upgrade-domain", "upgrade-dns-migration", "rollback"} {
+		if localRetryOperation(
+			operation,
+			map[string]any{
+				"ultra_runtime_action":        "apply",
+				"ultra_upgrade_domain_action": "arbitrary",
+				"ultra_dns_migration_action":  "arbitrary",
+			},
+		) {
+			t.Fatalf("unauthorized retry: %s", operation)
 		}
 	}
 }

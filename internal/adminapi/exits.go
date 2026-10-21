@@ -75,6 +75,18 @@ func (s *Server) handleListExits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodes := s.exits.List()
+	deleted, err := s.deletedCloudExits(r.Context())
+	if err != nil {
+		http.Error(w, "cloud history unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	visible := make([]exits.Node, 0, len(nodes))
+	for _, node := range nodes {
+		if !deleted[node.ID] {
+			visible = append(visible, node)
+		}
+	}
+	nodes = visible
 	type item struct {
 		exits.Node
 		Active bool `json:"active"`
@@ -91,9 +103,12 @@ func (s *Server) handleListExits(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if !activeStillEnabled && len(enabled) > 0 {
-		candidate, _ := exits.SelectActive(enabled, nil)
-		activeID = candidate.ID
+	if !activeStillEnabled {
+		activeID = ""
+		if len(enabled) > 0 {
+			candidate, _ := exits.SelectActive(enabled, nil)
+			activeID = candidate.ID
+		}
 	}
 	out := make([]item, 0, len(nodes))
 	for _, n := range nodes {
@@ -220,7 +235,9 @@ func (s *Server) validateClientUser(w http.ResponseWriter, uuid string) (u auth.
 	return u, true
 }
 
-func (s *Server) clientExitSelection(u auth.User) (selectedID *string, effectiveID string, health map[string]exits.Health, nodes []exits.Node) {
+func (s *Server) clientExitSelection(
+	u auth.User,
+) (selectedID *string, effectiveID string, health map[string]exits.Health, nodes []exits.Node) {
 	if s.exits == nil {
 		return nil, "", nil, nil
 	}
@@ -403,7 +420,7 @@ func (s *Server) writeExitError(w http.ResponseWriter, err error) {
 		http.Error(w, "not found", http.StatusNotFound)
 	case errors.Is(err, db.ErrExitLastEnabled):
 		http.Error(w, err.Error(), http.StatusConflict)
-	case errors.Is(err, db.ErrExitDuplicateAddr), errors.Is(err, db.ErrExitDuplicateUUID):
+	case errors.Is(err, db.ErrExitDuplicateAddr), errors.Is(err, db.ErrExitDuplicateUUID), errors.Is(err, db.ErrExitTargetBusy):
 		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		if isExitValidationError(err) {
@@ -476,7 +493,15 @@ func (s *Server) profileRoutes(u auth.User) []map[string]any {
 				}
 			}
 		}
-		out = append(out, map[string]any{"location_id": route.LocationID, "name": name, "preferred_exit_id": route.ExitID, "effective_exit_id": effective})
+		out = append(
+			out,
+			map[string]any{
+				"location_id":       route.LocationID,
+				"name":              name,
+				"preferred_exit_id": route.ExitID,
+				"effective_exit_id": effective,
+			},
+		)
 	}
 	return out
 }

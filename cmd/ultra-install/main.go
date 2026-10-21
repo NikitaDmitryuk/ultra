@@ -69,13 +69,8 @@ func legacyMain() {
 	exitHost := flag.String("exit", "", "exit VPS hostname or IP (SSH target)")
 
 	// PostgreSQL flags
-	dbHost := flag.String("db-host", "", "host to install PostgreSQL primary on (default: same as -bridge)")
-	dbReplica := flag.String(
-		"db-replica",
-		"",
-		"host to install PostgreSQL streaming replica on (default: same as -exit); requires -db-host",
-	)
-	dbSSHUser := flag.String("db-ssh-user", "", "SSH user for DB hosts (default: same as -ssh-user)")
+	dbHost := flag.String("db-host", "", "dedicated PostgreSQL server IP (required for database provisioning)")
+	dbSSHIdentity := flag.String("database-ssh-key", "", "SSH private key path for dedicated DB server (default: same as -identity)")
 	dbName := flag.String("db-name", "ultra_db", "PostgreSQL database name")
 	dbUser := flag.String("db-user", "ultra", "PostgreSQL application role")
 	exitDial := flag.String(
@@ -92,18 +87,18 @@ func legacyMain() {
 	exit2Priority := flag.Int("exit2-priority", 200, "failover priority for -exit2 (lower = preferred; primary -exit uses 100)")
 	exit2Name := flag.String("exit2-name", "backup", "display name for -exit2 in PostgreSQL exit_nodes")
 	sshUser := flag.String("ssh-user", "root", "SSH user (key auth; avoid password automation)")
-	identity := flag.String("identity", "", "path to SSH private key (optional if ssh uses agent)")
+	identity := flag.String("bridge-ssh-key", "", "bridge operator SSH key path")
+	exitIdentity := flag.String("main-exit-ssh-key", "", "main exit operator SSH key path")
 	publicHost := flag.String("public-host", "", "hostname or IP clients use to reach the bridge (default: -bridge)")
-	preset := flag.String("preset", "apijson", "splithttp template: apijson, steamlike (plusgaming = apijson)")
 	splithttpHostFlag := flag.String(
 		"splithttp-host",
 		"",
-		"override spec splithttp_host and tunnel TLS server name / cert CN (default: preset default host)",
+		"override spec splithttp_host and tunnel TLS server name / cert CN (required for a custom hostname)",
 	)
 	splithttpPathFlag := flag.String(
 		"splithttp-path",
 		"",
-		"override spec splithttp_path (default: random path from preset at install time)",
+		"override spec splithttp_path (default: /ultra-xhttp)",
 	)
 	realityDest := flag.String(
 		"reality-dest",
@@ -266,7 +261,8 @@ func legacyMain() {
 			bridgeHost:      *bridgeHost,
 			exitHost:        *exitHost,
 			sshUser:         *sshUser,
-			identity:        *identity,
+			identity:        *exitIdentity,
+			bridgeIdentity:  *identity,
 			remoteDir:       *remoteDir,
 			projectRoot:     *projectRoot,
 			binaryPath:      *binaryPath,
@@ -287,16 +283,24 @@ func legacyMain() {
 	}
 
 	values := map[string]string{
-		"BRIDGE": *bridgeHost, "EXIT": *exitHost, "EXIT_DIAL": *exitDial, "EXIT2": *exit2Host, "EXIT2_DIAL": *exit2Dial, "EXIT2_NAME": *exit2Name, "EXIT2_PRIORITY": strconv.Itoa(*exit2Priority),
-		"SSH_USER": *sshUser, "IDENTITY": *identity, "PUBLIC_HOST": *publicHost, "REMOTE_DIR": *remoteDir, "RELAY_BINARY": *binaryPath, "PROJECT_ROOT": *projectRoot,
-		"PRESET": *preset, "REALITY_DEST": *realityDest, "REALITY_SNI": *realitySNI, "VLESS_PORT": strconv.Itoa(*vlessPort), "TUNNEL_PORT": strconv.Itoa(tun),
-		"REUSE_BRIDGE_SPEC": strconv.FormatBool(*reuseBridgeSpec), "GENERATE_EXIT_TLS": strconv.FormatBool(*generateExitTLS), "LOG_LEVEL": logLevelNorm,
-		"DB_ENABLE": strconv.FormatBool(*dbHost != "" || *dbReplica != ""), "DB_HOST": *dbHost, "DB_REPLICA": *dbReplica, "DB_SSH_USER": *dbSSHUser, "DB_NAME": *dbName, "DB_USER": *dbUser,
+		"BRIDGE_IP": *bridgeHost, "MAIN_EXIT_IP": *exitHost, "EXIT_DIAL": *exitDial, "EXIT2": *exit2Host, "EXIT2_DIAL": *exit2Dial, "EXIT2_NAME": *exit2Name, "EXIT2_PRIORITY": strconv.Itoa(*exit2Priority),
+		"SSH_USER": *sshUser, "BRIDGE_SSH_KEY": *identity, "MAIN_EXIT_SSH_KEY": *exitIdentity, "PUBLIC_HOST": *publicHost, "REMOTE_DIR": *remoteDir, "RELAY_BINARY": *binaryPath, "PROJECT_ROOT": *projectRoot,
+		"PRESET": "standard", "REALITY_DEST": *realityDest, "REALITY_SNI": *realitySNI, "VLESS_PORT": strconv.Itoa(*vlessPort), "TUNNEL_PORT": strconv.Itoa(tun),
+		"REUSE_BRIDGE_SPEC": strconv.FormatBool(
+			*reuseBridgeSpec,
+		), "GENERATE_EXIT_TLS": strconv.FormatBool(*generateExitTLS), "LOG_LEVEL": logLevelNorm,
+		"DATABASE_IP": *dbHost, "DATABASE_SSH_KEY": *dbSSHIdentity, "DB_NAME": *dbName, "DB_USER": *dbUser,
 		"SPLITHTTP_HOST": *splithttpHostFlag, "SPLITHTTP_PATH": *splithttpPathFlag, "SKIP_GEO_DOWNLOAD": strconv.FormatBool(*skipGeoDownload), "GEO_RELEASE_TAG": *geoReleaseTag,
 		"ROUTING_MODE": *routingMode, "GEOSITE_BLOCK_TAGS": *geositeBlockTags, "DOMAIN_DIRECT": *domainDirect,
-		"DOH_DISABLE": strconv.FormatBool(*disableDOH), "FRAGMENT_DISABLE": strconv.FormatBool(*noFragment), "ANTI_CENSOR_PROFILE": *antiCensorProfile,
-		"PUBLIC_XHTTP_PORT": strconv.Itoa(*publicXHTTPPort), "SPLITHTTP_PADDING": *splithttpPadding, "SPLITHTTP_MAX_CHUNK_KB": strconv.Itoa(*splithttpMaxChunkKB), "REALITY_FINGERPRINTS": *realityFPs,
-		"WARP_ENABLE": strconv.FormatBool(*warpFlag), "WARP_PORT": strconv.Itoa(*warpPort), "TRANSPORT": *transportFlag, "VLESS_FLOW": *vlessFlowFlag, "DISABLE_VLESS_FLOW": strconv.FormatBool(*disableVLESSFlow),
+		"DOH_DISABLE": strconv.FormatBool(
+			*disableDOH,
+		), "FRAGMENT_DISABLE": strconv.FormatBool(*noFragment), "ANTI_CENSOR_PROFILE": *antiCensorProfile,
+		"PUBLIC_XHTTP_PORT": strconv.Itoa(
+			*publicXHTTPPort,
+		), "SPLITHTTP_PADDING": *splithttpPadding, "SPLITHTTP_MAX_CHUNK_KB": strconv.Itoa(*splithttpMaxChunkKB), "REALITY_FINGERPRINTS": *realityFPs,
+		"WARP_ENABLE": strconv.FormatBool(
+			*warpFlag,
+		), "WARP_PORT": strconv.Itoa(*warpPort), "TRANSPORT": *transportFlag, "VLESS_FLOW": *vlessFlowFlag, "DISABLE_VLESS_FLOW": strconv.FormatBool(*disableVLESSFlow),
 	}
 	plan := installplan.LegacyValuesToPlan(values)
 	plan.Artifacts.RelayBinary = *binaryPath

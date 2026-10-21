@@ -55,3 +55,14 @@ FROM user_ip_observations
 WHERE user_uuid=$1 AND last_seen_at >= NOW() - $2::interval
 GROUP BY bucket_start
 ORDER BY bucket_start;
+
+-- name: UpsertUserIPObservationBatch :exec
+INSERT INTO user_ip_observations(user_uuid,ip,first_seen_at,last_seen_at,sessions_seen)
+SELECT $1,ip::inet,NOW(),NOW(),COUNT(*) FROM unnest($2::text[]) AS input(ip) GROUP BY ip::inet
+ON CONFLICT(user_uuid,ip) DO UPDATE SET last_seen_at=NOW(),
+ sessions_seen=user_ip_observations.sessions_seen+EXCLUDED.sessions_seen;
+
+-- name: LeakIPCounts :one
+SELECT COUNT(*) FILTER (WHERE last_seen_at>=NOW()-INTERVAL '1 minute')::int AS concurrent,
+COUNT(*)::int AS unique_24h FROM user_ip_observations
+WHERE user_uuid=$1 AND last_seen_at>=NOW()-INTERVAL '24 hours';

@@ -32,7 +32,8 @@ func TestEnsureSSHKeyReusesKeyWithDifferentComment(t *testing.T) {
 			http.Error(w, "duplicate SSH key", http.StatusBadRequest)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"ssh_keys": []map[string]string{{"id": "existing", "ssh_key": material + " original-host"}}, "meta": map[string]any{"links": map[string]string{"next": ""}}})
+		_ = json.NewEncoder(w).
+			Encode(map[string]any{"ssh_keys": []map[string]string{{"id": "existing", "ssh_key": material + " original-host"}}, "meta": map[string]any{"links": map[string]string{"next": ""}}})
 	}))
 	defer server.Close()
 	api := NewVultr("test")
@@ -102,7 +103,9 @@ func TestRedirectDoesNotForwardCredentials(t *testing.T) {
 	destinationCalls := 0
 	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { destinationCalls++ }))
 	defer destination.Close()
-	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, destination.URL, http.StatusFound) }))
+	source := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, destination.URL, http.StatusFound) }),
+	)
 	defer source.Close()
 	v := NewVultr("test-key")
 	v.BaseURL = source.URL

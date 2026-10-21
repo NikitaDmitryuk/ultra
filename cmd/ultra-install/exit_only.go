@@ -23,6 +23,7 @@ type exitOnlyOpts struct {
 	exitHost        string
 	sshUser         string
 	identity        string
+	bridgeIdentity  string
 	remoteDir       string
 	projectRoot     string
 	binaryPath      string
@@ -73,7 +74,23 @@ func runExitOnly(o exitOnlyOpts) {
 	ctx, release, err := deployansible.WithOperationLock(ctx, root)
 	exitOnErr("exit-only lease", err)
 	defer release()
-	requestJSON, err := json.Marshal(map[string]any{"bridge": o.bridgeHost, "exit": o.exitHost, "uuid": o.tunnelUUID, "port": o.tunnelPort, "identity": o.identity, "binary": o.binaryPath, "log": o.logLevel, "warp": o.warp, "warp_port": o.warpPort, "transport": o.transport, "host": o.splithttpHost, "path": o.splithttpPath, "disable_doh": o.disableDOH})
+	requestJSON, err := json.Marshal(
+		map[string]any{
+			"bridge":      o.bridgeHost,
+			"exit":        o.exitHost,
+			"uuid":        o.tunnelUUID,
+			"port":        o.tunnelPort,
+			"identity":    o.identity,
+			"binary":      o.binaryPath,
+			"log":         o.logLevel,
+			"warp":        o.warp,
+			"warp_port":   o.warpPort,
+			"transport":   o.transport,
+			"host":        o.splithttpHost,
+			"path":        o.splithttpPath,
+			"disable_doh": o.disableDOH,
+		},
+	)
 	exitOnErr("exit-only identity", err)
 	// The route identity differentiates jobs; pure option fields are private below.
 	digest := sha256.Sum256(append(requestJSON, []byte(o.bridgeHost+"|"+o.exitHost+"|"+o.tunnelUUID)...))
@@ -82,7 +99,14 @@ func runExitOnly(o exitOnlyOpts) {
 	directory, err := beginBootstrapAttempt(attemptRoot)
 	exitOnErr("exit-only attempt", err)
 	exitOnErr("exit-only private attempt", ensurePrivateBootstrapDirectory(directory))
-	plan := &installplan.InstallPlan{SSH: installplan.SSHConfig{User: o.sshUser, Identity: o.identity}, Bridge: installplan.BridgeConfig{SSHHost: o.bridgeHost, RemoteDir: o.remoteDir}}
+	bridgeIdentity := o.bridgeIdentity
+	if bridgeIdentity == "" {
+		bridgeIdentity = o.identity
+	}
+	plan := &installplan.InstallPlan{
+		SSH:    installplan.SSHConfig{User: o.sshUser, Identity: bridgeIdentity},
+		Bridge: installplan.BridgeConfig{SSHHost: o.bridgeHost, RemoteDir: o.remoteDir},
+	}
 	executable := os.Getenv("ULTRA_ANSIBLE_EXECUTABLE")
 	if executable == "" {
 		executable = "/opt/ultra-ansible/current/venv/bin/ansible-playbook"
@@ -99,7 +123,7 @@ func runExitOnly(o exitOnlyOpts) {
 
 	preset := strings.TrimSpace(bridge.MimicPreset)
 	if preset == "" {
-		preset = "apijson"
+		preset = "standard"
 	}
 	strat, err := mimic.New(preset)
 	if err != nil {
@@ -237,11 +261,53 @@ func runExitOnly(o exitOnlyOpts) {
 	exitOnErr("exit-only binary", err)
 	sum, err := sourceSHA(source)
 	exitOnErr("exit-only binary", err)
-	request := deployansible.ExitRequest{Host: o.exitHost, User: o.sshUser, Identity: identity, KnownHosts: pins, BridgeIPv4: bridgeIP.IP.String(), Spec: *exitSpec}
+	request := deployansible.ExitRequest{
+		Host:       o.exitHost,
+		User:       o.sshUser,
+		Identity:   identity,
+		KnownHosts: pins,
+		BridgeIPv4: bridgeIP.IP.String(),
+		Spec:       *exitSpec,
+	}
 	exitOnErr("exit-only inputs", request.Validate())
-	inventory := map[string]any{"all": map[string]any{"children": map[string]any{"exits": map[string]any{"hosts": map[string]any{"exit": map[string]any{"ansible_host": o.exitHost, "ansible_user": o.sshUser, "ansible_ssh_private_key_file": identity, "ansible_ssh_args": "-F /dev/null -C -o ControlMaster=no -o ControlPath=none", "ansible_ssh_common_args": "-o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o IdentitiesOnly=yes -o UserKnownHostsFile=" + shellQuote(pins)}}}}}}
-	variables := map[string]any{"ultra_lock_directory": root, "ultra_spec": exitSpec, "ultra_bridge_ipv4": bridgeIP.IP.String(), "ultra_relay_source": source, "ultra_relay_sha256": sum, "ultra_relay_environment": "ULTRA_RELAY_LOG_LEVEL=" + o.logLevel + "\n", "ultra_warp_enabled": o.warp, "ultra_warp_port": o.warpPort}
-	_, err = deployansible.RunLocal(ctx, "configure-exit-operator", inventory, variables, filepath.Join(directory, "apply"), "/usr/bin/python3", executable)
+	inventory := map[string]any{
+		"all": map[string]any{
+			"children": map[string]any{
+				"exits": map[string]any{
+					"hosts": map[string]any{
+						"exit": map[string]any{
+							"ansible_host":                 o.exitHost,
+							"ansible_user":                 o.sshUser,
+							"ansible_ssh_private_key_file": identity,
+							"ansible_ssh_args":             "-F /dev/null -C -o ControlMaster=no -o ControlPath=none",
+							"ansible_ssh_common_args": "-o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o IdentitiesOnly=yes -o UserKnownHostsFile=" + shellQuote(
+								pins,
+							),
+						},
+					},
+				},
+			},
+		},
+	}
+	variables := map[string]any{
+		"ultra_lock_directory":    root,
+		"ultra_spec":              exitSpec,
+		"ultra_bridge_ipv4":       bridgeIP.IP.String(),
+		"ultra_relay_source":      source,
+		"ultra_relay_sha256":      sum,
+		"ultra_relay_environment": "ULTRA_RELAY_LOG_LEVEL=" + o.logLevel + "\n",
+		"ultra_warp_enabled":      o.warp,
+		"ultra_warp_port":         o.warpPort,
+	}
+	_, err = deployansible.RunLocal(
+		ctx,
+		"configure-exit-operator",
+		inventory,
+		variables,
+		filepath.Join(directory, "apply"),
+		"/usr/bin/python3",
+		executable,
+	)
 	exitOnErr("Ansible exit-only", err)
 	exitOnErr("exit-only completion", completeBootstrapAttempt(attemptRoot, directory))
 	fmt.Println("Exit node installed:", o.exitHost)

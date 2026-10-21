@@ -3,42 +3,31 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/NikitaDmitryuk/ultra/internal/cloud"
-	"github.com/NikitaDmitryuk/ultra/internal/db"
 	"log/slog"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/cloud"
+	"github.com/NikitaDmitryuk/ultra/internal/db"
 )
 
 func runQuotas(ctx context.Context, database *db.DB, api *cloud.Vultr, apply func(context.Context) error, log *slog.Logger) {
 	repo := db.NewQuotaRepo(database)
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	var nextProvider time.Time
-	pending := true
 	for {
 		// Provider GETs have 20-second timeouts and retry transient failures.
 		c, cancel := context.WithTimeout(ctx, 90*time.Second)
 		now := time.Now()
-		if !now.Before(nextProvider) {
-			if e := refreshBandwidth(c, repo, optionalBandwidthAPI(api), now); e != nil {
-				var refreshErr bandwidthRefreshError
-				var apiErr cloud.APIError
-				_ = errors.As(e, &refreshErr)
-				_ = errors.As(e, &apiErr)
-				log.Warn("quota provider refresh failed", "stage", refreshErr.stage, "code", cloud.ErrorCode(e), "http_status", apiErr.Status)
-			}
-			nextProvider = now.Add(5 * time.Minute)
+		if e := refreshBandwidth(c, repo, optionalBandwidthAPI(api), now); e != nil {
+			var refreshErr bandwidthRefreshError
+			var apiErr cloud.APIError
+			_ = errors.As(e, &refreshErr)
+			_ = errors.As(e, &apiErr)
+			log.Warn("quota provider refresh failed", "stage", refreshErr.stage, "code", cloud.ErrorCode(e), "http_status", apiErr.Status)
 		}
-		changed, e := repo.Recalculate(c, now)
-		pending = pending || changed
-		if e == nil && pending {
-			e = apply(c)
-			if e == nil {
-				pending = false
-				log.Info("quota routing applied")
-			}
-		}
-		if e != nil {
+		// Runtime refresh owns quota calculation, application and acknowledgement.
+		// It also retries every ten seconds if this immediate provider refresh fails.
+		if e := apply(c); e != nil {
 			log.Warn("quota evaluation failed; retry scheduled", "code", "quota_unavailable")
 		}
 		cancel()
@@ -102,7 +91,20 @@ func refreshBandwidth(ctx context.Context, repo bandwidthRepo, api bandwidthAPI,
 		}
 		// Every exit refers to this same observation. There are no apportioned shares
 		// and no dependency on a nominal plan or individual instance statistics.
-		updates = append(updates, db.BandwidthObservation{ID: b.ID, Instance: b.Instance, Monthly: b.Monthly, Remaining: pool.Remaining, Accrued: pool.Accrued, AccountUsed: pool.Used, LocalWatermark: watermark, Pool: true, Error: code})
+		updates = append(
+			updates,
+			db.BandwidthObservation{
+				ID:             b.ID,
+				Instance:       b.Instance,
+				Monthly:        b.Monthly,
+				Remaining:      pool.Remaining,
+				Accrued:        pool.Accrued,
+				AccountUsed:    pool.Used,
+				LocalWatermark: watermark,
+				Pool:           true,
+				Error:          code,
+			},
+		)
 	}
 	if saveErr := repo.SaveBandwidth(ctx, updates, now); saveErr != nil {
 		return bandwidthRefreshError{stage: "save_bandwidth", err: saveErr}

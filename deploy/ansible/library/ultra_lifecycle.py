@@ -2,18 +2,45 @@
 """Fixed root-only bridge lifecycle reservation; no user-controlled commands."""
 from ansible.module_utils.basic import AnsibleModule
 import os
+import stat
 import re
 import json
 import ipaddress
 import shlex
+import time
 import urllib.request
 from pathlib import Path
+
+
+# Recovery reconciliation may hold the infrastructure lock for its full
+# systemd TimeoutStartSec (540s); leave one minute for scheduling and retry.
+LIFECYCLE_LOCK_RETRY_SECONDS = 600
+LIFECYCLE_LOCK_RETRY_INTERVAL = 1
+INFRASTRUCTURE_BUSY = re.compile(r'(?:^|\n)Ansible lease: infrastructure_busy(?: \([^()\r\n]*\))?(?:\r?\n|$)')
+
+
+def run_lifecycle_transition(run_command, phase, sleep=time.sleep, monotonic=time.monotonic,
+                             retry_seconds=LIFECYCLE_LOCK_RETRY_SECONDS):
+    """Retry only an applying reservation rejected by the shared infrastructure lock."""
+    deadline = monotonic() + retry_seconds
+    while True:
+        code, stdout, stderr = run_command()
+        if code == 0:
+            return True
+        output = (stdout or '') + '\n' + (stderr or '')
+        if phase != 'applying' or not INFRASTRUCTURE_BUSY.search(output):
+            return False
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return None
+        sleep(min(LIFECYCLE_LOCK_RETRY_INTERVAL, remaining))
 
 
 def main():
     module = AnsibleModule(argument_spec={
         'id': {'type': 'str', 'required': True},
         'drain': {'type': 'bool', 'default': True},
+        'reserve_only': {'type': 'bool', 'default': False},
         'resume_frozen': {'type': 'bool', 'default': False},
         'phase': {'type': 'str', 'required': True, 'choices': ['applying', 'checking', 'released']},
     }, supports_check_mode=True)
@@ -31,9 +58,22 @@ def main():
         if module.params['phase'] != 'applying':
             module.fail_json(msg='invalid_resume_phase')
         command.append('--resume-frozen')
-    code, _, _ = module.run_command(command)
-    if code:
-        module.fail_json(msg='lifecycle_transition_failed')
+    result = run_lifecycle_transition(lambda: module.run_command(command), module.params['phase'])
+    if result is not True:
+        module.fail_json(msg='lifecycle_infrastructure_busy' if result is None else 'lifecycle_transition_failed')
+    try:
+        journal = Path('/var/lib/ultra-ansible/lifecycle.json')
+        metadata = journal.lstat()
+        if journal.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096 or metadata.st_uid != 0 or metadata.st_mode & 0o077:
+            raise ValueError('invalid_reservation')
+        if json.loads(journal.read_text()) != {'id': module.params['id'], 'phase': module.params['phase']}:
+            raise ValueError('invalid_reservation')
+    except (OSError, ValueError):
+        module.fail_json(msg='lifecycle_reservation_unverified')
+    if module.params['reserve_only']:
+        if module.params['phase'] != 'applying' or module.params['drain'] or module.params['resume_frozen']:
+            module.fail_json(msg='lifecycle_invalid_reservation_only')
+        module.exit_json(changed=False, verified=True, reservation_id=module.params['id'], reservation_phase='applying')
     if module.params['phase'] == 'applying' and not module.params['drain'] and not module.params['resume_frozen']:
         # Suppressing drain is allowed only with a positively absent/stopped
         # worker. An old checkpoint alone cannot prove it after a partial apply.
@@ -70,7 +110,7 @@ def main():
             # before inspection; do not reopen topology on an ambiguous failure.
             module.fail_json(msg='lifecycle_drain_failed')
     # Transition is idempotent; fixed command doesn't expose private state.
-    module.exit_json(changed=False, verified=True)
+    module.exit_json(changed=False, verified=True, reservation_id=module.params['id'], reservation_phase=module.params['phase'])
 
 
 if __name__ == '__main__':

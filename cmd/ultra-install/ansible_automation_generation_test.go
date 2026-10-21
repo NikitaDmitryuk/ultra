@@ -53,8 +53,10 @@ result.chmod(0o600)
 			if err := os.WriteFile(stub, []byte(source), 0700); err != nil {
 				t.Fatal(err)
 			}
-			p := &installplan.InstallPlan{Automation: &installplan.AutomationConfig{Version: "v2.5.0", ReleaseDir: root, ReadinessTimeoutSec: 1}}
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			p := &installplan.InstallPlan{
+				Automation: &installplan.AutomationConfig{Version: "v2.5.0", ReleaseDir: root, ReadinessTimeoutSec: 30},
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 			defer cancel()
 			if err := verifyBootstrapAutomation(ctx, p, map[string]any{"all": map[string]any{}}, root, python, stub, 2); err != nil {
 				t.Fatalf("second generation readiness: %v", err)

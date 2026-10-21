@@ -8,8 +8,9 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/db/sqlc"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/xtls/xray-core/common/uuid"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // UserRepo handles user CRUD against PostgreSQL.
@@ -19,129 +20,6 @@ type UserRepo struct {
 
 // NewUserRepo creates a UserRepo backed by db.
 func NewUserRepo(db *DB) *UserRepo { return &UserRepo{db: db} }
-
-func authUserFromFields(
-	uuid pgtype.UUID,
-	name, kind string,
-	isActive bool,
-	disabledAt pgtype.Timestamptz,
-	socksUsername, socksPassword pgtype.Text,
-	socksPort pgtype.Int4,
-	leakPolicy string,
-	leakMaxConcurrent, leakMaxUnique pgtype.Int4,
-	preferredExitID pgtype.UUID,
-	accountID pgtype.UUID,
-) auth.User {
-	u := auth.User{
-		UUID:            fromPGUUID(uuid),
-		AccountID:       fromPGUUID(accountID),
-		Name:            name,
-		Kind:            kind,
-		IsActive:        isActive,
-		DisabledAt:      ptrFromPGTime(disabledAt),
-		PreferredExitID: ptrFromPGUUID(preferredExitID),
-	}
-	u.SocksUsername = fromPGText(socksUsername)
-	u.SocksPassword = fromPGText(socksPassword)
-	u.SocksPort = ptrFromPGInt4(socksPort)
-	u.LeakPolicy = leakPolicy
-	u.LeakMaxConcurrentIPs = ptrFromPGInt4(leakMaxConcurrent)
-	u.LeakMaxUniqueIPs24h = ptrFromPGInt4(leakMaxUnique)
-	if u.Kind == "" {
-		u.Kind = "vless"
-	}
-	return u
-}
-
-func authUserFromGet(row sqlc.GetUserRow) auth.User {
-	return authUserFromFields(
-		row.Uuid,
-		row.Name,
-		row.Kind,
-		row.IsActive,
-		row.DisabledAt,
-		row.SocksUsername,
-		row.SocksPassword,
-		row.SocksPort,
-		row.LeakPolicy,
-		row.LeakMaxConcurrentIps,
-		row.LeakMaxUniqueIps24h,
-		row.PreferredExitID,
-		row.AccountID,
-	)
-}
-
-func authUserFromListActive(row sqlc.ListActiveUsersRow) auth.User {
-	return authUserFromFields(
-		row.Uuid,
-		row.Name,
-		row.Kind,
-		row.IsActive,
-		row.DisabledAt,
-		row.SocksUsername,
-		row.SocksPassword,
-		row.SocksPort,
-		row.LeakPolicy,
-		row.LeakMaxConcurrentIps,
-		row.LeakMaxUniqueIps24h,
-		row.PreferredExitID,
-		row.AccountID,
-	)
-}
-
-func authUserFromListAll(row sqlc.ListAllUsersRow) auth.User {
-	return authUserFromFields(
-		row.Uuid,
-		row.Name,
-		row.Kind,
-		row.IsActive,
-		row.DisabledAt,
-		row.SocksUsername,
-		row.SocksPassword,
-		row.SocksPort,
-		row.LeakPolicy,
-		row.LeakMaxConcurrentIps,
-		row.LeakMaxUniqueIps24h,
-		row.PreferredExitID,
-		row.AccountID,
-	)
-}
-
-func authUserFromRename(row sqlc.RenameUserRow) auth.User {
-	return authUserFromFields(
-		row.Uuid,
-		row.Name,
-		row.Kind,
-		row.IsActive,
-		row.DisabledAt,
-		row.SocksUsername,
-		row.SocksPassword,
-		row.SocksPort,
-		row.LeakPolicy,
-		row.LeakMaxConcurrentIps,
-		row.LeakMaxUniqueIps24h,
-		row.PreferredExitID,
-		row.AccountID,
-	)
-}
-
-func authUserFromSetPreferredExit(row sqlc.SetUserPreferredExitRow) auth.User {
-	return authUserFromFields(
-		row.Uuid,
-		row.Name,
-		row.Kind,
-		row.IsActive,
-		row.DisabledAt,
-		row.SocksUsername,
-		row.SocksPassword,
-		row.SocksPort,
-		row.LeakPolicy,
-		row.LeakMaxConcurrentIps,
-		row.LeakMaxUniqueIps24h,
-		row.PreferredExitID,
-		row.AccountID,
-	)
-}
 
 func normalizeKind(kind string) string {
 	k := strings.TrimSpace(strings.ToLower(kind))
@@ -166,7 +44,7 @@ func (r *UserRepo) Add(ctx context.Context, kind, name string) (auth.User, error
 	if err != nil {
 		return auth.User{}, err
 	}
-	err = r.db.Queries.InsertVlessUser(ctx, sqlc.InsertVlessUserParams{Uuid: pgUUID, Name: u.Name})
+	err = r.db.orm.WithContext(ctx).Table("users").Create(map[string]any{"uuid": fromPGUUID(pgUUID), "name": u.Name, "kind": "vless"}).Error
 	return u, err
 }
 
@@ -180,11 +58,16 @@ func (r *UserRepo) Rename(ctx context.Context, id, name string) (auth.User, erro
 	if err != nil {
 		return auth.User{}, err
 	}
-	row, err := r.db.Queries.RenameUser(ctx, sqlc.RenameUserParams{Name: name, Uuid: pgUUID})
+	var row userRow
+	result := r.db.orm.WithContext(ctx).Model(&row).Clauses(clause.Returning{}).Where("uuid = ?", fromPGUUID(pgUUID)).Update("name", name)
+	err = result.Error
+	if err == nil && result.RowsAffected == 0 {
+		err = pgx.ErrNoRows
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, auth.ErrUserNotFound
 	}
-	return authUserFromRename(row), err
+	return row.user(), err
 }
 
 // Remove soft-deletes a user by UUID (sets is_active=false).
@@ -193,7 +76,11 @@ func (r *UserRepo) Remove(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	affected, err := r.db.Queries.DisableUser(ctx, pgUUID)
+	result := r.db.orm.WithContext(ctx).
+		Table("users").
+		Where("uuid = ? AND is_active", fromPGUUID(pgUUID)).
+		Updates(map[string]any{"is_active": false, "disabled_at": gorm.Expr("NOW()")})
+	affected, err := result.RowsAffected, result.Error
 	if err != nil {
 		return err
 	}
@@ -207,14 +94,14 @@ func (r *UserRepo) Remove(ctx context.Context, id string) error {
 // (traffic_stats, monthly_traffic, notifications, user_ip_observations,
 // user_leak_signals) wipes related history.
 func (r *UserRepo) Purge(ctx context.Context, id string) error {
-	var enrolled bool
-	if err := r.db.Pool.QueryRow(ctx, `SELECT enrollment_source IS NOT NULL FROM users WHERE uuid=$1`, id).Scan(&enrolled); err != nil {
+	var row userRow
+	if err := cloudLookupError(r.db.orm.WithContext(ctx).Select("enrollment_source").Where("uuid = ?", id).Take(&row).Error); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return auth.ErrUserNotFound
 		}
 		return err
 	}
-	if enrolled {
+	if row.EnrollmentSource != nil {
 		return errors.New("enrolled accounts must be disabled, not purged")
 	}
 
@@ -222,7 +109,8 @@ func (r *UserRepo) Purge(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	affected, err := r.db.Queries.DeleteUser(ctx, pgUUID)
+	result := r.db.orm.WithContext(ctx).Where("uuid = ?", fromPGUUID(pgUUID)).Delete(&userRow{})
+	affected, err := result.RowsAffected, result.Error
 	if err != nil {
 		return err
 	}
@@ -248,7 +136,11 @@ func (r *UserRepo) Enable(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	affected, err := r.db.Queries.EnableUser(ctx, pgUUID)
+	result := r.db.orm.WithContext(ctx).
+		Table("users").
+		Where("uuid = ? AND kind = ?", fromPGUUID(pgUUID), "vless").
+		Updates(map[string]any{"is_active": true, "disabled_at": nil})
+	affected, err := result.RowsAffected, result.Error
 	if err != nil {
 		return err
 	}
@@ -268,17 +160,23 @@ func (r *UserRepo) SetPreferredExit(ctx context.Context, id string, exitID *stri
 	if err != nil {
 		return auth.User{}, err
 	}
-	row, err := r.db.Queries.SetUserPreferredExit(ctx, sqlc.SetUserPreferredExitParams{
-		Uuid:            pgUUID,
-		PreferredExitID: pgExitID,
-	})
+	var row userRow
+	result := r.db.orm.WithContext(ctx).
+		Model(&row).
+		Clauses(clause.Returning{}).
+		Where("uuid = ? AND is_active", fromPGUUID(pgUUID)).
+		Update("preferred_exit_id", ptrFromPGUUID(pgExitID))
+	err = result.Error
+	if err == nil && result.RowsAffected == 0 {
+		err = pgx.ErrNoRows
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, auth.ErrUserNotFound
 	}
 	if err != nil {
 		return auth.User{}, err
 	}
-	return authUserFromSetPreferredExit(row), nil
+	return row.user(), nil
 }
 
 // RotateUUID replaces a user's UUID and updates references in related tables.
@@ -350,26 +248,28 @@ func (r *UserRepo) rotateUUIDTx(ctx context.Context, tx pgx.Tx, id, newUUID stri
 
 // List returns all active users ordered by creation time.
 func (r *UserRepo) List(ctx context.Context) ([]auth.User, error) {
-	rows, err := r.db.Queries.ListActiveUsers(ctx)
+	rows := []userRow{}
+	err := r.db.orm.WithContext(ctx).Where("is_active").Order("created_at").Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
 	users := make([]auth.User, 0, len(rows))
 	for _, row := range rows {
-		users = append(users, authUserFromListActive(row))
+		users = append(users, row.user())
 	}
 	return users, nil
 }
 
 // ListAll returns active and disabled users ordered by creation time.
 func (r *UserRepo) ListAll(ctx context.Context) ([]auth.User, error) {
-	rows, err := r.db.Queries.ListAllUsers(ctx)
+	rows := []userRow{}
+	err := r.db.orm.WithContext(ctx).Order("created_at").Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
 	users := make([]auth.User, 0, len(rows))
 	for _, row := range rows {
-		users = append(users, authUserFromListAll(row))
+		users = append(users, row.user())
 	}
 	users, err = r.attachServices(ctx, users)
 	if err != nil {
@@ -384,12 +284,13 @@ func (r *UserRepo) Lookup(ctx context.Context, id string) (auth.User, bool, erro
 	if err != nil {
 		return auth.User{}, false, err
 	}
-	row, err := r.db.Queries.GetUser(ctx, pgUUID)
+	var row userRow
+	err = cloudLookupError(r.db.orm.WithContext(ctx).Where("uuid = ?", fromPGUUID(pgUUID)).Take(&row).Error)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, false, nil
 	}
 	if err != nil {
 		return auth.User{}, false, err
 	}
-	return authUserFromGet(row), true, nil
+	return row.user(), true, nil
 }

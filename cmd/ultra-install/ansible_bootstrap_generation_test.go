@@ -66,7 +66,11 @@ result=job/'result.json';result.write_text(json.dumps({'verified':True}));result
 				t.Fatal(err)
 			}
 			t.Setenv("ULTRA_INSTALL_SSH_KNOWN_HOSTS", pins)
-			p := &installplan.InstallPlan{Bridge: installplan.BridgeConfig{SSHHost: "192.0.2.1", RemoteDir: "/etc/ultra-relay"}, SSH: installplan.SSHConfig{Identity: filepath.Join(root, "identity")}, Bot: installplan.BotConfig{Enabled: true}}
+			p := &installplan.InstallPlan{
+				Bridge: installplan.BridgeConfig{SSHHost: "192.0.2.1", RemoteDir: "/etc/ultra-relay"},
+				SSH:    installplan.SSHConfig{Identity: filepath.Join(root, "identity")},
+				Bot:    installplan.BotConfig{Enabled: true},
+			}
 			if _, _, err = inspectBootstrap(ctx, p, filepath.Join(directory, "post-gate"), python, stub, root); err != nil {
 				t.Fatal(err)
 			}
@@ -139,7 +143,8 @@ result=job/'result.json';result.write_text(json.dumps({'verified':True}));result
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Count(string(calls), "reserve-rolledback-bootstrap\n") != 1 || strings.Contains(string(calls), "prepare-controller") {
+			if strings.Count(string(calls), "reserve-rolledback-bootstrap\n") != 1 ||
+				strings.Contains(string(calls), "prepare-controller") {
 				t.Fatalf("original checkpoint re-captured: %s", calls)
 			}
 			rollbackCalls := 1
@@ -151,7 +156,8 @@ result=job/'result.json';result.write_text(json.dumps({'verified':True}));result
 					t.Fatal("failed rollback history erased", err)
 				}
 			}
-			if strings.Count("\n"+string(calls), "\nbootstrap\n") != 2 || strings.Count(string(calls), "configure-bot\n") != 2 || strings.Count(string(calls), "rollback-adoption\n") != rollbackCalls {
+			if strings.Count("\n"+string(calls), "\nbootstrap\n") != 2 || strings.Count(string(calls), "configure-bot\n") != 2 ||
+				strings.Count(string(calls), "rollback-adoption\n") != rollbackCalls {
 				t.Fatalf("undone success cache reused: %s", calls)
 			}
 			for name, original := range map[string][]byte{"request.json": request, "receipt.json": receipt} {

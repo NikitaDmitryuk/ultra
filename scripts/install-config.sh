@@ -27,7 +27,39 @@ load_install_config() {
   return 1
  fi
  while IFS= read -r -d '' key && IFS= read -r -d '' val; do
-  printf -v "$key" '%s' "$val"
+  # config-values exposes only the canonical external keys. Map them to the
+  # long-standing shell variable names used internally by these diagnostics.
+  case "$key" in
+   BRIDGE_IP) printf -v BRIDGE '%s' "$val" ;;
+   BRIDGE_SSH_KEY) printf -v BRIDGE_SSH_IDENTITY '%s' "$val" ;;
+   MAIN_EXIT_IP) printf -v EXIT '%s' "$val" ;;
+   MAIN_EXIT_SSH_KEY) printf -v EXIT_SSH_IDENTITY '%s' "$val" ;;
+   DATABASE_IP) printf -v DATABASE '%s' "$val" ;;
+   DATABASE_SSH_KEY) printf -v DATABASE_SSH_IDENTITY '%s' "$val" ;;
+   BRIDGE|BRIDGE_SSH_HOST|BRIDGE_SSH_IDENTITY|EXIT|EXIT_SSH_IDENTITY|EXIT2|EXIT2_SSH_IDENTITY|DB_HOST|IDENTITY|FRONT|BACK)
+    echo "Deprecated install.config key rejected: $key" >&2
+    rm -f "$values"
+    return 1
+    ;;
+   *) printf -v "$key" '%s' "$val" ;;
+  esac
  done <"$values"
  rm -f "$values"
+}
+
+# Paths are non-secret references; the SSH client opens the selected key.
+install_identity_for_host() {
+	local host=$1
+ local selected=
+ if [[ "$host" == "${BRIDGE:-}" ]]; then
+  selected=${BRIDGE_SSH_IDENTITY:-}
+ elif [[ "$host" == "${EXIT:-}" ]]; then
+  selected=${EXIT_SSH_IDENTITY:-}
+ elif [[ "$host" == "${DATABASE:-}" ]]; then
+  selected=${DATABASE_SSH_IDENTITY:-}
+	fi
+	if [[ "$selected" == ~/* ]]; then
+		selected="$HOME/${selected#~/}"
+	fi
+	printf '%s' "$selected"
 }

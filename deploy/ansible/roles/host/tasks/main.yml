@@ -52,7 +52,7 @@
     - name: Enable UTF-8 locale
       ansible.builtin.lineinfile:
         path: /etc/locale.gen
-        regexp: '^#?\s*en_US.UTF-8 UTF-8'
+        regexp: "^#?\\s*en_US.UTF-8 UTF-8"
         line: en_US.UTF-8 UTF-8
       notify: Generate selected locale
     - name: Set default UTF-8 locale

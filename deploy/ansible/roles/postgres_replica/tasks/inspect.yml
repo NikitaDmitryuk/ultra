@@ -1,0 +1,32 @@
+---
+- name: Inspect existing replica ownership marker
+  ansible.builtin.stat:
+    path: /var/lib/postgresql/16/ultra-replica/ultra-replica.json
+    follow: false
+  register: postgres_replica_marker
+- name: Inspect existing recovery signal
+  ansible.builtin.stat:
+    path: /var/lib/postgresql/16/ultra-replica/standby.signal
+    follow: false
+  register: postgres_replica_signal
+- name: Refuse to adopt an unexpected cluster or promoted former standby
+  ansible.builtin.assert:
+    that:
+      - postgres_replica_marker.stat.isreg | default(false)
+      - not (postgres_replica_marker.stat.islnk | default(true))
+      - postgres_replica_signal.stat.isreg | default(false)
+      - not (postgres_replica_signal.stat.islnk | default(true))
+    fail_msg: Bridge replica PGDATA must be absent or an owned physical standby; automatic overwrite and promotion are forbidden.
+- name: Read existing replica identity marker
+  ansible.builtin.slurp:
+    src: /var/lib/postgresql/16/ultra-replica/ultra-replica.json
+  register: postgres_replica_marker_content
+  no_log: true
+- name: Require same dedicated primary before reusing standby
+  ansible.builtin.assert:
+    that:
+      - (postgres_replica_marker_content.content | b64decode | from_json).primary_host == ultra_postgres_replica.primary_host
+      - >-
+        (postgres_replica_marker_content.content | b64decode | from_json).system_identifier
+        == hostvars['database'].postgres_replica_primary_identity.stdout | trim
+  no_log: true

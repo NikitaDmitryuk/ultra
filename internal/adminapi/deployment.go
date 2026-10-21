@@ -1,6 +1,9 @@
 package adminapi
 
-import "net/http"
+import (
+	"context"
+	"net/http"
+)
 
 func (s *Server) requireTopologyReady(w http.ResponseWriter, r *http.Request) bool {
 	if s.TopologyReady != nil {
@@ -42,4 +45,18 @@ func (s *Server) handleDeploymentDrain(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"verified":true}`))
+}
+
+// LockTopologyMutation shares the admin topology barrier with cloud workers.
+// Recheck cancellation after acquisition so a cancelled waiter cannot mutate.
+func (s *Server) LockTopologyMutation(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.topologyMu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.topologyMu.Unlock()
+		return nil, err
+	}
+	return s.topologyMu.Unlock, nil
 }

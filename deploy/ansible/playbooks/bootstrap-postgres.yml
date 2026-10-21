@@ -1,12 +1,115 @@
 ---
+- name: Reconcile dedicated exit DNS before component certificate issuance
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: dns
+      when: ultra_dns_desired is defined and 'tunnel' in ultra_dns_desired
+- name: Generate application database tunnel identity
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - postgres_client
+    - role: db_tunnel
+      db_tunnel_ultra_stage: generate
+      when: groups['databases'] | length > 0
 - name: Configure primary database
   hosts: databases
   gather_facts: false
   any_errors_fatal: true
+  pre_tasks:
+    - name: Require the dedicated database inventory target
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'database'
+          - ansible_host == ultra_db_tunnel_host
+    - name: Install client tools for archive validation
+      ansible.builtin.include_role:
+        name: postgres_client
+      when: ultra_database_import_dump | default('') | length > 0
+    - name: Check archive and existing database before provisioning
+      ansible.builtin.include_role:
+        name: database_import
+        tasks_from: preflight
+      when: ultra_database_import_dump | default('') | length > 0
   roles:
-    - role: host
     - role: postgres
       when: ultra_postgres is defined
+    - role: database_import
+      when: ultra_database_import_dump | default('') | length > 0
+  post_tasks:
+    - name: Configure managed bridge replication observation after database import
+      ansible.builtin.include_role:
+        name: postgres
+        tasks_from: monitor
+      when: ultra_postgres is defined
+- name: Authorize application database tunnel
+  hosts: databases
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: db_tunnel
+      db_tunnel_ultra_stage: authorize
+- name: Activate application database tunnel
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: db_tunnel
+      db_tunnel_ultra_stage: install
+      when: groups['databases'] | length > 0
+- name: Prepare primary replication slot and identity
+  hosts: databases
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Observe primary cluster identity
+      ansible.builtin.command:
+        argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only, --no-align]
+        stdin: |
+          SELECT system_identifier FROM pg_control_system() WHERE NOT pg_is_in_recovery();
+      register: postgres_replica_primary_identity
+      changed_when: false
+    - name: Require a primary system identifier
+      ansible.builtin.assert:
+        that: postgres_replica_primary_identity.stdout | trim is match('^[0-9]+$')
+    - name: Observe recovery parameters and reject external tablespaces
+      ansible.builtin.command:
+        argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only, --no-align]
+        stdin: |
+          SELECT 1 / CASE WHEN EXISTS (SELECT 1 FROM pg_tablespace WHERE spcname NOT IN ('pg_default', 'pg_global')) THEN 0 ELSE 1 END;
+          SELECT json_build_object('max_connections', current_setting('max_connections')::int,
+            'max_worker_processes', current_setting('max_worker_processes')::int,
+            'max_wal_senders', current_setting('max_wal_senders')::int,
+            'max_prepared_transactions', current_setting('max_prepared_transactions')::int,
+            'max_locks_per_transaction', current_setting('max_locks_per_transaction')::int);
+      register: postgres_replica_primary_parameters
+      changed_when: false
+    - name: Ensure bounded persistent bridge replication slot
+      ansible.builtin.command:
+        argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only]
+        stdin: |
+          DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'ultra_bridge') THEN
+              PERFORM pg_create_physical_replication_slot('ultra_bridge');
+              RAISE NOTICE 'ULTRA_REPLICA_SLOT_CREATED';
+            END IF;
+          END
+          $$;
+          SELECT 1 / count(*) FROM pg_replication_slots
+            WHERE slot_name = 'ultra_bridge' AND slot_type = 'physical' AND NOT temporary
+            AND (wal_status IS NULL OR wal_status <> 'lost');
+      register: postgres_replica_slot
+      changed_when: "'ULTRA_REPLICA_SLOT_CREATED' in postgres_replica_slot.stderr"
+- name: Configure bridge physical standby
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: postgres_replica
 - name: Confirm completed database component
   hosts: localhost
   gather_facts: false

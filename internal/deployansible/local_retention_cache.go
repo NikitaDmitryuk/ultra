@@ -58,7 +58,8 @@ func collectedRetentionResult(operation, directory string, raw []byte, id string
 		return Receipt{}, true, errors.New("retention_cached_metadata_invalid")
 	}
 	for _, value := range []map[string]any{job, saved} {
-		if value["schema_version"] != float64(1) || value["operation"] != operation || value["request_sha256"] != id || value["binary_sha256"] != id {
+		if value["schema_version"] != float64(1) || value["operation"] != operation || value["request_sha256"] != id ||
+			value["binary_sha256"] != id {
 			return Receipt{}, true, errors.New("retention_cached_identity_invalid")
 		}
 	}

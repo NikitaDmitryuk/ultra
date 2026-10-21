@@ -14,7 +14,14 @@ import (
 // All mutation errors return through this transaction instead of os.Exit. A
 // legacy adoption restores only application files and a compatible binary; its
 // primary database and durable accounting state are never rolled back.
-func applyReservedBootstrap(ctx, originalCtx context.Context, p *installplan.InstallPlan, inventory map[string]any, inspection map[string]bootstrapInspection, directory, planRoot, stateRoot, python, executable, format string, release func()) (returnErr error) {
+func applyReservedBootstrap(
+	ctx, originalCtx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	inspection map[string]bootstrapInspection,
+	directory, planRoot, stateRoot, python, executable, format string,
+	release func(),
+) (returnErr error) {
 	held := true
 	verified := false
 	if resumed, err := resumeBootstrapFinalization(ctx, p, directory, planRoot, python, executable); resumed || err != nil {
@@ -51,7 +58,15 @@ func applyReservedBootstrap(ctx, originalCtx context.Context, p *installplan.Ins
 			return
 		}
 		stage := bootstrapMutationStage(directory, "rollback-adoption", generation)
-		_, err := deployansible.RunLocal(cleanup, "rollback-adoption", inventory, map[string]any{"ultra_lifecycle_id": lifecycleID(directory)}, stage, python, executable)
+		_, err := deployansible.RunLocal(
+			cleanup,
+			"rollback-adoption",
+			inventory,
+			map[string]any{"ultra_lifecycle_id": lifecycleID(directory)},
+			stage,
+			python,
+			executable,
+		)
 		if err != nil {
 			returnErr = errors.Join(returnErr, errors.New("bootstrap_compatible_rollback_unconfirmed"))
 			return
@@ -68,12 +83,7 @@ func applyReservedBootstrap(ctx, originalCtx context.Context, p *installplan.Ins
 			returnErr = errors.Join(returnErr, err)
 		}
 	}()
-	var transportTopology adoptionTopology
 	if p.AdoptRuntime {
-		var err error
-		if transportTopology, err = inspectAdoptionTopology(ctx, p, filepath.Join(directory, "post-gate"), python, executable, stateRoot); err != nil {
-			return err
-		}
 		preflight, err := os.MkdirTemp(directory, "adoption-preflight-")
 		if err != nil {
 			return err
@@ -90,7 +100,11 @@ func applyReservedBootstrap(ctx, originalCtx context.Context, p *installplan.Ins
 		return engineErr
 	}
 	if p.AdoptRuntime && !components {
-		return errors.New("adoption_replica_transport_component_anchor_required")
+		return errors.New("adoption_component_anchor_required")
+	}
+	cleanupSubscription, err := prepareFrozenBootstrapSubscription(p, inventory, directory)
+	if err != nil {
+		return err
 	}
 	if !components {
 		// An existing frozen monolithic job keeps its original implementation.
@@ -110,10 +124,9 @@ func applyReservedBootstrap(ctx, originalCtx context.Context, p *installplan.Ins
 	} else if err := runBootstrapComponents(ctx, inventory, operationVars, directory, generation, python, executable); err != nil {
 		return err
 	}
-	if p.AdoptRuntime {
-		emitInstallEvent(format, installplan.EventStep, "", "adopting independent replica transports", "")
-		if err := runAdoptionReplicaTunnels(ctx, inventory, transportTopology, inspection["bridge"], directory, stateRoot, generation, python, executable); err != nil {
-			return err
+	if cleanupSubscription != nil {
+		if err := cleanupSubscription(); err != nil {
+			return errors.New("bootstrap_subscription_stage_cleanup_failed")
 		}
 	}
 	if p.FullAutomation() && p.AdoptRuntime {

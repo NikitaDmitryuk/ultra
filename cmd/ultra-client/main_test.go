@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/proxy"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +9,8 @@ import (
 	"net/url"
 	"testing"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/proxy"
 )
 
 func TestLoopbackProxies(t *testing.T) {
@@ -29,7 +30,9 @@ func TestLoopbackProxies(t *testing.T) {
 }
 
 func TestBothLocalProxiesTransfer(t *testing.T) {
-	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("through proxy")) }))
+	target := httptest.NewTLSServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("through proxy")) }),
+	)
 	defer target.Close()
 	address := func() string {
 		l, e := net.Listen("tcp", "127.0.0.1:0")

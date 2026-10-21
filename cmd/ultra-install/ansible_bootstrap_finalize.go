@@ -47,12 +47,19 @@ func markBootstrapVerified(directory string) error {
 	if err != nil {
 		return err
 	}
-	return saveBootstrapAttempt(filepath.Join(directory, "finalization.json"), bootstrapFinalization{Schema: 1, ID: lifecycleID(directory), InventorySHA: digest, Phase: "verified"})
+	return saveBootstrapAttempt(
+		filepath.Join(directory, "finalization.json"),
+		bootstrapFinalization{Schema: 1, ID: lifecycleID(directory), InventorySHA: digest, Phase: "verified"},
+	)
 }
 
 // Finalization is separate from application rollback. A lost gate-release reply
 // or failed local journal write must never revert an already verified fleet.
-func resumeBootstrapFinalization(ctx context.Context, p *installplan.InstallPlan, directory, planRoot, python, executable string) (bool, error) {
+func resumeBootstrapFinalization(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	directory, planRoot, python, executable string,
+) (bool, error) {
 	if cached, err := completedOperatorOperation(directory, "bootstrap", ""); cached {
 		if err != nil {
 			return true, err
@@ -82,7 +89,8 @@ func resumeBootstrapFinalization(ctx context.Context, p *installplan.InstallPlan
 		return true, err
 	}
 	var state bootstrapFinalization
-	if json.Unmarshal(raw, &state) != nil || state.Schema != 1 || state.ID != lifecycleID(directory) || (state.Phase != "verified" && state.Phase != "released") {
+	if json.Unmarshal(raw, &state) != nil || state.Schema != 1 || state.ID != lifecycleID(directory) ||
+		(state.Phase != "verified" && state.Phase != "released") {
 		return true, errors.New("bootstrap_finalization_invalid")
 	}
 	inventory, digest, err := bootstrapFinalizationInputs(directory)

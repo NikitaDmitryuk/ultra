@@ -12,6 +12,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 	"github.com/jackc/pgx/v5"
 	"github.com/xtls/xray-core/common/uuid"
+	"gorm.io/gorm"
 )
 
 var ErrEnrollmentDenied = errors.New("enrollment unavailable")
@@ -59,30 +60,27 @@ func NewOpaqueToken() (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
+func (r *MemberRepo) memberQuery(ctx context.Context) *gorm.DB {
+	return r.db.orm.WithContext(ctx).
+		Table("users").
+		Select("uuid, telegram_id, name, is_active AS active, enrollment_source AS source, enrolled_at, member_pending AS pending, preferred_exit_id, (?) AS last_traffic_at", r.db.orm.Table("monthly_traffic AS t").Select("MAX(t.updated_at)").Where("t.user_uuid = users.uuid AND t.uplink_bytes + t.downlink_bytes > 0")).
+		Where("enrollment_source IS NOT NULL")
+}
 func (r *MemberRepo) Get(ctx context.Context, id int64) (Member, error) {
 	var m Member
-	e := r.db.Pool.QueryRow(ctx, `SELECT uuid::text,telegram_id,name,is_active,enrollment_source,enrolled_at,member_pending,preferred_exit_id::text,(SELECT MAX(t.updated_at) FROM monthly_traffic t WHERE t.user_uuid=users.uuid AND t.uplink_bytes+t.downlink_bytes>0) FROM users WHERE telegram_id=$1 AND enrollment_source IS NOT NULL`, id).Scan(&m.UUID, &m.TelegramID, &m.Name, &m.Active, &m.Source, &m.EnrolledAt, &m.Pending, &m.PreferredExitID, &m.LastTrafficAt)
+	e := cloudLookupError(r.memberQuery(ctx).Where("telegram_id = ?", id).Take(&m).Error)
 	return m, e
 }
 func (r *MemberRepo) List(ctx context.Context) ([]Member, error) {
-	rows, e := r.db.Pool.Query(ctx, `SELECT uuid::text,telegram_id,name,is_active,enrollment_source,enrolled_at,member_pending,preferred_exit_id::text,(SELECT MAX(t.updated_at) FROM monthly_traffic t WHERE t.user_uuid=users.uuid AND t.uplink_bytes+t.downlink_bytes>0) FROM users WHERE enrollment_source IS NOT NULL ORDER BY enrolled_at`)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
 	out := []Member{}
-	for rows.Next() {
-		var m Member
-		if e = rows.Scan(&m.UUID, &m.TelegramID, &m.Name, &m.Active, &m.Source, &m.EnrolledAt, &m.Pending, &m.PreferredExitID, &m.LastTrafficAt); e != nil {
-			return nil, e
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
+	e := r.memberQuery(ctx).Order("enrolled_at").Find(&out).Error
+	return out, e
 }
 func (r *MemberRepo) Group(ctx context.Context) (VPNGroup, error) {
 	var g VPNGroup
-	e := r.db.Pool.QueryRow(ctx, `SELECT chat_id,title,code,enabled FROM vpn_group WHERE singleton`).Scan(&g.ChatID, &g.Title, &g.Code, &g.Enabled)
+	e := cloudLookupError(
+		r.db.orm.WithContext(ctx).Table("vpn_group").Select("chat_id", "title", "code", "enabled").Where("singleton").Take(&g).Error,
+	)
 	if errors.Is(e, pgx.ErrNoRows) {
 		e = nil
 	}
@@ -102,7 +100,15 @@ func (r *MemberRepo) PutGroup(ctx context.Context, g VPNGroup, actor int64) (VPN
 		return g, e
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	_, e = tx.Exec(ctx, `INSERT INTO vpn_group(singleton,chat_id,title,code,enabled,updated_by) VALUES(true,$1,$2,$3,$4,$5) ON CONFLICT(singleton) DO UPDATE SET chat_id=$1,title=$2,code=$3,enabled=$4,updated_by=$5`, g.ChatID, g.Title, g.Code, g.Enabled, actor)
+	_, e = tx.Exec(
+		ctx,
+		`INSERT INTO vpn_group(singleton,chat_id,title,code,enabled,updated_by) VALUES(true,$1,$2,$3,$4,$5) ON CONFLICT(singleton) DO UPDATE SET chat_id=$1,title=$2,code=$3,enabled=$4,updated_by=$5`,
+		g.ChatID,
+		g.Title,
+		g.Code,
+		g.Enabled,
+		actor,
+	)
 	if e != nil {
 		return g, e
 	}
@@ -131,7 +137,14 @@ func (r *MemberRepo) Invite(ctx context.Context, target, actor int64, recipientN
 		return "", e
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	_, e = tx.Exec(ctx, `INSERT INTO vpn_invites(token_hash,recipient,created_by,expires_at,recipient_name) VALUES($1,$2,$3,NOW()+INTERVAL '7 days',$4)`, h[:], target, actor, name)
+	_, e = tx.Exec(
+		ctx,
+		`INSERT INTO vpn_invites(token_hash,recipient,created_by,expires_at,recipient_name) VALUES($1,$2,$3,NOW()+INTERVAL '7 days',$4)`,
+		h[:],
+		target,
+		actor,
+		name,
+	)
 	if e != nil {
 		return "", e
 	}
@@ -142,20 +155,16 @@ func (r *MemberRepo) Invite(ctx context.Context, target, actor int64, recipientN
 	return token, tx.Commit(ctx)
 }
 func (r *MemberRepo) Invites(ctx context.Context) ([]VPNInvite, error) {
-	rows, e := r.db.Pool.Query(ctx, `SELECT i.id,i.recipient,i.created_by,i.created_at,i.expires_at,i.used_at,i.cancelled_at,COALESCE(NULLIF(u.name,''),i.recipient_name) FROM vpn_invites i LEFT JOIN users u ON u.telegram_id=i.recipient ORDER BY i.id DESC LIMIT 200`)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
 	out := []VPNInvite{}
-	for rows.Next() {
-		var v VPNInvite
-		if e = rows.Scan(&v.ID, &v.Recipient, &v.CreatedBy, &v.CreatedAt, &v.ExpiresAt, &v.UsedAt, &v.CancelledAt, &v.RecipientName); e != nil {
-			return nil, e
-		}
-		out = append(out, v)
-	}
-	return out, rows.Err()
+	e := r.db.orm.WithContext(ctx).
+		Table("vpn_invites AS i").
+		Select("i.id, i.recipient, i.created_by, i.created_at, i.expires_at, i.used_at, i.cancelled_at, COALESCE(NULLIF(u.name, ''), i.recipient_name) AS recipient_name").
+		Joins("LEFT JOIN users u ON u.telegram_id = i.recipient").
+		Order("i.id DESC").
+		Limit(200).
+		Find(&out).
+		Error
+	return out, e
 }
 func (r *MemberRepo) CancelInvite(ctx context.Context, id, actor int64) error {
 	tx, e := r.db.Pool.Begin(ctx)
@@ -201,7 +210,8 @@ func (r *MemberRepo) Enroll(ctx context.Context, id int64, name, source, token s
 	}
 	if source == "group" {
 		var allowed bool
-		e = tx.QueryRow(ctx, `SELECT enabled AND code=$1 AND chat_id=$2 FROM vpn_group WHERE singleton FOR UPDATE`, token, chatID).Scan(&allowed)
+		e = tx.QueryRow(ctx, `SELECT enabled AND code=$1 AND chat_id=$2 FROM vpn_group WHERE singleton FOR UPDATE`, token, chatID).
+			Scan(&allowed)
 		if e != nil || !allowed {
 			return Member{}, ErrEnrollmentDenied
 		}
@@ -217,7 +227,14 @@ func (r *MemberRepo) Enroll(ctx context.Context, id int64, name, source, token s
 		}
 	}
 	key := uuid.New()
-	_, e = tx.Exec(ctx, `INSERT INTO users(uuid,name,telegram_id,kind,enrollment_source,enrolled_at,member_pending) VALUES($1,$2,$3,'vless',$4,NOW(),true)`, key.String(), name, id, source)
+	_, e = tx.Exec(
+		ctx,
+		`INSERT INTO users(uuid,name,telegram_id,kind,enrollment_source,enrolled_at,member_pending) VALUES($1,$2,$3,'vless',$4,NOW(),true)`,
+		key.String(),
+		name,
+		id,
+		source,
+	)
 	if e != nil {
 		return Member{}, e
 	}
@@ -225,7 +242,11 @@ func (r *MemberRepo) Enroll(ctx context.Context, id int64, name, source, token s
 	if e != nil {
 		return Member{}, e
 	}
-	_, e = tx.Exec(ctx, `INSERT INTO vpn_member_notifications(member_id,admin_id) SELECT $1,telegram_id FROM bot_admins ON CONFLICT DO NOTHING`, id)
+	_, e = tx.Exec(
+		ctx,
+		`INSERT INTO vpn_member_notifications(member_id,admin_id) SELECT $1,telegram_id FROM bot_admins ON CONFLICT DO NOTHING`,
+		id,
+	)
 	if e != nil {
 		return Member{}, e
 	}
@@ -236,31 +257,30 @@ func (r *MemberRepo) Enroll(ctx context.Context, id int64, name, source, token s
 }
 
 func (r *MemberRepo) Audit(ctx context.Context, actor, id int64, action string) error {
-	_, e := r.db.Pool.Exec(ctx, `INSERT INTO vpn_member_audit(actor,member_id,action) VALUES($1,$2,$3)`, actor, id, action)
-	return e
+	return r.db.orm.WithContext(ctx).
+		Table("vpn_member_audit").
+		Create(map[string]any{"actor": actor, "member_id": id, "action": action}).
+		Error
 }
 
 // Snapshot identifies exactly which desired versions a successful application acknowledges.
 func (r *MemberRepo) Snapshot(ctx context.Context) (map[string]int64, error) {
-	rows, e := r.db.Pool.Query(ctx, `SELECT uuid::text,member_revision FROM users WHERE member_pending`)
-	if e != nil {
-		return nil, e
+	var rows []struct {
+		UUID           string
+		MemberRevision int64
 	}
-	defer rows.Close()
+	if err := r.db.orm.WithContext(ctx).Table("users").Select("uuid", "member_revision").Where("member_pending").Find(&rows).Error; err != nil {
+		return nil, err
+	}
 	out := map[string]int64{}
-	for rows.Next() {
-		var id string
-		var revision int64
-		if e = rows.Scan(&id, &revision); e != nil {
-			return nil, e
-		}
-		out[id] = revision
+	for _, row := range rows {
+		out[row.UUID] = row.MemberRevision
 	}
-	return out, rows.Err()
+	return out, nil
 }
 func (r *MemberRepo) Acknowledge(ctx context.Context, snapshot map[string]int64) error {
 	for id, revision := range snapshot {
-		if _, e := r.db.Pool.Exec(ctx, `UPDATE users SET member_pending=false WHERE uuid=$1 AND member_revision=$2`, id, revision); e != nil {
+		if e := r.db.orm.WithContext(ctx).Table("users").Where("uuid = ? AND member_revision = ?", id, revision).Update("member_pending", false).Error; e != nil {
 			return e
 		}
 	}
@@ -272,7 +292,12 @@ func (r *MemberRepo) SetActive(ctx context.Context, id, actor int64, active bool
 		return e
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	result, e := tx.Exec(ctx, `UPDATE users SET is_active=$2,disabled_at=CASE WHEN $2 THEN NULL ELSE NOW() END WHERE telegram_id=$1 AND enrollment_source IS NOT NULL`, id, active)
+	result, e := tx.Exec(
+		ctx,
+		`UPDATE users SET is_active=$2,disabled_at=CASE WHEN $2 THEN NULL ELSE NOW() END WHERE telegram_id=$1 AND enrollment_source IS NOT NULL`,
+		id,
+		active,
+	)
 	if e != nil {
 		return e
 	}
@@ -307,7 +332,8 @@ func (r *MemberRepo) Reset(ctx context.Context, id, actor int64, expected string
 		return e
 	}
 	var current string
-	e = tx.QueryRow(ctx, `SELECT uuid::text FROM users WHERE telegram_id=$1 AND enrollment_source IS NOT NULL FOR UPDATE`, id).Scan(&current)
+	e = tx.QueryRow(ctx, `SELECT uuid::text FROM users WHERE telegram_id=$1 AND enrollment_source IS NOT NULL FOR UPDATE`, id).
+		Scan(&current)
 	if e != nil {
 		return e
 	}

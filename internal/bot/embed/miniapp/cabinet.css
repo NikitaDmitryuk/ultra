@@ -742,6 +742,68 @@ label {
   letter-spacing: -0.5px;
   color: var(--ink);
 }
+.routing-map {
+  margin: 20px 0;
+}
+.routing-source {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.routing-node {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg);
+  overflow-wrap: anywhere;
+}
+.routing-source .routing-node {
+  align-items: center;
+}
+.routing-node strong {
+  font-size: 15px;
+}
+.routing-node small {
+  font-size: 12px;
+}
+.routing-node .badge {
+  white-space: normal;
+}
+.routing-arrow {
+  color: var(--muted);
+  padding: 5px;
+}
+.routing-exits {
+  list-style: none;
+  padding: 0 0 0 20px;
+  margin: 0 0 0 20px;
+  border-left: 2px solid var(--line);
+}
+.routing-exit {
+  position: relative;
+  padding-top: 14px;
+}
+.routing-exit::before {
+  content: "";
+  position: absolute;
+  top: 38px;
+  left: -20px;
+  width: 20px;
+  border-top: 2px solid var(--line);
+}
+.routing-exit.is-active::before {
+  border-color: var(--blue);
+}
+.routing-exit.is-active .routing-node {
+  border-color: var(--blue);
+  box-shadow: inset 3px 0 var(--blue);
+}
 .route-card details {
   border-top: 1px solid var(--line);
   margin-top: 20px;

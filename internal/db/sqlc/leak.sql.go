@@ -224,6 +224,24 @@ func (q *Queries) InsertLeakSignal(ctx context.Context, arg InsertLeakSignalPara
 	return err
 }
 
+const leakIPCounts = `-- name: LeakIPCounts :one
+SELECT COUNT(*) FILTER (WHERE last_seen_at>=NOW()-INTERVAL '1 minute')::int AS concurrent,
+COUNT(*)::int AS unique_24h FROM user_ip_observations
+WHERE user_uuid=$1 AND last_seen_at>=NOW()-INTERVAL '24 hours'
+`
+
+type LeakIPCountsRow struct {
+	Concurrent int32 `json:"concurrent"`
+	Unique24h  int32 `json:"unique_24h"`
+}
+
+func (q *Queries) LeakIPCounts(ctx context.Context, userUuid pgtype.UUID) (LeakIPCountsRow, error) {
+	row := q.db.QueryRow(ctx, leakIPCounts, userUuid)
+	var i LeakIPCountsRow
+	err := row.Scan(&i.Concurrent, &i.Unique24h)
+	return i, err
+}
+
 const recentUserLeakSignals = `-- name: RecentUserLeakSignals :many
 SELECT id, user_uuid, kind, score, detail, created_at
 FROM user_leak_signals
@@ -279,5 +297,22 @@ type UpsertUserIPObservationParams struct {
 
 func (q *Queries) UpsertUserIPObservation(ctx context.Context, arg UpsertUserIPObservationParams) error {
 	_, err := q.db.Exec(ctx, upsertUserIPObservation, arg.UserUuid, arg.Ip)
+	return err
+}
+
+const upsertUserIPObservationBatch = `-- name: UpsertUserIPObservationBatch :exec
+INSERT INTO user_ip_observations(user_uuid,ip,first_seen_at,last_seen_at,sessions_seen)
+SELECT $1,ip::inet,NOW(),NOW(),COUNT(*) FROM unnest($2::text[]) AS input(ip) GROUP BY ip::inet
+ON CONFLICT(user_uuid,ip) DO UPDATE SET last_seen_at=NOW(),
+ sessions_seen=user_ip_observations.sessions_seen+EXCLUDED.sessions_seen
+`
+
+type UpsertUserIPObservationBatchParams struct {
+	UserUuid pgtype.UUID `json:"user_uuid"`
+	Column2  []string    `json:"column_2"`
+}
+
+func (q *Queries) UpsertUserIPObservationBatch(ctx context.Context, arg UpsertUserIPObservationBatchParams) error {
+	_, err := q.db.Exec(ctx, upsertUserIPObservationBatch, arg.UserUuid, arg.Column2)
 	return err
 }

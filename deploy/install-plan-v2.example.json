@@ -11,13 +11,15 @@
     "public_host": "192.0.2.10",
     "reality_dest": "origin.example.net:443",
     "reality_sni": "origin.example.net",
-    "vless_port": 24443
+    "vless_port": 24443,
+    "ssh_identity": "/secure/bridge_ed25519"
   },
   "exits": [
     {
       "name": "primary",
       "ssh_host": "192.0.2.20",
-      "priority": 100
+      "priority": 100,
+      "ssh_identity": "/secure/exit_ed25519"
     },
     {
       "name": "independent",
@@ -28,7 +30,10 @@
   "database": {
     "enabled": true,
     "name": "ultra_db",
-    "user": "ultra"
+    "user": "ultra",
+    "primary_host": "192.0.2.40",
+    "ssh_user": "root",
+    "ssh_identity": "/secure/database_ed25519"
   },
   "bot": {
     "enabled": true,
@@ -38,10 +43,7 @@
   "secrets": {
     "env_file": "/secure/.env"
   },
-  "features": {
-    "preset": "steamlike",
-    "generate_exit_tls": true
-  },
+  "features": {},
   "automation": {
     "version": "v1.0.0",
     "release_dir": "/srv/ultra-release-v1.0.0",

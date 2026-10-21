@@ -1,26 +1,36 @@
 # Canonical deployment policy; secrets belong only in .env.
-INSTALL_SCHEMA_VERSION=2
 SECRETS_ENV_FILE=.env
+# Trusted public key for verifying signed GitHub release bundles.
+ULTRA_RELEASE_MINISIGN_PUBLIC_KEY=REPLACE_WITH_TRUSTED_MINISIGN_PUBLIC_KEY
 SSH_USER=root
-IDENTITY=/secure/operator_ed25519
-BRIDGE=192.0.2.10
-# Optional SSH config alias or hostname; BRIDGE remains the service IPv4 address.
-BRIDGE_SSH_HOST=bridge-admin
+BRIDGE_IP=192.0.2.10
+BRIDGE_SSH_KEY=/secure/bridge_ed25519
 PUBLIC_HOST=192.0.2.10
-EXIT=192.0.2.20
-EXIT2=192.0.2.30
-EXIT2_NAME=independent
+MAIN_EXIT_IP=192.0.2.20
+MAIN_EXIT_SSH_KEY=/secure/exit_ed25519
 REUSE_BRIDGE_SPEC=false
 REALITY_DEST=origin.example.net:443
 REALITY_SNI=origin.example.net
 VLESS_PORT=24443
-PRESET=steamlike
-DB_ENABLE=true
+MAIN_EXIT_DOMAIN=tunnel.example.com
+DATABASE_IP=192.0.2.40
+DATABASE_SSH_KEY=/secure/database_ed25519
+# Optional local custom-format pg_dump archive for a clean DB host.
+# DATABASE_DUMP=/secure/database.dump
+# Reinstalling a bridge with an existing DB: private saved spec from bridge/backup.
+# DB_CREDENTIALS_FILE=/secure/previous-bridge-spec.json
+# Optional preserved, already-authorized Ed25519 tunnel key; strict reuse never writes primary authorized_keys.
+# DB_TUNNEL_PRIVATE_KEY_FILE=/secure/previous-db-tunnel-id_ed25519
+# One-time repair only: if login fails, set the app role password to the planned DSN.
+# Remove after successful deployment; the saved bridge spec then owns the credential.
+# DB_REPAIR_APP_CREDENTIALS=true
 DB_NAME=ultra_db
 DB_USER=ultra
 BOT_ENABLE=true
+# Bootstrap provisions subscription and VPN DNS records; bot uses the subscription name.
 BOT_DOMAIN=sync.example.com
 BOT_PORT=8444
+SUBSCRIPTION_DOMAIN=sync.example.com
 VPN_DOMAIN=edge.example.com
 ACME_EMAIL=operator@example.com
 PUBLIC_XHTTP_PATH=/connect
@@ -35,5 +45,5 @@ ULTRA_AUTOMATION_AGE_RECIPIENT=age1REPLACE_WITH_PUBLIC_RECIPIENT
 ULTRA_AUTOMATION_BRIDGE_PROVIDER=provider-a
 ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/secure/ultra-known-hosts
 ULTRA_AUTOMATION_ADMIN_TELEGRAM_ID=REPLACE_ADMIN_TELEGRAM_ID
-ULTRA_AUTOMATION_STATIC_NODES='[{"name":"primary","address":"192.0.2.20","provider":"provider-a","budget":{"monthly_bytes":1048576,"is_fallback":true}},{"name":"independent","address":"192.0.2.30","provider":"vultr","budget":{"monthly_bytes":2097152,"is_fallback":false}}]'
+ULTRA_AUTOMATION_STATIC_NODES='[{"name":"primary","address":"192.0.2.20","provider":"provider-a","budget":{"monthly_bytes":1048576,"is_fallback":true}}]'
 ULTRA_AUTOMATION_READINESS_TIMEOUT_SEC=900

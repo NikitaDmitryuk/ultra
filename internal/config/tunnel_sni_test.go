@@ -2,10 +2,11 @@ package config
 
 import (
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/exits"
-	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 	"strings"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/exits"
+	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 )
 
 func TestOmitTunnelSNIRequiresPinnedIP(t *testing.T) {
@@ -64,7 +65,7 @@ func TestTunnelSNIAutomaticPerPinnedPeer(t *testing.T) {
 			{"domain", "exit.example.com", validPin, "", TunnelTLSSelfSigned, false},
 			{"missing pin", "192.0.2.1", "", "", TunnelTLSSelfSigned, false},
 			{"malformed pin", "192.0.2.1", "abcd", "", TunnelTLSSelfSigned, false},
-			{"CA verification", "192.0.2.1", validPin, "", TunnelTLSACME, false},
+			{"pinned IP alongside CA exit", "192.0.2.1", validPin, "", TunnelTLSACME, true},
 			{"explicit send", "192.0.2.1", validPin, "send", TunnelTLSSelfSigned, false},
 		} {
 			t.Run(string(transport)+"/"+tc.name, func(t *testing.T) {
@@ -72,7 +73,10 @@ func TestTunnelSNIAutomaticPerPinnedPeer(t *testing.T) {
 				spec.TunnelTransport = transport
 				spec.TunnelTLSProvision = tc.provision
 				spec.SplitHTTPTLS.SNIMode = tc.mode
-				nodes := []exits.Node{{ID: "pinned", Address: tc.address, Port: 443, Enabled: true, PinnedPeerCertSHA256: tc.pin}, {ID: "domain", Address: "other.example.com", Port: 443, Enabled: true, PinnedPeerCertSHA256: validPin}}
+				nodes := []exits.Node{
+					{ID: "pinned", Address: tc.address, Port: 443, Enabled: true, PinnedPeerCertSHA256: tc.pin},
+					{ID: "domain", Address: "other.example.com", Port: 443, Enabled: true, PinnedPeerCertSHA256: validPin},
+				}
 				data, err := BuildBridgeXRayJSON(spec, nil, nodes, "pinned", strat, "none")
 				if err != nil {
 					t.Fatal(err)

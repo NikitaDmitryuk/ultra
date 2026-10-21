@@ -3,9 +3,10 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"testing"
+
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/dns"
-	"testing"
 )
 
 func TestBridgeDoHBootstrapDoesNotQueryItsOwnResolver(t *testing.T) {

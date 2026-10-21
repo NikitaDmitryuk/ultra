@@ -8,7 +8,7 @@ import (
 
 func canonicalFixture() map[string]string {
 	return map[string]string{
-		"INSTALL_SCHEMA_VERSION": "2", "BRIDGE": "192.0.2.1", "EXIT": "192.0.2.2", "BOT_DOMAIN": "sync.example.com", "VPN_DOMAIN": "edge.example.com", "ACME_EMAIL": "owner@example.com", "PUBLIC_XHTTP_PATH": "/connect", "DNS_PROVIDER": "vultr", "DNS_ZONE": "example.com", "ULTRA_AUTOMATION_VERSION": "v2.1", "ULTRA_AUTOMATION_RELEASE_DIR": "/release", "ULTRA_AUTOMATION_AGE_RECIPIENT": "age1fixture", "ULTRA_AUTOMATION_BRIDGE_PROVIDER": "a", "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": "/pins", "ULTRA_AUTOMATION_ADMIN_TELEGRAM_ID": "123", "ULTRA_AUTOMATION_STATIC_NODES": `[{"name":"NL","address":"192.0.2.2","provider":"a"}]`,
+		"INSTALL_SCHEMA_VERSION": "2", "BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "BOT_DOMAIN": "sync.example.com", "VPN_DOMAIN": "edge.example.com", "VLESS_PORT": "24443", "ACME_EMAIL": "owner@example.com", "PUBLIC_XHTTP_PATH": "/connect", "DNS_PROVIDER": "vultr", "DNS_ZONE": "example.com", "ULTRA_AUTOMATION_VERSION": "v2.1", "ULTRA_AUTOMATION_RELEASE_DIR": "/release", "ULTRA_AUTOMATION_AGE_RECIPIENT": "age1fixture", "ULTRA_AUTOMATION_BRIDGE_PROVIDER": "a", "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": "/pins", "ULTRA_AUTOMATION_ADMIN_TELEGRAM_ID": "123", "ULTRA_AUTOMATION_STATIC_NODES": `[{"name":"NL","address":"192.0.2.2","provider":"a"}]`,
 	}
 }
 func TestCanonicalV2MappingAndLegacyBoundary(t *testing.T) {
@@ -20,15 +20,20 @@ func TestCanonicalV2MappingAndLegacyBoundary(t *testing.T) {
 	if err := validateAutomation(p); err != nil {
 		t.Fatal(err)
 	}
-	if p.SchemaVersion != 2 || p.SecretsEnvFile() != ".env" || p.Automation.DNS.TTL != 300 || p.Automation.Ingress.Domain != "edge.example.com" {
+	if p.SchemaVersion != 2 || p.SecretsEnvFile() != ".env" || p.Automation.DNS.TTL != 300 ||
+		p.Automation.Ingress.Domain != "edge.example.com" {
 		t.Fatal("mapping lost policy")
 	}
 	delete(v, "INSTALL_SCHEMA_VERSION")
 	p, err = CanonicalValuesToPlan(v)
-	if err != nil || p.FullAutomation() {
-		t.Fatal("v1 acquired automation")
+	if err != nil || !p.FullAutomation() || p.SchemaVersion != CurrentSchemaVersion {
+		t.Fatal("omitted version must default to schema 2")
 	}
-	for _, key := range []string{"ULTRA_VULTR_API_KEY", "ULTRA_VULTR_DNS_API_KEY", "ULTRA_CUTOVER_SUBSCRIPTION_URL", "TELEGRAM_BOT_TOKEN"} {
+	v["INSTALL_SCHEMA_VERSION"] = "1"
+	if _, err := CanonicalValuesToPlan(v); err == nil {
+		t.Fatal("retired schema 1 accepted")
+	}
+	for _, key := range []string{"ULTRA_VULTR_API_KEY", "PROVIDER_API_KEY", "ULTRA_SUBSCRIPTION_PROBE_URL", "TELEGRAM_BOT_TOKEN"} {
 		v := canonicalFixture()
 		v[key] = "private-fixture"
 		_, err := CanonicalValuesToPlan(v)
@@ -52,23 +57,16 @@ func TestCanonicalRejectsRemovedAutomaticUpgradePolicy(t *testing.T) {
 	}
 }
 
-func TestCanonicalV2BridgeSSHHostDoesNotChangeServiceAddress(t *testing.T) {
-	v := canonicalFixture()
-	v["BRIDGE_SSH_HOST"] = "bridge-admin"
-	p, err := CanonicalValuesToPlan(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Bridge.Address != "192.0.2.1" || p.Bridge.SSHHost != "bridge-admin" {
-		t.Fatalf("bridge address and SSH target were conflated: %#v", p.Bridge)
-	}
-	if p.Bridge.PublicHost != "192.0.2.1" {
-		t.Fatalf("public host = %q, want service address", p.Bridge.PublicHost)
-	}
-	if p.Automation.BridgeIPv4 != "192.0.2.1" {
-		t.Fatalf("automation bridge IPv4 = %q, want service address", p.Automation.BridgeIPv4)
+func TestCanonicalRetiredRoleInputsAreRejected(t *testing.T) {
+	for _, key := range []string{"PRESET", "BRIDGE", "EXIT", "DB_HOST", "IDENTITY", "BRIDGE_SSH_HOST", "BRIDGE_SSH_IDENTITY", "EXIT_SSH_IDENTITY", "DB_SSH_IDENTITY", "EXIT2", "DB_ENABLE", "DB_REPLICA", "DB_SSH_USER"} {
+		v := canonicalFixture()
+		v[key] = "retired"
+		if _, err := CanonicalValuesToPlan(v); err == nil {
+			t.Fatalf("retired key %s accepted", key)
+		}
 	}
 }
+
 func TestDNSRoleValidation(t *testing.T) {
 	for _, value := range []string{"../vpn", "edge.example.com", "-vpn", "vpn_", ""} {
 		p, _ := CanonicalValuesToPlan(canonicalFixture())
@@ -93,12 +91,37 @@ func TestDNSRoleValidation(t *testing.T) {
 	}
 }
 func TestBotEnvironmentExcludesProvidersAndUnknownKeys(t *testing.T) {
-	out, err := BotEnvironment(map[string]string{"TELEGRAM_BOT_TOKEN": "fixture", "ULTRA_VULTR_API_KEY": "privatecompute", "ULTRA_VULTR_DNS_API_KEY": "privatedns", "ARBITRARY": "privateother", "ULTRA_BOT_PUBLIC_URL": "https://sync.example.com"})
+	out, err := BotEnvironment(
+		map[string]string{
+			"TELEGRAM_BOT_TOKEN":           "fixture",
+			"ULTRA_VULTR_API_KEY":          "privatecompute",
+			"ULTRA_SUBSCRIPTION_PROBE_URL": "https://sync.example.com/sub/privateprobe",
+			"ARBITRARY":                    "privateother",
+			"ULTRA_BOT_PUBLIC_URL":         "https://sync.example.com",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(out), "private") || !strings.Contains(string(out), "TELEGRAM_BOT_TOKEN=\"fixture\"") {
+	if strings.Contains(string(out), "private") || strings.Contains(string(out), "ULTRA_SUBSCRIPTION_PROBE_URL") ||
+		!strings.Contains(string(out), "TELEGRAM_BOT_TOKEN=\"fixture\"") {
 		t.Fatal("projection leaked or lost bot input")
+	}
+}
+
+func TestSubscriptionProbeURLsAreDisallowedDeploymentSecrets(t *testing.T) {
+	for _, key := range []string{"ULTRA_SUBSCRIPTION_PROBE_URL", "ULTRA_CUTOVER_SUBSCRIPTION_URL"} {
+		if !DisallowedDeploymentSecret(key) {
+			t.Fatalf("subscription probe URL key %q is not protected by shared deployment-secret rule", key)
+		}
+	}
+}
+
+func TestAnyAPIKeyIsDisallowedDeploymentSecret(t *testing.T) {
+	for _, key := range []string{"ULTRA_VULTR_API_KEY", "EXAMPLE_PROVIDER_API_KEY", "example_provider_api_key"} {
+		if !DisallowedDeploymentSecret(key) {
+			t.Fatalf("API key name %q is allowed in deployment configuration", key)
+		}
 	}
 }
 
@@ -178,6 +201,16 @@ func TestCanonicalRejectsPrivateSigningMaterialButAllowsPublicPolicy(t *testing.
 	if DisallowedDeploymentSecret("ULTRA_AUTO_UPGRADE_MINISIGN_PUBLIC_KEY_FILE") {
 		t.Fatal("public verifier rejected")
 	}
+	values := canonicalFixture()
+	values["ULTRA_RELEASE_MINISIGN_PUBLIC_KEY"] = "RWQtrusted-public-key"
+	plan, err := CanonicalValuesToPlan(values)
+	if err != nil || plan.SourceValues["ULTRA_RELEASE_MINISIGN_PUBLIC_KEY"] != "RWQtrusted-public-key" {
+		t.Fatal("trusted public key was not kept in local source values")
+	}
+	encoded, err := json.Marshal(plan)
+	if err != nil || strings.Contains(string(encoded), "RWQtrusted-public-key") {
+		t.Fatal("trusted public key leaked into serialized install plan")
+	}
 }
 
 func TestCanonicalIngressPorts(t *testing.T) {
@@ -197,5 +230,58 @@ func TestCanonicalIngressPorts(t *testing.T) {
 	values["ULTRA_INGRESS_BACKEND_PORT"] = "private-invalid"
 	if _, err := CanonicalValuesToPlan(values); err == nil || strings.Contains(err.Error(), "private-invalid") {
 		t.Fatal("invalid port not safely rejected")
+	}
+}
+
+func TestCanonicalVPNIngressDoesNotShareHTTPSPortWithVLESS(t *testing.T) {
+	values := canonicalFixture()
+	values["VLESS_PORT"] = "443"
+	if _, err := CanonicalValuesToPlan(values); err == nil || !strings.Contains(err.Error(), "managed HTTPS ingress on port 443") {
+		t.Fatalf("VLESS and managed HTTPS ingress must not share port 443: %v", err)
+	}
+	values["VLESS_PORT"] = "24443"
+	if _, err := CanonicalValuesToPlan(values); err != nil {
+		t.Fatalf("separate VLESS and HTTPS ports should be accepted: %v", err)
+	}
+}
+
+func TestAdoptionPreparationCannotAuthorizeDeployment(t *testing.T) {
+	values := map[string]string{
+		"BRIDGE_IP":        "192.0.2.1",
+		"MAIN_EXIT_IP":     "192.0.2.2",
+		"BRIDGE_SSH_KEY":   "/identity",
+		"SECRETS_ENV_FILE": "/private/secrets.env",
+	}
+	p, err := AdoptionPreparationValuesToPlan(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.SchemaVersion != CurrentSchemaVersion || p.Automation != nil || p.BridgeSSHIdentity() != "/identity" ||
+		p.SecretsEnvFile() != "/private/secrets.env" {
+		t.Fatal("preparation changed the schema or access inputs")
+	}
+	if err := ValidatePlan(p); err == nil || !strings.Contains(err.Error(), "schema 2 requires automation configuration") {
+		t.Fatalf("incomplete preparation authorized deployment: %v", err)
+	}
+	if _, err := CanonicalValuesToPlan(values); err == nil {
+		t.Fatal("ordinary config parsing accepted incomplete policy")
+	}
+	for _, edit := range []map[string]string{
+		{"INSTALL_SCHEMA_VERSION": "1"},
+		{"REUSE_BRIDGE_SPEC": "false"},
+		{"MAIN_EXIT_IP": ""},
+		{"TELEGRAM_BOT_TOKEN": "private-fixture"},
+		{"PRESET": "steamlike"},
+	} {
+		candidate := make(map[string]string, len(values)+len(edit))
+		for key, value := range values {
+			candidate[key] = value
+		}
+		for key, value := range edit {
+			candidate[key] = value
+		}
+		if _, err := AdoptionPreparationValuesToPlan(candidate); err == nil || strings.Contains(err.Error(), "private-fixture") {
+			t.Fatalf("unsafe preparation input accepted or exposed: %v", err)
+		}
 	}
 }

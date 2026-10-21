@@ -36,6 +36,38 @@ func (r *TelegramRepo) UpsertUserIPObservation(ctx context.Context, userUUID, ip
 	return r.db.Queries.UpsertUserIPObservation(ctx, sqlc.UpsertUserIPObservationParams{UserUuid: pgUUID, Ip: addr})
 }
 
+// UpsertUserIPObservations records every poll occurrence, including duplicate IPs.
+// Batching must not skip unchanged addresses: last_seen_at and sessions_seen feed
+// the detector's sliding windows and connection history.
+func (r *TelegramRepo) UpsertUserIPObservations(ctx context.Context, userUUID string, ips []string) error {
+	if len(ips) == 0 {
+		return nil
+	}
+	pgUUID, err := toPGUUID(userUUID)
+	if err != nil {
+		return err
+	}
+	addresses := make([]string, len(ips))
+	for i, ip := range ips {
+		addr, err := parseIPAddr(ip)
+		if err != nil {
+			return err
+		}
+		addresses[i] = addr.String()
+	}
+	return r.db.Queries.UpsertUserIPObservationBatch(ctx, sqlc.UpsertUserIPObservationBatchParams{UserUuid: pgUUID, Column2: addresses})
+}
+
+// LeakIPCounts reads both detector windows in one snapshot after poll writes.
+func (r *TelegramRepo) LeakIPCounts(ctx context.Context, userUUID string) (concurrent, unique24h int, err error) {
+	pgUUID, err := toPGUUID(userUUID)
+	if err != nil {
+		return 0, 0, err
+	}
+	row, err := r.db.Queries.LeakIPCounts(ctx, pgUUID)
+	return int(row.Concurrent), int(row.Unique24h), err
+}
+
 func (r *TelegramRepo) CountConcurrentIPs(ctx context.Context, userUUID string, window time.Duration) (int, error) {
 	pgUUID, err := toPGUUID(userUUID)
 	if err != nil {
@@ -63,31 +95,31 @@ func (r *TelegramRepo) InsertLeakSignal(ctx context.Context, userUUID, kind stri
 	if err != nil {
 		return err
 	}
-	return r.db.Queries.InsertLeakSignal(ctx, sqlc.InsertLeakSignalParams{UserUuid: pgUUID, Kind: kind, Score: int32(score), Detail: raw})
+	return r.db.orm.WithContext(ctx).
+		Select("user_uuid", "kind", "score", "detail").
+		Create(&leakSignalRow{UserUUID: fromPGUUID(pgUUID), Kind: kind, Score: int(int32(score)), Detail: raw}).
+		Error
 }
 
 func (r *TelegramRepo) RecentUserLeakSignals(ctx context.Context, userUUID string, limit int) ([]LeakSignal, error) {
+	if limit < 0 {
+		return nil, fmt.Errorf("limit must not be negative")
+	}
 	pgUUID, err := toPGUUID(userUUID)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := r.db.Queries.RecentUserLeakSignals(ctx, sqlc.RecentUserLeakSignalsParams{UserUuid: pgUUID, Limit: int32(limit)})
-	if err != nil {
+	rows := []leakSignalRow{}
+	if err := r.db.orm.WithContext(ctx).Where("user_uuid = ?", fromPGUUID(pgUUID)).Order("created_at DESC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]LeakSignal, 0, len(rows))
 	for _, row := range rows {
-		s := LeakSignal{
-			ID:        row.ID,
-			UserUUID:  fromPGUUID(row.UserUuid),
-			Kind:      row.Kind,
-			Score:     int(row.Score),
-			CreatedAt: timeFromPG(row.CreatedAt),
-		}
+		v := LeakSignal{ID: row.ID, UserUUID: row.UserUUID, Kind: row.Kind, Score: row.Score, CreatedAt: row.CreatedAt}
 		if len(row.Detail) > 0 {
-			_ = json.Unmarshal(row.Detail, &s.Detail)
+			_ = json.Unmarshal(row.Detail, &v.Detail)
 		}
-		out = append(out, s)
+		out = append(out, v)
 	}
 	return out, nil
 }

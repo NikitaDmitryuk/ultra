@@ -101,7 +101,15 @@ func (r *TrafficRepo) RecordSamples(ctx context.Context, samples []TrafficSample
 		}
 
 		exitID := strings.TrimPrefix(s.ExitTag, "to-exit-")
-		_, err = tx.Exec(ctx, `INSERT INTO account_exit_usage(account_id,exit_id,period,uplink_bytes,downlink_bytes) SELECT account_id,$2,$3,$4,$5 FROM users WHERE uuid=$1 ON CONFLICT(account_id,exit_id,period) DO UPDATE SET uplink_bytes=account_exit_usage.uplink_bytes+EXCLUDED.uplink_bytes,downlink_bytes=account_exit_usage.downlink_bytes+EXCLUDED.downlink_bytes`, s.UserUUID, exitID, s.CollectedAt.UTC().Format("2006-01"), s.UplinkBytes, s.DownlinkBytes)
+		_, err = tx.Exec(
+			ctx,
+			`INSERT INTO account_exit_usage(account_id,exit_id,period,uplink_bytes,downlink_bytes) SELECT account_id,$2,$3,$4,$5 FROM users WHERE uuid=$1 ON CONFLICT(account_id,exit_id,period) DO UPDATE SET uplink_bytes=account_exit_usage.uplink_bytes+EXCLUDED.uplink_bytes,downlink_bytes=account_exit_usage.downlink_bytes+EXCLUDED.downlink_bytes`,
+			s.UserUUID,
+			exitID,
+			s.CollectedAt.UTC().Format("2006-01"),
+			s.UplinkBytes,
+			s.DownlinkBytes,
+		)
 		if err != nil {
 			return err
 		}
@@ -136,21 +144,18 @@ func (r *TrafficRepo) RecordSamples(ctx context.Context, samples []TrafficSample
 
 // GetMonthlyAll returns monthly totals for every user in the given year/month.
 func (r *TrafficRepo) GetMonthlyAll(ctx context.Context, year, month int) ([]MonthlyTotal, error) {
-	rows, err := r.db.Queries.GetMonthlyAll(ctx, sqlc.GetMonthlyAllParams{Year: int32(year), Month: int32(month)})
+	out := []MonthlyTotal{}
+	err := r.db.orm.WithContext(ctx).
+		Table("monthly_traffic").
+		Where("year = ? AND month = ?", int32(year), int32(month)).
+		Order("user_uuid").
+		Find(&out).
+		Error
 	if err != nil {
 		return nil, err
 	}
-	out := make([]MonthlyTotal, 0, len(rows))
-	for _, row := range rows {
-		t := MonthlyTotal{
-			UserUUID:      fromPGUUID(row.UserUuid),
-			Year:          int(row.Year),
-			Month:         int(row.Month),
-			UplinkBytes:   row.UplinkBytes,
-			DownlinkBytes: row.DownlinkBytes,
-		}
-		t.TotalBytes = t.UplinkBytes + t.DownlinkBytes
-		out = append(out, t)
+	for i := range out {
+		out[i].TotalBytes = out[i].UplinkBytes + out[i].DownlinkBytes
 	}
 	return out, nil
 }
@@ -162,23 +167,19 @@ func (r *TrafficRepo) GetMonthlyUser(ctx context.Context, userUUID string, year,
 	if err != nil {
 		return MonthlyTotal{UserUUID: userUUID, Year: year, Month: month}, err
 	}
-	row, err := r.db.Queries.GetMonthlyUser(ctx, sqlc.GetMonthlyUserParams{UserUuid: pgUUID, Year: int32(year), Month: int32(month)})
-	if err != nil {
-		// No row yet → return zero value
-		if errors.Is(err, pgx.ErrNoRows) {
-			return MonthlyTotal{UserUUID: userUUID, Year: year, Month: month}, nil
-		}
-		return MonthlyTotal{UserUUID: userUUID, Year: year, Month: month}, err
-	}
-	t := MonthlyTotal{
-		UserUUID:      fromPGUUID(row.UserUuid),
-		Year:          int(row.Year),
-		Month:         int(row.Month),
-		UplinkBytes:   row.UplinkBytes,
-		DownlinkBytes: row.DownlinkBytes,
+	t := MonthlyTotal{UserUUID: userUUID, Year: year, Month: month}
+	err = cloudLookupError(
+		r.db.orm.WithContext(ctx).
+			Table("monthly_traffic").
+			Where("user_uuid = ? AND year = ? AND month = ?", fromPGUUID(pgUUID), int32(year), int32(month)).
+			Take(&t).
+			Error,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return MonthlyTotal{UserUUID: userUUID, Year: year, Month: month}, nil
 	}
 	t.TotalBytes = t.UplinkBytes + t.DownlinkBytes
-	return t, nil
+	return t, err
 }
 
 // GetMonthlyHistory returns total traffic across all users for the last N calendar months,
@@ -222,7 +223,8 @@ func (r *TrafficRepo) TrafficTimelineByBuckets(
 // Returns the number of rows deleted.
 func (r *TrafficRepo) PruneOldSamples(ctx context.Context, retention time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-retention)
-	return r.db.Queries.PruneOldTrafficSamples(ctx, toPGTime(cutoff))
+	result := r.db.orm.WithContext(ctx).Table("traffic_stats").Where("collected_at < ?", cutoff).Delete(&struct{}{})
+	return result.RowsAffected, result.Error
 }
 
 // GetLastSeenAll returns the most recent activity timestamp for each user that has ever

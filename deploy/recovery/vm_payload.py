@@ -13,13 +13,29 @@ import time
 import urllib.request
 
 sys.path.insert(0, '/opt/ultra-recovery')
-from restore_host import unit_environment, sql, database_spec, literal
+from restore_host import unit_environment, database_spec
+from db_connection import dsn_from_runtime, pgpass, connection_args
 
 
 def run(args, data=None, timeout=90):
     result=subprocess.run(args,input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout)
     if result.returncode:raise ValueError('synthetic_payload_command_failed')
     return result.stdout
+
+
+
+def literal(value):
+    return "'" + value.replace("'", "''") + "'"
+
+
+def sql(statement, database):
+    parsed = dsn_from_runtime(database)
+    with pgpass('/var/lib/ultra-recovery', parsed) as environment:
+        result = subprocess.run(connection_args(parsed, database, 'psql') + ['-XAtq', '-v', 'ON_ERROR_STOP=1', '-c', statement],
+                                env=environment, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+    if result.returncode:
+        raise ValueError('synthetic_database_query_failed')
+    return result.stdout.decode().strip()
 
 
 def api(path, value=None):

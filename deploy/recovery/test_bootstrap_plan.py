@@ -2,7 +2,9 @@ import hashlib
 import contextlib
 import io
 import copy
+import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import time
@@ -12,6 +14,7 @@ import subprocess
 import sys
 from unittest import mock
 import bootstrap_plan
+import db_connection
 import recovery_status
 
 
@@ -20,26 +23,51 @@ class BootstrapPlanTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.path = lambda value: self.root / str(value).lstrip('/') if str(value).startswith('/') and not str(value).startswith(str(self.root)) else Path(value)
-        for name, content in [('var/lib/ultra-relay/automation/id_ed25519', 'fixture-private'),
-                              ('var/lib/ultra-relay/automation/id_ed25519.pub', 'fixture-public'),
+        for name, content in [('etc/ultra-fleet/id_ed25519', 'fixture-private'),
+                              ('etc/ultra-fleet/id_ed25519.pub', 'fixture-public'),
                               ('etc/ultra-relay/bot.env', 'TELEGRAM_BOT_TOKEN=fixture-bot-token\n'),
                               ('etc/ultra-relay/environment', 'ULTRA_RELAY_ADMIN_TOKEN=fixture-admin-token\n'),
                               ('var/lib/ultra-relay/automation/vultr-api-key', 'fixture-cloud')]:
             path = self.root / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(content)
-        self.spec = self.root / 'spec.json'; self.spec.write_text('{}')
+        self.spec = self.root / 'spec.json'; self.spec.write_text(json.dumps({'database': {'dsn': 'postgres://app:fixture-pass@127.0.0.1:25432/fixture?sslmode=disable'}})); self.spec.chmod(0o600)
         self.pins = self.root / 'pins'; self.pins.write_text('fixture-pins')
-        self.config = {'database': 'fixture', 'known_hosts_file': str(self.pins), 'spec': str(self.spec),
+        self.config = {'database': 'fixture', 'database_host': '192.0.2.3', 'known_hosts_file': str(self.pins), 'spec': str(self.spec),
                        'static_nodes': [{'address': '192.0.2.2', 'name': 'Exit', 'provider': 'fixture', 'budget': {'monthly_bytes': 1024}}],
                        'age_recipient': 'fixture-age-recipient', 'bridge_provider': 'fixture', 'bridge_ipv4': '192.0.2.1',
                        'bridge_url': 'https://access.example.org/sub', 'version': 'v1.0.0', 'recovery_tool_members': [], 'tools': []}
         self.patch = mock.patch.multiple(bootstrap_plan, Path=self.path, CONFIG=self.root/'etc/ultra-recovery',
                                         ROOT=self.root/'opt/ultra-recovery', UNITS=self.root/'etc/systemd/system')
         self.patch.start()
-        self.discovery = mock.patch.object(bootstrap_plan, 'query', return_value=json.dumps([{'id':'11111111-2222-3333-4444-555555555555','address':'192.0.2.2'}]).encode())
+        self.db_spec_patch = mock.patch.object(db_connection, 'APP_SPEC', self.spec)
+        self.db_spec_patch.start()
+        self.discovery = mock.patch.object(bootstrap_plan, 'query_database', return_value=json.dumps([{'id':'11111111-2222-3333-4444-555555555555','address':'192.0.2.2'}]).encode())
         self.discovery.start()
 
     def tearDown(self):
-        self.discovery.stop(); self.patch.stop(); self.temp.cleanup()
+        self.db_spec_patch.stop(); self.discovery.stop(); self.patch.stop(); self.temp.cleanup()
+
+    def test_planner_imports_verified_sibling_helper_before_old_release_copy(self):
+        staged = self.root / 'staged'
+        old_release = self.root / 'old-release'
+        staged.mkdir()
+        old_release.mkdir()
+        shutil.copyfile(Path(bootstrap_plan.__file__), staged / 'bootstrap_plan.py')
+        (staged / 'db_connection.py').write_text("MARKER = 'verified-sibling'\n")
+        (old_release / 'db_connection.py').write_text("MARKER = 'stale-release'\n")
+
+        previous_module = sys.modules.pop('db_connection', None)
+        previous_path = sys.path[:]
+        try:
+            sys.path.insert(0, str(old_release))
+            spec = importlib.util.spec_from_file_location('staged_bootstrap_plan', staged / 'bootstrap_plan.py')
+            planner = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(planner)
+            self.assertEqual(planner.db_connection.MARKER, 'verified-sibling')
+        finally:
+            sys.path[:] = previous_path
+            sys.modules.pop('db_connection', None)
+            if previous_module is not None:
+                sys.modules['db_connection'] = previous_module
 
     def test_planner_has_no_host_mutations_and_initial_independence_is_unconfirmed(self):
         before = sorted(str(p) for p in self.root.rglob('*'))
@@ -47,6 +75,9 @@ class BootstrapPlanTests(unittest.TestCase):
         self.assertEqual(before, sorted(str(p) for p in self.root.rglob('*')))
         backup = json.loads(next(item['content'] for item in result['files'] if item['destination'].endswith('/backup.json')))
         self.assertFalse(backup['independent'])
+        self.assertIn('/var/lib/ultra-relay/automation/vultr-api-key', backup['state_paths'])
+        self.assertNotIn('/var/lib/ultra-relay/automation', backup['state_paths'])
+        self.assertIn('/var/lib/ultra-relay/automation/subscription-keys.json', backup['optional_state_paths'])
         self.assertTrue(result['verified'])
         self.assertTrue(all(item['mode']=='0600' for item in result['files']))
         self.assertEqual(result['nodes'][0]['id'],'11111111-2222-3333-4444-555555555555')
@@ -64,6 +95,22 @@ class BootstrapPlanTests(unittest.TestCase):
         token = next(item for item in result['files'] if item['destination'].endswith('/primary-bot-token'))
         self.assertEqual(token['content'], 'fixture-bot-token')
         self.assertEqual(token['mode'], '0600')
+
+    def test_bootstrap_creates_provider_key_directory_before_copy(self):
+        import yaml
+        role = Path(__file__).resolve().parents[1] / 'ansible/roles/recovery_primary/tasks/main.yml'
+        tasks = yaml.safe_load(role.read_text())
+        directory = next(index for index, task in enumerate(tasks)
+                         if task.get('name') == 'Ensure relay automation credential directory exists')
+        provider_key = next(index for index, task in enumerate(tasks)
+                            if task.get('name') == 'Install provider key in relay-private canonical location')
+        directory_task = tasks[directory]['ansible.builtin.file']
+        self.assertEqual(directory_task['path'], '/var/lib/ultra-relay/automation')
+        self.assertEqual(directory_task['state'], 'directory')
+        self.assertEqual(directory_task['owner'], 'ultra-relay')
+        self.assertEqual(directory_task['group'], 'ultra-relay')
+        self.assertEqual(directory_task['mode'], '0700')
+        self.assertLess(directory, provider_key)
 
     def test_cli_transports_secrets_only_in_private_file(self):
         output = self.root / 'recovery-plan.json'
@@ -135,9 +182,14 @@ class BootstrapPlanTests(unittest.TestCase):
                 playbook = self.root / ('failure-' + failure + '.yml')
                 playbook.write_text(yaml.safe_dump([{'hosts': 'localhost', 'gather_facts': False,
                     'tasks': [transport, {'ansible.builtin.fail': {'msg': 'fixture consumer failed'}}]}]))
+                local_tmp = self.root / ('ansible-local-' + failure)
+                local_tmp.mkdir()
+                env = os.environ.copy()
+                env['ANSIBLE_LOCAL_TEMP'] = str(local_tmp)
                 result = subprocess.run([executable, '-i', 'localhost,', '-c', 'local', str(playbook)],
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-                self.assertEqual(result.returncode, 2, result.stdout.decode(errors='replace'))
+                                        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+                self.assertEqual(result.returncode, 2,
+                                 (result.stdout + result.stderr).decode(errors='replace'))
                 self.assertFalse(output.exists())
                 self.assertNotIn(b'fixture-private-payload', result.stdout + result.stderr)
 
@@ -158,6 +210,13 @@ class BootstrapPlanTests(unittest.TestCase):
         result = bootstrap_plan.plan(self.config)
         backup = json.loads(next(item['content'] for item in result['files'] if item['destination'].endswith('/backup.json')))
         self.assertIn('/var/lib/ultra-ansible/retention', backup['state_paths'])
+        self.assertIn('/etc/ultra-db-tunnel', backup['state_paths'])
+        self.assertIn('/etc/systemd/system/ultra-db-tunnel.service', backup['state_paths'])
+        self.assertIn('/var/lib/ultra-relay/automation/vultr-api-key', backup['state_paths'])
+        self.assertNotIn('/var/lib/ultra-relay/automation', backup['state_paths'])
+        self.assertEqual(backup['optional_state_paths'], ['/var/lib/ultra-relay/automation/subscription-keys.json',
+                                                         '/var/lib/ultra-ansible/lifecycle.json',
+                                                         '/var/lib/ultra-ansible/lifecycle-retired.json'])
         self.assertIn(self.config['controller_directory'], backup['artifact_paths'])
 
     def test_pin_and_age_rotation_refused(self):

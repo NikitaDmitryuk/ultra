@@ -1,4 +1,17 @@
 ---
+- name: Select the frozen host rollback manifest
+  ansible.builtin.set_fact:
+    release_previous_manifest: >-
+      {{ ultra_release_manifest if (ultra_forward_only | default(false) | bool)
+         else (ultra_host_previous_manifest | default(ultra_previous_manifest)) }}
+- name: Require the emergency relay fallback to read the target schema
+  ansible.builtin.assert:
+    that:
+      - "'service-access-v1' in ultra_previous_relay_manifest.capabilities"
+      - "'provider-pool-quota-v1' in ultra_previous_relay_manifest.capabilities"
+      - ultra_previous_relay_manifest.database_schema_min | int <= ultra_release_manifest.database_schema_min | int
+      - ultra_previous_relay_manifest.database_schema_max | int >= ultra_release_manifest.database_schema_max | int
+  when: release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined and not (ultra_forward_only | default(false) | bool)
 - name: Validate the release activation contract
   ansible.builtin.assert:
     that:
@@ -6,12 +19,12 @@
       - ultra_release_manifest.version == ultra_release_version
       - ultra_architecture in ['amd64', 'arm64']
       - release_component in ['ultra-relay', 'ultra-bot']
-      - "'service-access-v1' in ultra_previous_manifest.capabilities"
+      - "'service-access-v1' in release_previous_manifest.capabilities"
       - "'service-access-v1' in ultra_release_manifest.capabilities"
-      - "'provider-pool-quota-v1' in ultra_previous_manifest.capabilities"
+      - "'provider-pool-quota-v1' in release_previous_manifest.capabilities"
       - "'provider-pool-quota-v1' in ultra_release_manifest.capabilities"
-      - ultra_previous_manifest.database_schema_min | int <= ultra_release_manifest.database_schema_min | int
-      - ultra_previous_manifest.database_schema_max | int >= ultra_release_manifest.database_schema_max | int
+      - release_previous_manifest.database_schema_min | int <= ultra_release_manifest.database_schema_min | int
+      - release_previous_manifest.database_schema_max | int >= ultra_release_manifest.database_schema_max | int
       - ultra_release_manifest.database_schema_min | int <= ultra_release_manifest.database_schema_max | int
 - name: Resolve the exact component from both manifests
   ansible.builtin.set_fact:
@@ -20,11 +33,22 @@
   ansible.builtin.assert:
     that:
       - ultra_release_manifest.assets | selectattr('name', 'equalto', release_asset_name) | list | length == 1
-      - ultra_previous_manifest.assets | selectattr('name', 'equalto', release_asset_name) | list | length == 1
+      - >-
+        (ultra_previous_relay_manifest.assets
+        if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined
+        else release_previous_manifest.assets) |
+        selectattr('name', 'equalto', release_asset_name) | list | length == 1
 - name: Pin the target and fallback hashes
   ansible.builtin.set_fact:
     release_target: "{{ ultra_release_manifest.assets | selectattr('name', 'equalto', release_asset_name) | first }}"
-    release_previous: "{{ ultra_previous_manifest.assets | selectattr('name', 'equalto', release_asset_name) | first }}"
+    release_previous: >-
+      {{ (ultra_release_manifest.assets |
+          selectattr('name', 'equalto', release_asset_name) | first)
+         if (ultra_forward_only | default(false) | bool)
+         else ((ultra_previous_relay_manifest.assets
+                if release_component == 'ultra-relay' and ultra_previous_relay_manifest is defined
+                else release_previous_manifest.assets) |
+               selectattr('name', 'equalto', release_asset_name) | first) }}
 - name: Validate exact asset metadata
   ansible.builtin.assert:
     that:
@@ -57,7 +81,7 @@
     that:
       - release_active.stat.isreg | default(false)
       - not release_active.stat.islnk | default(false)
-      - release_active.stat.checksum in [release_previous.sha256, release_target.sha256]
+      - (ultra_forward_only | default(false) | bool) or release_active.stat.checksum in [release_previous.sha256, release_target.sha256]
 - name: Create a private immutable release directory
   ansible.builtin.file:
     path: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}"
@@ -71,11 +95,13 @@
     checksum_algorithm: sha256
     follow: false
   register: release_fallback
+  when: not (ultra_forward_only | default(false) | bool)
 - name: Validate the saved fallback before any activation
   ansible.builtin.assert:
     that:
       - not release_fallback.stat.exists or (release_fallback.stat.isreg | default(false) and release_fallback.stat.checksum == release_previous.sha256)
       - release_active.stat.checksum == release_previous.sha256 or release_fallback.stat.exists
+  when: not (ultra_forward_only | default(false) | bool)
 - name: Preserve compatible code once
   ansible.builtin.copy:
     src: "/usr/local/bin/{{ release_component }}"
@@ -84,7 +110,7 @@
     owner: root
     group: root
     mode: "0755"
-  when: not release_fallback.stat.exists
+  when: not (ultra_forward_only | default(false) | bool) and not release_fallback.stat.exists
 - name: Activate and verify the component
   block:
     - name: Deliver the checked release binary
@@ -105,7 +131,7 @@
         that: release_delivered_stat.stat.checksum == release_target.sha256
     - name: Check relay configuration without changing data
       ansible.builtin.command:
-        argv: [/usr/local/bin/ultra-relay, '-check', '-spec', "{{ ultra_spec_path | default('/etc/ultra-relay/spec.json') }}"]
+        argv: [/usr/local/bin/ultra-relay, "-check", "-spec", "{{ ultra_spec_path | default('/etc/ultra-relay/spec.json') }}"]
       changed_when: false
       no_log: true
       when: release_component == 'ultra-relay'
@@ -113,9 +139,10 @@
       ansible.builtin.systemd_service:
         name: "{{ release_component }}.service"
         state: "{{ 'restarted' if release_delivered.changed else 'started' }}"
+      when: not (release_preserve_stopped | default(false) | bool)
     - name: Read the start of the verification window
       ansible.builtin.command:
-        argv: [date, '+%s%N']
+        argv: [date, "+%s%N"]
       delegate_to: "{{ ultra_bridge_inventory_host }}"
       changed_when: false
       register: release_probe_since
@@ -131,7 +158,7 @@
       delegate_to: "{{ ultra_bridge_inventory_host }}"
       changed_when: false
       no_log: true
-      when: inventory_hostname in groups['exits'] and release_component == 'ultra-relay'
+      when: inventory_hostname in groups['exits'] and release_component == 'ultra-relay' and not (ultra_legacy_bridge_maintenance | default(false) | bool)
     - name: Verify bridge reload before starting the bot
       ansible.builtin.command:
         argv: ["{{ ultra_release_probe_executable | default('/usr/local/bin/ultra-install') }}", release-probe]
@@ -139,14 +166,26 @@
       no_log: true
       when: inventory_hostname in groups['bridge'] and release_component == 'ultra-relay'
   rescue:
+    - name: Keep the failed legacy bridge stopped until fleet rollback restores exits
+      ansible.builtin.systemd_service:
+        name: ultra-relay.service
+        state: stopped
+      when: inventory_hostname in groups['bridge'] and release_component == 'ultra-relay' and (ultra_legacy_bridge_maintenance | default(false) | bool)
+    - name: Keep a failed forward-only candidate stopped in maintenance
+      ansible.builtin.systemd_service:
+        name: "{{ release_component }}.service"
+        state: stopped
+      when: (ultra_forward_only | default(false) | bool) and not (release_preserve_stopped | default(false) | bool)
     - name: Recheck the compatible fallback before restoring code
       ansible.builtin.stat:
         path: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/{{ release_component }}.previous"
         checksum_algorithm: sha256
       register: release_rollback_stat
+      when: not (ultra_forward_only | default(false) | bool)
     - name: Refuse an invalid fallback
       ansible.builtin.assert:
         that: release_rollback_stat.stat.checksum == release_previous.sha256
+      when: not (ultra_forward_only | default(false) | bool)
     - name: Restore only compatible executable code
       ansible.builtin.copy:
         src: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/{{ release_component }}.previous"
@@ -155,10 +194,15 @@
         owner: root
         group: root
         mode: "0755"
+      when: not (ultra_forward_only | default(false) | bool)
     - name: Restart the restored service
       ansible.builtin.systemd_service:
         name: "{{ release_component }}.service"
         state: restarted
+      when:
+        - not (release_preserve_stopped | default(false) | bool)
+        - not (inventory_hostname in groups['bridge'] and release_component == 'ultra-relay' and (ultra_legacy_bridge_maintenance | default(false) | bool))
+        - not (ultra_forward_only | default(false) | bool)
     - name: Retain the failed outcome after compatible rollback
       ansible.builtin.fail:
-        msg: release_activation_failed
+        msg: "{{ 'release_forward_only_activation_failed' if (ultra_forward_only | default(false) | bool) else 'release_activation_failed' }}"

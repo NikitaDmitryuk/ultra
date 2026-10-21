@@ -5,13 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/auth"
-	"github.com/NikitaDmitryuk/ultra/internal/mimic"
-	"github.com/NikitaDmitryuk/ultra/internal/proxy"
-	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
-	"github.com/google/uuid"
-	xnet "github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/core"
 	"io"
 	"net"
 	"net/http"
@@ -24,6 +17,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
+	"github.com/NikitaDmitryuk/ultra/internal/mimic"
+	"github.com/NikitaDmitryuk/ultra/internal/proxy"
+	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
+	"github.com/google/uuid"
+	xnet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/core"
 )
 
 // Exercise the actual loopback primary backend and its durable meter behind
@@ -43,7 +44,11 @@ func primaryInteractiveFixture(t *testing.T, nginx bool) {
 	spec.SplitRouting = BoolPtr(false)
 	spec.LegacyPublicEnabled = BoolPtr(false)
 	spec.GatewayVLESSPort = 0
-	spec.PrimaryXHTTP = &PrimaryXHTTPIngress{Host: "127.0.0.1", BackendPort: freePort(t), PublicXHTTPTLSSpec: PublicXHTTPTLSSpec{Port: freePort(t), ServerName: "example.com", Path: "/interactive", Mode: "stream-up"}}
+	spec.PrimaryXHTTP = &PrimaryXHTTPIngress{
+		Host:               "127.0.0.1",
+		BackendPort:        freePort(t),
+		PublicXHTTPTLSSpec: PublicXHTTPTLSSpec{Port: freePort(t), ServerName: "example.com", Path: "/interactive", Mode: "stream-up"},
+	}
 	user := auth.User{UUID: uuid.NewString(), AccountID: uuid.NewString(), Kind: "vless", IsActive: true}
 	strategy, _ := mimic.New("steamlike")
 	raw, err := BuildBridgeXRayJSON(spec, []auth.User{user}, nil, "", strategy, "error")
@@ -61,7 +66,16 @@ func primaryInteractiveFixture(t *testing.T, nginx bool) {
 		}
 	}
 	cfg["inbounds"] = inbounds
-	cfg["outbounds"] = []any{map[string]any{"protocol": "freedom", "tag": "to-exit-fixture", "settings": map[string]any{"domainStrategy": "UseIP", "finalRules": []any{map[string]any{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}}}
+	cfg["outbounds"] = []any{
+		map[string]any{
+			"protocol": "freedom",
+			"tag":      "to-exit-fixture",
+			"settings": map[string]any{
+				"domainStrategy": "UseIP",
+				"finalRules":     []any{map[string]any{"action": "allow", "ip": []string{"127.0.0.0/8"}}},
+			},
+		},
+	}
 	delete(cfg, "routing")
 	delete(cfg, "dns")
 	raw, _ = json.Marshal(cfg)
@@ -71,7 +85,10 @@ func primaryInteractiveFixture(t *testing.T, nginx bool) {
 	}
 	defer func() { _ = state.Close() }()
 	now := time.Now().UTC()
-	limits := []runtimestate.QuotaLimit{{AccountID: user.AccountID, ExitID: "fixture", Period: now.Format("2006-01"), LimitBytes: 1 << 20, ExpiresAt: now.Add(time.Hour)}, {ExitID: "fixture", Period: now.Format("2006-01"), LimitBytes: 1 << 20, ExpiresAt: now.Add(time.Hour)}}
+	limits := []runtimestate.QuotaLimit{
+		{AccountID: user.AccountID, ExitID: "fixture", Period: now.Format("2006-01"), LimitBytes: 1 << 20, ExpiresAt: now.Add(time.Hour)},
+		{ExitID: "fixture", Period: now.Format("2006-01"), LimitBytes: 1 << 20, ExpiresAt: now.Add(time.Hour)},
+	}
 	if err = state.SaveSnapshot(runtimestate.Snapshot{ConfirmedAt: now, Payload: []byte(`{}`)}, limits); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +127,9 @@ func primaryInteractiveFixture(t *testing.T, nginx bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	export.XRayOutboundJSON["streamSettings"].(map[string]any)["tlsSettings"].(map[string]any)["certificates"] = []any{map[string]any{"certificateFile": cert, "usage": "verify"}}
+	export.XRayOutboundJSON["streamSettings"].(map[string]any)["tlsSettings"].(map[string]any)["certificates"] = []any{
+		map[string]any{"certificateFile": cert, "usage": "verify"},
+	}
 	raw, _ = json.Marshal(map[string]any{"log": map[string]any{"loglevel": "error"}, "outbounds": []any{export.XRayOutboundJSON}})
 	client := &proxy.Runner{}
 	if err = client.StartJSON(raw); err != nil {
@@ -212,10 +231,17 @@ func nginxInteractiveFrontend(t *testing.T, primary *PrimaryXHTTPIngress, cert, 
 	if e != nil {
 		t.Fatal(e)
 	}
-	data = []byte(strings.NewReplacer("{{ ultra_ingress.domain }}", "example.com", "{{ ultra_ingress.path }}", "/interactive", "{{ ultra_ingress.backend_port }}", fmt.Sprint(primary.BackendPort), "{{ ingress_public_port }}", fmt.Sprint(primary.Port)).Replace(string(data)))
+	data = []byte(
+		strings.NewReplacer("{{ ultra_ingress.domain }}", "example.com", "{{ ultra_ingress.path }}", "/interactive", "{{ ultra_ingress.backend_port }}", fmt.Sprint(primary.BackendPort), "{{ ingress_public_port }}", fmt.Sprint(primary.Port)).
+			Replace(string(data)),
+	)
 	conf := string(data)
 	conf = strings.ReplaceAll(conf, "listen 80;", fmt.Sprintf("listen 127.0.0.1:%d;", freePort(t)))
-	conf = strings.ReplaceAll(conf, fmt.Sprintf("listen %d ssl http2;", primary.Port), fmt.Sprintf("listen 127.0.0.1:%d ssl http2;", primary.Port))
+	conf = strings.ReplaceAll(
+		conf,
+		fmt.Sprintf("listen %d ssl http2;", primary.Port),
+		fmt.Sprintf("listen 127.0.0.1:%d ssl http2;", primary.Port),
+	)
 	conf = strings.ReplaceAll(conf, "/etc/letsencrypt/live/example.com/fullchain.pem", "/fixtures/cert.pem")
 	conf = strings.ReplaceAll(conf, "/etc/letsencrypt/live/example.com/privkey.pem", "/fixtures/key.pem")
 	conf = strings.ReplaceAll(conf, "/var/log/nginx/ultra-vpn-error.log crit", "stderr warn")
@@ -224,7 +250,8 @@ func nginxInteractiveFrontend(t *testing.T, primary *PrimaryXHTTPIngress, cert, 
 		t.Fatal(e)
 	}
 	name := "ultra-nginx-interactive-" + uuid.NewString()
-	output, e := exec.Command("docker", "run", "--detach", "--rm", "--name", name, "--network", "host", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "--mount", "type=bind,src="+fixture+",dst=/fixtures,readonly", "--entrypoint", "nginx", image, "-c", "/fixtures/nginx.conf", "-g", "daemon off;").CombinedOutput()
+	output, e := exec.Command("docker", "run", "--detach", "--rm", "--name", name, "--network", "host", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "--mount", "type=bind,src="+fixture+",dst=/fixtures,readonly", "--entrypoint", "nginx", image, "-c", "/fixtures/nginx.conf", "-g", "daemon off;").
+		CombinedOutput()
 	if e != nil {
 		t.Fatalf("isolated Nginx start: %v %s", e, output)
 	}

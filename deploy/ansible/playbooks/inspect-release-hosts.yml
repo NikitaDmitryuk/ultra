@@ -1,6 +1,18 @@
 ---
+- name: Verify explicit prior operator evidence before selecting rollback baselines
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Verify root receipts retained assets and emergency checkpoint
+      ultra_upgrade_baseline:
+        input: "{{ ultra_upgrade_baseline_input }}"
+        nodes: "{{ ultra_upgrade_baseline_nodes }}"
+        bridge_address: "{{ ultra_upgrade_baseline_bridge_address }}"
+      register: upgrade_baseline_verified
+      when: ultra_upgrade_baseline_input is defined
 - name: Read exact frozen fleet architectures
-  hosts: all
+  hosts: all:!localhost
   gather_facts: false
   any_errors_fatal: true
   tasks:
@@ -25,7 +37,11 @@
   tasks:
     - name: Save the current inspection result
       ansible.builtin.copy:
-        content: '{"verified": true}'
+        content: >-
+          {{ {'verified': true} |
+             combine({'baseline': upgrade_baseline_verified.baseline}
+                     if ultra_upgrade_baseline_input is defined else {}) |
+             to_json(preprocess_unsafe=False) }}
         dest: "{{ ultra_result_file }}"
         mode: "0600"
       delegate_to: localhost

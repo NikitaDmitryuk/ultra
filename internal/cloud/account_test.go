@@ -30,7 +30,8 @@ func TestAccountFiltersIdentityAndRejectsMissingFigures(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			if strings.Contains(string(data), "private") || strings.Contains(string(data), "acl") || a.Balance.String() != "12.5" || a.ObservedAt.IsZero() {
+			if strings.Contains(string(data), "private") || strings.Contains(string(data), "acl") || a.Balance.String() != "12.5" ||
+				a.ObservedAt.IsZero() {
 				t.Fatal("bad billing DTO")
 			}
 		})

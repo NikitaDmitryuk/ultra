@@ -45,9 +45,6 @@ func (s *Selector) HealthSnapshot() map[string]Health {
 func (s *Selector) ProbeAndSelect(ctx context.Context, nodes []Node) (Node, bool) {
 	s.cycle.Lock()
 	defer s.cycle.Unlock()
-	parent := ctx
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
 	enabled := FilterEnabled(nodes)
 	results := make([]Health, len(enabled))
 	var wg sync.WaitGroup
@@ -63,13 +60,15 @@ func (s *Selector) ProbeAndSelect(ctx context.Context, nodes []Node) (Node, bool
 				return
 			}
 			if s.probe != nil {
-				results[i] = s.probe(ctx, n)
+				probeContext, cancel := context.WithTimeout(ctx, 8*time.Second)
+				defer cancel()
+				results[i] = s.probe(probeContext, n)
 			}
 		}(i, n)
 	}
 	wg.Wait()
 	// Cancellation by shutdown or the caller is not evidence of a network failure.
-	if parent.Err() != nil {
+	if ctx.Err() != nil {
 		return Node{}, false
 	}
 	s.mu.Lock()

@@ -1,0 +1,42 @@
+---
+- name: Require a staged Vultr compute credential for bridge upgrade
+  ansible.builtin.assert:
+    that:
+      - ultra_upgrade_provider_key_source | default('') | length > 0
+      - ultra_upgrade_provider_bridge_ipv4 | default('') | length > 0
+  no_log: true
+- name: Ensure relay automation credential directory exists
+  ansible.builtin.file:
+    path: /var/lib/ultra-relay/automation
+    state: directory
+    owner: ultra-relay
+    group: ultra-relay
+    mode: "0700"
+- name: Install staged Vultr compute credential
+  ansible.builtin.copy:
+    src: "{{ ultra_upgrade_provider_key_source }}"
+    dest: /var/lib/ultra-relay/automation/vultr-api-key
+    owner: ultra-relay
+    group: ultra-relay
+    mode: "0600"
+    diff: false
+  no_log: true
+- name: Ensure relay service drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/ultra-relay.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+- name: Configure Vultr compute identity for the relay service
+  ansible.builtin.template:
+    src: provider.conf.j2
+    dest: /etc/systemd/system/ultra-relay.service.d/provider.conf
+    owner: root
+    group: root
+    mode: "0644"
+    diff: false
+  no_log: true
+- name: Load the Vultr service drop-in into systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true

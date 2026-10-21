@@ -178,7 +178,14 @@ func acceptanceTransportJSON(spec *config.Spec, nodes []exits.Node) ([]byte, err
 }
 
 func TestAcceptanceTransportComparisonDetectsWrongMimic(t *testing.T) {
-	spec := &config.Spec{Role: config.RoleBridge, MimicPreset: "steamlike", PublicHost: "127.0.0.1", VLESSPort: 443, SplitRouting: config.BoolPtr(false), SplithttpPath: "/fixture"}
+	spec := &config.Spec{
+		Role:          config.RoleBridge,
+		MimicPreset:   "steamlike",
+		PublicHost:    "127.0.0.1",
+		VLESSPort:     443,
+		SplitRouting:  config.BoolPtr(false),
+		SplithttpPath: "/fixture",
+	}
 	nodes := []exits.Node{{ID: "fixture", Address: "127.0.0.1", Port: 8443, TunnelUUID: "fixture", Enabled: true}}
 	before, err := acceptanceTransportJSON(spec, nodes)
 	if err != nil {
@@ -218,7 +225,16 @@ func TestExitAcceptanceProductionCadence(t *testing.T) {
 		Expected   []string     `json:"expected"`
 	}
 	strategy, _ := mimic.New("apijson")
-	spec := &config.Spec{Role: config.RoleBridge, DevMode: true, ListenAddress: "127.0.0.1", PublicHost: "127.0.0.1", VLESSPort: cacheTestPort(t), AdminListen: fmt.Sprintf("127.0.0.1:%d", cacheTestPort(t)), SplitRouting: config.BoolPtr(false), Database: &config.DatabaseSpec{DSN: "postgres://invalid:invalid@127.0.0.1:1/isolated_no_control"}}
+	spec := &config.Spec{
+		Role:          config.RoleBridge,
+		DevMode:       true,
+		ListenAddress: "127.0.0.1",
+		PublicHost:    "127.0.0.1",
+		VLESSPort:     cacheTestPort(t),
+		AdminListen:   fmt.Sprintf("127.0.0.1:%d", cacheTestPort(t)),
+		SplitRouting:  config.BoolPtr(false),
+		Database:      &config.DatabaseSpec{DSN: "postgres://invalid:invalid@127.0.0.1:1/isolated_no_control"},
+	}
 	if livePath != "" {
 		info, err := os.Lstat(livePath)
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 65536 {
@@ -232,7 +248,8 @@ func TestExitAcceptanceProductionCadence(t *testing.T) {
 			t.Fatal("two exits and HTTPS payload required")
 		}
 		for i, n := range fixture.Nodes {
-			if net.ParseIP(n.Address) == nil || n.Port < 1 || n.Port > 65535 || n.TunnelUUID == "" || n.PinnedPeerCertSHA256 == "" || net.ParseIP(fixture.Expected[i]) == nil {
+			if net.ParseIP(n.Address) == nil || n.Port < 1 || n.Port > 65535 || n.TunnelUUID == "" || n.PinnedPeerCertSHA256 == "" ||
+				net.ParseIP(fixture.Expected[i]) == nil {
 				t.Fatal("invalid tunnel fixture")
 			}
 		}
@@ -309,15 +326,37 @@ func TestExitAcceptanceProductionCadence(t *testing.T) {
 		n.Enabled = true
 	}
 	pref := fixture.Nodes[0].ID
-	owner := auth.User{UUID: "2784871e-d8a9-4e1f-b831-3d86aa8653ee", AccountID: "isolated-acceptance", IsActive: true, Routes: []auth.RouteCredential{{UUID: "3b7d2c48-cc5c-4ae4-b054-2dd59ce9e27b", ExitID: &pref}}}
+	owner := auth.User{
+		UUID:      "2784871e-d8a9-4e1f-b831-3d86aa8653ee",
+		AccountID: "isolated-acceptance",
+		IsActive:  true,
+		Routes:    []auth.RouteCredential{{UUID: "3b7d2c48-cc5c-4ae4-b054-2dd59ce9e27b", ExitID: &pref}},
+	}
 	now := time.Now().UTC()
 	var limits []runtimestate.QuotaLimit
 	for _, n := range fixture.Nodes {
 		for _, account := range []string{owner.AccountID, ""} {
-			limits = append(limits, runtimestate.QuotaLimit{AccountID: account, ExitID: n.ID, Period: now.Format("2006-01"), LimitBytes: 32 << 20, ExpiresAt: now.Add(time.Hour)})
+			limits = append(
+				limits,
+				runtimestate.QuotaLimit{
+					AccountID:  account,
+					ExitID:     n.ID,
+					Period:     now.Format("2006-01"),
+					LimitBytes: 32 << 20,
+					ExpiresAt:  now.Add(time.Hour),
+				},
+			)
 		}
 	}
-	raw, _ := json.Marshal(runtimeSnapshotV1{Version: 1, Fingerprint: runtimeFingerprint(spec), Users: snapshotUsers([]auth.User{owner}), Nodes: fixture.Nodes, Limits: limits})
+	raw, _ := json.Marshal(
+		runtimeSnapshotV1{
+			Version:     1,
+			Fingerprint: runtimeFingerprint(spec),
+			Users:       snapshotUsers([]auth.User{owner}),
+			Nodes:       fixture.Nodes,
+			Limits:      limits,
+		},
+	)
 	statePath := filepath.Join(t.TempDir(), "runtime.db")
 	state, err := runtimestate.Open(statePath)
 	if err != nil {
@@ -328,7 +367,10 @@ func TestExitAcceptanceProductionCadence(t *testing.T) {
 		t.Fatal("fixture snapshot unavailable")
 	}
 	_ = state.Close()
-	runner := &acceptanceRunner{cacheIntegrationRunner: &cacheIntegrationRunner{Runner: new(proxy.Runner), healthPort: cacheTestPort(t)}, health: map[string]exits.Health{}}
+	runner := &acceptanceRunner{
+		cacheIntegrationRunner: &cacheIntegrationRunner{Runner: new(proxy.Runner), healthPort: cacheTestPort(t)},
+		health:                 map[string]exits.Health{},
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -346,7 +388,26 @@ func TestExitAcceptanceProductionCadence(t *testing.T) {
 		}
 	})
 	waitCacheDiagnostics(t, spec, "isolated-test-token")
-	clientJSON, _ := json.Marshal(map[string]any{"log": map[string]any{"loglevel": "none"}, "outbounds": []any{map[string]any{"protocol": "vless", "settings": map[string]any{"vnext": []any{map[string]any{"address": "127.0.0.1", "port": spec.VLESSPort, "users": []any{map[string]any{"id": owner.Routes[0].UUID, "encryption": "none"}}}}}, "streamSettings": map[string]any{"network": "tcp", "security": "none"}}}})
+	clientJSON, _ := json.Marshal(
+		map[string]any{
+			"log": map[string]any{"loglevel": "none"},
+			"outbounds": []any{
+				map[string]any{
+					"protocol": "vless",
+					"settings": map[string]any{
+						"vnext": []any{
+							map[string]any{
+								"address": "127.0.0.1",
+								"port":    spec.VLESSPort,
+								"users":   []any{map[string]any{"id": owner.Routes[0].UUID, "encryption": "none"}},
+							},
+						},
+					},
+					"streamSettings": map[string]any{"network": "tcp", "security": "none"},
+				},
+			},
+		},
+	)
 	client := new(proxy.Runner)
 	if client.StartJSON(clientJSON) != nil {
 		t.Fatal("isolated client failed")
@@ -360,7 +421,11 @@ func TestExitAcceptanceProductionCadence(t *testing.T) {
 		return core.Dial(ctx, client.Instance(), dest)
 	}}
 	t.Cleanup(tr.CloseIdleConnections)
-	hc := &http.Client{Transport: tr, Timeout: 4 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	hc := &http.Client{
+		Transport:     tr,
+		Timeout:       4 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	fetchWithClient := func(hc *http.Client) (string, error) {
 		r, e := hc.Get(fixture.PayloadURL)
 		if e != nil {
@@ -398,15 +463,18 @@ func TestExitAcceptanceProductionCadence(t *testing.T) {
 	// Establish real payload reachability through each exact generated outbound
 	// before attributing later failure to route selection.
 	for i, n := range fixture.Nodes {
-		preflightTransport := &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			dest, err := xnet.ParseDestination(network + ":" + address)
-			if err != nil {
-				return nil, err
-			}
-			ctx = session.ContextWithContent(ctx, &session.Content{SkipDNSResolve: true})
-			ctx = session.SetForcedOutboundTagToContext(ctx, exits.OutboundTag(n.ID))
-			return core.Dial(ctx, runner.Instance(), dest)
-		}}
+		preflightTransport := &http.Transport{
+			DisableKeepAlives: true,
+			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+				dest, err := xnet.ParseDestination(network + ":" + address)
+				if err != nil {
+					return nil, err
+				}
+				ctx = session.ContextWithContent(ctx, &session.Content{SkipDNSResolve: true})
+				ctx = session.SetForcedOutboundTagToContext(ctx, exits.OutboundTag(n.ID))
+				return core.Dial(ctx, runner.Instance(), dest)
+			},
+		}
 		directClient := &http.Client{Transport: preflightTransport, Timeout: 8 * time.Second, CheckRedirect: hc.CheckRedirect}
 		ip, err := fetchWithClient(directClient)
 		preflightTransport.CloseIdleConnections()

@@ -19,6 +19,7 @@ let currentPerson = null,
   currentTab = "overview",
   memberCache = [],
   subscription = null,
+  subscriptionRequest = null,
   subscriptionOwner = null,
   noticeTimer,
   refreshTimer;
@@ -170,6 +171,7 @@ async function self() {
   const m = data.member;
   if (subscriptionOwner !== m.uuid) {
     subscription = null;
+    subscriptionRequest = null;
     subscriptionOwner = m.uuid;
   }
   const ready = m.active && !m.pending;
@@ -181,14 +183,43 @@ async function self() {
     ),
   );
   async function getSubscription() {
-    if (!subscription)
-      subscription = await api("/api/self/subscription", "POST", {});
-    return subscription;
+    if (!subscriptionRequest) {
+      const request = (async () => {
+        if (subscription) {
+          const state = await api("/api/self");
+          const owner = state.member;
+          if (!state.registered || !owner?.active || owner.pending) {
+            subscription = null;
+            throw new Error("Доступ изменился. Обновите кабинет.");
+          }
+          if (subscriptionOwner !== owner.uuid) {
+            subscription = null;
+            subscriptionOwner = owner.uuid;
+          }
+        }
+        if (!subscription)
+          subscription = await api("/api/self/subscription", "POST", {});
+        return subscription;
+      })();
+      subscriptionRequest = request;
+      request.finally(() => {
+        if (subscriptionRequest === request) subscriptionRequest = null;
+      }).catch(() => {});
+    }
+    return subscriptionRequest;
   }
-  button("connect", async () =>
-    openExternal((await getSubscription()).import_url),
-  );
-  button("copy-sub", async () => copy((await getSubscription()).url));
+  button("connect", async () => {
+    const result = await getSubscription();
+    openExternal(result.import_url);
+    if (result.rotated)
+      notice("Старая ссылка подписки отозвана. Подключена новая ссылка.");
+  });
+  button("copy-sub", async () => {
+    const result = await getSubscription();
+    await copy(result.url);
+    if (result.rotated)
+      notice("Старая ссылка подписки отозвана. Скопирована новая ссылка.");
+  });
   await Promise.all([
     loadSelfTraffic(),
     ready
@@ -205,26 +236,35 @@ async function self() {
       5000,
     );
 }
+let locationRefreshTimer;
 async function locations() {
-  const data = await api("/api/self/exits");
-  const effective = data.exits.find((e) => e.id === data.effective_exit_id);
-  const exitLabel = (e) =>
-    e
-      ? `${esc(e.display_name)}${quotaKindLabel(e) ? ` <span class="badge">${esc(quotaKindLabel(e))}</span>` : ""}`
-      : "Нет подтверждённого маршрута";
-  document.querySelector("#locations").innerHTML =
-    `<p class="eyebrow">МАРШРУТИЗАЦИЯ</p><h2>Автоматический выход</h2><p class="muted">Профиль «Автоматически» выбирает доступный сервер и возвращается к основному после восстановления.</p><p>${esc(applicationLabel(data.application))}</p>${data.route_reason ? `<p class="muted">${esc(routeReasonLabel(data.route_reason))}</p>` : ""}<p>Подтверждённый выход: <strong>${exitLabel(effective)}</strong></p><details><summary>Как работают профили</summary><small>Профиль страны предпочитает её сервер. При отказе или исчерпании лимита он переключается на другой исправный выход, только если на нём осталась ваша квота. После восстановления возвращается к предпочтительной стране.</small>${(data.profiles || []).length ? "<h3>Маршруты профилей Happ</h3>" : ""}${(data.profiles || []).map((p) => {
-      const route = data.exits.find((e) => e.id === p.effective_exit_id);
-      return `<p>${esc(p.name)} → ${route ? exitLabel(route) : "Маршрут недоступен"}</p>`;
-    }).join("")}<small>Кабинет не видит, какой профиль включён на устройстве.</small></details>`;
-  if (data.application && data.application.state !== "applied") {
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(
-      () => locations().catch((e) => notice(e.message)),
-      5000,
-    );
+  clearTimeout(locationRefreshTimer);
+  const target = document.querySelector("#locations");
+  const version = viewVersion;
+  if (!target) return;
+  try {
+    const data = await api("/api/self/exits");
+    if (version !== viewVersion || document.querySelector("#locations") !== target)
+      return;
+    const summary = target.querySelector("summary");
+    const detailsOpen = target.querySelector("details")?.open;
+    const preserveFocus = summary === document.activeElement;
+    target.innerHTML = routingHTML(data);
+    if (detailsOpen) target.querySelector("details").open = true;
+    if (preserveFocus) target.querySelector("summary")?.focus({ preventScroll: true });
+  } finally {
+    if (version === viewVersion && document.querySelector("#locations") === target)
+      locationRefreshTimer = setTimeout(() => {
+        if (version !== viewVersion || document.querySelector("#locations") !== target)
+          return;
+        locations().catch(() => {
+          const status = target.querySelector("#route-refresh-status");
+          if (status) status.textContent = "Обновление задерживается. Повторяем автоматически.";
+        });
+      }, 10000);
   }
 }
+
 function instructions() {
   modal(
     '<h2>Подключить устройство</h2><label for="device">Ваша система</label><select id="device"><option>iPhone / iPad</option><option>Android</option><option>macOS</option><option>Windows</option><option>Linux</option></select><ol><li>Установите Happ из официального источника.</li><li>Нажмите «Подключить Happ» в личном кабинете.</li><li>Подтвердите импорт и включите VPN.</li></ol><p>Если импорт не открылся, скопируйте подписку и добавьте её в Happ вручную. На своих устройствах используйте одну подписку.</p><a href="https://www.happ.su/" target="_blank" rel="noopener noreferrer">Официальный сайт Happ</a>',
@@ -312,6 +352,24 @@ function person(m) {
       () => act("reset"),
     ),
   );
+  if (m.pending) {
+    const version = viewVersion;
+    const poll = async () => {
+      if (version !== viewVersion || currentPerson !== m.telegram_id) return;
+      try {
+        const members = await api("/api/members");
+        if (version !== viewVersion || currentPerson !== m.telegram_id) return;
+        const updated = members.find((member) => member.telegram_id === m.telegram_id);
+        if (updated) {
+          person(updated);
+          return;
+        }
+      } catch {}
+      if (version === viewVersion && currentPerson === m.telegram_id)
+        refreshTimer = setTimeout(poll, 5000);
+    };
+    refreshTimer = setTimeout(poll, 5000);
+  }
 }
 async function invites() {
   const version = ++viewVersion;
@@ -395,14 +453,99 @@ const phases = {
   creating: "Проверяем создание VPS",
   install: "Установка Ultra",
   verify: "Проверка туннеля",
-  publish: "Применение маршрутов",
+  publish: "Публикация локации",
+  apply: "Применение маршрута на bridge",
   replace_old: "Удаление прежнего VPS",
   ready: "Готов",
   unpublish: "Отключение маршрута",
   delete: "Удаление VPS",
   cleanup: "Очистка ресурсов",
+  cancel_cleanup: "Очистка ресурсов после отмены",
 };
-async function service() {
+function operationCardHTML(o, capacity) {
+  return `<div class="card" data-op-card="${esc(o.id)}"><div class="row"><h2>${esc(o.offer.region.city)}</h2><span class="badge ${o.state === "ready" ? "good" : o.state === "failed" || o.state === "unknown" ? "bad" : "wait"}" data-op-status>${esc(serverStateLabel(o, capacity))}</span></div><p>${esc(o.offer.plan.id)} · $${o.offer.price.monthly_cost}/месяц</p><div data-op-details>${cloudOperationDetailsHTML(o)}</div><button class="btn secondary" data-events="${esc(o.id)}">Журнал операции</button></div>`;
+}
+function cloudOperationsHTML(ops, unavailable, capacity) {
+  return `${unavailable ? '<div class="card" data-cloud-unavailable><h2>Vultr пока не настроен</h2><p>Для автоматизации нужны серверный API-ключ, SSH-ключ и настройки исполнителя.</p></div>' : '<button class="btn" id="create-server">Создать exit</button>'}${ops
+    .filter((o) => o.state !== "deleted" && o.state !== "cancelled")
+    .map((o) => operationCardHTML(o, capacity))
+    .join("")}`;
+}
+function reconcileCloudOperations(container, ops, unavailable, capacity) {
+  const existing = new Map(
+    [...container.querySelectorAll("[data-op-card]")].map((card) => [
+      card.dataset.opCard,
+      card,
+    ]),
+  );
+  const active = new Set(
+    ops
+      .filter((o) => o.state !== "deleted" && o.state !== "cancelled")
+      .map((o) => o.id),
+  );
+  if (!unavailable) {
+    for (const [id, card] of existing) if (!active.has(id)) card.remove();
+
+    for (const op of ops) {
+      if (!active.has(op.id)) continue;
+      const card = existing.get(op.id);
+      if (!card) {
+        container.insertAdjacentHTML("beforeend", operationCardHTML(op, capacity));
+        continue;
+      }
+      card.hidden = false;
+      const status = card.querySelector("[data-op-status]");
+      if (status) {
+        const className = `badge ${op.state === "ready" ? "good" : op.state === "failed" || op.state === "unknown" ? "bad" : "wait"}`;
+        const text = serverStateLabel(op, capacity);
+        if (status.className !== className) status.className = className;
+        if (status.textContent !== text) status.textContent = text;
+      }
+      const details = card.querySelector("[data-op-details]");
+      if (details) {
+        const html = cloudOperationDetailsHTML(op);
+        if (details.innerHTML !== html) details.innerHTML = html;
+      }
+    }
+  }
+
+  const unavailableNotice = container.querySelector("[data-cloud-unavailable]");
+  const createButton = container.querySelector("#create-server");
+  if (unavailable) {
+    if (createButton) createButton.remove();
+    if (!unavailableNotice)
+      container.insertAdjacentHTML(
+        "afterbegin",
+        '<div class="card" data-cloud-unavailable><h2>Vultr пока не настроен</h2><p>Для автоматизации нужны серверный API-ключ, SSH-ключ и настройки исполнителя.</p></div>',
+      );
+  } else {
+    if (unavailableNotice) unavailableNotice.remove();
+    if (!createButton)
+      container.insertAdjacentHTML(
+        "afterbegin",
+        '<button class="btn" id="create-server">Создать exit</button>',
+      );
+  }
+}
+let replicaRefreshTimer;
+function bridgeReplicasHTML(replicas) {
+  const labels = { streaming: "Копия обновляется", syncing: "Первичная синхронизация", lagging: "Копия отстаёт", disconnected: "Нет потока репликации", unknown: "Состояние копии неизвестно" };
+  return replicas.map((r) => `<div class="card"><strong>${esc(r.name)}</strong><p>${esc(labels[r.state] || labels.unknown)}</p><small>Наблюдение с primary${r.replay_lag_bytes != null ? ` · отставание WAL: ${esc(r.replay_lag_bytes)} байт` : ""}${r.checked_at ? ` · проверено: ${esc(r.checked_at)}` : ""}</small></div>`).join("") || '<p class="muted">Состояние копии временно недоступно</p>';
+}
+function scheduleReplicaRefresh(version) {
+  clearTimeout(replicaRefreshTimer);
+  replicaRefreshTimer = setTimeout(async () => {
+    if (version !== viewVersion) return;
+    let replicas = [];
+    try { replicas = await api("/api/cloud/replicas"); } catch {}
+    if (version !== viewVersion) return;
+    const section = app.querySelector("#bridge-replicas");
+    if (section) section.innerHTML = bridgeReplicasHTML(replicas);
+    scheduleReplicaRefresh(version);
+  }, 10000);
+}
+async function service(preserveOperations = false) {
+  clearTimeout(replicaRefreshTimer);
   const version = ++viewVersion;
   clearTimeout(refreshTimer);
   let ops = [],
@@ -417,62 +560,40 @@ async function service() {
   try {
     capacity = await api("/api/cloud/quotas");
   } catch {}
+  capacity = filterDeletedCloudExits(ops, capacity);
   let replicas = [];
   try {
     replicas = await api("/api/cloud/replicas");
   } catch {}
   if (version !== viewVersion) return;
-  app.innerHTML = `<p class="eyebrow">ИНФРАСТРУКТУРА</p><h1>Сервис</h1><div class="section-tabs"><button class="active" id="servers-view">Серверы</button><button id="diagnostics-view">Диагностика</button></div><p class="muted">Управление через Vultr · не более 5 VPS</p><p class="muted">Проверка HTTPS выполняется с bridge через exit. Подключение вашего устройства проверьте в Happ: откройте сайт с включённым VPN.</p><section id="cloud-account" aria-live="polite"></section>${unavailable ? '<div class="card"><h2>Vultr пока не настроен</h2><p>Для автоматизации нужны серверный API-ключ, SSH-ключ и настройки исполнителя.</p></div>' : '<button class="btn" id="create-server">Создать exit</button>'}${ops
-    .filter((o) => o.state !== "deleted" && o.state !== "cancelled")
-    .map(
-      (o) =>
-        `<div class="card"><div class="row"><h2>${esc(o.offer.region.city)}</h2><span class="badge ${o.state === "ready" ? "good" : o.state === "failed" || o.state === "unknown" ? "bad" : "wait"}">${esc(serverStateLabel(o, capacity))}</span></div><p>${esc(o.offer.plan.id)} · $${o.offer.price.monthly_cost}/месяц</p><p class="muted">${esc(serverBillingLabel(o))}</p>${o.error ? `<p class="bad">${esc(o.error_message || o.error)}</p>` : ""}${o.state === "ready" && !o.serves_subscription_ingress ? `<button class="btn secondary" data-replace="${esc(o.id)}">Сменить регион</button>` : ""}${o.state === "failed" || o.state === "unknown" ? `<button class="btn secondary" data-action="retry" data-op="${esc(o.id)}">Повторить проверку / продолжить</button>` : ""}<button class="btn secondary" data-events="${esc(o.id)}">Журнал операции</button>${o.serves_subscription_ingress ? "<p>Обслуживает подписки · перед удалением или заменой перенесите HTTPS-вход</p>" : o.instance_id ? `<button class="btn danger" data-action="delete" data-op="${esc(o.id)}">Удалить сервер</button>` : o.phase === "prepare" ? `<button class="btn secondary" data-action="cancel" data-op="${esc(o.id)}">Отменить создание</button>` : ""}</div>`,
-    )
-    .join(
-      "",
-    )}${capacity ? serverCapacityHTML(capacity) : "<p>Состояние выходов временно недоступно</p>"}<h2>Копии базы данных</h2><p class="muted">Основная БД на bridge. Восстановление — вручную.</p>${replicas.map((r) => `<div class="card"><strong>${esc(r.name)}</strong><p>${esc({ streaming: "Копия обновляется", syncing: "Первичная синхронизация", insufficient_space: "Недостаточно места", lagging: "Копия отстаёт", disconnected: "Нет потока репликации", unexpected_primary: "БД переведена в основную — требуется ручная проверка", error: "Копия БД недоступна: требуется проверка SSH/PostgreSQL", not_configured: "Ещё не настроена" }[r.state] || r.state)}</p><small>${r.free_bytes > 0 ? `Свободно: ${(r.free_bytes / 1073741824).toFixed(1)} ГБ` : "Свободное место: нет данных"}${r.required_bytes > 0 ? ` · нужно для копии: ${(r.required_bytes / 1073741824).toFixed(1)} ГБ` : ""}</small></div>`).join("") || '<p class="muted">Состояние копий пока недоступно</p>'}<p class="muted">Узлы, настроенные вручную, обслуживаются через локальный установщик. Они продолжают участвовать в маршрутах.</p><button class="btn secondary" id="refresh-service">Обновить</button>`;
+  const operationsHTML = cloudOperationsHTML(ops, unavailable, capacity);
+  if (preserveOperations) {
+    const operations = app.querySelector("#cloud-operations");
+    if (!operations) return;
+    reconcileCloudOperations(operations, ops, unavailable, capacity);
+    const capacitySection = app.querySelector("#server-capacity");
+    if (capacitySection && capacity)
+      capacitySection.innerHTML = serverCapacityHTML(capacity);
+    const replicaSection = app.querySelector("#bridge-replicas");
+    if (replicaSection) replicaSection.innerHTML = bridgeReplicasHTML(replicas);
+    scheduleReplicaRefresh(version);
+    loadCloudAccount();
+    bindCloudOperationControls();
+    button("create-server", () => serverOffer(""));
+    if (ops.some((o) => o.state === "pending" || o.state === "unknown"))
+      refreshTimer = setTimeout(() => refreshOperationCards(version), 5000);
+    return;
+  }
+  app.innerHTML = `<p class="eyebrow">ИНФРАСТРУКТУРА</p><h1>Сервис</h1><div class="section-tabs"><button class="active" id="servers-view">Серверы</button><button id="diagnostics-view">Диагностика</button></div><p class="muted">Управление через Vultr · не более 5 VPS</p><p class="muted">Проверка HTTPS выполняется с bridge через exit. Подключение вашего устройства проверьте в Happ: откройте сайт с включённым VPN.</p><section id="cloud-account" aria-live="polite"></section><section id="cloud-operations">${operationsHTML}</section><section id="server-capacity">${capacity ? serverCapacityHTML(capacity) : "<p>Состояние выходов временно недоступно</p>"}</section><h2>Копии базы данных</h2><p class="muted">Основная БД на отдельном database. Физическая standby-копия на bridge, асинхронная; переключение и восстановление — вручную.</p><section id="bridge-replicas" aria-live="polite">${bridgeReplicasHTML(replicas)}</section><p class="muted">Узлы, настроенные вручную, обслуживаются через локальный установщик. Они продолжают участвовать в маршрутах.</p><button class="btn secondary" id="refresh-service">Обновить</button>`;
   button("diagnostics-view", diagnostics);
   loadCloudAccount();
-  document
-    .querySelectorAll("[data-events]")
-    .forEach(
-      (el) =>
-        (el.onclick = () =>
-          operationEvents(el.dataset.events).catch((e) => notice(e.message))),
-    );
+  bindCloudOperationControls();
   button("create-server", () => serverOffer(""));
   button("refresh-service", service);
-  document
-    .querySelectorAll("[data-replace]")
-    .forEach(
-      (el) =>
-        (el.onclick = () =>
-          serverOffer(el.dataset.replace).catch((e) => notice(e.message))),
-    );
-  document.querySelectorAll("[data-op]").forEach(
-    (el) =>
-      (el.onclick = () => {
-        const action = el.dataset.action;
-        confirm(
-          action === "delete"
-            ? "Удалить платный сервер?"
-            : "Продолжить операцию?",
-          action === "delete"
-            ? "Сначала отключим маршрут. Удаление VPS необратимо; настройки локации сохранятся для резервного маршрута."
-            : "Повтор продолжит сохранённую операцию. При неизвестном результате покупка не повторяется.",
-          action === "delete" ? "Удалить" : "Продолжить",
-          async () => {
-            await api(`/api/cloud/operations/${el.dataset.op}/action`, "POST", {
-              action,
-            });
-            await service();
-          },
-        );
-      }),
-  );
+  scheduleReplicaRefresh(version);
   if (ops.some((o) => o.state === "pending" || o.state === "unknown"))
     refreshTimer = setTimeout(() => {
-      if (currentTab === "service") service().catch((e) => notice(e.message));
+      refreshOperationCards(version);
     }, 5000);
 }
 async function serverOffer(replace) {
@@ -493,11 +614,12 @@ async function serverOffer(replace) {
     button("buy", async () => {
       await api(`/api/cloud/offers/${offer.id}/confirm`, "POST", {});
       dialog.close();
-      await service();
+      await service(true);
     });
   });
 }
 async function tab(name) {
+  clearTimeout(replicaRefreshTimer);
   clearTimeout(refreshTimer);
   selectTab(name);
   viewVersion++;
@@ -644,12 +766,20 @@ function serverCapacityHTML(c) {
           `<div class="card"><h3>${esc(n.name)}${n.primary ? " · основной" : ""}</h3><p>${!n.enabled ? "Выключен" : n.ready ? "Серверная проверка HTTPS прошла" : "Серверная проверка HTTPS не прошла или выполняется"}</p>${(() => {
             const b = c.budgets.find((b) => b.exit_id === n.id);
             return b
-              ? `<p>${b.source === "vultr" ? "Сохранённый объём тарифа (справочно)" : "Бюджет хостинга"}: ${bytes(b.monthly_bytes)}/мес.</p>${b.source === "vultr" ? "<p class=\"muted\">Начисленный трафик и остаток общие для всех выходов Vultr; это не отдельный лимит узла.</p>" : ""}<small>Защитный запас 20%. ${b.source === "vultr" ? (b.error ? "Не удалось обновить данные Vultr" : b.observed_at ? "Данные Vultr: " + esc(new Date(b.observed_at).toLocaleString("ru")) : "Ожидаем данные Vultr") : "Бюджет задан администратором."}</small>`
+              ? `<p>${b.source === "vultr" ? "Начисленный пул Vultr (справочно)" : "Бюджет хостинга"}: ${bytes(b.monthly_bytes)}/мес.</p>${b.source === "vultr" ? "<p class=\"muted\">Начисленный пул и остаток общие для всех выходов Vultr; это не отдельный лимит узла.</p>" : ""}<small>Защитный запас 20%. ${b.source === "vultr" ? (b.error ? "Не удалось обновить данные Vultr" : b.observed_at ? "Данные Vultr: " + esc(new Date(b.observed_at).toLocaleString("ru")) : "Ожидаем данные Vultr") : "Бюджет задан администратором."}</small>`
               : "<small>Бюджет трафика не настроен</small>";
           })()}</div>`,
       )
       .join("")
   );
+}
+
+function filterDeletedCloudExits(ops, capacity) {
+  if (!capacity || !Array.isArray(capacity.nodes)) return capacity;
+  const deletedExits = new Set(
+    ops.filter((o) => o.state === "deleted").map((o) => o.exit_id).filter(Boolean),
+  );
+  return { ...capacity, nodes: capacity.nodes.filter((node) => !deletedExits.has(node.id)) };
 }
 
 function personTrafficData(t, period, tag = "") {
@@ -702,7 +832,7 @@ function trafficQuotasHTML(t) {
     (p) => p.quota_kind === "shared" || p.scope === "vultr",
   );
   const poolHTML = pool
-    ? `<div class="card compact-limits" data-quota-kind="shared"><div class="row"><h2>Общая квота выходов</h2><span class="badge">Общая квота</span></div><small>${esc(pool.period)} · UTC</small><p class="muted">Один личный лимит для отмеченных стран. Смена страны не обновляет остаток.</p><div class="route-row"><span>Личный лимит</span><strong>${bytes(pool.personal_limit_bytes)}</strong></div><div class="route-row"><span>Использовано за месяц</span><strong>${bytes(pool.used_bytes)}</strong></div><div class="route-row"><span>Осталось</span><strong>${pool.state === "unknown" ? "Уточняется" : bytes(pool.remaining_bytes)}</strong></div><p class="${pool.state === "exhausted" ? "bad" : "muted"}">${({ available: "Трафик доступен", exhausted: "Общая квота исчерпана", unknown: "Нет подтверждённого остатка", emergency: "Используется аварийный запас: данные провайдера временно недоступны" })[pool.state] || "Доступность уточняется"}</p><small>${pool.observed_at ? "Последние подтверждённые данные: " + quotaDate(pool.observed_at) : "Ожидаем подтверждённые данные"}<br>Сброс: ${quotaDate(pool.resets_at)}</small></div>`
+    ? `<div class="card compact-limits" data-quota-kind="shared"><div class="row"><h2>Общая квота выходов</h2><span class="badge">Общая квота</span></div><small>${esc(pool.period)} · UTC</small><p class="muted">Один личный лимит для отмеченных стран. Личный предел — 25% от безопасного общего пула Vultr после 20% резерва. Смена страны не обновляет остаток.</p><div class="route-row"><span>Личный лимит</span><strong>${bytes(pool.personal_limit_bytes)}</strong></div><div class="route-row"><span>Использовано за месяц</span><strong>${bytes(pool.used_bytes)}</strong></div><div class="route-row"><span>Осталось</span><strong>${pool.state === "unknown" ? "Уточняется" : bytes(pool.remaining_bytes)}</strong></div><p class="${pool.state === "exhausted" ? "bad" : "muted"}">${({ available: "Трафик доступен", exhausted: "Общая квота исчерпана", unknown: "Нет подтверждённого остатка", emergency: "Используется аварийный запас: данные провайдера временно недоступны" })[pool.state] || "Доступность уточняется"}</p><small>${pool.observed_at ? "Последние подтверждённые данные: " + quotaDate(pool.observed_at) : "Ожидаем подтверждённые данные"}<br>Сброс: ${quotaDate(pool.resets_at)}</small></div>`
     : "";
   const limitsHTML = (t.limits || []).map((l) => `<div class="card compact-limits"><h2>${esc(l.name)}</h2><div class="route-row"><span>${l.is_fallback ? "Ручной резерв · общий остаток узла" : "Доступный трафик"}</span><strong>${l.state === "unknown" ? "Уточняется" : bytes(l.remaining_bytes)}</strong></div>${!l.is_fallback && l.period === "month" ? `<p class="muted">Использовано за месяц: ${bytes(l.used_bytes)} · Личный лимит: ${bytes(l.personal_limit_bytes)}<br>Сброс: ${quotaDate(l.resets_at)}. Доступность также ограничена общим остатком узла.</p>` : ""}${l.pending ? '<p class="wait">Применяется переключение</p>' : l.state === "exhausted" ? `<p class="bad">${l.is_fallback ? "Бюджет исчерпан" : "Лимит исчерпан"}</p>` : ""}</div>`).join("");
   return poolHTML + limitsHTML;
@@ -848,4 +978,73 @@ function serverStateLabel(o, capacity) {
         : "Сервер создан · туннель недоступен";
   }
   return phases[o.phase] || "Создание сервера";
+}
+function cloudOperationDetailsHTML(o) {
+  return `<p class="muted">${esc(serverBillingLabel(o))}</p>${o.error ? `<p class="bad">${esc(o.error_message || o.error)}</p>` : ""}${o.state === "ready" && !o.serves_subscription_ingress ? `<button class="btn secondary" data-replace="${esc(o.id)}">Сменить регион</button>` : ""}${o.state === "failed" && o.phase === "verify" && o.exit_id === o.id && !o.serves_subscription_ingress ? `<button class="btn secondary" data-action="reinstall" data-op="${esc(o.id)}">Переустановить на этом VPS</button>` : ""}${o.state === "failed" ? `<button class="btn secondary" data-action="retry" data-op="${esc(o.id)}">Продолжить этап</button>` : ""}${o.serves_subscription_ingress ? "<p>Обслуживает подписки · перед удалением или заменой перенесите HTTPS-вход</p>" : o.instance_id ? `<button class="btn danger" data-action="delete" data-op="${esc(o.id)}">Удалить сервер</button>` : o.phase === "prepare" ? `<button class="btn secondary" data-action="cancel" data-op="${esc(o.id)}">Отменить создание</button>` : ""}`;
+}
+
+function bindCloudOperationControls() {
+  document
+    .querySelectorAll("[data-events]")
+    .forEach(
+      (el) =>
+        (el.onclick = () =>
+          operationEvents(el.dataset.events).catch((e) => notice(e.message))),
+    );
+  document.querySelectorAll("[data-replace]").forEach(
+    (el) =>
+      (el.onclick = () =>
+        serverOffer(el.dataset.replace).catch((e) => notice(e.message))),
+  );
+  document.querySelectorAll("[data-op]").forEach(
+    (el) =>
+      (el.onclick = () => {
+        const action = el.dataset.action;
+        confirm(
+          action === "delete"
+            ? "Удалить платный сервер?"
+            : "Продолжить операцию?",
+          action === "delete"
+            ? "Сначала отключим маршрут. Удаление VPS необратимо; настройки локации сохранятся для резервного маршрута."
+            : action === "reinstall"
+              ? "Повторно установим Ultra на том же неопубликованном VPS с проверкой SSH и сертификата. Новый сервер не покупается; перед публикацией проверим туннель."
+              : "Повтор продолжит сохранённую операцию. При неизвестном результате покупка не повторяется.",
+          action === "delete" ? "Удалить" : "Продолжить",
+          async () => {
+            await api(`/api/cloud/operations/${el.dataset.op}/action`, "POST", {
+              action,
+            });
+            await service(true);
+          },
+        );
+      }),
+  );
+}
+
+async function refreshOperationCards(version) {
+  if (version !== viewVersion || currentTab !== "service") return;
+  try {
+    const [ops, capacity] = await Promise.all([
+      api("/api/cloud/operations"),
+      api("/api/cloud/quotas").catch(() => null),
+    ]);
+    if (version !== viewVersion || currentTab !== "service") return;
+    const operations = app.querySelector("#cloud-operations");
+    if (!operations) return;
+    reconcileCloudOperations(operations, ops, false, capacity);
+    button("create-server", () => serverOffer(""));
+    if (capacity) {
+      const capacitySection = app.querySelector("#server-capacity");
+      if (capacitySection)
+        capacitySection.innerHTML = serverCapacityHTML(
+          filterDeletedCloudExits(ops, capacity),
+        );
+    }
+    bindCloudOperationControls();
+    if (ops.some((o) => o.state === "pending" || o.state === "unknown"))
+      refreshTimer = setTimeout(() => refreshOperationCards(version), 5000);
+  } catch {
+    if (version === viewVersion && currentTab === "service")
+      refreshTimer = setTimeout(() => refreshOperationCards(version), 5000);
+  }
 }

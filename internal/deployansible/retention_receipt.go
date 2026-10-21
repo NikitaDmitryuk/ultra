@@ -16,7 +16,8 @@ import (
 // may differ from root while preparing an atomic job-directory publication.
 // The caller must own the tree exclusively until execution starts.
 func WriteRetentionReceipt(root, publishedRoot, receiptPath string, identity any) error {
-	if !filepath.IsAbs(root) || !filepath.IsAbs(publishedRoot) || !filepath.IsAbs(receiptPath) || filepath.Clean(publishedRoot) != publishedRoot {
+	if !filepath.IsAbs(root) || !filepath.IsAbs(publishedRoot) || !filepath.IsAbs(receiptPath) ||
+		filepath.Clean(publishedRoot) != publishedRoot {
 		return errors.New("retention paths invalid")
 	}
 	for _, path := range []string{root, publishedRoot, filepath.Dir(receiptPath)} {
@@ -96,7 +97,8 @@ func retentionInventory(root string) (map[string]any, error) {
 		if err != nil {
 			return err
 		}
-		if !ownedByProcess(info) || info.Mode().Perm()&0022 != 0 || info.Mode()&(os.ModeSymlink|os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		if !ownedByProcess(info) || info.Mode().Perm()&0022 != 0 ||
+			info.Mode()&(os.ModeSymlink|os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
 			return errors.New("retention tree ownership invalid")
 		}
 		relative, err := filepath.Rel(root, path)

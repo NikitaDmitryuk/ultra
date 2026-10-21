@@ -4,10 +4,11 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 func TestOfflineRuntimeArchiveBoundaries(t *testing.T) {
@@ -119,6 +120,17 @@ func TestInstalledRuntimeMustMatchTargetDependencyHash(t *testing.T) {
 	if installedRuntimeMatches(binary, marker, "target") {
 		t.Fatal("unprotected runtime identity accepted")
 	}
+}
+
+func TestOfflineRuntimeSubprocessUsesConfiguredTempDirectory(t *testing.T) {
+	t.Setenv("TMPDIR", "/private/operator-tmp")
+	env := offlineRuntimeEnvironment("/private/runtime")
+	for _, entry := range env {
+		if entry == "TMPDIR=/private/operator-tmp" {
+			return
+		}
+	}
+	t.Fatalf("offline runtime environment does not preserve TMPDIR: %v", env)
 }
 
 func TestRecoveryRuntimeRejectsChecksumBeforePreparingPrivateState(t *testing.T) {

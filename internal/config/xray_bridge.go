@@ -114,8 +114,14 @@ func BuildBridgeXRayJSON(
 		// SNI adds no authentication and can make an otherwise reachable tunnel stall.
 		child := *spec
 		pin, pinErr := hex.DecodeString(normalizeCertSHA256(pinnedPeerCertSHA256))
-		safeOmission := spec.TunnelTLSProvision == TunnelTLSSelfSigned && net.ParseIP(address) != nil && pinErr == nil && len(pin) == 32
-		child.SplitHTTPTLS.OmitSNI = spec.SplitHTTPTLS.OmitSNI || spec.SplitHTTPTLS.SNIMode == "omit" || (spec.SplitHTTPTLS.SNIMode != "send" && safeOmission)
+		// Managed IP exits carry their own certificate identity even when the
+		// static exit uses ACME. The shared bridge policy must not discard it.
+		safeOmission := net.ParseIP(address) != nil && pinErr == nil && len(pin) == 32
+		if safeOmission {
+			child.TunnelTLSProvision = TunnelTLSSelfSigned
+		}
+		child.SplitHTTPTLS.OmitSNI = spec.SplitHTTPTLS.OmitSNI || spec.SplitHTTPTLS.SNIMode == "omit" ||
+			(spec.SplitHTTPTLS.SNIMode != "send" && safeOmission)
 		if spec.UsesGRPC() {
 			return grpcOutboundStream(&child, strat, pinnedPeerCertSHA256)
 		}
@@ -220,9 +226,12 @@ func BuildBridgeXRayJSON(
 		})
 	}
 	if spec.PublicXHTTPTLS != nil && !spec.DevMode {
-		inbounds = append(inbounds, map[string]any{"tag": w.InboundVLESSTag + "-xhttp-tls", "listen": spec.ListenAddress, "port": spec.PublicXHTTPTLS.Port,
-			"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption},
-			"streamSettings": publicTLSStream(spec, true)})
+		inbounds = append(
+			inbounds,
+			map[string]any{"tag": w.InboundVLESSTag + "-xhttp-tls", "listen": spec.ListenAddress, "port": spec.PublicXHTTPTLS.Port,
+				"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption},
+				"streamSettings": publicTLSStream(spec, true)},
+		)
 	}
 	if p := spec.PrimaryXHTTP; p != nil {
 		child := *spec
@@ -231,13 +240,23 @@ func BuildBridgeXRayJSON(
 		delete(stream, "tlsSettings")
 		stream["security"] = "none"
 		stream["sockopt"] = map[string]any{"trustedXForwardedFor": []string{"X-Ultra-Proxy"}}
-		inbounds = append(inbounds, map[string]any{"tag": w.InboundVLESSTag + "-primary-xhttp", "listen": "127.0.0.1", "port": p.BackendPort,
-			"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption}, "streamSettings": stream})
+		inbounds = append(
+			inbounds,
+			map[string]any{"tag": w.InboundVLESSTag + "-primary-xhttp", "listen": "127.0.0.1", "port": p.BackendPort,
+				"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption}, "streamSettings": stream},
+		)
 	}
 	if spec.GatewayVLESSPort > 0 {
-		inbounds = append(inbounds, map[string]any{"tag": w.InboundVLESSTag + "-gateway", "listen": "127.0.0.1", "port": spec.GatewayVLESSPort,
-			"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption},
-			"streamSettings": map[string]any{"network": "tcp", "security": "none", "sockopt": map[string]any{"acceptProxyProtocol": true}}})
+		inbounds = append(
+			inbounds,
+			map[string]any{"tag": w.InboundVLESSTag + "-gateway", "listen": "127.0.0.1", "port": spec.GatewayVLESSPort,
+				"protocol": "vless", "settings": map[string]any{"clients": xhttpClients, "decryption": w.VLESSEncryption},
+				"streamSettings": map[string]any{
+					"network":  "tcp",
+					"security": "none",
+					"sockopt":  map[string]any{"acceptProxyProtocol": true},
+				}},
+		)
 	}
 	if statsEnabled {
 		inbounds = append(inbounds, map[string]any{

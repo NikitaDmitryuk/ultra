@@ -21,24 +21,34 @@ func LoadConfig(path string) (*InstallPlan, error) {
 	return LoadLegacyEnvConfig(path)
 }
 
+// LoadLifecycleConfig does not inspect operator-local bootstrap archives.
+func LoadLifecycleConfig(path string) (*InstallPlan, error) {
+	values, err := parseLegacyEnvFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return CanonicalLifecycleValuesToPlan(values)
+}
+
 func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 	sshUser := valueDefault(v, "SSH_USER", "root")
-	bridgeAddress := firstValue(v, "BRIDGE", "FRONT")
-	bridgeSSHHost := valueDefault(v, "BRIDGE_SSH_HOST", bridgeAddress)
-	exitHost := firstValue(v, "EXIT", "BACK")
+	bridgeAddress := v["BRIDGE_IP"]
+	bridgeSSHHost := bridgeAddress
+	exitHost := v["MAIN_EXIT_IP"]
 	publicHost := valueDefault(v, "PUBLIC_HOST", bridgeAddress)
 	vlessPort := intDefault(v, "VLESS_PORT", 443)
 	tunnelPort := intDefault(v, "TUNNEL_PORT", vlessPort)
 
 	p := &InstallPlan{
-		SchemaVersion: 1,
+		SchemaVersion: CurrentSchemaVersion,
 		SSH: SSHConfig{
 			User:              sshUser,
-			Identity:          v["IDENTITY"],
+			Identity:          "",
 			StrictHostKey:     boolValue(v, "ULTRA_INSTALL_SSH_STRICT_HOST_KEY", false),
 			ConnectTimeoutSec: intDefault(v, "ULTRA_SSH_CONNECT_TIMEOUT", 10),
 		},
 		Bridge: BridgeConfig{
+			SSHIdentity: v["BRIDGE_SSH_KEY"],
 			Address:     bridgeAddress,
 			SSHHost:     bridgeSSHHost,
 			PublicHost:  publicHost,
@@ -53,6 +63,7 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 			AdminListen: "127.0.0.1:8443",
 		},
 		Features: FeatureConfig{
+			MainExitDomain:         v["MAIN_EXIT_DOMAIN"],
 			Preset:                 valueDefault(v, "PRESET", "apijson"),
 			Transport:              valueDefault(v, "TRANSPORT", "splithttp"),
 			RoutingMode:            v["ROUTING_MODE"],
@@ -77,10 +88,12 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 			SplitHTTPPath:          v["SPLITHTTP_PATH"],
 		},
 		Database: DatabaseConfig{
-			Enabled:     boolValue(v, "DB_ENABLE", false),
-			PrimaryHost: v["DB_HOST"],
-			ReplicaHost: v["DB_REPLICA"],
-			SSHUser:     v["DB_SSH_USER"],
+			Enabled:              v["DATABASE_IP"] != "",
+			PrimaryHost:          v["DATABASE_IP"],
+			RepairAppCredentials: boolValue(v, "DB_REPAIR_APP_CREDENTIALS", false),
+
+			SSHUser:     sshUser,
+			SSHIdentity: v["DATABASE_SSH_KEY"],
 			Name:        valueDefault(v, "DB_NAME", "ultra_db"),
 			User:        valueDefault(v, "DB_USER", "ultra"),
 		},
@@ -92,7 +105,10 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 			EnvFile:            valueDefault(v, "BOT_ENV_FILE", ".env"),
 		},
 		Secrets: SecretsConfig{
-			EnvFile: valueDefault(v, "BOT_ENV_FILE", ".env"),
+			DatabaseCredentialsFile:      v["DB_CREDENTIALS_FILE"],
+			DatabaseTunnelPrivateKeyFile: v["DB_TUNNEL_PRIVATE_KEY_FILE"],
+			DatabaseDumpFile:             v["DATABASE_DUMP"],
+			EnvFile:                      valueDefault(v, "BOT_ENV_FILE", ".env"),
 		},
 		Verification: Verification{
 			Enabled:           boolValue(v, "VERIFY_AFTER_INSTALL", false),
@@ -118,22 +134,15 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 
 	if exitHost != "" {
 		p.Exits = append(p.Exits, ExitNode{
-			Name:     "primary",
-			SSHHost:  exitHost,
-			DialAddr: valueDefault(v, "EXIT_DIAL", exitHost),
-			Port:     tunnelPort,
-			Priority: 100,
+			Name:        "primary",
+			SSHHost:     exitHost,
+			SSHIdentity: v["MAIN_EXIT_SSH_KEY"],
+			DialAddr:    valueDefault(v, "EXIT_DIAL", exitHost),
+			Port:        tunnelPort,
+			Priority:    100,
 		})
 	}
-	if exit2 := strings.TrimSpace(v["EXIT2"]); exit2 != "" && exit2 != exitHost {
-		p.Exits = append(p.Exits, ExitNode{
-			Name:     valueDefault(v, "EXIT2_NAME", "backup"),
-			SSHHost:  exit2,
-			DialAddr: valueDefault(v, "EXIT2_DIAL", exit2),
-			Port:     tunnelPort,
-			Priority: intDefault(v, "EXIT2_PRIORITY", 200),
-		})
-	}
+
 	return p
 }
 
@@ -212,15 +221,6 @@ func unquote(s string) string {
 		}
 	}
 	return s
-}
-
-func firstValue(v map[string]string, keys ...string) string {
-	for _, k := range keys {
-		if s := strings.TrimSpace(v[k]); s != "" {
-			return s
-		}
-	}
-	return ""
 }
 
 func valueDefault(v map[string]string, key, def string) string {

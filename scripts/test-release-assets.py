@@ -78,7 +78,7 @@ def validate_bundle(directory, workflow):
     assert len(expected) == 14 and len(rows) == 14 and {row['name'] for row in rows} == expected, 'complete 14-asset manifest required'
     assert manifest['schema_version'] == 1 and re.fullmatch('[0-9a-f]{40}', manifest['source_commit']), 'invalid manifest provenance'
     assert manifest['database_schema_min'] == 24 and manifest['database_schema_max'] == 25, 'unexpected database range'
-    assert {'service-access-v1', 'provider-pool-quota-v1', 'lifecycle-gate-v1'} <= set(manifest['capabilities']), 'missing required capabilities'
+    assert {'service-access-v1', 'provider-pool-quota-v1', 'lifecycle-gate-v1', 'ansible-deploy-v1'} <= set(manifest['capabilities']), 'missing required capabilities'
     assert_publication(workflow, manifest, checksums)
     checksum_rows = {}
     for line in checksums.splitlines():
@@ -149,6 +149,7 @@ class ReleaseAssets(unittest.TestCase):
 
     def test_actual_publication_covers_generated_manifest_and_checksums(self):
         assert_publication(self.workflow, self.manifest, self.checksums)
+        self.assertIn('ansible-deploy-v1', self.manifest['capabilities'])
         for row in self.manifest['assets']:
             raw = (self.directory / row['name']).read_bytes()
             self.assertEqual(row['sha256'], hashlib.sha256(raw).hexdigest())

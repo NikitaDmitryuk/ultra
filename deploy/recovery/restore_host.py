@@ -19,7 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from recovery import atomic_json, repository
+from recovery import MAX_ARTIFACT_BYTES, MAX_BYTES, atomic_json, repository
 from restore_common import APP_UNITS, AUTOMATION_UNITS, PHASES, fence, safe_target, sha, stage_manifests, system_unit, safe_error_code
 
 
@@ -30,14 +30,6 @@ def run(args, data=None, timeout=180):
     return result.stdout
 
 
-def sql(query, database='postgres'):
-    return run(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database], query.encode()).decode().strip()
-
-
-def literal(value):
-    return "'" + str(value).replace("'", "''") + "'"
-
-
 def identifier(value):
     if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,62}', value):
         raise ValueError('unsupported_database_identifier')
@@ -46,8 +38,8 @@ def identifier(value):
 
 def database_spec(spec):
     value = urllib.parse.urlsplit(spec.get('database', {}).get('dsn', ''))
-    if value.scheme not in ('postgres', 'postgresql') or value.hostname not in ('localhost', '127.0.0.1', '::1') or (value.port or 5432) != 5432:
-        raise ValueError('local_postgres_uri_required')
+    if value.scheme not in ('postgres', 'postgresql') or value.hostname not in ('localhost', '127.0.0.1') or value.port != 25432:
+        raise ValueError('dedicated_database_tunnel_uri_required')
     name, user = urllib.parse.unquote(value.path.lstrip('/')), urllib.parse.unquote(value.username or '')
     identifier(name); identifier(user)
     password = urllib.parse.unquote(value.password or '')
@@ -150,6 +142,16 @@ def write(path, data, mode=0o600):
         stream.flush(); os.fsync(stream.fileno())
         os.fchmod(stream.fileno(), mode)
     os.replace(temporary, path)
+
+
+
+def relocate_deployment(deployment, plan):
+    deployment['bridge_ipv4'] = plan['new_bridge_address']
+    deployment['bridge_provider'] = plan['new_bridge_provider']
+    deployment['database_host'] = plan['database_host']
+    if (deployment.get('ingress') or {}).get('public_host') == plan['old_bridge_address']:
+        deployment['ingress']['public_host'] = plan['new_bridge_address']
+    return deployment
 
 
 def install_files(stage, state, artifacts, root=Path('/')):
@@ -286,37 +288,13 @@ def seed_artifact_cache(repo, name, expected, stream):
             Path(temporary).unlink(missing_ok=True)
 
 
-def plan_peer_reseed(plan, database_name, system_identifier, topology=None):
-    """Derive pinned reseed requests; cloud ownership guards remain application code."""
-    import sys
-    sys.path.insert(0, '/opt/ultra-recovery')
-    import reconcile as module
-    if topology is None:
-        config = module.read_config('/etc/ultra-recovery/reconcile.json')
-        nodes = module.desired_nodes(config, module.discover(config))[0]
-    else:
-        module, config, nodes = topology
-    selected = []
-    for node in nodes:
-        ports = json.loads(sql("SELECT coalesce(json_agg(port),'[]') FROM exit_nodes WHERE enabled AND address=" + literal(node['address']), database_name))
-        if len(ports) != 1 or not isinstance(ports[0], int) or not 1 <= ports[0] <= 65535:
-            raise ValueError('unique_persisted_exit_tunnel_required')
-        peer = {'address': plan['new_bridge_address']}
-        # Cloud ownership/API operations stay application code; host changes
-        # are applied by the operator's Ansible runner after this proof.
-        module.ensure_provider_peer_rule(config, node, peer)
-        module.ensure_provider_peer_rule(config, node, peer, port=ports[0])
-        selected.append({'id': node['id'], 'address': node['address'],
-                         'identity': config['ssh_identity_file'], 'known_hosts': node['known_hosts'],
-                         'plan': {'action': 'reseed', 'restore_id': plan['restore_id'],
-                                  'system_identifier': system_identifier,
-                                  'old_bridge_address': plan['old_bridge_address'],
-                                  'new_bridge_address': plan['new_bridge_address'], 'tunnel_port': ports[0],
-                                  'fence': plan['fence'], 'target_host': plan['target_host']}})
-    if plan.get('migration_identity') is not None:
-        for node in selected:
-            node['plan']['migration_identity'] = plan['migration_identity']
-    return selected
+def restore_fleet_directory(path='/etc/ultra-fleet'):
+    directory = Path(path)
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError('restored_fleet_identity_directory_invalid')
+    relay = pwd.getpwnam('ultra-relay')
+    os.chown(directory, 0, relay.pw_gid)
+    directory.chmod(0o750)
 
 
 class Host:
@@ -356,19 +334,11 @@ class Host:
         for tool in ('python3', 'age', 'nginx', 'systemctl', 'ssh', 'curl', 'openssl'):
             if not shutil.which(tool):
                 raise ValueError('prepared_target_tools_missing')
-        if not Path('/usr/lib/postgresql/16/bin/pg_restore').is_file():
-            raise ValueError('prepared_postgres_16_required')
         if shutil.disk_usage('/var/lib').free < 3 * 1024**3:
             raise ValueError('target_disk_insufficient')
         if not self.status.get('prepared'):
             if Path('/etc/ultra-relay/spec.json').exists():
                 raise ValueError('target_already_contains_ultra')
-            if sql("SELECT count(*) FROM pg_database WHERE NOT datistemplate AND datname!='postgres'") != '0':
-                raise ValueError('target_contains_application_databases')
-            if sql("SELECT current_setting('server_version_num')::int/10000") != '16' or sql('SELECT pg_is_in_recovery()') != 'f':
-                raise ValueError('empty_postgres_16_primary_required')
-            if sql("SELECT count(*) FROM pg_tablespace WHERE spcname NOT IN ('pg_default','pg_global')") != '0':
-                raise ValueError('external_tablespaces_unsupported')
             self.status.update(prepared=True, machine_id=machine)
             self.persist()  # Own the dedicated target before installing any state.
 
@@ -384,7 +354,9 @@ class Host:
         try:
             with tarfile.open(self.directory / 'stage.tar.gz') as archive:
                 members = archive.getmembers()
-                if len(members) > 45000 or sum(item.size for item in members) > 1024**3:
+                state_bytes = sum(item.size for item in members if not item.name.startswith('artifacts/'))
+                artifact_bytes = sum(item.size for item in members if item.name.startswith('artifacts/'))
+                if len(members) > 45000 or state_bytes > MAX_BYTES or artifact_bytes > MAX_ARTIFACT_BYTES:
                     raise ValueError('stage_archive_exceeds_bounds')
                 seen = set()
                 for item in members:
@@ -415,11 +387,7 @@ class Host:
         deployment_path = Path('/etc/ultra-recovery/deployment.json')
         if deployment_path.exists():
             deployment = json.loads(deployment_path.read_text())
-            deployment['bridge_ipv4'] = self.plan['new_bridge_address']
-            deployment['bridge_provider'] = self.plan['new_bridge_provider']
-            if (deployment.get('ingress') or {}).get('public_host') == self.plan['old_bridge_address']:
-                deployment['ingress']['public_host'] = self.plan['new_bridge_address']
-            atomic_json(deployment_path, deployment)
+            atomic_json(deployment_path, relocate_deployment(deployment, self.plan))
         Path('/var/www/ultra-acme/.well-known/acme-challenge').mkdir(parents=True, exist_ok=True)
         for directory in (Path('/var/www'), *Path('/var/www').rglob('*')):
             if directory.is_dir() and not directory.is_symlink():
@@ -477,19 +445,24 @@ class Host:
                 for path in (Path(base), *Path(base).rglob('*')):
                     if path.is_dir() and not path.is_symlink():
                         path.chmod(0o755)
+        # Backup preserves files; recreate traversal permissions on the root-owned
+        # parent separately, without making it writable by the runtime account.
+        restore_fleet_directory()
         relay = environments['ultra-relay.service']
-        if not relay.get('ULTRA_REPLICATION_KEY_FILE') or not relay.get('ULTRA_VULTR_SSH_KEY_FILE'):
-            raise ValueError('replication_automation_state_required')
+        if not relay.get('ULTRA_VULTR_SSH_KEY_FILE'):
+            raise ValueError('backup_automation_identity_required')
         # Preserve intended environment for final activation; no values are output.
         atomic_json(self.directory / 'service-environment.json', environments)
         reconcile_path = Path('/etc/ultra-recovery/reconcile.json')
         reconcile_config = json.loads(reconcile_path.read_text())
         reconcile_config['bridge_provider'] = self.plan['new_bridge_provider']
+        reconcile_config['database_host'] = self.plan['database_host']
         atomic_json(reconcile_path, reconcile_config)
         backup_config = json.loads(Path('/etc/ultra-recovery/backup.json').read_text())
         # Old provider receipts do not establish independence for this new primary.
         # Reconciliation may set this true only after validating fresh deliveries.
         backup_config['independent'] = False
+        backup_config['database_host'] = self.plan['database_host']
         atomic_json('/etc/ultra-recovery/backup.json', backup_config)
         repo = Path(backup_config['repository'])
         if repo != Path('/var/lib/ultra-recovery') or backup_config['source'] != 'bridge':
@@ -500,72 +473,6 @@ class Host:
             repository(repo, 'bridge', initialize=True)
         self.status['database_name'] = name
         self.persist()
-
-    def database(self):
-        spec = json.loads(Path('/etc/ultra-relay/spec.json').read_text())
-        name, user, password = database_spec(spec)
-        if not self.status.get('database_intent'):
-            if sql('SELECT count(*) FROM pg_database WHERE datname=' + literal(name)) != '0':
-                raise ValueError('database_not_created_by_this_restore')
-            self.status['database_intent'] = name
-            self.persist()
-        if self.status['database_intent'] != name:
-            raise ValueError('database_intent_changed')
-        if sql('SELECT count(*) FROM pg_roles WHERE rolname=' + literal(user)) == '0':
-            sql('CREATE ROLE ' + identifier(user) + ' LOGIN PASSWORD ' + literal(password))
-        else:
-            sql('ALTER ROLE ' + identifier(user) + ' LOGIN PASSWORD ' + literal(password))
-        # Resume a failed import only while applications are persistently masked.
-        if any(not Path('/etc/systemd/system', unit).is_symlink() or Path('/etc/systemd/system', unit).readlink() != Path('/dev/null') for unit in APP_UNITS):
-            raise ValueError('database_restore_requires_inactive_apps')
-        run(['runuser', '-u', 'postgres', '--', 'dropdb', '--if-exists', name])
-        run(['runuser', '-u', 'postgres', '--', 'createdb', '-O', user, name])
-        dump = (self.stage / 'database.dump').read_bytes()
-        run(['runuser', '-u', 'postgres', '--', 'pg_restore', '--exit-on-error', '--no-owner', '--no-acl', '--role=' + user, '-d', name], dump, timeout=600)
-        reference = 'ultra_restore_reference_' + self.plan['restore_id'][:16]
-        run(['runuser', '-u', 'postgres', '--', 'dropdb', '--if-exists', reference])
-        run(['runuser', '-u', 'postgres', '--', 'createdb', reference])
-        try:
-            run(['runuser', '-u', 'postgres', '--', 'pg_restore', '--exit-on-error', '--no-owner', '--no-acl', '-d', reference], dump, timeout=600)
-            tables = json.loads(sql("SELECT json_agg(tablename ORDER BY tablename) FROM pg_tables WHERE schemaname='public'", name))
-            for table in tables:
-                query = "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'[]') FROM " + identifier(table) + ' t'
-                if sql(query, name) != sql(query, reference):
-                    raise ValueError('restored_table_mismatch')
-            self.status['tables_verified'] = len(tables)
-            self.status['restored_schema'] = int(sql('SELECT max(version) FROM schema_migrations', name))
-            release = json.loads((self.stage / 'artifacts/opt/ultra-recovery/release-manifest.json').read_text())
-            if not release['database_schema_min'] <= self.status['restored_schema'] <= release['database_schema_max']:
-                raise ValueError('release_incompatible_with_restored_schema')
-        finally:
-            run(['runuser', '-u', 'postgres', '--', 'dropdb', '--if-exists', reference])
-        env = json.loads((self.directory / 'service-environment.json').read_text())['ultra-relay.service']
-        credentials = json.loads(Path(env['ULTRA_REPLICATION_KEY_FILE']).read_text())
-        role, secret = credentials['user'], credentials['password']
-        if not re.fullmatch(r'ultra_recovery(?:_[a-z0-9]{1,24})?', role) or not re.fullmatch(r'[a-f0-9]{64}', secret) or credentials['port'] != 5432:
-            raise ValueError('unsupported_replication_credentials')
-        if sql('SELECT count(*) FROM pg_roles WHERE rolname=' + literal(role)) == '0':
-            sql('CREATE ROLE ' + identifier(role) + ' LOGIN REPLICATION')
-        sql('ALTER ROLE ' + identifier(role) + ' LOGIN REPLICATION PASSWORD ' + literal(secret) + '; GRANT pg_monitor TO ' + identifier(role))
-        for setting, value in (('listen_addresses', 'localhost'), ('wal_level', 'replica'), ('max_replication_slots', '10'), ('max_wal_senders', '10'), ('max_slot_wal_keep_size', '1GB')):
-            sql('ALTER SYSTEM SET ' + setting + '=' + literal(value))
-        hba = Path(sql('SHOW hba_file'))
-        marker = '# ultra-restore-' + self.plan['restore_id']
-        if marker not in hba.read_text():
-            with hba.open('a') as stream:
-                stream.write('\nhost replication ' + role + ' 127.0.0.1/32 scram-sha-256 ' + marker + '\nhost postgres ' + role + ' 127.0.0.1/32 scram-sha-256 ' + marker + '\n')
-        self.status['system_identifier'] = sql('SELECT system_identifier FROM pg_control_system()')
-        sql("UPDATE node_replication SET state='not_configured',detail='restored_primary_requires_reseed',checked_at=now()", name)
-
-    def nodes(self):
-        import sys
-        sys.path.insert(0, '/opt/ultra-recovery')
-        import reconcile
-        config = reconcile.read_config('/etc/ultra-recovery/reconcile.json')
-        return reconcile, config, reconcile.desired_nodes(config, reconcile.discover(config))[0]
-
-    def peer_reseed(self):
-        self.status['reseed_nodes'] = plan_peer_reseed(self.plan, self.status['database_name'], self.status['system_identifier'], self.nodes())
 
     def override(self, final=False):
         values = {'ULTRA_VULTR_BRIDGE_IP': self.plan['new_bridge_address']}
@@ -637,15 +544,12 @@ class Host:
             from recovery_status import independent_generation
             config = json.loads(Path('/etc/ultra-recovery/reconcile.json').read_text())
             controller_state = json.loads((Path(config['state_dir']) / 'state.json').read_text())
-            replicas = json.loads(sql("SELECT coalesce(json_agg(json_build_object('state',r.state,'age',extract(epoch from now()-r.checked_at))),'[]') FROM exit_nodes n LEFT JOIN node_replication r ON r.node_id=n.id WHERE n.enabled", self.status['database_name']))
             if (0 <= time.time() - backup.get('snapshot_at', 0) <= 300
                     and controller.get('state') == 'ready' and controller.get('independent') is True
                     and independent_generation(config, controller_state, controller, backup)
                     and 0 <= time.time() - controller_state.get('updated_at', 0) <= 120
-                    and 0 <= time.time() - controller.get('updated_at', 0) <= 120
-                    and replicas and all(row['state'] == 'streaming' and row['age'] is not None and 0 <= row['age'] <= 90 for row in replicas)):
+                    and 0 <= time.time() - controller.get('updated_at', 0) <= 120):
                 self.status['ready_at'] = int(time.time())
-                self.status['replicas_ready'] = len(replicas)
                 return
         except (OSError, ValueError, KeyError, TypeError):
             pass
@@ -662,12 +566,23 @@ class Host:
         import dns
         policy = json.loads(dns.private('/etc/ultra-recovery/dns.json').read_text())
         config, previous = policy['config'], dict(policy['desired'])
-        if set(previous) not in ({'subscription', 'vpn'}, {'subscription', 'vpn', 'backend'}):
+        if not ({'subscription', 'vpn'} <= set(previous) <= {'subscription', 'vpn', 'backend', 'tunnel'}):
             raise ValueError('restored_dns_policy_required')
         # Older bootstrap plans may save only the public pair while DNS ownership
         # already includes the separately migrated backend. Move that owned record
         # with the bridge rather than silently retaining the fenced source address.
         receipt = json.loads(dns.private('/etc/ultra-recovery/dns-receipt.json').read_text())
+        # The tunnel belongs to the exit, which is not moved with this bridge.
+        tunnel = receipt.get('records', {}).get('tunnel')
+        if tunnel is not None:
+            if receipt.get('version') != 1 or receipt.get('zone') != config['zone']:
+                raise ValueError('restored_dns_policy_mismatch')
+            dns._validate_owned_row(tunnel)
+            if 'tunnel' in previous and (previous['tunnel'].get('name') != tunnel['name'] or previous['tunnel'].get('data') != tunnel['data']):
+                raise ValueError('restored_dns_policy_mismatch')
+            previous['tunnel'] = {'name': tunnel['name'], 'data': tunnel['data']}
+        elif 'tunnel' in previous:
+            raise ValueError('restored_dns_policy_mismatch')
         backend = receipt.get('records', {}).get('backend')
         if backend is not None:
             if (receipt.get('version') != 1 or receipt.get('zone') != config['zone']
@@ -686,7 +601,7 @@ class Host:
         names = {role: previous[role]['name'] + '.' + config['zone'] for role in previous}
         if names['subscription'] != self.plan['subscription_domain'] or names['vpn'] != self.plan['public_host']:
             raise ValueError('restored_dns_policy_mismatch')
-        desired = {role: dict(previous[role], data=self.plan['new_bridge_address']) for role in previous}
+        desired = {role: dict(previous[role], data=(previous[role]['data'] if role == 'tunnel' else self.plan['new_bridge_address'])) for role in previous}
         backend_port = None
         backend_hostname = None
         if backend is not None:
@@ -749,11 +664,6 @@ class Host:
             for name, row in artifacts['files'].items():
                 if sha(safe_target('/', name)) != row['sha256']:
                     raise ValueError('installed_artifact_changed')
-        if 'database' in self.status['completed']:
-            if sql('SELECT system_identifier FROM pg_control_system()') != self.status['system_identifier']:
-                raise ValueError('restored_database_identity_changed')
-            if int(sql('SELECT max(version) FROM schema_migrations', self.status['database_name'])) != self.status['restored_schema']:
-                raise ValueError('restored_database_schema_changed')
 
     def phase(self, action):
         if action not in PHASES:
@@ -800,7 +710,7 @@ def main():
             result = {}
         else:
             result = Host(args.directory, plan).phase(args.phase)
-    print(json.dumps({key: result[key] for key in ('restore_id', 'completed', 'machine_id', 'snapshot_at', 'tables_verified', 'restored_schema', 'replicas_ready', 'ready_at', 'reseed_nodes') if key in result}))
+    print(json.dumps({key: result[key] for key in ('restore_id', 'completed', 'machine_id', 'snapshot_at', 'ready_at') if key in result}))
 
 
 if __name__ == '__main__':

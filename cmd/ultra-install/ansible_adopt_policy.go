@@ -15,18 +15,16 @@ import (
 // This opt-in imports an explicit endpoint, never an ambient SSH alias or its
 // ProxyCommand. The inspection still requires the original identity and pins.
 func adoptionSSHOverride(p *installplan.InstallPlan, host string) (*installplan.InstallPlan, error) {
-	if p.Automation != nil || len(p.SourceValues) == 0 || net.ParseIP(host) == nil {
+	if p == nil || p.SchemaVersion != installplan.CurrentSchemaVersion || p.Automation != nil || len(p.SourceValues) == 0 ||
+		net.ParseIP(host) == nil {
 		return nil, errors.New("adoption_explicit_ssh_address_required")
 	}
 	values := make(map[string]string, len(p.SourceValues)+1)
 	for key, value := range p.SourceValues {
 		values[key] = value
 	}
-	values["BRIDGE_SSH_HOST"] = host
-	if values["DB_HOST"] == p.Bridge.SSHHost {
-		values["DB_HOST"] = host
-	}
-	return installplan.CanonicalValuesToPlan(values)
+	values["BRIDGE_IP"] = host
+	return installplan.AdoptionPreparationValuesToPlan(values)
 }
 
 // Recovery metadata supplies existing policy, never credentials or a second
@@ -35,12 +33,18 @@ type adoptionPolicyError struct{ stage string }
 
 func (*adoptionPolicyError) Error() string { return "adoption_policy_missing_or_conflicting" }
 
-func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspection, version, release, pins string) (*installplan.InstallPlan, []byte, error) {
+func prepareAdoptionConfig(
+	p *installplan.InstallPlan,
+	inspection bootstrapInspection,
+	version, release, pins string,
+) (*installplan.InstallPlan, []byte, error) {
 	stage := "input"
 	fail := func() (*installplan.InstallPlan, []byte, error) {
 		return nil, nil, &adoptionPolicyError{stage: stage}
 	}
-	if p.Automation != nil || len(p.SourceValues) == 0 || !filepath.IsAbs(release) || !filepath.IsAbs(pins) {
+	if p == nil || p.SchemaVersion != installplan.CurrentSchemaVersion || p.Automation != nil || len(p.SourceValues) == 0 ||
+		!filepath.IsAbs(release) ||
+		!filepath.IsAbs(pins) {
 		return fail()
 	}
 	var deployment struct {
@@ -77,7 +81,16 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 		return fail()
 	}
 	stage = "agreement"
-	if deployment.Version == "" || deployment.BridgeProvider == "" || deployment.BridgeURL == "" || deployment.Database == "" || len(deployment.StaticNodes) == 0 || backup.Source != "bridge" || backup.Recipient == "" || deployment.BridgeProvider != reconcile.BridgeProvider || deployment.BridgeURL != reconcile.BridgeURL || deployment.Database != backup.Database || deployment.Database != reconcile.Database || deployment.Database != p.Database.Name || !reflect.DeepEqual(deployment.StaticNodes, reconcile.StaticNodes) {
+	if deployment.Version == "" || deployment.BridgeProvider == "" || deployment.BridgeURL == "" || deployment.Database == "" ||
+		len(deployment.StaticNodes) == 0 ||
+		backup.Source != "bridge" ||
+		backup.Recipient == "" ||
+		deployment.BridgeProvider != reconcile.BridgeProvider ||
+		deployment.BridgeURL != reconcile.BridgeURL ||
+		deployment.Database != backup.Database ||
+		deployment.Database != reconcile.Database ||
+		deployment.Database != p.Database.Name ||
+		!reflect.DeepEqual(deployment.StaticNodes, reconcile.StaticNodes) {
 		return fail()
 	}
 	stage = "bridge"
@@ -117,7 +130,8 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 	}
 	stage = "subscription"
 	if deployment.IngressMode != "" {
-		if (deployment.IngressMode != "direct" && deployment.IngressMode != "forward") || !set("SUBSCRIPTION_INGRESS_MODE", deployment.IngressMode) {
+		if (deployment.IngressMode != "direct" && deployment.IngressMode != "forward") ||
+			!set("SUBSCRIPTION_INGRESS_MODE", deployment.IngressMode) {
 			return fail()
 		}
 		if deployment.IngressMode == "forward" && (deployment.Ingress == nil || strings.TrimSpace(deployment.Ingress.ForwardHost) == "") {
@@ -129,7 +143,7 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 	}
 	nodes, _ := json.Marshal(deployment.StaticNodes)
 	for key, value := range map[string]string{
-		"ULTRA_AUTOMATION_AGE_RECIPIENT": backup.Recipient, "ULTRA_AUTOMATION_BRIDGE_PROVIDER": deployment.BridgeProvider, "ULTRA_AUTOMATION_BRIDGE_IPV4": deployment.BridgeIPv4, "ULTRA_AUTOMATION_BRIDGE_URL": deployment.BridgeURL, "ULTRA_AUTOMATION_STATIC_NODES": string(nodes), "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": pins,
+		"ULTRA_AUTOMATION_AGE_RECIPIENT": backup.Recipient, "ULTRA_AUTOMATION_BRIDGE_PROVIDER": deployment.BridgeProvider, "ULTRA_AUTOMATION_BRIDGE_URL": deployment.BridgeURL, "ULTRA_AUTOMATION_STATIC_NODES": string(nodes), "ULTRA_AUTOMATION_KNOWN_HOSTS_FILE": pins,
 	} {
 		stage = "managed_policy." + key
 		if !set(key, value) {
@@ -245,15 +259,15 @@ func prepareAdoptionConfig(p *installplan.InstallPlan, inspection bootstrapInspe
 // exact shipped recovery scripts/units and the declared controller are regenerated.
 func adoptionBackupExtras(paths []string, regeneratedController ...string) ([]string, error) {
 	owned := map[string]bool{}
-	for _, path := range []string{"/etc/ultra-relay", "/etc/ultra-recovery", "/var/lib/ultra-relay/automation", "/etc/systemd/system/ultra-relay.service", "/etc/systemd/system/ultra-relay.service.d", "/etc/systemd/system/ultra-bot.service", "/etc/systemd/system/ultra-auto-upgrade.service", "/etc/systemd/system/ultra-auto-upgrade.timer", "/var/lib/ultra-recovery-reconcile/heartbeat_ed25519", "/var/lib/ultra-recovery-reconcile/heartbeat_ed25519.pub", "/usr/local/bin/ultra-relay", "/usr/local/bin/ultra-bot", "/usr/local/bin/ultra-client", "/usr/local/bin/ultra-install", "/usr/local/libexec/ultra-relay-emergency", "/usr/local/libexec/ultra-emergency-manifest.json", "/usr/local/libexec/ultra-emergency-manifest.json.minisig", "/var/lib/ultra-ansible/channel", "/etc/ultra-ansible", "/etc/systemd/system/ultra-ansible-controller.service"} {
+	for _, path := range []string{"/etc/ultra-fleet", "/etc/ultra-relay", "/etc/ultra-recovery", "/var/lib/ultra-relay/automation", "/etc/systemd/system/ultra-relay.service", "/etc/systemd/system/ultra-relay.service.d", "/etc/systemd/system/ultra-bot.service", "/etc/systemd/system/ultra-auto-upgrade.service", "/etc/systemd/system/ultra-auto-upgrade.timer", "/var/lib/ultra-recovery-reconcile/heartbeat_ed25519", "/var/lib/ultra-recovery-reconcile/heartbeat_ed25519.pub", "/usr/local/bin/ultra-relay", "/usr/local/bin/ultra-bot", "/usr/local/bin/ultra-client", "/usr/local/bin/ultra-install", "/usr/local/libexec/ultra-relay-emergency", "/usr/local/libexec/ultra-emergency-manifest.json", "/usr/local/libexec/ultra-emergency-manifest.json.minisig", "/var/lib/ultra-ansible/channel", "/etc/ultra-ansible", "/etc/systemd/system/ultra-ansible-controller.service"} {
 		owned[path] = true
 	}
 	// Keep this exact member list aligned with the non-test recovery archive in
 	// Makefile. Directory, extension and prefix matches would erase custom hooks.
 	for _, name := range []string{
-		"bootstrap_plan.py", "cutover_contract.py", "dns.py", "domain_cutover.py", "heartbeat.py", "monitor.py",
+		"bootstrap_plan.py", "db_connection.py", "cutover_contract.py", "dns.py", "domain_cutover.py", "heartbeat.py", "monitor.py",
 		"operator_access.py", "reconcile.py", "recovery.py", "recovery_key.py", "recovery_status.py", "restore.py",
-		"restore_ansible.py", "restore_common.py", "restore_host.py", "restore_peer.py", "smoke.py",
+		"restore_ansible.py", "restore_database.py", "restore_firewall.py", "restore_common.py", "restore_host.py", "restore_peer.py", "smoke.py",
 		"ultra-monitor-probe.service", "ultra-monitor.service", "ultra-monitor.timer",
 		"ultra-recovery-backup.service", "ultra-recovery-backup.timer", "ultra-recovery-prune.service", "ultra-recovery-prune.timer",
 		"ultra-recovery-reconcile.service", "ultra-recovery-reconcile.timer",
@@ -317,7 +331,11 @@ func validAdoptionMetadata(name string, raw []byte) bool {
 		}
 	}
 	if ingress, exists := object["ingress"]; exists && string(ingress) != "null" {
-		if !adoptionObjectFields(ingress, "domain email path forward_host public_host backend_port gateway_port status_port experimental_port staging_port", nil) {
+		if !adoptionObjectFields(
+			ingress,
+			"domain email path forward_host public_host backend_port gateway_port status_port experimental_port staging_port",
+			nil,
+		) {
 			return false
 		}
 	}

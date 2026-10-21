@@ -2,9 +2,10 @@ package config
 
 import (
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"strings"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/auth"
 )
 
 func TestMonitorServiceRoutingFailsClosed(t *testing.T) {

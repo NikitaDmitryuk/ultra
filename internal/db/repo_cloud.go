@@ -4,74 +4,102 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/jackc/pgx/v5"
 	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/cloud"
+	"github.com/NikitaDmitryuk/ultra/internal/db/sqlc"
+	"github.com/jackc/pgx/v5"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type CloudRepo struct{ db *DB }
 
 func NewCloudRepo(d *DB) *CloudRepo { return &CloudRepo{db: d} }
 func (r *CloudRepo) SaveOffer(ctx context.Context, o cloud.Offer) error {
+	var err error
+	o, err = canonicalCloudOffer(o)
+	if err != nil {
+		return err
+	}
 	body, e := json.Marshal(o)
 	if e != nil {
 		return e
 	}
-	_, e = r.db.Pool.Exec(ctx, `INSERT INTO cloud_offers(id,actor,expires_at,body) VALUES($1,$2,$3,$4)`, o.ID, o.Actor, o.ExpiresAt, body)
-	return e
+	return r.db.orm.WithContext(ctx).Create(&cloudOfferRow{ID: o.ID, Actor: o.Actor, ExpiresAt: o.ExpiresAt, Body: body}).Error
+}
+
+// PostgreSQL identifiers are UUID values. Persist the same canonical identity in
+// JSON so spelling differences cannot create separate replacement reservations.
+func canonicalCloudOffer(o cloud.Offer) (cloud.Offer, error) {
+	if o.ReplaceID != "" {
+		id, err := toPGUUID(o.ReplaceID)
+		if err != nil {
+			return o, err
+		}
+		o.ReplaceID = fromPGUUID(id)
+	}
+	return o, nil
+}
+
+func cloudID(id string) clause.Eq {
+	return clause.Eq{Column: clause.Column{Name: "id"}, Value: id}
+}
+func cloudLookupError(err error) error {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return pgx.ErrNoRows
+	}
+	return err
 }
 func (r *CloudRepo) Offer(ctx context.Context, id string) (cloud.Offer, error) {
 	var o cloud.Offer
-	var body []byte
-	e := r.db.Pool.QueryRow(ctx, `SELECT body FROM cloud_offers WHERE id=$1`, id).Scan(&body)
-	if e != nil {
-		return o, e
+	var row cloudOfferRow
+	if e := r.db.orm.WithContext(ctx).Select("body").Where(cloudID(id)).Take(&row).Error; e != nil {
+		return o, cloudLookupError(e)
 	}
-	e = json.Unmarshal(body, &o)
-	return o, e
+	err := json.Unmarshal(row.Body, &o)
+	return o, err
 }
 func (r *CloudRepo) Get(ctx context.Context, id string) (cloud.Operation, error) {
 	var o cloud.Operation
-	var body []byte
-	e := r.db.Pool.QueryRow(ctx, `SELECT body FROM cloud_operations WHERE id=$1`, id).Scan(&body)
-	if e != nil {
-		return o, e
+	var row cloudOperationRow
+	if e := r.db.orm.WithContext(ctx).Select("body").Where(cloudID(id)).Take(&row).Error; e != nil {
+		return o, cloudLookupError(e)
 	}
-	e = json.Unmarshal(body, &o)
-	return o, e
+	err := json.Unmarshal(row.Body, &o)
+	return o, err
 }
 func (r *CloudRepo) List(ctx context.Context) ([]cloud.Operation, error) {
-	rows, e := r.db.Pool.Query(ctx, `SELECT body FROM cloud_operations ORDER BY created_at`)
-	if e != nil {
+	rows := []cloudOperationRow{}
+	if e := r.db.orm.WithContext(ctx).Select("body").Order(clause.OrderByColumn{Column: clause.Column{Name: "created_at"}}).Find(&rows).Error; e != nil {
 		return nil, e
 	}
-	defer rows.Close()
-	out := []cloud.Operation{}
-	for rows.Next() {
-		var body []byte
+	out := make([]cloud.Operation, 0, len(rows))
+	for _, row := range rows {
 		var o cloud.Operation
-		if e = rows.Scan(&body); e != nil {
-			return nil, e
-		}
-		if e = json.Unmarshal(body, &o); e != nil {
+		if e := json.Unmarshal(row.Body, &o); e != nil {
 			return nil, e
 		}
 		out = append(out, o)
 	}
-	return out, rows.Err()
+	return out, nil
 }
+
 func (r *CloudRepo) Reserve(ctx context.Context, offer cloud.Offer) (cloud.Operation, error) {
 	tx, e := r.db.Pool.Begin(ctx)
 	if e != nil {
 		return cloud.Operation{}, e
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(817365005)`); e != nil {
+	qtx := r.db.Queries.WithTx(tx)
+	offerID, e := toPGUUID(offer.ID)
+	if e != nil {
 		return cloud.Operation{}, e
 	}
-	var existing []byte
-	e = tx.QueryRow(ctx, `SELECT body FROM cloud_operations WHERE id=$1`, offer.ID).Scan(&existing)
+	if e = qtx.LockCloudReservation(ctx); e != nil {
+		return cloud.Operation{}, e
+	}
+	existing, e := qtx.CloudOperationBody(ctx, offerID)
 	if e == nil {
 		var op cloud.Operation
 		e = json.Unmarshal(existing, &op)
@@ -81,26 +109,31 @@ func (r *CloudRepo) Reserve(ctx context.Context, offer cloud.Offer) (cloud.Opera
 		return cloud.Operation{}, e
 	}
 	if offer.ReplaceID != "" {
-		var replaceable bool
-		if e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cloud_operations WHERE id=$1 AND state='ready') AND NOT EXISTS(SELECT 1 FROM cloud_operations WHERE occupies_slot AND body->'offer'->>'replace_id'=$1)`, offer.ReplaceID).Scan(&replaceable); e != nil {
+		replaceID, e := toPGUUID(offer.ReplaceID)
+		if e != nil {
 			return cloud.Operation{}, e
 		}
-		if !replaceable {
+		replaceable, e := qtx.CloudReplacementEligible(ctx, replaceID)
+		if e != nil {
+			return cloud.Operation{}, e
+		}
+		if !replaceable.Bool {
 			return cloud.Operation{}, cloud.ErrConflict
 		}
+		offer.ReplaceID = fromPGUUID(replaceID)
 	}
-	var count int
-	if e = tx.QueryRow(ctx, `SELECT COUNT(*) FROM cloud_operations WHERE occupies_slot`).Scan(&count); e != nil {
+	count, e := qtx.CloudOccupiedSlots(ctx)
+	if e != nil {
 		return cloud.Operation{}, e
 	}
-	if count >= cloud.MaxServers {
+	if count >= int64(cloud.MaxServers) {
 		return cloud.Operation{}, cloud.ErrLimit
 	}
-	var valid bool
-	if e = tx.QueryRow(ctx, `SELECT expires_at>NOW() AND actor=$2 FROM cloud_offers WHERE id=$1`, offer.ID, offer.Actor).Scan(&valid); e != nil {
+	valid, e := qtx.CloudOfferValid(ctx, sqlc.CloudOfferValidParams{ID: offerID, Actor: offer.Actor})
+	if e != nil {
 		return cloud.Operation{}, e
 	}
-	if !valid {
+	if !valid.Bool {
 		return cloud.Operation{}, cloud.ErrPriceChanged
 	}
 	op := cloud.Operation{ID: offer.ID, Offer: offer, State: "pending", Phase: "prepare", CreatedAt: time.Now().UTC()}
@@ -108,67 +141,112 @@ func (r *CloudRepo) Reserve(ctx context.Context, offer cloud.Offer) (cloud.Opera
 	if e != nil {
 		return op, e
 	}
-	_, e = tx.Exec(ctx, `INSERT INTO cloud_operations(id,state,body) VALUES($1,$2,$3)`, op.ID, op.State, body)
+	e = qtx.InsertReservedCloudOperation(ctx, sqlc.InsertReservedCloudOperationParams{ID: offerID, State: op.State, Body: body})
 	if e != nil {
 		return op, e
 	}
-	if _, e = tx.Exec(ctx, `INSERT INTO cloud_audit(actor,operation_id,action) VALUES($1,$2,'confirmed')`, offer.Actor, op.ID); e != nil {
+	if e = qtx.InsertCloudConfirmation(ctx, sqlc.InsertCloudConfirmationParams{Actor: offer.Actor, OperationID: offerID}); e != nil {
 		return op, e
 	}
 	return op, tx.Commit(ctx)
 }
 func (r *CloudRepo) Save(ctx context.Context, op cloud.Operation) error {
+	var err error
+	op.Offer, err = canonicalCloudOffer(op.Offer)
+	if err != nil {
+		return err
+	}
 	body, e := json.Marshal(op)
 	if e != nil {
 		return e
 	}
-	_, e = r.db.Pool.Exec(ctx, `UPDATE cloud_operations SET state=$2,body=$3,occupies_slot=$4 WHERE id=$1`, op.ID, op.State, body, op.State != "cancelled" && op.State != "deleted")
-	return e
+	row := cloudOperationRow{State: op.State, Body: body, OccupiesSlot: op.State != "cancelled" && op.State != "deleted"}
+	result := r.db.orm.WithContext(ctx).Where(cloudID(op.ID)).
+		Where("COALESCE(body->>'reinstall_job_id','') = ? AND COALESCE(body->>'reinstall_target','') = ?", op.ReinstallJobID, op.ReinstallTarget).
+		Select("state", "body", "occupies_slot").Updates(&row)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return cloud.ErrConflict
+	}
+	return nil
 }
+
 func (r *CloudRepo) Lock(ctx context.Context) (func(), error) {
 	conn, e := r.db.Pool.Acquire(ctx)
 	if e != nil {
 		return nil, e
 	}
-	if _, e = conn.Exec(ctx, `SELECT pg_advisory_lock(817365006)`); e != nil {
+	q := sqlc.New(conn)
+	if e = q.LockCloudWorker(ctx); e != nil {
 		conn.Release()
 		return nil, e
 	}
 	return func() {
 		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if _, err := conn.Exec(c, `SELECT pg_advisory_unlock(817365006)`); err != nil {
+		if err := q.UnlockCloudWorker(c); err != nil {
 			_ = conn.Conn().Close(c)
 		}
 		conn.Release()
 	}, nil
 }
 
+// LockCapacity serializes the provider inventory check with a reservation
+// without waiting behind the long-running cloud worker stages.
+func (r *CloudRepo) LockCapacity(ctx context.Context) (func(), error) {
+	conn, err := r.db.Pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	q := sqlc.New(conn)
+	if err = q.LockCloudCapacity(ctx); err != nil {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = conn.Conn().Close(cleanup)
+		cancel()
+		conn.Release()
+		return nil, err
+	}
+	return func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := q.UnlockCloudCapacity(cleanup); err != nil {
+			_ = conn.Conn().Close(cleanup)
+		}
+		conn.Release()
+	}, nil
+}
+
 func (r *CloudRepo) Audit(ctx context.Context, actor int64, id, action string) error {
-	_, e := r.db.Pool.Exec(ctx, `INSERT INTO cloud_audit(actor,operation_id,action) VALUES($1,$2,$3)`, actor, id, action)
-	return e
+	return r.db.orm.WithContext(ctx).Create(&cloudAuditRow{Actor: actor, OperationID: id, Action: action}).Error
 }
 
 func (r *CloudRepo) RecordEvent(ctx context.Context, e cloud.Event) error {
-	_, err := r.db.Pool.Exec(ctx, `INSERT INTO cloud_operation_events(operation_id,phase,outcome,code,http_status,duration_ms,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, e.OperationID, e.Phase, e.Outcome, e.Code, e.HTTPStatus, e.DurationMS, e.At)
-	return err
+	return r.db.orm.WithContext(ctx).
+		Create(&cloudEventRow{OperationID: e.OperationID, Phase: e.Phase, Outcome: e.Outcome, Code: e.Code, HTTPStatus: e.HTTPStatus, DurationMS: e.DurationMS, CreatedAt: e.At}).
+		Error
 }
 func (r *CloudRepo) Events(ctx context.Context, id string) ([]cloud.Event, error) {
-	rows, e := r.db.Pool.Query(ctx, `SELECT operation_id::text,phase,outcome,code,http_status,duration_ms,created_at FROM cloud_operation_events WHERE operation_id=$1 ORDER BY id DESC LIMIT 100`, id)
-	if e != nil {
+	rows := []cloudEventRow{}
+	if e := r.db.orm.WithContext(ctx).Where(clause.Eq{Column: clause.Column{Name: "operation_id"}, Value: id}).Order(clause.OrderByColumn{Column: clause.Column{Name: "id"}, Desc: true}).Limit(100).Find(&rows).Error; e != nil {
 		return nil, e
 	}
-	defer rows.Close()
-	out := []cloud.Event{}
-	for rows.Next() {
-		var v cloud.Event
-		if e = rows.Scan(&v.OperationID, &v.Phase, &v.Outcome, &v.Code, &v.HTTPStatus, &v.DurationMS, &v.At); e != nil {
-			return nil, e
+	out := make([]cloud.Event, 0, len(rows))
+	for _, row := range rows {
+		v := cloud.Event{
+			OperationID: row.OperationID,
+			Phase:       row.Phase,
+			Outcome:     row.Outcome,
+			Code:        row.Code,
+			HTTPStatus:  row.HTTPStatus,
+			DurationMS:  row.DurationMS,
+			At:          row.CreatedAt,
 		}
 		if v.Code != "" {
 			v.Message = cloud.ErrorMessage(v.Code)
 		}
 		out = append(out, v)
 	}
-	return out, rows.Err()
+	return out, nil
 }

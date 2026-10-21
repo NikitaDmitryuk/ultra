@@ -7,6 +7,7 @@ import (
 )
 
 var ErrIngressInUse = errors.New("subscription ingress is in use")
+var ErrLastEnabledExit = errors.New("last enabled exit cannot be removed")
 
 // Provider text is used only for classification and is never retained or returned.
 func providerCode(status int, message string) string {
@@ -37,6 +38,13 @@ func providerCode(status int, message string) string {
 	}
 }
 func ErrorCode(err error) string {
+	var readiness interface{ ReadinessCode() string }
+	if errors.As(err, &readiness) {
+		switch readiness.ReadinessCode() {
+		case "lifecycle_busy", "controller_unavailable":
+			return readiness.ReadinessCode()
+		}
+	}
 	if errors.Is(err, ErrUnknownCreation) {
 		return "creation_requires_reconciliation"
 	}
@@ -50,8 +58,6 @@ func ErrorCode(err error) string {
 	switch {
 	case errors.Is(err, ErrIngressInUse):
 		return "ingress_in_use"
-	case errors.Is(err, ErrUnknownCreation):
-		return "creation_requires_reconciliation"
 	case errors.Is(err, ErrLimit):
 		return "capacity_limit"
 	case errors.Is(err, ErrPriceChanged):
@@ -76,6 +82,9 @@ func ErrorMessage(code string) string {
 		}
 	}
 	messages := map[string]string{
+		"lifecycle_busy":                   "Контроллер занят установкой или восстановлением инфраструктуры. Дождитесь завершения и повторите действие.",
+		"controller_unavailable":           "Контроллер установки недоступен. Проверьте его службу на bridge и повторите действие.",
+		"route_removal_failed":             "Не удалось отключить маршрут. Проверьте журнал операции и повторите удаление. VPS не удалён и продолжает оплачиваться.",
 		"provider_invalid_request":         "Vultr отклонил формат запроса Ultra. Требуется исправление API-клиента; повторная оплата не поможет.",
 		"provider_timeout":                 "Vultr не ответил вовремя. Проверьте журнал: после отправки покупки сначала сверяется её результат.",
 		"provider_unreachable":             "Не удалось подключиться к API Vultr. Проверьте сеть и DNS исполнителя на bridge.",
@@ -98,6 +107,10 @@ func ErrorMessage(code string) string {
 		"installation_failed":              "Не удалось установить Ultra на VPS. Проверьте доступ по SSH и состояние службы. VPS продолжает оплачиваться.",
 		"tunnel_verification_failed":       "Новый туннель не прошёл проверку передачи данных. Локация не опубликована; VPS продолжает оплачиваться.",
 		"configuration_not_applied":        "Маршруты не подтверждены ядром. Исправьте конфигурацию и повторите применение.",
+		"route_publication_failed":         "Не удалось опубликовать локацию. Продолжение повторит только этот этап на том же VPS.",
+		"route_publication_timeout":        "Публикация локации превысила время ожидания. Продолжите операцию на том же VPS.",
+		"route_application_failed":         "Не удалось применить маршрут на bridge. Продолжение возобновит применение без повторной публикации.",
+		"route_application_timeout":        "Применение маршрута на bridge превысило время ожидания. Продолжите операцию без повторной покупки или публикации.",
 		"server_deletion_failed":           "Vultr не подтвердил удаление VPS. Ресурс остаётся в лимите; оплата может продолжаться.",
 		"old_server_deletion_failed":       "Новый маршрут готов, но удаление прежнего VPS не подтверждено. Оба ресурса остаются в лимите.",
 		"operation_timeout":                "Этап превысил время ожидания. Проверьте журнал и повторите продолжение операции.",

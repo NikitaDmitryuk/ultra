@@ -34,7 +34,7 @@ class PreservedTopology(unittest.TestCase):
                 self.assertEqual((root/name/'disk.qcow2').read_bytes(),b'preserved-disk')
                 self.assertEqual((root/name/'seed.img').read_bytes(),b'preserved-seed')
             guests=[call.args[0] for call in launch.call_args_list if call.args[0][0]=='qemu-system-x86_64']
-            self.assertEqual(len(guests),4)
+            self.assertEqual(len(guests),6)
             self.assertTrue(all('restrict=on' in args[args.index('-netdev')+1] for args in guests))
             self.assertTrue(all(args[args.index('-m')+1]=='640' for args in guests))
 

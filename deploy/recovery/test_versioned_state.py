@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.parse
 from unittest import mock
 
 import recovery
@@ -44,6 +45,9 @@ class VersionedStateTests(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(mock.patch.object(recovery, 'VERSIONED_STATE_PATHS', self.patterns))
+        self.stack.enter_context(mock.patch.object(recovery.db_connection, 'dsn_from_runtime',
+            side_effect=lambda database: urllib.parse.urlsplit(
+                'postgres://app:fixture-pass@127.0.0.1:25432/' + database)))
         self.stack.enter_context(mock.patch.object(recovery, 'run', side_effect=self.dump))
         self.stack.enter_context(mock.patch.object(recovery, 'encrypt', side_effect=self.encrypt))
         self.stack.enter_context(mock.patch.object(recovery, 'verify_remote_artifact', side_effect=ValueError('missing')))
@@ -51,8 +55,10 @@ class VersionedStateTests(unittest.TestCase):
 
     @staticmethod
     def dump(args, **kwargs):
+        if args[:2] == ['pg_restore', '--list']:
+            return argparse.Namespace(returncode=0, stdout=b'; archive listing\nTABLE public.fixture\n')
         kwargs['stdout'].write(b'fixture-database')
-        return argparse.Namespace(returncode=0)
+        return argparse.Namespace(returncode=0, stdout=b'')
 
     def encrypt(self, source, target, recipient):
         self.encryptions.append(target.name)
@@ -129,7 +135,7 @@ class VersionedStateTests(unittest.TestCase):
         asset.write_bytes(b'x' * 100)
         self.config['artifact_paths'] = [str(asset)]
         binary_bytes = sum(path.stat().st_size for path in self.binaries)
-        with mock.patch.object(recovery, 'MAX_BYTES', binary_bytes + asset.stat().st_size - 1):
+        with mock.patch.object(recovery, 'MAX_ARTIFACT_BYTES', binary_bytes + asset.stat().st_size - 1):
             with self.assertRaisesRegex(ValueError, 'exceeds backup limits'):
                 self.capture()
         self.assertFalse(self.delivered)
@@ -149,11 +155,11 @@ class VersionedStateTests(unittest.TestCase):
                 self.capture()
         self.assertFalse(self.delivered)
 
-    def test_actual_512_mib_limit_rejects_oversized_artifact_before_delivery(self):
+    def test_actual_1_gib_limit_rejects_oversized_artifact_before_delivery(self):
         # Sparse file and mocked digest exercise the real bound without a large
-        # disk allocation or a half-gigabyte hashing pass in the test suite.
+        # disk allocation or a gigabyte hashing pass in the test suite.
         with self.binaries[0].open('wb') as stream:
-            stream.truncate(recovery.MAX_BYTES + 1)
+            stream.truncate(recovery.MAX_ARTIFACT_BYTES + 1)
         with mock.patch.object(recovery, 'digest', return_value='a' * 64):
             with self.assertRaisesRegex(ValueError, 'exceeds backup limits'):
                 self.capture()

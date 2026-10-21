@@ -2,9 +2,10 @@ package config
 
 import (
 	"encoding/json"
+	"testing"
+
 	"github.com/xtls/xray-core/infra/conf"
 	"github.com/xtls/xray-core/transport/internet/splithttp"
-	"testing"
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"

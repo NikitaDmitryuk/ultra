@@ -2,9 +2,37 @@ package exits
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
+
+func TestProbeTimeoutStartsAfterQueueWait(t *testing.T) {
+	s := NewSelector(func(ctx context.Context, _ Node) Health {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) < 7900*time.Millisecond {
+			t.Error("queue waiting consumed the peer's probe budget")
+		}
+		select {
+		case <-time.After(200 * time.Millisecond):
+			return Health{InternetOK: true, Reachable: true}
+		case <-ctx.Done():
+			return Health{}
+		}
+	})
+	nodes := make([]Node, 9)
+	for i := range nodes {
+		nodes[i] = Node{ID: fmt.Sprint(i), Enabled: true}
+	}
+	for range 2 {
+		s.ProbeAndSelect(context.Background(), nodes)
+	}
+	for id, health := range s.HealthSnapshot() {
+		if !health.Eligible {
+			t.Errorf("healthy queued peer %s became ineligible", id)
+		}
+	}
+}
 
 func TestSelectorRoutesNotMeasurements(t *testing.T) {
 	now := time.Unix(1000, 0)

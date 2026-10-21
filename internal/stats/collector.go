@@ -4,12 +4,13 @@ package stats
 import (
 	"context"
 	"errors"
-	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
-	"github.com/google/uuid"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
+	"github.com/google/uuid"
 
 	xraystats "github.com/xtls/xray-core/features/stats"
 
@@ -199,7 +200,10 @@ func (c *Collector) collect(at time.Time) {
 			}
 			for _, credential := range credentials {
 				for tag, bytes := range measured[credential] {
-					samples = append(samples, db.TrafficSample{UserUUID: u.UUID, CollectedAt: at, UplinkBytes: bytes[0], DownlinkBytes: bytes[1], ExitTag: tag})
+					samples = append(
+						samples,
+						db.TrafficSample{UserUUID: u.UUID, CollectedAt: at, UplinkBytes: bytes[0], DownlinkBytes: bytes[1], ExitTag: tag},
+					)
 				}
 			}
 			continue
@@ -264,7 +268,17 @@ func (c *Collector) checkpoint(ctx context.Context, full bool) error {
 	batch := runtimestate.TrafficBatch{Version: 1, NodeID: c.state.NodeID(), BatchID: uuid.NewString(), CollectedAt: at}
 	for account, tags := range meter.DrainAccountTraffic() {
 		for tag, n := range tags {
-			batch.Samples = append(batch.Samples, runtimestate.Sample{AccountID: account, ExitID: strings.TrimPrefix(tag, "to-exit-"), ExitTag: tag, Period: at.Format("2006-01"), UplinkBytes: n[0], DownlinkBytes: n[1]})
+			batch.Samples = append(
+				batch.Samples,
+				runtimestate.Sample{
+					AccountID:     account,
+					ExitID:        strings.TrimPrefix(tag, "to-exit-"),
+					ExitTag:       tag,
+					Period:        at.Format("2006-01"),
+					UplinkBytes:   n[0],
+					DownlinkBytes: n[1],
+				},
+			)
 		}
 	}
 	// Empty measurement still flushes conservative durable reservations after a crash.

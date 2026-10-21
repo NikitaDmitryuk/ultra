@@ -67,6 +67,7 @@ minisign.pub
 .cursor/
 .claude/
 .idea/
+.codex/
 
 # Optional generated Graphify index and reports
 /graphify-out/

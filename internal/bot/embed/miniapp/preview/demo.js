@@ -330,22 +330,7 @@
       };
     else if (path === "/api/cloud/operations") value = ops;
     else if (path === "/api/cloud/replicas")
-      value = [
-        {
-          id: "ams",
-          name: "Амстердам",
-          state: "streaming",
-          free_bytes: 22 * 1073741824,
-          required_bytes: 5 * 1073741824,
-        },
-        {
-          id: "fra",
-          name: "Франкфурт",
-          state: "syncing",
-          free_bytes: 18 * 1073741824,
-          required_bytes: 5 * 1073741824,
-        },
-      ];
+      value = [{ id: "bridge", name: "Bridge PostgreSQL standby", source: "primary", state: "streaming", replay_lag_bytes: 0, checked_at: new Date().toISOString() }];
     else if (path === "/api/cloud/catalog")
       value = {
         regions: [

@@ -1,5 +1,6 @@
 {
   "database": "ultra_db",
+  "database_host": "192.0.2.30",
   "bridge_provider": "provider-a",
   "vultr_state_dir": "/var/lib/ultra-relay/vultr",
   "ssh_identity_file": "/etc/ultra-relay/automation/id_ed25519",

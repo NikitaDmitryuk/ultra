@@ -8,12 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 type bootstrapRollbackProof struct {
@@ -81,7 +82,8 @@ func recordBootstrapRollbackProof(directory string, inventory map[string]any, ge
 				return false, readErr
 			}
 			for _, entry := range entries {
-				if strings.HasPrefix(entry.Name(), "rollback-adoption-") && !strings.HasPrefix(entry.Name(), "rollback-adoption-generation-") {
+				if strings.HasPrefix(entry.Name(), "rollback-adoption-") &&
+					!strings.HasPrefix(entry.Name(), "rollback-adoption-generation-") {
 					return false, errors.New("bootstrap_legacy_rollback_proof_required")
 				}
 			}
@@ -106,12 +108,24 @@ func recordBootstrapRollbackProof(directory string, inventory map[string]any, ge
 	if err != nil {
 		return false, err
 	}
-	expected, err := json.Marshal(map[string]any{"inventory": inventory, "variables": map[string]any{"ultra_lifecycle_id": lifecycleID(directory)}})
+	expected, err := json.Marshal(
+		map[string]any{"inventory": inventory, "variables": map[string]any{"ultra_lifecycle_id": lifecycleID(directory)}},
+	)
 	if err != nil {
 		return false, err
 	}
 	requestHash := sha256.Sum256(request)
-	if !bytes.Equal(expected, request) || json.Unmarshal(receipt, &saved) != nil || json.Unmarshal(jobRaw, &job) != nil || job["operation"] != "rollback-adoption" || saved["operation"] != job["operation"] || job["request_sha256"] != hex.EncodeToString(requestHash[:]) || saved["request_sha256"] != job["request_sha256"] || saved["binary_sha256"] != job["binary_sha256"] || saved["state"] != "succeeded" || job["binary_sha256"] != job["request_sha256"] || job["schema_version"] != float64(1) || saved["schema_version"] != job["schema_version"] || saved["attempt"] != job["attempt"] {
+	if !bytes.Equal(expected, request) || json.Unmarshal(receipt, &saved) != nil || json.Unmarshal(jobRaw, &job) != nil ||
+		job["operation"] != "rollback-adoption" ||
+		saved["operation"] != job["operation"] ||
+		job["request_sha256"] != hex.EncodeToString(requestHash[:]) ||
+		saved["request_sha256"] != job["request_sha256"] ||
+		saved["binary_sha256"] != job["binary_sha256"] ||
+		saved["state"] != "succeeded" ||
+		job["binary_sha256"] != job["request_sha256"] ||
+		job["schema_version"] != float64(1) ||
+		saved["schema_version"] != job["schema_version"] ||
+		saved["attempt"] != job["attempt"] {
 		return false, errors.New("bootstrap_compatible_rollback_unconfirmed")
 	}
 	values, ok := saved["result"].(map[string]any)
@@ -124,7 +138,13 @@ func recordBootstrapRollbackProof(directory string, inventory map[string]any, ge
 	}
 	inventoryHash := sha256.Sum256(inventoryRaw)
 	receiptHash := sha256.Sum256(receipt)
-	proof := bootstrapRollbackProof{Schema: 1, ID: lifecycleID(directory), Generation: generation, InventorySHA: hex.EncodeToString(inventoryHash[:]), ReceiptSHA: hex.EncodeToString(receiptHash[:])}
+	proof := bootstrapRollbackProof{
+		Schema:       1,
+		ID:           lifecycleID(directory),
+		Generation:   generation,
+		InventorySHA: hex.EncodeToString(inventoryHash[:]),
+		ReceiptSHA:   hex.EncodeToString(receiptHash[:]),
+	}
 	raw, err := json.Marshal(proof)
 	if err != nil {
 		return false, err
@@ -154,7 +174,14 @@ func bootstrapMutationSource(directory, stage string) (string, error) {
 	return source, nil
 }
 
-func runBootstrapMutationStage(ctx context.Context, operation string, inventory, variables map[string]any, directory, stage string, generation int, python, executable string) (deployansible.Receipt, error) {
+func runBootstrapMutationStage(
+	ctx context.Context,
+	operation string,
+	inventory, variables map[string]any,
+	directory, stage string,
+	generation int,
+	python, executable string,
+) (deployansible.Receipt, error) {
 	target := bootstrapMutationStage(directory, stage, generation)
 	source, err := bootstrapMutationSource(directory, stage)
 	if err != nil {
@@ -179,7 +206,13 @@ func bootstrapMutationOriginalStage(directory, stage string, generation int) str
 
 // Only the whole operator transaction can finish a pending rollback. This runs
 // before re-reserving stopped applications and before any new base mutation.
-func resumeBootstrapMutationGeneration(ctx context.Context, p *installplan.InstallPlan, directory string, inventory map[string]any, python, executable string) (int, error) {
+func resumeBootstrapMutationGeneration(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	directory string,
+	inventory map[string]any,
+	python, executable string,
+) (int, error) {
 	for generation := 1; generation <= 100; generation++ {
 		advanced, err := recordBootstrapRollbackProof(directory, inventory, generation)
 		if err == nil {
@@ -198,15 +231,25 @@ func resumeBootstrapMutationGeneration(ctx context.Context, p *installplan.Insta
 			return 0, err
 		}
 		request, requestErr := readBootstrapGenerationInput(filepath.Join(stage, "request.json"))
-		expected, marshalErr := json.Marshal(map[string]any{"inventory": inventory, "variables": map[string]any{"ultra_lifecycle_id": lifecycleID(directory)}})
+		expected, marshalErr := json.Marshal(
+			map[string]any{"inventory": inventory, "variables": map[string]any{"ultra_lifecycle_id": lifecycleID(directory)}},
+		)
 		var job map[string]any
 		digest := sha256.Sum256(request)
-		if requestErr != nil || marshalErr != nil || !bytes.Equal(request, expected) || json.Unmarshal(jobRaw, &job) != nil || job["operation"] != "rollback-adoption" || job["schema_version"] != float64(1) || job["request_sha256"] != hex.EncodeToString(digest[:]) || job["binary_sha256"] != job["request_sha256"] {
+		if requestErr != nil || marshalErr != nil || !bytes.Equal(request, expected) || json.Unmarshal(jobRaw, &job) != nil ||
+			job["operation"] != "rollback-adoption" ||
+			job["schema_version"] != float64(1) ||
+			job["request_sha256"] != hex.EncodeToString(digest[:]) ||
+			job["binary_sha256"] != job["request_sha256"] {
 			return 0, errors.New("bootstrap_rollback_resume_inputs_invalid")
 		}
 		if receipt, receiptErr := readBootstrapGenerationInput(filepath.Join(stage, "receipt.json")); receiptErr == nil {
 			var saved map[string]any
-			if json.Unmarshal(receipt, &saved) != nil || saved["operation"] != job["operation"] || saved["schema_version"] != job["schema_version"] || saved["request_sha256"] != job["request_sha256"] || saved["binary_sha256"] != job["binary_sha256"] || (saved["state"] != "running" && saved["state"] != "failed") {
+			if json.Unmarshal(receipt, &saved) != nil || saved["operation"] != job["operation"] ||
+				saved["schema_version"] != job["schema_version"] ||
+				saved["request_sha256"] != job["request_sha256"] ||
+				saved["binary_sha256"] != job["binary_sha256"] ||
+				(saved["state"] != "running" && saved["state"] != "failed") {
 				return 0, errors.New("bootstrap_rollback_resume_receipt_invalid")
 			}
 		} else if !os.IsNotExist(receiptErr) {

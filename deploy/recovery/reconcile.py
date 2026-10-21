@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Root recovery reconciliation for already-owned, ready exits. No provisioning or migrations."""
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import ipaddress
@@ -10,33 +11,121 @@ import pwd
 import stat
 import shlex
 import shutil
+import signal
 import grp
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
 import uuid
 from recovery import atomic_json, create, digest, private, read_config, ssh
+import recovery
+import db_connection
+
+# Leave time to cancel the controller and publish status before systemd's 540s
+# deadline. Lifecycle lock acquisition allows 600s, including its retry margin.
+RECONCILE_BUDGET_SECONDS = 480
+ANSIBLE_TIMEOUT_SECONDS = 450
+CHILD_STOP_SECONDS = 10
+_deferring_budget = False
+_budget_expired = False
+_budget_deadline = None
+
+
+class ReconcileBlocked(Exception):
+    def __init__(self, code, attempt=None):
+        self.code, self.attempt = code, attempt
+        super().__init__(code)
+
+
+@contextlib.contextmanager
+def reconcile_budget():
+    global _budget_expired, _budget_deadline
+    _budget_expired = False
+    _budget_deadline = time.monotonic() + RECONCILE_BUDGET_SECONDS
+    def expired(_signum, _frame):
+        global _budget_expired
+        if _deferring_budget:
+            # Never raise inside Popen launch or subprocess.run cleanup. Native
+            # run timeouts use the remaining budget and reap their child first.
+            _budget_expired = True
+            return
+        raise ReconcileBlocked('reconcile_budget_exhausted')
+    previous = signal.signal(signal.SIGALRM, expired)
+    previous_recovery_run = recovery.run
+    # create() and ssh() resolve this module function for pg_dump, age and SSH.
+    # The oneshot service is single threaded; restore it for library callers.
+    recovery.run = recovery_command
+    signal.setitimer(signal.ITIMER_REAL, RECONCILE_BUDGET_SECONDS)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        recovery.run = previous_recovery_run
+        _budget_expired = False
+        _budget_deadline = None
+
+
+def run_command(arguments, **kwargs):
+    """Let subprocess.run finish bounded native cleanup before budget errors."""
+    global _deferring_budget
+    deadline = _budget_deadline
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or _budget_expired:
+            raise ReconcileBlocked('reconcile_budget_exhausted')
+        kwargs['timeout'] = min(kwargs.get('timeout', remaining), remaining)
+    previous = _deferring_budget
+    _deferring_budget = True
+    try:
+        return subprocess.run(arguments, **kwargs)
+    finally:
+        _deferring_budget = previous
+        if deadline is not None and (_budget_expired or time.monotonic() >= deadline):
+            raise ReconcileBlocked('reconcile_budget_exhausted')
+
+
+def recovery_command(arguments, **kwargs):
+    result = run_command(arguments, stderr=subprocess.DEVNULL,
+                         timeout=kwargs.pop('timeout', 60), **kwargs)
+    if result.returncode:
+        raise ValueError('recovery command failed')
+    return result
 
 QUERY = """BEGIN READ ONLY;
 SET LOCAL statement_timeout='5s';
 SELECT COALESCE(json_agg(json_build_object('id',c.id::text,'state',c.state,
  'phase',c.body->>'phase','instance_id',c.body->>'instance_id','firewall_id',c.body->>'firewall_id',
  'exit_id',c.body->>'exit_id','address',n.address,'enabled',COALESCE(n.enabled,false),
- 'country',n.country_code)), '[]'::json)
+ 'country',n.country_code,'tunnel_port',n.port)), '[]'::json)
 FROM cloud_operations c LEFT JOIN exit_nodes n ON n.id::text=c.body->>'exit_id'
 WHERE c.state IN ('ready','deleted','cancelled');
 COMMIT;"""
 
 
-def discover(config):
+EXIT_PORT_QUERY = """BEGIN READ ONLY;
+SET LOCAL statement_timeout='5s';
+SELECT COALESCE(json_agg(json_build_object('id',id::text,'address',address,'port',port)),'[]'::json) FROM exit_nodes WHERE enabled=true;
+COMMIT;"""
+
+
+def discover(config, query=QUERY):
     database = config['database']
     if not re.fullmatch(r'[A-Za-z0-9_-]+', database):
         raise ValueError('invalid database')
-    result = subprocess.run(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database, '-c', QUERY],
-                            capture_output=True, timeout=8)
+    try:
+        dsn = db_connection.dsn_from_runtime(database)
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ValueError('discovery unavailable') from None
+    with tempfile.TemporaryDirectory(prefix='ultra-db-discovery-') as directory:
+        with db_connection.pgpass(directory, dsn) as environment:
+            result = run_command(db_connection.connection_args(dsn, database, 'psql') +
+                                    ['-XAtq', '-v', 'ON_ERROR_STOP=1', '-c', query],
+                                    capture_output=True, timeout=8, env=environment)
     if result.returncode or len(result.stdout) > 65536:
         raise ValueError('discovery unavailable')
     rows = json.loads(result.stdout)
@@ -119,6 +208,10 @@ def previous_monitor(config, node):
 def compact_completed_attempts(directory, now=None):
     """Bound reconciliation caches; never remove a queued/running attempt."""
     now = time.time() if now is None else now
+    # An interrupted full pass still needs the exact earlier request evidence.
+    if (directory.parent.parent / 'reconcile-progress.json').exists():
+        return
+
     complete = []
     for path in directory.glob('attempt-*'):
         if path.is_symlink() or not path.is_dir():
@@ -178,7 +271,157 @@ def compact_projected_sources(config, now=None):
             private(source).unlink()
 
 
+def write_reconcile_progress(journal):
+    atomic_json(journal['path'], {'calls': journal['calls'], 'baseline': journal['baseline'],
+                                 'health_start': journal.get('health_start')})
+
+
+def ansible_diagnostic_root():
+    # Must match controller.SafeJournal.default_root(); never trust a path from
+    # an attempt receipt or allow private request data to choose this root.
+    return Path('/var/log/ultra-ansible' if os.geteuid() == 0 else
+                '/tmp/ultra-ansible-diagnostics-' + str(os.geteuid()))
+
+
+def ansible_failure_summary(attempt, interrupted=False, started_ns=0):
+    """Project only validated source coordinates from the controller sidecar."""
+    events = {'controller_start', 'controller_succeeded', 'controller_failed',
+              'controller_timeout', 'controller_interrupted', 'task_start',
+              'task_ok', 'task_skipped', 'task_failed', 'task_unreachable',
+              'task_retry', 'logging_degraded'}
+    allowed = {'schema_version', 'event', 'time_ns', 'operation', 'task', 'host',
+               'truncated', 'censored', 'duration_ms', 'changed', 'skipped', 'rc',
+               'detail', 'code', 'ignored'}
+
+    def checked_directory(path):
+        if not path.is_absolute() or path.resolve() != path:
+            raise ValueError('unsafe diagnostic directory')
+        info = path.stat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise ValueError('unsafe diagnostic directory')
+
+    def read_event(directory_fd, name):
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                     dir_fd=directory_fd)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                    or info.st_size > 4096):
+                raise ValueError('unsafe diagnostic file')
+            raw = stream.read(4097)
+        if len(raw) > 4096:
+            raise ValueError('oversized diagnostic')
+        def unique_object(pairs):
+            result = {}
+            for key, item in pairs:
+                if key in result:
+                    raise ValueError('duplicate diagnostic key')
+                result[key] = item
+            return result
+        def invalid_number(_value):
+            raise ValueError('invalid diagnostic number')
+        value = json.loads(raw, object_pairs_hook=unique_object, parse_constant=invalid_number)
+        if (not isinstance(value, dict) or set(value) - allowed
+                or type(value.get('schema_version')) is not int or value['schema_version'] != 1
+                or value.get('event') not in events
+                or type(value.get('time_ns')) is not int or not 0 < value['time_ns'] <= time.time_ns()
+                or value.get('operation', 'reconcile') != 'reconcile'):
+            raise ValueError('invalid diagnostic schema')
+        for key in ('truncated', 'censored', 'changed', 'skipped', 'ignored'):
+            if key in value and type(value[key]) is not bool:
+                raise ValueError('invalid diagnostic flag')
+        if 'duration_ms' in value and (type(value['duration_ms']) is not int or value['duration_ms'] < 0):
+            raise ValueError('invalid diagnostic duration')
+        if 'rc' in value and (type(value['rc']) is not int or not -255 <= value['rc'] <= 255):
+            raise ValueError('invalid diagnostic rc')
+        for key in ('code', 'detail'):
+            if key in value and (not isinstance(value[key], str)
+                                 or not re.fullmatch(r'[a-z_]{1,96}', value[key])):
+                raise ValueError('invalid diagnostic enum')
+
+        if 'host' in value and (not isinstance(value['host'], str) or not (
+                value['host'] in {'bridge', 'exit', 'database', 'receiver', 'localhost', ''}
+                or re.fullmatch(r'[a-f0-9]{16}', value['host']))):
+            raise ValueError('invalid diagnostic host')
+        task = value.get('task', {})
+        if not isinstance(task, dict) or set(task) - {'source', 'line', 'action'}:
+            raise ValueError('invalid diagnostic task')
+        if task:
+            source = task.get('source')
+            if (not isinstance(source, str) or
+                    not re.fullmatch(r'(?:roles|playbooks)/[A-Za-z0-9_./-]{1,240}\.yml', source)
+                    or any(part in ('', '.', '..') for part in source.split('/'))
+                    or type(task.get('line')) is not int or not 1 <= task['line'] <= 100000
+                    or ('action' in task and (not isinstance(task['action'], str) or
+                        not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]{0,95}', task['action'])))):
+                raise ValueError('invalid diagnostic source')
+        # code/detail are deliberately not projected: future controller enums
+        # must never turn arbitrary module strings into published diagnostics.
+        return value
+
+    try:
+        root = ansible_diagnostic_root()
+        checked_directory(root)
+        if root.resolve().is_relative_to(attempt.resolve()):
+            return {}
+        prefix = hashlib.sha256(str(attempt.absolute()).encode()).hexdigest() + '-'
+        selected = None
+        with os.scandir(root) as entries:
+            # Controller retention allows at most 128 sessions plus its lock.
+            for index, entry in enumerate(entries):
+                if index >= 129:
+                    return {}
+                if not re.fullmatch(re.escape(prefix) + r'[a-f0-9]{32}', entry.name):
+                    continue
+                session = root / entry.name
+                checked_directory(session)
+                fd = os.open(session, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    current = read_event(fd, 'current.json')
+                    if current.get('operation') != 'reconcile' or current['time_ns'] < started_ns:
+                        continue
+                    try:
+                        first = read_event(fd, 'first-failure.json')
+                    except FileNotFoundError:
+                        first = None
+                    if first is not None and (first['event'] not in ('task_failed', 'task_unreachable')
+                                              or first.get('ignored', False)
+                                              or not started_ns <= first['time_ns'] <= current['time_ns']):
+                        return {}
+                    if selected is not None:
+                        return {}  # Multiple sessions cannot be attributed safely.
+                    selected = (current, first)
+                finally:
+                    os.close(fd)
+        if selected is None:
+            return {}
+        current, first = selected
+        value = first or current
+        cancelled = interrupted or current['event'] in ('controller_timeout', 'controller_interrupted')
+        return {'phase': value['event'], 'host': value.get('host'),
+                'task': value.get('task', {}),
+                'rc': None if cancelled or value.get('censored', False) else value.get('rc')}
+    except (OSError, ValueError, TypeError, RecursionError):
+        # Missing, partial or unsafe diagnostics never mask the actual failure.
+        return {}
+
+
+def record_ansible_failure(directory, attempt, reason_code, receipt_code='unavailable', interrupted=False, started_ns=0):
+    try:
+        atomic_json(directory / 'last-failure.json', {
+            'attempt': attempt.name, 'reason_code': reason_code,
+            'receipt_code': receipt_code if receipt_code in
+                ('ansible_failed', 'execution_failed', 'interrupted') else 'unavailable',
+            'updated_at': int(time.time()),
+            **ansible_failure_summary(attempt, interrupted=interrupted, started_ns=started_ns)})
+    except OSError:
+        pass  # Diagnostic storage must not replace cancellation/failure handling.
+
+
 def ansible_apply(config, node, variables):
+    global _deferring_budget
     variables = dict(variables, ultra_lock_directory=config.get('controller_state_dir', '/var/lib/ultra-ansible'))
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', node['id']):
         raise ValueError('invalid ansible node identity')
@@ -190,18 +433,132 @@ def ansible_apply(config, node, variables):
         'ansible_ssh_args': '-F /dev/null -o ControlMaster=no -o ControlPath=none',
         'ansible_ssh_common_args': '-o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o IdentitiesOnly=yes -o UserKnownHostsFile=' + shlex.quote(node['known_hosts']),
     }}}}}}
+    # Do not abandon an interrupted controller, even if the desired inputs have
+    # changed. RunLocal resumes only an identical immutable request. A conflicting
+    # unfinished job needs explicit resolution before new work may be dispatched.
+    request = {'inventory': inventory, 'variables': variables}
+    journal = config.get('_reconcile_journal')
+    entry = None
+    if journal is not None and journal['cursor'] < len(journal['calls']):
+        entry = journal['calls'][journal['cursor']]
+        if entry.get('node') != node['id'] or entry.get('request') != request:
+            raise ReconcileBlocked('ansible_pending_conflict', entry.get('attempt'))
+        journal['cursor'] += 1
+        attempt = directory / entry['attempt']
+        if attempt.is_symlink():
+            raise ReconcileBlocked('ansible_attempt_unavailable', attempt.name)
+        receipt = {}
+        if attempt.exists():
+            try:
+                saved = read_config(private(attempt / 'request.json'))
+                job = read_config(private(attempt / 'job.json'))
+                receipt = read_config(private(attempt / 'receipt.json')) if (attempt / 'receipt.json').exists() else {}
+                if saved != request or job.get('operation') != 'reconcile':
+                    raise ReconcileBlocked('ansible_pending_conflict', attempt.name)
+            except (OSError, ValueError, TypeError):
+                raise ReconcileBlocked('ansible_receipt_unavailable', attempt.name) from None
+        if receipt.get('state') == 'succeeded':
+            return False  # Replayed evidence cannot establish fresh health.
+        if receipt.get('state') == 'failed':
+            # A failed final call is terminal and safe to retry with a new
+            # attempt; earlier failed optional calls must replay their branch.
+            if journal['cursor'] != len(journal['calls']):
+                raise ValueError('ansible_reconcile_failed')
+            journal['calls'].pop()
+            journal['cursor'] -= 1
+            write_reconcile_progress(journal)
+            entry = None
+
+    unfinished = []
+    for path in directory.glob('attempt-*'):
+        if path.is_symlink() or not path.is_dir():
+            raise ReconcileBlocked('ansible_attempt_unavailable', path.name)
+        try:
+            receipt = read_config(private(path / 'receipt.json')) if (path / 'receipt.json').exists() else {}
+            if receipt.get('state') in ('succeeded', 'failed'):
+                continue
+            saved = read_config(private(path / 'request.json'))
+            job = read_config(private(path / 'job.json'))
+            if saved != request or job.get('operation') != 'reconcile':
+                raise ReconcileBlocked('ansible_pending_conflict', path.name)
+            unfinished.append(path)
+        except (OSError, ValueError, TypeError):
+            raise ReconcileBlocked('ansible_receipt_unavailable', path.name) from None
+    if len(unfinished) > 1:
+        raise ReconcileBlocked('ansible_multiple_pending')
+    attempt = unfinished[0] if unfinished else directory / (entry['attempt'] if entry else 'attempt-' + str(uuid.uuid4()))
+    if entry is not None and attempt.name != entry['attempt']:
+        raise ReconcileBlocked('ansible_pending_conflict', entry['attempt'])
+    if journal is not None and entry is None:
+        journal['calls'].append({'node': node['id'], 'request': request, 'attempt': attempt.name})
+        write_reconcile_progress(journal)
+        journal['cursor'] += 1
+
     atomic_json(directory / 'inventory.json', inventory)
     atomic_json(directory / 'variables.json', variables)
     executable = config.get('installer_binary', '/usr/local/bin/ultra-install')
-    result = subprocess.run([executable, 'ansible-run', '--operation', 'reconcile',
+    process = None
+    started_ns = time.time_ns()
+    _deferring_budget = True
+    try:
+        process = subprocess.Popen([executable, 'ansible-run', '--operation', 'reconcile',
                              '--inventory', str(directory / 'inventory.json'),
                              '--variables', str(directory / 'variables.json'),
-                             '--state-dir', str(directory / ('attempt-' + str(uuid.uuid4())))],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
+                             '--state-dir', str(attempt)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _deferring_budget = False
+        if _budget_expired:
+            raise ReconcileBlocked('reconcile_budget_exhausted', attempt.name)
+        returncode = process.wait(timeout=ANSIBLE_TIMEOUT_SECONDS)
+    except BaseException as error:
+        _deferring_budget = False
+        if process is None:
+            raise
+        # Once aborting the run, finish the bounded cleanup uninterrupted. The
+        # service retains at least 60s after the run budget for these two waits.
+        if isinstance(error, (ReconcileBlocked, subprocess.TimeoutExpired)):
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        # SIGTERM lets ultra-install cancel its isolated controller, which kills
+        # the Ansible session and persists an interrupted receipt before exiting.
+        reason = ('ansible_child_timeout' if isinstance(error, subprocess.TimeoutExpired)
+                  else error.code if isinstance(error, ReconcileBlocked) else 'ansible_interrupted')
+        try:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=CHILD_STOP_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=CHILD_STOP_SECONDS)
+                except subprocess.TimeoutExpired:
+                    reason = 'ansible_cancel_timeout'
+                    raise ReconcileBlocked(reason, attempt.name) from None
+        finally:
+            record_ansible_failure(directory, attempt, reason, 'interrupted', interrupted=True, started_ns=started_ns)
+        if isinstance(error, subprocess.TimeoutExpired):
+            raise ReconcileBlocked(reason, attempt.name) from None
+        if isinstance(error, ReconcileBlocked):
+            error.attempt = attempt.name
+        raise
     compact_completed_attempts(directory)
     compact_projected_sources(config)
-    if result.returncode:
+    try:
+        receipt = read_config(private(attempt / 'receipt.json'))
+    except (OSError, ValueError, TypeError):
+        raise ReconcileBlocked('ansible_receipt_unavailable', attempt.name) from None
+    if receipt.get('state') not in ('succeeded', 'failed'):
+        record_ansible_failure(directory, attempt, 'ansible_attempt_pending',
+                               receipt.get('code'), interrupted=True, started_ns=started_ns)
+        raise ReconcileBlocked('ansible_attempt_pending', attempt.name)
+    if returncode or receipt['state'] != 'succeeded':
+        # Safe correlation survives optional-receiver fallback; raw Ansible
+        # output and private inputs never enter the published controller status.
+        record_ansible_failure(directory, attempt, 'ansible_receipt_failed', receipt.get('code'), started_ns=started_ns)
         raise ValueError('ansible_reconcile_failed')
+    return True
 
 
 def install(config, node, monitor=None, extra=None):
@@ -225,7 +582,7 @@ def install(config, node, monitor=None, extra=None):
                     os.fsync(stream.fileno())
         files.append({'destination': destination, 'source': str(source.resolve()), 'mode': format(mode, '04o')})
 
-    for name in ['recovery.py', 'monitor.py', 'heartbeat.py']:
+    for name in ['recovery.py', 'db_connection.py', 'monitor.py', 'heartbeat.py']:
         project('/opt/ultra-recovery/' + name, source=base / name, mode=0o755)
     for name in ['ultra-recovery-prune.service', 'ultra-recovery-prune.timer', 'ultra-monitor.service', 'ultra-monitor.timer', 'ultra-monitor-probe.service']:
         project('/etc/systemd/system/' + name, source=base / name, mode=0o644)
@@ -350,6 +707,54 @@ def ensure_provider_peer_rule(config, primary, peer, port=22):
     return address
 
 
+def admit_restored_bridge(config, address):
+    """Restore bridge admission to pinned exits; never reseed PostgreSQL."""
+    address = str(ipaddress.IPv4Address(address))
+    rows = discover(config)
+    ready = any(row.get('state') == 'ready' and row.get('phase') == 'ready' and row.get('enabled') for row in rows)
+    if not ready and not config.get('static_nodes'):
+        return {'verified': True, 'managed_exits': 0, 'static_exits': 0}
+    nodes, _ = desired_nodes(config, rows)
+    exit_rows = discover(config, EXIT_PORT_QUERY)
+    enabled = {}
+    exit_ids = set()
+    for row in exit_rows:
+        host = str(ipaddress.IPv4Address(row['address']))
+        port = row.get('port')
+        if host in enabled or row['id'] in exit_ids or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ValueError('restored_exit_tunnel_port_unavailable')
+        enabled[host] = (row['id'], port)
+        exit_ids.add(row['id'])
+    ports = {}
+    # Validate all ports, identities and pins before the first mutation.
+    for node in nodes:
+        persisted = enabled.get(node['address'])
+        if persisted is None or persisted[0] != node['id'] or node['address'] == address:
+            raise ValueError('restored_exit_tunnel_port_unavailable')
+        port = persisted[1]
+        if node.get('managed'):
+            cloud = next(row for row in rows if row['id'] == node['id'])
+            if cloud.get('tunnel_port') != port:
+                raise ValueError('restored_exit_tunnel_port_unavailable')
+        ports[node['id']] = sorted({22, port})
+    cloud_private_file(config['ssh_identity_file'], config.get('ssh_identity_owner', 'ultra-relay'))
+    for node in nodes:
+        # Provider changes require proven resource ownership; static provider
+        # admission remains an explicit operator prerequisite.
+        if node.get('managed'):
+            for port in ports[node['id']]:
+                ensure_provider_peer_rule(config, node, {'address': address}, port)
+        try:
+            ansible_apply(config, node, {'ultra_recovery_peer_rules': [
+                {'address': address, 'port': port} for port in ports[node['id']]]})
+        except (OSError, ValueError, subprocess.SubprocessError):
+            if not node.get('managed'):
+                raise ValueError('static_exit_firewall_operator_admission_required') from None
+            raise
+    managed = sum(bool(node.get('managed')) for node in nodes)
+    return {'verified': True, 'managed_exits': managed, 'static_exits': len(nodes) - managed}
+
+
 def allow_peer(config, primary, peer, port=22):
     address = ensure_provider_peer_rule(config, primary, peer, port=port)
     if address is None:
@@ -361,9 +766,9 @@ def ensure_heartbeat_key(config, primary):
     directory = Path(config['state_dir'])
     key = directory / 'heartbeat_ed25519'
     if not key.exists():
-        subprocess.run(['ssh-keygen', '-t', 'ed25519', '-N', '', '-q', '-f', str(key)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        run_command(['ssh-keygen', '-t', 'ed25519', '-N', '', '-q', '-f', str(key)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
     material = private(key).read_bytes()
-    derived = subprocess.run(['ssh-keygen', '-y', '-f', str(key)], check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+    derived = run_command(['ssh-keygen', '-y', '-f', str(key)], check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
     public = derived.stdout.decode().strip().split()
     if len(public) < 2 or public[0] != 'ssh-ed25519' or not re.fullmatch(r'[A-Za-z0-9+/=]+', public[1]):
         raise ValueError('heartbeat key unavailable')
@@ -379,10 +784,23 @@ def peer_key_pair(material, public):
 
 
 def monitor_ready(config, node, mode, independent=False):
+    journal = config.get('_reconcile_journal')
+    if (journal is not None and journal.get('deferred_monitors')
+            and (journal['cursor'] == len(journal['calls']) or
+                 journal.get('health_start') is not None and journal['cursor'] >= journal['health_start'])
+            and not journal.get('refreshing_health')):
+        journal['deferred_monitors'].append((node, mode, independent))
+        return
     expected = {'us_monitor', 'us_notifications', 'probe_execution'} if mode == 'peer' else {
         'bridge_https', 'vpn_payload', 'probe_execution', 'independent_backup' if independent else 'backup_generation'}
+    replayed = False
     for _ in range(2):
-        ansible_apply(config, node, {'ultra_monitor_run_once': True})
+        replayed = ansible_apply(config, node, {'ultra_monitor_run_once': True}) is False or replayed
+        if replayed:
+            # Traverse the saved call sequence to its late pending attempt.
+            # Refresh both samples after traversal; old receipts prove execution
+            # but cannot prove that the current heartbeat is healthy or fresh.
+            continue
         result = execute(config, node, ['cat', '/var/lib/ultra-monitor/heartbeat.json'], stdout=subprocess.PIPE, timeout=10)
         if len(result.stdout) > 4096:
             raise ValueError('monitor state exceeds bounds')
@@ -393,6 +811,9 @@ def monitor_ready(config, node, mode, independent=False):
         current = heartbeat.get('current_checks', {})
         if not (0 <= time.time() - heartbeat['updated_at'] <= 120 and expected <= current.keys() and all(current[key] is True for key in expected) and not heartbeat.get('send_error')):
             raise ValueError('monitor not ready')
+    if replayed:
+        config['_reconcile_journal'].setdefault('deferred_monitors', []).append((node, mode, independent))
+        return
     if not (expected <= checks.keys() and all(checks[key] is True for key in expected)):
         raise ValueError('monitor not ready')
 
@@ -411,6 +832,13 @@ def candidate_backup(config, backup, nodes, retired):
     return {**backup, 'destinations': candidates, 'independent': independent}
 
 
+def verify_peer_access(config, peer, command):
+    result = execute(config, peer, command, stdout=subprocess.PIPE, timeout=10)
+    heartbeat = json.loads(result.stdout)
+    if not 0 <= time.time() - heartbeat['updated_at'] <= 120:
+        raise ValueError('peer access not ready')
+
+
 def topology_fingerprint(config, nodes):
     value = {'nodes': nodes, 'bridge_provider': config['bridge_provider']}
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
@@ -427,7 +855,7 @@ def refresh_monitor_profile(config):
     targets = config.get('monitor_targets', [config['payload_url']])
     if not isinstance(targets, list) or not targets or any(not isinstance(t, str) or ',' in t for t in targets):
         raise ValueError('invalid monitor targets')
-    result = subprocess.run(['/usr/local/bin/ultra-relay', '-ensure-monitor-access', '-spec', spec,
+    result = run_command(['/usr/local/bin/ultra-relay', '-ensure-monitor-access', '-spec', spec,
                     '-monitor-profile-output', config['probe_profile_file'],
                     '-monitor-targets', ','.join(targets)], check=True, timeout=65,
                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -444,9 +872,72 @@ def reconcile(config):
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     if directory.is_symlink() or directory.stat().st_mode & 0o077:
         raise ValueError('private state directory required')
-    with open(directory / 'reconcile.lock', 'a') as lock:
+    with open(directory / 'reconcile.lock', 'a') as lock, reconcile_budget():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
+            stage = 'resume'
+            # Keep progress outside immutable Ansible attempts. Replaying the
+            # identical earlier calls reaches a late interrupted request without
+            # dispatching receiver work over that pending controller.
+            config = dict(config)
+            progress = directory / 'reconcile-progress.json'
+            saved_progress = read_config(private(progress)) if progress.exists() else {'calls': []}
+            if not isinstance(saved_progress, dict):
+                raise ReconcileBlocked('ansible_progress_unavailable')
+            calls = saved_progress.get('calls')
+            if not isinstance(calls, list) or any(
+                    not isinstance(call, dict) or not isinstance(call.get('request'), dict)
+                    or not isinstance(call.get('node'), str)
+                    or not isinstance(call.get('attempt'), str)
+                    or not re.fullmatch(r'attempt-[A-Za-z0-9-]{1,64}', call['attempt'])
+                    for call in calls):
+                raise ReconcileBlocked('ansible_progress_unavailable')
+            # Inspect every node before any controller dispatch, even when a
+            # legacy interrupted attempt has no progress journal to replay.
+            pending_nodes = set()
+            for attempt in (directory / 'ansible').glob('*/attempt-*'):
+                if attempt.is_symlink() or not attempt.is_dir():
+                    raise ReconcileBlocked('ansible_attempt_unavailable', attempt.name)
+                receipt = read_config(private(attempt / 'receipt.json')) if (attempt / 'receipt.json').exists() else {}
+                if receipt.get('state') in ('succeeded', 'failed'):
+                    continue
+                matching = [call for call in calls if call['node'] == attempt.parent.name and call['attempt'] == attempt.name]
+                if len(matching) != 1 or read_config(private(attempt / 'request.json')) != matching[0]['request'] or read_config(private(attempt / 'job.json')).get('operation') != 'reconcile':
+                    raise ReconcileBlocked('ansible_pending_conflict', attempt.name)
+                if attempt.parent.name in pending_nodes:
+                    raise ReconcileBlocked('ansible_multiple_pending')
+                pending_nodes.add(attempt.parent.name)
+            # Completed controller generations have no unresolved dispatch to
+            # resume. Health can fail after every attempt became terminal; the
+            # next pass must use current quota/topology rather than compare new
+            # inputs against those old immutable requests forever. Missing or
+            # queued attempts remain unresolved, including crashes before launch.
+            terminal = bool(calls) and not pending_nodes
+            for call in calls:
+                attempt = directory / 'ansible' / call['node'] / call['attempt']
+                if not attempt.exists() or not (attempt / 'receipt.json').exists():
+                    terminal = False
+                    break
+                saved = read_config(private(attempt / 'request.json'))
+                job = read_config(private(attempt / 'job.json'))
+                receipt = read_config(private(attempt / 'receipt.json'))
+                if saved != call['request'] or job.get('operation') != 'reconcile':
+                    raise ReconcileBlocked('ansible_pending_conflict', attempt.name)
+                if receipt.get('state') not in ('succeeded', 'failed'):
+                    terminal = False
+                    break
+            if terminal:
+                # Keep immutable attempt evidence; only retire the orchestration
+                # cursor after the global pending scan proved it safe.
+                saved_progress = {'calls': []}
+                calls = []
+                atomic_json(progress, saved_progress)
+            journal = {'path': progress, 'calls': calls, 'cursor': 0,
+                       'baseline': saved_progress.get('baseline'), 'health_start': saved_progress.get('health_start')}
+            if journal['health_start'] is not None and (type(journal['health_start']) is not int or not 0 <= journal['health_start'] <= len(calls)):
+                raise ReconcileBlocked('ansible_progress_unavailable')
+            config['_reconcile_journal'] = journal
+
             stage = 'monitor_profile'
             monitor_quota = refresh_monitor_profile(config)
             stage = 'discover'
@@ -455,6 +946,15 @@ def reconcile(config):
             nodes, retired = desired_nodes(config, rows)
             previous = read_config(directory / 'state.json') if (directory / 'state.json').exists() else {}
             backup = read_config(config['backup_config'])
+            if journal['baseline'] is None:
+                journal['baseline'] = {'previous': previous, 'backup': backup}
+            else:
+                baseline = journal['baseline']
+                if not isinstance(baseline, dict) or not isinstance(baseline.get('previous'), dict) or not isinstance(baseline.get('backup'), dict):
+                    raise ReconcileBlocked('ansible_progress_unavailable')
+                if backup != baseline['backup'] and backup != baseline.get('published_backup'):
+                    raise ReconcileBlocked('ansible_pending_conflict')
+                previous, backup = baseline['previous'], baseline['backup']
             if backup.get('source') != 'bridge': raise ValueError('unexpected backup source')
             stage = 'receiver'
             reachable = []
@@ -525,10 +1025,10 @@ def reconcile(config):
                     command = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'UpdateHostKeys=no',
                                '-o', 'ConnectTimeout=5', '-o', 'IdentitiesOnly=yes', '-i', peer_key_path,
                                '-o', 'UserKnownHostsFile=/etc/ultra-recovery/peer_known_hosts', primary['host'], 'heartbeat']
-                    result = execute(config, peer, command, stdout=subprocess.PIPE, timeout=10)
-                    heartbeat = json.loads(result.stdout)
-                    if not 0 <= time.time() - heartbeat['updated_at'] <= 120:
-                        raise ValueError('peer access not ready')
+                    if journal.get('deferred_monitors') and journal['cursor'] < len(journal['calls']):
+                        journal.setdefault('deferred_peer_access', []).append((peer, command))
+                    else:
+                        verify_peer_access(config, peer, command)
                     old_monitor = previous_monitor(config, peer)
                     try:
                         install(config, peer, peer_config)
@@ -539,6 +1039,28 @@ def reconcile(config):
                         raise
                 except (ValueError, subprocess.SubprocessError):
                     peer_pending.append(peer['id'])
+            for old in previous.get('node_metadata', []):
+                if old['id'] in retired and old['id'] != primary['id']:
+                    try:
+                        ansible_apply(config, old, {'ultra_monitor_retire': True})
+                    except (ValueError, subprocess.SubprocessError):
+                        pass  # Deleted/unreachable VM; archives and prune timer remain.
+            journal = config['_reconcile_journal']
+            deferred = journal.setdefault('deferred_monitors', [])
+            if deferred and journal.get('health_start') is None:
+                journal['health_start'] = journal['cursor']
+                write_reconcile_progress(journal)
+            journal['refreshing_health'] = True
+            try:
+                while deferred:
+                    node, mode, required_independence = deferred.pop(0)
+                    monitor_ready(config, node, mode, required_independence)
+            finally:
+                journal['refreshing_health'] = False
+            for peer, command in journal.get('deferred_peer_access', []):
+                verify_peer_access(config, peer, command)
+            if journal['cursor'] != len(journal['calls']):
+                raise ReconcileBlocked('ansible_pending_conflict')
             final_targets = [target(config, node, node['id'] == primary['id']) for node in confirmed]
             final_hosts = {item['host'] for item in final_targets}
             for item in backup['destinations']:
@@ -549,21 +1071,27 @@ def reconcile(config):
             final = {**backup, 'destinations': final_targets, 'independent': bool(independent)}
             if final != backup:
                 create(final)
+                journal['baseline']['published_backup'] = final
+                write_reconcile_progress(journal)
                 atomic_json(config['backup_config'], final)
             # Publish independence only after confirmed required delivery.
             state = {'primary': primary['id'], 'nodes': [node['id'] for node in confirmed], 'peer_pending': peer_pending, 'updated_at': int(time.time()), 'topology': fingerprint, 'node_metadata': confirmed}
             atomic_json(directory / 'state.json', state)
             write_status(config, {'state': 'pending' if peer_pending else 'ready', 'updated_at': int(time.time()),
                                               'independent': bool(independent), 'primary': primary['id'], 'peer_pending': peer_pending})
-            for old in previous.get('node_metadata', []):
-                if old['id'] in retired and old['id'] != primary['id']:
-                    try:
-                        ansible_apply(config, old, {'ultra_monitor_retire': True})
-                    except (ValueError, subprocess.SubprocessError):
-                        pass  # Deleted/unreachable VM; archives and prune timer remain.
+            progress.unlink(missing_ok=True)
+            for attempts in (directory / 'ansible').glob('*'):
+                compact_completed_attempts(attempts)
+            compact_projected_sources(config)
+
             return state
-        except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError):
-            write_status(config, {'state': 'error', 'code': 'reconcile_unavailable', 'stage': stage, 'updated_at': int(time.time())})
+        except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError, ReconcileBlocked) as error:
+            status = {'state': 'error', 'code': 'reconcile_unavailable', 'stage': stage, 'updated_at': int(time.time())}
+            if isinstance(error, ReconcileBlocked):
+                status['reason_code'] = error.code
+                if error.attempt and re.fullmatch(r'attempt-[A-Za-z0-9-]{1,64}', error.attempt):
+                    status['attempt'] = error.attempt
+            write_status(config, status)
             raise ValueError('reconciliation unavailable') from None
 
 

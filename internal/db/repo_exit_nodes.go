@@ -24,7 +24,9 @@ var (
 
 // ExitNodeRepo manages exit_nodes rows on the bridge PostgreSQL.
 type ExitNodeRepo struct {
-	db *DB
+	retirementDisableID string
+	db                  *DB
+	transaction         pgx.Tx
 }
 
 func NewExitNodeRepo(db *DB) *ExitNodeRepo {
@@ -210,6 +212,12 @@ func (r *ExitNodeRepo) bootstrap(ctx context.Context, spec *config.Spec, bootstr
 }
 
 func (r *ExitNodeRepo) mergeBootstrapEntry(ctx context.Context, e exits.BootstrapEntry) error {
+	if r.transaction == nil {
+		return r.withMutation(ctx, func(repo *ExitNodeRepo) error { return repo.mergeBootstrapEntry(ctx, e) })
+	}
+	if err := r.targetMutable(ctx, "", e.Address); err != nil {
+		return err
+	}
 	name := strings.TrimSpace(e.Name)
 	if name == "" {
 		name = "exit"
@@ -228,6 +236,9 @@ func (r *ExitNodeRepo) mergeBootstrapEntry(ctx context.Context, e exits.Bootstra
 	if address != "" && e.Port > 0 {
 		id, err := r.db.Queries.FindExitNodeByAddressPort(ctx, sqlc.FindExitNodeByAddressPortParams{Address: address, Port: int32(e.Port)})
 		if err == nil {
+			if err := r.targetMutable(ctx, fromPGUUID(id), address); err != nil {
+				return err
+			}
 			return r.db.Queries.MergeExitByAddressPort(ctx, sqlc.MergeExitByAddressPortParams{
 				ID:        id,
 				Name:      name,
@@ -250,6 +261,9 @@ func (r *ExitNodeRepo) mergeBootstrapEntry(ctx context.Context, e exits.Bootstra
 	if tunnelUUID != "" {
 		id, err := r.db.Queries.FindExitNodeByTunnelUUID(ctx, tunnelUUID)
 		if err == nil {
+			if err := r.targetMutable(ctx, fromPGUUID(id), address); err != nil {
+				return err
+			}
 			return r.db.Queries.MergeExitByTunnelUUID(ctx, sqlc.MergeExitByTunnelUUIDParams{
 				ID:        id,
 				Name:      name,
@@ -269,7 +283,7 @@ func (r *ExitNodeRepo) mergeBootstrapEntry(ctx context.Context, e exits.Bootstra
 	}
 
 	enabledPtr := enabled
-	_, err := r.Add(ctx, exits.AddParams{
+	_, err := r.add(ctx, exits.AddParams{
 		Name:                 name,
 		Address:              e.Address,
 		Port:                 e.Port,
@@ -292,6 +306,12 @@ func (r *ExitNodeRepo) BootstrapFromSpec(ctx context.Context, spec *config.Spec)
 
 // Add inserts a new exit node (generates id and tunnel_uuid when empty).
 func (r *ExitNodeRepo) Add(ctx context.Context, p exits.AddParams) (exits.Node, error) {
+	var node exits.Node
+	err := r.withMutation(ctx, func(repo *ExitNodeRepo) error { var err error; node, err = repo.add(ctx, p); return err })
+	return node, err
+}
+
+func (r *ExitNodeRepo) add(ctx context.Context, p exits.AddParams) (exits.Node, error) {
 	name := strings.TrimSpace(p.Name)
 	if name == "" {
 		return exits.Node{}, errors.New("exit name required")
@@ -299,6 +319,9 @@ func (r *ExitNodeRepo) Add(ctx context.Context, p exits.AddParams) (exits.Node, 
 	address := strings.TrimSpace(p.Address)
 	if address == "" || p.Port <= 0 || p.Port > 65535 {
 		return exits.Node{}, errors.New("exit address and port required")
+	}
+	if err := r.targetMutable(ctx, strings.TrimSpace(p.ID), address); err != nil {
+		return exits.Node{}, err
 	}
 	tunnelUUID := strings.TrimSpace(p.TunnelUUID)
 	if tunnelUUID == "" {
@@ -389,6 +412,9 @@ func (r *ExitNodeRepo) update(ctx context.Context, id string, patch exits.Update
 		}
 	}
 	port := cur.Port
+	if err := r.targetMutable(ctx, cur.ID, cur.Address, address); err != nil {
+		return exits.Node{}, err
+	}
 	if patch.Port != nil {
 		port = *patch.Port
 		if port <= 0 || port > 65535 {
@@ -480,6 +506,9 @@ func (r *ExitNodeRepo) delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	if err := r.targetMutable(ctx, cur.ID, cur.Address); err != nil {
+		return err
+	}
 	if cur.Enabled {
 		count, err := r.CountEnabled(ctx)
 		if err != nil {
@@ -513,7 +542,7 @@ func (r *ExitNodeRepo) withMutation(ctx context.Context, fn func(*ExitNodeRepo) 
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(817365010)`); err != nil {
 		return err
 	}
-	repo := &ExitNodeRepo{db: &DB{Pool: r.db.Pool, Queries: r.db.Queries.WithTx(tx)}}
+	repo := &ExitNodeRepo{db: &DB{Pool: r.db.Pool, Queries: r.db.Queries.WithTx(tx)}, transaction: tx}
 	if err = fn(repo); err != nil {
 		return err
 	}

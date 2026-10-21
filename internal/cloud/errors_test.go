@@ -51,7 +51,8 @@ func TestFailedPurchaseCarriesUsefulMessage(t *testing.T) {
 		t.Fatal("expected failure")
 	}
 	saved, e := store.Get(context.Background(), op.ID)
-	if e != nil || saved.Error != "insufficient_funds" || saved.HTTPStatus != 400 || !strings.Contains(saved.ErrorMessage, "недостаточно средств") {
+	if e != nil || saved.Error != "insufficient_funds" || saved.HTTPStatus != 400 ||
+		!strings.Contains(saved.ErrorMessage, "недостаточно средств") {
 		t.Fatal("missing actionable failure", e)
 	}
 }
@@ -71,7 +72,8 @@ func TestStageJournalIncludesFailureAndNoRepeatedUnknownSpam(t *testing.T) {
 		t.Fatal(e)
 	}
 	events, _ := s.Store.Events(ctx, offer.ID)
-	if len(events) != 2 || events[0].Outcome != "started" || events[1].Outcome != "failed" || events[1].Code != "creation_requires_reconciliation" {
+	if len(events) != 2 || events[0].Outcome != "started" || events[1].Outcome != "failed" ||
+		events[1].Code != "creation_requires_reconciliation" {
 		t.Fatal("missing failure journal", events)
 	}
 	_ = s.Step(ctx)

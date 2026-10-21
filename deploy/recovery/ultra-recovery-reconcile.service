@@ -1,12 +1,14 @@
 [Unit]
 Description=Reconcile backups and independent monitoring for owned ready ultra exits
-After=postgresql.service network-online.target
+After=network-online.target
 Wants=network-online.target
 [Service]
 Type=oneshot
 User=root
 UMask=0077
 ExecStart=/usr/bin/python3 /opt/ultra-recovery/reconcile.py --config /etc/ultra-recovery/reconcile.json
+# reconcile.py budgets 480s plus bounded controller cancellation/status writes.
+# Keep the 60s margin below ultra_lifecycle.py's 600s shared lock retry window.
 TimeoutStartSec=540
 Nice=10
 PrivateTmp=yes

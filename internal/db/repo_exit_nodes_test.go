@@ -3,14 +3,15 @@ package db
 import (
 	"context"
 	"errors"
-	"github.com/NikitaDmitryuk/ultra/internal/config"
-	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/runtimestate"
 
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/google/uuid"
@@ -221,7 +222,15 @@ func TestDeleteExitPreservesLateAccountingAndReplacementIdentity(t *testing.T) {
 	owner := uuid.NewString()
 	at := time.Now().UTC()
 	period := at.Format("2006-01")
-	batch := runtimestate.TrafficBatch{Version: 1, NodeID: uuid.NewString(), BatchID: uuid.NewString(), CollectedAt: at, Samples: []runtimestate.Sample{{AccountID: owner, ExitID: us.ID, ExitTag: "to-exit-" + us.ID, Period: period, UplinkBytes: 10, ChargeTotalBytes: 262144}}}
+	batch := runtimestate.TrafficBatch{
+		Version:     1,
+		NodeID:      uuid.NewString(),
+		BatchID:     uuid.NewString(),
+		CollectedAt: at,
+		Samples: []runtimestate.Sample{
+			{AccountID: owner, ExitID: us.ID, ExitTag: "to-exit-" + us.ID, Period: period, UplinkBytes: 10, ChargeTotalBytes: 262144},
+		},
+	}
 	traffic := NewTrafficRepo(database)
 	if err = traffic.RecordBatch(ctx, batch); err != nil {
 		t.Fatal(err)
@@ -242,11 +251,14 @@ func TestDeleteExitPreservesLateAccountingAndReplacementIdentity(t *testing.T) {
 		t.Fatal("replacement reused deleted identity")
 	}
 	var charge, up int64
-	if err = database.Pool.QueryRow(ctx, `SELECT charged_bytes,uplink_bytes FROM account_exit_usage WHERE account_id=$1 AND exit_id=$2 AND period=$3`, owner, us.ID, period).Scan(&charge, &up); err != nil || charge != 524288 || up != 20 {
+	if err = database.Pool.QueryRow(ctx, `SELECT charged_bytes,uplink_bytes FROM account_exit_usage WHERE account_id=$1 AND exit_id=$2 AND period=$3`, owner, us.ID, period).Scan(&charge, &up); err != nil ||
+		charge != 524288 ||
+		up != 20 {
 		t.Fatalf("deleted cost lost %d %d %v", charge, up, err)
 	}
 	var count int
-	if err = database.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM account_exit_usage WHERE exit_id=$1`, replacement.ID).Scan(&count); err != nil || count != 0 {
+	if err = database.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM account_exit_usage WHERE exit_id=$1`, replacement.ID).Scan(&count); err != nil ||
+		count != 0 {
 		t.Fatalf("replacement stole historical accounting %d %v", count, err)
 	}
 }

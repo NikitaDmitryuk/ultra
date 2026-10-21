@@ -25,17 +25,16 @@ jobs:
         run: go mod download
       - name: Verify dependencies
         run: go mod verify
+      - name: Check formatting
+        run: make format-check
       - name: Lint
-        uses: golangci/golangci-lint-action@v9.3.0
-        with:
-          version: v2.14.0
-          args: --timeout 5m
+        run: make lint
       - name: Vet
         run: make vet
       - name: Check agent context and ADRs
         run: make harness-check
   go-tests:
-    name: Go tests, race and PostgreSQL recovery
+    name: Go tests and PostgreSQL recovery
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -61,10 +60,40 @@ jobs:
         run: go mod download
       - name: Test
         run: make test
-      - name: Race tests
-        run: make test-race
+      - name: Verify imported exit identity preservation with PostgreSQL
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q postgresql-client
+          python3 deploy/recovery/test_dump_exit_identity.py --test-dsn "$DATABASE_URL"
       - name: Dump and restore during VPN load
         run: python3 scripts/test-load-pg-recovery.py --container '${{ job.services.postgres.id }}'
+  go-race:
+    name: Go race tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ultra_ci_only
+          POSTGRES_DB: ultra_ci
+        ports:
+          - 5432:5432
+        options: --health-cmd "pg_isready -U postgres -d ultra_ci" --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      DATABASE_URL: postgres://postgres:ultra_ci_only@127.0.0.1:5432/ultra_ci?sslmode=disable
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download dependencies
+        run: go mod download
+      - name: Race tests
+        run: make test-race
   build:
     name: Build all binaries
     runs-on: ubuntu-latest
@@ -104,9 +133,11 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install pinned Ansible validation tools
-        run: python3 -m pip install 'ansible-core==2.20.0' 'ansible-lint==26.1.0'
+        run: python3 -m pip install 'ansible-core==2.20.0' 'ansible-lint==26.10.0'
       - name: Validate Ansible roles
         run: make test-ansible
+      - name: Operator deployment and recovery regression tests
+        run: make test-operator
   ansible-integration:
     name: Ansible SSH and offline runtime
     runs-on: ubuntu-latest
@@ -125,7 +156,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install pinned Ansible validation tools
-        run: python3 -m pip install 'ansible-core==2.20.0' 'ansible-lint==26.1.0'
+        run: python3 -m pip install 'ansible-core==2.20.0' 'ansible-lint==26.10.0'
       - name: Verify exit role and offline Ansible runtime
         run: |
           python3 scripts/build-ansible-runtime.py --architecture amd64 --output /tmp/ultra-ansible-runtime.tar.gz
@@ -136,6 +167,14 @@ jobs:
           python3 scripts/test-ansible-release.py --ansible-playbook "$(command -v ansible-playbook)"
           python3 scripts/test-ansible-recovery.py --installer "$PWD/ultra-install" --ansible-playbook "$(command -v ansible-playbook)"
           python3 scripts/test-ansible-forward-role.py --ansible-playbook "$(command -v ansible-playbook)"
+      - name: Verify restricted bridge PostgreSQL standby observation
+        run: |
+          docker pull postgres:16
+          python3 scripts/test-ansible-postgres-monitor.py
+          python3 scripts/test-ansible-postgres-replica-slot.py
+          python3 scripts/test-ansible-postgres-credential.py
+      - name: Verify atomic imports with PostgreSQL 16
+        run: python3 scripts/test-import-protocol-pg.py
   nginx:
     name: Primary XHTTP with actual Nginx
     runs-on: ubuntu-latest
@@ -191,6 +230,7 @@ jobs:
     needs:
       - go-quality
       - go-tests
+      - go-race
       - build
       - ansible-validation
       - ansible-integration

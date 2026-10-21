@@ -75,7 +75,12 @@ func render(data []byte, profile, socks, httpAddr string) ([]byte, error) {
 	inbound := func(addr, protocol string) map[string]any {
 		host, port, _ := net.SplitHostPort(addr)
 		n, _ := strconv.Atoi(port)
-		return map[string]any{"listen": host, "port": n, "protocol": protocol, "settings": map[string]any{"auth": "noauth", "udp": protocol == "socks"}}
+		return map[string]any{
+			"listen":   host,
+			"port":     n,
+			"protocol": protocol,
+			"settings": map[string]any{"auth": "noauth", "udp": protocol == "socks"},
+		}
 	}
 	full["inbounds"] = []any{inbound(socks, "socks"), inbound(httpAddr, "http")}
 	full["log"] = map[string]any{"loglevel": "warning"}

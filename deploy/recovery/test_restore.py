@@ -18,11 +18,59 @@ import restore_peer as peer
 
 
 class RestoreContracts(unittest.TestCase):
+    def test_retirement_floor_requires_enforcing_recovery_migration(self):
+        ledger='state/var/lib/ultra-ansible/lifecycle-retired.json'
+        common.restore_controller_floor({'files':{}})
+        common.restore_controller_floor({'controller_enforcement_floor':0,'files':{}})
+        for value in (1, 2, -1, True, None, '0'):
+            with self.subTest(floor=value),self.assertRaisesRegex(ValueError,'^controller_enforcement_migration_required$'):
+                common.restore_controller_floor({'controller_enforcement_floor':value,'files':{}})
+        with self.assertRaisesRegex(ValueError,'^controller_enforcement_migration_required$'):
+            common.restore_controller_floor({'controller_enforcement_floor':0,'files':{ledger:{}}})
+        self.assertEqual(common.safe_error_code(ValueError('controller_enforcement_migration_required')),
+                         'controller_enforcement_migration_required')
+
+    def test_stage_rejects_declared_enforcement_floor_before_activation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stage=Path(directory);(stage/'artifacts').mkdir()
+            (stage/'manifest.json').write_text(json.dumps({'kind':'backup','source':'bridge','files':{},
+                                                         'controller_enforcement_floor':1}))
+            (stage/'artifacts/manifest.json').write_text(json.dumps({'kind':'artifact','source':'bridge','files':{}}))
+            with self.assertRaisesRegex(ValueError,'^controller_enforcement_migration_required$'):
+                common.stage_manifests(stage)
+            (stage/'manifest.json').write_text(json.dumps({'kind':'backup','source':'bridge','files':{}}))
+            (stage/'artifacts/manifest.json').write_text(json.dumps({'kind':'artifact','source':'bridge','files':{},
+                                                                   'controller_enforcement_floor':1}))
+            with self.assertRaisesRegex(ValueError,'^controller_enforcement_migration_required$'):
+                common.stage_manifests(stage)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_host_stage_enforces_independent_state_and_artifact_limits(self):
+        import io
+        import tarfile
+        archive=self.root/'stage.tar.gz'
+        for state_size,artifact_size,accepted in ((50,100,True),(51,100,False),(50,101,False)):
+            with self.subTest(state=state_size,artifact=artifact_size):
+                with tarfile.open(archive,'w:gz') as output:
+                    for name,size in (('database.dump',state_size),('artifacts/binary',artifact_size)):
+                        info=tarfile.TarInfo(name);info.size=size
+                        output.addfile(info,io.BytesIO(b'x'*size))
+                target=host.Host(self.root,{'restore_id':'a'*64,'stage_sha256':common.sha(archive)})
+                with mock.patch.object(host,'MAX_BYTES',50),mock.patch.object(host,'MAX_ARTIFACT_BYTES',100),mock.patch.object(host,'stage_manifests',return_value=({},{})):
+                    if accepted:
+                        target.unpack()
+                        self.assertEqual((target.stage/'artifacts/binary').stat().st_size,100)
+                        shutil.rmtree(target.stage)
+                    else:
+                        with self.assertRaisesRegex(ValueError,'stage_archive_exceeds_bounds'):target.unpack()
+                        self.assertFalse(target.stage.exists())
+                        self.assertFalse((self.root/'stage.pending').exists())
+
     def test_seed_retirement_resumes_after_crash_and_rejects_foreign_marker(self):
         directory=self.root/'replica';retired=self.root/'retired';directory.mkdir();retired.mkdir()
         seed=directory/'seed';seed.mkdir();(seed/'payload').write_text('owned old seed')
@@ -89,26 +137,6 @@ class RestoreContracts(unittest.TestCase):
         before=common.plan_id(checked,'c'*64)
         checked['migration_identity']=dict(identity,target_machine_id='d'*32)
         self.assertNotEqual(before,common.plan_id(checked,'c'*64))
-
-    def test_peer_projection_is_pure_and_checks_authenticated_credentials(self):
-        import restore_ansible as adapter
-        identity=self.root/'stage/state/etc/ultra-recovery/key'
-        identity.parent.mkdir(parents=True);identity.write_bytes(b'synthetic key')
-        pins=identity.with_name('pins');pins.write_bytes(b'synthetic pins')
-        manifest={'files':{'state/etc/ultra-recovery/key':{'sha256':common.sha(identity)},
-                           'state/etc/ultra-recovery/pins':{'sha256':common.sha(pins)}}}
-        nodes=[{'identity':'/etc/ultra-recovery/key','known_hosts':'/etc/ultra-recovery/pins',
-                'address':'198.18.0.12','plan':{'action':'reseed'}}]
-        with mock.patch.object(common,'stage_manifests',return_value=(manifest,{})), mock.patch.object(adapter.subprocess,'run') as execute:
-            values=adapter.project_peer_inputs({'isolated_peer_addresses':['198.18.0.12']},self.root,nodes)
-            self.assertEqual(values[0]['variables']['ultra_peer_plan']['action'],'reseed')
-            execute.assert_not_called()
-            with self.assertRaisesRegex(ValueError,'isolated_restore_production_peer_forbidden'):
-                adapter.project_peer_inputs({'isolated_peer_addresses':[]},self.root,nodes)
-            identity.write_bytes(b'changed')
-            with self.assertRaisesRegex(ValueError,'restored_peer_credential_changed'):
-                adapter.project_peer_inputs({},self.root,nodes)
-
     def test_activate_reloads_nginx_after_start_and_on_completed_resume(self):
         target=host.Host(self.root, {'restore_id':'a'*64, 'fence':{}, 'target_host':'fixture', 'old_bridge_address':'192.0.2.1'})
         with mock.patch.object(host, 'stage_manifests', return_value=({}, {})), mock.patch.object(host, 'restore_certbot_lineages'), mock.patch.object(host, 'restore_units'), mock.patch.object(target, 'override'), mock.patch.object(target, 'wait_runtime'), mock.patch.object(host, 'AUTOMATION_UNITS', ()), mock.patch.object(host, 'run') as run:
@@ -265,6 +293,23 @@ class RestoreContracts(unittest.TestCase):
         for update in ({'confirmed_at': 151}, {'confirmed_at': -3601}, {'target_host': 'other'}, {'source_address': '192.0.2.2'}, {'confirmed_offline': False}):
             with self.assertRaises(ValueError):
                 common.fence(dict(value, **update), 'bridge', 'root@target', '192.0.2.1', now=150)
+    def test_database_restore_target_cannot_be_a_vpn_host(self):
+        original = json.loads(Path(__file__).with_name('restore.example.json').read_text())
+        for host in (original['new_bridge_address'], original['target']['host'].rsplit('@', 1)[-1], original['ingress']['host'].rsplit('@', 1)[-1]):
+            value = dict(original, database_host=host, database_target=dict(original['database_target'], host='root@' + host))
+            with self.subTest(host=host), self.assertRaisesRegex(ValueError, 'dedicated_database_must_be_separate_from_vpn'):
+                common.configuration(value)
+
+    def test_restored_deployment_tracks_the_selected_database_host(self):
+        from restore_host import relocate_deployment
+        deployment = {'bridge_ipv4': '192.0.2.10', 'database_host': '192.0.2.40', 'other': 'preserved', 'ingress': {'public_host': '192.0.2.10'}}
+        plan = {'old_bridge_address': '192.0.2.10', 'new_bridge_address': '192.0.2.11', 'new_bridge_provider': 'provider', 'database_host': '192.0.2.41'}
+        restored = relocate_deployment(deployment, plan)
+        self.assertEqual(restored['database_host'], plan['database_host'])
+        self.assertEqual(restored['bridge_ipv4'], plan['new_bridge_address'])
+        self.assertEqual(restored['ingress']['public_host'], plan['new_bridge_address'])
+        self.assertEqual(restored['other'], 'preserved')
+
     def test_plan_default_source_and_stable_resume_identity(self):
         value = json.loads(Path(__file__).with_name('restore.example.json').read_text())
         value.pop('source')
@@ -342,22 +387,12 @@ class RestoreContracts(unittest.TestCase):
         self.assertEqual(changed['primary_xhttp']['server_name'],'stable.example')
         self.assertEqual(changed['users'],[{'uuid':'stable-user'}]);self.assertEqual(changed['exits'],[{'address':'192.0.2.1'}])
         self.assertEqual(changed['public_entries'][1]['host'],'nl.example')
-    def test_managed_firewall_admission_precedes_peer_ssh(self):
-        target=host.Host(self.root,{'restore_id':'a'*64,'old_bridge_address':'192.0.2.1','new_bridge_address':'192.0.2.2','fence':{},'target_host':'root@192.0.2.2'})
-        target.status['system_identifier']='123';target.status['database_name']='fixture'
-        module=mock.Mock();calls=[]
-        module.ensure_provider_peer_rule.side_effect=lambda *args,**kwargs:calls.append('firewall')
-        module.execute.side_effect=lambda *args,**kwargs:calls.append('ssh')
-        with mock.patch.object(target,'nodes',return_value=(module,{'ssh_identity_file':'/etc/ultra-recovery/identity'},[{'id':'node','address':'192.0.2.3','known_hosts':'/etc/ultra-recovery/pins'}])),mock.patch.object(host,'sql',return_value='[8443]'):target.peer_reseed()
-        self.assertEqual(calls,['firewall','firewall'])
-        module.execute.assert_not_called()
-        self.assertEqual(target.status['reseed_nodes'][0]['plan']['tunnel_port'],8443)
     def test_certificate_inventory_uses_only_explicit_file_fields(self):
         value={'public_xhttp_tls':{'cert_file':'/etc/letsencrypt/live/vpn/fullchain.pem','key_file':'/etc/letsencrypt/live/vpn/privkey.pem'},'reality':{'private_key':'opaque-secret'},'other':{'key_file':'not-a-path'}}
         self.assertEqual(host.certificate_files(value),['/etc/letsencrypt/live/vpn/fullchain.pem','/etc/letsencrypt/live/vpn/privkey.pem'])
-    def test_dsn_requires_local_pg16_default_endpoint(self):
-        self.assertEqual(host.database_spec({'database':{'dsn':'postgres://app:p%40ss@localhost:5432/app?sslmode=disable'}}), ('app','app','p@ss'))
-        for value in ('postgres://app:pw@remote/app', 'postgres://app:pw@localhost:5433/app','postgres://app@localhost/app','postgres://app:pw@localhost/app;DROP'):
+    def test_dsn_requires_dedicated_database_tunnel_endpoint(self):
+        self.assertEqual(host.database_spec({'database':{'dsn':'postgres://app:p%40ss@localhost:25432/app?sslmode=disable'}}), ('app','app','p@ss'))
+        for value in ('postgres://app:pw@remote/app', 'postgres://app:pw@localhost:5432/app', 'postgres://app:pw@localhost:5433/app','postgres://app@localhost/app','postgres://app:pw@localhost/app;DROP'):
             with self.assertRaises(ValueError): host.database_spec({'database':{'dsn':value}})
     def test_saved_environment_reset_and_file_override(self):
         directory=self.root/'etc/systemd/system';directory.mkdir(parents=True)
@@ -383,6 +418,10 @@ class RestoreContracts(unittest.TestCase):
         self.assertIn('Reactivate previous HTTPS forward configuration',role)
         (nginx/'conf.d/acme-proxy.conf').write_text('foreign')
         with self.assertRaisesRegex(ValueError,'foreign_ingress'):peer.prepare_forward(plan,self.root)
+
+    def test_forward_peer_bundle_contains_recovery_database_dependency(self):
+        role = Path(__file__).parents[1] / 'ansible/roles/restore_peer/tasks/main.yml'
+        self.assertIn('loop: [restore_peer.py, restore_common.py, recovery.py, db_connection.py]', role.read_text())
 
     def test_forward_pid_must_be_old_primary_owned_ssh(self):
         listeners='LISTEN 0 128 127.0.0.1:15432 0.0.0.0:* users:(("sshd",pid=456,fd=5))'
@@ -416,21 +455,20 @@ class RestoreContracts(unittest.TestCase):
     def test_fresh_ingress_ack_required_before_automation(self):
         plan={'restore_id':'a'*64,'target_host':'target','old_bridge_address':'192.0.2.1', 'fence':{'source':'bridge','confirmed_offline':True,'confirmed_at':time.time(),'target_host':'target','source_address':'192.0.2.1'}}
         target=host.Host(self.root,plan)
-        target.status['completed']=list(common.PHASES[:5])
+        target.status['completed']=list(common.PHASES[:3])
         with self.assertRaisesRegex(ValueError,'phase_order'):target.phase('automation')
         with self.assertRaisesRegex(ValueError,'verified_public'):target.phase('ingress')
         plan['ingress_confirmed']=True;target.phase('ingress')
         self.assertIn('ingress',target.status['completed'])
     def test_readiness_waits_for_first_receipts(self):
         target=host.Host(self.root,{'restore_id':'a'*64,'readiness_timeout':30})
-        target.status['database_name']='fixture'
         backup={'snapshot_at':time.time(),'source':'bridge','backup_name':'synthetic.age','backup_sha256':'a'*64,'artifact_sha256':'b'*64,'delivered_target_ids':['independent']};controller={'state':'ready','independent':True,'updated_at':time.time(),'primary':'independent'}
         config={'bridge_provider':'source','state_dir':'/fixture'};state={'primary':'independent','updated_at':time.time(),'node_metadata':[{'id':'independent','provider':'other'}]}
-        with mock.patch.object(target,'wait_runtime'),mock.patch.object(host.time,'sleep') as sleep,mock.patch.object(Path,'read_text',side_effect=[FileNotFoundError(),json.dumps(backup),json.dumps(controller),json.dumps(config),json.dumps(state)]),mock.patch.object(host,'sql',return_value='[{"state":"streaming","age":1}]'):
+        with mock.patch.object(target,'wait_runtime'),mock.patch.object(host.time,'sleep') as sleep,mock.patch.object(Path,'read_text',side_effect=[FileNotFoundError(),json.dumps(backup),json.dumps(controller),json.dumps(config),json.dumps(state)]):
             with self.assertRaisesRegex(ValueError,'readiness_timeout'):
                 target.ready()
             target.ready()
-        sleep.assert_not_called();self.assertEqual(target.status['replicas_ready'],1)
+        sleep.assert_not_called();self.assertTrue(target.status['ready_at'])
 
 
 @unittest.skipUnless(shutil.which('age-keygen'), 'age tools required')
@@ -567,3 +605,55 @@ class BackendDNSRestoreContracts(unittest.TestCase):
         names = [call.kwargs['server_hostname'] for call in self.context.return_value.wrap_socket.call_args_list]
         self.assertEqual(names.count('old.example.com'), 2)
         self.assertNotIn('core.example.com', names)
+
+class FleetDirectoryTests(unittest.TestCase):
+    def test_restored_parent_is_root_owned_and_runtime_traversable(self):
+        with tempfile.TemporaryDirectory() as root:
+            target = Path(root) / 'fleet'
+            target.mkdir(mode=0o700)
+            with mock.patch.object(host.pwd, 'getpwnam', return_value=type('Account', (), {'pw_gid': 123})()), mock.patch.object(host.os, 'chown') as chown:
+                host.restore_fleet_directory(target)
+                chown.assert_called_once_with(target, 0, 123)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o750)
+            link = Path(root) / 'linked'
+            link.symlink_to(target)
+            with self.assertRaisesRegex(ValueError, 'directory_invalid'):
+                host.restore_fleet_directory(link)
+
+class DatabaseAdapterRetryTests(unittest.TestCase):
+    def test_transient_failure_and_success_each_dispatch_fresh_database_observation(self):
+        import restore_ansible as adapter
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            identity = directory / 'operator-key'
+            identity.write_text('synthetic'); identity.chmod(0o600)
+            pins = directory / 'pins'; pins.write_text('synthetic pin'); pins.chmod(0o600)
+            stage = directory / 'stage'
+            public = stage / 'state/etc/ultra-db-tunnel/id_ed25519.pub'
+            public.parent.mkdir(parents=True); public.write_text('ssh-ed25519 YWJj fixture')
+            spec = stage / 'state/etc/ultra-relay/spec.json'
+            spec.parent.mkdir(parents=True); spec.write_text(json.dumps({'database': {'dsn': 'postgres://app:fixture@127.0.0.1:25432/app?sslmode=disable'}}))
+            endpoint = {'host': 'root@192.0.2.30', 'identity': str(identity), 'known_hosts': str(pins)}
+            config = {'database_target': endpoint, 'target': dict(endpoint, host='root@192.0.2.10'), '_ansible_executable': '/synthetic/ansible'}
+            plan = {'restore_id': 'a'*64, 'database_host': '192.0.2.30', 'database': {'name': 'app', 'user': 'app'}}
+            paths = []
+            def execute(argv, **kwargs):
+                target = Path(argv[argv.index('--state-dir')+1]); paths.append(target)
+                if len(paths) == 1:
+                    return subprocess.CompletedProcess(argv, 1)
+                target.mkdir(); (target / 'result.json').write_text('{"verified":true}')
+                return subprocess.CompletedProcess(argv, 0)
+            state = {'files': {'state/etc/ultra-db-tunnel/id_ed25519.pub': {'sha256': common.sha(public)}}}
+            with mock.patch.object(common, 'stage_manifests', return_value=(state, {})), mock.patch.object(adapter, 'runtime_arguments', return_value=[]), mock.patch.object(adapter.subprocess, 'run', side_effect=execute):
+                with self.assertRaisesRegex(ValueError, 'pinned_remote_action_failed'):
+                    adapter.database(config, directory, plan, directory/'archive')
+                self.assertTrue(adapter.database(config, directory, plan, directory/'archive')['verified'])
+                self.assertTrue(adapter.database(config, directory, plan, directory/'archive')['verified'])
+            self.assertEqual(len(set(paths)), 3)
+            for path in paths:
+                self.assertIn(plan['restore_id'], path.parent.name)
+                variables = json.loads((path.parent/'variables.json').read_text())
+                self.assertEqual(variables['ultra_restore_database_plan'], plan)
+                inventory = json.loads((path.parent/'inventory.json').read_text())
+                bridge = inventory['all']['hosts']['bridge']
+                self.assertEqual(bridge['db_tunnel_ultra_public_key'], 'ssh-ed25519 YWJj fixture')

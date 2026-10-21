@@ -5,12 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/config"
-	"github.com/NikitaDmitryuk/ultra/internal/subscriptionmeta"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/subscriptionmeta"
 )
 
 type subscriptionCacheEntry struct {
@@ -53,7 +54,12 @@ func (s *Server) handleSubscriptionCache(w http.ResponseWriter, r *http.Request)
 			req := httptest.NewRequest("GET", "/v1/subscriptions/"+url.PathEscape(token)+"?"+query, nil).WithContext(r.Context())
 			req.SetPathValue("token", token)
 			req.Header.Set("User-Agent", "Happ")
-			format, err := config.ResolveSubscriptionFormat(req.URL.Query().Get("format"), req.URL.Query().Get("transport"), req.UserAgent(), s.spec.HappDefaultJSON)
+			format, err := config.ResolveSubscriptionFormat(
+				req.URL.Query().Get("format"),
+				req.URL.Query().Get("transport"),
+				req.UserAgent(),
+				s.spec.HappDefaultJSON,
+			)
 			if err != nil {
 				continue
 			}

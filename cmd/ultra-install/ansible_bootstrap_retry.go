@@ -41,14 +41,18 @@ func frozenBootstrapStageLeaseDependencies() frozenBootstrapRetryDependencies {
 			return deployansible.WithOperationLock(ctx, path)
 		},
 		attach: func(ctx context.Context, lock, id string) (context.Context, func(), error) {
-			return (deployansible.Client{Socket: bootstrapBrokerSocket}).WithLifecycleOperationLock(ctx, lock, id)
+			return (deployansible.Client{Socket: bootstrapBrokerSocket}).WithActiveLifecycleOperationLock(ctx, lock, id)
 		},
 		remoteLock: deployansible.WithOperationLock,
 	}
 }
 
 // This adapter is internal to fixed root CLI protocols, never a service API.
-func withFrozenBootstrapStageLease(ctx context.Context, directory string, action func(context.Context) (deployansible.Receipt, error)) (deployansible.Receipt, error) {
+func withFrozenBootstrapStageLease(
+	ctx context.Context,
+	directory string,
+	action func(context.Context) (deployansible.Receipt, error),
+) (deployansible.Receipt, error) {
 	return withFrozenBootstrapStageLeaseWith(ctx, directory, frozenBootstrapStageLeaseDependencies(), action)
 }
 
@@ -75,13 +79,22 @@ func readRootPrivateBootstrapRetry(path string) ([]byte, error) {
 	return readBootstrapGenerationInput(path)
 }
 
-func retryFrozenBootstrapOperatorWith(ctx context.Context, directory, python, executable string, deps frozenBootstrapRetryDependencies) (deployansible.Receipt, error) {
+func retryFrozenBootstrapOperatorWith(
+	ctx context.Context,
+	directory, python, executable string,
+	deps frozenBootstrapRetryDependencies,
+) (deployansible.Receipt, error) {
 	return withFrozenBootstrapStageLeaseWith(ctx, directory, deps, func(locked context.Context) (deployansible.Receipt, error) {
 		return deps.replay(locked, directory, python, executable)
 	})
 }
 
-func withFrozenBootstrapStageLeaseWith(ctx context.Context, directory string, deps frozenBootstrapRetryDependencies, action func(context.Context) (deployansible.Receipt, error)) (deployansible.Receipt, error) {
+func withFrozenBootstrapStageLeaseWith(
+	ctx context.Context,
+	directory string,
+	deps frozenBootstrapRetryDependencies,
+	action func(context.Context) (deployansible.Receipt, error),
+) (deployansible.Receipt, error) {
 	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
 		return deployansible.Receipt{}, errors.New("retry_stage_directory_invalid")
 	}
@@ -105,11 +118,21 @@ func withFrozenBootstrapStageLeaseWith(ctx context.Context, directory string, de
 		Binary    string `json:"binary_sha256"`
 	}
 	digest := sha256.Sum256(requestRaw)
-	if json.Unmarshal(requestRaw, &request) != nil || json.Unmarshal(jobRaw, &job) != nil || job.Schema != 1 || job.Hash != hex.EncodeToString(digest[:]) || job.Binary != job.Hash {
+	if json.Unmarshal(requestRaw, &request) != nil || json.Unmarshal(jobRaw, &job) != nil || job.Schema != 1 ||
+		job.Hash != hex.EncodeToString(digest[:]) ||
+		job.Binary != job.Hash {
 		return deployansible.Receipt{}, errors.New("retry_inputs_invalid")
 	}
 	switch job.Operation {
-	case "bootstrap", "bootstrap-postgres", "bootstrap-exit", "bootstrap-bridge", "adopt-replica-tunnels", "ingress", "configure-bot", "bootstrap-automation", "reserve-rolledback-bootstrap":
+	case "inspect-bootstrap",
+		"bootstrap",
+		"bootstrap-postgres",
+		"bootstrap-exit",
+		"bootstrap-bridge",
+		"ingress",
+		"configure-bot",
+		"bootstrap-automation",
+		"reserve-rolledback-bootstrap":
 	default:
 		return deployansible.Receipt{}, errors.New("retry_bootstrap_operation_required")
 	}
@@ -133,7 +156,11 @@ func withFrozenBootstrapStageLeaseWith(ctx context.Context, directory string, de
 		receiptRaw, receiptErr := deps.readPrivate(filepath.Join(directory, "receipt.json"))
 		if receiptErr == nil {
 			var receipt map[string]any
-			if json.Unmarshal(receiptRaw, &receipt) != nil || receipt["schema_version"] != float64(job.Schema) || receipt["operation"] != job.Operation || receipt["request_sha256"] != job.Hash || receipt["binary_sha256"] != job.Binary || (receipt["state"] != "running" && receipt["state"] != "failed" && receipt["state"] != "succeeded") {
+			if json.Unmarshal(receiptRaw, &receipt) != nil || receipt["schema_version"] != float64(job.Schema) ||
+				receipt["operation"] != job.Operation ||
+				receipt["request_sha256"] != job.Hash ||
+				receipt["binary_sha256"] != job.Binary ||
+				(receipt["state"] != "running" && receipt["state"] != "failed" && receipt["state"] != "succeeded") {
 				return errors.New("retry_frozen_receipt_invalid")
 			}
 		} else if !os.IsNotExist(receiptErr) {
@@ -141,7 +168,7 @@ func withFrozenBootstrapStageLeaseWith(ctx context.Context, directory string, de
 		}
 		return nil
 	}
-	remote := func(operatorDirectory string, modePath string, originalMode []byte) (deployansible.Receipt, error) {
+	native := func(operatorDirectory string, modePath string, originalMode []byte) (deployansible.Receipt, error) {
 		if filepath.Clean(lock) == bootstrapBrokerLockDirectory {
 			return deployansible.Receipt{}, errors.New("retry_local_broker_attachment_required")
 		}
@@ -151,7 +178,8 @@ func withFrozenBootstrapStageLeaseWith(ctx context.Context, directory string, de
 		if operatorDirectory == "" {
 			operatorDirectory = filepath.Join(lock, "operator")
 		}
-		if filepath.Clean(operatorDirectory) != operatorDirectory || filepath.Dir(operatorDirectory) != lock || filepath.Base(operatorDirectory) != "operator" {
+		if filepath.Clean(operatorDirectory) != operatorDirectory || filepath.Dir(operatorDirectory) != lock ||
+			filepath.Base(operatorDirectory) != "operator" {
 			return deployansible.Receipt{}, errors.New("retry_original_operator_lock_required_resume_full_apply")
 		}
 		operator, operatorRelease, err := deps.operator(ctx, operatorDirectory)
@@ -163,14 +191,10 @@ func withFrozenBootstrapStageLeaseWith(ctx context.Context, directory string, de
 			return deployansible.Receipt{}, err
 		}
 		rawMode, modeReadErr := deps.readPrivate(modePath)
-		if originalMode != nil {
-			if modeReadErr != nil {
-				return deployansible.Receipt{}, modeReadErr
-			}
-			if !bytes.Equal(rawMode, originalMode) {
-				return deployansible.Receipt{}, errors.New("retry_frozen_inputs_changed")
-			}
-		} else if !os.IsNotExist(modeReadErr) {
+		if modeReadErr != nil {
+			return deployansible.Receipt{}, modeReadErr
+		}
+		if !bytes.Equal(rawMode, originalMode) {
 			return deployansible.Receipt{}, errors.New("retry_frozen_inputs_changed")
 		}
 		locked, release, err := deps.remoteLock(operator, lock)
@@ -181,12 +205,23 @@ func withFrozenBootstrapStageLeaseWith(ctx context.Context, directory string, de
 		if err = validateLockedStage(); err != nil {
 			return deployansible.Receipt{}, err
 		}
+		// Native execution keeps the frozen stateRoot lease in its context.
+		// Retain the bridge broker's active descriptor separately through action;
+		// replacing locked would make RunLocalRetryFailed use the wrong lease.
+		_, brokerRelease, err := deps.attach(locked, bootstrapBrokerLockDirectory, lifecycleID(attempt))
+		if err != nil {
+			return deployansible.Receipt{}, err
+		}
+		defer brokerRelease()
+		if err = validateLockedStage(); err != nil {
+			return deployansible.Receipt{}, err
+		}
 		return action(locked)
 	}
 	modePath := filepath.Join(attempt, "execution-mode.json")
 	modeRaw, modeErr := deps.readPrivate(modePath)
-	if os.IsNotExist(modeErr) && lock != bootstrapBrokerLockDirectory {
-		return remote("", modePath, nil)
+	if os.IsNotExist(modeErr) {
+		return deployansible.Receipt{}, errors.New("retry_remote_lifecycle_attachment_unsupported")
 	}
 	if modeErr != nil {
 		return deployansible.Receipt{}, modeErr
@@ -201,10 +236,59 @@ func withFrozenBootstrapStageLeaseWith(ctx context.Context, directory string, de
 		}
 	}
 	if !mode.Local {
+		if !mode.Native {
+			if job.Operation != "inspect-bootstrap" {
+				return deployansible.Receipt{}, errors.New("retry_remote_lifecycle_attachment_unsupported")
+			}
+			if err := validateFrozenRemoteInspection(directory, lock, mode, request.Inventory); err != nil {
+				return deployansible.Receipt{}, err
+			}
+			attemptRaw, err := deps.readPrivate(filepath.Join(attempt, "..", "attempt.json"))
+			if err != nil {
+				return deployansible.Receipt{}, err
+			}
+			var activeAttempt struct {
+				Active   string `json:"active"`
+				Complete bool   `json:"complete"`
+			}
+			if json.Unmarshal(attemptRaw, &activeAttempt) != nil || activeAttempt.Active != filepath.Base(attempt) ||
+				activeAttempt.Complete {
+				return deployansible.Receipt{}, errors.New("retry_active_attempt_required")
+			}
+			operator, operatorRelease, err := deps.operator(ctx, mode.OperatorDirectory)
+			if err != nil {
+				return deployansible.Receipt{}, err
+			}
+			defer operatorRelease()
+			if err = validateLockedStage(); err != nil {
+				return deployansible.Receipt{}, err
+			}
+			currentMode, err := deps.readPrivate(modePath)
+			if err != nil || !bytes.Equal(currentMode, modeRaw) {
+				return deployansible.Receipt{}, errors.New("retry_frozen_inputs_changed")
+			}
+			locked, release, err := deps.remoteLock(operator, lock)
+			if err != nil {
+				return deployansible.Receipt{}, err
+			}
+			defer release()
+			if err = validateLockedStage(); err != nil {
+				return deployansible.Receipt{}, err
+			}
+			currentMode, err = deps.readPrivate(modePath)
+			if err != nil || !bytes.Equal(currentMode, modeRaw) {
+				return deployansible.Receipt{}, errors.New("retry_frozen_inputs_changed")
+			}
+			currentAttempt, err := deps.readPrivate(filepath.Join(attempt, "..", "attempt.json"))
+			if err != nil || !bytes.Equal(currentAttempt, attemptRaw) {
+				return deployansible.Receipt{}, errors.New("retry_frozen_inputs_changed")
+			}
+			return action(locked)
+		}
 		if lock == bootstrapBrokerLockDirectory {
 			return deployansible.Receipt{}, errors.New("retry_frozen_execution_invalid")
 		}
-		return remote(mode.OperatorDirectory, modePath, modeRaw)
+		return native(mode.OperatorDirectory, modePath, modeRaw)
 	}
 	if lock != bootstrapBrokerLockDirectory {
 		return deployansible.Receipt{}, errors.New("retry_frozen_execution_invalid")
@@ -256,11 +340,17 @@ func withFrozenBootstrapStageLeaseWith(ctx context.Context, directory string, de
 		return deployansible.Receipt{}, errors.New("retry_frozen_target_invalid")
 	}
 	local := true
-	p := &installplan.InstallPlan{Bridge: installplan.BridgeConfig{SSHHost: target[0], Address: target[1]}, ControllerLocal: &local, ControllerLocalTarget: mode.Target}
+	p := &installplan.InstallPlan{
+		Bridge:                installplan.BridgeConfig{SSHHost: target[0], Address: target[1]},
+		ControllerLocal:       &local,
+		ControllerLocalTarget: mode.Target,
+	}
 	if !deps.machine(p) {
 		return deployansible.Receipt{}, errors.New("retry_frozen_machine_changed")
 	}
-	if !filepath.IsAbs(mode.OperatorDirectory) || filepath.Clean(mode.OperatorDirectory) != mode.OperatorDirectory || filepath.Base(mode.OperatorDirectory) != "operator" || filepath.Dir(mode.OperatorDirectory) != filepath.Dir(filepath.Dir(attempt)) {
+	if !filepath.IsAbs(mode.OperatorDirectory) || filepath.Clean(mode.OperatorDirectory) != mode.OperatorDirectory ||
+		filepath.Base(mode.OperatorDirectory) != "operator" ||
+		filepath.Dir(mode.OperatorDirectory) != filepath.Dir(filepath.Dir(attempt)) {
 		return deployansible.Receipt{}, errors.New("retry_original_operator_lock_required_resume_full_apply")
 	}
 	operator, operatorRelease, err := deps.operator(ctx, mode.OperatorDirectory)
@@ -292,6 +382,37 @@ func withFrozenBootstrapStageLeaseWith(ctx context.Context, directory string, de
 		return deployansible.Receipt{}, err
 	}
 	return action(locked)
+}
+
+// A failed initial inspection is read-only and precedes the remote lifecycle
+// reservation. Retry only that frozen stage under its original local locks.
+// Mutating remote bootstrap stages still require broker lifecycle attachment.
+func validateFrozenRemoteInspection(directory, lock string, mode frozenExecution, inventory map[string]any) error {
+	if mode.Local || mode.Native || !filepath.IsAbs(lock) || filepath.Clean(lock) != lock ||
+		filepath.Clean(filepath.Dir(filepath.Dir(filepath.Dir(directory)))) != lock ||
+		filepath.Base(directory) != "inspect" ||
+		!strings.HasPrefix(filepath.Base(filepath.Dir(directory)), "attempt-") ||
+		!strings.HasPrefix(filepath.Base(filepath.Dir(filepath.Dir(directory))), "bootstrap-") ||
+		mode.OperatorDirectory != filepath.Join(lock, "operator") {
+		return errors.New("retry_frozen_execution_invalid")
+	}
+	target := strings.Split(mode.Target, "|")
+	all, _ := inventory["all"].(map[string]any)
+	vars, _ := all["vars"].(map[string]any)
+	children, _ := all["children"].(map[string]any)
+	bridgeGroup, _ := children["bridge"].(map[string]any)
+	hosts, _ := bridgeGroup["hosts"].(map[string]any)
+	bridge, _ := hosts["bridge"].(map[string]any)
+	sshArgs, _ := vars["ansible_ssh_common_args"].(string)
+	if len(target) != 2 || target[0] == "" || target[1] == "" ||
+		bridge["ansible_host"] != target[0] || bridge["ansible_connection"] == "local" ||
+		vars["ultra_inspect_dir"] != filepath.Join(filepath.Dir(directory), "inspection") ||
+		!strings.Contains(sshArgs, "StrictHostKeyChecking=yes") ||
+		!strings.Contains(sshArgs, "UpdateHostKeys=no") ||
+		!strings.Contains(sshArgs, "UserKnownHostsFile=") {
+		return errors.New("retry_frozen_target_invalid")
+	}
+	return nil
 }
 
 func validateBootstrapRetryOperatorDirectory(path string) error {

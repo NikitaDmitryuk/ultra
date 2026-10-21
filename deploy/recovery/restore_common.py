@@ -18,7 +18,7 @@ AUTOMATION_UNITS = (
     'ultra-ansible-controller.service',
 )
 APP_UNITS = ('ultra-relay.service', 'ultra-bot.service')
-PHASES = ('prepare', 'install', 'database', 'peer_reseed', 'activate', 'ingress', 'automation', 'ready')
+PHASES = ('prepare', 'install', 'activate', 'ingress', 'automation', 'ready')
 
 
 def canonical(value):
@@ -81,6 +81,11 @@ def configuration(value):
         raise ValueError('explicit_new_bridge_provider_required')
     value['new_bridge_provider'] = value['new_bridge_provider'].lower()
     endpoint(value['target'])
+    database_target = endpoint(value['database_target'])
+    database_host = str(ipaddress.IPv4Address(value['database_host']))
+    database_endpoint = database_target['host'].rsplit('@', 1)[-1]
+    if database_endpoint != database_host:
+        raise ValueError('restore_database_target_mismatch')
     value.setdefault('ingress_mode', 'forward')
     if value['ingress_mode'] not in ('forward', 'direct'):
         raise ValueError('unsupported_ingress_mode')
@@ -88,6 +93,11 @@ def configuration(value):
         endpoint(value['ingress'])
         if value['target']['host'] == value['ingress']['host']:
             raise ValueError('ingress_must_be_separate')
+    vpn_hosts = {value['new_bridge_address'], value['target']['host'].rsplit('@', 1)[-1]}
+    if value['ingress_mode'] == 'forward':
+        vpn_hosts.add(value['ingress']['host'].rsplit('@', 1)[-1])
+    if database_host in vpn_hosts:
+        raise ValueError('dedicated_database_must_be_separate_from_vpn')
     for key in ('bundle', 'identity', 'fence_file', 'state_dir'):
         path = Path(value[key])
         if not path.is_absolute() or '..' in path.parts or path == Path('/'):
@@ -115,6 +125,8 @@ def plan_id(config, bundle_sha):
     # destinations and the selected immutable generation cannot.
     identity = {key: config[key] for key in ('source', 'old_bridge_address', 'new_bridge_address',
                                             'public_host', 'subscription_domain', 'new_bridge_provider')}
+    identity.update(database_host=config['database_host'],
+                    database_target={key: config['database_target'].get(key, 22) for key in ('host', 'port')})
     identity['ingress_mode'] = config.get('ingress_mode', 'forward')
     if config.get('migration_identity') is not None:
         identity['migration_identity'] = migration_identity(config['migration_identity'])
@@ -169,6 +181,8 @@ def stage_manifests(stage):
                 if not name.startswith('state/'):
                     raise ValueError('invalid_state_inventory')
                 destination(name.removeprefix('state/'))
+    restore_controller_floor(state)
+    restore_controller_floor(artifacts)
     files = artifacts['files']
     for name in ('usr/local/bin/ultra-relay', 'usr/local/bin/ultra-bot'):
         if name not in files:
@@ -186,6 +200,16 @@ def stage_manifests(stage):
     if not isinstance(release.get('database_schema_min'), int) or not isinstance(release.get('database_schema_max'), int):
         raise ValueError('release_schema_bounds_required')
     return state, artifacts
+
+
+def restore_controller_floor(state):
+    # The old restore format carries no proof that its selected immutable
+    # controller enforces retirement. An authenticated generation is not a
+    # capability proof; refuse activation until an enforcing migration exists.
+    floor = state.get('controller_enforcement_floor', 0)
+    ledger = 'state/var/lib/ultra-ansible/lifecycle-retired.json'
+    if type(floor) is not int or floor != 0 or ledger in state.get('files', {}):
+        raise ValueError('controller_enforcement_migration_required')
 
 
 def read_private(path):
@@ -207,6 +231,7 @@ SAFE_ERROR_CODES = frozenset((
     'certbot_lineage_version_limit',
     'dns_api_request_failed',
     'dns_conflicting_records',
+    'dns_delete_unconfirmed',
     'dns_duplicate_roles',
     'dns_foreign_record',
     'dns_invalid_address',
@@ -219,6 +244,16 @@ SAFE_ERROR_CODES = frozenset((
     'dns_invalid_record_id',
     'dns_invalid_record_name',
     'dns_invalid_records',
+    'dns_migration_acceptance_mismatch',
+    'dns_migration_acceptance_required',
+    'dns_migration_candidate_changed',
+    'dns_migration_candidate_exists',
+    'dns_migration_incomplete',
+    'dns_migration_not_prepared',
+    'dns_migration_paths_conflict',
+    'dns_migration_policy_changed',
+    'dns_migration_requires_new_names',
+    'dns_migration_rollback_unavailable',
     'dns_owned_name_change_requires_migration',
     'dns_pagination_limit',
     'dns_pagination_loop',
@@ -236,6 +271,7 @@ SAFE_ERROR_CODES = frozenset((
     'dns_untrusted_api_url',
     'dns_untrusted_pagination',
     'dns_write_unconfirmed',
+    'dns_zone_change_requires_migration',
     'absolute_private_restore_paths_required',
     'absolute_ssh_files_required',
     'application_artifact_missing',
@@ -244,6 +280,7 @@ SAFE_ERROR_CODES = frozenset((
     'bridge_manifests_required',
     'checksum',
     'configuration_too_large',
+    'controller_enforcement_migration_required',
     'database_intent_changed',
     'database_not_created_by_this_restore',
     'database_restore_requires_inactive_apps',

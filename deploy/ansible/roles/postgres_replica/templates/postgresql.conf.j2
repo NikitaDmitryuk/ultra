@@ -1,0 +1,15 @@
+# Managed bridge physical standby. Application writes always use the primary tunnel.
+data_directory = '/var/lib/postgresql/16/ultra-replica'
+hba_file = '/etc/ultra-postgres-replica/pg_hba.conf'
+ident_file = '/etc/ultra-postgres-replica/pg_ident.conf'
+listen_addresses = '127.0.0.1'
+port = 5433
+unix_socket_directories = '/run/ultra-postgres-replica'
+unix_socket_permissions = 0700
+hot_standby = on
+{% set parameters = hostvars['database'].postgres_replica_primary_parameters.stdout_lines[-1] | from_json %}
+{% for key in ['max_connections', 'max_worker_processes', 'max_wal_senders', 'max_prepared_transactions', 'max_locks_per_transaction'] %}
+{{ key }} = {{ parameters[key] }}
+{% endfor %}
+timezone = 'UTC'
+log_timezone = 'UTC'

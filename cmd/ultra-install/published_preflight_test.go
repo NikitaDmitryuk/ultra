@@ -4,14 +4,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/config"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 func TestPublishedApplyPreflightProcess(t *testing.T) {
@@ -28,8 +29,32 @@ func TestPublishedApplyPreflightProcess(t *testing.T) {
 		return
 	}
 	dir := t.TempDir()
-	p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE": "192.0.2.1", "EXIT": "192.0.2.2", "REALITY_DEST": "example.com:443", "IDENTITY": filepath.Join(dir, "identity")})
-	p.Automation = &installplan.AutomationConfig{Version: "v1.2.3", ReleaseDir: dir, AgeRecipient: "age1fixture", BridgeProvider: "a", BridgeIPv4: "192.0.2.1", BridgeURL: "https://sync.example.com/healthz", KnownHostsFile: filepath.Join(dir, "pins"), StaticNodes: []installplan.AutomationNode{{Name: "NL", Address: "192.0.2.2", Provider: "a"}}, Ingress: &installplan.AutomationIngress{Domain: "edge.example.com", Email: "operator@example.com", Path: "/connect", PublicHost: "192.0.2.1", BackendPort: 18080}}
+	p := installplan.LegacyValuesToPlan(
+		map[string]string{
+			"BRIDGE_IP":         "192.0.2.1",
+			"MAIN_EXIT_IP":      "192.0.2.2",
+			"REALITY_DEST":      "example.com:443",
+			"BRIDGE_SSH_KEY":    filepath.Join(dir, "identity"),
+			"MAIN_EXIT_SSH_KEY": filepath.Join(dir, "identity"),
+		},
+	)
+	p.Automation = &installplan.AutomationConfig{
+		Version:        "v1.2.3",
+		ReleaseDir:     dir,
+		AgeRecipient:   "age1fixture",
+		BridgeProvider: "a",
+		BridgeIPv4:     "192.0.2.1",
+		BridgeURL:      "https://sync.example.com/healthz",
+		KnownHostsFile: filepath.Join(dir, "pins"),
+		StaticNodes:    []installplan.AutomationNode{{Name: "NL", Address: "192.0.2.2", Provider: "a"}},
+		Ingress: &installplan.AutomationIngress{
+			Domain:      "edge.example.com",
+			Email:       "operator@example.com",
+			Path:        "/connect",
+			PublicHost:  "192.0.2.1",
+			BackendPort: 18080,
+		},
+	}
 	var assets []map[string]any
 	for _, name := range []string{"ultra-relay-linux-amd64", "ultra-relay-linux-arm64", "ultra-bot-linux-amd64", "ultra-bot-linux-arm64", "ultra-client-linux-amd64", "ultra-client-linux-arm64", "ultra-recovery.tar.gz"} {
 		data := []byte(name)
@@ -76,7 +101,13 @@ pathlib.Path(LOG).write_text('inspect-bootstrap\n')
 		t.Fatal(err)
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestPublishedApplyPreflightProcess$")
-	cmd.Env = append(os.Environ(), "ULTRA_PREFLIGHT_TEST_PLAN="+plan, "ULTRA_PREFLIGHT_TEST_LOG="+log, "ULTRA_ANSIBLE_EXECUTABLE="+executable, "ULTRA_INSTALL_STATE_DIR="+filepath.Join(dir, "state"))
+	cmd.Env = append(
+		os.Environ(),
+		"ULTRA_PREFLIGHT_TEST_PLAN="+plan,
+		"ULTRA_PREFLIGHT_TEST_LOG="+log,
+		"ULTRA_ANSIBLE_EXECUTABLE="+executable,
+		"ULTRA_INSTALL_STATE_DIR="+filepath.Join(dir, "state"),
+	)
 	out, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "published_ingress_change_requires_explicit_cutover") {
 		t.Fatalf("expected preflight rejection, got %v: %s", err, out)
@@ -92,8 +123,24 @@ pathlib.Path(LOG).write_text('inspect-bootstrap\n')
 }
 
 func TestPublishedIngressPlanAllowsExactReuseAndUnpublishedStage(t *testing.T) {
-	p := &installplan.InstallPlan{SchemaVersion: 2, Automation: &installplan.AutomationConfig{Ingress: &installplan.AutomationIngress{Domain: "edge.example.com", PublicHost: "192.0.2.1", Path: "/connect", BackendPort: 18080}}}
-	spec := &config.Spec{PrimaryXHTTP: &config.PrimaryXHTTPIngress{Host: "192.0.2.1", BackendPort: 18080, PublicXHTTPTLSSpec: config.PublicXHTTPTLSSpec{ServerName: "edge.example.com", Port: 443, Path: "/connect"}}}
+	p := &installplan.InstallPlan{
+		SchemaVersion: 2,
+		Automation: &installplan.AutomationConfig{
+			Ingress: &installplan.AutomationIngress{
+				Domain:      "edge.example.com",
+				PublicHost:  "192.0.2.1",
+				Path:        "/connect",
+				BackendPort: 18080,
+			},
+		},
+	}
+	spec := &config.Spec{
+		PrimaryXHTTP: &config.PrimaryXHTTPIngress{
+			Host:               "192.0.2.1",
+			BackendPort:        18080,
+			PublicXHTTPTLSSpec: config.PublicXHTTPTLSSpec{ServerName: "edge.example.com", Port: 443, Path: "/connect"},
+		},
+	}
 	if err := checkPublishedIngressPlan(p, spec); err != nil {
 		t.Fatal(err)
 	}
@@ -109,8 +156,27 @@ func TestPublishedIngressPlanAllowsExactReuseAndUnpublishedStage(t *testing.T) {
 }
 
 func TestPublishedIngressAdoptionRejectsUnpublishedAndGatewayChange(t *testing.T) {
-	p := &installplan.InstallPlan{SchemaVersion: 2, AdoptRuntime: true, Automation: &installplan.AutomationConfig{Ingress: &installplan.AutomationIngress{Domain: "edge.example.com", PublicHost: "192.0.2.1", Path: "/connect", BackendPort: 18080, GatewayPort: 18081}}}
-	spec := &config.Spec{GatewayVLESSPort: 18081, PrimaryXHTTP: &config.PrimaryXHTTPIngress{Host: "192.0.2.1", BackendPort: 18080, PublicXHTTPTLSSpec: config.PublicXHTTPTLSSpec{ServerName: "edge.example.com", Port: 443, Path: "/connect"}}}
+	p := &installplan.InstallPlan{
+		SchemaVersion: 2,
+		AdoptRuntime:  true,
+		Automation: &installplan.AutomationConfig{
+			Ingress: &installplan.AutomationIngress{
+				Domain:      "edge.example.com",
+				PublicHost:  "192.0.2.1",
+				Path:        "/connect",
+				BackendPort: 18080,
+				GatewayPort: 18081,
+			},
+		},
+	}
+	spec := &config.Spec{
+		GatewayVLESSPort: 18081,
+		PrimaryXHTTP: &config.PrimaryXHTTPIngress{
+			Host:               "192.0.2.1",
+			BackendPort:        18080,
+			PublicXHTTPTLSSpec: config.PublicXHTTPTLSSpec{ServerName: "edge.example.com", Port: 443, Path: "/connect"},
+		},
+	}
 	if err := checkPublishedIngressPlan(p, spec); err != nil {
 		t.Fatal(err)
 	}

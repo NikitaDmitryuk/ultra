@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic QEMU acceptance topology; run inside a dedicated disposable container.
 
-Creates four independent Ubuntu systemd guests and pinned SSH endpoints. It never
+Creates six independent Ubuntu systemd guests and pinned SSH endpoints. It never
 loads operator recovery keys, production bundles, or production configuration.
 The base must be an official Ubuntu 24.04 cloud image. All guest networking uses
 QEMU restrict=on and explicit forwards to this container's loopback listeners.
@@ -15,7 +15,7 @@ import shlex
 import subprocess
 import time
 
-NODES = ('bridge', 'nl', 'us', 'replacement')
+NODES = ('bridge', 'nl', 'us', 'replacement', 'database', 'database_restore')
 PORTS = (22, 80, 443, 8444, 24443, 15432, 8443, 18080)
 
 

@@ -38,7 +38,13 @@ func TestProviderPoolSurvivesReplacementRotationDeletionAndLateBatch(t *testing.
 	if err := d.Pool.QueryRow(ctx, `SELECT account_id::text FROM users WHERE uuid=$1`, user).Scan(&owner); err != nil {
 		t.Fatal(err)
 	}
-	batch := runtimestate.TrafficBatch{Version: 1, NodeID: uuid.NewString(), BatchID: uuid.NewString(), CollectedAt: now, Samples: []runtimestate.Sample{{AccountID: owner, ExitID: old, ExitTag: "to-exit-" + old, ChargeTotalBytes: 150}}}
+	batch := runtimestate.TrafficBatch{
+		Version:     1,
+		NodeID:      uuid.NewString(),
+		BatchID:     uuid.NewString(),
+		CollectedAt: now,
+		Samples:     []runtimestate.Sample{{AccountID: owner, ExitID: old, ExitTag: "to-exit-" + old, ChargeTotalBytes: 150}},
+	}
 	traffic := NewTrafficRepo(d)
 	for range 2 {
 		if err := traffic.RecordBatch(ctx, batch); err != nil {
@@ -69,10 +75,12 @@ func TestProviderPoolSurvivesReplacementRotationDeletionAndLateBatch(t *testing.
 		t.Fatal(err)
 	}
 	var blocked bool
-	if err = d.Pool.QueryRow(ctx, `SELECT blocked FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, rotated, replacement).Scan(&blocked); err != nil || !blocked {
+	if err = d.Pool.QueryRow(ctx, `SELECT blocked FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, rotated, replacement).Scan(&blocked); err != nil ||
+		!blocked {
 		t.Fatal("aggregate personal quota not enforced", blocked, err)
 	}
-	if err = d.Pool.QueryRow(ctx, `SELECT blocked FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, rotated, manual).Scan(&blocked); err != nil || blocked {
+	if err = d.Pool.QueryRow(ctx, `SELECT blocked FROM user_exit_quotas WHERE user_uuid=$1 AND exit_id=$2`, rotated, manual).Scan(&blocked); err != nil ||
+		blocked {
 		t.Fatal("manual fallback blocked", blocked, err)
 	}
 	if _, err = d.Pool.Exec(ctx, `DELETE FROM users WHERE uuid=$1`, rotated); err != nil {
@@ -137,12 +145,21 @@ func TestPoolPendingOldPeriodCannotBypassBackgroundReplay(t *testing.T) {
 	if err := r.EnsureVultr(ctx, exit, exit, 1000); err != nil {
 		t.Fatal(err)
 	}
-	batch := runtimestate.TrafficBatch{Version: 1, NodeID: uuid.NewString(), BatchID: uuid.NewString(), CollectedAt: time.Now(), Samples: []runtimestate.Sample{{AccountID: uuid.NewString(), ExitID: "unknown-pending", Period: "2026-09", ChargeTotalBytes: 50}}}
+	batch := runtimestate.TrafficBatch{
+		Version:     1,
+		NodeID:      uuid.NewString(),
+		BatchID:     uuid.NewString(),
+		CollectedAt: time.Now(),
+		Samples: []runtimestate.Sample{
+			{AccountID: uuid.NewString(), ExitID: "unknown-pending", Period: "2026-09", ChargeTotalBytes: 50},
+		},
+	}
 	if err := NewTrafficRepo(d).RecordBatch(ctx, batch); err == nil {
 		t.Fatal("background replay accepted unclassified old-period spend")
 	}
 	var recorded bool
-	if err := d.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM traffic_batches WHERE batch_id=$1)`, batch.BatchID).Scan(&recorded); err != nil || recorded {
+	if err := d.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM traffic_batches WHERE batch_id=$1)`, batch.BatchID).Scan(&recorded); err != nil ||
+		recorded {
 		t.Fatal("unsafe batch acknowledged", recorded, err)
 	}
 }

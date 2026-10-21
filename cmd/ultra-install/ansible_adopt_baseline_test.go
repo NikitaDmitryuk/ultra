@@ -3,8 +3,9 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"testing"
+
+	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 func TestPrepareAdoptionInstalledBaseline(t *testing.T) {
@@ -19,17 +20,31 @@ func TestPrepareAdoptionInstalledBaseline(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var inspection bootstrapInspection
-			encoded, _ := json.Marshal(map[string]any{"files": []map[string]string{{"source": "/opt/ultra-recovery/release-manifest.json", "content": base64.StdEncoding.EncodeToString([]byte(tc.raw))}}})
+			encoded, _ := json.Marshal(
+				map[string]any{
+					"files": []map[string]string{
+						{
+							"source":  "/opt/ultra-recovery/release-manifest.json",
+							"content": base64.StdEncoding.EncodeToString([]byte(tc.raw)),
+						},
+					},
+				},
+			)
 			if err := json.Unmarshal(encoded, &inspection); err != nil {
 				t.Fatal(err)
 			}
 			vars := map[string]any{}
 			inventory := map[string]any{"all": map[string]any{"vars": vars}}
-			err := prepareAdoptionBaseline(&installplan.InstallPlan{AdoptRuntime: true}, inventory, map[string]bootstrapInspection{"bridge": inspection})
+			err := prepareAdoptionBaseline(
+				&installplan.InstallPlan{AdoptRuntime: true},
+				inventory,
+				map[string]bootstrapInspection{"bridge": inspection},
+			)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tc.wantErr)
 			}
-			if !tc.wantErr && (vars["ultra_previous_relay_unit_sha256"] != legacyRelayUnitSHA || vars["ultra_adoption_installed_manifest"] == nil) {
+			if !tc.wantErr &&
+				(vars["ultra_previous_relay_unit_sha256"] != legacyRelayUnitSHA || vars["ultra_adoption_installed_manifest"] == nil) {
 				t.Fatal("trusted installed baseline missing")
 			}
 		})
@@ -47,7 +62,10 @@ func TestAdoptionInventoryPreservesExplicitEmptyRouting(t *testing.T) {
 		"bridge": map[string]any{"hosts": map[string]any{"bridge": bridge}},
 		"exits":  map[string]any{"hosts": map[string]any{"exit_0": exit}},
 	}}}
-	ds := &installplan.DesiredState{BridgeSpec: []byte(`{"geoip_direct_tags":[],"future_setting":{"enabled":false}}`), ExitSpecs: map[string][]byte{"exit": []byte(`{"geosite_direct_tags":[]}`)}}
+	ds := &installplan.DesiredState{
+		BridgeSpec: []byte(`{"geoip_direct_tags":[],"future_setting":{"enabled":false}}`),
+		ExitSpecs:  map[string][]byte{"exit": []byte(`{"geosite_direct_tags":[]}`)},
+	}
 	if err := preserveAdoptionJSON(p, ds, inventory); err != nil {
 		t.Fatal(err)
 	}

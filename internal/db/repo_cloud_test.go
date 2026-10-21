@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -75,6 +76,35 @@ func TestCloudConcurrentReservations(t *testing.T) {
 	}
 }
 
+func TestCloudCapacityLockDoesNotWaitForWorker(t *testing.T) {
+	d := openTestDB(t)
+	repo := NewCloudRepo(d)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	unlockWorker, err := repo.Lock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlockWorker()
+	unlockCapacity, err := repo.LockCapacity(ctx)
+	if err != nil {
+		t.Fatal("capacity lock waited behind cloud worker:", err)
+	}
+	defer unlockCapacity()
+	tx, err := d.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	var routeLockAvailable bool
+	if err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(817365007)`).Scan(&routeLockAvailable); err != nil {
+		t.Fatal(err)
+	}
+	if !routeLockAvailable {
+		t.Fatal("capacity lock blocks the shared route/user/traffic advisory lock")
+	}
+}
+
 func TestRouteCredentialsLifecycle(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
@@ -85,12 +115,23 @@ func TestRouteCredentialsLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	exitID := uuid.NewString()
-	_, err = d.Pool.Exec(ctx, `INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid,enabled) VALUES($1,'test','192.0.2.1',443,$2,false)`, exitID, uuid.NewString())
+	_, err = d.Pool.Exec(
+		ctx,
+		`INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid,enabled) VALUES($1,'test','192.0.2.1',443,$2,false)`,
+		exitID,
+		uuid.NewString(),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err = routes.Publish(ctx, "fra", "Frankfurt", exitID); err != nil {
 		t.Fatal(err)
+	}
+	if published, err := routes.IsPublished(ctx, "fra", exitID); err != nil || !published {
+		t.Fatalf("published route not visible: published=%t err=%v", published, err)
+	}
+	if applied, err := routes.IsApplied(ctx, exitID); err != nil || applied {
+		t.Fatalf("new route reported applied: applied=%t err=%v", applied, err)
 	}
 	loaded, err := users.ListAll(ctx)
 	if err != nil {
@@ -115,8 +156,13 @@ func TestRouteCredentialsLifecycle(t *testing.T) {
 	if err = routes.Publish(ctx, "fra", "Frankfurt", exitID); err != nil {
 		t.Fatal(err)
 	}
+	if applied, err := routes.IsApplied(ctx, exitID); err != nil || !applied {
+		t.Fatalf("same-target republish reset applied marker: applied=%t err=%v", applied, err)
+	}
 	var savedAlias, savedLoc string
-	if err = d.Pool.QueryRow(ctx, `SELECT uuid::text,location_id::text FROM vpn_route_credentials WHERE user_uuid=$1`, u.UUID).Scan(&savedAlias, &savedLoc); err != nil || savedAlias != alias || savedLoc != loc {
+	if err = d.Pool.QueryRow(ctx, `SELECT uuid::text,location_id::text FROM vpn_route_credentials WHERE user_uuid=$1`, u.UUID).Scan(&savedAlias, &savedLoc); err != nil ||
+		savedAlias != alias ||
+		savedLoc != loc {
 		t.Fatal("publication changed stable credentials", err)
 	}
 	next, err := users.RotateUUID(ctx, u.UUID)
@@ -124,11 +170,26 @@ func TestRouteCredentialsLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var old int
-	if err = d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM vpn_route_credentials WHERE uuid=$1 OR user_uuid=$2`, alias, u.UUID).Scan(&old); err != nil || old != 0 {
+	if err = d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM vpn_route_credentials WHERE uuid=$1 OR user_uuid=$2`, alias, u.UUID).Scan(&old); err != nil ||
+		old != 0 {
 		t.Fatal("old credentials survived reset", err)
 	}
-	if err = d.Pool.QueryRow(ctx, `SELECT uuid::text,location_id::text FROM vpn_route_credentials WHERE user_uuid=$1`, next).Scan(&savedAlias, &savedLoc); err != nil || savedAlias == alias || savedLoc != loc {
+	if err = d.Pool.QueryRow(ctx, `SELECT uuid::text,location_id::text FROM vpn_route_credentials WHERE user_uuid=$1`, next).Scan(&savedAlias, &savedLoc); err != nil ||
+		savedAlias == alias ||
+		savedLoc != loc {
 		t.Fatal("reset lost location", err)
+	}
+	replacementID := uuid.NewString()
+	if _, err = d.Pool.Exec(ctx,
+		`INSERT INTO exit_nodes(id,name,address,port,tunnel_uuid,enabled) VALUES($1,'replacement','192.0.2.2',443,$2,false)`,
+		replacementID, uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
+	if err = routes.Publish(ctx, "fra", "Frankfurt", replacementID); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := routes.IsApplied(ctx, replacementID); err != nil || applied {
+		t.Fatalf("replacement inherited old route applied marker: applied=%t err=%v", applied, err)
 	}
 }
 
@@ -156,7 +217,8 @@ func TestConcurrentLocationAndUserCreation(t *testing.T) {
 		}
 	}
 	var missing int
-	if e := d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM users u CROSS JOIN vpn_locations l WHERE u.kind='vless' AND l.published AND NOT EXISTS(SELECT 1 FROM vpn_route_credentials c WHERE c.user_uuid=u.uuid AND c.location_id=l.id)`).Scan(&missing); e != nil || missing != 0 {
+	if e := d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM users u CROSS JOIN vpn_locations l WHERE u.kind='vless' AND l.published AND NOT EXISTS(SELECT 1 FROM vpn_route_credentials c WHERE c.user_uuid=u.uuid AND c.location_id=l.id)`).Scan(&missing); e != nil ||
+		missing != 0 {
 		t.Fatal("concurrent publication missed credentials", missing, e)
 	}
 }
@@ -172,12 +234,91 @@ func TestCloudJournalSurvivesRepositoryRestart(t *testing.T) {
 	if _, e := r.Reserve(ctx, offer); e != nil {
 		t.Fatal(e)
 	}
-	event := cloud.Event{OperationID: offer.ID, Phase: "prepare", Outcome: "failed", Code: "insufficient_funds", HTTPStatus: 400, DurationMS: 450, At: time.Now()}
+	event := cloud.Event{
+		OperationID: offer.ID,
+		Phase:       "prepare",
+		Outcome:     "failed",
+		Code:        "insufficient_funds",
+		HTTPStatus:  400,
+		DurationMS:  450,
+		At:          time.Now(),
+	}
 	if e := r.RecordEvent(ctx, event); e != nil {
 		t.Fatal(e)
 	}
 	events, e := NewCloudRepo(d).Events(ctx, offer.ID)
 	if e != nil || len(events) != 1 || events[0].Code != event.Code || events[0].HTTPStatus != 400 || events[0].Message == "" {
 		t.Fatal("journal not recoverable", e)
+	}
+}
+
+// Replacement identity is a UUID, including for operations persisted before
+// canonical JSON writes. Repeated spelling variants must not reserve another VM.
+func TestCloudReplacementUUIDCanonicalIdentity(t *testing.T) {
+	const sourceID = "aa00bb11-cc22-dd33-ee44-ff5566778899"
+	for name, spelling := range map[string]string{
+		"uppercase": strings.ToUpper(sourceID),
+		"braced":    "{" + strings.ToUpper(sourceID) + "}",
+		"compact":   strings.ReplaceAll(strings.ToUpper(sourceID), "-", ""),
+		"urn":       "URN:UUID:" + strings.ToUpper(sourceID),
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := openTestDB(t)
+			repo := NewCloudRepo(d)
+			ctx := context.Background()
+			sourceOffer := cloud.Offer{ID: sourceID, Actor: 1, ExpiresAt: time.Now().Add(time.Minute)}
+			if err := repo.SaveOffer(ctx, sourceOffer); err != nil {
+				t.Fatal(err)
+			}
+			source, err := repo.Reserve(ctx, sourceOffer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source.State = "ready"
+			if err := repo.Save(ctx, source); err != nil {
+				t.Fatal(err)
+			}
+			first := cloud.Offer{ID: uuid.NewString(), Actor: 1, ExpiresAt: time.Now().Add(time.Minute), ReplaceID: spelling}
+			if err := repo.SaveOffer(ctx, first); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := repo.Offer(ctx, first.ID)
+			if err != nil || saved.ReplaceID != sourceID {
+				t.Fatalf("persisted offer identity=%q: %v", saved.ReplaceID, err)
+			}
+			replacement, err := repo.Reserve(ctx, first)
+			if err != nil || replacement.Offer.ReplaceID != sourceID {
+				t.Fatalf("reserved identity=%q: %v", replacement.Offer.ReplaceID, err)
+			}
+			// Save must also canonicalize an operation loaded from historical JSON.
+			replacement.Offer.ReplaceID = spelling
+			if err := repo.Save(ctx, replacement); err != nil {
+				t.Fatal(err)
+			}
+			current, err := repo.Get(ctx, replacement.ID)
+			if err != nil || current.Offer.ReplaceID != sourceID {
+				t.Fatalf("saved operation identity=%q: %v", current.Offer.ReplaceID, err)
+			}
+			// Simulate an existing pre-fix row: no migration or rewrite is required for
+			// the reservation guard to recognize the same physical source.
+			if _, err := d.Pool.Exec(ctx, `UPDATE cloud_operations SET body=jsonb_set(body,'{offer,replace_id}',to_jsonb($2::text)) WHERE id=$1`, replacement.ID, spelling); err != nil {
+				t.Fatal(err)
+			}
+			repeated, err := repo.Reserve(ctx, first)
+			if err != nil || repeated.ID != replacement.ID {
+				t.Fatalf("same-offer retry changed reservation: %+v %v", repeated, err)
+			}
+			second := cloud.Offer{ID: uuid.NewString(), Actor: 1, ExpiresAt: time.Now().Add(time.Minute), ReplaceID: sourceID}
+			if err := repo.SaveOffer(ctx, second); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repo.Reserve(ctx, second); !errors.Is(err, cloud.ErrConflict) {
+				t.Fatalf("second replacement of the same UUID accepted: %v", err)
+			}
+			var count int
+			if err := d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM cloud_operations`).Scan(&count); err != nil || count != 2 {
+				t.Fatalf("operations=%d, want source and one replacement: %v", count, err)
+			}
+		})
 	}
 }

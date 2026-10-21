@@ -10,6 +10,21 @@
       loop:
         - ultra-recovery-backup.timer
         - ultra-recovery-reconcile.timer
+      when: not (ultra_legacy_bridge_maintenance | default(false) | bool)
+    - name: Inspect the same-operation legacy checkpoint before cleanup
+      ansible.builtin.stat:
+        path: "/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/maintenance.json"
+        follow: false
+      register: legacy_resume_checkpoint
+      when: ultra_legacy_bridge_maintenance | default(false) | bool
+    - name: Restore the bound candidate bot and prior timers or exact original rollback states
+      ultra_upgrade_maintenance:
+        id: "{{ ultra_lifecycle_id }}"
+        legacy_sha256: "{{ ultra_legacy_bridge_sha256 }}"
+        phase: "{{ 'restore-accepted' if ultra_legacy_accepted_resume | default({}) else 'restore-services' }}"
+        accepted: "{{ ultra_legacy_accepted_resume | default({}) }}"
+      no_log: true
+      when: ultra_legacy_bridge_maintenance | default(false) | bool and legacy_resume_checkpoint.stat.exists | default(false) | bool
     - name: Save the current resume receipt
       ansible.builtin.copy:
         content: '{"resumed": true}'

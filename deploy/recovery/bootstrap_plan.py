@@ -12,14 +12,30 @@ import stat
 import sys
 import tempfile
 import uuid
-
 CONFIG = Path('/etc/ultra-recovery')
 ROOT = Path('/opt/ultra-recovery')
 UNITS = Path('/etc/systemd/system')
+# Use the helper staged and verified beside this planner, never an older copy
+# under ROOT that an earlier release may have left behind.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import db_connection
 
 
 def query(argv):
     result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
+    if result.returncode:
+        raise ValueError('bootstrap_discovery_unavailable')
+    return result.stdout
+
+
+def query_database(database, statement):
+    dsn = db_connection.dsn_from_runtime(database)
+    with tempfile.TemporaryDirectory(prefix='ultra-db-query-') as directory:
+        with db_connection.pgpass(directory, dsn) as environment:
+            result = subprocess.run(db_connection.connection_args(dsn, database, 'psql') +
+                                    ['-XAtq', '-v', 'ON_ERROR_STOP=1', '-c', statement],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    timeout=20, env=environment)
     if result.returncode:
         raise ValueError('bootstrap_discovery_unavailable')
     return result.stdout
@@ -38,9 +54,9 @@ def plan(config):
     database = config['database']
     if not re.fullmatch(r'[A-Za-z0-9_-]+', database):
         raise ValueError('invalid_bootstrap_database')
-    identity = '/var/lib/ultra-relay/automation/id_ed25519'
+    identity = '/etc/ultra-fleet/id_ed25519'
     if not Path(identity).is_file() or not Path(identity + '.pub').is_file():
-        raise ValueError('replica_automation_identity_missing')
+        raise ValueError('fleet_automation_identity_missing')
     trusted = Path(config['known_hosts_file']).read_bytes()
     if (CONFIG / 'known_hosts').exists() and (CONFIG / 'known_hosts').read_bytes() != trusted:
         raise ValueError('explicit_ssh_pin_rotation_required')
@@ -79,8 +95,8 @@ def plan(config):
     if not token:
         raise ValueError('existing_bot_token_unavailable')
     desired(CONFIG / 'primary-bot-token', token)
-    rows = json.loads(query(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', database,
-                             '-c', "SELECT COALESCE(json_agg(json_build_object('id',id,'address',address)), '[]'::json) FROM exit_nodes WHERE enabled"]))
+    rows = json.loads(query_database(database,
+                    "SELECT COALESCE(json_agg(json_build_object('id',id,'address',address)), '[]'::json) FROM exit_nodes WHERE enabled"))
     nodes = []
     for item in config['static_nodes']:
         address = str(ipaddress.ip_address(item['address']))
@@ -107,8 +123,9 @@ def plan(config):
         desired_records = {role: {'name': policy[field], 'data': config['bridge_ipv4']}
                            for role, field in [('subscription', 'subscription_name'), ('vpn', 'vpn_name')]}
         document('dns.json', {'config': policy, 'desired': desired_records})
-    state_paths = ['/etc/ultra-relay', str(CONFIG), '/var/lib/ultra-relay/automation',
+    state_paths = ['/etc/ultra-fleet', '/etc/ultra-relay', str(CONFIG), '/var/lib/ultra-relay/automation/vultr-api-key',
                    '/etc/systemd/system/ultra-relay.service', '/etc/systemd/system/ultra-relay.service.d',
+                   '/etc/ultra-db-tunnel', '/etc/systemd/system/ultra-db-tunnel.service',
                    '/etc/systemd/system/ultra-bot.service', '/var/lib/ultra-recovery-reconcile/heartbeat_ed25519',
                    '/var/lib/ultra-recovery-reconcile/heartbeat_ed25519.pub'] + config.get('state_paths', [])
     spec = json.loads(Path(config['spec']).read_text())
@@ -157,10 +174,20 @@ def plan(config):
     for name in config['recovery_tool_members']:
         if name.endswith(('.service', '.timer')):
             state_paths.append(str(UNITS / name))
+    database_host = str(ipaddress.ip_address(config['database_host']))
     backup = {'source': 'bridge', 'repository': '/var/lib/ultra-recovery', 'database': database,
+              'database_host': database_host,
               'recipient': config['age_recipient'], 'identity_file': identity, 'known_hosts': str(CONFIG / 'known_hosts'),
               'destinations': [{'id': n['id'], 'name': n['name'], 'host': 'root@' + n['address'], 'required': True} for n in nodes],
               'independent': False, 'state_paths': sorted(set(state_paths)), 'artifact_paths': sorted(set(artifact_paths)), 'diagnostic_status': True}
+    # The subscription keyring is installed by a later runtime upgrade.
+    # Capture it once present without making pre-upgrade backups fail.
+    backup['optional_state_paths'] = ['/var/lib/ultra-relay/automation/subscription-keys.json']
+    if config.get('controller_directory'):
+        # These journals may not exist before the first reservation/retirement.
+        # Capture must reselect them around pg_dump to detect first publication.
+        backup['optional_state_paths'] += ['/var/lib/ultra-ansible/lifecycle.json',
+                                           '/var/lib/ultra-ansible/lifecycle-retired.json']
     existing_backup = CONFIG / 'backup.json'
     if existing_backup.exists():
         existing = json.loads(existing_backup.read_text())
@@ -169,7 +196,8 @@ def plan(config):
         backup['destinations'] = existing['destinations']
         backup['independent'] = existing.get('independent', False)
     document('backup.json', backup)
-    reconcile = {'database': database, 'bridge_provider': config['bridge_provider'], 'vultr_state_dir': '/var/lib/ultra-relay/vultr',
+    reconcile = {'database': database, 'database_host': database_host,
+                 'bridge_provider': config['bridge_provider'], 'vultr_state_dir': '/var/lib/ultra-relay/vultr',
                  'ssh_identity_file': identity, 'vultr_api_key_file': cloud, 'api_key_owner': 'ultra-relay', 'ssh_identity_owner': 'ultra-relay',
                  'backup_config': str(CONFIG / 'backup.json'), 'state_dir': '/var/lib/ultra-recovery-reconcile',
                  'status_file': '/var/lib/ultra-relay/recovery-reconcile-status.json', 'status_group': 'ultra-relay',
@@ -179,6 +207,7 @@ def plan(config):
                  'payload_url': 'https://www.cloudflare.com/cdn-cgi/trace', 'static_nodes': nodes, 'monitor_spec_file': config['spec']}
     document('reconcile.json', reconcile)
     deployment = {key: config[key] for key in ('version', 'bridge_ipv4', 'bridge_provider', 'bridge_url', 'database')}
+    deployment['database_host'] = database_host
     deployment['controller_directory'] = config.get('controller_directory')
     deployment.update(ingress=config.get('ingress'), ssh_identity_file=identity, known_hosts_file=str(CONFIG / 'known_hosts'), static_nodes=nodes)
     document('deployment.json', deployment)

@@ -74,10 +74,8 @@ func (b *Bot) runLeakDetector(ctx context.Context) {
 					continue
 				}
 				ips := onlineByUser[u.UUID]
-				for _, ip := range ips {
-					if err := b.teleRepo.UpsertUserIPObservation(ctx, u.UUID, ip); err != nil {
-						b.log.Warn("leak: upsert ip observation failed", "user_uuid", u.UUID, "ip", ip, "err", err)
-					}
+				if err := b.teleRepo.UpsertUserIPObservations(ctx, u.UUID, ips); err != nil {
+					b.log.Warn("leak: upsert ip observations failed", "user_uuid", u.UUID, "err", err)
 				}
 				b.evalLeakForUser(ctx, u, ips, breachState)
 			}
@@ -112,14 +110,9 @@ func (b *Bot) evalLeakForUser(ctx context.Context, u dbUserLeakCfg, currentIPs [
 	maxConcurrent := defaultLeakMaxConcurrent
 	maxUnique24h := defaultLeakMaxUnique24h
 
-	concurrent, err := b.teleRepo.CountConcurrentIPs(ctx, u.UUID, time.Minute)
+	concurrent, unique24h, err := b.teleRepo.LeakIPCounts(ctx, u.UUID)
 	if err != nil {
-		b.log.Warn("leak: count concurrent IPs failed", "user_uuid", u.UUID, "err", err)
-		return
-	}
-	unique24h, err := b.teleRepo.CountUniqueIPs(ctx, u.UUID, 24*time.Hour)
-	if err != nil {
-		b.log.Warn("leak: count unique 24h IPs failed", "user_uuid", u.UUID, "err", err)
+		b.log.Warn("leak: count IP windows failed", "user_uuid", u.UUID, "err", err)
 		return
 	}
 	if concurrent <= maxConcurrent && unique24h <= maxUnique24h {

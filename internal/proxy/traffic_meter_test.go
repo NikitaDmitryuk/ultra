@@ -3,14 +3,15 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"sync/atomic"
+	"testing"
+
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/transport"
-	"sync/atomic"
-	"testing"
 )
 
 type fakeMeasuredHandler struct {
@@ -43,7 +44,13 @@ func TestMeterUsesActualOutboundAndKeepsUserCounter(t *testing.T) {
 	for _, tag := range []string{"to-exit-a", "direct"} {
 		var output bytes.Buffer
 		h := measuredOutbound{Handler: fakeMeasuredHandler{tag: tag, t: t}, meter: meter}
-		h.Dispatch(ctx, &transport.Link{Reader: buf.NewReader(bytes.NewBufferString("request")), Writer: &dispatcher.SizeStatWriter{Writer: buf.NewWriter(&output), Counter: atomicCounter{&original}}})
+		h.Dispatch(
+			ctx,
+			&transport.Link{
+				Reader: buf.NewReader(bytes.NewBufferString("request")),
+				Writer: &dispatcher.SizeStatWriter{Writer: buf.NewWriter(&output), Counter: atomicCounter{&original}},
+			},
+		)
 		if output.String() != "reply" {
 			t.Fatal("payload changed")
 		}

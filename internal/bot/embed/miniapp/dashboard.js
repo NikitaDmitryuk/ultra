@@ -158,17 +158,42 @@ async function diagnostics() {
     return service();
   });
   button("refresh-diagnostics", diagnostics);
-  const [health, alerts] = await Promise.allSettled([
+  const [health, alerts, replicas, database] = await Promise.allSettled([
     api("/api/health"),
     api("/api/alerts/recent?limit=10"),
+    api("/api/cloud/replicas"),
+    api("/api/database"),
   ]);
   if (version !== viewVersion) return;
   const target = document.querySelector("#network-health");
+  const bridgeStandby =
+    replicas.status === "fulfilled" && Array.isArray(replicas.value)
+      ? replicas.value.find((replica) => replica.id === "bridge")
+      : null;
+  const standbyState = bridgeStandby?.state
+    ? esc(bridgeStandby.state)
+    : "Состояние неизвестно";
+  const standbyTone = bridgeStandby?.state === "streaming"
+    ? "good"
+    : bridgeStandby?.state && bridgeStandby.state !== "unknown"
+      ? "bad"
+      : "wait";
+  const primary = database.status === "fulfilled" ? database.value : null;
+  const primaryHost = primary?.primary_host
+    ? esc(primary.primary_host)
+    : "не указан в runtime";
+  const primaryState = primary
+    ? primary.reachable
+      ? primary.observed_role === "primary"
+        ? "Доступен · primary"
+        : `Доступен · роль ${esc(primary.observed_role || "неизвестна")}`
+      : "Нет ответа на SQL-проверку"
+    : "Состояние неизвестно";
   if (health.status === "fulfilled") {
     const h = health.value,
       state = healthSummary(h),
       exits = h.exits?.length ? h.exits : h.exit ? [h.exit] : [];
-    target.innerHTML = `<div class="card"><div class="row wrap"><h2>Состояние сети</h2><span class="badge ${state.tone}">${esc(state.label)}</span></div><small>Проверено: ${esc(dateLabel(h.checked_at))}</small><div class="route-row"><span>Bridge · интернет<small>Задержка ${latencyLabel(h.bridge?.internet_latency_ms)}</small></span><strong class="${h.bridge?.internet_ok ? "good" : "bad"}">${h.bridge?.internet_ok ? "Доступен" : "Недоступен"}</strong></div>${exits.map((e) => `<div class="route-row"><span>${esc(e.name || e.id)}<small>${e.active ? "Активный выход" : "Резервный выход"} · туннель ${latencyLabel(e.tunnel_latency_ms)} · интернет ${latencyLabel(e.internet_latency_ms)}</small></span><span class="badge ${e.reachable && e.internet_ok ? "good" : "bad"}">${e.reachable && e.internet_ok ? "Доступен" : e.reachable ? "Нет интернета" : "Нет туннеля"}</span></div>`).join("")}${ingressHealthHTML(h.public_ingresses || [])}</div>`;
+    target.innerHTML = `<div class="card"><div class="row wrap"><h2>Состояние сети</h2><span class="badge ${state.tone}">${esc(state.label)}</span></div><small>Проверено: ${esc(dateLabel(h.checked_at))}</small><div class="route-row"><span>Bridge · интернет<small>Задержка ${latencyLabel(h.bridge?.internet_latency_ms)}</small></span><strong class="${h.bridge?.internet_ok ? "good" : "bad"}">${h.bridge?.internet_ok ? "Доступен" : "Недоступен"}</strong></div><div class="route-row"><span>Primary PostgreSQL<small>Сервер: ${primaryHost} · проверка через пул приложения</small></span><span class="badge ${primary?.reachable && primary.observed_role === "primary" ? "good" : "wait"}">${primaryState}</span></div><div class="route-row"><span>Bridge PostgreSQL standby · реплика<small>Физическая реплика primary</small></span><span class="badge ${standbyTone}">${standbyState}</span></div>${exits.map((e) => `<div class="route-row"><span>${esc(e.name || e.id)}<small>${e.active ? "Активный выход" : "Резервный выход"} · туннель ${latencyLabel(e.tunnel_latency_ms)} · интернет ${latencyLabel(e.internet_latency_ms)}</small></span><span class="badge ${e.reachable && e.internet_ok ? "good" : "bad"}">${e.reachable && e.internet_ok ? "Доступен" : e.reachable ? "Нет интернета" : "Нет туннеля"}</span></div>`).join("")}${ingressHealthHTML(h.public_ingresses || [])}</div>`;
   } else {
     target.innerHTML = panelError("Состояние сети", "retry-health");
     button("retry-health", diagnostics);
@@ -311,19 +336,31 @@ async function configDetail(user) {
   await load();
 }
 
+function routingHTML(data) {
+  const exits = Array.isArray(data.exits) ? data.exits : [];
+  const effective = exits.find((exit) => exit.id === data.effective_exit_id);
+  const applied = data.application?.state === "applied";
+  const branches = exits.map((exit) => {
+    const active = effective?.id === exit.id;
+    const label = active
+      ? applied ? "Авто · текущий выход" : "Авто · ожидает применения"
+      : exit.reachable ? "Туннель доступен" : "Туннель недоступен";
+    return `<li class="routing-exit${active ? " is-active" : ""}" data-route-exit="${esc(exit.id)}"><span class="routing-node"><strong>${esc(exit.display_name || exit.country_name || "Выход")}</strong>${exit.city ? `<small>${esc(exit.city)}</small>` : ""}<small class="${active && applied ? "good" : !exit.reachable ? "wait" : "muted"}">${label}</small>${quotaKindLabel(exit) ? `<span class="badge">${esc(quotaKindLabel(exit))}</span>` : ""}</span></li>`;
+  }).join("");
+  return `<p class="eyebrow">МАРШРУТИЗАЦИЯ</p><h2>Схема подключения</h2><p class="muted">Серверный маршрут профиля «Автоматически».</p><div class="routing-map" aria-label="Устройство подключается к Bridge, затем к одному из выходов"><div class="routing-source"><span class="routing-node"><strong>Ваше устройство</strong><small>Happ</small></span><span class="routing-arrow" aria-hidden="true">↓</span><span class="routing-node"><strong>Bridge</strong><small>VPN-вход</small></span></div>${branches ? `<ul class="routing-exits" aria-label="Выходы VPN">${branches}</ul>` : '<p class="empty-state">Выходов пока нет</p>'}</div><p class="${applied && effective ? "good" : "wait"}">${esc(applicationLabel(data.application))}</p>${!effective ? '<p class="wait">Нет подтверждённого выхода. Трафик VPN не проходит.</p>' : ""}${data.route_reason ? `<p class="muted">${esc(routeReasonLabel(data.route_reason))}</p>` : ""}<small id="route-refresh-status">Схема обновляется автоматически.</small><details><summary>Как выбирается выход</summary><p>Профиль «Автоматически» выбирает доступный сервер и возвращается к основному после восстановления. Профиль страны предпочитает её сервер и может переключиться на другой исправный выход с доступной вам квотой.</p><small>Кабинет не видит, какой профиль включён в Happ. Доступность туннеля не гарантирует остаток квоты.</small></details>`;
+}
+
 function ingressHealthHTML(ingresses) {
   const phases = {
     public_tls: "Публичный TLS",
     local_backend: "Локальный обработчик",
     server_path_ready: "Серверный маршрут готов",
-    descriptor: "Конфигурация подготовлена",
-    primary_candidate: "Кандидат на основной вход",
-    transport_process: "Транспортный процесс",
   };
   return ingresses
+    .filter((i) => i.id === "primary")
     .map(
       (i) =>
-        `<div class="route-row"><span>${i.id === "primary" ? "Основной вход" : "Экспериментальный вход"}<small>${esc(phases[i.phase] || i.phase)}${i.certificate_not_after ? " · сертификат до " + esc(dateLabel(i.certificate_not_after)) : ""}</small></span><span class="badge ${i.ready ? "good" : "wait"}">${i.ready ? "Готов" : "Недоступен"}</span></div>`,
+        `<div class="route-row"><span>Основной вход<small>${esc(phases[i.phase] || i.phase)}${i.certificate_not_after ? " · сертификат до " + esc(dateLabel(i.certificate_not_after)) : ""}</small></span><span class="badge ${i.ready ? "good" : "wait"}">${i.ready ? "Готов" : "Недоступен"}</span></div>`,
     )
     .join("");
 }

@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +18,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/NikitaDmitryuk/ultra/internal/db"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -36,6 +37,26 @@ func TestConstructionDoesNotContactTelegram(t *testing.T) {
 	b.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/happ", nil))
 	if w.Code != 200 {
 		t.Fatal("import page unavailable offline", w.Code)
+	}
+}
+
+func TestSubscriptionCacheFailureReasonIsSanitized(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "transport", err: errors.New("subscription cache upstream unavailable"), want: "upstream_unavailable"},
+		{name: "HTTP status", err: errors.New("subscription cache upstream status 503"), want: "upstream_http_503"},
+		{name: "invalid response", err: errors.New("invalid subscription cache response"), want: "invalid_response"},
+		{name: "filesystem detail", err: errors.New("open /secret/path: permission denied"), want: "cache_persist_failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := subscriptionCacheFailureReason(test.err); got != test.want {
+				t.Fatalf("reason=%q, want %q", got, test.want)
+			}
+		})
 	}
 }
 func TestFailedDeliveryIsNotAcknowledged(t *testing.T) {
@@ -80,7 +101,11 @@ func TestSubscriptionCacheBootOutageExpirationAndRevocation(t *testing.T) {
 	if err := b.ConfigureSubscriptionCache(path); err != nil {
 		t.Fatal(err)
 	}
-	entry := cachedSubscription{Body: []byte("vless://cached"), Headers: map[string]string{"Content-Type": "text/plain"}, ConfirmedAt: time.Now()}
+	entry := cachedSubscription{
+		Body:        []byte("vless://cached"),
+		Headers:     map[string]string{"Content-Type": "text/plain"},
+		ConfirmedAt: time.Now(),
+	}
 	if err := b.subscriptionCache.replace(map[string]cachedSubscription{key: entry}); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +204,10 @@ func TestKnownRevocationWinsInflightBulkCacheRefresh(t *testing.T) {
 	token := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	key := subscriptionCacheKey(token, "")
 	other := subscriptionCacheKey(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), "")
-	entries := map[string]cachedSubscription{key: {Body: []byte("vless://old"), ConfirmedAt: time.Now()}, other: {Body: []byte("vless://other"), ConfirmedAt: time.Now()}}
+	entries := map[string]cachedSubscription{
+		key:   {Body: []byte("vless://old"), ConfirmedAt: time.Now()},
+		other: {Body: []byte("vless://other"), ConfirmedAt: time.Now()},
+	}
 	started, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -264,7 +292,8 @@ func TestTruncatedSubscriptionHTTP200UsesConfirmedCache(t *testing.T) {
 	req.TLS = &tls.ConnectionState{}
 	response := httptest.NewRecorder()
 	b.handlePublicSubscription(response, req)
-	if response.Code != 200 || response.Body.String() != "vless://confirmed\n" || response.Header().Get("X-Ultra-State") != "cached" || response.Header().Get("Content-Type") != "text/plain" {
+	if response.Code != 200 || response.Body.String() != "vless://confirmed\n" || response.Header().Get("X-Ultra-State") != "cached" ||
+		response.Header().Get("Content-Type") != "text/plain" {
 		t.Fatalf("truncated body escaped fallback: %d %q %v", response.Code, response.Body.String(), response.Header())
 	}
 	cached, ok := b.subscriptionCache.get(key)
@@ -287,7 +316,8 @@ func TestInvalidBulkResponseRetainsOriginalCacheLease(t *testing.T) {
 				case "invalid-json":
 					_, _ = w.Write([]byte("{"))
 				case "expired":
-					_ = json.NewEncoder(w).Encode(subscriptionCacheSnapshot{Version: 1, Entries: map[string]cachedSubscription{key: {Body: []byte("expired"), ConfirmedAt: time.Now().Add(-25 * time.Hour)}}})
+					_ = json.NewEncoder(w).
+						Encode(subscriptionCacheSnapshot{Version: 1, Entries: map[string]cachedSubscription{key: {Body: []byte("expired"), ConfirmedAt: time.Now().Add(-25 * time.Hour)}}})
 				}
 			}))
 			defer source.Close()
@@ -379,7 +409,11 @@ func TestProductionOutboxSendIsBoundedAndUsesRetryAfter(t *testing.T) {
 		if r.Method != "POST" || !strings.HasSuffix(r.URL.Path, "/sendMessage") {
 			t.Error("unexpected Telegram method")
 		}
-		return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(`{"ok":false,"error_code":429,"parameters":{"retry_after":73}}`)), Header: make(http.Header)}, nil
+		return &http.Response{
+			StatusCode: 429,
+			Body:       io.NopCloser(strings.NewReader(`{"ok":false,"error_code":429,"parameters":{"retry_after":73}}`)),
+			Header:     make(http.Header),
+		}, nil
 	})}
 	api := &tgbotapi.BotAPI{Token: "synthetic", Client: client}
 	b := &Bot{api: api, botToken: "synthetic", msgSender: api, alertsTele: repo}
@@ -592,7 +626,11 @@ func TestAdminLookupOutageIsExplicitAndCannotMutateRelay(t *testing.T) {
 				}
 				messages = append(messages, body)
 				methods = append(methods, r.URL.Path)
-				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ok":true,"result":true}`)), Header: make(http.Header)}, nil
+				return &http.Response{
+					StatusCode: 200,
+					Body:       io.NopCloser(strings.NewReader(`{"ok":true,"result":true}`)),
+					Header:     make(http.Header),
+				}, nil
 			})}}
 			b := &Bot{api: api, botToken: "synthetic", adminRepo: &reliabilityUnavailableAdmin{}, adminAPIURL: relay.URL}
 			msg := &tgbotapi.Message{From: &tgbotapi.User{ID: 42}, Chat: &tgbotapi.Chat{ID: 42, Type: "private"}, Text: "/invitevpn 123"}
@@ -602,17 +640,22 @@ func TestAdminLookupOutageIsExplicitAndCannotMutateRelay(t *testing.T) {
 			case "group_selection":
 				b.handleGroupShared(context.Background(), msg, sharedGroup{RequestID: 1, ChatID: -100})
 			case "callback":
-				b.handleMemberCallback(context.Background(), &tgbotapi.CallbackQuery{ID: "callback", From: msg.From, Message: msg, Data: "vpn_disable:123"})
+				b.handleMemberCallback(
+					context.Background(),
+					&tgbotapi.CallbackQuery{ID: "callback", From: msg.From, Message: msg, Data: "vpn_disable:123"},
+				)
 			}
 			if relayCalls != 0 || len(messages) != 1 {
 				t.Fatalf("missing explicit failure or attempted mutation: calls=%d messages=%v", relayCalls, messages)
 			}
 			text, _ := messages[0]["text"].(string)
-			if !strings.Contains(text, "Сервис временно недоступен") || strings.Contains(text, "Только администратор") || strings.Contains(text, "сохранено") {
+			if !strings.Contains(text, "Сервис временно недоступен") || strings.Contains(text, "Только администратор") ||
+				strings.Contains(text, "сохранено") {
 				t.Fatalf("DB error misreported as permissions/success: %q", text)
 			}
 			if scenario == "callback" {
-				if !strings.HasSuffix(methods[0], "/answerCallbackQuery") || messages[0]["show_alert"] != true || messages[0]["callback_query_id"] != "callback" {
+				if !strings.HasSuffix(methods[0], "/answerCallbackQuery") || messages[0]["show_alert"] != true ||
+					messages[0]["callback_query_id"] != "callback" {
 					t.Fatal("callback spinner was not closed with error alert")
 				}
 			} else if !strings.HasSuffix(methods[0], "/sendMessage") {
@@ -641,7 +684,8 @@ func TestSubscriptionCacheSeparatesEffectiveFormats(t *testing.T) {
 			t.Fatal(err)
 		}
 		w := httptest.NewRecorder()
-		if !b.serveSubscriptionFallback(w, key, token, r) || w.Body.String() != c.want || w.Header().Get("Vary") != "User-Agent" || w.Header().Get("Cache-Control") != "no-store" {
+		if !b.serveSubscriptionFallback(w, key, token, r) || w.Body.String() != c.want || w.Header().Get("Vary") != "User-Agent" ||
+			w.Header().Get("Cache-Control") != "no-store" {
 			t.Fatal(c, w.Body.String())
 		}
 	}
@@ -669,8 +713,16 @@ func TestSubscriptionCacheSeparatesEffectiveFormats(t *testing.T) {
 func TestSubscriptionPolicyRefreshAndRestart(t *testing.T) {
 	token := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	snapshot := subscriptionCacheSnapshot{Version: 1, HappDefaultJSON: true, Entries: map[string]cachedSubscription{
-		subscriptionCacheKey(token, "format=uri"):  {Body: []byte("uri"), Headers: map[string]string{"Content-Type": "text/plain", "Vary": "User-Agent"}, ConfirmedAt: time.Now()},
-		subscriptionCacheKey(token, "format=happ"): {Body: []byte("[]"), Headers: map[string]string{"Content-Type": "application/json", "Vary": "User-Agent"}, ConfirmedAt: time.Now()},
+		subscriptionCacheKey(token, "format=uri"): {
+			Body:        []byte("uri"),
+			Headers:     map[string]string{"Content-Type": "text/plain", "Vary": "User-Agent"},
+			ConfirmedAt: time.Now(),
+		},
+		subscriptionCacheKey(token, "format=happ"): {
+			Body:        []byte("[]"),
+			Headers:     map[string]string{"Content-Type": "application/json", "Vary": "User-Agent"},
+			ConfirmedAt: time.Now(),
+		},
 	}}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/subscriptions/cache" {

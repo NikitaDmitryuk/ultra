@@ -2,11 +2,69 @@ package config
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
 )
+
+func TestBridgeMixedCATunnelAndPinnedCloudExit(t *testing.T) {
+	for _, transport := range []TunnelTransport{TunnelTransportSplitHTTP, TunnelTransportGRPC} {
+		t.Run(string(transport), func(t *testing.T) {
+			spec := bridgeSpecForAntiCensorTest()
+			spec.TunnelTLSProvision = TunnelTLSACME
+			spec.TunnelTransport = transport
+			spec.SplitHTTPTLS.ServerName = "tunnel.example.com"
+			pin := strings.Repeat("ab", 32)
+			nodes := []exits.Node{
+				{ID: "static", Address: "tunnel.example.com", Port: 443, Enabled: true},
+				{ID: "cloud", Address: "192.0.2.2", Port: 443, Enabled: true, PinnedPeerCertSHA256: pin},
+			}
+			strat, err := mimic.New("steamlike")
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := BuildBridgeXRayJSON(spec, nil, nodes, "static", strat, "none")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rendered struct {
+				Outbounds []struct {
+					Tag    string `json:"tag"`
+					Stream struct {
+						TLS map[string]any `json:"tlsSettings"`
+					} `json:"streamSettings"`
+				} `json:"outbounds"`
+			}
+			if err := json.Unmarshal(data, &rendered); err != nil {
+				t.Fatal(err)
+			}
+			seen := 0
+			for _, outbound := range rendered.Outbounds {
+				tls := outbound.Stream.TLS
+				switch outbound.Tag {
+				case exits.OutboundTag("cloud"):
+					seen++
+					if tls["serverName"] != "" || tls["pinnedPeerCertSha256"] != pin {
+						t.Fatal("cloud exit lost certificate authentication", tls)
+					}
+				case exits.OutboundTag("static"):
+					seen++
+					if tls["serverName"] != "tunnel.example.com" || tls["pinnedPeerCertSha256"] != nil {
+						t.Fatal("static CA policy changed", tls)
+					}
+				}
+				if tls["allowInsecure"] != nil {
+					t.Fatal("TLS verification bypassed")
+				}
+			}
+			if seen != 2 || spec.TunnelTLSProvision != TunnelTLSACME || spec.SplitHTTPTLS.OmitSNI {
+				t.Fatal("missing outbound or mutated bridge policy")
+			}
+		})
+	}
+}
 
 func TestGRPCSelfSignedUsesPinnedPeerCertSha256(t *testing.T) {
 	const pin = "e8e2d387fdbffeb38e9c9065cf30a97ee23c0e3d32ee6f78ffae40966befccc9"

@@ -191,6 +191,8 @@ def artifact_references(value):
     return result
 
 
+# Historical replica receipts remain recognizable for safe retention only;
+# these names are not executable controller operations.
 INDEPENDENT_JOBS = ('configure-exit', 'configure-replica', 'stop-replica', 'retain-artifacts')
 PAYLOAD_DIRECTORIES = ('bundle', 'recovery-bundle', 'ansible-tmp', '__pycache__')
 

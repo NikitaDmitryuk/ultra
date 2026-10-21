@@ -35,7 +35,7 @@
   ansible.builtin.assert:
     that:
       - >-
-        item.destination is match(('^(/opt/ultra-recovery/(recovery|monitor|heartbeat)\.py
+        item.destination is match(('^(/opt/ultra-recovery/(recovery|db_connection|monitor|heartbeat)\.py
         |/usr/local/bin/ultra-client
         |/etc/ultra-recovery/(monitor\.json|probe\.json|primary-bot-token|peer_known_hosts|peer_ed25519(-[a-f0-9]{64})?(\.pub)?)
         |/etc/systemd/system/ultra-(recovery-prune\.(service|timer)|monitor\.(service|timer)|monitor-probe\.service))$') | regex_replace('\\s+', ''))

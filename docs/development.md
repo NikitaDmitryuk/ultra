@@ -8,27 +8,71 @@
 
 | Изменение | Проверка |
 | --- | --- |
+| Перед каждым коммитом | `make format`, затем `make lint`; проверь итоговый diff после автоформатирования |
 | Только инструкции или документация | `make harness-check`; содержательная сверка с источниками |
 | Состав релиза, manifest или публикация GitHub Release | `python3 scripts/test-release-assets.py`, затем `python3 scripts/test-release-assets.py --dist dist`: реальный комплект должен совпадать с manifest, SHA-256, архитектурами ELF, исходными архивами и закреплёнными offline wheels |
 | Проверяющий инструмент harness | `go test ./tools/harnesscheck`; `make harness-check`; `go vet ./tools/harnesscheck` |
+| Offline rebuild-non-db preflight | `env -u DATABASE_URL go test ./cmd/ultra-install -run '^TestRebuild' -count=1`: strict evidence/scope, неподтверждённое доверие, приватность входов, blocked journal/replay/crash; тесты не подключаются к production |
+| Retained-primary recovery execute | `env -u DATABASE_URL go test ./cmd/ultra-install -run '^TestRetained' -count=1`; `python3 scripts/test-retained-primary-gates.py`; `python3 scripts/test-subscription-key-projection.py`; syntax check `rebuild-retained-primary.yml` закреплённым Ansible runtime. Проверяются orphan/SIGKILL replay, обязательные прежние DB credentials, точная route identity, frozen binding без потери integer precision и hard localhost gates при DB unreachable; production execute этими тестами не запускается |
 | Go-код | Тесты затронутых пакетов, затем `make test`, `make vet`, `make lint` |
 | Конфигурация Xray, маршрутизация, failover | Тесты `./internal/config ./internal/exits ./internal/proxy`; сборка relay |
+| Ansible upgrade с DNS/domain/runtime effects | `python3 scripts/test-ansible-dns-migration.py`, `test-ansible-upgrade-domain.py`, `test-ansible-upgrade-runtime.py`, `test-ansible-runtime-effects.py`, `test-ansible-accepted-resume.py`, operation mapping и syntax check закреплённым Ansible runtime |
+| Блокировка продления managed tunnel TLS и приватный checkpoint | `python3 scripts/test-managed-tls-fence.py`; тот же набор включён в `go test ./cmd/ultra-install` и использует только синтетические hosts и локальный тестовый CA |
+| Forward-only lifecycle recovery / broker bootstrap | `go test ./cmd/ultra-install ./internal/deployansible`; `python3 scripts/test-manual-deploy.py`; `python3 scripts/test-forward-broker-guard.py`; operation mapping, release retention и syntax check `bootstrap-forward-broker.yml` |
+| Восстановление recovery-инструментов перед readiness | `python3 scripts/test-recovery-tools-bootstrap.py`; Go-тесты `TestRecoveryBootstrap`; operation mapping и syntax check `bootstrap-recovery-inspect.yml`, `bootstrap-recovery-tools.yml`; crash/resume, fallback и завершённый replay |
+| Совместимость controller при retirement floor | `python3 scripts/test-controller-enforcement.py`; `python3 scripts/test-ansible-release-contracts.py`; focused Go tests `TestUpgradeEnforcement`, `TestEnforcementPreflightRetention`, `TestControllerEnforcementProtocol`; syntax check `inspect-upgrade.yml` |
 | SQL, репозитории, миграции | Генерация SQLC при изменении схемы/запросов; `go test ./internal/db` с отдельной тестовой БД |
+| Восстановление DB tunnel identity | `env -u DATABASE_URL go test ./internal/installplan ./cmd/ultra-install -run 'DatabaseTunnel|TunnelReuse'`; `python3 scripts/test-db-tunnel-reuse.py`; operation mapping, Ansible syntax check `bootstrap.yml` и `bootstrap-postgres.yml`; `make harness-check` |
 | Встроенные web-ресурсы или установочные скрипты | Тесты затронутого Go-пакета, пересборка соответствующего бинарника; для UI — `make test-ui` (Node.js 22+) и проверка затронутого сценария в браузере |
 
 Сборка бинарников: `make build`, `make build-install`, `make build-bot`.
-CI запускает независимые группы Go lint/vet, Go-тестов с PostgreSQL и race, сборки,
+
+`rebuild-retained-primary` реализует отдельный узкий execute, а не продолжение
+`rebuild-non-db preflight`. Admission намеренно одноразовый: existing remote marker
+запрещает повтор даже после successful receipt, пока не выполнена независимая ручная
+reconciliation. Проверки и границы описаны в [rebuild recovery](rebuild-non-db.md).
+
+CI запускает независимые группы Go lint/vet, обычных Go-тестов с PostgreSQL,
+race-тестов с отдельной PostgreSQL, сборки,
 Ansible-валидации и SSH-интеграции, Nginx, Mini App/release-контракта и recovery
 параллельно. Итоговый check `Lint, test, build` требует успеха каждой группы:
 ошибка, отмена или пропуск группы не дают успешный gate. PostgreSQL-интеграция
-и dump/restore выполняются в одном выделенном job с PostgreSQL 16. Локальную проверку без БД
+и dump/restore выполняются в job обычных тестов с PostgreSQL 16; race-набор запускается
+отдельно со своим PostgreSQL 16, чтобы не ждать завершения обычных тестов. Локальную проверку без БД
 можно выполнить как `env -u DATABASE_URL make test`, чтобы не использовать случайно
 унаследованный DSN. Пропущенную DB-интеграцию явно указывай в результате.
 
-`make format` форматирует весь репозиторий и выполняет `go mod tidy`; для узкой правки
-форматируй только изменённые Go-файлы и проверяй итоговый diff.
+`make test-operator` объединяет offline-регрессии manual deploy, forward broker,
+operator DB dump и восстановления DNS; этот target обязателен в Ansible CI.
+Проверка PostgreSQL credential repair отдельно выполняется на PostgreSQL 16 в
+SSH integration job; тот же job запускает атомарный import protocol в отдельном
+PostgreSQL 16 контейнере без сети. `test-ui` не повторяет release/controller проверки из
+`test-ansible`; общий gate требует обе группы.
 
-## PostgreSQL и SQLC
+Если сборке нужен большой `GOTMPDIR` на диске, а проверки installer используют
+короткие deadlines и множество `fsync`, компилируй пакеты через `go test -c`,
+затем запускай каждый бинарник из каталога его пакета с удалённым из окружения
+`GOTMPDIR` и `TMPDIR` на быстром временном разделе. `testing.TempDir()` в используемом
+Go учитывает `GOTMPDIR`: смена только `TMPDIR` не переносит fixtures. Медленная
+подготовка immutable tree может исчерпать deadline ещё до запуска controller;
+проверь этот этап перед изменением тайм-аутов приложения.
+При `disk quota exceeded` проверяй пользовательскую квоту, а не только `df`:
+общая свободная ёмкость не гарантирует доступное место для текущего UID.
+Освобождай только подтверждённые генерируемые кеши без активных пользователей;
+для отдельного Go build cache используй `GOCACHE=<проверенный-каталог> go clean -cache`.
+Если сборка упирается в квоту `/tmp`, но в workspace уже есть полный проверенный
+`.gocache`, переиспользуй его через явный `GOCACHE` и направь `GOTMPDIR` в новый
+каталог на workspace-диске; сначала проверь `df` и не удаляй соседние артефакты.
+
+Перед каждым коммитом запусти `make format`, проверь получившийся diff, затем `make lint`.
+Форматирование обязательно, а не best-effort: `goimports`, `gofmt`, `golines` и
+`golangci-lint` имеют закреплённые версии в [Makefile](../Makefile). `make format`
+также выполняет `go mod tidy`. CI запускает те же `make format-check` и `make lint`;
+`format-check` завершится ошибкой, если форматирование изменило checkout. При обновлении
+инструментов меняй версию в Makefile и подтверждай, что локальный запуск и CI используют
+одинаковые команды.
+
+## PostgreSQL, SQLC и ORM
 
 DB-интеграционные тесты читают `DATABASE_URL`; без него вызывают `t.Skip`.
 Успех `make test` не подтверждает выполнение этих тестов. Используй только выделенную
@@ -41,9 +85,47 @@ DB-интеграционные тесты читают `DATABASE_URL`; без �
 
 Исходники запросов — `internal/db/queries`, схемы — `internal/db/migrations`.
 [sqlc.yaml](../sqlc.yaml) задаёт генерацию Go-кода в `internal/db/sqlc` через pgx/v5.
-Меняй исходные SQL, затем выполняй `sqlc generate` из корня и проверяй сгенерированный
-diff; ручная правка результата будет потеряна. Версия SQLC в репозитории пока не закреплена:
-не обновляй генератор попутно и не принимай несвязанные массовые изменения генерации.
+Меняй исходные SQL, затем выполняй `make generate-db` из корня и проверяй
+сгенерированный diff; ручная правка результата будет потеряна. Версия SQLC
+закреплена в [Makefile](../Makefile) и совпадает с заголовками сгенерированных файлов.
+Не обновляй генератор попутно и не принимай несвязанные массовые изменения генерации.
+
+Обычные независимые CRUD-операции пользователей, администраторов, уведомлений,
+подписок, участников, маршрутов и cloud используют GORM: явные
+[модели существующих таблиц](../internal/db/orm_crud.go),
+[cloud-модели](../internal/db/orm_cloud.go), проекции и карты обновлений. ORM заимствует
+соединения из того же pgx pool через адаптер без idle-соединений: ORM не открывает
+собственных физических соединений, лимит подключений остаётся общим. Инициализация не подключается
+к PostgreSQL; автоматический ping, SQL-логирование с параметрами и неявные
+транзакции отдельных записей отключены. ORM не выполняет миграций: источником
+схемы остаются нумерованные SQL-миграции. Источник: [адаптер](../internal/db/orm.go).
+
+Резервирование cloud-слотов и advisory locks, durable-пакеты трафика и IP-наблюдения
+выполняются SQLC-запросами. Для пяти записей трафика
+[очередь SQLC](../internal/db/queued_sqlc.go) сохраняет один pgx pipeline внутри
+исходной транзакции; ORM не участвует в учёте трафика. При извлечении JSON-массивов
+используй явные проекции `jsonb_array_elements`: анализатор SQLC 1.31.1 не описывает
+поля табличного alias `jsonb_to_recordset` корректно. Проверяй сгенерированный SQL
+и реальные DB-тесты, включая число запросов и rollback.
+
+Граница ORM проходит по целостной операции. Транзакции регистрации участников,
+выдачи subscription-токенов, UUID rotation, публикации маршрутов, provider pool,
+квот и служебного доступа сохраняют pgx/SQLC и PostgreSQL locks. ExitNodeRepo
+переиспользует SQLC-чтения и записи внутри сериализованной транзакции проверки
+последнего enabled exit; его временный DB привязан к этой транзакции. Подмена
+этих вызовов обычным ORM пула вывела бы их за пределы блокировки.
+Atomic claims и подтверждения notification leases, оконные функции, bucket-
+агрегации, lateral/JSON-проекции бюджета, миграции и проверки системного каталога
+также сохраняют PostgreSQL SQL. Независимые чтения и записи используют ORM,
+включая snapshots/acknowledgements участников и квот: карты условий и обновлений
+сохраняют false, нули, NULL и сравнение исходной версии.
+[AST-проверка](../internal/db/orm_test.go) запрещает возвращать полные SQL-операторы
+в завершённые cloud, durable-трафик и IP-наблюдения; она не запрещает SQL-выражения
+и не утверждает, что весь проект переведён на ORM. Не переносите сложную
+транзакцию в независимые ORM-вызовы и не включайте `AutoMigrate`.
+ORM здесь упрощает CRUD; она не является дополнительной гарантией сохранности
+или доказательством ускорения. При изменении ORM-записей явно проверяйте нулевые
+значения, прежние ошибки отсутствия строки и общий лимит пула.
 
 Новая миграция требует трёх согласованных изменений: нового нумерованного SQL-файла,
 директивы `go:embed` и записи в списке миграций в
@@ -68,6 +150,98 @@ Mini App встраивается из `internal/bot/embed/miniapp`, Admin UI �
 не проверяет поставляемый интерфейс. QR-коды строит встроенный `qrcode-generator`
 1.4.4 ([исходник с лицензией MIT](../internal/bot/embed/miniapp/vendor/qrcode.js));
 для графиков и QR внешние CDN не нужны.
+
+Upgrade проецирует управляемые runtime-настройки на самом целевом узле: spec,
+environment и точные rollback images не передаются в receipts. Fixed transport
+проверяет installer по manifest и связывает host journal с digest неизменяемого
+запроса; exit proof строится из bridge DB inspection и frozen strict SSH inventory.
+Каждая повторная попытка activation использует отдельную runtime transaction.
+Источники: [transport](../cmd/ultra-install/upgrade_runtime_probe.go),
+[caller](../cmd/ultra-install/upgrade_runtime_integration.go).
+
+Незавершённый manual journal с `mutator_dispatched=true` блокирует обычный повтор,
+`--retry-failed` и использование release как baseline. Одноразовый `--forward-only`
+принимает только exact journal прерванного upgrade: удерживает broker lease,
+проверяет свежим playbook единственное дерево прежнего worker на bridge и каждом
+узле замороженного inventory, записывает write-ahead handoff и затем меняет lifecycle ID.
+Для legacy journal без digest staged-конфига wrapper требует совпадения канонической
+конфигурации, attempt и закреплённого SSH transport, затем получает недостающий digest
+read-only attestation точного remote root, manifest и request-bound job/receipt;
+installer всё равно независимо проверяет конфигурацию, frozen plan и handoff.
+Свободный flock, `status` и локальные поля `drained`/`quiescent` сами по себе не
+доказывают остановку workers. Перед мутацией создаётся свежий DB snapshot, проверяется
+читаемость custom archive через `pg_restore --list` и независимая доставка. Это не
+репетиция восстановления: успешный список TOC не доказывает, что данные можно восстановить.
+При ошибке forward-only не возвращает старый бинарник и не откатывает БД; он повторно
+закрепляет тот же lifecycle gate, останавливает bot/relay и принадлежащие upgrade
+таймеры/службы на замороженном inventory и подтверждает их состояние. Если gate или
+остановку подтвердить не удалось, команда завершается ошибкой; считать production
+безопасно переведённым в maintenance нельзя.
+
+Для сбоя `--forward-only` до handoff операторский путь
+`scripts/manual-deploy.py --continue-forward-only --config <canonical-config>`
+сохраняет исходный production-журнал и отдельно привязывает журнал предыдущего
+кандидата. Installer повторно проверяет оба журнала, staged config/release, frozen
+plan, lifecycle и отсутствие activation. Допускаются сохранённый handoff с его
+drain evidence и частичные broker-bootstrap stages; все файлы проверяются на
+приватность, а installer сверяет содержимое bundle с подписанным Ansible archive.
+Broker recovery читает controller identity из host variables единственного `bridge`
+в frozen request inventory; lifecycle ID остаётся привязан к request variables.
+Фикстуры должны сохранять это production-размещение полей.
+В сохранённом drain stage допускаются точные генерируемые controller артефакты:
+обычный приватный `execution.lock` и приватное дерево `.ansible` (Ansible HOME).
+Workspace проверяется рекурсивно по владельцу, типам, правам и лимитам размера;
+symlink и посторонние элементы stage блокируют продолжение. Наличие lock-файла
+не подтверждает quiescence: operator lease, lifecycle и свежий fleet census
+проверяются независимо.
+Историческое дерево предыдущего успешного upgrade может содержать inspect, host,
+runtime и Ansible job artifacts; безопасное дерево проверяется без предположения,
+что в нём ровно три элемента, а request/job/receipt activation сверяются отдельно.
+
+Если действующий controller не поддерживает атомарный supersede, recovery под
+удерживаемым predecessor OFD проверяет broker по systemd MainPID, executable и
+unit hashes, устанавливает только immutable broker runtime/unit из подписанного
+кандидата и перезапускает controller. Он повторно принимает тот же OFD, проверяет
+неизменный `oldID/applying`, делает новый полный fleet census и только затем
+сохраняет intent и вызывает атомарный supersede. Повтор может продолжить только тот
+же кандидат с подтверждёнными request/job/receipt; неоднозначный либо неполный
+bootstrap stage блокирует действие. При аварии процесс может потерять kernel OFD,
+но durable `applying` gate остаётся закрытым, пока новый controller не примет тот
+же ID и descriptor. Rollback неизвестного relay и изменение БД этим recovery-путём
+не выполняются.
+
+Изменение staged input/SSH transport, неизвестные файлы, чужая broker identity,
+activation, retirement-конфликт или несовпадение remote attestation блокируют
+продолжение. `--retry-failed` не заменяет этот путь и не разрешает использовать
+неудавшийся candidate как predecessor.
+
+Retirement ledger устанавливает сохраняемый floor контроллера. Обычный upgrade
+может сохранить его по точному operation-bound proof candidate и rollback broker:
+до reservation оба executable проходят behavioral probes в изолированных state/socket,
+а после reservation, при выборе runtime и после restart доказательство проверяется
+по текущим identities и неизменным bytes ledger. Начальный envelope — ledger v1
+без handoff и lifecycle `released`; retry допускает только тот же operation lifecycle.
+Приватный `controller-enforcement.json` входит в completion metadata; write-ahead
+intent на bridge сохраняет допустимые old/new combinations при частичном переключении.
+Crash после публикации intent восстанавливается только по exact same-inode sibling
+pair; произвольные hardlinks не допускаются. Отдельный local release-intent связывает
+успешные commit/finalize/resume receipts до release. Retry при нём выполняет только
+свежую проверку exact candidate/ledger/own lifecycle, при необходимости завершающий
+release и повторную read-only проверку, затем seal completion. Ни reserve, ни стадии
+upgrade не переисполняются; отсутствие intent или drift сохраняют отказ.
+Rollback и restore без собственного точного proof блокируются до первой мутации.
+Backup включает оба lifecycle journal и аутентифицирует `controller_enforcement_floor`.
+Collector всегда перечитывает фиксированный retirement ledger даже при старой backup policy.
+Restore поколения с таким floor выдаёт `controller_enforcement_migration_required`:
+текущий формат не доказывает совместимость восстановленного контроллера.
+Более старый snapshot на новом узле не содержит актуального floor: для его безопасной
+миграции нужен независимый от snapshot монотонный checkpoint enforcement/retirement.
+Эти ограничения не доказывают quiescence ранее прерванной попытки.
+Источники: [manual gate](../scripts/manual-deploy.py),
+[operation proof](../cmd/ultra-install/upgrade_enforcement.go),
+[isolated verifier](../deploy/ansible/library/ultra_controller_enforcement.py),
+[rollback preflight](../deploy/ansible/roles/release/tasks/controller-rollback-preflight.yml),
+[проверка restore](../deploy/recovery/restore_common.py).
 
 Роли и systemd-шаблоны Ansible встраиваются в `ultra-install` из
 [deploy/ansible](../deploy/ansible/assets.go). Изменение установленного YAML отдельно
@@ -174,8 +348,9 @@ TLS sniffing может заменить IP назначения доменом 
 
 Полная синтетическая topology-проверка использует отдельные VM и собственные ключи;
 [vm_topology.py](../deploy/recovery/vm_topology.py) ограничивает TCG translation cache
-параметром `tb-size=32`, чтобы четыре гостя не расходовали память на неограниченный
-кеш эмуляции. До запуска [vm_acceptance.py](../deploy/recovery/vm_acceptance.py)
+параметром `tb-size=32`, чтобы шесть гостей не расходовали память на неограниченный
+кеш эмуляции. Dedicated DB требует двух дополнительных VM; полный acceptance
+после изменения топологии ещё не подтверждён. До запуска [vm_acceptance.py](../deploy/recovery/vm_acceptance.py)
 вызовите `vm_topology_fixture.py dependencies --workspace <private-directory>`.
 Команда запускает только пакеты тестовых payload/DoH-служб и возвращает
 `prepared`/`pending`; pending завершается кодом 2. Повторная проверка не прерывает
@@ -351,6 +526,12 @@ reload, восстановление прежних файлов после ош
 отдельного `!unsafe`-скаляра даже в кавычках. Это могло менять строковые права,
 пароли или настройки. `scripts/test-ansible-input-types.py` проверяет сохранение
 типов и запрет вычисления вложенных выражений через настоящий DataLoader/Templar.
+
+Не ставь `no_log: true` на аргумент модуля, если его значение затем возвращается
+в зарегистрированном результате: Ansible маскирует совпадающие данные и в самом
+результате, из-за чего следующие задачи могут получить маркер вместо исходного
+значения. Для сокрытия вывода используй task-level `no_log`; сериализационный
+контракт ingress проверяет `scripts/test-ansible-ingress.py`.
 
 Диагностические shell-скрипты получают только разрешённые несекретные параметры
 через `ultra-install config-values`: общий Go-парсер формирует NUL-пары,

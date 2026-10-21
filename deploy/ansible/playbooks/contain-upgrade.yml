@@ -1,0 +1,78 @@
+---
+# Keep nginx available for unrelated virtual hosts; stopped bot and relay remove
+# candidate request handlers. Timers own no processes and lack service PID fields.
+- name: Stop failed candidate writers across the handoff-proven frozen fleet
+  hosts: all:!localhost
+  gather_facts: false
+  strategy: linear
+  vars:
+    containment_units:
+      - ultra-recovery-backup.timer
+      - ultra-recovery-reconcile.timer
+      - ultra-auto-upgrade.timer
+      - certbot.timer
+      - ultra-bot.service
+      - ultra-relay.service
+      - ultra-recovery-backup.service
+      - ultra-recovery-reconcile.service
+      - ultra-auto-upgrade.service
+      - certbot.service
+  tasks:
+    - name: Identify installed fixed app and automation units
+      ansible.builtin.command:
+        argv: [systemctl, show, "--property=LoadState", "--value", "{{ item }}"]
+      loop: "{{ containment_units }}"
+      register: containment_loaded
+      changed_when: false
+      failed_when: false
+      become: true
+    - name: Stop every present producer even if another unit fails
+      ansible.builtin.command:
+        argv: [systemctl, stop, "{{ item.item }}"]
+      loop: "{{ containment_loaded.results }}"
+      when: item.rc == 0 and item.stdout != 'not-found'
+      register: containment_stopped
+      changed_when: item.rc == 0 and item.stdout != 'not-found'
+      failed_when: false
+      become: true
+    - name: Inspect shutdown after all stop attempts
+      ansible.builtin.command:
+        argv: [systemctl, show, "--property=LoadState,ActiveState,MainPID,ControlPID", "{{ item }}"]
+      loop: "{{ containment_units }}"
+      register: containment_state
+      changed_when: false
+      failed_when: false
+      become: true
+    - name: Require each unit to be positively absent or completely stopped
+      ansible.builtin.assert:
+        that:
+          - item.rc in [0, 1]
+          - >-
+            'LoadState=not-found' in item.stdout_lines or
+            (('ActiveState=inactive' in item.stdout_lines or
+            'ActiveState=failed' in item.stdout_lines) and
+            ('MainPID=0' in item.stdout_lines or
+            (item.item.endswith('.timer') and item.stdout_lines |
+            select('match', '^MainPID=') | list | length == 0)) and
+            ('ControlPID=0' in item.stdout_lines or
+            (item.item.endswith('.timer') and item.stdout_lines |
+            select('match', '^ControlPID=') | list | length == 0)))
+      loop: "{{ containment_state.results }}"
+    - name: Mark this frozen host contained only after shutdown is verified
+      ansible.builtin.set_fact:
+        ultra_candidate_contained: true
+- name: Confirm every frozen host before issuing maintenance receipt
+  hosts: bridge
+  gather_facts: false
+  tasks:
+    - name: Require affirmative shutdown proof from the whole fleet
+      ansible.builtin.assert:
+        that: hostvars[item].ultra_candidate_contained | default(false) | bool
+      loop: '{{ groups["all"] | difference(["localhost"]) }}'
+    - name: Record same-operation maintenance confirmation
+      ansible.builtin.copy:
+        content: "{{ {'verified': true, 'maintenance_id': ultra_lifecycle_id} | to_json(preprocess_unsafe=False) }}"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
