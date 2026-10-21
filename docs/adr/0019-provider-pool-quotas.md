@@ -16,12 +16,15 @@ Vultr объединяет исходящий трафик аккаунта ме
 ## Решение
 
 Заменяет бюджетную часть [ADR 0010](0010-monthly-quotas-and-route-application.md)
-и [ADR 0014](0014-saved-vultr-plan-for-quotas.md). Месячная ёмкость равна
-2 TB + 1 TB за каждый текущий экземпляр аккаунта, используя десятичные байты.
-Считать все экземпляры из полного `/instances`, включая выключенные; удалённые,
-исчезнувшие из списка, больше не дают ёмкость. Общий `gb_out` из
-`/account/bandwidth` вычитать один раз. Удаление экземпляра не уменьшает уже
-учтённый расход. Безопасный потолок — округлённые вниз 80% ёмкости; личный потолок
+и [ADR 0014](0014-saved-vultr-plan-for-quotas.md). Подтверждённая ёмкость — сумма
+`instance_bandwidth_credits`, `free_bandwidth_credits` и
+`purchased_bandwidth_credits` из `current_month_to_date` ответа
+`/account/bandwidth`. Начисления экземпляров зависят от времени работы в расчётном
+периоде; список текущих VPS и `current_month_projected` не устанавливают уже
+доступную квоту. Общий `gb_out` того же периода вычитать один раз. Создание и удаление
+экземпляра не сбрасывают начисления и расход. Отсутствующие, отрицательные и
+непредставимые значения не подтверждают новую квоту. При переводе API GB в байты
+сохраняется десятичный множитель 10⁹. Безопасный потолок — округлённые вниз 80% ёмкости; личный потолок
 — 25% безопасного потолка. Период — календарный месяц UTC. Остаток не делить между exit.
 
 `account_id` сохраняет личный расход при ротации и отзыве доступа. Принадлежность
@@ -73,4 +76,5 @@ Vultr объединяет исходящий трафик аккаунта ме
 - [Регрессии локального пула](../../internal/runtimestate/pool_test.go)
 - [Объединение трафика Vultr](https://blogs.vultr.com/Vultr-Announces-Reduced-Bandwidth-Pricing-2-Tb-Of-Free-Monthly-Egress-Free-Ingress-And-Global-Pooling)
 - [Данные общего расхода](../../internal/cloud/bandwidth.go)
-- [Подсчёт текущих экземпляров](../../internal/cloud/vultr.go)
+- [Контракт начислений API](https://github.com/vultr/govultr/blob/master/account.go)
+- [Почасовое начисление квоты](https://docs.vultr.com/support/platform/billing/how-are-bandwidth-caps-calculated)

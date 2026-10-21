@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// AccountBandwidth is the accrued account-wide pool, in decimal bytes.
+// AccountBandwidth is the confirmed accrued account-wide pool, in bytes.
 type AccountBandwidth struct {
 	Accrued   int64
 	Used      int64
@@ -15,21 +15,9 @@ type AccountBandwidth struct {
 }
 
 const (
-	// Vultr's account egress allowance is decimal: 2 TB plus 1 TB for each
-	// instance that still exists in the account. Stopped instances remain in
-	// /instances and therefore remain billable; deleted instances disappear.
-	VultrBaseBandwidthBytes    int64 = 2_000_000_000_000
-	VultrPerInstanceBytes      int64 = 1_000_000_000_000
-	VultrSafeBudgetNumerator         = 4
-	VultrSafeBudgetDenominator       = 5
+	VultrSafeBudgetNumerator   = 4
+	VultrSafeBudgetDenominator = 5
 )
-
-func vultrBandwidthCapacity(instances int) (int64, error) {
-	if instances < 0 || int64(instances) > (math.MaxInt64-VultrBaseBandwidthBytes)/VultrPerInstanceBytes {
-		return 0, ErrUnavailable
-	}
-	return VultrBaseBandwidthBytes + int64(instances)*VultrPerInstanceBytes, nil
-}
 
 func vultrSafeBandwidthBudget(capacity int64) int64 {
 	return capacity/VultrSafeBudgetDenominator*VultrSafeBudgetNumerator +
@@ -40,7 +28,10 @@ func (v *Vultr) AccountBandwidth(ctx context.Context) (AccountBandwidth, error) 
 	var response struct {
 		Bandwidth struct {
 			Current *struct {
-				Out *float64 `json:"gb_out"`
+				Out       *float64 `json:"gb_out"`
+				Instance  *int64   `json:"instance_bandwidth_credits"`
+				Free      *int64   `json:"free_bandwidth_credits"`
+				Purchased *int64   `json:"purchased_bandwidth_credits"`
 			} `json:"current_month_to_date"`
 		} `json:"bandwidth"`
 	}
@@ -55,13 +46,14 @@ func (v *Vultr) AccountBandwidth(ctx context.Context) (AccountBandwidth, error) 
 	if math.IsNaN(used) || math.IsInf(used, 0) || used >= float64(math.MaxInt64) {
 		return AccountBandwidth{}, ErrUnavailable
 	}
-	instances, err := v.Instances(ctx)
-	if err != nil {
-		return AccountBandwidth{}, err
-	}
-	capacity, err := vultrBandwidthCapacity(len(instances))
-	if err != nil {
-		return AccountBandwidth{}, err
+	// Current credits already include hourly instance accrual and purchased
+	// bandwidth. Inventory and projected credits cannot establish today's pool.
+	var capacity int64
+	for _, credit := range []*int64{c.Instance, c.Free, c.Purchased} {
+		if credit == nil || *credit < 0 || *credit > (math.MaxInt64-capacity)/1_000_000_000 {
+			return AccountBandwidth{}, ErrUnavailable
+		}
+		capacity += *credit * 1_000_000_000
 	}
 	safe := vultrSafeBandwidthBudget(capacity)
 	return AccountBandwidth{Accrued: capacity, Used: int64(used), Remaining: max(0, safe-int64(used))}, nil
