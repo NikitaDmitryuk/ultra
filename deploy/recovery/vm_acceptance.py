@@ -6,6 +6,7 @@ before the real restore command and is never reset after a failure. Only newly
 created synthetic credentials and this topology's owned VM processes are used.
 """
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -94,9 +95,118 @@ def fixture_helper_sources():
         'restore_common.py':'restore_common.py'}.items()}
 
 
+def fixture_public_key(path):
+    if not path:
+        raise ValueError('synthetic_upgrade_trusted_public_key_file_required')
+    lines=Path(path).read_text().splitlines()
+    if lines and lines[0].startswith('untrusted comment:'):
+        lines=lines[1:]
+    if len(lines)!=1:
+        raise ValueError('invalid_synthetic_upgrade_public_key')
+    key=lines[0].strip()
+    try:
+        decoded=base64.b64decode(key,validate=True)
+    except ValueError:
+        raise ValueError('invalid_synthetic_upgrade_public_key') from None
+    if len(decoded)!=42 or decoded[:2] not in (b'Ed',b'ED'):
+        raise ValueError('invalid_synthetic_upgrade_public_key')
+    return key
+
+
+def synthetic_upgrade_config(plan, release, public_key):
+    """Project the fixture's initial policy into the signed upgrade CLI contract.
+
+    The canonical format has one bootstrap main exit; all installed exit policy
+    (including independent budgets) lives in automation.static_nodes.
+    """
+    bridge=plan['bridge'];database=plan['database'];bot=plan['bot']
+    automation=plan['automation'];ingress=automation['ingress'];ssh_config=plan['ssh']
+    main_exit=plan['exits'][0]
+    values={
+        'INSTALL_SCHEMA_VERSION':'2',
+        'ULTRA_RELEASE_MINISIGN_PUBLIC_KEY':public_key,
+        'SSH_USER':ssh_config['user'],
+        'ULTRA_INSTALL_SSH_STRICT_HOST_KEY':ssh_config['strict_host_key'],
+        'BRIDGE_IP':bridge['address'],
+        'BRIDGE_SSH_KEY':bridge.get('ssh_identity',ssh_config['identity']),
+        'PUBLIC_HOST':bridge['public_host'],
+        'REUSE_BRIDGE_SPEC':bridge.get('reuse_spec',False),
+        'REALITY_DEST':bridge['reality_dest'],'REALITY_SNI':bridge['reality_sni'],
+        'VLESS_PORT':bridge['vless_port'],
+        'MAIN_EXIT_IP':main_exit['ssh_host'],
+        'MAIN_EXIT_SSH_KEY':main_exit.get('ssh_identity',ssh_config['identity']),
+        'DATABASE_IP':database['primary_host'],
+        'DATABASE_SSH_KEY':database.get('ssh_identity',ssh_config['identity']),
+        'DB_NAME':database['name'],'DB_USER':database['user'],
+        'BOT_ENABLE':bot['enabled'],'BOT_DOMAIN':bot['domain'],'BOT_PORT':bot['port'],
+        'SUBSCRIPTION_DOMAIN':bot.get('subscription_domain',bot['domain']),
+        'SECRETS_ENV_FILE':plan['secrets']['env_file'],
+        'VPN_DOMAIN':ingress['domain'],'ACME_EMAIL':ingress['email'],
+        'PUBLIC_XHTTP_PATH':ingress['path'],
+        'BOT_INGRESS_IP':ingress.get('forward_host',''),
+        'ULTRA_AUTOMATION_VERSION':release['version'],
+        'ULTRA_AUTOMATION_RELEASE_DIR':release['directory'],
+        'ULTRA_AUTOMATION_AGE_RECIPIENT':automation['age_recipient'],
+        'ULTRA_AUTOMATION_BRIDGE_PROVIDER':automation['bridge_provider'],
+        'ULTRA_AUTOMATION_BRIDGE_URL':automation['bridge_url'],
+        'ULTRA_AUTOMATION_KNOWN_HOSTS_FILE':automation['known_hosts_file'],
+        'ULTRA_AUTOMATION_ADMIN_TELEGRAM_ID':automation['admin_telegram_id'],
+        'ULTRA_AUTOMATION_STATIC_NODES':json.dumps(automation['static_nodes']),
+        'ULTRA_AUTOMATION_READINESS_TIMEOUT_SEC':automation['readiness_timeout_sec'],
+    }
+    if automation.get('dns'):
+        dns=automation['dns']
+        values.update(DNS_PROVIDER=dns['provider'],DNS_ZONE=dns['zone'],DNS_TTL=dns.get('ttl',300),
+                      DNS_SUBSCRIPTION_NAME=dns['subscription_name'],DNS_VPN_NAME=dns['vpn_name'])
+    for field in ('state_paths','artifact_paths'):
+        if field in automation:
+            values['ULTRA_AUTOMATION_'+field.upper()]=json.dumps(automation[field])
+    for field in ('backend','gateway','status','experimental','staging'):
+        if field+'_port' in ingress:
+            values['ULTRA_INGRESS_'+field.upper()+'_PORT']=ingress[field+'_port']
+    # JSON string quoting matches the canonical Go parser, including spaces,
+    # quotes and backslashes in private fixture paths. No shell evaluates it.
+    return ''.join(key+'='+json.dumps(str(value).lower() if isinstance(value,bool) else str(value))+'\n'
+                   for key,value in values.items())
+
+
+def require_synthetic_upgrade_dns_policy(plan):
+    # The real forward-only VM fixture has no managed DNS provider. A canonical
+    # direct-ingress plan can be exercised locally in preflight tests, but dummy
+    # credentials do not make live provider mutation available to this harness.
+    automation=plan.get('automation',{})
+    if not automation.get('dns') or automation.get('ingress',{}).get('forward_host'):
+        raise ValueError('synthetic_upgrade_managed_dns_fixture_required')
+
+
+def serial_upgrade(directory, installer, upgrade_release, public_key_file):
+    if not upgrade_release:
+        raise ValueError('explicit_synthetic_upgrade_release_required')
+    next_release=Path(upgrade_release).resolve()
+    manifest=json.loads((next_release/'release-manifest.json').read_text())
+    version=manifest.get('version','')
+    if version=='latest' or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,95}',version):
+        raise ValueError('explicit_synthetic_upgrade_version_required')
+    public_key=fixture_public_key(public_key_file)
+    plan=json.loads((directory/'install-plan.json').read_text())
+    require_synthetic_upgrade_dns_policy(plan)
+    config=directory/'upgrade-install.config'
+    config.write_text(synthetic_upgrade_config(plan,{'version':version,'directory':str(next_release)},public_key))
+    config.chmod(0o600)
+    run([installer,'upgrade','--config',str(config),'--release-dir',str(next_release)],directory/'upgrade.log')
+    return version
+
+
 def execute(args):
     os.umask(0o077)
     directory=Path(args.workspace).resolve();installer=str(Path(args.installer).resolve())
+    if args.upgrade_release:
+        fixture_public_key(getattr(args,'upgrade_public_key_file',None))
+        # Fresh VM apply intentionally uses the supported external/forward
+        # ingress path. It cannot also supply managed DNS for signed upgrade.
+        if not getattr(args,'existing_deployment',False):
+            raise ValueError('synthetic_upgrade_managed_dns_fixture_required')
+        require_synthetic_upgrade_dns_policy(json.loads((directory/'install-plan.json').read_text()))
     topology=json.loads((directory/'topology.json').read_text())
     if not topology.get('synthetic_only') or not topology.get('isolation_verified_at'):
         raise ValueError('verified_synthetic_topology_required')
@@ -140,13 +250,7 @@ def execute(args):
         phase('apply',apply)
     if args.upgrade_release:
         def upgrade():
-            plan=json.loads((directory/'install-plan.json').read_text())
-            next_release=Path(args.upgrade_release).resolve()
-            manifest=json.loads((next_release/'release-manifest.json').read_text())
-            plan['automation'].update(version=manifest['version'],release_dir=str(next_release))
-            (directory/'upgrade-plan.json').write_text(json.dumps(plan))
-            run([installer,'upgrade','--plan',str(directory/'upgrade-plan.json')],directory/'upgrade.log')
-            receipt['upgraded_version']=manifest['version'];save()
+            receipt['upgraded_version']=serial_upgrade(directory,installer,args.upgrade_release,args.upgrade_public_key_file);save()
         phase('serial_upgrade',upgrade)
     def install_payload_tools(address):
         files={**{'/opt/ultra-fixture/'+name:data for name,data in fixture_helper_sources().items()},
@@ -199,4 +303,5 @@ def execute(args):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--workspace',required=True);parser.add_argument('--installer',required=True);parser.add_argument('--release-dir',required=True);parser.add_argument('--state-proof',required=True);parser.add_argument('--upgrade-release');parser.add_argument('--existing-deployment',action='store_true',help='verify installed automation, then restore without repeating apply')
+    parser.add_argument('--upgrade-public-key-file',help='independently trusted synthetic fixture Minisign public key; required with --upgrade-release')
     execute(parser.parse_args())

@@ -255,6 +255,252 @@ func TestUpgradeRuntimeProofBoundToStaticAndDynamicFrozenTargets(t *testing.T) {
 	}
 }
 
+func TestUpgradeRuntimeStaticExitsRequiresCanonicalSourceEvidence(t *testing.T) {
+	p := &installplan.InstallPlan{
+		SourceValues: map[string]string{"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2"},
+		Exits:        []installplan.ExitNode{{Name: "primary", SSHHost: "192.0.2.2", DialAddr: "192.0.2.2", Port: 9443}},
+		Automation: &installplan.AutomationConfig{
+			StaticNodes: []installplan.AutomationNode{{Name: "NL", Address: "192.0.2.2", Provider: "fixture"}},
+		},
+	}
+	exits, err := upgradeRuntimeStaticExits(p)
+	if err != nil || len(exits) != 1 || exits[0] != p.Exits[0] {
+		t.Fatalf("legacy/internal plan lost explicit exits: %+v %v", exits, err)
+	}
+	p.SourceValues["INSTALL_SCHEMA_VERSION"] = "2"
+	if _, err := upgradeRuntimeStaticExits(p); err == nil {
+		t.Fatal("declared canonical config accepted missing static policy")
+	}
+	delete(p.SourceValues, "INSTALL_SCHEMA_VERSION")
+	p.SourceValues["ULTRA_AUTOMATION_STATIC_NODES"] = ""
+	if _, err := upgradeRuntimeStaticExits(p); err == nil {
+		t.Fatal("explicit invalid static policy fell back to legacy exits")
+	}
+}
+
+func TestUpgradeRuntimeCanonicalSyntheticStaticTopology(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python unavailable")
+	}
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "upgrade-install.config")
+	// Exercise the actual config writer and canonical file parser with a separate
+	// direct-ingress preflight fixture. Ordinary isolated VMs use forward ingress
+	// without managed DNS and cannot perform the signed serial upgrade yet.
+	script := `import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+sys.path.insert(0,str(root/'deploy/recovery'))
+import vm_acceptance
+plan=json.loads((root/'deploy/install-plan-v2.example.json').read_text())
+plan['bot'].update(domain='vpn.fixture.test',subscription_domain='sync.fixture.test')
+plan['automation']['dns']={'provider':'vultr','zone':'fixture.test','ttl':300,'subscription_name':'sync','vpn_name':'vpn'}
+plan['automation']['ingress'].update(domain='vpn.fixture.test',forward_host='')
+env=pathlib.Path(sys.argv[2]).with_name('synthetic.env')
+env.write_text('ULTRA_VULTR_API_KEY=synthetic-no-provider-permission\nTELEGRAM_BOT_TOKEN=fixture-token\n')
+env.chmod(0o600)
+plan['secrets']['env_file']=str(env)
+plan['exits']=[{'name':'NL','ssh_host':'192.0.2.20','priority':100},{'name':'US','ssh_host':'192.0.2.30','priority':200}]
+plan['automation']['static_nodes']=[{'name':e['name'],'address':e['ssh_host'],'provider':'fixture-'+e['name'],'budget':{'monthly_bytes':1048576,'is_fallback':i==0}} for i,e in enumerate(plan['exits'])]
+pathlib.Path(sys.argv[2]).write_text(vm_acceptance.synthetic_upgrade_config(plan,{'version':'v2.3.2','directory':'/fixture/release'},'fixture-public-key'))
+`
+	if out, err := exec.Command(python, "-c", script, root, path).CombinedOutput(); err != nil {
+		t.Fatalf("synthetic config: %v: %s", err, out)
+	}
+	load := func(t *testing.T) *installplan.InstallPlan {
+		t.Helper()
+		p, err := installplan.LoadLifecycleConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	p := load(t)
+	if err := installplan.ValidatePlan(p); err != nil {
+		t.Fatalf("synthetic canonical plan validation: %v", err)
+	}
+	if err := validateUpgradeDomainConfigPresence(p); err != nil {
+		t.Fatalf("synthetic canonical domain preflight: %v", err)
+	}
+	// Ingress bootstrap unconditionally runs this preparation for prepare,
+	// activate, stage and rollback. Validate that actual local prerequisite,
+	// including the shared provider credential, without running its Ansible role.
+	dnsVariables := map[string]any{}
+	if err := prepareAnsibleDNS(p, dnsVariables); err != nil {
+		t.Fatalf("direct synthetic bootstrap DNS preparation: %v", err)
+	}
+	if dnsVariables["ultra_dns_api_key"] != "synthetic-no-provider-permission" {
+		t.Fatal("synthetic shared DNS credential not projected")
+	}
+	if _, err := prepareProviderSecrets(p, t.TempDir()); err != nil {
+		t.Fatalf("synthetic bootstrap provider preparation: %v", err)
+	}
+	t.Run("forward DNS bootstrap remains rejected", func(t *testing.T) {
+		bad := load(t)
+		bad.Automation.Ingress.ForwardHost = "192.0.2.20"
+		if err := prepareAnsibleDNS(bad, map[string]any{}); err == nil || err.Error() != "managed DNS requires direct bridge ingress" {
+			t.Fatalf("forward DNS bootstrap did not fail closed: %v", err)
+		}
+	})
+	t.Run("missing shared DNS key remains rejected", func(t *testing.T) {
+		bad := load(t)
+		env := filepath.Join(t.TempDir(), "empty.env")
+		if err := os.WriteFile(env, []byte("TELEGRAM_BOT_TOKEN=fixture-token\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		bad.Secrets.EnvFile = env
+		if err := prepareAnsibleDNS(bad, map[string]any{}); err == nil ||
+			err.Error() != "canonical Vultr API key required for managed DNS" {
+			t.Fatalf("missing DNS credential did not fail closed: %v", err)
+		}
+	})
+	if dns := p.Automation.DNS; dns.Provider != "vultr" || dns.Zone != "fixture.test" || dns.TTL != 300 ||
+		dns.SubscriptionName != "sync" || dns.VPNName != "vpn" || p.PublicSubscriptionDomain() != "sync.fixture.test" {
+		t.Fatalf("synthetic canonical DNS policy lost: %+v", dns)
+	}
+	ingress := p.Automation.Ingress
+	// Match a hypothetical installed direct-ingress policy: these pure gates
+	// must pass without DNS/provider mutation or a live provider credential.
+	evidence := upgradeDomainEvidence{DNSTTL: 300, ACMEEmailMatches: true, IngressModeMatches: true,
+		ForwardHostMatches: true, StagingPortMatches: true, StatusPortMatches: true,
+		ExperimentalPortMatch: true, AgeRecipientMatches: true, BridgeProviderMatches: true,
+		StaticNodesMatch: true, AdminIDMatches: true, StatePathsMatch: true, ArtifactPathsMatch: true,
+		BridgeIPv4: p.Automation.BridgeIPv4, Path: ingress.Path, BackendPort: ingress.BackendPort,
+		GatewayPort: ingress.GatewayPort, Fingerprint: "firefox"}
+	if err := validateUpgradeDomainPolicy(evidence, ingress, p.Automation.DNS, p.Automation); err != nil {
+		t.Fatalf("unchanged synthetic domain policy rejected: %v", err)
+	}
+	t.Run("missing DNS still fails domain preflight", func(t *testing.T) {
+		bad := load(t)
+		delete(bad.SourceValues, "DNS_PROVIDER")
+		withoutDNS, err := installplan.CanonicalLifecycleValuesToPlan(bad.SourceValues)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateUpgradeDomainConfigPresence(withoutDNS); err == nil ||
+			err.Error() != "upgrade_domain_policy_removal_migration_required" {
+			t.Fatalf("missing DNS did not fail closed: %v", err)
+		}
+	})
+	if len(p.Exits) != 1 || p.Exits[0].Name != "primary" || p.Exits[0].SSHHost != "192.0.2.20" {
+		t.Fatal("canonical bootstrap contract changed")
+	}
+	const nlID = "11111111-1111-1111-1111-111111111111"
+	const usID = "22222222-2222-2222-2222-222222222222"
+	var inspection upgradeInspection
+	if err := json.Unmarshal([]byte(`{"topology_sha256":"`+strings.Repeat("a", 64)+`","nodes":[{"id":"`+nlID+`","address":"192.0.2.20","pins":"fixture-pin"},{"id":"`+usID+`","address":"192.0.2.30","pins":"fixture-pin"}]}`), &inspection); err != nil {
+		t.Fatal(err)
+	}
+	inspection.ObservedAt, inspection.Identity = 1, "fixture-identity"
+	inspection.RuntimeNodes = map[string]upgradeRuntimeNodeEvidence{
+		nlID: {Name: "NL", TunnelIdentityDigest: strings.Repeat("b", 64)},
+		usID: {Name: "US", TunnelIdentityDigest: strings.Repeat("c", 64)},
+	}
+	nodes, err := freezeUpgradeExits(inspection, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := map[string]any{
+		"all": map[string]any{"children": map[string]any{"exits": map[string]any{"hosts": nodes}}},
+	}
+	check := func(t *testing.T, p *installplan.InstallPlan) {
+		t.Helper()
+		requests, err := upgradeRuntimeRequests(p, inspection, inventory, "fixture-runtime-1")
+		if err != nil || len(requests) != 3 {
+			t.Fatalf("canonical static requests: %v", err)
+		}
+		bridge := requests["bridge"].(runtimeProbeInput).Request
+		if len(bridge.Exits) != 2 || bridge.Exits[0].Name != "NL" || bridge.Exits[1].Name != "US" ||
+			bridge.Exits[0].SSHHost != "192.0.2.20" || bridge.Exits[1].DialAddr != "192.0.2.30" {
+			t.Fatalf("lost exact main-first runtime topology: %+v", bridge.Exits)
+		}
+		for id, name := range map[string]string{nlID: "NL", usID: "US"} {
+			r := requests["exit_"+strings.ReplaceAll(id, "-", "")].(runtimeProbeInput).Request
+			if r.Node != name || r.Proof.Node != name || r.Proof.NodeID != "" ||
+				r.Proof.DesiredIdentity == "" {
+				t.Fatalf("lost static proof for %s", name)
+			}
+		}
+		if len(p.Exits) != 1 || p.Exits[0].Name != "primary" {
+			t.Fatal("request construction mutated canonical bootstrap plan")
+		}
+	}
+	check(t, p)
+	// Reordering policy cannot change which address is the main exit.
+	v := p.SourceValues
+	var policy []installplan.AutomationNode
+	if err := json.Unmarshal([]byte(v["ULTRA_AUTOMATION_STATIC_NODES"]), &policy); err != nil {
+		t.Fatal(err)
+	}
+	policy[0], policy[1] = policy[1], policy[0]
+	raw, _ := json.Marshal(policy)
+	v["ULTRA_AUTOMATION_STATIC_NODES"] = string(raw)
+	reordered, err := installplan.CanonicalLifecycleValuesToPlan(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(t, reordered)
+	t.Run("canonical main with additional managed exit", func(t *testing.T) {
+		mixed := load(t)
+		mixed.Automation.StaticNodes = mixed.Automation.StaticNodes[:1]
+		raw, _ := json.Marshal(mixed.Automation.StaticNodes)
+		mixed.SourceValues["ULTRA_AUTOMATION_STATIC_NODES"] = string(raw)
+		managedInspection := inspection
+		managedInspection.RuntimeNodes = map[string]upgradeRuntimeNodeEvidence{
+			nlID: inspection.RuntimeNodes[nlID],
+			usID: {Name: "US", Managed: true, TunnelIdentityDigest: strings.Repeat("c", 64)},
+		}
+		requests, err := upgradeRuntimeRequests(
+			mixed,
+			managedInspection,
+			inventory,
+			"fixture-runtime-1",
+		)
+		if err != nil || len(requests) != 3 {
+			t.Fatalf("canonical static and managed fleet: %v", err)
+		}
+		dynamic := requests["exit_"+strings.ReplaceAll(usID, "-", "")].(runtimeProbeInput).Request
+		if dynamic.Node != "" || dynamic.Proof.NodeID != usID ||
+			dynamic.Proof.TopologySHA != inspection.TopologySHA {
+			t.Fatal("managed exit lost frozen topology proof")
+		}
+	})
+	for _, field := range []string{"missing primary", "mismatched primary", "duplicate name", "duplicate address", "missing node", "renamed node", "policy mismatch", "managed tunnel"} {
+		t.Run(field, func(t *testing.T) {
+			bad := load(t)
+			switch field {
+			case "missing primary":
+				delete(bad.SourceValues, "MAIN_EXIT_IP")
+			case "mismatched primary":
+				bad.SourceValues["MAIN_EXIT_IP"] = "192.0.2.99"
+				bad.Exits[0].SSHHost, bad.Exits[0].DialAddr = "192.0.2.99", "192.0.2.99"
+			case "duplicate name":
+				bad.Automation.StaticNodes[1].Name = "NL"
+			case "duplicate address":
+				bad.Automation.StaticNodes[1].Address = "192.0.2.20"
+			case "missing node":
+				bad.Automation.StaticNodes = bad.Automation.StaticNodes[:1]
+			case "renamed node":
+				bad.Automation.StaticNodes[1].Name = "other"
+			case "policy mismatch":
+				delete(bad.SourceValues, "ULTRA_AUTOMATION_STATIC_NODES")
+			case "managed tunnel":
+				bad.Features.MainExitDomain = "tunnel.example.com"
+			}
+			if field != "policy mismatch" {
+				raw, _ := json.Marshal(bad.Automation.StaticNodes)
+				bad.SourceValues["ULTRA_AUTOMATION_STATIC_NODES"] = string(raw)
+			}
+			if _, err := upgradeRuntimeRequests(bad, inspection, inventory, "fixture-runtime-1"); err == nil {
+				t.Fatal("ambiguous or changed canonical topology accepted")
+			}
+		})
+	}
+}
+
 func TestFinalReleaseRollbackRestoresInactiveDisabledBot(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {

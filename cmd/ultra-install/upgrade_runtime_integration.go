@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	ansibleassets "github.com/NikitaDmitryuk/ultra/deploy/ansible"
@@ -22,6 +23,71 @@ type upgradeRuntimeNodeEvidence struct {
 	CertificatePin       string `json:"certificate_pin"`
 }
 
+// Bootstrap's primary exit is not the recovery policy's runtime node name.
+// Reconcile and the upgrade inspection preserve static_nodes names and addresses.
+// Resolve that policy only for the canonical single-main bootstrap envelope;
+// never reinterpret an already expanded or adopted plan as canonical input.
+func upgradeRuntimeStaticExits(p *installplan.InstallPlan) ([]installplan.ExitNode, error) {
+	if p.Automation == nil {
+		return p.Exits, nil
+	}
+	_, hasPolicy := p.SourceValues["ULTRA_AUTOMATION_STATIC_NODES"]
+	_, hasSchema := p.SourceValues["INSTALL_SCHEMA_VERSION"]
+	if !hasPolicy && !hasSchema {
+		// Legacy/internal plans may carry automation independently of canonical
+		// config presence. Their explicit exits remain the runtime authority.
+		return p.Exits, nil
+	}
+	fail := func() ([]installplan.ExitNode, error) {
+		return nil, errors.New("upgrade_runtime_topology_migration_required")
+	}
+	main := p.SourceValues["MAIN_EXIT_IP"]
+	var policy []installplan.AutomationNode
+	if json.Unmarshal([]byte(p.SourceValues["ULTRA_AUTOMATION_STATIC_NODES"]), &policy) != nil ||
+		!reflect.DeepEqual(policy, p.Automation.StaticNodes) {
+		return fail()
+	}
+	if net.ParseIP(main) == nil || len(p.Exits) != 1 || p.Exits[0].Name != "primary" ||
+		p.Exits[0].SSHHost != main || p.Exits[0].DialAddr != main || len(p.Automation.StaticNodes) == 0 {
+		return fail()
+	}
+	primary := -1
+	names, addresses := map[string]bool{}, map[string]bool{}
+	exits := make([]installplan.ExitNode, 0, len(p.Automation.StaticNodes))
+	for i, node := range p.Automation.StaticNodes {
+		ip := net.ParseIP(node.Address)
+		if ip == nil || node.Name == "" || strings.TrimSpace(node.Name) != node.Name ||
+			names[node.Name] || addresses[ip.String()] {
+			return fail()
+		}
+		names[node.Name], addresses[ip.String()] = true, true
+		ex := p.Exits[0]
+		ex.Name, ex.SSHHost, ex.DialAddr = node.Name, node.Address, node.Address
+		exits = append(exits, ex)
+		if node.Address == main {
+			primary = i
+		}
+	}
+	if primary < 0 {
+		return fail()
+	}
+	// Keep the main exit first even when policy order differs: bridge defaults
+	// and managed tunnel preservation depend on the selected primary address.
+	mainExit := exits[primary]
+	copy(exits[1:primary+1], exits[:primary])
+	exits[0] = mainExit
+	if p.Features.MainExitDomain != "" {
+		if len(exits) != 1 {
+			return nil, errors.New("upgrade_managed_tunnel_single_static_exit_required")
+		}
+		// The ACME fence also binds the original bootstrap node name.
+		if exits[0].Name != p.Exits[0].Name {
+			return fail()
+		}
+	}
+	return exits, nil
+}
+
 func upgradeRuntimeRequests(
 	p *installplan.InstallPlan,
 	inspection upgradeInspection,
@@ -31,7 +97,11 @@ func upgradeRuntimeRequests(
 	if p == nil || p.SourceValues == nil {
 		return nil, errors.New("upgrade_canonical_runtime_required")
 	}
-	if p.Features.MainExitDomain != "" && len(p.Exits) != 1 {
+	staticExits, err := upgradeRuntimeStaticExits(p)
+	if err != nil {
+		return nil, err
+	}
+	if p.Features.MainExitDomain != "" && len(staticExits) != 1 {
 		return nil, errors.New("upgrade_managed_tunnel_single_static_exit_required")
 	}
 	r := runtimeHostRequest{
@@ -42,7 +112,7 @@ func upgradeRuntimeRequests(
 		Features:    p.Features,
 		BotEnabled:  p.Bot.Enabled,
 	}
-	for _, ex := range p.Exits {
+	for _, ex := range staticExits {
 		r.Exits = append(r.Exits, runtimeHostExit{Name: ex.Name, SSHHost: ex.SSHHost, DialAddr: ex.DialAddr, Port: ex.Port})
 	}
 	in := runtimeProbeInput{Request: r, SubscriptionDomain: p.PublicSubscriptionDomain(), BotDomain: p.Bot.Domain}
@@ -102,7 +172,7 @@ func upgradeRuntimeRequests(
 			return nil, errors.New("upgrade_runtime_exit_proof_unavailable")
 		}
 		name := ""
-		for _, ex := range p.Exits {
+		for _, ex := range staticExits {
 			if ex.Name == evidence.Name && ex.SSHHost == node.Address && ex.DialAddr == node.Address {
 				name = ex.Name
 				break
@@ -143,7 +213,7 @@ func upgradeRuntimeRequests(
 		exitRequest.Proof.DesiredIdentity = identity
 		requests[alias] = runtimeProbeInput{Request: exitRequest}
 	}
-	if len(seen) != len(p.Exits) {
+	if len(seen) != len(staticExits) {
 		return nil, errors.New("upgrade_runtime_topology_migration_required")
 	}
 	return requests, nil
