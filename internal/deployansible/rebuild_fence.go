@@ -346,7 +346,14 @@ func (g *lifecycleGate) importRecoveryFence(s SignedRecoveryFenceRequest) Respon
 		}
 		return Response{Code: g.recoveryQuiescenceBlocker().Error()}
 	}
-	j := &recoveryFenceJournal{Version: 1, AnchorSHA256: anchorHash, Request: s, RequestSHA256: hash, Phase: "draining", UsedNonces: []string{s.Request.Nonce}}
+	j := &recoveryFenceJournal{
+		Version:       1,
+		AnchorSHA256:  anchorHash,
+		Request:       s,
+		RequestSHA256: hash,
+		Phase:         "draining",
+		UsedNonces:    []string{s.Request.Nonce},
+	}
 	// Persist closure before closing our OFD or testing external holder drain.
 	if err = g.saveRecoveryFence(j); err != nil {
 		return Response{Code: "recovery_persistence_failed"}

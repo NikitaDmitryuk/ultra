@@ -310,7 +310,8 @@ func (r *ExitNodeRepo) GuardCloudReinstall(
 // The transaction must still observe the exact pending unpublish identity; all
 // external Update calls and terminal tombstones retain the ordinary guard.
 func (r *ExitNodeRepo) DisableCloudRetirement(ctx context.Context, op *cloud.Operation) error {
-	if op == nil || op.ID == "" || op.ExitID != op.ID || op.Phase != "retire_unpublish" || op.State != "pending" || net.ParseIP(op.RetirementTarget) == nil {
+	if op == nil || op.ID == "" || op.ExitID != op.ID || op.Phase != "retire_unpublish" || op.State != "pending" ||
+		net.ParseIP(op.RetirementTarget) == nil {
 		return cloud.ErrConflict
 	}
 	return r.withMutation(ctx, func(repo *ExitNodeRepo) error {

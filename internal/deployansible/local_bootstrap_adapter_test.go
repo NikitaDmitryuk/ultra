@@ -116,7 +116,8 @@ func TestAdaptedBootstrapPreservesOriginalBundleAndLinksProof(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(target, "bundle.adapter.json"), oldProof, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err = prepareAdaptedBootstrapPostgres(lease, original.Inventory, original.Variables, target, source); err == nil || err.Error() != "bootstrap_adapter_proof_conflict" {
+	if err = prepareAdaptedBootstrapPostgres(lease, original.Inventory, original.Variables, target, source); err == nil ||
+		err.Error() != "bootstrap_adapter_proof_conflict" {
 		t.Fatal("old generation accepted", err)
 	}
 	id, err := BootstrapPostgresAdapterID()

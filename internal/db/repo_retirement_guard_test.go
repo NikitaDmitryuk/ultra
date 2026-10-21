@@ -31,7 +31,10 @@ func TestRetirementReservationProtectsFailedAndDeletedExit(t *testing.T) {
 				if err := repo.Delete(ctx, node.ID); !errors.Is(err, ErrExitTargetBusy) {
 					t.Fatalf("delete escaped reservation: %v", err)
 				}
-				if _, err := repo.Add(ctx, exits.AddParams{Name: "alias", Address: node.Address, Port: node.Port + 1}); !errors.Is(err, ErrExitTargetBusy) {
+				if _, err := repo.Add(ctx, exits.AddParams{Name: "alias", Address: node.Address, Port: node.Port + 1}); !errors.Is(
+					err,
+					ErrExitTargetBusy,
+				) {
 					t.Fatalf("alias escaped reservation: %v", err)
 				}
 				err := repo.DisableCloudRetirement(ctx, &op)
@@ -185,7 +188,10 @@ func TestRetirementRejectsExistingHostAliasesBeforeCheckpoint(t *testing.T) {
 				instance.Tags = []string{"ultra", "ultra-operation-" + op.ID}
 				api := &retirementGuardProvider{instance: instance}
 				s := &cloud.Service{Store: NewCloudRepo(database), API: api, Provisioner: &retirementGuardProvisioner{repo: repo}}
-				if err := s.RetireExits(ctx, 1, []cloud.RetirementTarget{{OperationID: op.ID, InstanceID: op.InstanceID}}); !errors.Is(err, cloud.ErrConflict) {
+				if err := s.RetireExits(ctx, 1, []cloud.RetirementTarget{{OperationID: op.ID, InstanceID: op.InstanceID}}); !errors.Is(
+					err,
+					cloud.ErrConflict,
+				) {
 					t.Fatalf("shared host accepted: %v", err)
 				}
 				saved, err := s.Store.Get(ctx, op.ID)
@@ -210,7 +216,10 @@ func TestRetirementUninstalledPaidFailureReservesHostThroughRetry(t *testing.T) 
 	instance.Tags = []string{"ultra", "ultra-operation-" + op.ID}
 	api := &retirementGuardProvider{instance: instance, fail: true}
 	s := &cloud.Service{Store: NewCloudRepo(database), API: api, Provisioner: &retirementGuardProvisioner{repo: repo}}
-	if err := s.RetireExits(ctx, 1, []cloud.RetirementTarget{{OperationID: op.ID, InstanceID: op.InstanceID}}); !errors.Is(err, cloud.ErrUnavailable) {
+	if err := s.RetireExits(ctx, 1, []cloud.RetirementTarget{{OperationID: op.ID, InstanceID: op.InstanceID}}); !errors.Is(
+		err,
+		cloud.ErrUnavailable,
+	) {
 		t.Fatal(err)
 	}
 	failed, err := s.Store.Get(ctx, op.ID)
@@ -220,7 +229,10 @@ func TestRetirementUninstalledPaidFailureReservesHostThroughRetry(t *testing.T) 
 	assertReserved := func() {
 		t.Helper()
 		for _, enabled := range []bool{true, false} {
-			if _, err := repo.Add(ctx, exits.AddParams{Name: "alias", Address: instance.IP, Port: node.Port + 1, Enabled: &enabled}); !errors.Is(err, ErrExitTargetBusy) {
+			if _, err := repo.Add(ctx, exits.AddParams{Name: "alias", Address: instance.IP, Port: node.Port + 1, Enabled: &enabled}); !errors.Is(
+				err,
+				ErrExitTargetBusy,
+			) {
 				t.Fatalf("paid host alias accepted: %v", err)
 			}
 		}
@@ -255,7 +267,10 @@ func TestRetirementSavedAddressReservesUninstalledTargetInEveryPhase(t *testing.
 				if err := NewCloudRepo(database).Save(ctx, op); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := repo.Add(ctx, exits.AddParams{Name: "alias", Address: "::ffff:" + node.Address, Port: node.Port + 1}); !errors.Is(err, ErrExitTargetBusy) {
+				if _, err := repo.Add(ctx, exits.AddParams{Name: "alias", Address: "::ffff:" + node.Address, Port: node.Port + 1}); !errors.Is(
+					err,
+					ErrExitTargetBusy,
+				) {
 					t.Fatalf("uninstalled address escaped reservation: %v", err)
 				}
 			})
@@ -299,7 +314,10 @@ func TestRetirementReplayAndWorkerRecheckHostAliasesIncludingProvider404(t *test
 				instance.Tags = []string{"ultra", "ultra-operation-" + op.ID}
 				api := &retirementGuardProvider{instance: instance, missing: missing}
 				s := &cloud.Service{Store: NewCloudRepo(database), API: api, Provisioner: &retirementGuardProvisioner{repo: repo}}
-				if err := s.RetireExits(ctx, 1, []cloud.RetirementTarget{{OperationID: op.ID, InstanceID: op.InstanceID}}); !errors.Is(err, cloud.ErrConflict) {
+				if err := s.RetireExits(ctx, 1, []cloud.RetirementTarget{{OperationID: op.ID, InstanceID: op.InstanceID}}); !errors.Is(
+					err,
+					cloud.ErrConflict,
+				) {
 					t.Fatalf("replay ignored alias: %v", err)
 				}
 				if err := s.Step(ctx); !errors.Is(err, cloud.ErrConflict) {

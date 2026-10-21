@@ -36,7 +36,8 @@ func TestDeleteRouteRemovalFailurePreventsProviderDelete(t *testing.T) {
 				t.Fatalf("worker error = %v", err)
 			}
 			op := store.ops["op"]
-			if op.Error != "route_removal_failed" || op.State != "failed" || op.Phase != "unpublish" || !op.Charged || provider.deletes != 0 {
+			if op.Error != "route_removal_failed" || op.State != "failed" || op.Phase != "unpublish" || !op.Charged ||
+				provider.deletes != 0 {
 				t.Fatalf("unsafe deletion result: %+v, provider deletes %d", op, provider.deletes)
 			}
 			if op.ErrorMessage == "" || strings.Contains(op.ErrorMessage, "private-token") {

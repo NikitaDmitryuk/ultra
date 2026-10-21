@@ -82,7 +82,13 @@ func TestDeleteResumesAfterCleanupFailureWithoutRewinding(t *testing.T) {
 	}
 	got := store.ops["op"]
 	if got.State != "deleted" || got.Charged || provider.deletes != 1 || provisioner.unpublished != 1 || cleanup.calls != 2 {
-		t.Fatalf("deletion replayed completed effects: op=%+v deletes=%d unpublish=%d cleanup=%d", got, provider.deletes, provisioner.unpublished, cleanup.calls)
+		t.Fatalf(
+			"deletion replayed completed effects: op=%+v deletes=%d unpublish=%d cleanup=%d",
+			got,
+			provider.deletes,
+			provisioner.unpublished,
+			cleanup.calls,
+		)
 	}
 }
 

@@ -23,7 +23,11 @@ func TestBandwidthUsesCurrentAccruedCreditsAndProviderUsage(t *testing.T) {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
-		_, _ = w.Write([]byte(`{"bandwidth":{"current_month_to_date":{"gb_out":300,"instance_bandwidth_credits":123,"free_bandwidth_credits":2048,"purchased_bandwidth_credits":50},"current_month_projected":{"gb_out":500,"instance_bandwidth_credits":4000,"free_bandwidth_credits":2048,"purchased_bandwidth_credits":50}}}`))
+		_, _ = w.Write(
+			[]byte(
+				`{"bandwidth":{"current_month_to_date":{"gb_out":300,"instance_bandwidth_credits":123,"free_bandwidth_credits":2048,"purchased_bandwidth_credits":50},"current_month_projected":{"gb_out":500,"instance_bandwidth_credits":4000,"free_bandwidth_credits":2048,"purchased_bandwidth_credits":50}}}`,
+			),
+		)
 	}))
 	defer server.Close()
 	api := NewVultr("fixture")
@@ -66,7 +70,12 @@ func TestAccountPoolRequiresConfirmedCredits(t *testing.T) {
 	for _, field := range []string{"instance_bandwidth_credits", "free_bandwidth_credits", "purchased_bandwidth_credits"} {
 		for _, invalid := range []any{"missing", nil, -1, 0.5, "unknown", int64(math.MaxInt64), int64(math.MaxInt64 / 1_000_000_000)} {
 			t.Run(fmt.Sprintf("%s/%v", field, invalid), func(t *testing.T) {
-				current := map[string]any{"gb_out": 0, "instance_bandwidth_credits": 1, "free_bandwidth_credits": 2048, "purchased_bandwidth_credits": 0}
+				current := map[string]any{
+					"gb_out":                      0,
+					"instance_bandwidth_credits":  1,
+					"free_bandwidth_credits":      2048,
+					"purchased_bandwidth_credits": 0,
+				}
 				if invalid == "missing" {
 					delete(current, field)
 				} else {

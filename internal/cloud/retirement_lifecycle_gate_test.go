@@ -67,10 +67,22 @@ func TestRetirementApplyingLifecycleBlocksInitialAndResumedDeletion(t *testing.T
 				t.Fatal(err)
 			}
 			if !reflect.DeepEqual(before, after) || store.saves != 0 || store.audits != 0 {
-				t.Fatalf("closed gate changed retirement checkpoint: before=%+v after=%+v saves=%d audits=%d", before, after, store.saves, store.audits)
+				t.Fatalf(
+					"closed gate changed retirement checkpoint: before=%+v after=%+v saves=%d audits=%d",
+					before,
+					after,
+					store.saves,
+					store.audits,
+				)
 			}
 			if gateCalls != 1 || api.reads != 0 || provider.deletes != 0 || provisioner.unpublished != 0 {
-				t.Fatalf("retirement advanced through closed gate: gate=%d inventory=%d delete=%d unpublish=%d", gateCalls, api.reads, provider.deletes, provisioner.unpublished)
+				t.Fatalf(
+					"retirement advanced through closed gate: gate=%d inventory=%d delete=%d unpublish=%d",
+					gateCalls,
+					api.reads,
+					provider.deletes,
+					provisioner.unpublished,
+				)
 			}
 		})
 	}

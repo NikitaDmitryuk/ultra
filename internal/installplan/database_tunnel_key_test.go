@@ -42,7 +42,8 @@ func TestDatabaseTunnelKeyPinsPrivateSourceAndRejectsMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, err = json.Marshal(lifecycle)
-	if err != nil || strings.Contains(string(raw), "database_tunnel_private_key") || lifecycle.SourceValues["DB_TUNNEL_PRIVATE_KEY_FILE"] != "" {
+	if err != nil || strings.Contains(string(raw), "database_tunnel_private_key") ||
+		lifecycle.SourceValues["DB_TUNNEL_PRIVATE_KEY_FILE"] != "" {
 		t.Fatal("bootstrap private identity retained by lifecycle")
 	}
 }

@@ -13,12 +13,15 @@ import (
 // DatabaseTunnelPrivateKeyDigest pins an operator-local key without serializing
 // its contents. Key format and lack of passphrase are checked on bridge by ssh-keygen.
 func DatabaseTunnelPrivateKeyDigest(path string) (string, error) {
-	invalid := errors.New("DB_TUNNEL_PRIVATE_KEY_FILE requires an absolute clean path to a nonempty regular file with mode 0400 or 0600 (at most 64 KiB)")
+	invalid := errors.New(
+		"DB_TUNNEL_PRIVATE_KEY_FILE requires an absolute clean path to a nonempty regular file with mode 0400 or 0600 (at most 64 KiB)",
+	)
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return "", invalid
 	}
 	before, err := os.Lstat(path)
-	if err != nil || !before.Mode().IsRegular() || (before.Mode() != 0400 && before.Mode() != 0600) || before.Size() < 1 || before.Size() > 64<<10 {
+	if err != nil || !before.Mode().IsRegular() || (before.Mode() != 0400 && before.Mode() != 0600) || before.Size() < 1 ||
+		before.Size() > 64<<10 {
 		return "", invalid
 	}
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)

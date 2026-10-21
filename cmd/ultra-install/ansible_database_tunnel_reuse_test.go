@@ -36,7 +36,8 @@ func TestDatabaseTunnelReuseInventoryContainsOnlyPinnedReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	vars := inv["all"].(map[string]any)["vars"].(map[string]any)
-	if vars["ultra_db_tunnel_private_key_source"] != path || vars["ultra_db_tunnel_private_key_sha256"] != p.Secrets.DatabaseTunnelPrivateKeySHA256 {
+	if vars["ultra_db_tunnel_private_key_source"] != path ||
+		vars["ultra_db_tunnel_private_key_sha256"] != p.Secrets.DatabaseTunnelPrivateKeySHA256 {
 		t.Fatal("source identity not pinned")
 	}
 	raw, err := json.Marshal(inv)

@@ -41,7 +41,11 @@ func TestCloudActionReportsOnlySafeReadinessDiagnostics(t *testing.T) {
 			var logs bytes.Buffer
 			s.log = slog.New(slog.NewJSONHandler(&logs, nil))
 			s.Cloud = &cloud.Service{Store: actionGateStore{}, TopologyReady: func(context.Context) error { return tc.err }}
-			r := httptest.NewRequest("POST", "/v1/cloud/operations/private-operation/action", strings.NewReader(`{"action":"delete","actor":1}`))
+			r := httptest.NewRequest(
+				"POST",
+				"/v1/cloud/operations/private-operation/action",
+				strings.NewReader(`{"action":"delete","actor":1}`),
+			)
 			r.Header.Set("Authorization", "Bearer secret")
 			w := httptest.NewRecorder()
 			s.authMiddleware(s.mux).ServeHTTP(w, r)

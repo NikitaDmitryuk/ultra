@@ -62,7 +62,10 @@ func retirementFixture(t *testing.T) (*Service, *retirementProvider, *retirement
 		if err := s.Store.Save(context.Background(), op); err != nil {
 			t.Fatal(err)
 		}
-		api.instances = append(api.instances, Instance{ID: op.InstanceID, IP: "192.0.2.2", Tags: []string{"ultra", "ultra-operation-" + id}})
+		api.instances = append(
+			api.instances,
+			Instance{ID: op.InstanceID, IP: "192.0.2.2", Tags: []string{"ultra", "ultra-operation-" + id}},
+		)
 		targets = append(targets, RetirementTarget{OperationID: id, InstanceID: op.InstanceID})
 	}
 	api.instances = append(api.instances, Instance{ID: "unmanaged"})
@@ -232,9 +235,17 @@ func TestRetirementUsesPaginatedInventoryBeforeCheckpoint(t *testing.T) {
 		}
 		pages++
 		if r.URL.Query().Get("cursor") == "" {
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"instances":[{"id":"unmanaged"}],"meta":{"links":{"next":"next-page"}}}`))}, nil
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(`{"instances":[{"id":"unmanaged"}],"meta":{"links":{"next":"next-page"}}}`)),
+			}, nil
 		}
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"instances":[{"id":"vm-a","tags":["ultra","wrong-operation"]}],"meta":{"links":{"next":""}}}`))}, nil
+		return &http.Response{
+			StatusCode: 200,
+			Body: io.NopCloser(
+				strings.NewReader(`{"instances":[{"id":"vm-a","tags":["ultra","wrong-operation"]}],"meta":{"links":{"next":""}}}`),
+			),
+		}, nil
 	})
 	s.API = &Vultr{BaseURL: "https://provider.example", HTTP: &http.Client{Transport: transport}}
 	if err := s.RetireExits(context.Background(), 1, []RetirementTarget{{OperationID: "a", InstanceID: "vm-a"}}); err == nil {

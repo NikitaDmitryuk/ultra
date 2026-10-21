@@ -14,7 +14,10 @@ func TestRetirementProtectsBridgeAndMainBeforeDatabaseMutation(t *testing.T) {
 	p := &Provisioner{DB: &db.DB{}, Bridge: &config.Spec{Database: &config.DatabaseSpec{PrimaryHost: "192.0.2.3"}}, BridgeIP: "192.0.2.1"}
 	p.Bridge.Exit.Address = "192.0.2.2"
 	for _, address := range []string{"192.0.2.1", "192.0.2.2", "::ffff:192.0.2.2", "192.0.2.3"} {
-		if err := p.ValidateRetirement(context.Background(), &cloud.Operation{ID: "operation", ExitID: "operation"}, cloud.Instance{IP: address}); !errors.Is(err, cloud.ErrConflict) {
+		if err := p.ValidateRetirement(context.Background(), &cloud.Operation{ID: "operation", ExitID: "operation"}, cloud.Instance{IP: address}); !errors.Is(
+			err,
+			cloud.ErrConflict,
+		) {
 			t.Fatalf("protected address %s accepted: %v", address, err)
 		}
 	}
@@ -22,7 +25,10 @@ func TestRetirementProtectsBridgeAndMainBeforeDatabaseMutation(t *testing.T) {
 
 func TestRetirementRequiresPersistedInfrastructure(t *testing.T) {
 	p := &Provisioner{}
-	if err := p.ValidateRetirement(context.Background(), &cloud.Operation{}, cloud.Instance{IP: "192.0.2.2"}); !errors.Is(err, cloud.ErrUnavailable) {
+	if err := p.ValidateRetirement(context.Background(), &cloud.Operation{}, cloud.Instance{IP: "192.0.2.2"}); !errors.Is(
+		err,
+		cloud.ErrUnavailable,
+	) {
 		t.Fatal(err)
 	}
 }
@@ -31,7 +37,10 @@ func TestRetirementRequiresKnownPrimaryIdentity(t *testing.T) {
 	for _, primary := range []string{"", "db.example.test", "192.0.2.999"} {
 		t.Run(primary, func(t *testing.T) {
 			p := &Provisioner{DB: &db.DB{}, Bridge: &config.Spec{Database: &config.DatabaseSpec{PrimaryHost: primary}}}
-			if err := p.ValidateRetirement(context.Background(), &cloud.Operation{}, cloud.Instance{IP: "192.0.2.2"}); !errors.Is(err, cloud.ErrUnavailable) {
+			if err := p.ValidateRetirement(context.Background(), &cloud.Operation{}, cloud.Instance{IP: "192.0.2.2"}); !errors.Is(
+				err,
+				cloud.ErrUnavailable,
+			) {
 				t.Fatalf("retirement accepted unknown primary %q: %v", primary, err)
 			}
 		})

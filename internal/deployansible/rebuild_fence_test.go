@@ -48,7 +48,10 @@ func newRecoveryFixture(t *testing.T) *recoveryFixture {
 	now := time.Now().Unix()
 	f := &recoveryFixture{directory: directory, gate: gate, key: key, request: SignedRecoveryFenceRequest{Request: RecoveryFenceRequest{
 		Version: 1, SignerID: anchor.SignerID, RecoveryID: "11111111-1111-1111-1111-111111111111", Nonce: strings.Repeat("n", 32), IssuedAt: now - 10, ExpiresAt: now + 3600,
-		ManualJournalSHA256: strings.Repeat("1", 64), PredecessorSHA256: []string{strings.Repeat("2", 64)}, CandidateSHA256: strings.Repeat("3", 64), FleetSHA256: strings.Repeat("4", 64), Primary: primary,
+		ManualJournalSHA256: strings.Repeat(
+			"1",
+			64,
+		), PredecessorSHA256: []string{strings.Repeat("2", 64)}, CandidateSHA256: strings.Repeat("3", 64), FleetSHA256: strings.Repeat("4", 64), Primary: primary,
 		Targets: []RecoveryTarget{{Provider: "fixture", AccountID: "account", InstanceID: "bridge", Role: "bridge"}},
 	}}}
 	f.signRequest(t)
@@ -65,8 +68,22 @@ func (f *recoveryFixture) signRequest(t *testing.T) {
 func (f *recoveryFixture) completion(t *testing.T) SignedRecoveryFenceCompletion {
 	t.Helper()
 	raw, _ := RecoveryFenceSigningBytes(f.request.Request)
-	c := RecoveryFenceCompletion{Version: 1, SignerID: f.request.Request.SignerID, RequestSHA256: recoveryHash(raw), Nonce: f.request.Request.Nonce, CompletedAt: time.Now().Unix(), ExpiresAt: time.Now().Unix() + 3600,
-		TargetOutcomesSHA256: strings.Repeat("5", 64), PrimaryVerificationSHA256: strings.Repeat("6", 64), BackupReceiptSHA256: strings.Repeat("7", 64), TunnelEscrowSHA256: strings.Repeat("8", 64), ControllerHandoffSHA256: strings.Repeat("9", 64)}
+	c := RecoveryFenceCompletion{
+		Version:       1,
+		SignerID:      f.request.Request.SignerID,
+		RequestSHA256: recoveryHash(raw),
+		Nonce:         f.request.Request.Nonce,
+		CompletedAt:   time.Now().Unix(),
+		ExpiresAt:     time.Now().Unix() + 3600,
+		TargetOutcomesSHA256: strings.Repeat(
+			"5",
+			64,
+		),
+		PrimaryVerificationSHA256: strings.Repeat("6", 64),
+		BackupReceiptSHA256:       strings.Repeat("7", 64),
+		TunnelEscrowSHA256:        strings.Repeat("8", 64),
+		ControllerHandoffSHA256:   strings.Repeat("9", 64),
+	}
 	signed, _ := RecoveryCompletionSigningBytes(c)
 	return SignedRecoveryFenceCompletion{Completion: c, Signature: ed25519.Sign(f.key, signed)}
 }
@@ -130,7 +147,10 @@ func TestRecoveryFenceLifecycleAndExecutionEntrypoints(t *testing.T) {
 		t.Fatalf("direct Execute=%v", err)
 	}
 	for _, operation := range []string{"inspect-bootstrap", "reconcile", "bootstrap-postgres", "bootstrap-bridge"} {
-		if _, err := RunLocal(context.Background(), operation, map[string]any{}, map[string]any{}, directory, "/bin/false", "/bin/false"); !errors.Is(err, errRecoveryFenced) {
+		if _, err := RunLocal(context.Background(), operation, map[string]any{}, map[string]any{}, directory, "/bin/false", "/bin/false"); !errors.Is(
+			err,
+			errRecoveryFenced,
+		) {
 			t.Fatalf("local %s=%v", operation, err)
 		}
 	}
@@ -152,7 +172,10 @@ func TestRecoveryFencePriorLeasePreventsDrainAndCompletion(t *testing.T) {
 	if err != nil || j.Phase != "draining" {
 		t.Fatalf("write ahead journal=%+v %v", j, err)
 	}
-	if _, err = RunLocal(ctx, "reconcile", map[string]any{}, map[string]any{}, filepath.Join(f.directory, "attempt"), "/bin/false", "/bin/false"); !errors.Is(err, errRecoveryFenced) {
+	if _, err = RunLocal(ctx, "reconcile", map[string]any{}, map[string]any{}, filepath.Join(f.directory, "attempt"), "/bin/false", "/bin/false"); !errors.Is(
+		err,
+		errRecoveryFenced,
+	) {
 		t.Fatalf("previous lease stage=%v", err)
 	}
 	if _, err = Execute(ctx, filepath.Join(f.directory, "job"), "/bin/false", "/bin/false"); !errors.Is(err, errRecoveryFenced) {
@@ -436,7 +459,11 @@ func TestRecoveryFenceBrokerAdmission(t *testing.T) {
 		requireRecoveryCode(t, recoveryBrokerResponse(t, f, Message{Action: action, ID: id}), expected)
 	}
 	if os.Getuid() != 0 {
-		requireRecoveryCode(t, recoveryBrokerResponse(t, f, Message{Action: "recovery-fence-import", RecoveryFence: &f.request}), "controller_access_denied")
+		requireRecoveryCode(
+			t,
+			recoveryBrokerResponse(t, f, Message{Action: "recovery-fence-import", RecoveryFence: &f.request}),
+			"controller_access_denied",
+		)
 	}
 }
 func TestRecoveryFenceExpiredActiveRequestAndUnsupportedCompletionRestart(t *testing.T) {

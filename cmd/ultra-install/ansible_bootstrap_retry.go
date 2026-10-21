@@ -251,7 +251,8 @@ func withFrozenBootstrapStageLeaseWith(
 				Active   string `json:"active"`
 				Complete bool   `json:"complete"`
 			}
-			if json.Unmarshal(attemptRaw, &activeAttempt) != nil || activeAttempt.Active != filepath.Base(attempt) || activeAttempt.Complete {
+			if json.Unmarshal(attemptRaw, &activeAttempt) != nil || activeAttempt.Active != filepath.Base(attempt) ||
+				activeAttempt.Complete {
 				return deployansible.Receipt{}, errors.New("retry_active_attempt_required")
 			}
 			operator, operatorRelease, err := deps.operator(ctx, mode.OperatorDirectory)
