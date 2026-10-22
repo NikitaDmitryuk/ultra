@@ -10,7 +10,9 @@
 - name: Require a regular private floor when present
   ansible.builtin.assert:
     that:
-      - ultra_prepared_controller_policy | default((ultra_controller_enforcement_spec | default({})).get('prepared_policy', {})) | length == 0 or release_enforcement_floor.stat.exists
+      - >-
+        ultra_prepared_controller_policy | default((ultra_controller_enforcement_spec | default({})).get('prepared_policy', {})) | length == 0 or
+        release_enforcement_floor.stat.exists
       - release_enforcement_floor.stat.exists is defined
       - not (release_enforcement_floor.stat.islnk | default(false))
       - not release_enforcement_floor.stat.exists or (release_enforcement_floor.stat.isreg | default(false))

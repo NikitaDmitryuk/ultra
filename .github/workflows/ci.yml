@@ -161,7 +161,7 @@ jobs:
         run: |
           python3 scripts/build-ansible-runtime.py --architecture amd64 --output /tmp/ultra-ansible-runtime.tar.gz
           make build-install
-          python3 scripts/test-ansible-exit.py --installer "$PWD/ultra-install" --ansible-playbook "$(command -v ansible-playbook)" --runtime /tmp/ultra-ansible-runtime.tar.gz
+          sudo -n /usr/bin/python3 scripts/test-ansible-exit.py --installer "$PWD/ultra-install" --ansible-playbook "$(command -v ansible-playbook)" --runtime /tmp/ultra-ansible-runtime.tar.gz
       - name: Verify release rollback and recovery roles through SSH
         run: |
           python3 scripts/test-ansible-release.py --ansible-playbook "$(command -v ansible-playbook)"

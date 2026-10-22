@@ -12,7 +12,9 @@
 - name: Reject a linked or nonregular controller floor
   ansible.builtin.assert:
     that:
-      - ultra_prepared_controller_policy | default((ultra_controller_enforcement_spec | default({})).get('prepared_policy', {})) | length == 0 or release_controller_rollback_retirement.stat.exists
+      - >-
+        ultra_prepared_controller_policy | default((ultra_controller_enforcement_spec | default({})).get('prepared_policy', {})) | length == 0 or
+        release_controller_rollback_retirement.stat.exists
       - release_controller_rollback_retirement.stat.exists is defined
       - not (release_controller_rollback_retirement.stat.islnk | default(false))
       - not release_controller_rollback_retirement.stat.exists or (release_controller_rollback_retirement.stat.isreg | default(false))

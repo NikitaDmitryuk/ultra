@@ -23,8 +23,12 @@
 - name: Require exact tools identity fallback before changing live pointers
   ansible.builtin.assert:
     that:
-      - not item.stat.exists or (item.stat.isreg | default(false) and not item.stat.islnk | default(false) and item.stat.uid == 0 and item.stat.mode == '0600' and item.stat.checksum == item.item.previous_sha256)
-      - item.item.previous_sha256 == '' or item.item.previous_sha256 == item.item.sha256 or release_tools_identity_active.results[ansible_loop.index0].stat.checksum != item.item.sha256 or item.stat.exists
+      - >-
+        not item.stat.exists or (item.stat.isreg | default(false) and not item.stat.islnk | default(false) and item.stat.uid == 0 and item.stat.mode
+        == '0600' and item.stat.checksum == item.item.previous_sha256)
+      - >-
+        item.item.previous_sha256 == '' or item.item.previous_sha256 == item.item.sha256 or
+        release_tools_identity_active.results[ansible_loop.index0].stat.checksum != item.item.sha256 or item.stat.exists
   loop: "{{ release_tools_identity_fallback.results }}"
   loop_control:
     extended: true

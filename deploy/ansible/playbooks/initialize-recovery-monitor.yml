@@ -9,6 +9,7 @@
         argv: [python3, "{{ ultra_preparation_snapshot }}/prepare.py", monitor]
         stdin: "{{ ultra_preparation_payload | to_json(preprocess_unsafe=False) }}"
       no_log: true
+      changed_when: true
       register: recovery_monitor_result
     - name: Return only bound terminal initialization evidence
       ansible.builtin.copy:

@@ -625,8 +625,10 @@ func validateControllerHistoricalTerminal(expected ExecutionFence) error {
 		Identity  map[string]string            `json:"identity"`
 		Inventory map[string][]json.RawMessage `json:"inventory"`
 	}
-	if json.Unmarshal(raw, &ownership) != nil || ownership.Schema != 1 || ownership.Path != filepath.Join(expected.JobDirectory, "bundle") ||
-		len(ownership.Identity) != 1 || ownership.Identity["request_sha256"] != expected.RequestSHA256 ||
+	if json.Unmarshal(raw, &ownership) != nil || ownership.Schema != 1 ||
+		ownership.Path != filepath.Join(expected.JobDirectory, "bundle") ||
+		len(ownership.Identity) != 1 ||
+		ownership.Identity["request_sha256"] != expected.RequestSHA256 ||
 		len(ownership.Inventory) == 0 {
 		return ErrExecutionFenced
 	}

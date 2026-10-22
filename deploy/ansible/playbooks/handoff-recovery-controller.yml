@@ -18,9 +18,12 @@
         argv: [/usr/bin/python3, "/opt/ultra-ansible/recovery-tools/{{ ultra_release_manifest_sha256 }}/prepare.py", activate-tools]
         stdin: "{{ {'request_sha256': ultra_recovery_preparation_request_sha256, 'started_at': 1} | to_json(preprocess_unsafe=False) }}"
       no_log: true
+      changed_when: true
     - name: Return exact candidate handoff terminal acknowledgement
       ansible.builtin.copy:
-        content: "{{ {'verified': true, 'request_sha256': ultra_recovery_preparation_request_sha256, 'operation_id': ultra_lifecycle_id, 'controller_directory': ultra_controller_directory} | to_json(preprocess_unsafe=False) }}"
+        content: >-
+          {{ {'verified': true, 'request_sha256': ultra_recovery_preparation_request_sha256, 'operation_id': ultra_lifecycle_id,
+          'controller_directory': ultra_controller_directory} | to_json(preprocess_unsafe=False) }}
         dest: "{{ ultra_result_file }}"
         mode: "0600"
       delegate_to: localhost

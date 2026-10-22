@@ -20,7 +20,7 @@ build-bot:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BOT_BINARY) ./cmd/ultra-bot
 
 test:
-	CGO_ENABLED=0 go test ./...
+	CGO_ENABLED=0 go test -timeout 20m ./...
 
 generate-db:
 	go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION) generate
@@ -169,7 +169,7 @@ test-ui:
 	node --test scripts/test-happ-import.cjs scripts/test-cabinet.cjs scripts/test-miniapp-preview.cjs
 
 test-race:
-	go test -race -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' ./...
+	go test -timeout 20m -race -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' ./...
 
 .PHONY: build-client-release
 build-client-release:
@@ -185,6 +185,7 @@ ansible-dist:
 	python3 scripts/manual-deploy-runtime.py --architecture arm64 --output dist/ultra-ansible-runtime-linux-arm64.tar.gz
 
 test-ansible:
+	python3 scripts/test-ansible-exit-driver.py
 	python3 scripts/test-ansible-controller-process.py
 	python3 scripts/test-ansible-controller-fence.py
 	python3 scripts/test-ansible-execution-containment.py

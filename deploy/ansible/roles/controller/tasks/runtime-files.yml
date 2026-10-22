@@ -49,7 +49,7 @@
     owner: root
     group: root
     mode: "0755"
-  notify: "{{ [] if ultra_controller_stage_only | default(false) | bool else ['Restart Ansible controller'] }}"
+  notify: "{{ [] if controller_stage_only | default(false) | bool else ['Restart Ansible controller'] }}"
 - name: Require the supported offline runtime Python version
   ansible.builtin.command:
     argv: [/usr/bin/python3, --version]

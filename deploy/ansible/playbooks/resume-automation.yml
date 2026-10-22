@@ -42,7 +42,9 @@
       when: ultra_legacy_bridge_maintenance | default(false) | bool and legacy_resume_checkpoint.stat.exists | default(false) | bool
     - name: Save the current resume receipt
       ansible.builtin.copy:
-        content: "{{ {'resumed': not (release_resume_prepared.prepared_schedules_suspended | default(false) | bool), 'prepared_schedules_suspended': release_resume_prepared.prepared_schedules_suspended | default(false) | bool} | to_json(preprocess_unsafe=False) }}"
+        content: >-
+          {{ {'resumed': not (release_resume_prepared.prepared_schedules_suspended | default(false) | bool), 'prepared_schedules_suspended':
+          release_resume_prepared.prepared_schedules_suspended | default(false) | bool} | to_json(preprocess_unsafe=False) }}
         dest: "{{ ultra_result_file }}"
         mode: "0600"
       delegate_to: localhost

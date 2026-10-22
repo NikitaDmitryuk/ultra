@@ -102,7 +102,7 @@ func TestRecoveryInputsRejectPathModeRootAndInventoryTampering(t *testing.T) {
 	}
 }
 func TestRecoveryInputsArchiveFailureNeverPublishesDestination(t *testing.T) {
-	for _, attack := range []string{"descriptor-digest", "symlink", "unlisted", "changed-file", "incomplete"} {
+	for _, attack := range []string{"descriptor-digest", "symlink", "traversal", "absolute", "unlisted", "changed-file", "incomplete"} {
 		t.Run(attack, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "preparation")
 			snapshot := recoveryInputFixture(root)
@@ -114,6 +114,10 @@ func TestRecoveryInputsArchiveFailureNeverPublishesDestination(t *testing.T) {
 				header.Linkname = "/etc/passwd"
 				header.Size = 0
 				content = nil
+			case "traversal":
+				header.Name = "../../outside"
+			case "absolute":
+				header.Name = "/outside"
 			case "unlisted":
 				header.Name = "arbitrary"
 			case "changed-file":

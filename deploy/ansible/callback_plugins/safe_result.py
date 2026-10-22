@@ -122,9 +122,20 @@ class CallbackModule(CallbackBase):
         self._execution_hosts.add(host.name)
         if getattr(task, 'async_val', 0):
             self._execution_unsafe = True
-        data = getattr(result, '_result', {}) if result is not None else {}
-        if isinstance(data, dict) and 'ansible_job_id' in data:
-            self._execution_unsafe = True
+        if getattr(task, 'no_log', False):
+            # Even reading a censored result can disclose secrets. Certify only
+            # statically known synchronous, nondelegated tasks; hidden job IDs
+            # or delegated targets cannot establish a complete target census.
+            asynchronous = getattr(task, 'async_val', None)
+            delegated = getattr(task, 'delegate_to', object())
+            if (type(asynchronous) is not int or asynchronous != 0
+                    or delegated not in (None, '')
+                    or str(getattr(task, 'action', '')).split('.')[-1] == 'async_status'):
+                self._execution_unsafe = True
+        else:
+            data = getattr(result, '_result', {}) if result is not None else {}
+            if isinstance(data, dict) and 'ansible_job_id' in data:
+                self._execution_unsafe = True
         if terminal:
             self._execution_pending.discard(identity)
         else:

@@ -8,12 +8,12 @@
   ansible.builtin.stat:
     path: /etc/ultra-fleet/id_ed25519
     follow: false
-  register: recovery_fleet_identity
+  register: recovery_preparation_fleet_identity
 - name: Fail closed when original installed fleet identity is unavailable
   ansible.builtin.assert:
     that:
-      - recovery_fleet_identity.stat.isreg | default(false)
-      - not recovery_fleet_identity.stat.islnk | default(false)
+      - recovery_preparation_fleet_identity.stat.isreg | default(false)
+      - not recovery_preparation_fleet_identity.stat.islnk | default(false)
     fail_msg: recovery_preparation_original_fleet_identity_required
 - name: Observe whether an old backup timer is installed
   ansible.builtin.command:
@@ -56,7 +56,9 @@
 - name: Reject foreign writable or linked staging ancestors
   ansible.builtin.assert:
     that:
-      - not item.stat.exists or (item.stat.isdir | default(false) and not item.stat.islnk | default(false) and item.stat.uid == 0 and item.stat.mode in ['0700', '0755', '0750'])
+      - >-
+        not item.stat.exists or (item.stat.isdir | default(false) and not item.stat.islnk | default(false) and item.stat.uid == 0 and item.stat.mode
+        in ['0700', '0755', '0750'])
   loop: "{{ recovery_preparation_ancestors.results }}"
 - name: Create recovery-only private directories
   ansible.builtin.file:
@@ -77,7 +79,9 @@
 - name: Reject replacement of existing baseline or immutable tools identity
   ansible.builtin.assert:
     that:
-      - not item.stat.exists or (item.stat.isreg | default(false) and not item.stat.islnk | default(false) and item.stat.checksum in (item.item.allowed_sha256 | default([item.item.sha256])))
+      - >-
+        not item.stat.exists or (item.stat.isreg | default(false) and not item.stat.islnk | default(false) and item.stat.checksum in
+        (item.item.allowed_sha256 | default([item.item.sha256])))
   loop: "{{ recovery_preparation_existing.results }}"
   no_log: true
 - name: Verify local release sources before copying them
@@ -128,12 +132,13 @@
     name: controller
     tasks_from: runtime-files
   vars:
-    ultra_controller_stage_only: true
+    controller_stage_only: true
 - name: Build recovery-only configuration using the normal guarded renderer
   ansible.builtin.command:
     argv: [python3, "{{ ultra_preparation_snapshot }}/prepare.py", stage]
     stdin: "{{ ultra_preparation_payload | to_json(preprocess_unsafe=False) }}"
   no_log: true
+  changed_when: true
   register: recovery_preparation_rendered
 - name: Return proof-bound staging evidence without application release acceptance
   ansible.builtin.copy:

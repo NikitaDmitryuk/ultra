@@ -4,6 +4,7 @@ package deployansible
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,7 +12,7 @@ import (
 	"time"
 )
 
-func TestConfigurationTerminalAfterSubmitterTimeout(t *testing.T) {
+func TestConfigurationTerminalAfterSubmitterTimeoutRequiresVerifiedCompletion(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 unavailable")
@@ -60,16 +61,28 @@ func TestConfigurationTerminalAfterSubmitterTimeout(t *testing.T) {
 	}
 	deadline = time.Now().Add(5 * time.Second)
 	for {
-		terminal, err = client.ConfigurationTerminal(context.Background(), id)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if terminal {
+		raw, readErr := os.ReadFile(filepath.Join(state, id, "receipt.json"))
+		var receipt Receipt
+		if readErr == nil && json.Unmarshal(raw, &receipt) == nil && receipt.State == "failed" {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("failed receipt not terminal")
+			t.Fatal("worker did not record its abnormal exit")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	// Exit 1 has no normal terminal callback. Even after the local process ends,
+	// its failed receipt cannot prove that all remote work has stopped.
+	terminal, err = client.ConfigurationTerminal(context.Background(), id)
+	if err != nil || terminal {
+		t.Fatalf("unverified failure considered terminal: %v %v", terminal, err)
+	}
+	if _, err = os.Stat(filepath.Join(state, id, "execution-completion.json")); !os.IsNotExist(err) {
+		t.Fatal("abnormal exit produced completion evidence", err)
+	}
+	directory := filepath.Join(state, id)
+	if fence, err := inspectExecutionFence(executionFenceDirectory(directory)); err != nil || fence == nil ||
+		fence.JobDirectory != directory {
+		t.Fatal("abnormal exit released its execution fence", fence, err)
 	}
 }

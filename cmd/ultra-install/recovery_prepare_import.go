@@ -181,6 +181,9 @@ func importRecoveryInputs(stream io.Reader, root, descriptorSHA string) error {
 		if nextErr != nil {
 			return errors.New("recovery_inputs_archive_invalid")
 		}
+		if !filepath.IsLocal(header.Name) {
+			return errors.New("recovery_inputs_archive_inventory_changed")
+		}
 		entry, ok := snapshot.Entries[header.Name]
 		if !ok || entry.Kind != "file" || seen[header.Name] || header.Typeflag != tar.TypeReg || header.Size != entry.Size {
 			return errors.New("recovery_inputs_archive_inventory_changed")

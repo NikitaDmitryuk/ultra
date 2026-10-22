@@ -203,8 +203,8 @@ func TestRecoveryPreparationRuntimeFilesDoNotSelectBrokerOrRestartDuringStaging(
 			t.Fatalf("staging changes broker selection: %s", forbidden)
 		}
 	}
-	if !strings.Contains(string(files), "[] if ultra_controller_stage_only") ||
-		!strings.Contains(string(stage), "ultra_controller_stage_only: true") {
+	if !strings.Contains(string(files), "[] if controller_stage_only") ||
+		!strings.Contains(string(stage), "controller_stage_only: true") {
 		t.Fatal("staging may notify controller restart")
 	}
 	if !strings.Contains(string(selection), "import_tasks: runtime-files.yml") ||
