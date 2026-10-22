@@ -72,7 +72,8 @@ def _fixture_run(args,**kwargs):
     if args[1]=='show':
         active=(_fixture_root/'active').exists() and unit=='ultra-ansible-controller.service'
         content=(_fixture_root/'system'/(unit+'.d')/'90-retained-primary.conf').read_text()
-        return type('Result',(),{'returncode':0,'stdout':'LoadState=loaded\nActiveState='+('active' if active else 'inactive')+'\nRefuseManualStart='+('yes' if 'RefuseManualStart=yes' in content else 'no')+'\nUnitFileState=disabled\nMainPID='+('4242' if active else '0')+'\n'})()
+        extra=(_fixture_root/'properties').read_text() if (_fixture_root/'properties').exists() else ''
+        return type('Result',(),{'returncode':0,'stdout':extra+'LoadState=loaded\nActiveState='+('active' if active else 'inactive')+'\nRefuseManualStart='+('yes' if 'RefuseManualStart=yes' in content else 'no')+'\nUnitFileState=disabled\nMainPID='+('4242' if active else '0')+'\n'})()
     with (_fixture_root/'mutations').open('a') as stream:stream.write(json.dumps(args)+'\n')
     if args[1]=='stop' and unit=='ultra-ansible-controller.service':
         (_fixture_root/'active').unlink(missing_ok=True)

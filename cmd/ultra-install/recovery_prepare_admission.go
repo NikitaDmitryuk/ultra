@@ -209,7 +209,7 @@ def trusted(path,directory=False,private=False):
  return p
 def read(path):return json.loads(trusted(path,private=True).read_text())
 def show(unit):
- r=subprocess.run(['systemctl','show',unit,'--property=LoadState','--property=ActiveState','--property=RefuseManualStart','--property=UnitFileState','--property=MainPID'],capture_output=True,text=True,timeout=10)
+ r=subprocess.run(['systemctl','show',unit,'--property=LoadState','--property=ActiveState','--property=RefuseManualStart','--property=UnitFileState','--property=MainPID','--property=Id','--property=SubState','--property=FragmentPath','--property=ControlGroup','--property=User','--property=Group','--property=DropInPaths'],capture_output=True,text=True,timeout=10)
  assert r.returncode in (0,1)
  return dict(line.split('=',1) for line in r.stdout.splitlines() if '=' in line)
 def syncdir(path):
@@ -299,6 +299,7 @@ def authenticated_observer(item,args):
   assert hashlib.sha256(trusted(release/asset['name']).read_bytes()).hexdigest()==asset['sha256']
   return True
  except (OSError,ValueError,AssertionError,KeyError,IndexError,StopIteration,TypeError):return False
+` + recoveryPreparationManagedControllerRemote + `
 def census(allowed=None):
  allowed=set(allowed or [])
  invoker=payload.get('local_invoker')
@@ -340,7 +341,7 @@ def sealed():
  queue();census()
 if mode=='seal':
  dropins(True);queue()
- properties=show(units[0]);allowed=set()
+ properties=show(units[0]);allowed=set();managed=None
  if properties.get('ActiveState')=='active':
   assert role=='bridge'
   pid=int(properties['MainPID']);assert pid>0
@@ -350,12 +351,21 @@ if mode=='seal':
   assert args[3]==str(Path(args[0]).parent/'venv/bin/ansible-playbook')
   arch={'x86_64':'amd64','aarch64':'arm64'}[platform.machine()]
   executable=(proc/str(pid)/'exe').read_bytes()
-  assert hashlib.sha256(executable).hexdigest()==payload['baseline_installers'][arch]
+  if hashlib.sha256(executable).hexdigest()!=payload['baseline_installers'][arch]:
+   managed_controller(pid,args,executable,arch)
+   managed=(pid,args,executable,arch,(proc/str(pid)/'stat').read_text().rsplit(')',1)[1].split()[19])
   allowed.add(pid)
  census(allowed)
  publish(record,json.dumps(dict(expected,phase='sealing'),sort_keys=True).encode())
  for unit in units:publish(system/(unit+'.d/90-retained-primary.conf'),blocked.encode(),0o644)
  subprocess.run(['systemctl','daemon-reload'],check=True,timeout=20)
+ if managed is not None:
+  pid,args,executable,arch,starttime=managed
+  assert (proc/str(pid)/'stat').read_text().rsplit(')',1)[1].split()[19]==starttime
+  assert [value.decode() for value in (proc/str(pid)/'cmdline').read_bytes().split(b'\0') if value]==args
+  assert (proc/str(pid)/'exe').read_bytes()==executable
+  managed_controller(pid,args,executable,arch)
+  queue();census(allowed)
  # A free infrastructure lock is only serialization. We stop solely the exact
  # idle broker just authenticated above, never a job or an unknown process.
  for unit in units:

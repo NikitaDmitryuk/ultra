@@ -238,6 +238,25 @@ Capability `recovery-preparation-v1` обязательна. Последующ�
 recovery-инструмент: он продолжает обеспечивать admission и execution fence,
 а app-бинарники и их manifest откатываются к исходному baseline.
 
+Закрытие origins допускает idle controller из отдельного automation release,
+даже если его installer SHA не совпадает с app baseline. Это узкая проверка
+уже управляемого `managed-v0.0.<number>` каталога: версия и digest installer/runtime
+должны совпасть с единственным приватным staged manifest, runtime marker и
+завершённым retention receipt. Проверяется весь текущий inventory, включая
+сохранённые ссылки runtime (с тем же исключением воспроизводимых Python caches,
+что у retention); дополнительные или изменённые файлы запрещены. Каталоги и
+метаданные принадлежат root, приватны и не проходят через symlink. Отдельная
+проверка связывает `/proc` executable, argv, root credentials, parent и cgroup
+с точным systemd MainPID, unit и единственным известным admission drop-in;
+`current` должен указывать на тот же каталог. Перед остановкой identity проверяется
+повторно под сохранёнными locks. Fence, очередь и полный process census остаются
+обязательными. Pending receipt и просто наблюдённый SHA не дают admission.
+Это доказательство сохранённых управляемых bytes только для seal/stop старого
+controller, без утверждения о подписи или clean source provenance. Оно не меняет
+app baseline и не разрешает запуск нового controller или выполнение jobs.
+Источники: [admission](../cmd/ultra-install/recovery_prepare_admission.go),
+[managed controller proof](../cmd/ultra-install/recovery_prepare_controller.go).
+
 Наблюдение реплики в Mini App требует инфраструктурную функцию
 `ultra_monitor.bridge_replication_status()` на primary. Обычная установка и
 восстановление БД создают её после import; подготовка recovery на bridge не
