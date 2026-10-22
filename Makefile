@@ -32,12 +32,13 @@ vet:
 	go vet ./...
 
 format:
+	python3 scripts/generate-ansible-ssh-policy.py
 	@echo "Running goimports..."
-	go run $(GOIMPORTS_PKG) -w .
+	git ls-files -z --cached --others --exclude-standard -- '*.go' | xargs -0 -r go run $(GOIMPORTS_PKG) -w
 	@echo "Running gofmt -s..."
-	gofmt -s -w .
+	git ls-files -z --cached --others --exclude-standard -- '*.go' | xargs -0 -r gofmt -s -w
 	@echo "Running golines..."
-	go run $(GOLINES_PKG) --max-len=140 -w .
+	git ls-files -z --cached --others --exclude-standard -- '*.go' | xargs -0 -r go run $(GOLINES_PKG) --max-len=140 -w
 	go mod tidy
 
 format-check:
@@ -131,7 +132,7 @@ release-dist: ansible-dist build-client-release build-linux-amd64 build-install-
 	cp $(BINARY)-linux-amd64 $(INSTALL_BINARY)-linux-amd64 $(BOT_BINARY)-linux-amd64 \
 	   $(BINARY)-linux-arm64 $(INSTALL_BINARY)-linux-arm64 $(BOT_BINARY)-linux-arm64 \
 	   ultra-client-linux-amd64 ultra-client-linux-arm64 deploy/mobile-bootstrap.sh dist/
-	tar -czf dist/ultra-recovery.tar.gz -C deploy/recovery $$(cd deploy/recovery && find . -maxdepth 1 -type f \( -name "*.py" -o -name "*.service" -o -name "*.timer" \) ! -name "test_*" ! -name "vm_*" ! -name "test-*" -printf "%f\n" | sort)
+	tar -czf dist/ultra-recovery.tar.gz -C deploy/recovery $$(cd deploy/recovery && find . -maxdepth 1 -type f \( -name "*.py" -o -name "*.service" -o -name "*.timer" -o -name "ssh_policy.json" \) ! -name "test_*" ! -name "vm_*" ! -name "test-*" -printf "%f\n" | sort)
 	(cd dist && sha256sum \
 	   $(BINARY)-linux-amd64 $(INSTALL_BINARY)-linux-amd64 $(BOT_BINARY)-linux-amd64 \
 	   $(BINARY)-linux-arm64 $(INSTALL_BINARY)-linux-arm64 $(BOT_BINARY)-linux-arm64 \
@@ -180,11 +181,13 @@ build-client-release:
 
 ansible-dist:
 	mkdir -p dist
-	tar --exclude=__pycache__ --exclude=\*.pyc -czf dist/ultra-ansible.tar.gz -C deploy/ansible ansible.cfg requirements.txt controller.py playbooks roles library callback_plugins
+	tar --exclude=__pycache__ --exclude=\*.pyc -czf dist/ultra-ansible.tar.gz -C deploy/ansible ansible.cfg requirements.txt controller.py playbooks roles library callback_plugins module_utils
 	python3 scripts/manual-deploy-runtime.py --architecture amd64 --output dist/ultra-ansible-runtime-linux-amd64.tar.gz
 	python3 scripts/manual-deploy-runtime.py --architecture arm64 --output dist/ultra-ansible-runtime-linux-arm64.tar.gz
 
 test-ansible:
+	python3 scripts/generate-ansible-ssh-policy.py --check
+	python3 scripts/test-ansible-ssh-policy.py
 	python3 scripts/test-ansible-exit-driver.py
 	python3 scripts/test-ansible-controller-process.py
 	python3 scripts/test-ansible-controller-fence.py
@@ -240,6 +243,7 @@ test-manual-deploy:
 # Offline operator/recovery scripts are explicitly gated; Docker checks stay separate.
 .PHONY: test-operator
 test-operator: test-manual-deploy
+	python3 scripts/test-operator-inputs.py
 	python3 scripts/test-forward-broker-guard.py
 	python3 scripts/test-operator-db-dump.py
 	python3 scripts/test-recover-bootstrap-dns.py

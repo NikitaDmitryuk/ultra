@@ -28,6 +28,15 @@ func requireUpgradeTool(tools []map[string]any, name string) error {
 }
 
 func extractUpgradeTools(archivePath, directory string, previous map[string]string) ([]map[string]any, error) {
+	return extractRecoveryTools(archivePath, directory, previous, true)
+}
+
+// Historical archives retain their authenticated bytes and may predate the SSH policy.
+func extractHistoricalUpgradeTools(archivePath, directory string, previous map[string]string) ([]map[string]any, error) {
+	return extractRecoveryTools(archivePath, directory, previous, false)
+}
+
+func extractRecoveryTools(archivePath, directory string, previous map[string]string, requirePolicy bool) ([]map[string]any, error) {
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return nil, err
@@ -54,7 +63,7 @@ func extractUpgradeTools(archivePath, directory string, previous map[string]stri
 			return nil, err
 		}
 		if member.Typeflag != tar.TypeReg ||
-			!regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)$`).MatchString(member.Name) ||
+			(!regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)$`).MatchString(member.Name) && member.Name != "ssh_policy.json") ||
 			seen[member.Name] ||
 			member.Size < 0 ||
 			member.Size > 4<<20 ||
@@ -102,6 +111,9 @@ func extractUpgradeTools(archivePath, directory string, previous map[string]stri
 		if !seen[name] {
 			return nil, errors.New("recovery_bundle_incomplete")
 		}
+	}
+	if seen["ssh_policy.py"] != seen["ssh_policy.json"] || (requirePolicy && !seen["ssh_policy.py"]) {
+		return nil, errors.New("recovery_bundle_incomplete")
 	}
 	return tools, nil
 }

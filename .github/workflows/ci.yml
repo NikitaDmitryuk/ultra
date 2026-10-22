@@ -164,6 +164,10 @@ jobs:
           python3 scripts/build-ansible-runtime.py --architecture amd64 --output /tmp/ultra-ansible-runtime.tar.gz
           make build-install
           sudo -n /usr/bin/python3 scripts/test-ansible-exit.py --installer "$PWD/ultra-install" --ansible-playbook "$(command -v ansible-playbook)" --runtime /tmp/ultra-ansible-runtime.tar.gz
+      - name: Verify isolated systemd execution faults and root SSH retry
+        run: python3 scripts/test-execution-systemd.py --runtime /tmp/ultra-ansible-runtime.tar.gz
+      - name: Verify repeated retained prepare-only admission with one backup
+        run: python3 scripts/test-retained-prepare-repeat.py --runtime /tmp/ultra-ansible-runtime.tar.gz
       - name: Verify release rollback and recovery roles through SSH
         run: |
           python3 scripts/test-ansible-release.py --ansible-playbook "$(command -v ansible-playbook)"

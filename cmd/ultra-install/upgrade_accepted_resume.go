@@ -87,15 +87,10 @@ func upgradeResumeVariables(lock, operation string, legacy bool, legacySHA strin
 // Only an already committed continuation may reuse this exact successful
 // cleanup. Ordinary failed/rolled-back attempts must restore schedules anew.
 func successfulUpgradeResume(directory string, inventory, variables map[string]any) (bool, error) {
-	expected, err := json.Marshal(map[string]any{"inventory": inventory, "variables": variables})
-	if err != nil {
-		return false, err
-	}
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return false, err
 	}
-	expectedSHA := digestSHA256(expected)
 	for _, entry := range entries {
 		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "resume-") {
 			continue
@@ -107,6 +102,8 @@ func successfulUpgradeResume(directory string, inventory, variables map[string]a
 		jobRaw, jobErr := readBootstrapGenerationInput(filepath.Join(stage, "job.json"))
 		requestRaw, requestErr := readBootstrapGenerationInput(filepath.Join(stage, "request.json"))
 		receiptRaw, receiptErr := readBootstrapGenerationInput(filepath.Join(stage, "receipt.json"))
+		expected, expectedErr := expectedFrozenLocalRequest(requestRaw, inventory, variables)
+		expectedSHA := digestSHA256(expected)
 		var job struct {
 			Schema    int    `json:"schema_version"`
 			Operation string `json:"operation"`
@@ -114,7 +111,7 @@ func successfulUpgradeResume(directory string, inventory, variables map[string]a
 			Binary    string `json:"binary_sha256"`
 		}
 		var receipt deployansible.Receipt
-		if jobErr != nil || requestErr != nil || receiptErr != nil || string(requestRaw) != string(expected) ||
+		if jobErr != nil || requestErr != nil || receiptErr != nil || expectedErr != nil || string(requestRaw) != string(expected) ||
 			json.Unmarshal(jobRaw, &job) != nil || json.Unmarshal(receiptRaw, &receipt) != nil ||
 			job.Schema != 1 || job.Operation != "resume-automation" || job.Request != expectedSHA || !runtimeHostValidDigest(job.Binary) ||
 			receipt.RequestSHA256 != expectedSHA || receipt.BinarySHA256 != job.Binary || receipt.State != "succeeded" {

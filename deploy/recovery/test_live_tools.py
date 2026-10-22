@@ -15,7 +15,7 @@ import live_tools
 NAMES = ['recovery.py', 'db_connection.py', 'reconcile.py', 'monitor.py', 'heartbeat.py', 'live_tools.py',
          'ultra-recovery-backup.service', 'ultra-recovery-backup.timer',
          'ultra-recovery-prune.service', 'ultra-recovery-prune.timer',
-         'ultra-monitor.service', 'ultra-monitor.timer', 'ultra-monitor-probe.service']
+         'ultra-monitor.service', 'ultra-monitor.timer', 'ultra-monitor-probe.service', 'ssh_policy.json']
 
 
 class CurrentToolsTests(unittest.TestCase):
@@ -26,8 +26,10 @@ class CurrentToolsTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch.object(live_tools, 'ROOT', self.bundle).start(); patch.object(live_tools, 'SYSTEM', self.system).start()
 
-    def generation(self, version):
+    def generation(self, version, extra=None):
         stream = io.BytesIO(); files = {name: (version + ':' + name).encode() for name in NAMES}
+        files['ssh_policy.json'] = Path(__file__).with_name('ssh_policy.json').read_bytes()
+        files.update(extra or {})
         with tarfile.open(fileobj=stream, mode='w:gz') as archive:
             for name, data in files.items():
                 member = tarfile.TarInfo(name); member.size = len(data); archive.addfile(member, io.BytesIO(data))
@@ -40,7 +42,7 @@ class CurrentToolsTests(unittest.TestCase):
         files, manifest, archive, inventory = generation
         for name, data in files.items():
             (self.bundle / name).write_bytes(data); (self.bundle / name).chmod(0o755 if name.endswith('.py') else 0o644)
-            if not name.endswith('.py'):
+            if live_tools.recovery_member_is_systemd_unit(name):
                 (self.system / name).write_bytes(data)
         for name, data in zip(live_tools.NAMES, (manifest, archive, inventory)):
             (self.bundle / name).write_bytes(data); (self.bundle / name).chmod(0o600)
@@ -89,6 +91,19 @@ class CurrentToolsTests(unittest.TestCase):
             path.write_bytes(original)
         path = self.system / 'ultra-monitor.service'; path.write_bytes(b'old-unit')
         with self.assertRaises(ValueError): live_tools.verify(False)
+
+    def test_policy_json_is_only_verified_under_opt_and_arbitrary_json_is_rejected(self):
+        generation = self.generation('policy-json')
+        self.select(generation)
+        inventory = live_tools.verify(False)
+        self.assertEqual(inventory['members']['ssh_policy.json'], live_tools.digest(generation[0]['ssh_policy.json']))
+        self.assertEqual((self.bundle / 'ssh_policy.json').read_bytes(), generation[0]['ssh_policy.json'])
+        self.assertFalse((self.system / 'ssh_policy.json').exists())
+        (self.bundle / 'ssh_policy.json').write_bytes(b'changed policy')
+        with self.assertRaises(ValueError):
+            live_tools.verify(False)
+        with self.assertRaises(ValueError):
+            self.generation('arbitrary-json', {'untrusted.json': b'not allowlisted'})
 
     def test_manifest_archive_inventory_and_dispatcher_are_not_claimed_booleans(self):
         generation = self.generation('candidate'); self.select(generation)

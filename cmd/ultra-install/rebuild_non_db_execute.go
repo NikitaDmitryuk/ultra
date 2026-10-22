@@ -29,6 +29,10 @@ type retainedPrimaryIdentity struct {
 }
 
 type retainedPrimaryRebuildInput struct {
+	ExecutionTimeoutSeconds    int64               `json:",omitempty"`
+	BackupSnapshotUTC          string              `json:",omitempty"`
+	BackupSHA256               string              `json:",omitempty"`
+	BackupMaxAgeSeconds        float64             `json:",omitempty"`
 	BridgeOnly                 bool                `json:",omitempty"`
 	RetainedExit               *retainedBridgeExit `json:",omitempty"`
 	Inventory                  map[string]any

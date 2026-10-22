@@ -265,13 +265,15 @@ func forwardDrainIntent(
 		operatorPrivate(stage, true) != nil {
 		return intent, fail
 	}
-	expected, err := json.Marshal(
-		map[string]any{"inventory": old.Inventory, "variables": forwardDrainVariables(lockDirectory, old.ID, lifecycleID(directory))},
-	)
+	request, err := readForwardEvidence(filepath.Join(stage, "request.json"))
 	if err != nil {
 		return intent, fail
 	}
-	request, err := readForwardEvidence(filepath.Join(stage, "request.json"))
+	expected, err := expectedFrozenLocalRequest(
+		request,
+		old.Inventory,
+		forwardDrainVariables(lockDirectory, old.ID, lifecycleID(directory)),
+	)
 	if err != nil || !bytes.Equal(request, expected) {
 		return intent, fail
 	}

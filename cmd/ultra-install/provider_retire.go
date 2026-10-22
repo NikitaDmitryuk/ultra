@@ -123,7 +123,7 @@ func retireDeletedProvider(
 	if identity == "" {
 		identity = p.SSH.Identity
 	}
-	result, err := retainedRemote(
+	result, err := retainedMutation(
 		ctx,
 		p,
 		p.Database.PrimaryHost,

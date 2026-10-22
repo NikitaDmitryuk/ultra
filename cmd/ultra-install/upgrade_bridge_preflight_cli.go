@@ -48,7 +48,7 @@ func parseBridgePreflightJournal(raw []byte) (bridgePreflightJournal, error) {
 	if len(raw) > 1048576 || json.Unmarshal(raw, &fields) != nil || len(fields) != 19 || decodeRetainedReconcile(raw, &j) != nil ||
 		j.Schema != 1 || j.Commit != bridgePreflightCommit || j.Version != "v0.0."+commit.String() ||
 		j.Adopt || j.Stage != "upgrade" || !j.MutatorDispatched || j.ForwardOnly || j.ForwardJournalSHA != "" ||
-		j.SecretsSource != "installed-runtime" || j.ConfigProjection != "upgrade-v2" || j.Architecture != runtime.GOARCH ||
+		j.SecretsSource != "installed-runtime" || (j.ConfigProjection != "upgrade-v2" && j.ConfigProjection != "upgrade-v3") || j.Architecture != runtime.GOARCH ||
 		!regexp.MustCompile(`^install\.config\.before-`+regexp.QuoteMeta(j.Version)+`-[0-9]+$`).MatchString(j.Backup) {
 		return j, errors.New("bridge_preflight_journal_class_invalid")
 	}

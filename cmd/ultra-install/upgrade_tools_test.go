@@ -35,6 +35,8 @@ func writeToolFixture(t *testing.T, names []string) string {
 func TestUpgradeToolsRejectUnsafeOrIncompleteArchive(t *testing.T) {
 	required := []string{
 		"recovery.py",
+		"ssh_policy.py",
+		"ssh_policy.json",
 		"monitor.py",
 		"heartbeat.py",
 		"reconcile.py",
@@ -78,5 +80,35 @@ func TestExitUpgradeIncludesRecoveryDependencies(t *testing.T) {
 	}
 	if isExitUpgradeRecoveryTool("ultra-client") {
 		t.Fatal("exit recovery selector included unrelated client tool")
+	}
+}
+
+func TestHistoricalUpgradeToolsPreserveLegacyArchive(t *testing.T) {
+	legacy := []string{
+		"recovery.py",
+		"monitor.py",
+		"heartbeat.py",
+		"reconcile.py",
+		"ultra-recovery-backup.service",
+		"ultra-recovery-backup.timer",
+	}
+	archive := writeToolFixture(t, legacy)
+	if _, err := extractUpgradeTools(archive, filepath.Join(t.TempDir(), "candidate"), nil); err == nil {
+		t.Fatal("new candidate without SSH policy accepted")
+	}
+	tools, err := extractHistoricalUpgradeTools(archive, filepath.Join(t.TempDir(), "baseline"), nil)
+	if err != nil || len(tools) != len(legacy) {
+		t.Fatalf("historical baseline: %v", err)
+	}
+	for _, tool := range tools {
+		data, err := os.ReadFile(tool["source"].(string))
+		if err != nil || string(data) != "fixture" {
+			t.Fatal("historical member bytes changed")
+		}
+	}
+	for _, orphan := range []string{"ssh_policy.py", "ssh_policy.json"} {
+		if _, err := extractHistoricalUpgradeTools(writeToolFixture(t, append(legacy, orphan)), filepath.Join(t.TempDir(), "partial"), nil); err == nil {
+			t.Fatalf("partial policy accepted: %s", orphan)
+		}
 	}
 }

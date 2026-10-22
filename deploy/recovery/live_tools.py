@@ -18,6 +18,17 @@ SYSTEM = Path('/etc/systemd/system')
 CURRENT = Path('/opt/ultra-ansible/current')
 RETENTION = Path('/var/lib/ultra-ansible/retention')
 NAMES = ('tools-manifest.json', 'tools.tar.gz', 'tools-inventory.json')
+SYSTEMD_SUFFIXES = ('.service', '.timer')
+
+
+def recovery_member_allowed(name):
+    if name == 'ssh_policy.json':
+        return True
+    return bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)', name))
+
+
+def recovery_member_is_systemd_unit(name):
+    return name.endswith(SYSTEMD_SUFFIXES)
 
 
 def digest(data):
@@ -43,7 +54,7 @@ def archive_inventory(manifest_raw, archive_raw):
     members = {}; seen = set(); total = 0
     with tarfile.open(fileobj=io.BytesIO(archive_raw), mode='r:gz') as stream:
         for member in stream:
-            if (not member.isfile() or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)', member.name)
+            if (not member.isfile() or not recovery_member_allowed(member.name)
                     or member.name in seen or len(seen) >= 64 or not 0 <= member.size <= 4 * 1024 * 1024):
                 raise ValueError('recovery_tools_archive_unsafe')
             seen.add(member.name); total += member.size
@@ -55,7 +66,7 @@ def archive_inventory(manifest_raw, archive_raw):
             if not member.name.startswith('test_'):
                 members[member.name] = digest(data)
     required = ['recovery.py', 'db_connection.py', 'reconcile.py', 'monitor.py', 'heartbeat.py',
-                'ultra-recovery-backup.service', 'ultra-recovery-backup.timer']
+                'ultra-recovery-backup.service', 'ultra-recovery-backup.timer', 'ssh_policy.json']
     if any(name not in members for name in required):
         raise ValueError('recovery_tools_bundle_incomplete')
     return {'protocol': 'ultra-recovery-tools-v1', 'manifest_sha256': digest(manifest_raw), 'members': members}
@@ -135,7 +146,7 @@ def verify(dispatcher=True):
     for name, checksum in inventory['members'].items():
         if digest(regular(ROOT / name)) != checksum:
             raise ValueError('recovery_tools_member_changed')
-        if not name.endswith('.py') and digest(regular(SYSTEM / name)) != checksum:
+        if recovery_member_is_systemd_unit(name) and digest(regular(SYSTEM / name)) != checksum:
             raise ValueError('recovery_tools_member_changed')
     if dispatcher:
         verify_dispatcher(json.loads(manifest))

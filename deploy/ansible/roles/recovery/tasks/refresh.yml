@@ -3,7 +3,7 @@
   ansible.builtin.assert:
     that:
       - >-
-        item.destination is match(('^(/opt/ultra-recovery/[A-Za-z0-9][A-Za-z0-9_.-]*\.py|/usr/local/bin/ultra-client
+        item.destination is match(('^(/opt/ultra-recovery/(ssh_policy\.json|[A-Za-z0-9][A-Za-z0-9_.-]*\.py)|/usr/local/bin/ultra-client
         |/etc/systemd/system/ultra-(recovery-(backup|prune|reconcile)\.(service|timer)|monitor\.(service|timer)|monitor-probe\.service))$')
         | regex_replace('\\s+', ''))
       - item.mode in ['0644', '0755']

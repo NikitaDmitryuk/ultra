@@ -145,7 +145,9 @@ credentials не означает запрет этих явно необход�
 ## Исполнимое восстановление с сохранённым primary
 
 Отдельная команда `ultra-install rebuild-retained-primary` устанавливает приложения
-на уже переустановленные bridge и один постоянный exit. Она не вызывает provider
+на уже переустановленные bridge и один постоянный exit. Это retained emergency:
+локальный запуск требует root и отдельные root-staged snapshots. Не меняй владельца
+canonical config между обычным запуском wrapper и emergency. Команда не вызывает provider
 reimage/delete, не продолжает прежнюю операцию и не архивирует её journal.
 Это узкий операторский путь: `--accept-reimaged-fleet` явно подтверждает выполненное
 оператором удаление прежних dynamic exits и переустановку известных non-DB узлов;
@@ -161,9 +163,18 @@ reimage/delete, не продолжает прежнюю операцию и н�
 (обычный файл оператора, 0600, без symlink) и сохранённая авторизованная tunnel
 identity. DSN должен содержать прежний пароль и совпадать с configured DB name/user
 и loopback tunnel endpoint. Случайный password fallback запрещён; rendered DSN
-повторно сравнивается с сохранённым. Backup должен быть свежим (до 30 минут),
-совпадать с указанным digest, успешно проходить age authentication и чтение
-`pg_restore`; полноценное тестовое восстановление этим не подтверждается.
+повторно сравнивается с сохранённым. Backup — один `.backup.tar.age` archive: его
+manifest связывает snapshot time, source identity, database и digest `primary.dump`,
+а внешний digest проверяет зашифрованный archive. Backup по умолчанию должен быть
+свежее 30 минут; положительный `--backup-max-age` явно меняет только это окно для
+execute и не ослабляет независимую readiness. Проверяются age authentication и
+чтение `pg_restore`; полноценное тестовое восстановление этим не подтверждается.
+Age подтверждает аутентифицированное шифрование для настроенной identity, но не
+устанавливает личность подписавшего или создателя backup.
+
+`--config` указывает на явно подготовленную root-owned копию canonical bytes, а не
+на shared user-owned canonical file. `--state-dir` должен быть новым пустым каталогом root:root с режимом 0700; он
+создаётся таким же, если отсутствует. Все пути задаются явно и абсолютно.
 
 Primary исключён из mutation inventory по точной host identity. Его Ansible-задачи
 выполняют только read-only SQL. Отдельный localhost gate перед каждой mutation play
@@ -183,6 +194,19 @@ Execute запускается только от root. До чтения вхо�
 `systemctl show --property=Version`, а при существующем `/var/lib/ultra-ansible` —
 приватный root-owned каталог. Это `deployansible.PreflightLocalExecution`, тот же
 guard, который исполняется внутри executor.
+
+Доверенные Python/Ansible executable и `ssh`, `age`, `pg_restore`, а также
+`systemctl`/`systemd-run` должны быть обычными root-owned executable без group/world
+write; все родительские каталоги — root-owned и без group/world write. Это исключает
+подмену локальной команды через writable path.
+
+Для execute `--execution-timeout` по умолчанию равен 20 минутам и входит в frozen
+request; изменение timeout при повторе означает другой запрос. Readiness имеет
+отдельный предел ожидания и не меняется этим флагом. Таймаут процесса или systemd
+не доказывает quiescence и не разрешает повторную мутацию. Сохраняются отдельные
+`execution-runtime-limit-<generation>.json` и, если доступно подтверждение manager,
+`execution-systemd-limit-<generation>.json`; они не подменяют controller receipt и
+не подтверждают, что все дочерние процессы остановлены.
 
 Причина обязательности: непроверенный локальный прогон проходил все CLI- и
 SSH-проверки, создавал одноразовый admission на узлах и падал на первом локальном

@@ -13,7 +13,9 @@
         executable: /usr/bin/python3
       become: true
       changed_when: false
-      no_log: true
+      # The script emits public readiness evidence only. Keep transport errors
+      # visible to safe_result's fixed classification so transient SSH can retry;
+      # controller output is suppressed and raw messages are never journalled.
       register: release_readiness
     - name: Save only the public readiness result
       ansible.builtin.copy:

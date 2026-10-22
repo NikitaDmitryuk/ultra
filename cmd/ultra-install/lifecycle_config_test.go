@@ -82,7 +82,7 @@ func TestLifecycleCLIPlanAndDoctorIgnoreLocalBootstrapArchive(t *testing.T) {
 	}
 }
 
-func TestLifecycleCLIUpgradeStatusAndRepairLoadLifecycleConfig(t *testing.T) {
+func TestLifecycleCLIUpgradeStatusAndRepairSafeLocalBoundaries(t *testing.T) {
 	config, raw := lifecycleCLIFixture(t)
 	for _, args := range [][]string{
 		{"operator-upgrade", "--config", config, "--release-dir", "/missing/lifecycle-fixture-release",
@@ -101,6 +101,9 @@ func TestLifecycleCLIUpgradeStatusAndRepairLoadLifecycleConfig(t *testing.T) {
 		}
 		want := map[string]string{"operator-upgrade": "operator upgrade release verification:",
 			"status": "ansible executable unavailable", "recovery-tools-bootstrap": "bootstrap_must_execute_on_attested_bridge"}[args[0]]
+		if args[0] == "operator-upgrade" && os.Geteuid() != 0 {
+			want = "operator_root_required"
+		}
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("%s failed at unexpected boundary: %s", args[0], out)
 		}

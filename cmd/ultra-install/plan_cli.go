@@ -31,6 +31,8 @@ func handlePlanSubcommand(args []string) bool {
 		exitOnErr("deployment operation", runDeployOperationCommand(args[1:], os.Stdout))
 	case "retained-primary-reconcile":
 		exitOnErr("retained primary reconciliation", runRetainedReconcile(args[1:], os.Stdout))
+	case "operator-journal-reconcile":
+		exitOnErr("operator journal reconciliation", runOperatorJournalReconcile(args[1:], os.Stdout))
 	case "rebuild-retained-primary":
 		exitOnErr("retained primary recovery", runRetainedPrimaryCommand(args[1:]))
 	case "rebuild-non-db":

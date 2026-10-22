@@ -87,6 +87,8 @@ class BotTokenBootstrap(unittest.TestCase):
         os.mkfifo(fifo, 0o600)
         with self.assertRaises(D.DeployError):
             D.bot_token_from_env(fifo)
+
+
         with self.assertRaises(D.DeployError):
             D.bot_token_from_env(self.root)
         self.env.write_bytes(b'x' * 1048577)
@@ -603,7 +605,8 @@ class RecoveryStateAttestation(unittest.TestCase):
     def test_cli_dispatches_before_build_checks_and_rejects_mutating_options(self):
         argv = ['manual-deploy.py','--attest-recovery-state','--attestation-bootstrap',
                 'recovery-tools-bootstrap-operation-fixture','--attestation-candidate','a'*64]
-        with patch.object(os.environ, 'get', side_effect=lambda key, default=None: default), \
+        with patch.object(D, 'require_emergency_root'), patch.object(D, 'validate_operator_config'), \
+             patch.object(os.environ, 'get', side_effect=lambda key, default=None: default), \
              patch.object(D, 'collect_recovery_attestation', return_value={'schema':1}) as collect, \
              patch.object(D, 'run', side_effect=AssertionError('no build/git checks')), \
              patch.object(sys, 'argv', argv), contextlib.redirect_stdout(io.StringIO()) as out:
@@ -1259,6 +1262,8 @@ class ReimagedAdoptionArchive(unittest.TestCase):
         with patch.object(D, '__file__', str(self.repo / 'scripts/manual-deploy.py')), patch.object(
                 D.sys, 'argv', argv), patch.dict(D.os.environ, {'ADOPT': '0'}), patch.object(
                 D.shutil, 'which', side_effect=AssertionError('no tools')), patch.object(
+                D, 'require_emergency_root', side_effect=AssertionError('ordinary local recovery is not root-only')), \
+                patch.object(D, 'validate_operator_config'), patch.object(
                 D, 'run', side_effect=AssertionError('no subprocess')), patch.object(
                 D, 'build_candidate', side_effect=AssertionError('no build')), contextlib.redirect_stdout(io.StringIO()):
             D.main()
@@ -1342,7 +1347,7 @@ class ForwardContinuationAttestationDiagnostics(unittest.TestCase):
         with patch.object(D, 'run', side_effect=D.DeployError(code)) as runner, \
              patch.object(D.time, 'sleep') as sleep:
             with self.assertRaisesRegex(D.DeployError, '^' + code + '$'):
-                D.run_forward_continuation_attestation(['ssh', '-o', 'ConnectTimeout=15', 'fixture'], Path('.'))
+                D.run_forward_continuation_attestation(['ssh', *D._SSH_POLICY.ssh_options('probe'), 'fixture'], Path('.'))
         self.assertEqual(runner.call_count, 3)
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
 
@@ -1351,18 +1356,18 @@ class ForwardContinuationAttestationDiagnostics(unittest.TestCase):
 class ForwardContinuationAttestationRetry(unittest.TestCase):
     def test_retries_exit_255_then_returns_success(self):
         responses = [D.DeployError('forward_continuation_attestation_failed_exit_255'), 'receipt']
-        command = ['ssh', '-o', 'ConnectTimeout=15', 'python3 -c read-only-probe']
+        command = ['ssh', *D._SSH_POLICY.ssh_options('probe'), 'python3 -c read-only-probe']
         with patch.object(D, 'run', side_effect=responses) as runner, \
              patch.object(D.time, 'sleep') as sleep:
             self.assertEqual(D.run_forward_continuation_attestation(command, Path('.')), 'receipt')
         self.assertEqual(runner.call_count, 2)
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [2])
-        self.assertEqual(command[2], 'ConnectTimeout=15')
-        self.assertTrue(all(call.args[0][2] == 'ConnectTimeout=30' for call in runner.call_args_list))
+        self.assertEqual(command[1:1 + len(D._SSH_POLICY.ssh_options('probe'))], D._SSH_POLICY.ssh_options('probe'))
+        self.assertTrue(all(call.args[0] == command for call in runner.call_args_list))
 
     def test_exhausts_three_exit_255_attempts(self):
         failure = D.DeployError('forward_continuation_attestation_failed_exit_255')
-        command = ['ssh', '-o', 'ConnectTimeout=15', 'python3 -c read-only-probe']
+        command = ['ssh', *D._SSH_POLICY.ssh_options('probe'), 'python3 -c read-only-probe']
         with patch.object(D, 'run', side_effect=[failure, failure, failure]) as runner, \
              patch.object(D.time, 'sleep') as sleep:
             with self.assertRaisesRegex(D.DeployError, 'failed_exit_255'):
@@ -1371,7 +1376,7 @@ class ForwardContinuationAttestationRetry(unittest.TestCase):
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
 
     def test_does_not_retry_other_exit_codes(self):
-        command = ['ssh', '-o', 'ConnectTimeout=15', 'python3 -c read-only-probe']
+        command = ['ssh', *D._SSH_POLICY.ssh_options('probe'), 'python3 -c read-only-probe']
         with patch.object(D, 'run', side_effect=D.DeployError(
                 'forward_continuation_attestation_failed_exit_1')) as runner, \
              patch.object(D.time, 'sleep') as sleep:
@@ -1854,14 +1859,14 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
             self.rollout()
         self.assertEqual(self.calls, [])
 
-    def test_success_removes_one_time_baseline_setting_and_preserves_readable_mode(self):
-        self.config.chmod(0o644)
+    def test_success_removes_one_time_baseline_setting_and_preserves_private_mode(self):
+        self.config.chmod(0o600)
         self.config.write_bytes(self.original + b'ULTRA_UPGRADE_BASELINE_FILE=/private/baseline.json\n')
         original = self.config.read_bytes()
         self.rollout()
         self.assertNotIn(b'ULTRA_UPGRADE_BASELINE_FILE=', self.config.read_bytes())
         self.assertEqual(D.config_values(self.config.read_bytes())['ULTRA_AUTOMATION_VERSION'], self.version)
-        self.assertEqual(self.config.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
         self.assertEqual(next(self.root.glob('install.config.before-*')).read_bytes(), original)
 
     def test_failed_upgrade_retains_one_time_baseline_setting(self):
@@ -2041,22 +2046,22 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
         with self.assertRaisesRegex(D.DeployError, '^manual_forward_only_upgrade_only$'):
             self.rollout(forward_only=True, retry_failed=True)
 
-    def test_readable_canonical_config_keeps_its_mode(self):
-        self.config.chmod(0o644)
+    def test_private_canonical_config_keeps_its_mode(self):
+        self.config.chmod(0o600)
         self.rollout(config_path=self.config)
-        self.assertEqual(self.config.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
         self.assertIn(self.version.encode(), self.config.read_bytes())
         self.assertEqual(next(self.root.glob('install.config.before-*')).stat().st_mode & 0o777, 0o600)
 
-    def test_readable_canonical_config_keeps_mode_when_preflight_fails(self):
-        self.config.chmod(0o644)
+    def test_private_canonical_config_keeps_mode_when_preflight_fails(self):
+        self.config.chmod(0o600)
 
         def failing_doctor(command, cwd, stage, capture=False, env=None):
             raise D.DeployError('fixture_failure')
         with self.assertRaises(D.DeployError):
             self.rollout(config_path=self.config, runner=failing_doctor)
         self.assertEqual(self.config.read_bytes(), self.original)
-        self.assertEqual(self.config.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
 
     def test_explicit_fresh_adoption_is_rejected_without_remote_actions(self):
         with self.assertRaisesRegex(D.DeployError, '^fresh_adoption_unsupported$'):
@@ -2181,7 +2186,7 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
 
     def test_nested_lock_fails_closed(self):
         with D.lock(self.root / 'lock'):
-            with self.assertRaisesRegex(D.DeployError, 'already_running'):
+            with self.assertRaisesRegex(D.DeployError, '^operator_lock_busy$'):
                 with D.lock(self.root / 'lock'):
                     self.fail('conflicting lock accepted')
 
@@ -2193,20 +2198,22 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
         self.assertEqual(run.call_args.kwargs['stderr'], subprocess.DEVNULL)
 
     def test_dirty_tree_fails_before_build_or_deploy(self):
-        with patch.object(D, '__file__', str(self.repo / 'scripts/manual-deploy.py')), patch.object(D.shutil, 'which', return_value='/fixture'), patch.object(D.sys, 'argv', ['manual-deploy.py']), patch.object(D, 'run', side_effect=[' M tracked']) as run:
+        with patch.object(D, '__file__', str(self.repo / 'scripts/manual-deploy.py')), patch.object(D, 'require_emergency_root'), patch.object(D, 'validate_operator_config'), patch.object(D.shutil, 'which', return_value='/fixture'), patch.object(D.sys, 'argv', ['manual-deploy.py']), patch.object(D, 'run', side_effect=[' M tracked']) as run:
             with self.assertRaisesRegex(D.DeployError, 'tracked_tree_dirty'):
                 D.main()
         self.assertEqual(run.call_count, 1)
 
     def test_fresh_adoption_fails_before_candidate_build(self):
         def reject_while_locked(*args):
-            with self.assertRaisesRegex(D.DeployError, 'already_running'):
+            with self.assertRaisesRegex(D.DeployError, '^operator_lock_busy$'):
                 with D.lock(self.repo / 'dist/manual/deploy.lock'):
                     self.fail('adoption checked before acquiring the deployment lock')
             return False
         with patch.object(D, '__file__', str(self.repo / 'scripts/manual-deploy.py')), \
              patch.object(D.shutil, 'which', return_value='/fixture'), \
              patch.object(D.sys, 'argv', ['manual-deploy.py']), \
+             patch.object(D, 'require_emergency_root'), patch.object(D, 'validate_operator_config'), \
+             patch.object(D, 'require_manual_state_directory'), \
              patch.dict(os.environ, {'ADOPT': '1'}), \
              patch.object(D, 'run', side_effect=['', self.commit]), \
              patch.object(D, 'valid_completed_remote_cleanup', side_effect=reject_while_locked), \
@@ -2584,16 +2591,96 @@ print('acknowledged '+n,flush=True)
         with self.assertRaisesRegex(D.DeployError, 'manual_config_projection_invalid'):
             D.projected_upgrade_config(self.original, 'future')
 
-    def test_upgrade_v2_projects_controller_pins_without_changing_operator_config(self):
-        configured = self.original + b'DATABASE_DUMP=/operator/private.dump\n'
+    def test_upgrade_v2_projection_preserves_historical_identity_bytes(self):
+        configured = (b'BRIDGE_SSH_KEY=/home/operator/.ssh/bridge\n'
+                      b'MAIN_EXIT_SSH_KEY=/home/operator/.ssh/exit\n'
+                      b'DATABASE_SSH_KEY=/home/operator/.ssh/database\n'
+                      b'DATABASE_DUMP=/home/operator/private.dump\n'
+                      b'ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/home/operator/.ssh/known_hosts\n')
         staged = D.projected_upgrade_config(configured, 'upgrade-v2')
+        self.assertEqual(staged, b'BRIDGE_SSH_KEY=/home/operator/.ssh/bridge\n'
+                         b'MAIN_EXIT_SSH_KEY=/home/operator/.ssh/exit\n'
+                         b'DATABASE_SSH_KEY=/home/operator/.ssh/database\n'
+                         b'ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/etc/ultra-recovery/known_hosts\n')
+        self.assertIn(b'/home/operator', staged)
+
+    def test_upgrade_v3_removes_local_key_and_runtime_references(self):
+        configured = (self.original + b'DATABASE_DUMP=/home/operator/private.dump\n'
+                      b'BRIDGE_SSH_KEY=/home/operator/.ssh/bridge\n'
+                      b'MAIN_EXIT_SSH_KEY=/home/operator/.ssh/exit\n'
+                      b'DATABASE_SSH_KEY=/home/operator/.ssh/database\n'
+                      b'DB_CREDENTIALS_FILE=/home/operator/private/credentials.json\n'
+                      b'DB_TUNNEL_PRIVATE_KEY_FILE=/home/operator/.ssh/db-tunnel\n'
+                      b'ULTRA_SUBSCRIPTION_ENCRYPTION_KEY_FILE=/home/operator/private/subscription-keys.json\n'
+                      b'ULTRA_OPERATOR_AGE_IDENTITY_FILE=/home/operator/private/backup-identity.txt\n')
+        remote_release = '/var/lib/ultra-ansible/operator-inputs/manual-' + self.commit + '-' + 'a' * 64 + '/release'
+        candidate = D.config_candidate(configured, self.version, remote_release)
+        staged = D.projected_upgrade_config(candidate, 'upgrade-v3')
         self.assertIn(b'ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/etc/ultra-recovery/known_hosts\n', staged)
         self.assertNotIn(b'DATABASE_DUMP=', staged)
+        self.assertNotIn(b'/home/operator', staged)
+        for key in (b'DB_CREDENTIALS_FILE=', b'DB_TUNNEL_PRIVATE_KEY_FILE=',
+                    b'ULTRA_SUBSCRIPTION_ENCRYPTION_KEY_FILE=', b'ULTRA_OPERATOR_AGE_IDENTITY_FILE='):
+            self.assertNotIn(key, staged)
+        self.assertIn(('ULTRA_AUTOMATION_RELEASE_DIR="' + remote_release + '"\n').encode(), staged)
         self.assertIn(b'ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=' + str(self.pins).encode() + b'\n', configured)
         with self.assertRaisesRegex(D.DeployError, 'manual_controller_pins_config_required'):
-            D.projected_upgrade_config(b'INSTALL_SCHEMA_VERSION=2\n', 'upgrade-v2')
+            D.projected_upgrade_config(b'INSTALL_SCHEMA_VERSION=2\n', 'upgrade-v3')
         with self.assertRaisesRegex(D.DeployError, 'duplicate_canonical_release_key'):
-            D.projected_upgrade_config(configured + b'ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/other\n', 'upgrade-v2')
+            D.projected_upgrade_config(configured + b'ULTRA_AUTOMATION_KNOWN_HOSTS_FILE=/other\n', 'upgrade-v3')
+
+        parsed_remote_config = D.config_values(staged)
+        self.assertEqual(parsed_remote_config['ULTRA_AUTOMATION_RELEASE_DIR'], remote_release)
+        self.assertEqual(parsed_remote_config['ULTRA_AUTOMATION_KNOWN_HOSTS_FILE'],
+                         '/etc/ultra-recovery/known_hosts')
+        for key in ('DATABASE_DUMP', 'DB_CREDENTIALS_FILE', 'DB_TUNNEL_PRIVATE_KEY_FILE',
+                    'ULTRA_SUBSCRIPTION_ENCRYPTION_KEY_FILE', 'ULTRA_OPERATOR_AGE_IDENTITY_FILE'):
+            self.assertNotIn(key, parsed_remote_config)
+        for key in ('BRIDGE_SSH_KEY', 'MAIN_EXIT_SSH_KEY', 'DATABASE_SSH_KEY'):
+            self.assertEqual(parsed_remote_config[key], '/etc/ultra-fleet/id_ed25519')
+        self.assertEqual(parsed_remote_config['SSH_USER'], 'root')
+
+    def test_v3_remote_archive_load_uses_runtime_secrets_marker_without_operator_paths(self):
+        configured = (self.original + b'BRIDGE_SSH_KEY=/home/operator/.ssh/bridge\n'
+                      b'MAIN_EXIT_SSH_KEY=/home/operator/.ssh/exit\n'
+                      b'DATABASE_SSH_KEY=/home/operator/.ssh/database\n'
+                      b'DATABASE_DUMP=/home/operator/private.dump\n'
+                      b'DB_CREDENTIALS_FILE=/home/operator/private/credentials.json\n'
+                      b'DB_TUNNEL_PRIVATE_KEY_FILE=/home/operator/.ssh/db-tunnel\n'
+                      b'ULTRA_SUBSCRIPTION_ENCRYPTION_KEY_FILE=/home/operator/private/subscription-keys.json\n'
+                      b'ULTRA_OPERATOR_AGE_IDENTITY_FILE=/home/operator/private/backup-identity.txt\n')
+        remote_release = '/var/lib/ultra-ansible/operator-inputs/manual-' + self.commit + '-' + 'b' * 64 + '/release'
+        candidate = D.config_candidate(configured, self.version, remote_release)
+        staged = D.projected_upgrade_config(candidate, 'upgrade-v3')
+        marker = b'{"secrets_source":"installed-runtime"}'
+
+        def remote_load(command, **kwargs):
+            with tarfile.open(fileobj=kwargs['stdin'], mode='r|gz') as archive:
+                received = {member.name: archive.extractfile(member).read() for member in archive}
+            self.assertEqual(received['install.config'], staged)
+            self.assertEqual(received['secrets-source.json'], marker)
+            values = D.config_values(received['install.config'])
+            self.assertEqual(values['BRIDGE_IP'], '192.0.2.10')
+            self.assertEqual(values['ULTRA_AUTOMATION_RELEASE_DIR'], remote_release)
+            self.assertNotIn('/home/operator', received['install.config'].decode())
+            return subprocess.CompletedProcess(command, 0, json.dumps({
+                'architecture': 'arm64', 'manifest_sha256': D.sha(self.manifest),
+                'config_sha256': D.sha(staged),
+                'attempt': D.remote_attempt(staged, self.version)}).encode())
+
+        with patch.object(D, 'run_stage', side_effect=remote_load):
+            receipt = D.stage_remote(self.repo, self.root, self.bundle, staged, ['ssh', 'root@192.0.2.10'],
+                                     self.commit, self.version, D.sha(self.manifest),
+                                     {'secrets-source.json': marker})
+        self.assertEqual(receipt['config_sha256'], D.sha(staged))
+
+    def test_fresh_transport_uses_v3_and_frozen_v2_record_keeps_v2(self):
+        transport = ['ssh', 'root@192.0.2.10']
+        self.assertEqual(D.deployment_config_projection(None, transport, False, self.commit, self.version),
+                         'upgrade-v3')
+        frozen = {'config_projection': 'upgrade-v2', 'commit': self.commit, 'version': self.version}
+        self.assertEqual(D.deployment_config_projection(frozen, transport, False, self.commit, self.version),
+                         'upgrade-v2')
 
     def test_projected_prepared_restart_keeps_exact_staged_identity(self):
         self.dump_config()
@@ -2603,7 +2690,7 @@ print('acknowledged '+n,flush=True)
         with self.assertRaisesRegex(D.DeployError, 'fixture_failure'):
             self.rollout(runner=fail)
         record = json.loads((self.root / 'operation.json').read_bytes())
-        self.assertEqual(record['config_projection'], 'upgrade-v2')
+        self.assertEqual(record['config_projection'], 'upgrade-v3')
         staged = self.stage_mock.call_args.args[3]
         record.update(stage='prepared', mutator_dispatched=False)
         D.atomic_write(self.root / 'operation.json', json.dumps(record).encode())
@@ -2791,7 +2878,7 @@ print('acknowledged '+n,flush=True)
         self.new_candidate_fixture()
         canonical = self.repo / 'canonical.config'
         self.config.rename(canonical)
-        canonical.chmod(0o644)
+        canonical.chmod(0o600)
         config = canonical.read_bytes()
         before = {str(p.relative_to(self.root)): (p.read_bytes(), p.stat().st_mode & 0o777)
                   for p in self.root.rglob('*') if p.is_file()}
@@ -2799,7 +2886,7 @@ print('acknowledged '+n,flush=True)
             with self.assertRaisesRegex(D.DeployError, '^manual_forward_continuation_missing_prior_candidate$'):
                 self.rollout(config_path=canonical, continue_forward_only=True, runner=attest)
         self.assertEqual(canonical.read_bytes(), config)
-        self.assertEqual(canonical.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(canonical.stat().st_mode & 0o777, 0o600)
         self.assertFalse(self.config.exists())
         self.assertEqual({str(p.relative_to(self.root)): (p.read_bytes(), p.stat().st_mode & 0o777)
                           for p in self.root.rglob('*') if p.is_file()}, before)
@@ -2838,11 +2925,11 @@ print('acknowledged '+n,flush=True)
             return response
         canonical = self.repo / 'canonical.config'
         self.config.rename(canonical)
-        canonical.chmod(0o644)
+        canonical.chmod(0o600)
         with patch.object(D, 'subscription_probe_from_env', side_effect=AssertionError('must not read env')):
             with self.assertRaisesRegex(D.DeployError, 'new_failure'):
                 self.rollout(config_path=canonical, continue_forward_only=True, runner=runner)
-        self.assertEqual(canonical.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(canonical.stat().st_mode & 0o777, 0o600)
         self.assertFalse(self.config.exists())
         self.assertEqual(self.stage_mock.call_args.args[8]['forward-operation.json'], proof)
         self.assertEqual([p.read_bytes() for p in self.root.glob('operation.forward-only-abandoned-*.json')], [proof])
@@ -3452,7 +3539,7 @@ print('acknowledged '+n,flush=True)
             staged = D.config_candidate(config, version, remote_root / 'release', remote_root / 'baseline/descriptor.json')
             return staged, {'baseline/descriptor.json': b'{}', 'baseline/operator-journal.json': b'{}'}
         with patch.object(D, 'stage_upgrade_baseline', side_effect=prepared):
-            first_attempt = D.remote_attempt(D.projected_upgrade_config(baseline_setting, 'upgrade-v2'), self.version)
+            first_attempt = D.remote_attempt(D.projected_upgrade_config(baseline_setting, 'upgrade-v3'), self.version)
             self.rollout()
             self.assertNotIn(b'ULTRA_UPGRADE_BASELINE_FILE=', self.config.read_bytes())
             first_config = self.stage_mock.call_args.args[3]
@@ -3462,7 +3549,7 @@ print('acknowledged '+n,flush=True)
         self.assertEqual(second.args[3], first_config)
         with patch.object(D, 'stage_upgrade_baseline', side_effect=prepared):
             self.assertEqual(D.completed_baseline_replay(
-                self.root, self.config.read_bytes(), self.version, self.commit, 'upgrade-v2')[0], first_attempt)
+                self.root, self.config.read_bytes(), self.version, self.commit, 'upgrade-v3')[0], first_attempt)
         self.assertEqual(first.args[1], second.args[1])
         self.assertEqual(D.remote_attempt(first.args[3], self.version), D.remote_attempt(second.args[3], self.version))
 
@@ -5096,7 +5183,7 @@ class RuntimeReuse(unittest.TestCase):
         ansible = self.source / 'deploy/ansible'
         for name in ['ansible.cfg', 'controller.py']:
             (ansible / name).write_text('fixture')
-        for name in ['playbooks', 'roles', 'library', 'callback_plugins']:
+        for name in ['playbooks', 'roles', 'library', 'callback_plugins', 'module_utils']:
             (ansible / name).mkdir()
         environment = os.environ.copy()
         environment['ULTRA_VERIFIED_RUNTIME_DIR'] = str(self.cache)
@@ -5262,7 +5349,8 @@ class PerRoleOperatorIdentity(unittest.TestCase):
             config=("BRIDGE_IP=192.0.2.10\nMAIN_EXIT_IP=192.0.2.20\nDATABASE_IP=192.0.2.30\nBRIDGE_SSH_KEY="+str(bridge)+
                     "\nDATABASE_SSH_KEY=/tmp/database-key\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE="+str(pins)+
                     "\nULTRA_AUTOMATION_STATIC_NODES='[{\"name\":\"primary\",\"address\":\"192.0.2.20\"}]'\n").encode()
-            with patch.dict(os.environ,{'ULTRA_OPERATOR_IDENTITY':'','ULTRA_OPERATOR_KNOWN_HOSTS':''}), \
+            with patch.object(D.os, 'geteuid', return_value=1000), \
+                    patch.dict(os.environ,{'ULTRA_OPERATOR_IDENTITY':'','ULTRA_OPERATOR_KNOWN_HOSTS':''}), \
                     patch.object(D.subprocess,'run',return_value=subprocess.CompletedProcess([],0)):
                 argv,_=D.operator_transport(None,config)
             self.assertEqual(argv[-1],'root@192.0.2.10')
@@ -5390,6 +5478,76 @@ class KnownHostsBootstrap(unittest.TestCase):
         with self.assertRaises(D.DeployError): D.operator_pins(path)
         path.chmod(0o600); path.write_bytes(b'x'*(D.KNOWN_HOSTS_LIMIT+1))
         with self.assertRaises(D.DeployError): D.operator_pins(path)
+
+
+class OperatorRootContract(unittest.TestCase):
+    def test_ordinary_entrypoint_reaches_normal_preflight_as_nonroot(self):
+        with patch.object(D, '__file__', str(Path.cwd()/'scripts/manual-deploy.py')), \
+             patch.object(D.os, 'geteuid', return_value=1000), \
+             patch.object(D, 'validate_operator_config'), \
+             patch.object(D, 'require_manual_state_directory'), \
+             patch.object(D.shutil, 'which', return_value='/fixture'), \
+             patch.object(sys, 'argv', ['manual-deploy.py']), \
+             patch.object(D, 'run', side_effect=[' M tracked']), \
+             self.assertRaisesRegex(D.DeployError, '^tracked_tree_dirty_commit_before_deploy$'):
+            D.main()
+
+    def test_operator_config_must_be_current_uid_private_regular_single_link(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / 'install.config'
+            config.write_bytes(b'config fixture\n')
+            config.chmod(0o600)
+            D.validate_operator_config(config)
+            with patch.object(D.os, 'geteuid', return_value=os.geteuid() + 1000), \
+                 self.assertRaisesRegex(D.DeployError, '^canonical_config_requires_operator_0600$'):
+                D.validate_operator_config(config)
+
+    def test_lock_contract_reports_owner_mismatch_and_busy_distinctly(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'deploy.lock'
+            path.write_bytes(b'')
+            path.chmod(0o600)
+            fake = type('Stat', (), {'st_mode': path.stat().st_mode, 'st_nlink': 1, 'st_uid': 2000})()
+            with patch.object(D.os, 'fstat', return_value=fake), \
+                 self.assertRaisesRegex(D.DeployError, '^operator_lock_owner_mismatch$'):
+                with D.lock(path):
+                    pass
+            with patch.object(D.os, 'geteuid', return_value=1000):
+                held = os.open(path, os.O_RDWR)
+                try:
+                    import fcntl
+                    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    with self.assertRaisesRegex(D.DeployError, '^operator_lock_busy$'):
+                        with D.lock(path):
+                            pass
+                finally:
+                    os.close(held)
+
+    def test_bridge_preflight_recovery_does_not_require_local_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / 'install.config'
+            config.write_bytes(b'fixture\n')
+            config.chmod(0o600)
+            commit = 'a' * 40
+            version = 'v0.0.' + str(int(commit, 16))
+            argv = ['manual-deploy.py', '--recover-bridge-preflight', '--config', str(config),
+                    '--journal-sha256', 'b' * 64, '--backup-sha256', 'c' * 64,
+                    '--config-sha256', 'd' * 64]
+            with patch.object(D, '__file__', str(Path.cwd() / 'scripts/manual-deploy.py')), \
+                 patch.object(D.os, 'geteuid', return_value=1000), \
+                 patch.object(D, 'require_emergency_root', side_effect=AssertionError('remote root is sufficient')), \
+                 patch.object(D, 'validate_operator_config'), \
+                 patch.object(D, 'require_manual_state_directory'), \
+                 patch.object(D, 'configure_operator_transport'), \
+                 patch.object(D, 'operator_requested', return_value=False), \
+                 patch.object(D, 'lock', side_effect=lambda path: contextlib.nullcontext()), \
+                 patch.object(D, 'build_candidate', return_value=Path(temporary) / 'bundle'), \
+                 patch.object(D, 'recover_bridge_preflight') as recover, \
+                 patch.object(D.shutil, 'which', return_value='/fixture'), \
+                 patch.object(D, 'run', side_effect=['', commit, '', commit]), \
+                 patch.object(D.sys, 'argv', argv), patch.dict(D.os.environ, {'ADOPT': '0'}):
+                D.main()
+            recover.assert_called_once()
 
 
 if __name__ == '__main__':

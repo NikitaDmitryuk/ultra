@@ -241,7 +241,7 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 						var archive bytes.Buffer
 						zipped := gzip.NewWriter(&archive)
 						writer := tar.NewWriter(zipped)
-						for _, tool := range []string{"recovery.py", "db_connection.py", "monitor.py", "heartbeat.py", "reconcile.py", "live_tools.py", "ultra-recovery-backup.service", "ultra-recovery-backup.timer"} {
+						for _, tool := range []string{"recovery.py", "db_connection.py", "monitor.py", "heartbeat.py", "reconcile.py", "live_tools.py", "ssh_policy.py", "ssh_policy.json", "ultra-recovery-backup.service", "ultra-recovery-backup.timer"} {
 							if err := writer.WriteHeader(&tar.Header{Name: tool, Mode: 0600, Size: 4}); err != nil {
 								t.Fatal(err)
 							}

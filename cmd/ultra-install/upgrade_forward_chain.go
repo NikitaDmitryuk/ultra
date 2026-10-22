@@ -87,7 +87,10 @@ func forwardSavedRequest(stage string) (map[string]any, map[string]any, error) {
 		Inventory map[string]any `json:"inventory"`
 		Variables map[string]any `json:"variables"`
 	}
-	if err != nil || decodeForwardChain(raw, &r) != nil || r.Inventory == nil || r.Variables == nil {
+	if err != nil || json.Unmarshal(raw, &r) != nil || r.Inventory == nil || r.Variables == nil {
+		return nil, nil, errors.New("upgrade_forward_chain_request_invalid")
+	}
+	if _, err = expectedFrozenLocalRequest(raw, r.Inventory, r.Variables); err != nil {
 		return nil, nil, errors.New("upgrade_forward_chain_request_invalid")
 	}
 	return r.Inventory, r.Variables, nil
@@ -311,7 +314,7 @@ func verifyForwardRecoveryTools(directory, archive string) (result error) {
 			break
 		}
 		if err != nil || h.Typeflag != tar.TypeReg ||
-			!regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)$`).MatchString(h.Name) ||
+			(!regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)$`).MatchString(h.Name) && h.Name != "ssh_policy.json") ||
 			seen[h.Name] ||
 			h.Size < 0 ||
 			h.Size > 1048576 ||
@@ -579,9 +582,12 @@ func verifyForwardCensusAttempt(
 		verifyForwardDrainFiles(stage, archive) != nil {
 		return fail
 	}
-	expected, err := json.Marshal(map[string]any{"inventory": old.Inventory,
-		"variables": forwardDrainVariables(lockDirectory, old.ID, lifecycleID(directory))})
 	request, readErr := readForwardEvidence(filepath.Join(stage, "request.json"))
+	expected, err := expectedFrozenLocalRequest(
+		request,
+		old.Inventory,
+		forwardDrainVariables(lockDirectory, old.ID, lifecycleID(directory)),
+	)
 	if err != nil || readErr != nil || !bytes.Equal(request, expected) {
 		return fail
 	}

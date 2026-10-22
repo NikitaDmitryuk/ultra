@@ -85,7 +85,10 @@ class Contracts(unittest.TestCase):
             self.assertEqual(reads.call_count, 2)
             self.assertEqual(json.loads(output.call_args.args[0]), {'verified': True, 'ready': True})
         tasks = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/wait-upgrade-readiness.yml').read_text())[0]['tasks']
-        self.assertTrue(all(task['no_log'] for task in tasks))
+        # The public-only script exposes fixed transport categories to the safe
+        # callback; copying the result still suppresses task payloads.
+        self.assertFalse(tasks[0].get('no_log', False))
+        self.assertTrue(tasks[1]['no_log'])
         self.assertIn('--wait-readiness', tasks[0]['ansible.builtin.script']['cmd'])
         self.assertNotIn('until', tasks[0])
 

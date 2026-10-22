@@ -335,6 +335,9 @@ generation. Один успешный Ansible receipt при незавершё�
 `--recover-bridge-preflight` у wrapper. Он требует явные SHA-256 журнала,
 предыдущей и текущей конфигураций, неизменный pinned SSH transport и предварительно
 закрытые старые dispatch origins через проверенный `recovery-prepare --seal-only`.
+Команду запускает локальный владелец canonical config и operator state; локальный
+root не нужен, поскольку удалённый proof и закрытие выполняются через pinned SSH к
+bridge от `root`.
 Помощник проверяет полный исходный release, точный сохранённый план и аудированный
 порядок исполнения. Квитанция `preflight_failed_no_mutation` сохраняется вместе с
 исходным журналом и evidence; только затем wrapper архивирует активный журнал.
@@ -656,9 +659,83 @@ fence для этого UUID, затем освобождает reservation. С�
 tracked-дерево должно быть чистым. Главный сервер установки всегда `bridge`:
 на нём работают VPN-вход и управляющий исполнитель. Статические `exit` — отдельные
 узлы выхода трафика. Канонический `install.config` задаёт bridge и статические узлы.
+Обычный локальный запуск выполняется от текущего непривилегированного пользователя-
+оператора, без `sudo`; SSH подключается к узлам и запускает удалённую работу от
+`root`. `--build-only` также доступен этому пользователю и только собирает локальный
+candidate. Все режимы
+wrapper требуют явные абсолютные пути и проверяют, что canonical `install.config`,
+journal и локальные locks принадлежат текущему effective UID; config и journal —
+regular files с одним hard link и режимом `0600`, каталоги состояния — режимом `0700`.
+Wrapper не выводит пути из `HOME`/`SUDO_USER`, не исправляет владельца и не меняет
+владение canonical config между обычными и root-запусками.
+
+Retained emergency использует отдельные root-staged snapshots и запускается локально
+от root; для него не меняют владельца canonical config. Разовая утилита миграции
+предназначена только для точного списка таких приватных emergency inputs. Она
+принимает повторяемый `--path` и точный `--from-uid`, по умолчанию выполняет dry-run;
+рекурсивного обхода или `chown -R` нет. Перед `--apply` перечисли каждый путь.
+Утилита проверяет отсутствие symlink в родительских путях, владельца root или ровно
+указанного UID, отсутствие group/world write и regular file с единственным hard link.
+Она назначает каталогам `0700`, файлам `0600`, не читая и не переписывая содержимое.
+Занятые `manual-deploy.lock`, `deploy.lock` и `*.manual-deploy.lock` мигрировать нельзя.
+Не включай canonical config,
+обычные operator journal или рабочий lock в emergency migration list:
+
+```sh
+sudo python3 scripts/operator-inputs.py --from-uid <previous-uid> \
+  --path /absolute/path/to/root-staged-emergency-input
+```
+
+### Осмотр operator journal
+
+Для диагностики незавершённой операции используй только абсолютные пути к canonical
+config и исходным байтам journal. Обычный `inspect` выполняется от владельца этих
+inputs без `sudo`, удерживает локальный lock, сверяет config binding и собирает
+ограниченные remote observations; её вывод
+`next_action` и `may_abandon` — отчёт, а не разрешение выполнить действие:
+
+```sh
+ultra-install operator-journal-reconcile inspect \
+  --config /absolute/path/to/install.config \
+  --original-journal /absolute/path/to/operation.json
+```
+
+При необходимости inspect может также получить сохранённый workspace и manifest;
+эти параметры задаются парой и требуют локального root-доступа к retained evidence:
+
+```sh
+sudo ultra-install operator-journal-reconcile inspect \
+  --config /absolute/path/to/install.config \
+  --original-journal /absolute/path/to/operation.json \
+  --state-dir /absolute/path/to/retained-state \
+  --manifest /absolute/path/to/release-manifest.json
+```
+
+`--state-dir` и `--manifest` для `inspect` указываются вместе. Только явно
+подтверждённая недиспатчившаяся попытка может перейти в
+`abandon-undispatched`; команда требует точный SHA-256 journal, совпадающий с
+переданными исходными байтами, исходный state/manifest и новый receipt path.
+Отсутствующий receipt сам по себе не доказывает, что dispatch не было: неполный,
+диспатченный или неизвестный stage блокирует действие. Успешный abandon сохраняет
+marker переименованием и публикует отдельный receipt, не переписывая исходный
+journal. Источники: [journal reconcile](../cmd/ultra-install/operator_journal.go),
+[strict undispatched proof](../cmd/ultra-install/retained_abandon.go).
+
+```sh
+sudo ultra-install operator-journal-reconcile abandon-undispatched \
+  --config /absolute/path/to/install.config \
+  --original-journal /absolute/path/to/operation.json \
+  --state-dir /absolute/path/to/retained-state \
+  --manifest /absolute/path/to/release-manifest.json \
+  --receipt /absolute/path/to/abandonment-receipt.json \
+  --confirm-journal-sha256 <sha256-of-the-exact-journal-bytes>
+```
+
 Операторский SSH подключается напрямую к bridge, а bridge-контроллер открывает Ansible
 SSH-соединения к exit. Exit не используется как jump host для входа оператора на
-bridge. На операторской машине wrapper сам выберет `BRIDGE_SSH_KEY` и
+bridge. Подключение оператора к bridge и все remote Ansible connections используют
+пользователя `root`; локальный оператор при этом остаётся непривилегированным.
+На операторской машине wrapper сам выберет `BRIDGE_SSH_KEY` и
 `ULTRA_AUTOMATION_KNOWN_HOSTS_FILE` из `install.config`, если явные переменные
 не заданы. Если wrapper запускается прямо на bridge в локальном controller-режиме,
 задайте `ULTRA_OPERATOR_LOCAL_CONTROLLER=1`. Явные локальные пути к ключу и файлу
@@ -669,7 +746,7 @@ ULTRA_OPERATOR_IDENTITY=/secure/operator/ssh-key \
 ULTRA_OPERATOR_KNOWN_HOSTS=/secure/operator/known_hosts make deploy
 ```
 
-При удалённом upgrade проекция `upgrade-v2` задаёт bridge-контроллеру постоянный
+При новом удалённом upgrade проекция `upgrade-v3` задаёт bridge-контроллеру постоянный
 файл `/etc/ultra-recovery/known_hosts`. После проверенного staging, до doctor и
 upgrade, wrapper по тому же pinned SSH передаёт точные байты доверенного
 операторского known_hosts через stdin. Источник ограничен 1 MiB, принадлежит
@@ -684,9 +761,13 @@ manual-deploy и infrastructure locks и допускает создание т�
 префиксом ожидаемых байтов. Тайм-ауты ограничены 30 секундами на bridge и 45
 секундами у оператора, удалённый вывод не публикуется. Новые ключи с remote не
 принимаются; конфликт pins требует отдельной проверки доверенного источника.
-Исходный операторский путь остаётся в локальном `install.config`; он не должен
-существовать на bridge. Устаревшая проекция
-`upgrade-v1` сохраняет прежние байты для проверки уже замороженных операций.
+Новая проекция удаляет локальные SSH-key и secret-file references из staged
+конфигурации; runtime secrets берутся с установленного bridge только через явный
+`installed-runtime` источник. Исходный операторский путь остаётся в локальном
+`install.config`; он не должен существовать на bridge. `upgrade-v2` сохраняет
+исторические байты для retry уже замороженных операций, включая прежние identity
+references; новые кандидаты используют `upgrade-v3`. Устаревшая `upgrade-v1`
+также сохраняет прежние байты для проверки замороженных операций.
 
 Build candidate выполняется в отдельном checkout и использует принадлежащий этому
 checkout Go cache; операторский `GOCACHE` не наследуется. Release передаётся bridge
@@ -785,7 +866,16 @@ inputs. Failed retry использует frozen копию; явно перед
 Ключ должен быть выделенным файлом с правами 0600, а host keys — проверенными
 заранее. SSH использует `-F /dev/null`, `StrictHostKeyChecking=yes` и только эти
 локальные path refs; пользовательский `~/.ssh/config` не читается. `.env`, SSH
-private key и known_hosts не копируются на сервер.
+private key и known_hosts не копируются на сервер. В свежей remote upgrade config
+`BRIDGE_SSH_KEY`, `MAIN_EXIT_SSH_KEY` и `DATABASE_SSH_KEY` удаляются, локальный
+`DATABASE_DUMP` исключается, локальный release path заменяется путём на bridge, а
+known_hosts path указывает на `/etc/ultra-recovery/known_hosts`. Исходный config
+остаётся операторским и не меняется этими проекциями. Wrapper и installer используют
+общую версионированную SSH policy с профилями `probe` и `mutate`: read-only probes
+повторяют только allowlisted transient transport failures, а неопределённую
+mutating-операцию нельзя автоматически отправить повторно. Источники:
+[SSH policy](../deploy/recovery/ssh_policy.py) и
+[Go SSH policy](../internal/operatorssh).
 
 `ULTRA_OPERATOR_INVENTORY` остаётся необязательным compatibility route для
 продолжения существующего failed adoption artifact из `adopt-*/compare/`. В этом
@@ -837,6 +927,15 @@ controller ограничивает всё Ansible-задание с transport �
 `stage`, `node` и `code`; он не содержит inventory, task result или stdout/stderr.
 Файл создаётся с правами 0600 и помогает найти упавший read-only шаг после удаления
 временного каталога. Он не является receipt или разрешением на повторный mutator.
+Обычные operations имеют отдельный `--execution-timeout`: по умолчанию 1 час для
+`upgrade` и 20 минут для остальных операций. У upgrade флаг относится к самой
+операции обновления; вспомогательные стадии сохраняют свои бюджеты. Значение
+замораживается в запросе; при продолжении без явного флага используется сохранённое
+значение, включая исторический запрос без поля timeout. Явный повтор с другим
+значением не является продолжением того же execution. Этот флаг не
+меняет независимый readiness budget. Timeout сохраняет runtime-limit evidence, а при
+доступном manager result — также systemd-limit evidence; ни один из них сам по себе
+не доказывает quiescence или безопасный повтор mutation.
 После захвата reservation выполняется
 обычный строгий однократный `inspect-upgrade`: ожидание внутри него блокировало бы
 reconcile, которому нужна та же lock. При возобновлении до activation ожидание также пропускается по проверенному
@@ -1314,13 +1413,14 @@ bootstrap сохраняют проверку реального приватн�
 
 Для ручного upgrade операторский wrapper оставляет локальный dump в canonical
 `install.config`, но исключает `DATABASE_DUMP` из удалённой конфигурации операции
-(`upgrade-v1` и `upgrade-v2`): bridge не получает bootstrap-архив и не проверяет путь,
-доступный только на машине оператора. `upgrade-v2` дополнительно подменяет локальный
-`ULTRA_AUTOMATION_KNOWN_HOSTS_FILE` на уже установленный bridge-файл
+(`upgrade-v1`, `upgrade-v2` и `upgrade-v3`): bridge не получает bootstrap-архив и не
+проверяет путь, доступный только на машине оператора. `upgrade-v2` и `upgrade-v3`
+подменяют локальный `ULTRA_AUTOMATION_KNOWN_HOSTS_FILE` на уже установленный bridge-файл
 `/etc/ultra-recovery/known_hosts`; операторский SSH продолжает использовать исходный
-локальный pin-файл. Полная установка через `apply` сохраняет обычную проверку и передачу
-архива. Замороженные журналы с `upgrade-v1` или без проекции продолжают проверяться по
-прежнему staged digest; wrapper не переписывает их при retry.
+локальный pin-файл. Только `upgrade-v3` также исключает локальные SSH и secret-file
+references из staged config. Полная установка через `apply` сохраняет обычную проверку
+и передачу архива. Замороженные журналы с `upgrade-v1`, `upgrade-v2` или без проекции
+продолжают проверяться по прежнему staged digest; wrapper не переписывает их при retry.
 
 Если дамп задан, имеющийся в нём месячный бюджет статического выхода остаётся
 источником истины и расход не обнуляется. Конфигурация может не дублировать

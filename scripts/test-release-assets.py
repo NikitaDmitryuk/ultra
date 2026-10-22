@@ -117,13 +117,17 @@ def validate_bundle(directory, workflow):
                 assert any('-none-any.whl' in name or '-cp' + str(python) + '-' in name or re.search(r'-cp(\d+)-abi3-', name) and int(re.search(r'-cp(\d+)-abi3-', name)[1]) <= python for name in wheels), 'wheel missing for Python ' + str(python) + ': ' + package
     ansible = archive_files(directory / 'ultra-ansible.tar.gz')
     assert {'ansible.cfg', 'requirements.txt', 'controller.py', 'playbooks/bootstrap.yml', 'playbooks/upgrade.yml'} <= ansible.keys(), 'incomplete Ansible sources'
-    expected_ansible = {path.relative_to(ROOT / 'deploy/ansible').as_posix() for path in (ROOT / 'deploy/ansible').rglob('*') if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc' and (path.relative_to(ROOT / 'deploy/ansible').parts[0] in ['playbooks', 'roles', 'library', 'callback_plugins'] or path.name in ['ansible.cfg', 'requirements.txt', 'controller.py'])}
+    expected_ansible = {path.relative_to(ROOT / 'deploy/ansible').as_posix() for path in (ROOT / 'deploy/ansible').rglob('*') if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc' and (path.relative_to(ROOT / 'deploy/ansible').parts[0] in ['playbooks', 'roles', 'library', 'callback_plugins', 'module_utils'] or path.name in ['ansible.cfg', 'requirements.txt', 'controller.py'])}
     assert set(ansible) == expected_ansible, 'incomplete Ansible source inventory'
     for name, raw in ansible.items():
         source = ROOT / 'deploy/ansible' / name
         assert source.is_file() and source.read_bytes() == raw, 'Ansible archive differs from source: ' + name
     recovery = archive_files(directory / 'ultra-recovery.tar.gz')
-    required_recovery = {path.name for path in (ROOT / 'deploy/recovery').iterdir() if path.suffix in ['.py', '.service', '.timer'] and not path.name.startswith(('test_', 'vm_', 'test-'))}
+    recovery_sources = [path for path in (ROOT / 'deploy/recovery').iterdir()
+                        if (path.suffix in ['.py', '.service', '.timer'] or path.name == 'ssh_policy.json')
+                        and not path.name.startswith(('test_', 'vm_', 'test-'))]
+    assert {path.name for path in recovery_sources if path.suffix == '.json'} == {'ssh_policy.json'}, 'unexpected recovery JSON source'
+    required_recovery = {path.name for path in recovery_sources}
     assert set(recovery) == required_recovery, 'incomplete recovery tools'
     for name, raw in recovery.items():
         assert (ROOT / 'deploy/recovery' / name).read_bytes() == raw, 'recovery archive differs from source: ' + name

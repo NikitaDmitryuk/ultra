@@ -31,7 +31,9 @@ var ErrExecutionFenced = errors.New("execution_uncertain_reconciliation_required
 
 // Fixed production namespace, independent of frozen requests and job paths.
 // Package tests replace this resolver with an isolated private fixture.
-var executionFenceDirectory = func(string) string { return "/var/lib/ultra-ansible" }
+var executionFenceDirectory = productionExecutionFenceDirectory
+
+func productionExecutionFenceDirectory(string) string { return "/var/lib/ultra-ansible" }
 
 func executionReadOnly(operation string) bool {
 	switch operation {
@@ -147,7 +149,16 @@ func InspectExecutionFence() (*ExecutionFence, error) {
 	if err != nil {
 		return nil, err
 	}
-	return inspectExecutionFence(root)
+	fence, err := inspectExecutionFence(root)
+	if err == nil && fence != nil {
+		// Retain a late manager timeout observation after dispatcher death. This
+		// is diagnostic only; it never authorizes dispatch or retires the fence.
+		limitErr := observeExecutionRuntimeLimit(*fence)
+		if limitErr != nil && !errors.Is(limitErr, errExecutionRuntimeLimit) {
+			return fence, limitErr
+		}
+	}
+	return fence, err
 }
 
 func executionAdmission(directory string) error {
@@ -327,6 +338,9 @@ func ReconcileExecutionFence(expected ExecutionFence) error {
 	if err != nil || current == nil || *current != expected {
 		return ErrExecutionFenced
 	}
+	if err = observeExecutionRuntimeLimit(expected); err != nil {
+		return err
+	}
 	if err = validateExecutionCompletion(expected); err != nil {
 		return err
 	}
@@ -363,6 +377,9 @@ func validateExecutionTerminal(expected ExecutionFence) error {
 // validateExecutionReceipt checks exact normal outcome evidence only. Callers
 // must independently establish their live or historical frozen input binding.
 func validateExecutionReceipt(expected ExecutionFence) error {
+	if err := savedExecutionRuntimeLimit(expected); err != nil {
+		return err
+	}
 	raw, err := readRetryPrivate(filepath.Join(expected.JobDirectory, "execution-completion.json"))
 	if err != nil {
 		return ErrExecutionFenced

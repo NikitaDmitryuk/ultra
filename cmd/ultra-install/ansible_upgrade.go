@@ -509,7 +509,7 @@ func ansibleUpgrade(
 	bridge["ultra_recovery_files"] = tools
 	baselineToolHashes := map[string]string{}
 	if baselineInput != nil {
-		priorTools, toolErr := extractUpgradeTools(
+		priorTools, toolErr := extractHistoricalUpgradeTools(
 			filepath.Join(filepath.Dir(baselineInput.Descriptor.Manifest), "ultra-recovery.tar.gz"),
 			filepath.Join(directory, "baseline-tools"),
 			nil,
@@ -1359,7 +1359,7 @@ func verifyCommittedUpgradeContinuation(directory string, inventory, variables m
 		jobRaw, jobErr := readBootstrapGenerationInput(filepath.Join(stage, "job.json"))
 		requestRaw, requestErr := readBootstrapGenerationInput(filepath.Join(stage, "request.json"))
 		receiptRaw, receiptErr := readBootstrapGenerationInput(filepath.Join(stage, "receipt.json"))
-		expected, marshalErr := json.Marshal(map[string]any{"inventory": inventory, "variables": expectedVariables})
+		expected, marshalErr := expectedFrozenLocalRequest(requestRaw, inventory, expectedVariables)
 		var job struct {
 			Operation string `json:"operation"`
 			Request   string `json:"request_sha256"`
@@ -1458,11 +1458,6 @@ func runUpgradeInspection(
 		operation != "inspect-upgrade-domains" {
 		return deployansible.Receipt{}, errors.New("upgrade_inspection_operation_required")
 	}
-	request, err := json.Marshal(map[string]any{"inventory": inventory, "variables": variables})
-	if err != nil {
-		return deployansible.Receipt{}, err
-	}
-	hash := fmt.Sprintf("%x", sha256.Sum256(request))
 	for attempt := 1; attempt <= 1000; attempt++ {
 		stage := directory
 		if attempt > 1 {
@@ -1481,12 +1476,15 @@ func runUpgradeInspection(
 		}
 		jobRaw, jobErr := readBootstrapGenerationInput(filepath.Join(stage, "job.json"))
 		requestRaw, requestErr := readBootstrapGenerationInput(filepath.Join(stage, "request.json"))
+		request, expectedErr := deployansible.LocalRequestBytes(ctx, operation, stage, inventory, variables)
+		hash := fmt.Sprintf("%x", sha256.Sum256(request))
 		var job struct {
 			Operation string `json:"operation"`
 			Request   string `json:"request_sha256"`
 			Binary    string `json:"binary_sha256"`
 		}
-		if jobErr != nil || requestErr != nil || json.Unmarshal(jobRaw, &job) != nil || string(requestRaw) != string(request) ||
+		if jobErr != nil || requestErr != nil || expectedErr != nil || json.Unmarshal(jobRaw, &job) != nil ||
+			string(requestRaw) != string(request) ||
 			job.Operation != operation ||
 			job.Request != hash ||
 			receipt.RequestSHA256 != hash ||

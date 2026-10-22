@@ -397,30 +397,49 @@ class EnforcementTests(unittest.TestCase):
 
     def test_prepared_tools_inventory_authenticates_complete_candidate_not_app_manifest(self):
         names=['recovery.py','db_connection.py','reconcile.py','monitor.py','heartbeat.py',
-               'ultra-recovery-backup.service','ultra-recovery-backup.timer']
+               'ultra-recovery-backup.service','ultra-recovery-backup.timer','ssh_policy.json']
+        contents={name:('candidate-'+name).encode() for name in names}
+        contents['ssh_policy.json']=(ROOT/'deploy/recovery/ssh_policy.json').read_bytes()
         archive=io.BytesIO()
         with tarfile.open(fileobj=archive,mode='w:gz') as stream:
             for name in names:
-                raw=('candidate-'+name).encode();info=tarfile.TarInfo(name);info.size=len(raw);stream.addfile(info,io.BytesIO(raw))
+                raw=contents[name];info=tarfile.TarInfo(name);info.size=len(raw);stream.addfile(info,io.BytesIO(raw))
         zipped=archive.getvalue()
         manifest=json.dumps({'assets':[{'name':'ultra-recovery.tar.gz','size':len(zipped),'sha256':guard.digest(zipped)}]}).encode()
         request={'tools_release_directory':'/release','tools_manifest_sha256':guard.digest(manifest)}
         files={'/release/release-manifest.json':manifest,'/release/ultra-recovery.tar.gz':zipped}
         inventory={}
         for name in names:
-            raw=('candidate-'+name).encode();files['/opt/ultra-recovery/'+name]=raw;inventory['/opt/ultra-recovery/'+name]=guard.digest(raw)
-            if not name.endswith('.py'):
+            raw=contents[name];files['/opt/ultra-recovery/'+name]=raw;inventory['/opt/ultra-recovery/'+name]=guard.digest(raw)
+            if name.endswith(('.service','.timer')):
                 files['/etc/systemd/system/'+name]=raw;inventory['/etc/systemd/system/'+name]=guard.digest(raw)
         suspension={'protocol':'ultra-recovery-preparation-suspension-v1','request_sha256':'a'*64,
                     'tools_manifest_sha256':request['tools_manifest_sha256'],'active_inventory':inventory}
         files['/etc/ultra-recovery/preparation-suspension.json']=json.dumps(suspension).encode()
         with patch.object(guard,'regular',side_effect=lambda path,*a,**k:files[str(path)]):
             self.assertEqual(set(guard.prepared_tools_inventory(request,'a'*64)),set(names))
+            self.assertNotIn('/etc/systemd/system/ssh_policy.json',inventory)
+            self.assertIn('/opt/ultra-recovery/ssh_policy.json',inventory)
+            files['/opt/ultra-recovery/ssh_policy.json']=b'changed policy'
+            with self.assertRaises(ValueError):guard.prepared_tools_inventory(request,'a'*64)
+            files['/opt/ultra-recovery/ssh_policy.json']=contents['ssh_policy.json']
             files['/opt/ultra-recovery/reconcile.py']=b'original-app-generation'
             with self.assertRaises(ValueError):guard.prepared_tools_inventory(request,'a'*64)
             files['/opt/ultra-recovery/reconcile.py']=b'candidate-reconcile.py'
             del suspension['active_inventory']['/opt/ultra-recovery/reconcile.py']
             files['/etc/ultra-recovery/preparation-suspension.json']=json.dumps(suspension).encode()
+            with self.assertRaises(ValueError):guard.prepared_tools_inventory(request,'a'*64)
+
+        malicious=io.BytesIO()
+        with tarfile.open(fileobj=malicious,mode='w:gz') as stream:
+            for name in names+['untrusted.json']:
+                raw=('candidate-'+name).encode();info=tarfile.TarInfo(name);info.size=len(raw);stream.addfile(info,io.BytesIO(raw))
+        zipped=malicious.getvalue()
+        manifest=json.dumps({'assets':[{'name':'ultra-recovery.tar.gz','size':len(zipped),'sha256':guard.digest(zipped)}]}).encode()
+        files['/release/release-manifest.json']=manifest
+        files['/release/ultra-recovery.tar.gz']=zipped
+        request['tools_manifest_sha256']=guard.digest(manifest)
+        with patch.object(guard,'regular',side_effect=lambda path,*a,**k:files[str(path)]):
             with self.assertRaises(ValueError):guard.prepared_tools_inventory(request,'a'*64)
 
     def test_prepared_schedule_restoration_requires_exact_bound_checkpoint(self):

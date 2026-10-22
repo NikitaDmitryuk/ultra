@@ -12,6 +12,27 @@ import (
 
 // completeDeploymentFixture supplies the policy required by schema 2 while
 // keeping the plan's role endpoints and runtime settings under test.
+func TestBootstrapInventoryRejectsNonRootBeforeStaging(t *testing.T) {
+	for _, role := range []string{"bridge", "database"} {
+		t.Run(role, func(t *testing.T) {
+			p := installplan.LegacyValuesToPlan(map[string]string{"SSH_USER": "root", "DATABASE_IP": "192.0.2.30"})
+			if role == "bridge" {
+				p.SSH.User = "operator"
+			} else {
+				p.Database.SSHUser = "operator"
+			}
+			dir := filepath.Join(t.TempDir(), "must-not-exist")
+			_, err := bootstrapInventory(p, dir)
+			if err == nil || err.Error() != "operator_root_transport_required" {
+				t.Fatalf("non-root transport accepted: %v", err)
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Fatalf("staging occurred before rejecting remote user: %v", err)
+			}
+		})
+	}
+}
+
 func completeDeploymentFixture(p *installplan.InstallPlan, release, pins string) {
 	p.SchemaVersion = installplan.CurrentSchemaVersion
 	address := p.Bridge.Address
@@ -237,7 +258,7 @@ func TestBootstrapDedicatedDatabaseInventory(t *testing.T) {
 			"BRIDGE_SSH_KEY":    "/keys/vpn",
 			"MAIN_EXIT_SSH_KEY": "/keys/exit",
 			"DATABASE_IP":       "192.0.2.40",
-			"SSH_USER":          "db-admin",
+			"SSH_USER":          "root",
 			"DATABASE_SSH_KEY":  "/keys/db",
 		},
 	)
@@ -252,7 +273,7 @@ func TestBootstrapDedicatedDatabaseInventory(t *testing.T) {
 		t.Fatal("expected one dedicated DB host")
 	}
 	db := dbs["database"].(map[string]any)
-	if db["ansible_host"] != "192.0.2.40" || db["ansible_user"] != "db-admin" || db["ansible_ssh_private_key_file"] != "/keys/db" {
+	if db["ansible_host"] != "192.0.2.40" || db["ansible_user"] != "root" || db["ansible_ssh_private_key_file"] != "/keys/db" {
 		t.Fatal("dedicated database SSH target lost")
 	}
 	if _, ok := dbs["bridge"]; ok {

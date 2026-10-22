@@ -10,6 +10,8 @@ import socket
 import struct
 import subprocess
 import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ssh_policy import ssh_options
 
 
 def endpoint(value):
@@ -95,7 +97,7 @@ def ssh_args(proxy, host, jump=None, forward=None, command=()):
         target(jump)
         transport = [sys.executable, script, 'ssh', '--socks', proxy, '--forward', '%h:%p', jump]
     result = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
-              '-o', 'UpdateHostKeys=no', '-o', 'ConnectTimeout=8',
+              '-o', 'UpdateHostKeys=no', *ssh_options('probe'),
               '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'ProxyJump=none',
               '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2',
               '-o', 'ProxyCommand=' + shlex.join(transport)]

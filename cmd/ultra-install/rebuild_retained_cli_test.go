@@ -155,13 +155,13 @@ func TestRetainedBackupRejectsUnauthenticatedInputs(t *testing.T) {
 	if err := os.WriteFile(p, []byte("not an archive"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyRetainedBackup(p, strings.Repeat("0", 64), "/private/identity"); err == nil {
+	if _, err := verifyRetainedBackupBundle(p, strings.Repeat("0", 64), "/private/identity", strings.Repeat("1", 64), "ultra", time.Minute, time.Now()); err == nil {
 		t.Fatal("accepted changed backup")
 	}
 	if err := os.Chmod(p, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyRetainedBackup(p, strings.Repeat("0", 64), "/private/identity"); err == nil {
+	if _, err := verifyRetainedBackupBundle(p, strings.Repeat("0", 64), "/private/identity", strings.Repeat("1", 64), "ultra", time.Minute, time.Now()); err == nil {
 		t.Fatal("accepted public backup")
 	}
 }

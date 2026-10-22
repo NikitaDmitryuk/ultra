@@ -382,7 +382,10 @@ func runLocal(
 		defer lock.Close() //nolint:errcheck
 	}
 	admission() // The infrastructure lease now tracks this admitted stage.
-	raw, err := json.Marshal(map[string]any{"inventory": inventory, "variables": variables})
+	raw, err := localExecutionRequest(ctx, operation, directory, inventory, variables)
+	if source != "" && err == nil {
+		raw, err = pinnedLocalExecutionRequest(ctx, operation, directory, source, inventory, variables)
+	}
 	if err != nil {
 		return localDispatchFailure("request_unencodable", err)
 	}
@@ -461,6 +464,10 @@ func runLocal(
 		return localDispatchFailure("local_receipt_unavailable", errors.New("local operation receipt unavailable"))
 	}
 	if runErr != nil || receipt.State != "succeeded" {
+		if fence != nil && errors.Is(observeExecutionRuntimeLimit(*fence), errExecutionRuntimeLimit) {
+			receipt.Diagnostic = Diagnostic{Stage: "execute", Node: "local", Code: "execution_runtime_limit"}
+			return receipt, errExecutionRuntimeLimit
+		}
 		if receipt.Diagnostic == (Diagnostic{}) {
 			receipt.Diagnostic = Diagnostic{Stage: "execute", Node: "local", Code: dispatchCode(runErr)}
 		}

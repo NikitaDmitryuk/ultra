@@ -90,6 +90,7 @@ def checked_pins(config, primary):
 
 
 def verify_delivery(config, topology, backup_config, backup):
+    from ansible.module_utils.ultra_ssh_policy import ssh_options
     # Match reconcile.validate_delivery: the bridge retains the artifact, while
     # the encrypted database generation lives on its confirmed receiver.
     primary = next(node for node in topology['node_metadata'] if node['id'] == topology['primary'])
@@ -119,8 +120,7 @@ def verify_delivery(config, topology, backup_config, backup):
     if digest(artifact) != hashes[1]:
         raise ValueError('adoption_generation_invalid')
     command = ['sha256sum', *['/var/lib/ultra-recovery/' + name for name in names]]
-    result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'UpdateHostKeys=no',
-                             '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2',
+    result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'UpdateHostKeys=no', *ssh_options('probe'),
                              '-o', 'IdentitiesOnly=yes', '-i', identity, '-o', 'UserKnownHostsFile=' + pins,
                              host, shlex.join(command)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15)
     expected = [[value.encode('ascii'), ('/var/lib/ultra-recovery/' + name).encode('ascii')]

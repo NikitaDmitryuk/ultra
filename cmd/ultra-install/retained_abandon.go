@@ -178,11 +178,15 @@ func verifyRetainedUndispatchedWorkspace(
 		return in, artifacts, err
 	}
 	var submitted struct {
-		Inventory map[string]any `json:"inventory"`
-		Variables map[string]any `json:"variables"`
+		ExecutionTimeoutSeconds *int64         `json:"execution_timeout_seconds,omitempty"`
+		Inventory               map[string]any `json:"inventory"`
+		Variables               map[string]any `json:"variables"`
 	}
 	if decodeRetainedReconcile(request, &submitted) != nil {
 		return in, artifacts, errors.New("retained_abandon_request_changed")
+	}
+	if !retainedExecutionTimeoutMatches(in.ExecutionTimeoutSeconds, submitted.ExecutionTimeoutSeconds) {
+		return in, artifacts, errors.New("retained_abandon_execution_timeout_changed")
 	}
 	var compact bytes.Buffer
 	if json.Compact(&compact, raw) != nil {
@@ -230,7 +234,7 @@ func openRetainedAbandonLease(
 	p *installplan.InstallPlan,
 	binding string,
 ) (*retainedAbandonLease, error) {
-	args := retainedSSH(p, p.Bridge.SSHHost, p.BridgeSSHIdentity(), false, true)
+	args := retainedSSH(p, p.Bridge.SSHHost, p.BridgeSSHIdentity(), false, true, "mutate")
 	args = append(
 		args,
 		strings.Join(

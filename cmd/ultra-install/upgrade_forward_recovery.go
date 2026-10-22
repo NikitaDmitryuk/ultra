@@ -428,11 +428,11 @@ func verifyForwardFailedBootstrap(stage, archive string, old forwardOldOperation
 		!reflect.DeepEqual(original.Inventory, old.Inventory) {
 		return fail
 	}
-	expected, err := json.Marshal(map[string]any{"inventory": old.Inventory, "variables": variables})
+	request, err := readForwardEvidence(filepath.Join(stage, "request.json"))
 	if err != nil {
 		return fail
 	}
-	request, err := readForwardEvidence(filepath.Join(stage, "request.json"))
+	expected, err := expectedFrozenLocalRequest(request, old.Inventory, variables)
 	if err != nil {
 		return fail
 	}
@@ -446,7 +446,7 @@ func verifyForwardFailedBootstrap(stage, archive string, old forwardOldOperation
 				legacyVariables[key] = value
 			}
 		}
-		legacyExpected, err := json.Marshal(map[string]any{"inventory": old.Inventory, "variables": legacyVariables})
+		legacyExpected, err := expectedFrozenLocalRequest(request, old.Inventory, legacyVariables)
 		if err != nil || !bytes.Equal(request, legacyExpected) {
 			return fail
 		}
@@ -590,11 +590,6 @@ func verifyForwardApplying(root, id string) error {
 
 func verifyForwardBrokerStages(directory, archive string, inventory, variables map[string]any) error {
 	fail := errors.New("upgrade_forward_broker_stage_unverified")
-	expected, err := json.Marshal(map[string]any{"inventory": inventory, "variables": variables})
-	if err != nil {
-		return fail
-	}
-	digest := digestSHA256(expected)
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return fail
@@ -608,9 +603,11 @@ func verifyForwardBrokerStages(directory, archive string, inventory, variables m
 			return fail
 		}
 		request, err := readForwardEvidence(filepath.Join(stage, "request.json"))
-		if err != nil || !bytes.Equal(request, expected) {
+		expected, expectedErr := expectedFrozenLocalRequest(request, inventory, variables)
+		if err != nil || expectedErr != nil || !bytes.Equal(request, expected) {
 			return fail
 		}
+		digest := digestSHA256(expected)
 		for _, name := range []string{"job.json", "receipt.json"} {
 			raw, err := readForwardEvidence(filepath.Join(stage, name))
 			var evidence struct {

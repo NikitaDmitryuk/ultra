@@ -5,5 +5,5 @@ import "embed"
 
 // Scripts contains source only; no generated state, credentials, or recovery bundles.
 //
-//go:embed *.py
+//go:embed *.py ssh_policy.json
 var Scripts embed.FS

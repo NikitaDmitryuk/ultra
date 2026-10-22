@@ -20,6 +20,7 @@
 | Ansible upgrade с DNS/domain/runtime effects | `python3 scripts/test-ansible-dns-migration.py`, `test-ansible-upgrade-domain.py`, `test-ansible-upgrade-runtime.py`, `test-ansible-runtime-effects.py`, `test-ansible-accepted-resume.py`, operation mapping и syntax check закреплённым Ansible runtime |
 | Блокировка продления managed tunnel TLS и приватный checkpoint | `python3 scripts/test-managed-tls-fence.py`; тот же набор включён в `go test ./cmd/ultra-install` и использует только синтетические hosts и локальный тестовый CA |
 | Forward-only lifecycle recovery / broker bootstrap | `go test ./cmd/ultra-install ./internal/deployansible`; `python3 scripts/test-manual-deploy.py`; `python3 scripts/test-forward-broker-guard.py`; operation mapping, release retention и syntax check `bootstrap-forward-broker.yml` |
+| Операторские входы, UID ownership и SSH policy | `python3 scripts/test-manual-deploy.py`; `python3 scripts/test-operator-inputs.py`; `python3 deploy/recovery/test_ssh_policy.py`; проверки используют локальные fixtures и не подключаются к production |
 | Восстановление recovery-инструментов перед readiness | `python3 scripts/test-recovery-tools-bootstrap.py`; Go-тесты `TestRecoveryBootstrap`; operation mapping и syntax check `bootstrap-recovery-inspect.yml`, `bootstrap-recovery-tools.yml`; crash/resume, fallback и завершённый replay |
 | Совместимость controller при retirement floor | `python3 scripts/test-controller-enforcement.py`; `python3 scripts/test-ansible-release-contracts.py`; focused Go tests `TestUpgradeEnforcement`, `TestEnforcementPreflightRetention`, `TestControllerEnforcementProtocol`; syntax check `inspect-upgrade.yml` |
 | SQL, репозитории, миграции | Генерация SQLC при изменении схемы/запросов; `go test ./internal/db` с отдельной тестовой БД |
@@ -47,8 +48,16 @@ Ansible-валидации и SSH-интеграции, Nginx, Mini App/release-
 последовательную матрицу сбоев и повторов с записью immutable bundle и `fsync`.
 Это бюджет тестового исполнителя; тайм-ауты рабочих операций он не меняет.
 
-`make test-operator` объединяет offline-регрессии manual deploy, forward broker,
-operator DB dump и восстановления DNS; этот target обязателен в Ansible CI.
+`make test-operator` объединяет offline-регрессии manual deploy, миграции точно
+перечисленных operator inputs, forward broker, operator DB dump и восстановления
+DNS; этот target обязателен в Ansible CI. `python3 deploy/recovery/test_ssh_policy.py`
+проверяет общую версионированную SSH policy отдельно. Её источник —
+`deploy/recovery/ssh_policy.json`; `make format` генерирует автономный
+`deploy/ansible/module_utils/ultra_ssh_policy.py` из JSON и общего Python-конструктора.
+Ansible доставляет этот модуль вместе с задачей, поэтому первая проверка нового
+узла не зависит от уже установленного `/opt/ultra-recovery`.
+`scripts/test-ansible-ssh-policy.py` проверяет актуальность генерации и реальную
+доставку через локальный Ansible; он входит в `make test-ansible`.
 Проверка PostgreSQL credential repair отдельно выполняется на PostgreSQL 16 в
 SSH integration job; тот же job запускает атомарный import protocol в отдельном
 PostgreSQL 16 контейнере без сети. `test-ui` не повторяет release/controller проверки из
@@ -76,6 +85,10 @@ Go учитывает `GOTMPDIR`: смена только `TMPDIR` не пере
 `format-check` завершится ошибкой, если форматирование изменило checkout. При обновлении
 инструментов меняй версию в Makefile и подтверждай, что локальный запуск и CI используют
 одинаковые команды.
+
+Go-форматтеры обрабатывают отслеживаемые и неигнорируемые Go-файлы, не обходя
+checkout рекурсивно. Так они не заходят в игнорируемую root-owned историю операций
+под `dist/manual`: это защищённое состояние выкладки может быть недоступно build user.
 
 ## PostgreSQL, SQLC и ORM
 
@@ -500,7 +513,12 @@ Go-регрессии в `execution_fence_test.go` проверяют generation
 `TestDeployOperationResubmitAfterStatusCrashPreservesCompletedUpgrade` проверяет
 границу между долговечным завершением upgrade и финальным status. Эти unit-тесты
 не подтверждают работу настоящего systemd или переживание потери SSH; для этого
-нужен отдельный стенд с настоящим service manager.
+используется `scripts/test-execution-systemd.py` в Ansible integration CI. Он запускает
+изолированный Docker-стенд с настоящим systemd и pinned root SSH, без host mounts:
+transient unit timeout, SIGKILL dispatcher с поздним observer, отмена, живой потомок
+и потеря первого SSH-ответа readiness. Проверка отличает runtime-limit evidence от
+доказанной остановки workers: при живом потомке completion не публикуется даже при
+успешном receipt. Синтетические `systemctl`-ответы этих гарантий не подтверждают.
 
 Recovery-снимок переносит только полный проверяемый bundle, исходный release,
 привязанные config/journals и публичные SSH pins; subscription keys и приватные

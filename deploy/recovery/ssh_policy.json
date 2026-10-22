@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "probe_connect_timeout_seconds": 15,
+  "mutate_connect_timeout_seconds": 30,
+  "server_alive_interval_seconds": 5,
+  "server_alive_count_max": 2,
+  "strict_host_key_checking": "yes",
+  "update_host_keys": "no",
+  "readonly_attempts": 3,
+  "readonly_attempt_timeout_seconds": 60,
+  "readonly_total_timeout_seconds": 180,
+  "readonly_backoff_seconds": [1, 3],
+  "max_stdout_bytes": 1048576,
+  "max_stderr_bytes": 4096
+}

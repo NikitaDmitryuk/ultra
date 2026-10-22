@@ -70,30 +70,18 @@ func runRetainedReconcile(args []string, out io.Writer) error {
 			return errors.New("retained_reconcile_absolute_paths_required")
 		}
 	}
+	if err := requireRootOperator(); err != nil {
+		return err
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	ctx, cancelTimeout := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancelTimeout()
-	lock, err := os.OpenFile(
-		filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"),
-		os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW,
-		0600,
-	)
+	lock, err := openOperatorLock(filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"), 0)
 	if err != nil {
-		return errors.New("retained_reconcile_operator_lock_unavailable")
+		return err
 	}
 	defer func() { _ = lock.Close() }()
-	info, err := lock.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
-		return errors.New("retained_reconcile_operator_lock_unsafe")
-	}
-	owner, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || owner.Uid != uint32(os.Geteuid()) || owner.Nlink != 1 {
-		return errors.New("retained_reconcile_operator_lock_unsafe")
-	}
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return errors.New("retained_reconcile_operator_busy")
-	}
 	// An undispatched attempt has no successful execute, so it is proved and
 	// retired on its own path rather than through the reconciliation snapshot.
 	if abandon {
@@ -315,11 +303,15 @@ func loadRetainedReconcileSnapshot(
 		return in, e, err
 	}
 	var submitted struct {
-		Inventory map[string]any `json:"inventory"`
-		Variables map[string]any `json:"variables"`
+		ExecutionTimeoutSeconds *int64         `json:"execution_timeout_seconds,omitempty"`
+		Inventory               map[string]any `json:"inventory"`
+		Variables               map[string]any `json:"variables"`
 	}
 	if decodeRetainedReconcile(request, &submitted) != nil {
 		return in, e, errors.New("retained_reconcile_request_changed")
+	}
+	if !retainedExecutionTimeoutMatches(in.ExecutionTimeoutSeconds, submitted.ExecutionTimeoutSeconds) {
+		return in, e, errors.New("retained_reconcile_execution_timeout_changed")
 	}
 	binding, ok := submitted.Variables["ultra_retained_recovery_binding_sha256"].(string)
 	if !ok || (binding != historicalBinding && binding != normalizedBinding) {
@@ -340,7 +332,11 @@ func loadRetainedReconcileSnapshot(
 	vars["ultra_retained_recovery_binding_sha256"] = e.Binding
 	vars["ultra_bootstrap_exit_host"] = "exit_0"
 	vars["ultra_preserve_runtime"] = false
-	wantRaw, _ := json.Marshal(map[string]any{"inventory": in.Inventory, "variables": vars})
+	wantRequest := map[string]any{"inventory": in.Inventory, "variables": vars}
+	if submitted.ExecutionTimeoutSeconds != nil {
+		wantRequest["execution_timeout_seconds"] = *submitted.ExecutionTimeoutSeconds
+	}
+	wantRaw, _ := json.Marshal(wantRequest)
 	var want, actual any
 	if decodeRetainedReconcile(wantRaw, &want) != nil || decodeRetainedReconcile(request, &actual) != nil ||
 		!reflect.DeepEqual(actual, want) {
@@ -569,7 +565,7 @@ func openRetainedReconcileLease(
 	if err != nil {
 		return nil, err
 	}
-	args := retainedSSH(p, address, key, false, true)
+	args := retainedSSH(p, address, key, false, true, "mutate")
 	args = append(
 		args,
 		strings.Join(

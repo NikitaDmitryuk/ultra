@@ -4,8 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+
 	"encoding/json"
 	"errors"
 	"flag"
@@ -26,6 +25,7 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
+	"github.com/NikitaDmitryuk/ultra/internal/operatorssh"
 )
 
 // A standalone mutation must prove the local containment prerequisites before it
@@ -44,6 +44,8 @@ func runRetainedPrimaryCommand(args []string) error {
 	journal := fs.String("original-journal", "", "retained original journal, read only")
 	directory := fs.String("state-dir", "", "new private recovery workspace")
 	backup := fs.String("backup", "", "fresh age encrypted primary custom dump")
+	backupMaxAge := fs.Duration("backup-max-age", 30*time.Minute, "maximum verified snapshot age")
+	executionTimeout := fs.Duration("execution-timeout", 20*time.Minute, "maximum execution runtime")
 	backupSHA := fs.String("backup-sha256", "", "expected encrypted backup digest")
 	python := fs.String("python", "/usr/bin/python3", "controller Python")
 	executable := fs.String("executable", "", "pinned operator Ansible executable")
@@ -63,6 +65,9 @@ func runRetainedPrimaryCommand(args []string) error {
 	if fs.Parse(args) != nil || fs.NArg() != 0 || (*bridgeOnly == *acceptFleet) || (*bridgeOnly != (*retainedSource != "")) ||
 		(*bridgeOnly != *authorizeFleet) {
 		return errors.New("retained_primary_explicit_operator_scope_required")
+	}
+	if *backupMaxAge <= 0 || *executionTimeout <= 0 || *executionTimeout%time.Second != 0 {
+		return errors.New("retained_primary_duration_invalid")
 	}
 	for _, p := range []string{*config, *manifestPath, *journal, *directory, *backup, *python, *executable} {
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
@@ -93,6 +98,9 @@ func runRetainedPrimaryCommand(args []string) error {
 	p, err := installplan.LoadConfig(*config)
 	if err != nil {
 		return errors.New("retained_primary_config_invalid")
+	}
+	if p.SSH.User != "root" || (p.Database.Enabled && p.Database.SSHUser != "" && p.Database.SSHUser != "root") {
+		return errors.New("operator_root_transport_required")
 	}
 	if p.Automation == nil || p.Automation.Ingress == nil || p.Automation.Ingress.ForwardHost != "" || !p.Database.Enabled ||
 		len(p.Exits) != 1 ||
@@ -127,28 +135,37 @@ func runRetainedPrimaryCommand(args []string) error {
 		versions[n] = strconv.Itoa(n + 1)
 	}
 	migrationVersions := strings.Join(versions, ",")
-	if err = verifyRetainedBackup(*backup, *backupSHA, p.SourceValues["ULTRA_OPERATOR_AGE_IDENTITY_FILE"]); err != nil {
+	if err = retainedRuntimePreflight(*python, *executable); err != nil {
 		return err
 	}
-	if err = os.Mkdir(*directory, 0700); err != nil {
-		return errors.New("retained_primary_new_workspace_required")
-	}
-	// A shared operator lock excludes the normal wrapper in this checkout. Remote
-	// infrastructure/manual locks are held by each live SSH lease below.
-	lock, err := os.OpenFile(
-		filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"),
-		os.O_CREATE|os.O_RDWR,
-		0600,
+	backupMetadata, err := verifyRetainedBackupBundle(
+		*backup,
+		*backupSHA,
+		p.SourceValues["ULTRA_OPERATOR_AGE_IDENTITY_FILE"],
+		retainedSourceSHA256(p.Database.PrimaryHost, p.Database.Name),
+		p.Database.Name,
+		*backupMaxAge,
+		time.Now(),
 	)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = lock.Close() }()
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return errors.New("retained_primary_operator_busy")
+	lock, err := openOperatorLock(filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"), 0)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = lock.Close() }()
+	workspace, err := openRetainedWorkspace(*directory, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = workspace.Close() }()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	ctx, err = deployansible.WithExecutionTimeout(ctx, *executionTimeout)
+	if err != nil {
+		return err
+	}
 	inventory, err := bootstrapInventory(p, *directory)
 	if err != nil {
 		return err
@@ -177,8 +194,11 @@ func runRetainedPrimaryCommand(args []string) error {
 			nil,
 		)
 		arch := strings.TrimSpace(string(raw))
-		if e != nil || (arch != "amd64" && arch != "arm64") {
-			return errors.New("retained_primary_architecture_unverified")
+		if e != nil {
+			return e
+		}
+		if arch != "amd64" && arch != "arm64" {
+			return fmt.Errorf("retained_primary_architecture_unparsable: role=%s response=%q", entry.alias, raw[:min(len(raw), 200)])
 		}
 		inspection[entry.alias] = bootstrapInspection{Architecture: arch}
 	}
@@ -245,6 +265,10 @@ func runRetainedPrimaryCommand(args []string) error {
 		ManifestSHA256:             digestSHA256(manifestRaw),
 		CandidateMigrationVersions: migrationVersions,
 		CandidateMigrationsSHA256:  digestSHA256([]byte(migrationVersions)),
+		BackupSnapshotUTC:          backupMetadata.SnapshotStarted.UTC().Format(time.RFC3339),
+		BackupSHA256:               *backupSHA,
+		BackupMaxAgeSeconds:        backupMaxAge.Seconds(),
+		ExecutionTimeoutSeconds:    int64(*executionTimeout / time.Second),
 		Directory:                  *directory,
 		Python:                     *python,
 		Executable:                 *executable,
@@ -309,19 +333,28 @@ func runRetainedPrimaryCommand(args []string) error {
 	}
 	if *bridgeOnly {
 		if _, e := retainedRemote(ctx, p, p.Bridge.SSHHost, p.BridgeSSHIdentity(), false, retainedBridgeFreshCheck, nil); e != nil {
-			return errors.New("retained_bridge_fresh_machine_required")
+			return fmt.Errorf("retained_bridge_fresh_machine_required: %w", e)
 		}
 	}
 	if *prepareOnly {
+		if err = recordRetainedBackupAdmission(*directory, backupMetadata, *backupMaxAge, time.Now()); err != nil {
+			return err
+		}
 		fmt.Println("retained-primary inputs validated; production unchanged")
 		return nil
+	}
+	if err = revalidateRetainedBackupFreshness(backupMetadata, *backupMaxAge, time.Now()); err != nil {
+		return err
 	}
 	// Check both hosts before either receives mutations. A local terminal receipt
 	// cannot establish that orphaned executors drained after a runner crash.
 	for _, entry := range retainedMutationTargets(p, *bridgeOnly) {
 		if _, e := retainedRemote(ctx, p, entry.address, entry.key, false, retainedFenceAdmissionCheck, nil); e != nil {
-			return errors.New("retained_primary_existing_admission_requires_manual_reconciliation")
+			return fmt.Errorf("retained_primary_existing_admission_requires_manual_reconciliation: %w", e)
 		}
+	}
+	if err = recordRetainedBackupAdmission(*directory, backupMetadata, *backupMaxAge, time.Now()); err != nil {
+		return err
 	}
 	for _, entry := range retainedMutationTargets(p, *bridgeOnly) {
 		release, e := holdRetainedFence(ctx, p, entry.address, entry.key, fenceBinding, *bridgeOnly)
@@ -334,7 +367,7 @@ func runRetainedPrimaryCommand(args []string) error {
 		VerifyFence: func(ctx context.Context, _ retainedPrimaryRebuildInput) error {
 			for _, entry := range retainedMutationTargets(p, *bridgeOnly) {
 				if _, e := retainedRemote(ctx, p, entry.address, entry.key, false, retainedFenceVerify, []string{fenceBinding}); e != nil {
-					return errors.New("retained_primary_fence_unverified")
+					return fmt.Errorf("retained_primary_fence_unverified: %w", e)
 				}
 			}
 			if in.BridgeOnly {
@@ -372,44 +405,36 @@ func quoteRetainedArgs(args []string) []string {
 	}
 	return out
 }
-func retainedSSH(p *installplan.InstallPlan, address, key string, proxy, destination bool) []string {
-	args := []string{
-		"ssh",
-		"-F",
-		"/dev/null",
-		"-T",
-		"-o",
-		"BatchMode=yes",
-		"-o",
-		"IdentitiesOnly=yes",
-		"-o",
-		"StrictHostKeyChecking=yes",
-		"-o",
-		"UpdateHostKeys=no",
-		"-o",
-		"ControlMaster=no",
-		"-o",
-		"ControlPath=none",
-		"-o",
-		"GlobalKnownHostsFile=/dev/null",
-		"-o",
-		"UserKnownHostsFile=" + p.Automation.KnownHostsFile,
-		"-o",
-		"ConnectTimeout=15",
-		"-i",
-		key,
+func retainedSSH(p *installplan.InstallPlan, address, key string, proxy, destination bool, profiles ...string) []string {
+	profile := "probe"
+	if len(profiles) > 0 && profiles[0] == "mutate" {
+		profile = "mutate"
 	}
+	args := []string{
+		"ssh", "-F", "/dev/null", "-T",
+		"-o", "BatchMode=yes",
+		"-o", "IdentitiesOnly=yes",
+		"-o", "ControlMaster=no",
+		"-o", "ControlPath=none",
+		"-o", "GlobalKnownHostsFile=/dev/null",
+	}
+	args = append(args, operatorssh.DefaultPolicy.Options(profile)...)
+	args = append(args, "-o", "UserKnownHostsFile="+p.Automation.KnownHostsFile, "-i", key)
 	if proxy {
-		args = append(args, "-o", "ProxyCommand="+retainedProxyCommand(p))
+		args = append(args, "-o", "ProxyCommand="+retainedProxyCommand(p, profile))
 	}
 	if destination {
-		args = append(args, p.SSH.User+"@"+address)
+		args = append(args, "root@"+address)
 	}
 	return args
 }
-func retainedProxyCommand(p *installplan.InstallPlan) string {
-	jump := retainedSSH(p, p.Bridge.SSHHost, p.BridgeSSHIdentity(), false, false)
-	jump = append(jump, "-W", "%h:%p", p.SSH.User+"@"+p.Bridge.SSHHost)
+func retainedProxyCommand(p *installplan.InstallPlan, profiles ...string) string {
+	profile := "probe"
+	if len(profiles) > 0 && profiles[0] == "mutate" {
+		profile = "mutate"
+	}
+	jump := retainedSSH(p, p.Bridge.SSHHost, p.BridgeSSHIdentity(), false, false, profile)
+	jump = append(jump, "-W", "%h:%p", "root@"+p.Bridge.SSHHost)
 	return strings.Join(quoteRetainedArgs(jump), " ")
 }
 
@@ -421,22 +446,57 @@ func retainedRemote(
 	program string,
 	parameters []string,
 ) ([]byte, error) {
-	callCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	args := retainedSSH(p, address, key, proxy, true)
+	return retainedRemoteOperation(ctx, p, address, key, proxy, program, parameters, false)
+}
+
+func retainedMutation(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	address, key string,
+	proxy bool,
+	program string,
+	parameters []string,
+) ([]byte, error) {
+	return retainedRemoteOperation(ctx, p, address, key, proxy, program, parameters, true)
+}
+
+func retainedRemoteOperation(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	address, key string,
+	proxy bool,
+	program string,
+	parameters []string,
+	mutate bool,
+) ([]byte, error) {
+	profile := "probe"
+	if mutate {
+		profile = "mutate"
+	}
+	args := retainedSSH(p, address, key, proxy, true, profile)
 	remote := append([]string{"python3", "-"}, parameters...)
 	args = append(args, strings.Join(quoteRetainedArgs(remote), " "))
-	cmd := exec.CommandContext(callCtx, args[0], args[1:]...)
-	cmd.Stdin = strings.NewReader(program)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return nil, errors.New("retained_primary_remote_check_failed")
+	role := "exit"
+	if proxy {
+		role = "database"
+	} else if address == p.Bridge.SSHHost {
+		role = "bridge"
 	}
-	if out.Len() > 1<<20 {
-		return nil, errors.New("retained_primary_remote_output_invalid")
+	run := runRetainedReadOnlySSH
+	if mutate {
+		run = runRetainedMutationSSH
 	}
-	return out.Bytes(), nil
+	out, err := run(ctx, role, args, []byte(program), func(line string) { fmt.Fprintln(os.Stderr, line) })
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("retained_primary_remote_cancelled: %w", ctx.Err())
+		}
+		if retainedReadOnlyFailureKind(err) == "transport_exhausted" {
+			return nil, fmt.Errorf("retained_primary_remote_transport_failed: role=%s: %w", role, err)
+		}
+		return nil, fmt.Errorf("retained_primary_remote_check_failed: role=%s: %w", role, err)
+	}
+	return out, nil
 }
 
 func observeRetainedPrimary(
@@ -459,7 +519,10 @@ print(json.dumps(j))
 	}
 	raw, err := retainedRemote(ctx, p, p.Database.PrimaryHost, key, true, program, []string{p.Database.Name})
 	var id retainedPrimaryIdentity
-	if err != nil || json.Unmarshal(raw, &id) != nil {
+	if err != nil {
+		return id, err
+	}
+	if json.Unmarshal(raw, &id) != nil {
 		return id, errors.New("retained_primary_observation_failed")
 	}
 	route, err := observeRetainedRoute(ctx, p)
@@ -491,7 +554,10 @@ print(r.stdout)
 		[]string{p.Database.Name, p.Exits[0].DialAddr, strconv.Itoa(p.Exits[0].Port)},
 	)
 	var rows []exits.BootstrapEntry
-	if err != nil || json.Unmarshal(bytes.TrimSpace(raw), &rows) != nil {
+	if err != nil {
+		return exits.BootstrapEntry{}, err
+	}
+	if json.Unmarshal(bytes.TrimSpace(raw), &rows) != nil {
 		return exits.BootstrapEntry{}, errors.New("retained_primary_exact_existing_route_required")
 	}
 	return validateRetainedRoute(p, rows)
@@ -512,46 +578,6 @@ func validateRetainedRoute(p *installplan.InstallPlan, rows []exits.BootstrapEnt
 	}
 	return route, nil
 }
-func verifyRetainedBackup(path, expected, identity string) error {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || time.Since(info.ModTime()) > 30*time.Minute ||
-		time.Since(info.ModTime()) < 0 ||
-		!rebuildSHA.MatchString(expected) ||
-		!filepath.IsAbs(identity) {
-		return errors.New("retained_primary_fresh_private_backup_required")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	h := sha256.New()
-	_, err = io.Copy(h, file)
-	_ = file.Close()
-	if err != nil || hex.EncodeToString(h.Sum(nil)) != expected {
-		return errors.New("retained_primary_backup_digest_mismatch")
-	}
-	plain, err := os.CreateTemp("", "ultra-retained-backup-")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(plain.Name()) }()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "age", "--decrypt", "--identity", identity, path)
-	cmd.Stdout = plain
-	err = cmd.Run()
-	closeErr := plain.Close()
-	if err != nil || closeErr != nil {
-		return errors.New("retained_primary_backup_authentication_failed")
-	}
-	if err = exec.CommandContext(ctx, "pg_restore", "--file=/dev/null", plain.Name()).Run(); err != nil {
-		return errors.New("retained_primary_backup_archive_invalid")
-	}
-	return nil
-}
-
-// Require a private saved DSN before rendering: normal installation may generate
-// a new password, but retained-primary recovery must never provision that password.
 func retainedExistingDatabaseCredentials(p *installplan.InstallPlan) (string, error) {
 	path := p.Secrets.DatabaseCredentialsFile
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
@@ -645,7 +671,7 @@ print('verified')
 `
 
 func holdRetainedFence(ctx context.Context, p *installplan.InstallPlan, address, key, binding string, freshBridge bool) (func(), error) {
-	args := retainedSSH(p, address, key, false, true)
+	args := retainedSSH(p, address, key, false, true, "mutate")
 	program := retainedFenceProgram(freshBridge)
 	args = append(args, strings.Join(quoteRetainedArgs([]string{"python3", "-u", "-c", program, binding}), " "))
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)

@@ -54,8 +54,7 @@ func ansibleBootstrapAutomationGeneration(
 	selected := []map[string]any{}
 	for _, tool := range tools {
 		name := filepath.Base(tool["destination"].(string))
-		if !strings.HasPrefix(name, "test_") &&
-			(filepath.Ext(name) == ".py" || filepath.Ext(name) == ".service" || filepath.Ext(name) == ".timer") {
+		if !strings.HasPrefix(name, "test_") && isRecoveryToolName(name) {
 			selected = append(selected, tool)
 			members = append(members, name)
 		}

@@ -459,7 +459,7 @@ func TestDedicatedDatabaseUsesTunnelAndExplicitSSHIdentity(t *testing.T) {
 			"BRIDGE_IP":         "192.0.2.1",
 			"MAIN_EXIT_IP":      "192.0.2.2",
 			"DATABASE_IP":       "192.0.2.40",
-			"SSH_USER":          "db-admin",
+			"SSH_USER":          "root",
 			"DATABASE_SSH_KEY":  "/keys/db",
 			"BRIDGE_SSH_KEY":    "/keys/vpn",
 			"REUSE_BRIDGE_SPEC": "false",
@@ -471,7 +471,7 @@ func TestDedicatedDatabaseUsesTunnelAndExplicitSSHIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Database.SSHIdentity != "/keys/db" || p.Database.SSHUser != "db-admin" {
+	if p.Database.SSHIdentity != "/keys/db" || p.Database.SSHUser != "root" {
 		t.Fatal("database SSH access lost")
 	}
 	if !strings.Contains(ds.DBDSN, "@127.0.0.1:25432/") || ds.PostgresConfig == nil {

@@ -22,13 +22,14 @@ import (
 
 // ExitRequest carries a pinned artifact and existing route identity, never generates UUIDs.
 type ExitRequest struct {
-	Port       int         `json:"port,omitempty"`
-	Host       string      `json:"host"`
-	User       string      `json:"user"`
-	Identity   string      `json:"identity"`
-	KnownHosts string      `json:"known_hosts"`
-	BridgeIPv4 string      `json:"bridge_ipv4"`
-	Spec       config.Spec `json:"spec"`
+	ExecutionTimeoutSeconds int64       `json:"execution_timeout_seconds,omitempty"`
+	Port                    int         `json:"port,omitempty"`
+	Host                    string      `json:"host"`
+	User                    string      `json:"user"`
+	Identity                string      `json:"identity"`
+	KnownHosts              string      `json:"known_hosts"`
+	BridgeIPv4              string      `json:"bridge_ipv4"`
+	Spec                    config.Spec `json:"spec"`
 }
 
 type Result struct {
@@ -80,6 +81,9 @@ func Export(directory string) error {
 }
 
 func (r ExitRequest) validatePolicy() error {
+	if r.ExecutionTimeoutSeconds < 0 || r.ExecutionTimeoutSeconds > 9223371976 {
+		return errors.New("invalid_execution_timeout")
+	}
 	if r.Port < 0 || r.Port > 65535 {
 		return errors.New("invalid SSH port")
 	}

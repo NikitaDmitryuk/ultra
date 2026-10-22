@@ -25,7 +25,7 @@ func executionFixture(t *testing.T) (string, string) {
 }
 func prepareExecutionFixture(t *testing.T, directory string) {
 	t.Helper()
-	raw := []byte(`{"inventory":{"all":{}},"variables":{}}`)
+	raw := []byte(`{"execution_timeout_seconds":1200,"inventory":{"all":{}},"variables":{}}`)
 	if err := prepareLocalOperation(directory, "bootstrap", raw, executionHash(raw), func(bundle string) error {
 		if err := os.Mkdir(bundle, 0700); err != nil {
 			return err
@@ -125,7 +125,7 @@ func TestExecutionFenceGoControllerHandoff(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
-	raw := []byte(`{"inventory":{"all":{}},"variables":{}}`)
+	raw := []byte(`{"execution_timeout_seconds":1200,"inventory":{"all":{}},"variables":{}}`)
 	if err = prepareLocalOperation(job, "bootstrap", raw, executionHash(raw), Export); err != nil {
 		t.Fatal(err)
 	}

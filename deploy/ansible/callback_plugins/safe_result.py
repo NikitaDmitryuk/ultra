@@ -224,7 +224,11 @@ class CallbackModule(CallbackBase):
         self.execution_task(result._host, result._task, True, result)
         self._execution_unsafe = True
         # Classify known failures without persisting the possibly sensitive message.
-        text = '' if getattr(result._task, 'no_log', False) else result._result.get('msg', '')
+        # Classify only a visible message; Ansible may already censor no_log.
+        # Read in memory only: neither this text nor its fragments are persisted.
+        text = result._result.get('msg', '')
+        if not isinstance(text, str):
+            text = ''
         code = 'host_unreachable'
         for fragment, candidate in [('Host key verification failed', 'ssh_pin_mismatch'),
                                     ('Permission denied', 'ssh_authentication_failed'),

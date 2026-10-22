@@ -11,6 +11,9 @@ import time
 from unittest.mock import patch
 
 import yaml
+import ansible.module_utils
+
+ansible.module_utils.__path__.append(str(Path(__file__).resolve().parents[1] / 'deploy/ansible/module_utils'))
 
 source = Path(__file__).resolve().parents[1] / 'deploy/ansible/library/ultra_adoption_guard.py'
 spec = importlib.util.spec_from_file_location('adoption', source)

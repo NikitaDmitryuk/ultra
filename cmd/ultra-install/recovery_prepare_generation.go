@@ -54,7 +54,15 @@ func recoveryPreparationGeneration(r recoveryPreparationRequest, in recoveryPrep
 	activeTools := map[string]map[string]any{}
 	baselineTools := map[string]string{}
 	for _, release := range []struct{ source, subdir, destination string }{{r.ToolsReleaseDirectory, "candidate", filepath.Join(snapshot, "recovery")}, {filepath.Dir(r.BaselineManifestPath), "baseline", baselineSnapshot}} {
-		tools, e := extractUpgradeTools(filepath.Join(release.source, "ultra-recovery.tar.gz"), filepath.Join(stage, release.subdir), nil)
+		archive := filepath.Join(release.source, "ultra-recovery.tar.gz")
+		toolDirectory := filepath.Join(stage, release.subdir)
+		var tools []map[string]any
+		var e error
+		if release.subdir == "baseline" {
+			tools, e = extractHistoricalUpgradeTools(archive, toolDirectory, nil)
+		} else {
+			tools, e = extractUpgradeTools(archive, toolDirectory, nil)
+		}
 		if e != nil {
 			return nil, e
 		}
@@ -68,8 +76,7 @@ func recoveryPreparationGeneration(r recoveryPreparationRequest, in recoveryPrep
 			if strings.HasPrefix(name, "test_") {
 				continue
 			}
-			ext := filepath.Ext(name)
-			if ext != ".py" && ext != ".service" && ext != ".timer" {
+			if !isRecoveryToolName(name) {
 				continue
 			}
 			sha, e := sourceSHA(tool["source"].(string))
@@ -94,7 +101,7 @@ func recoveryPreparationGeneration(r recoveryPreparationRequest, in recoveryPrep
 		tool := activeTools[name]
 		destination := filepath.Join("/opt/ultra-recovery", name)
 		mode := "0600"
-		if filepath.Ext(name) != ".py" {
+		if isRecoverySystemdUnit(name) {
 			destination = filepath.Join("/etc/systemd/system", name)
 			mode = "0644"
 		}
@@ -105,7 +112,7 @@ func recoveryPreparationGeneration(r recoveryPreparationRequest, in recoveryPrep
 		}
 		files[len(files)-1]["allowed_sha256"] = allowed
 		activeInventory[destination] = tool["sha256"].(string)
-		if filepath.Ext(name) != ".py" {
+		if isRecoverySystemdUnit(name) {
 			bundleDestination := filepath.Join("/opt/ultra-recovery", name)
 			add(tool["source"].(string), bundleDestination, mode, tool["sha256"].(string))
 			files[len(files)-1]["allowed_sha256"] = allowed
@@ -258,6 +265,23 @@ func recoveryPreparationGeneration(r recoveryPreparationRequest, in recoveryPrep
 	return variables, nil
 }
 
+func isRecoveryToolName(name string) bool {
+	if name == "ssh_policy.json" {
+		return true
+	}
+	switch filepath.Ext(name) {
+	case ".py", ".service", ".timer":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRecoverySystemdUnit(name string) bool {
+	ext := filepath.Ext(name)
+	return ext == ".service" || ext == ".timer"
+}
+
 // The live tools release is independent of the application fallback manifest.
 // Its raw manifest authenticates the archive; the complete derived inventory is
 // checked again on the target before it becomes a reconciliation source.
@@ -280,8 +304,7 @@ func upgradeLiveToolsIdentity(
 		if strings.HasPrefix(name, "test_") {
 			continue
 		}
-		ext := filepath.Ext(name)
-		if ext == ".py" || ext == ".service" || ext == ".timer" {
+		if isRecoveryToolName(name) {
 			members[name] = tool["sha256"].(string)
 		}
 	}

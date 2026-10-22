@@ -55,6 +55,56 @@ class ExecutionFence(unittest.TestCase):
     def run_job(self, directory):
         return C.execute(directory, self.stub, self.bundle, self.logs, self.namespace)
 
+    def test_runtime_limit_is_attempt_bound_and_never_normal_completion(self):
+        directory = self.job('runtime-limit', delay=30)
+        request = C.load_private(directory / 'request.json')
+        request['execution_timeout_seconds'] = 1
+        C.atomic(directory / 'request.json', request)
+        job = C.load_private(directory / 'job.json')
+        job['request_sha256'] = hashlib.sha256((directory / 'request.json').read_bytes()).hexdigest()
+        C.atomic(directory / 'job.json', job)
+        state = self.run_job(directory)
+        self.assertEqual((state['state'], state['code']), ('failed', 'execution_runtime_limit'))
+        generation = state['execution_generation']
+        evidence = directory / ('execution-runtime-limit-' + generation + '.json')
+        value = C.load_private(evidence)
+        self.assertEqual(value['fence'], C.load_private(self.namespace / 'execution-fence.json'))
+        self.assertEqual(value['timeout_seconds'], 1)
+        self.assertFalse((directory / 'execution-completion.json').exists())
+        self.assertFalse((directory / ('execution-drain-' + generation + '.json')).exists())
+        pid = int(self.marker.read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        # Saved timeout evidence is immutable and cannot become retry authority.
+        before = evidence.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'execution_runtime_limit_conflict'):
+            C.exclusive_atomic(evidence, {**value, 'timeout_seconds': 2})
+        self.assertEqual(evidence.read_bytes(), before)
+        with self.assertRaisesRegex(ValueError, 'execution_uncertain'):
+            self.run_job(self.job('next-job'))
+
+    def test_execution_timeout_validation_precedes_dispatch(self):
+        for index, value in enumerate((0, -1, True, 1.5, '1')):
+            directory = self.job('invalid-timeout-' + str(index))
+            request = C.load_private(directory / 'request.json')
+            request['execution_timeout_seconds'] = value
+            C.atomic(directory / 'request.json', request)
+            with self.assertRaisesRegex(ValueError, 'invalid_execution_timeout'):
+                self.run_job(directory)
+        self.assertFalse(self.marker.exists())
+
+    def test_upgrade_timeout_and_readiness_have_separate_budgets(self):
+        for operation, timeout in (('upgrade', 1200), ('bootstrap', 1200), ('wait-upgrade-readiness', 700)):
+            directory = self.job('budget-' + operation, operation=operation)
+            budgets = []
+            def runner(*args, **kwargs):
+                budgets.append(kwargs['timeout'])
+                C.atomic(directory / 'result.json', {'verified': True})
+                return 0
+            with patch.object(C, 'run_playbook', runner):
+                self.run_job(directory)
+            self.assertEqual(budgets, [timeout])
+
     def test_live_cgroup_worker_prevents_cleanup_completion_publication(self):
         library = self.bundle / 'library'
         library.mkdir(mode=0o700)

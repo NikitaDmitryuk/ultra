@@ -626,6 +626,11 @@ def execute(directory, executable, bundle, diagnostics_root=None, execution_root
     job = validate(load_private(directory / 'job.json'))
     raw = load_private(directory / 'request.json', raw=True)
     request = json.loads(raw)
+    # Fresh Go requests carry their policy explicitly. Missing fields retain the
+    # legacy execution budget rather than adopting a new upgrade default.
+    timeout = request.get('execution_timeout_seconds', 1200)
+    if type(timeout) is not int or timeout <= 0 or timeout > 9223371976:
+        raise ValueError('invalid_execution_timeout')
     if hashlib.sha256(raw).hexdigest() != job['request_sha256']:
         raise ValueError('request_changed')
     if job['operation'] in LOCAL_OPERATIONS:
@@ -695,7 +700,7 @@ def execute(directory, executable, bundle, diagnostics_root=None, execution_root
             str(executable), '-i', str(directory / 'inventory.yml'),
             str(Path(bundle) / 'playbooks' / operation_playbook(job['operation'])),
             '--extra-vars', '@' + str(directory / 'variables.yml'),
-        ], bundle, environment, timeout=700 if job['operation'] == 'wait-upgrade-readiness' else 900)
+        ], bundle, environment, timeout=700 if job['operation'] == 'wait-upgrade-readiness' else timeout)
         if exit_code:
             if (directory / 'diagnostic.json').exists():
                 state['diagnostic'] = load_private(directory / 'diagnostic.json')
@@ -730,7 +735,14 @@ def execute(directory, executable, bundle, diagnostics_root=None, execution_root
         state.update(state='running', code='interrupted')
         observation = 'controller_interrupted'
     except subprocess.TimeoutExpired:
-        state.update(state='failed', code='execution_failed')
+        diagnostic = {'stage': 'execute', 'node': 'local', 'code': 'execution_runtime_limit'}
+        state.update(state='failed', code='execution_runtime_limit', diagnostic=diagnostic)
+        # Never claim normal completion or worker quiescence from a deadline.
+        # Preserve an immutable generation-bound timeout fact separately.
+        if fence is not None:
+            exclusive_atomic(directory / ('execution-runtime-limit-' + fence['generation'] + '.json'),
+                             {'schema': 1, 'fence': fence, 'diagnostic': diagnostic,
+                              'source': 'controller', 'timeout_seconds': timeout})
         observation = 'controller_timeout'
     except (OSError, ValueError, subprocess.SubprocessError):
         state.update(state='failed', code='execution_failed')
@@ -742,6 +754,25 @@ def execute(directory, executable, bundle, diagnostics_root=None, execution_root
     if state['state'] == 'succeeded' or normal_failure_proof is not None:
         finish_execution(directory, bundle, execution_root or EXECUTION_ROOT, fence, state['state'], normal_failure_proof)
     return state
+
+
+def exclusive_atomic(path, value):
+    """Publish complete durable bytes without replacing earlier evidence."""
+    temporary = path.with_name('.' + path.name + '-' + uuid.uuid4().hex)
+    try:
+        atomic(temporary, value)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if load_private(path) != value:
+                raise ValueError('execution_runtime_limit_conflict')
+        fd = os.open(path.parent, os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def main():

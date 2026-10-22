@@ -15,11 +15,26 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"time"
+
 	"strings"
 	"syscall"
 
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
+
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
+
+// An omitted flag preserves historical frozen requests; a supplied value applies
+// only to activation and must match any existing immutable activation request.
+func upgradeExecutionContext(ctx context.Context, fs *flag.FlagSet, timeout time.Duration) (context.Context, error) {
+	explicit := false
+	fs.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "execution-timeout" })
+	if !explicit {
+		return ctx, nil
+	}
+	return deployansible.WithOperationExecutionTimeout(ctx, "upgrade", timeout)
+}
 
 func runAutomationCommand(action string, args []string) {
 	fs := flag.NewFlagSet("ultra-install "+action, flag.ExitOnError)
@@ -27,6 +42,7 @@ func runAutomationCommand(action string, args []string) {
 	configPath := fs.String("config", "", "canonical install.config path (exclusive with --plan)")
 	releaseDir := fs.String("release-dir", "", "local signed release directory (overrides GitHub selection)")
 	releaseSelector := fs.String("release", "latest", "GitHub release tag, or latest for the stable release")
+	executionTimeout := fs.Duration("execution-timeout", time.Hour, "maximum execution runtime per frozen operation")
 	retryFailed := fs.Bool("retry-failed", false, "explicitly retry the same failed frozen Ansible job after recovery preflight")
 	probeFile := fs.String("subscription-probe-url-file", "", "private 0600 HTTPS subscription URL file for domain acceptance")
 	jobDirectory := fs.String("job-dir", "", "persistent private Ansible upgrade directory")
@@ -35,6 +51,10 @@ func runAutomationCommand(action string, args []string) {
 	secretsSource := fs.String("secrets-source", "canonical", "canonical or installed-runtime secret inputs (upgrade only)")
 	lifecycle := fs.Bool("lifecycle", false, "explicit existing-deployment context (upgrade/status only)")
 	_ = fs.Parse(args)
+	if *executionTimeout <= 0 || *executionTimeout%time.Second != 0 {
+		exitOnErr("execution timeout", errors.New("execution_timeout_invalid"))
+		return
+	}
 	if fs.NArg() > 0 {
 		exitOnErr("upgrade arguments", errors.New("positional arguments are not supported"))
 		return
@@ -55,6 +75,12 @@ func runAutomationCommand(action string, args []string) {
 	if action == "upgrade" {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
+		ctx, err := upgradeExecutionContext(ctx, fs, *executionTimeout)
+		exitOnErr("execution timeout", err)
+		if err = requireRootOperator(); err != nil {
+			exitOnErr("operator identity", err)
+			return
+		}
 		publicKey := strings.TrimSpace(p.SourceValues["ULTRA_RELEASE_MINISIGN_PUBLIC_KEY"])
 		if publicKey == "" {
 			message := "trusted Minisign public key missing from canonical install.config (ULTRA_RELEASE_MINISIGN_PUBLIC_KEY)"
@@ -140,6 +166,7 @@ func runOperatorUpgradeCommand(args []string) {
 	version := fs.String("version", "", "expected candidate version")
 	manifestSHA := fs.String("manifest-sha256", "", "expected release manifest SHA-256")
 	configSHA := fs.String("config-sha256", "", "expected canonical config SHA-256")
+	executionTimeout := fs.Duration("execution-timeout", time.Hour, "maximum execution runtime per frozen operation")
 	retryFailed := fs.Bool("retry-failed", false, "explicitly retry the same failed frozen Ansible job after recovery preflight")
 	forwardOnly := fs.Bool("forward-only", false, "continue without restoring an unknown previous relay binary")
 	forwardJournalFile := fs.String("forward-journal-file", "", "private archived dispatched-operation journal for forward-only recovery")
@@ -154,6 +181,10 @@ func runOperatorUpgradeCommand(args []string) {
 	secretsSource := fs.String("secrets-source", "canonical", "canonical or installed-runtime secret inputs")
 	_ = fs.Bool("lifecycle", false, "explicit existing-deployment context; operator upgrade is always lifecycle-only")
 	_ = fs.Parse(args)
+	if *executionTimeout <= 0 || *executionTimeout%time.Second != 0 {
+		exitOnErr("execution timeout", errors.New("execution_timeout_invalid"))
+		return
+	}
 	if fs.NArg() > 0 || *configPath == "" || *releaseDir == "" || *version == "" ||
 		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(*sourceCommit) ||
 		!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(*manifestSHA) ||
@@ -169,7 +200,11 @@ func runOperatorUpgradeCommand(args []string) {
 		exitOnErr("operator upgrade prior candidate", errors.New("complete prior candidate identity required"))
 		return
 	}
-	configRaw, err := os.ReadFile(*configPath)
+	if err := requireRootOperator(); err != nil {
+		exitOnErr("operator identity", err)
+		return
+	}
+	configRaw, err := readRebuildInput(*configPath, true)
 	if err != nil || digestSHA256(configRaw) != *configSHA {
 		exitOnErr("operator upgrade config verification", errors.New("canonical config digest mismatch"))
 		return
@@ -197,6 +232,8 @@ func runOperatorUpgradeCommand(args []string) {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	ctx, err = upgradeExecutionContext(ctx, fs, *executionTimeout)
+	exitOnErr("execution timeout", err)
 	if *forwardJournalFile != "" {
 		if !filepath.IsAbs(*forwardJournalFile) {
 			exitOnErr("operator upgrade forward journal", errors.New("forward journal must be an absolute private file"))

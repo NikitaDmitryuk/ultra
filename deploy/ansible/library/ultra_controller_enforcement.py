@@ -548,17 +548,18 @@ def prepared_tools_inventory(request, preparation_sha):
     expected = {}; hashes = {}; seen = set(); total = 0
     with tarfile.open(fileobj=io.BytesIO(archive), mode='r:gz') as stream:
         for member in stream:
-            need(member.isfile() and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)',member.name)
+            need(member.isfile() and (member.name == 'ssh_policy.json' or
+                 re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)',member.name))
                  and member.name not in seen and len(seen)<64 and 0<=member.size<=4*1024*1024)
             seen.add(member.name); total += member.size; need(total<=32*1024*1024)
             data = stream.extractfile(member).read(member.size+1); need(len(data)==member.size)
             if member.name.startswith('test_'): continue
             checksum = digest(data); hashes[member.name] = checksum
             expected['/opt/ultra-recovery/'+member.name] = checksum
-            if not member.name.endswith('.py'):
+            if member.name.endswith(('.service', '.timer')):
                 expected['/etc/systemd/system/'+member.name] = checksum
     need(all(name in hashes for name in ['recovery.py','db_connection.py','reconcile.py','monitor.py','heartbeat.py',
-                                        'ultra-recovery-backup.service','ultra-recovery-backup.timer']))
+                                        'ultra-recovery-backup.service','ultra-recovery-backup.timer','ssh_policy.json']))
     suspension = json.loads(regular('/etc/ultra-recovery/preparation-suspension.json', True, 1048576))
     need(suspension.get('protocol') == 'ultra-recovery-preparation-suspension-v1'
          and suspension.get('request_sha256') == preparation_sha

@@ -206,15 +206,20 @@ class JournalTests(unittest.TestCase):
                 CONTROLLER.execute(self.job, executable, ROOT / 'deploy/ansible', self.spool, self.namespace)
             run.assert_not_called()
 
-    def test_real_runner_timeout_retains_last_task_and_legacy_receipt(self):
+    def test_real_runner_timeout_retains_last_task_and_execution_evidence(self):
         executable = self.fixture()
         original = CONTROLLER.run_playbook
         def short_run(arguments, bundle, environment, timeout):
             return original(arguments, bundle, environment, timeout=.5)
         with patch.object(CONTROLLER, 'run_playbook', side_effect=short_run):
             receipt = CONTROLLER.execute(self.job, executable, ROOT / 'deploy/ansible', self.spool, self.namespace)
-        self.assertEqual((receipt['state'], receipt['code']), ('failed', 'execution_failed'))
-        self.assertNotIn('diagnostic', receipt)
+        self.assertEqual((receipt['state'], receipt['code']), ('failed', 'execution_runtime_limit'))
+        self.assertEqual(receipt['diagnostic'], {'stage': 'execute', 'node': 'local', 'code': 'execution_runtime_limit'})
+        generation = receipt['execution_generation']
+        evidence = self.job / ('execution-runtime-limit-' + generation + '.json')
+        self.assertEqual(json.loads(evidence.read_text())['fence'],
+                         json.loads((self.namespace / 'execution-fence.json').read_text()))
+        self.assertFalse((self.job / 'execution-completion.json').exists())
         self.assertNotIn('task', receipt)
         self.assertEqual(self.checkpoint()['event'], 'controller_timeout')
         self.assertEqual(self.checkpoint()['task']['line'], 23)

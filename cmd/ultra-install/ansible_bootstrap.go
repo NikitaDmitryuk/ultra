@@ -66,9 +66,16 @@ func bootstrapInventoryWithNativeAttestation(
 	directory string,
 	attest func(*installplan.InstallPlan) (string, error),
 ) (map[string]any, error) {
-
+	if (p.SSH.User != "" && p.SSH.User != "root") || (p.Database.Enabled && p.Database.SSHUser != "" && p.Database.SSHUser != "root") {
+		return nil, fmt.Errorf("operator_root_transport_required")
+	}
 	if p.Bridge.RemoteDir != "/etc/ultra-relay" {
 		return nil, fmt.Errorf("ansible bootstrap requires canonical remote directory /etc/ultra-relay")
+	}
+	if p.LifecycleOnly && p.SourceValues["BRIDGE_SSH_KEY"] == installedFleetIdentity {
+		if err := attestInstalledRuntimeTransport(p); err != nil {
+			return nil, err
+		}
 	}
 	if p.BridgeSSHIdentity() == "" {
 		return nil, fmt.Errorf("explicit pinned SSH identity required")
@@ -92,8 +99,8 @@ func bootstrapInventoryWithNativeAttestation(
 		return nil, err
 	}
 	common := map[string]any{
-		"ansible_user":                 p.SSH.User,
-		"ansible_become":               p.SSH.User != "root",
+		"ansible_user":                 "root",
+		"ansible_become":               false,
 		"ansible_become_method":        "sudo",
 		"ansible_become_flags":         "-H -S -n",
 		"ansible_ssh_private_key_file": identity,
@@ -142,7 +149,7 @@ func bootstrapInventoryWithNativeAttestation(
 		}
 		dbUser := p.Database.SSHUser
 		if dbUser == "" {
-			dbUser = p.SSH.User
+			dbUser = "root"
 		}
 		db["database"] = map[string]any{
 			"ansible_host":                 p.Database.PrimaryHost,

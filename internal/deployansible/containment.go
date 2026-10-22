@@ -81,9 +81,14 @@ func runContainedController(ctx context.Context, command *exec.Cmd, fence *Execu
 		return errors.New("execution_containment_unverified")
 	}
 	unit := "ultra-execution-" + fence.Generation + ".service"
-	args := []string{"--unit=" + unit, "--wait", "--pipe", "--collect", "--service-type=exec",
+	timeout, err := preparedExecutionTimeout(fence.JobDirectory)
+	if err != nil {
+		return err
+	}
+	// Keep failed units loaded until their Result has been durably observed.
+	args := []string{"--unit=" + unit, "--wait", "--pipe", "--service-type=exec",
 		"--property=KillMode=control-group", "--property=Delegate=no", "--property=UMask=0077",
-		"--property=TimeoutStopSec=30", "--property=RuntimeMaxSec=1200", "--property=Restart=no"}
+		"--property=TimeoutStopSec=30", "--property=RuntimeMaxSec=" + strconv.FormatInt(int64(timeout/time.Second), 10), "--property=Restart=no"}
 	for _, value := range command.Env {
 		args = append(args, "--setenv="+value)
 	}
@@ -95,6 +100,10 @@ func runContainedController(ctx context.Context, command *exec.Cmd, fence *Execu
 	contained.Cancel = func() error { return stopExecutionUnit(unit) }
 	contained.WaitDelay = 5 * time.Second
 	err = contained.Run()
+	limitErr := observeExecutionRuntimeLimit(*fence)
+	if limitErr != nil {
+		return errors.Join(err, limitErr)
+	}
 	// Exit status (including normal rc2) and cleanup are independent facts.
 	// No proof is published if the stop/drain observation fails.
 	return completeContainedExecution(*fence, unit, err, stopExecutionUnit)
@@ -179,7 +188,7 @@ var observeContainmentUnit = containmentUnitState
 func containmentUnitState(unit string) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	raw, err := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", unit, "--property=LoadState", "--property=ActiveState", "--property=ControlGroup", "--property=KillMode", "--property=Delegate", "--property=User", "--property=MainPID", "--property=InvocationID").
+	raw, err := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", unit, "--property=LoadState", "--property=ActiveState", "--property=ControlGroup", "--property=KillMode", "--property=Delegate", "--property=User", "--property=MainPID", "--property=InvocationID", "--property=Result").
 		Output()
 	if err != nil {
 		return nil, err
