@@ -292,7 +292,7 @@ class EnforcementTests(unittest.TestCase):
                      'installer_sha256':'a'*64,'runtime_sha256':'b'*64,'unit_sha256':guard.digest(b'unit')}
         source = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'; operation = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
         proof = {'source_lifecycle':{'id':source,'phase':'released'}}
-        files = {str(root/'config'):b'original',str(root/'upgrade-config'):b'new',str(root/'manifest'):b'baseline',
+        files = {str(root/'config'):b'original',str(root/'upgrade-config'):b'new',str(root/'manifest'):enc({'assets':[]}),
                  str(root/'known-hosts'):b'pins',str(root/'release/release-manifest.json'):b'tools',
                  str(planned/'operator-plan.json'):b'plan',str(planned/'recovery-upgrade-inventory.json'):b'inventory',
                  str(planned/'controller-enforcement.json'):enc(proof),str(guard.UNIT):b'unit'}
@@ -302,6 +302,7 @@ class EnforcementTests(unittest.TestCase):
         for field,key,name in [('config_path','config_sha256','config'),('upgrade_config_path','upgrade_config_sha256','upgrade-config'),
                                ('baseline_manifest_path','baseline_manifest_sha256','manifest'),('known_hosts_path','known_hosts_sha256','known-hosts')]:
             request[field]=str(root/name);request[key]=guard.digest(files[request[field]])
+        if getattr(self,'reimage',False):request['bridge_reimage']={'acknowledgement':'bridge-reimaged-retained-primary-and-exit-preserved'}
         files[str(state_dir/'request.json')]=enc(request); prep_sha=guard.digest(enc(request))
         envelope={'schema':2,'preparation':request};raw=enc(envelope);envelope_sha=guard.digest(raw)
         files[str(root/'deploy-operations/current.json')]=enc({'schema':1,'request_sha256':envelope_sha})
@@ -310,6 +311,13 @@ class EnforcementTests(unittest.TestCase):
         files[state_path]=enc({'request_sha256':envelope_sha,'state':'running','stage':'upgrade'})
         files[str(root/'recovery-preparation-admission.json')]=enc({'protocol':'ultra-recovery-preparation-admission-v1',
             'phase':'sealed','fence_sha256':'f'*64,'config_sha256':request['config_sha256'],'baseline_manifest_sha256':request['baseline_manifest_sha256']})
+        if getattr(self,'reimage',False):
+            admission=json.loads(files[str(root/'recovery-preparation-admission.json')])
+            admission.update(exit_fence_sha256='e'*64,bridge_genesis='a'*64)
+            files[str(root/'recovery-preparation-admission.json')]=enc(admission)
+            files[str(root/'bridge-reimage-genesis.json')]=enc({'protocol':'ultra-bridge-reimage-genesis-v1','binding_sha256':'a'*64})
+            files[str(state_dir/'origins_sealed.json')]=enc({'protocol':'ultra-recovery-preparation-phase-v1',
+                'phase':'origins_sealed','request_sha256':prep_sha,'verified':True,'evidence':{'admission':admission}})
         files[str(root/'retained-primary-admission.json')]=enc({'protocol':'retained-primary-admission-v1','binding_sha256':'f'*64})
         for name in ['ultra-recovery-reconcile.service','ultra-recovery-reconcile.timer']:
             files[str(guard.UNIT.parent/(name+'.d')/'90-retained-primary.conf')]=guard.recovery_blocked().encode()
@@ -353,6 +361,18 @@ class EnforcementTests(unittest.TestCase):
              patch.object(guard,'sealed_candidate'), \
              patch.object(guard,'prepared_tools_inventory',return_value={'reconcile.py':'verified'}):
             self.assertTrue(guard.prepared_policy(p))
+            with patch.object(guard,'recovery_dropin'):
+                self.assertIsNotNone(guard.recovery_context(p['prepared_policy']['preparation_sha256'],p['operation_id'],
+                    p['candidate'],p['manifest_sha256'],read_only=True))
+            if getattr(self,'reimage',False):
+                for path in [guard.ROOT/'recovery-preparation-admission.json',guard.ROOT/'bridge-reimage-genesis.json',guard.ROOT/'prep/origins_sealed.json']:
+                    saved=files[str(path)];files[str(path)]=b'{}'
+                    with self.subTest(path=str(path)),self.assertRaises((ValueError,KeyError)):
+                        guard.prepared_policy(p)
+                    with patch.object(guard,'recovery_dropin'),self.assertRaises((ValueError,KeyError)):
+                        guard.recovery_context(p['prepared_policy']['preparation_sha256'],p['operation_id'],p['candidate'],p['manifest_sha256'],read_only=True)
+                    files[str(path)]=saved
+
             for key in p['prepared_policy']:
                 broken=copy.deepcopy(p);broken['prepared_policy'][key]='foreign'
                 with self.subTest(field=key),self.assertRaises((ValueError,TypeError,KeyError)):
@@ -370,6 +390,10 @@ class EnforcementTests(unittest.TestCase):
             p['recovery_request_sha256']=p['prepared_policy']['preparation_sha256']
             with self.assertRaises(ValueError):guard.prepared_policy(p)
 
+
+    def test_bridge_reimage_admission_reaches_both_enforcement_paths(self):
+        self.reimage=True
+        self.test_prepared_policy_requires_every_protected_binding_and_exact_supervisor()
 
     def test_prepared_tools_inventory_authenticates_complete_candidate_not_app_manifest(self):
         names=['recovery.py','db_connection.py','reconcile.py','monitor.py','heartbeat.py',

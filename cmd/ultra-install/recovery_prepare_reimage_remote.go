@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os/exec"
 	"strconv"
@@ -107,4 +109,28 @@ original=observe();print('verified',flush=True)
 for command in sys.stdin:
  assert command=='recheck\n' and observe()==original
  print('verified',flush=True)
+`
+
+// A foreign preserved-exit admission cannot be migrated by bridge reimage.
+// Check before sealing the new bridge; the final exit lease checks again.
+func preflightBridgeReimageExitAdmission(ctx context.Context, p *installplan.InstallPlan, a recoveryPreparationAdmission) error {
+	raw, _ := json.Marshal(a)
+	_, err := retainedRemote(ctx, p, p.Exits[0].SSHHost, p.ExitSSHIdentity(p.Exits[0]), false, bridgeReimageExitAdmissionPreflight, []string{base64.StdEncoding.EncodeToString(raw)})
+	if err != nil {
+		return errors.New("bridge_reimage_existing_exit_admission_unsupported")
+	}
+	return nil
+}
+
+const bridgeReimageExitAdmissionPreflight = `import os,sys,json,base64,stat
+from pathlib import Path
+expected=json.loads(base64.b64decode(sys.argv[1],validate=True))
+path=Path('/var/lib/ultra-ansible/recovery-preparation-admission.json')
+for parent in path.parents:
+ s=parent.lstat();assert stat.S_ISDIR(s.st_mode) and s.st_uid==0 and not s.st_mode&0o022
+if os.path.lexists(path):
+ s=path.lstat();assert stat.S_ISREG(s.st_mode) and s.st_nlink==1 and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o600
+ actual=json.loads(path.read_text());phase=actual.pop('phase',None);expected.pop('phase',None)
+ assert phase in ('sealed','sealing') and actual==expected
+print('verified')
 `

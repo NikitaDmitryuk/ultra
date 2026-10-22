@@ -3459,7 +3459,7 @@ def rollout_prepared_recovery(repo, root, bundle, commit, version, config, sourc
             return rollout_prepared_recovery(repo, root, bundle, commit, version, config, source_spec, False, bridge_reimage_fleet, bridge_reimage_retirement)
         return resume_supervised_deployment(repo, root, bundle, config, old, commit, version, retry_failed)
     require(not retry_failed, 'preparation_retry_requires_submitted_operation')
-    validate_dispatched_manual_operation(old)
+    validate_dispatched_manual_operation(dict(old, stage='upgrade') if reimage and old.get('stage') == 'status' else old)
     require(old.get('adopt') is False and old.get('forward_only') is False and
             sources['legacy_journal'] == str(journal) and private_file(Path(sources['legacy_journal'])) == old_raw,
             'preparation_legacy_journal_changed')

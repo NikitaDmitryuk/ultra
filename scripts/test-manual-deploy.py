@@ -4886,6 +4886,16 @@ class PreparedRecovery(unittest.TestCase):
         self.assertFalse((self.root/'operation.json').exists())
         self.assertEqual((archive/'legacy-journal.json').read_bytes(),self.old_raw)
 
+    def test_bridge_reimage_status_predecessor_preserves_original_bytes(self):
+        self.prepare_reimage()
+        self.old['stage']='status';self.old_raw=json.dumps(self.old).encode()
+        D.atomic_write(self.root/'operation.json',self.old_raw)
+        source=json.loads(self.spec.read_bytes());D.atomic_write(Path(source['original_journal']),self.old_raw)
+        self.invoke(reimage=True,export=self.reimage_export)
+        archive=self.root/('recovery-source-'+D.sha(self.old_raw))
+        self.assertEqual((archive/'legacy-journal.json').read_bytes(),self.old_raw)
+        self.assertEqual(json.loads((archive/'legacy-journal.json').read_bytes())['stage'],'status')
+
     def test_bridge_reimage_pre_dispatch_crash_keeps_current_canonical_and_old_journal(self):
         self.prepare_reimage()
         def lost(*a,**k):raise D.DeployError('pre-dispatch failure')

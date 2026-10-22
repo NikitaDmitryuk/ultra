@@ -129,6 +129,30 @@ def identity(directory, unit_raw):
             'tree_sha256': tree_digest(root), 'unit': unit_raw.decode()}
 
 
+def recovery_admission(request, request_sha):
+    expected = {'protocol':'ultra-recovery-preparation-admission-v1', 'phase':'sealed',
+                'fence_sha256':request['retained_fence_sha256'],
+                'baseline_manifest_sha256':request['baseline_manifest_sha256'],
+                'config_sha256':request['config_sha256']}
+    if request.get('bridge_reimage') is not None:
+        # The Go origin sealer already authenticated the successful new restore
+        # and preserved exit. Consume its request-bound terminal proof rather
+        # than guessing that both hosts have the new bridge's fence.
+        terminal = json.loads(regular(Path(request['state_directory']) / 'origins_sealed.json', True, 1048576))
+        need(terminal.get('protocol') == 'ultra-recovery-preparation-phase-v1'
+             and terminal.get('request_sha256') == request_sha and terminal.get('phase') == 'origins_sealed'
+             and terminal.get('verified') is True)
+        admission = terminal.get('evidence', {}).get('admission', {})
+        need(isinstance(admission, dict) and set(admission) == set(expected) | {'exit_fence_sha256','bridge_genesis'}
+             and all(admission.get(key) == value for key,value in expected.items())
+             and SHA.fullmatch(admission.get('exit_fence_sha256', ''))
+             and SHA.fullmatch(admission.get('bridge_genesis', '')))
+        need(json.loads(regular(ROOT / 'bridge-reimage-genesis.json', True, 4096)) ==
+             {'protocol':'ultra-bridge-reimage-genesis-v1','binding_sha256':admission['bridge_genesis']})
+        expected = admission
+    return expected
+
+
 def recovery_context(request_sha, operation, candidate, manifest, read_only=False):
     if not request_sha:
         return None
@@ -150,10 +174,7 @@ def recovery_context(request_sha, operation, candidate, manifest, read_only=Fals
     need(digest(raw) == request_sha and json.loads(raw) == request
          and request['protocol'] == 'ultra-recovery-preparation-request-v1'
          and request['tools_manifest_sha256'] == manifest)
-    admission = {'protocol':'ultra-recovery-preparation-admission-v1',
-                 'fence_sha256':request['retained_fence_sha256'],
-                 'baseline_manifest_sha256':request['baseline_manifest_sha256'],
-                 'config_sha256':request['config_sha256'],'phase':'sealed'}
+    admission = recovery_admission(request, request_sha)
     need(json.loads(regular(ROOT / 'recovery-preparation-admission.json', True, 4096)) == admission
          and json.loads(regular(ROOT / 'retained-primary-admission.json', True, 4096)) ==
          {'protocol':'retained-primary-admission-v1','binding_sha256':admission['fence_sha256']}
@@ -606,9 +627,7 @@ def prepared_policy(p):
     need(digest(regular(Path(request['tools_release_directory']) / 'release-manifest.json')) == request['tools_manifest_sha256'])
     need(request['tools_manifest_sha256'] == p['manifest_sha256'] == policy.get('manifest_sha256')
          and request['baseline_manifest_sha256'] == policy.get('baseline_manifest_sha256'))
-    admission = {'protocol':'ultra-recovery-preparation-admission-v1','phase':'sealed',
-                 'fence_sha256':request['retained_fence_sha256'],'config_sha256':request['config_sha256'],
-                 'baseline_manifest_sha256':request['baseline_manifest_sha256']}
+    admission = recovery_admission(request, policy['preparation_sha256'])
     need(json.loads(regular(ROOT / 'recovery-preparation-admission.json', True, 4096)) == admission
          and json.loads(regular(ROOT / 'retained-primary-admission.json', True, 4096)) ==
          {'protocol':'retained-primary-admission-v1','binding_sha256':request['retained_fence_sha256']}

@@ -209,7 +209,8 @@ func validateBridgeReimageRetirement(proof *recoveryBridgeReimage) error {
 		EventRows     int    `json:"event_rows"`
 	}
 	fail := errors.New("bridge_reimage_retirement_receipt_unverified")
-	if count != 1 || decodeRetainedReconcile(proof.Retirement, &receipt) != nil || receipt.Protocol != "ultra-provider-absence-retirement-v1" ||
+	if count != 1 || decodeRetainedReconcile(proof.Retirement, &receipt) != nil ||
+		receipt.Protocol != "ultra-provider-absence-retirement-v1" ||
 		!runtimeHostValidDigest(receipt.Binding) ||
 		!runtimeHostValidDigest(receipt.Deletion) ||
 		receipt.ExitRows != 1 ||

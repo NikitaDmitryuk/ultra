@@ -65,8 +65,10 @@ func validateRecoveryBridgeReimage(proof *recoveryBridgeReimage, journal []byte,
 		in.JournalSHA256 != digestSHA256(journal) {
 		return fail
 	}
-	if _, _, err := validateBridgeReimageFleet(proof.Fleet, in); err != nil {
+	if live, _, err := validateBridgeReimageFleet(proof.Fleet, in); err != nil {
 		return err
+	} else if len(live) != 0 {
+		return errors.New("bridge_reimage_live_dynamic_targets_unsupported")
 	}
 	if err := validateBridgeReimageRetirement(proof); err != nil {
 		return err

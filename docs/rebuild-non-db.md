@@ -58,6 +58,9 @@ operator journal, recovery automation, standby и независимые recover
 проверенный successful bridge-only execute и неизменённая primary/постоянный exit.
 Exporter повторно вычисляет старый descriptor и сверяет его с dispatched journal.
 Неполный архив, другой прежний static scope или чужой admission оставляют gate закрытым.
+Для exit поддерживается отсутствие прежнего recovery-preparation admission либо
+повтор точного текущего binding; миграция чужого admission не выполняется.
+Read-only preflight проверяет это до изменения нового bridge origin.
 
 Перед новым execute обнови **канонический** `install.config`: версия должна
 соответствовать проверенному полному candidate release, путь release должен быть
@@ -71,8 +74,10 @@ reconciliation. Для дальнейшего source descriptor использу
 `cloud_operations`, включая disabled/deleted/cancelled. Поля фиксированы в
 `bridgeReimageFleetRow`; `retirement_binding` — значение
 `body#>>'{provider_absence_retirement,binding_sha256}'` или пустая строка.
-Каждый live dynamic exit требует provider identity и pinned SSH census под lock;
-каждый deleted instance — свежий GET 404 и отсутствие во всех страницах provider
+Live dynamic exits в этом узком режиме не поддерживаются: новый fleet key
+авторизован только на постоянном exit. До supersession все dynamic targets
+должны иметь проверенный terminal outcome; отсутствие старого SSH ключа не
+разрешает пропустить узел. Каждый deleted instance — свежий GET 404 и отсутствие во всех страницах provider
 inventory. Незарегистрированный live instance блокирует переход. Режим ограничен
 одним текущим Vultr account и одним постоянным exit; неизвестная история или
 другой provider не получает автоматического разрешения.

@@ -229,6 +229,11 @@ func sealRecoveryPreparationOriginsLocked(ctx context.Context, r recoveryPrepara
 	if err != nil {
 		return err
 	}
+	if r.BridgeReimage != nil {
+		if err = preflightBridgeReimageExitAdmission(ctx, p, in.admission); err != nil {
+			return err
+		}
+	}
 	local, err := openLocalRecoveryPreparationAdmission(ctx, in.admission, in.installers, true)
 	if err != nil {
 		return err

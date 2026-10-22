@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"math/big"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -14,6 +16,9 @@ import (
 
 func bridgeReimageProofFixture(t *testing.T) (*recoveryBridgeReimage, []byte, retainedPrimaryRebuildInput) {
 	in, fleet := bridgeReimageFleetFixture(t)
+	fleet[1].Enabled = false
+	fleet[2].State = "deleted"
+	fleet[2].OccupiesSlot = false
 	number, _ := new(big.Int).SetString(bridgePreflightCommit, 16)
 	version := "v0.0." + number.String()
 	legacy, _ := json.Marshal(
@@ -73,7 +78,7 @@ func bridgeReimageProofFixture(t *testing.T) (*recoveryBridgeReimage, []byte, re
 	return proof, raw, in
 }
 func TestBridgeReimageProofRejectsMixedAuthority(t *testing.T) {
-	for _, scenario := range []string{"valid", "no-ack", "old-config", "source", "legacy", "descriptor", "journal", "wrong-fence", "two-host-mode", "missing-exit", "partial-fleet"} {
+	for _, scenario := range []string{"valid", "no-ack", "old-config", "source", "legacy", "descriptor", "journal", "wrong-fence", "two-host-mode", "missing-exit", "partial-fleet", "live-dynamic"} {
 		t.Run(scenario, func(t *testing.T) {
 			proof, journal, in := bridgeReimageProofFixture(t)
 			switch scenario {
@@ -95,6 +100,10 @@ func TestBridgeReimageProofRejectsMixedAuthority(t *testing.T) {
 				in.BridgeOnly = false
 			case "missing-exit":
 				in.RetainedExit = nil
+			case "live-dynamic":
+				proof.Fleet[1].Enabled = true
+				proof.Fleet[2].State = "ready"
+				proof.Fleet[2].OccupiesSlot = true
 			case "partial-fleet":
 				proof.Fleet = proof.Fleet[1:]
 			}
@@ -206,6 +215,52 @@ func TestBridgeReimageRetirementCannotRewriteHistoricalScope(t *testing.T) {
 			err := validateBridgeReimageRetirement(&recoveryBridgeReimage{Fleet: fleet, Retirement: raw})
 			if (err == nil) != (scenario == "valid") {
 				t.Fatalf("retirement: %v", err)
+			}
+		})
+	}
+}
+
+func TestBridgeReimageExitAdmissionPreflightRejectsForeignWithoutWriting(t *testing.T) {
+	for _, scenario := range []string{"absent", "same", "foreign", "symlink"} {
+		t.Run(scenario, func(t *testing.T) {
+			directory := t.TempDir()
+			path := filepath.Join(directory, "admission.json")
+			admission := recoveryPreparationAdmission{Protocol: "ultra-recovery-preparation-admission-v1", Phase: "sealed", FenceSHA256: strings.Repeat("a", 64), BaselineManifestSHA256: strings.Repeat("b", 64), ConfigSHA256: strings.Repeat("c", 64), ExitFenceSHA256: strings.Repeat("d", 64), BridgeGenesis: strings.Repeat("e", 64)}
+			raw, _ := json.Marshal(admission)
+			if scenario != "absent" {
+				saved := raw
+				if scenario == "foreign" {
+					saved = []byte(`{"phase":"sealed","protocol":"foreign"}`)
+				}
+				if err := os.WriteFile(path, saved, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "symlink" {
+				if err := os.Rename(path, path+".target"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(path+".target", path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, _ := os.ReadFile(path)
+			program := strings.ReplaceAll(bridgeReimageExitAdmissionPreflight, "Path('/var/lib/ultra-ansible/recovery-preparation-admission.json')", "Path("+fmtPython(path)+")")
+			program = strings.ReplaceAll(program, "for parent in path.parents:", "for parent in [path.parent]:")
+			program = strings.ReplaceAll(program, "s.st_uid==0", "s.st_uid==os.geteuid()")
+			command := exec.Command("python3", "-c", program, base64.StdEncoding.EncodeToString(raw))
+			err := command.Run()
+			if (err == nil) != (scenario == "absent" || scenario == "same") {
+				t.Fatalf("preflight %s: %v", scenario, err)
+			}
+			after, _ := os.ReadFile(path)
+			if string(before) != string(after) {
+				t.Fatal("preflight wrote admission")
+			}
+			if scenario == "absent" {
+				if _, e := os.Lstat(path); !os.IsNotExist(e) {
+					t.Fatal("preflight created admission")
+				}
 			}
 		})
 	}
