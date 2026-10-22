@@ -143,6 +143,40 @@ func TestRecoveryInputsArchiveFailureNeverPublishesDestination(t *testing.T) {
 		})
 	}
 }
+
+func TestRecoveryInputsArchiveParserReportsFailureStage(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "preparation")
+	if err := importRecoveryInputs(bytes.NewReader([]byte("not gzip")), root, strings.Repeat("a", 64)); err == nil ||
+		err.Error() != "recovery_inputs_gzip_header_invalid" {
+		t.Fatalf("gzip header error = %v", err)
+	}
+
+	snapshot := recoveryInputFixture(root)
+	var raw bytes.Buffer
+	compressed := gzip.NewWriter(&raw)
+	archive := tar.NewWriter(compressed)
+	descriptor, _ := json.Marshal(snapshot)
+	if err := archive.WriteHeader(&tar.Header{Name: "descriptor.json", Mode: 0600, Size: int64(len(descriptor))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archive.Write(descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compressed.Write([]byte("unexpected trailing data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := importRecoveryInputs(bytes.NewReader(raw.Bytes()), root, digestSHA256(descriptor)); err == nil ||
+		err.Error() != "recovery_inputs_archive_trailer_invalid" {
+		t.Fatalf("archive trailer error = %v", err)
+	}
+}
+
 func TestRecoveryInputsExistingReplayRequiresIdenticalTree(t *testing.T) {
 	root, pending := t.TempDir(), t.TempDir()
 	for _, p := range []string{root, pending} {
@@ -292,7 +326,7 @@ func TestRecoveryInputsCorruptTrailerCannotPublish(t *testing.T) {
 	raw, digest := recoveryInputArchive(t, recoveryInputFixture(root), nil, nil)
 	raw[len(raw)-8] ^= 1
 	err := importRecoveryInputs(bytes.NewReader(raw), root, digest)
-	if err == nil || err.Error() != "recovery_inputs_archive_invalid" {
+	if err == nil || err.Error() != "recovery_inputs_archive_trailer_invalid" {
 		t.Fatalf("corrupt gzip trailer accepted: %v", err)
 	}
 	if _, err = os.Lstat(root); !os.IsNotExist(err) {

@@ -2468,8 +2468,8 @@ def remote_command(transport, commit, version, manifest_sha, config_sha, attempt
 STAGING_STDOUT_LIMIT = 16384
 STAGING_STDERR_LIMIT = 4096
 PREPARATION_IMPORT_FAILURE_CODES = frozenset({
+    'recovery_inputs_archive_trailer_invalid',
     'recovery_inputs_archive_incomplete',
-    'recovery_inputs_archive_invalid',
     'recovery_inputs_archive_inventory_changed',
     'recovery_inputs_descriptor_changed',
     'recovery_inputs_descriptor_invalid',
@@ -2478,6 +2478,7 @@ PREPARATION_IMPORT_FAILURE_CODES = frozenset({
     'recovery_inputs_existing_unsafe',
     'recovery_inputs_file_changed',
     'recovery_inputs_file_invalid',
+    'recovery_inputs_gzip_header_invalid',
     'recovery_inputs_import_arguments_invalid',
     'recovery_inputs_incomplete',
     'recovery_inputs_kind_invalid',
@@ -2487,6 +2488,7 @@ PREPARATION_IMPORT_FAILURE_CODES = frozenset({
     'recovery_inputs_path_invalid',
     'recovery_inputs_pins_changed',
     'recovery_inputs_size_limit',
+    'recovery_inputs_tar_read_invalid',
 })
 
 

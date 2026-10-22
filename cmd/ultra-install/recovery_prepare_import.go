@@ -125,7 +125,7 @@ func readRecoveryInputSnapshot(stream io.Reader, root, descriptorSHA string) (re
 	var snapshot recoveryInputSnapshot
 	gzipReader, err := gzip.NewReader(stream)
 	if err != nil {
-		return snapshot, nil, nil, errors.New("recovery_inputs_archive_invalid")
+		return snapshot, nil, nil, errors.New("recovery_inputs_gzip_header_invalid")
 	}
 	archive := tar.NewReader(gzipReader)
 	header, err := archive.Next()
@@ -179,7 +179,7 @@ func importRecoveryInputs(stream io.Reader, root, descriptorSHA string) error {
 			break
 		}
 		if nextErr != nil {
-			return errors.New("recovery_inputs_archive_invalid")
+			return errors.New("recovery_inputs_tar_read_invalid")
 		}
 		if !filepath.IsLocal(header.Name) {
 			return errors.New("recovery_inputs_archive_inventory_changed")
@@ -216,7 +216,7 @@ func importRecoveryInputs(stream io.Reader, root, descriptorSHA string) error {
 	// truncated/corrupt transport or concatenated payload is not a snapshot.
 	tail, tailErr := io.ReadAll(io.LimitReader(closer, 10241))
 	if tailErr != nil || len(tail) > 10240 || len(bytes.Trim(tail, "\x00")) != 0 {
-		return errors.New("recovery_inputs_archive_invalid")
+		return errors.New("recovery_inputs_archive_trailer_invalid")
 	}
 	for _, name := range names {
 		entry := snapshot.Entries[name]
