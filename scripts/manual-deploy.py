@@ -3421,6 +3421,7 @@ def export_preparation_stream(installer, spec, pins, remote_root, manifest_sha, 
             request.get('legacy_journal_sha256') == sha(private_file(Path(json.loads(private_file(spec))['legacy_journal']))) and
             request.get('known_hosts_sha256') == sha(private_file(pins)), 'preparation_descriptor_binding_changed')
     stream.seek(0)
+    stream.flush()
     return sha(descriptor)
 
 

@@ -4910,9 +4910,13 @@ class PreparedRecovery(unittest.TestCase):
             binary.chmod(0o700)
             return binary
         with tempfile.TemporaryFile(dir=self.root) as stream:
+            expected=subprocess.run([str(export_fixture())],stdout=subprocess.PIPE,check=True).stdout
             digest=D.export_preparation_stream(export_fixture(),spec,self.pins,remote,'a'*64,self.root,self.repo,stream)
             self.assertEqual(digest,D.sha(json.dumps(descriptor).encode()))
             self.assertEqual(stream.tell(),0)
+            self.assertEqual(os.lseek(stream.fileno(),0,os.SEEK_CUR),0)
+            received=subprocess.run(['cat'],stdin=stream,stdout=subprocess.PIPE,check=True).stdout
+            self.assertEqual(received,expected)
         for name,extra in [('wrong.json',0),('descriptor.json',1)]:
             with self.subTest(name=name,extra=extra),tempfile.TemporaryFile(dir=self.root) as stream,self.assertRaises(D.DeployError):
                 D.export_preparation_stream(export_fixture(name,extra),spec,self.pins,remote,'a'*64,self.root,self.repo,stream)
