@@ -44,7 +44,7 @@ def census():
   try:args=(proc/'cmdline').read_bytes().split(b'\0')
   except (FileNotFoundError,ProcessLookupError):continue
   names=[os.path.basename(x.decode(errors='replace')) for x in args]
-  assert not any(x in ['ultra-install','ansible-playbook','controller.py','reconcile.py','ansible-controller','ansible-run','ansible-exit','rebuild-retained-primary','operator-upgrade','ansible-retry-bootstrap','ansible-bootstrap-components','retained-primary-reconcile','apply-remote'] for x in names)
+  assert not any(x in ['ultra-install','ansible-playbook','controller.py','reconcile.py','ansible-controller','ansible-run','ansible-exit','rebuild-retained-primary','operator-upgrade','deploy-operation','bridge-preflight-proof','recovery-prepare','ansible-retry-bootstrap','ansible-bootstrap-components','retained-primary-reconcile','apply-remote'] for x in names)
 def fences():
  marker=trusted(state/'retained-primary-admission.json',private=True)
  assert json.loads(marker.read_text())=={'protocol':'retained-primary-admission-v1','binding_sha256':binding}

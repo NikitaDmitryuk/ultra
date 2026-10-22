@@ -36,7 +36,7 @@ result=job/'result.json'
 result.write_text('{"verified":true}')
 result.chmod(0o600)
 `
-	if err = os.WriteFile(executable, []byte(source), 0700); err != nil {
+	if err = os.WriteFile(executable, withNormalAnsibleFailure(source), 0700); err != nil {
 		t.Fatal(err)
 	}
 	p := &installplan.InstallPlan{Automation: &installplan.AutomationConfig{Ingress: &installplan.AutomationIngress{Domain: "example.com"}}}
@@ -94,7 +94,7 @@ result=job/'result.json'
 result.write_text('{"verified":true}')
 result.chmod(0o600)
 `
-			if err := os.WriteFile(executable, []byte(source), 0700); err != nil {
+			if err := os.WriteFile(executable, withNormalAnsibleFailure(source), 0700); err != nil {
 				t.Fatal(err)
 			}
 			p := &installplan.InstallPlan{Automation: &installplan.AutomationConfig{

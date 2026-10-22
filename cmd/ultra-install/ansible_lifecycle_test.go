@@ -84,7 +84,7 @@ result=pathlib.Path(variables['ultra_result_file']);result.write_text(json.dumps
 				restoreFailure = "sys.exit(1)"
 			}
 			source = strings.Replace(source, "FAIL_RESTORE", restoreFailure, 1)
-			if err = os.WriteFile(stub, []byte(source), 0700); err != nil {
+			if err = os.WriteFile(stub, withNormalAnsibleFailure(source), 0700); err != nil {
 				t.Fatal(err)
 			}
 			ctx, release, err := deployansible.WithOperationLock(context.Background(), root)

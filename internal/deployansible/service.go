@@ -14,7 +14,9 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -37,6 +39,19 @@ type Response struct {
 	State        string     `json:"state"`
 	Code         string     `json:"code,omitempty"`
 	Result       Result     `json:"result,omitempty"`
+}
+
+// Result is a value type with custom JSON decoding, so omitempty alone does
+// not omit its zero value. An uncertain projection must carry no result at all.
+func (r Response) MarshalJSON() ([]byte, error) {
+	if r.State == "running" && r.Code == "execution_uncertain_reconciliation_required" {
+		return json.Marshal(struct {
+			State string `json:"state"`
+			Code  string `json:"code"`
+		}{r.State, r.Code})
+	}
+	type response Response
+	return json.Marshal(response(r))
 }
 
 func (c Client) exchange(ctx context.Context, message Message) (Response, error) {
@@ -90,7 +105,12 @@ func (c Client) exchange(ctx context.Context, message Message) (Response, error)
 		closeInputs(outputs)
 		return Response{}, errors.New("ansible response unavailable")
 	}
-	if response.Code != "" {
+	// A raw terminal receipt may precede its cleanup proof by a short window.
+	// Only job observations may continue polling this exact nonterminal reply;
+	// lifecycle actions and all other errors retain their existing semantics.
+	pendingCleanup := (message.Action == "submit" || message.Action == "status") &&
+		response.State == "running" && response.Code == "execution_uncertain_reconciliation_required"
+	if response.Code != "" && !pendingCleanup {
 		closeInputs(outputs)
 		if response.Diagnostic.Code != "" {
 			return response, fmt.Errorf("%s (%s: %s; %s)", response.Code,
@@ -98,7 +118,8 @@ func (c Client) exchange(ctx context.Context, message Message) (Response, error)
 		}
 		return response, fmt.Errorf("%s (%s: %s)", response.Code, response.Diagnostic.Node, response.Diagnostic.Stage)
 	}
-	if (message.Action == "lease-attach" && len(outputs) != 1) || (message.Action != "lease-attach" && len(outputs) != 0) {
+	leaseReply := message.Action == "lease-attach" || message.Action == "lease-observe"
+	if (leaseReply && len(outputs) != 1) || (!leaseReply && len(outputs) != 0) {
 		closeInputs(outputs)
 		return Response{}, errors.New("unexpected controller descriptors")
 	}
@@ -285,7 +306,7 @@ func Serve(ctx context.Context, socket, state, python, executable string, allowe
 				_, runErr := Execute(jobContext, directory, python, executable)
 				lease.active.Store(false)
 				_ = operationLock.Close()
-				if runErr != nil && ctx.Err() == nil {
+				if runErr != nil && !errors.Is(runErr, ErrExecutionFenced) && ctx.Err() == nil {
 					if _, receiptErr := os.Stat(filepath.Join(directory, "receipt.json")); os.IsNotExist(receiptErr) {
 						_ = writeJSON(filepath.Join(directory, "receipt.json"), Receipt{State: "failed", Code: "job_validation_failed"})
 						_ = syncDirectory(directory)
@@ -378,6 +399,11 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 			return Response{Code: "controller_access_denied"}
 		}
 		return gate.retire(message.ID)
+	case "lease-observe":
+		if uid != 0 {
+			return Response{Code: "controller_access_denied"}
+		}
+		return gate.observe(message.ID)
 	case "lease-attach":
 		if uid != 0 {
 			return Response{Code: "controller_access_denied"}
@@ -438,6 +464,9 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 				} else if !os.IsNotExist(readErr) {
 					return Response{Code: "job_unavailable"}
 				}
+				if err = executionAdmission(directory); err != nil {
+					return Response{Code: "execution_uncertain_reconciliation_required"}
+				}
 				if err = os.RemoveAll(directory); err != nil {
 					return Response{Code: "job_unavailable"}
 				}
@@ -448,6 +477,9 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 			return Response{Code: "job_unavailable"}
 		}
 		if _, err = os.Lstat(directory); os.IsNotExist(err) {
+			if err = executionAdmission(directory); err != nil {
+				return Response{Code: "execution_uncertain_reconciliation_required"}
+			}
 			if err = prepareInputs(directory, message.Binary, *message.Request, inputs); err != nil {
 				return Response{Code: "exit_preparation_failed"}
 			}
@@ -491,5 +523,156 @@ func handleConnection(conn *net.UnixConn, state string, allowedUID uint32, gate 
 	if err != nil || json.Unmarshal(data, &receipt) != nil {
 		return Response{Code: "receipt_unavailable"}
 	}
+	return projectControllerReceipt(directory, data, receipt)
+}
+
+// A task receipt precedes systemd cleanup. Project terminal state only from
+// already committed evidence; status never runs a census, reconciles or writes.
+func projectControllerReceipt(directory string, raw []byte, receipt Receipt) Response {
+	if (receipt.State == "succeeded" || receipt.State == "failed") && !controllerTerminalVerified(directory, raw) {
+		return Response{State: "running", Code: "execution_uncertain_reconciliation_required"}
+	}
 	return Response{State: receipt.State, Code: receipt.Code, Result: receipt.Result, Diagnostic: receipt.Diagnostic}
+}
+func controllerTerminalVerified(directory string, raw []byte) bool {
+	var metadata struct {
+		Generation string `json:"execution_generation"`
+	}
+	if json.Unmarshal(raw, &metadata) != nil {
+		return false
+	}
+	// Do not use executionRoot/InspectExecutionFence: those may create state.
+	current, err := inspectExecutionFence(executionFenceDirectory(directory))
+	if err != nil {
+		return false
+	}
+	if current != nil && (current.JobDirectory == directory || metadata.Generation != "" && current.Generation == metadata.Generation) {
+		return false
+	}
+	if metadata.Generation == "" {
+		// Genuine legacy and read-only receipts have no execution evidence. A
+		// truncated modern receipt cannot erase its generation to gain this path.
+		entries, err := os.ReadDir(directory)
+		if err != nil {
+			return false
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if name == "execution-completion.json" || name == "execution-containment.json" ||
+				strings.HasPrefix(name, "execution-dispatch-") || strings.HasPrefix(name, "execution-drain-") {
+				return false
+			}
+		}
+		return true
+	}
+	if !regexp.MustCompile(`^[a-f0-9]{32}$`).MatchString(metadata.Generation) {
+		return false
+	}
+	// The proof identifies the exact frozen job; completion validation checks
+	// the current job/request/bundle, receipt hash and normal rc0/rc2 outcome.
+	proofRaw, err := readRetryPrivate(filepath.Join(directory, "execution-containment.json"))
+	if err != nil {
+		return false
+	}
+	var saved struct {
+		Fence ExecutionFence `json:"fence"`
+	}
+	if json.Unmarshal(proofRaw, &saved) != nil || saved.Fence.JobDirectory != directory || saved.Fence.Generation != metadata.Generation {
+		return false
+	}
+	proof, err := readContainmentProof(saved.Fence)
+	if err != nil {
+		return false
+	}
+	verified, err := verifiedContainment(proof)
+	// Do not invoke containment recovery, including if evidence changes while
+	// Status is reading it. This path consumes committed evidence only.
+	return err == nil && verified && validateControllerHistoricalTerminal(saved.Fence) == nil
+}
+
+// Historical RPC state consumes the frozen ownership inventory, not executable
+// payloads which normal retention may already have collected. This is never an
+// authority for dispatch, retry, execution completion or fence reconciliation.
+func validateControllerHistoricalTerminal(expected ExecutionFence) error {
+	jobRaw, err := readRetryPrivate(filepath.Join(expected.JobDirectory, "job.json"))
+	if err != nil || executionHash(jobRaw) != expected.JobSHA256 {
+		return ErrExecutionFenced
+	}
+	var job struct {
+		Schema    int    `json:"schema_version"`
+		Operation string `json:"operation"`
+		Request   string `json:"request_sha256"`
+		Attempt   int    `json:"attempt"`
+	}
+	if json.Unmarshal(jobRaw, &job) != nil || job.Schema != 1 {
+		return ErrExecutionFenced
+	}
+	if job.Attempt == 0 {
+		job.Attempt = 1
+	}
+	requestRaw, err := readRetryPrivate(filepath.Join(expected.JobDirectory, "request.json"))
+	if err != nil || job.Operation != expected.Operation || job.Attempt != expected.Attempt || job.Request != expected.RequestSHA256 ||
+		executionHash(requestRaw) != expected.RequestSHA256 || executionHash(requestRaw) != expected.InventorySHA256 {
+		return ErrExecutionFenced
+	}
+	raw, err := readRetryPrivate(filepath.Join(expected.JobDirectory, "bundle.retention.json"))
+	if err != nil {
+		return ErrExecutionFenced
+	}
+	var ownership struct {
+		Schema    int                          `json:"schema"`
+		Path      string                       `json:"path"`
+		Identity  map[string]string            `json:"identity"`
+		Inventory map[string][]json.RawMessage `json:"inventory"`
+	}
+	if json.Unmarshal(raw, &ownership) != nil || ownership.Schema != 1 || ownership.Path != filepath.Join(expected.JobDirectory, "bundle") ||
+		len(ownership.Identity) != 1 || ownership.Identity["request_sha256"] != expected.RequestSHA256 ||
+		len(ownership.Inventory) == 0 {
+		return ErrExecutionFenced
+	}
+	names := make([]string, 0, len(ownership.Inventory))
+	for name := range ownership.Inventory {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	hash := sha256.New()
+	for _, name := range names {
+		if name == "." || filepath.IsAbs(name) || filepath.ToSlash(filepath.Clean(name)) != name || strings.HasPrefix(name, "../") {
+			return ErrExecutionFenced
+		}
+		entry := ownership.Inventory[name]
+		if len(entry) < 2 {
+			return ErrExecutionFenced
+		}
+		var kind string
+		if json.Unmarshal(entry[0], &kind) != nil {
+			return ErrExecutionFenced
+		}
+		var mode uint32
+		switch kind {
+		case "directory":
+			if len(entry) != 2 || json.Unmarshal(entry[1], &mode) != nil {
+				return ErrExecutionFenced
+			}
+		case "file":
+			var digest string
+			if len(entry) != 3 || json.Unmarshal(entry[1], &digest) != nil || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(digest) ||
+				json.Unmarshal(entry[2], &mode) != nil {
+				return ErrExecutionFenced
+			}
+			hash.Write([]byte(name))
+			hash.Write([]byte{0})
+			hash.Write([]byte(digest))
+			hash.Write([]byte{'\n'})
+		default:
+			return ErrExecutionFenced
+		}
+		if mode > 0777 || mode&0022 != 0 {
+			return ErrExecutionFenced
+		}
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != expected.BundleSHA256 {
+		return ErrExecutionFenced
+	}
+	return validateExecutionReceipt(expected)
 }

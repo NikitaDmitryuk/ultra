@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +26,9 @@ func TestBootstrapRollbackReappliesCompletedStagesWithSameFrozenIdentity(t *test
 			if err = os.Chmod(root, 0700); err != nil {
 				t.Fatal(err)
 			}
+			// Model the prior immutable bundle before its first execution binding.
+			fixturePriorControllerComments.Store(root, true)
+			t.Cleanup(func() { fixturePriorControllerComments.Delete(root) })
 			directory, err := beginBootstrapAttempt(root)
 			if err != nil {
 				t.Fatal(err)
@@ -53,7 +57,7 @@ if operation=='configure-bot' and not fail.exists():
  sys.exit(1)
 result=job/'result.json';result.write_text(json.dumps({'verified':True}));result.chmod(0o600)
 `
-			if err = os.WriteFile(stub, []byte(source), 0700); err != nil {
+			if err = os.WriteFile(stub, withNormalAnsibleFailure(source), 0700); err != nil {
 				t.Fatal(err)
 			}
 			ctx, release, err := deployansible.WithOperationLock(context.Background(), root)
@@ -84,17 +88,6 @@ result=job/'result.json';result.write_text(json.dumps({'verified':True}));result
 			receipt, err := os.ReadFile(filepath.Join(directory, "apply", "receipt.json"))
 			if err != nil {
 				t.Fatal(err)
-			}
-			// Model an older immutable installer bundle, distinct from current Export.
-			for _, stage := range []string{"apply", "bot"} {
-				path := filepath.Join(directory, stage, "bundle", "controller.py")
-				raw, readErr := os.ReadFile(path)
-				if readErr != nil {
-					t.Fatal(readErr)
-				}
-				if err = os.WriteFile(path, append(raw, []byte("\n# original prior-version bundle\n")...), 0600); err != nil {
-					t.Fatal(err)
-				}
 			}
 			// Recreate a crash after durable successful rollback, before proof publication.
 			if err = os.Remove(filepath.Join(directory, "rollback-generation-1.json")); err != nil {
@@ -127,6 +120,23 @@ result=job/'result.json';result.write_text(json.dumps({'verified':True}));result
 			resumed, err := beginBootstrapAttempt(root)
 			if err != nil || resumed != directory {
 				t.Fatal("attempt UUID changed", err)
+			}
+			if interruption != "proof-publication" {
+				before, _ := os.ReadFile(filepath.Join(root, "operations"))
+				if _, _, err := prepareReservedBootstrap(ctx, p, inventory, nil, directory, root, python, stub); !errors.Is(
+					err,
+					deployansible.ErrExecutionFenced,
+				) {
+					t.Fatal("corrupted terminal receipt did not fail closed", err)
+				}
+				after, _ := os.ReadFile(filepath.Join(root, "operations"))
+				// The previous rollback completed normally before this synthetic
+				// receipt corruption, so reserving a fresh lifecycle remains safe.
+				// The corrupted old rollback itself must never run a second time.
+				if string(after) != string(before)+"lifecycle\n" {
+					t.Fatalf("corrupted rollback redispatched: before=%s after=%s", before, after)
+				}
+				return
 			}
 			frozen, previous, err := prepareReservedBootstrap(ctx, p, inventory, nil, directory, root, python, stub)
 			if err != nil || previous["bridge"].Architecture != "amd64" {

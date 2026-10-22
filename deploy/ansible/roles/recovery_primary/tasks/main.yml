@@ -158,6 +158,11 @@
     tasks_from: refresh
   vars:
     recovery_managed_files: "{{ ultra_automation_tools }}"
+- name: Publish the independent verified current tools identity on a fresh installation
+  ansible.builtin.include_tasks: ../../release/tasks/tools-identity-publish.yml
+  vars:
+    ultra_recovery_tools_identity_files: "{{ ultra_automation_tools_identity_files }}"
+    ultra_recovery_files: "{{ ultra_automation_tools }}"
 - name: Install pinned primary release identity
   ansible.builtin.copy:
     src: "{{ ultra_automation_manifest_source }}"

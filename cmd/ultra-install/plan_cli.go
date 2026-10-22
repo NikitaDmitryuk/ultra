@@ -23,6 +23,8 @@ func handlePlanSubcommand(args []string) bool {
 		return true
 	}
 	switch args[0] {
+	case "deploy-operation":
+		exitOnErr("deployment operation", runDeployOperationCommand(args[1:], os.Stdout))
 	case "retained-primary-reconcile":
 		exitOnErr("retained primary reconciliation", runRetainedReconcile(args[1:], os.Stdout))
 	case "rebuild-retained-primary":
@@ -57,6 +59,10 @@ func handlePlanSubcommand(args []string) bool {
 		runOperatorUpgradeCommand(args[1:])
 	case "local-preflight-proof":
 		runLocalPreflightProof(args[1:])
+	case "bridge-preflight-proof":
+		exitOnErr("bridge preflight proof", runBridgePreflightProof(args[1:], os.Stdout))
+	case "recovery-prepare":
+		exitOnErr("recovery preparation", runRecoveryPreparation(args[1:], os.Stdout))
 	case "recovery-tools-bootstrap":
 		runRecoveryToolsBootstrapCommand(args[1:])
 	case "domain-cutover":

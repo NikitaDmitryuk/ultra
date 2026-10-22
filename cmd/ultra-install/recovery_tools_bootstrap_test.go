@@ -131,7 +131,7 @@ result=job/'result.json'
 result.write_text(json.dumps({'verified':True}))
 result.chmod(0o600)
 `
-			if err := os.WriteFile(executable, []byte(source), 0700); err != nil {
+			if err := os.WriteFile(executable, withNormalAnsibleFailure(source), 0700); err != nil {
 				t.Fatal(err)
 			}
 			stage := filepath.Join(root, "phase")

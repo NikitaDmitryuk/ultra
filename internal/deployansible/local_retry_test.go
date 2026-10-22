@@ -189,7 +189,7 @@ func TestRetryRejectsConflictWithoutErasingFailure(t *testing.T) {
 	}
 }
 
-func TestExplicitLocalRetryPreservesFrozenBundleAndSuccessCache(t *testing.T) {
+func TestExplicitLocalRetryPreservesFrozenBundleAndBlocksUncertainDispatch(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python unavailable")
@@ -260,27 +260,27 @@ result.chmod(0o600)
 		t.Fatal("rejected retry removed receipt")
 	}
 	for i := 0; i < 2; i++ {
-		if _, err = RetryFrozenBootstrap(ctx, directory, python, executable); err != nil {
-			t.Fatal(err)
+		if _, err = RetryFrozenBootstrap(ctx, directory, python, executable); !errors.Is(err, ErrExecutionFenced) {
+			t.Fatal("uncertain retry must remain fenced", err)
 		}
 	}
 	calls, _ = os.ReadFile(filepath.Join(directory, "calls"))
-	if string(calls) != "2" {
+	if string(calls) != "1" {
 		t.Fatalf("unexpected execution count %s", calls)
 	}
 	if _, err = RetryFrozenBootstrapWithLock(context.Background(), directory, python, executable); err == nil {
 		t.Fatal("frozen lease already held but retry acquired it")
 	}
 	release()
-	if _, err = RetryFrozenBootstrapWithLock(context.Background(), directory, python, executable); err != nil {
-		t.Fatal(err)
+	if _, err = RetryFrozenBootstrapWithLock(context.Background(), directory, python, executable); !errors.Is(err, ErrExecutionFenced) {
+		t.Fatal("free infrastructure lock cleared uncertainty", err)
 	}
 	after, _ := os.ReadFile(bundle)
 	if !bytes.Equal(original, after) {
 		t.Fatal("frozen bundle changed")
 	}
-	if _, err = os.Stat(filepath.Join(directory, "history", "attempt-1.json")); err != nil {
-		t.Fatal("failure archive missing")
+	if _, err = os.Stat(filepath.Join(directory, "history", "attempt-1.json")); !os.IsNotExist(err) {
+		t.Fatal("blocked retry advanced the attempt", err)
 	}
 }
 
@@ -374,8 +374,11 @@ result.chmod(0o600)
 			}
 			delete(variables, "changed")
 			for range 2 {
-				if _, err := RunLocalRetryFailed(ctx, operation, map[string]any{}, variables, stage, python, executable); err != nil {
-					t.Fatal(err)
+				if _, err := RunLocalRetryFailed(ctx, operation, map[string]any{}, variables, stage, python, executable); !errors.Is(
+					err,
+					ErrExecutionFenced,
+				) {
+					t.Fatal("uncertain compensation replay accepted", err)
 				}
 			}
 			after, err := os.ReadFile(filepath.Join(stage, "request.json"))
@@ -383,11 +386,11 @@ result.chmod(0o600)
 				t.Fatal("frozen request changed", err)
 			}
 			calls, _ := os.ReadFile(filepath.Join(stage, "calls"))
-			if string(calls) != "2" {
+			if string(calls) != "1" {
 				t.Fatalf("executions: %s", calls)
 			}
-			if _, err := os.Stat(filepath.Join(stage, "history", "attempt-1.json")); err != nil {
-				t.Fatal("failed receipt not preserved", err)
+			if _, err := os.Stat(filepath.Join(stage, "history", "attempt-1.json")); !os.IsNotExist(err) {
+				t.Fatal("blocked retry advanced the attempt", err)
 			}
 		})
 	}

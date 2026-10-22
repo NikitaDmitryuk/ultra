@@ -546,6 +546,14 @@ while time.monotonic()<deadline:
 	if err := os.WriteFile(filepath.Join(bundle, "controller.py"), []byte(source), 0600); err != nil {
 		t.Fatal(err)
 	}
+
+	raw := []byte(`{}`)
+	if err := writePrivate(filepath.Join(f.directory, "attempt", "request.json"), raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(f.directory, "attempt", "job.json"), map[string]any{"schema_version": 1, "operation": "configure-exit", "request_sha256": executionHash(raw), "binary_sha256": executionHash(raw)}); err != nil {
+		t.Fatal(err)
+	}
 	holder := exec.Command(os.Args[0], "-test.run=^TestRecoveryFenceOrphanedExecutorHelper$", "-test.timeout=10s")
 	holder.Env = []string{"ULTRA_RECOVERY_TEST_ORPHAN_DIR=" + f.directory, "PATH=/usr/bin:/bin"}
 	if err := holder.Start(); err != nil {

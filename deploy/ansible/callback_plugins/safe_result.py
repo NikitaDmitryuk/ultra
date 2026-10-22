@@ -113,13 +113,67 @@ class CallbackModule(CallbackBase):
             fields['ignored'] = True
         journal.best_effort(event, **fields)
 
+    def execution_task(self, host, task, terminal=False, result=None):
+        if not hasattr(self, '_execution_pending'):
+            self._execution_pending = set()
+            self._execution_hosts = set()
+            self._execution_unsafe = False
+        identity = (host.name, str(getattr(task, '_uuid', id(task))))
+        self._execution_hosts.add(host.name)
+        if getattr(task, 'async_val', 0):
+            self._execution_unsafe = True
+        data = getattr(result, '_result', {}) if result is not None else {}
+        if isinstance(data, dict) and 'ansible_job_id' in data:
+            self._execution_unsafe = True
+        if terminal:
+            self._execution_pending.discard(identity)
+        else:
+            self._execution_pending.add(identity)
+        if len(self._execution_pending) > 100000:
+            self._execution_unsafe = True
+
+    def v2_playbook_on_stats(self, stats):
+        target = os.environ.get('ULTRA_EXECUTION_TERMINAL_FILE')
+        binding = os.environ.get('ULTRA_EXECUTION_BINDING')
+        if not target or not binding:
+            return
+        try:
+            hosts = set(stats.processed)
+            if (not hosts or hosts != getattr(self, '_execution_hosts', set())
+                    or getattr(self, '_execution_pending', {True})
+                    or getattr(self, '_execution_unsafe', True)):
+                return
+            summaries = [stats.summarize(host) for host in hosts]
+            if any(value.get('unreachable', 0) for value in summaries):
+                return
+            if not any(value.get('failures', 0) for value in summaries):
+                return
+            value = {'fence': json.loads(binding), 'outcome': 'failed',
+                     'contacted_hosts': len(hosts), 'pending_tasks': 0,
+                     'unreachable_hosts': 0, 'unmanaged_async': False}
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, 'w') as stream:
+                json.dump(value, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            parent = os.open(Path(target).parent, os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+        except (OSError, ValueError, TypeError, AttributeError):
+            return  # Missing/invalid proof remains fenced.
+
     def v2_runner_on_start(self, host, task):
+        self.execution_task(host, task)
         self.event('task_start', host, task)
 
     def v2_runner_on_ok(self, result):
+        self.execution_task(result._host, result._task, True, result)
         self.event('task_ok', result._host, result._task, result)
 
     def v2_runner_on_skipped(self, result):
+        self.execution_task(result._host, result._task, True, result)
         self.event('task_skipped', result._host, result._task, result)
 
     def v2_runner_retry(self, result):
@@ -150,11 +204,14 @@ class CallbackModule(CallbackBase):
             os.fsync(stream.fileno())
 
     def v2_runner_on_failed(self, result, ignore_errors=False):
+        self.execution_task(result._host, result._task, True, result)
         self.event('task_failed', result._host, result._task, result, 'task_failed', ignore_errors)
         if not ignore_errors:
             self.record(result, 'task_failed')
 
     def v2_runner_on_unreachable(self, result):
+        self.execution_task(result._host, result._task, True, result)
+        self._execution_unsafe = True
         # Classify known failures without persisting the possibly sensitive message.
         text = '' if getattr(result._task, 'no_log', False) else result._result.get('msg', '')
         code = 'host_unreachable'

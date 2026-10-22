@@ -165,6 +165,7 @@ func forwardChainFixture(t *testing.T) *chainFixture {
 		"monitor.py",
 		"heartbeat.py",
 		"reconcile.py",
+		"live_tools.py",
 		"ultra-recovery-backup.service",
 		"ultra-recovery-backup.timer",
 	}

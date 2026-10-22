@@ -3,6 +3,19 @@
   hosts: bridge
   gather_facts: false
   tasks:
+    - name: Authenticate any prepared schedule suspension before resuming
+      ultra_controller_enforcement:
+        action: verify
+        phase: candidate
+        operation_id: "{{ ultra_controller_enforcement_spec.operation_id }}"
+        scope_sha256: "{{ ultra_controller_enforcement_spec.scope_sha256 }}"
+        manifest_sha256: "{{ ultra_controller_enforcement_spec.manifest_sha256 }}"
+        candidate: "{{ ultra_controller_enforcement_spec.proof.candidate }}"
+        proof: "{{ ultra_controller_enforcement_spec.proof }}"
+        prepared_policy: "{{ ultra_prepared_controller_policy }}"
+      register: release_resume_prepared
+      when: ultra_prepared_controller_policy | default({}) | length > 0
+      no_log: true
     - name: Resume owned timers
       ansible.builtin.systemd_service:
         name: "{{ item }}"
@@ -10,7 +23,9 @@
       loop:
         - ultra-recovery-backup.timer
         - ultra-recovery-reconcile.timer
-      when: not (ultra_legacy_bridge_maintenance | default(false) | bool)
+      when:
+        - not (ultra_legacy_bridge_maintenance | default(false) | bool)
+        - not (release_resume_prepared.prepared_schedules_suspended | default(false) | bool)
     - name: Inspect the same-operation legacy checkpoint before cleanup
       ansible.builtin.stat:
         path: "/var/lib/ultra-ansible/upgrade/{{ ultra_lifecycle_id }}/maintenance.json"
@@ -27,7 +42,7 @@
       when: ultra_legacy_bridge_maintenance | default(false) | bool and legacy_resume_checkpoint.stat.exists | default(false) | bool
     - name: Save the current resume receipt
       ansible.builtin.copy:
-        content: '{"resumed": true}'
+        content: "{{ {'resumed': not (release_resume_prepared.prepared_schedules_suspended | default(false) | bool), 'prepared_schedules_suspended': release_resume_prepared.prepared_schedules_suspended | default(false) | bool} | to_json(preprocess_unsafe=False) }}"
         dest: "{{ ultra_result_file }}"
         mode: "0600"
       delegate_to: localhost

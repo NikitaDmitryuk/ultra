@@ -250,6 +250,9 @@ func runLocal(
 ) (Receipt, error) {
 	allowed := map[string]bool{
 		"bootstrap-recovery-inspect":   true,
+		"handoff-recovery-controller":  true,
+		"stage-recovery-preparation":   true,
+		"initialize-recovery-monitor":  true,
 		"bootstrap-recovery-tools":     true,
 		"wait-upgrade-readiness":       true,
 		"bootstrap-forward-broker":     true,
@@ -373,9 +376,33 @@ func runLocal(
 		return Receipt{}, err
 	}
 	if retry {
+		if !executionReadOnly(operation) {
+			if err = executionAdmission(directory); err != nil {
+				return Receipt{}, err
+			}
+			if prior, readErr := os.ReadFile(filepath.Join(directory, "receipt.json")); readErr == nil {
+				var state struct {
+					State string `json:"state"`
+				}
+				if json.Unmarshal(prior, &state) != nil ||
+					(state.State != "succeeded" && !completedExecution(directory) && !preparedRetryExecution(directory)) {
+					_, _ = beginExecution(directory) // Adopt a legacy uncertain mutator without dispatch.
+					return Receipt{}, ErrExecutionFenced
+				}
+			}
+			if completedExecution(directory) {
+				if err = prepareRetryExecution(directory); err != nil {
+					return Receipt{}, err
+				}
+			}
+		}
 		if err = retryFailedLocalAttempt(directory); err != nil {
 			return Receipt{}, err
 		}
+	}
+	fence, fenceErr := beginExecution(directory)
+	if fenceErr != nil {
+		return Receipt{}, fenceErr
 	}
 	bundle := filepath.Join(directory, "bundle")
 	command := exec.CommandContext(
@@ -391,7 +418,15 @@ func runLocal(
 	)
 	isolateCommand(command)
 	command.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
-	runErr := command.Run()
+	if fence != nil {
+		command.Env = append(command.Env, "ULTRA_EXECUTION_GENERATION="+fence.Generation)
+	}
+	runErr := runContainedController(ctx, command, fence)
+	if fence != nil {
+		if closeErr := reconcileControllerExecution(*fence, runErr); closeErr != nil && runErr == nil {
+			return Receipt{}, closeErr
+		}
+	}
 	data, err := os.ReadFile(filepath.Join(directory, "receipt.json"))
 	var receipt Receipt
 	if err != nil || json.Unmarshal(data, &receipt) != nil {

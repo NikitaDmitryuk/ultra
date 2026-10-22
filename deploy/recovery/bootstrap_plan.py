@@ -165,6 +165,7 @@ def plan(config):
     if config.get('release_signature') is True:
         artifact_paths.extend(['/usr/local/libexec/ultra-emergency-manifest.json.minisig', str(ROOT / 'release-manifest.json.minisig')])
     artifact_paths += [str(ROOT / name) for name in config['recovery_tool_members']]
+    artifact_paths += [str(ROOT / name) for name in ('tools-manifest.json','tools.tar.gz','tools-inventory.json')]
     artifact_paths += config.get('artifact_paths', [])
     if spec.get('geo_assets_dir'):
         artifact_paths.append(spec['geo_assets_dir'])
@@ -201,7 +202,8 @@ def plan(config):
                  'ssh_identity_file': identity, 'vultr_api_key_file': cloud, 'api_key_owner': 'ultra-relay', 'ssh_identity_owner': 'ultra-relay',
                  'backup_config': str(CONFIG / 'backup.json'), 'state_dir': '/var/lib/ultra-recovery-reconcile',
                  'status_file': '/var/lib/ultra-relay/recovery-reconcile-status.json', 'status_group': 'ultra-relay',
-                 'bundle_dir': str(ROOT), 'client_binary': '/usr/local/bin/ultra-client', 'installer_binary': '/usr/local/bin/ultra-install',
+                 'bundle_dir': '/opt/ultra-recovery', 'client_binary': '/usr/local/bin/ultra-client', 'installer_binary': '/opt/ultra-ansible/current/ultra-install',
+                 'ansible_executable': '/opt/ultra-ansible/current/venv/bin/ansible-playbook',
                  'bot_token_file': str(CONFIG / 'primary-bot-token'), 'chat_id_file': str(CONFIG / 'admin-chat-id'),
                  'probe_profile_file': str(CONFIG / 'probe.json'), 'bridge_url': config['bridge_url'],
                  'payload_url': 'https://www.cloudflare.com/cdn-cgi/trace', 'static_nodes': nodes, 'monitor_spec_file': config['spec']}

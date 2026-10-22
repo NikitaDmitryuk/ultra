@@ -19,7 +19,7 @@
       no_log: true
     - name: Read protected release readiness and owned topology
       ansible.builtin.script:
-        cmd: "{{ playbook_dir }}/../roles/release/files/state.py"
+        cmd: "{{ playbook_dir }}/../roles/release/files/state.py{{ (' --prepared-policy ' + (ultra_controller_enforcement_spec | to_json(preprocess_unsafe=False) | b64encode)) if (ultra_controller_enforcement_spec | default({})).get('prepared_policy', {}) | length > 0 else '' }}"
         executable: /usr/bin/python3
       changed_when: false
       no_log: true

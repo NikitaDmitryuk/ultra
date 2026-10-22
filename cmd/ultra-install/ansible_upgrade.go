@@ -24,6 +24,7 @@ type upgradeInspection struct {
 	DatabaseSchema      int                                   `json:"database_schema"`
 	ControllerDirectory string                                `json:"controller_directory"`
 	ControllerUnitSHA   string                                `json:"controller_unit_sha256"`
+	ToolIdentityHashes  map[string]string                     `json:"tool_identity_hashes"`
 	ToolHashes          map[string]string                     `json:"tool_hashes"`
 	AutoPolicy          map[string]any                        `json:"auto_policy"`
 	ObservedAt          int64                                 `json:"observed_at"`
@@ -227,6 +228,7 @@ func ansibleUpgrade(
 		}
 	}()
 	var enforcement map[string]any
+	var preparedControllerPolicy map[string]any
 	if !forwardOnly {
 		enforcement, err = upgradeEnforcementSpec(directory, releaseDir, manifest, inventory)
 		if err != nil {
@@ -235,6 +237,13 @@ func ansibleUpgrade(
 		if completed, completionErr := recoverEnforcementCompletion(ctx, p, directory, lockDirectory, python, executable, manifest, inventory, enforcement); completionErr != nil ||
 			completed {
 			return completionErr
+		}
+		preparedControllerPolicy, err = recoveryPreparedControllerPolicy(ctx, p, directory, releaseDir, inventory, enforcement)
+		if err != nil {
+			return err
+		}
+		if len(preparedControllerPolicy) > 0 {
+			enforcement["prepared_policy"] = preparedControllerPolicy
 		}
 		// Probe both exact broker executables in isolated state before reserving
 		// production. A fresh receipt is required even when a proof is retained.
@@ -267,6 +276,10 @@ func ansibleUpgrade(
 				legacyBridgeSHA,
 				acceptedResume,
 			)
+			if len(preparedControllerPolicy) > 0 {
+				variables["ultra_prepared_controller_policy"] = preparedControllerPolicy
+				variables["ultra_controller_enforcement_spec"] = enforcement
+			}
 			_, err = deployansible.RunLocal(cleanup, "resume-automation", inventory, variables, resumeDirectory, python, executable)
 			if err == nil {
 				resumeCompleted = true
@@ -318,8 +331,10 @@ func ansibleUpgrade(
 			returnErr = errors.Join(returnErr, errors.New("upgrade_automation_resume_failed"))
 			return
 		}
-		if err := ansibleLifecycle(cleanup, p, inventory, directory, python, executable, "released", false); err != nil {
-			returnErr = errors.Join(returnErr, err)
+		if len(preparedControllerPolicy) == 0 {
+			if err := ansibleLifecycle(cleanup, p, inventory, directory, python, executable, "released", false); err != nil {
+				returnErr = errors.Join(returnErr, err)
+			}
 		}
 	}()
 	if enforcement != nil {
@@ -328,11 +343,15 @@ func ansibleUpgrade(
 			return err
 		}
 	}
+	inspectionVariables := map[string]any{"ultra_lock_directory": lockDirectory}
+	if len(preparedControllerPolicy) > 0 {
+		inspectionVariables["ultra_controller_enforcement_spec"] = enforcement
+	}
 	inspectionReceipt, err := runUpgradeInspection(
 		ctx,
 		"inspect-upgrade",
 		inventory,
-		map[string]any{"ultra_lock_directory": lockDirectory},
+		inspectionVariables,
 		filepath.Join(directory, "inspect"),
 		python,
 		executable,
@@ -351,7 +370,8 @@ func ansibleUpgrade(
 	if enforcement != nil {
 		if proof, _ := enforcement["proof"].(map[string]any); len(proof) != 0 {
 			rollback, _ := proof["rollback"].(map[string]any)
-			if rollback["directory"] != inspection.ControllerDirectory || rollback["unit_sha256"] != inspection.ControllerUnitSHA {
+			if (rollback["directory"] != inspection.ControllerDirectory || rollback["unit_sha256"] != inspection.ControllerUnitSHA) &&
+				!recoveryBrokerInspectionMatches(preparedControllerPolicy, inspection, enforcement) {
 				return errors.New("upgrade_controller_enforcement_rollback_changed")
 			}
 		}
@@ -474,6 +494,18 @@ func ansibleUpgrade(
 	if err = requireUpgradeTool(tools, "db_connection.py"); err != nil {
 		return err
 	}
+	if err = requireUpgradeTool(tools, "live_tools.py"); err != nil {
+		return err
+	}
+	toolsManifestSHA, identityErr := sourceSHA(filepath.Join(releaseDir, "release-manifest.json"))
+	if identityErr != nil {
+		return identityErr
+	}
+	liveIdentity, identityErr := upgradeLiveToolsIdentity(directory, releaseDir, toolsManifestSHA, tools, inspection.ToolIdentityHashes)
+	if identityErr != nil {
+		return identityErr
+	}
+	bridge["ultra_recovery_tools_identity_files"] = liveIdentity
 	bridge["ultra_recovery_files"] = tools
 	baselineToolHashes := map[string]string{}
 	if baselineInput != nil {
@@ -549,8 +581,16 @@ func ansibleUpgrade(
 		bridge["ultra_controller_directory"].(string),
 	)
 	controllerHash := sha256.Sum256([]byte(controllerRendered))
-	bridge["ultra_previous_controller_directory"] = inspection.ControllerDirectory
-	bridge["ultra_previous_controller_unit_sha256"] = inspection.ControllerUnitSHA
+	previousControllerDirectory, previousControllerUnitSHA, policyErr := preparedControllerRollbackIdentity(
+		preparedControllerPolicy,
+		enforcement,
+		inspection,
+	)
+	if policyErr != nil {
+		return policyErr
+	}
+	bridge["ultra_previous_controller_directory"] = previousControllerDirectory
+	bridge["ultra_previous_controller_unit_sha256"] = previousControllerUnitSHA
 	bridge["ultra_target_controller_unit_sha256"] = hex.EncodeToString(controllerHash[:])
 	bridge["ultra_auto_upgrade_policy"] = inspection.AutoPolicy
 	bridge["ultra_auto_upgrade_enabled"] = inspection.AutoPolicy["enabled"] == true
@@ -578,6 +618,9 @@ func ansibleUpgrade(
 	}
 	if enforcement != nil {
 		variables["ultra_controller_enforcement_spec"] = enforcement
+	}
+	if len(preparedControllerPolicy) > 0 {
+		variables["ultra_prepared_controller_policy"] = preparedControllerPolicy
 	}
 	if planSecretsSource(p) != "canonical" {
 		variables["ultra_secrets_source"] = planSecretsSource(p)
@@ -939,36 +982,46 @@ func ansibleUpgrade(
 			releaseLock()
 			lockHeld = false
 			ctx = originalCtx
-			readinessTimeout := 900 * time.Second
-			if p.Automation != nil && p.Automation.ReadinessTimeoutSec > 0 {
-				readinessTimeout = time.Duration(p.Automation.ReadinessTimeoutSec) * time.Second
+			envelope, _, _, supervisorErr := runningDeployReconcileRequest()
+			if supervisorErr != nil {
+				err = supervisorErr
+			} else if envelope != nil {
+				err = runDeployPostActivationReconcile(ctx, envelope.Args)
 			}
-			deadline := time.Now().Add(readinessTimeout)
-			for {
-				verifyDirectory, createErr := os.MkdirTemp(directory, "verify-")
-				if createErr != nil {
-					err = createErr
+
+			if err == nil {
+				readinessTimeout := 900 * time.Second
+				if p.Automation != nil && p.Automation.ReadinessTimeoutSec > 0 {
+					readinessTimeout = time.Duration(p.Automation.ReadinessTimeoutSec) * time.Second
+				}
+				deadline := time.Now().Add(readinessTimeout)
+				for {
+					verifyDirectory, createErr := os.MkdirTemp(directory, "verify-")
+					if createErr != nil {
+						err = createErr
+						break
+					}
+					_ = os.Remove(verifyDirectory)
+					_, err = deployansible.RunLocal(ctx, "verify-release", inventory, variables, verifyDirectory, python, executable)
+					if err == nil {
+						break
+					}
+					if time.Now().After(deadline) {
+						err = errors.New("upgrade_post_activation_readiness_failed")
+						break
+					}
+					select {
+					case <-ctx.Done():
+						err = ctx.Err()
+					case <-time.After(5 * time.Second):
+						continue
+					}
 					break
 				}
-				_ = os.Remove(verifyDirectory)
-				_, err = deployansible.RunLocal(ctx, "verify-release", inventory, variables, verifyDirectory, python, executable)
-				if err == nil {
-					break
-				}
-				if time.Now().After(deadline) {
-					err = errors.New("upgrade_post_activation_readiness_failed")
-					break
-				}
-				select {
-				case <-ctx.Done():
-					err = ctx.Err()
-				case <-time.After(5 * time.Second):
-					continue
-				}
-				break
 			}
 		}
 	}
+
 	if err != nil {
 		if forwardOnly {
 			// The operator explicitly chose forward-only recovery. Preserve the
@@ -1038,8 +1091,10 @@ func ansibleUpgrade(
 		if legacyBridgeMaintenance {
 			resumeCompleted = true // rollback restores the exact checkpointed bot/timer states
 		}
-		if gateErr := ansibleLifecycle(cleanup, p, inventory, directory, python, executable, "released", false); gateErr != nil {
-			return errors.Join(err, gateErr)
+		if len(preparedControllerPolicy) == 0 {
+			if gateErr := ansibleLifecycle(cleanup, p, inventory, directory, python, executable, "released", false); gateErr != nil {
+				return errors.Join(err, gateErr)
+			}
 		}
 		return err
 	}
@@ -1082,8 +1137,10 @@ func ansibleUpgrade(
 		if rollbackErr := runUpgradeReleaseRollback(cleanup, p, inspection, inventory, variables, directory, python, executable, generation, false); rollbackErr != nil {
 			return errors.Join(err, errors.New("upgrade_release_commit_rollback_incomplete"))
 		}
-		if gateErr := ansibleLifecycle(cleanup, p, inventory, directory, python, executable, "released", false); gateErr != nil {
-			return errors.Join(err, gateErr)
+		if len(preparedControllerPolicy) == 0 {
+			if gateErr := ansibleLifecycle(cleanup, p, inventory, directory, python, executable, "released", false); gateErr != nil {
+				return errors.Join(err, gateErr)
+			}
 		}
 		return err
 	}

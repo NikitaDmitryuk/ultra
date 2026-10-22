@@ -5,6 +5,8 @@ Probes run the exact broker bytes with an isolated socket/state and no jobs.
 The production ledger is only read, including during rollback verification.
 """
 import array
+import io
+import tarfile
 import configparser
 import hashlib
 import json
@@ -127,13 +129,99 @@ def identity(directory, unit_raw):
             'tree_sha256': tree_digest(root), 'unit': unit_raw.decode()}
 
 
-def running_identity():
+def recovery_context(request_sha, operation, candidate, manifest, read_only=False):
+    if not request_sha:
+        return None
+    need(SHA.fullmatch(request_sha) and canonical_id(operation))
+    operations = ROOT / 'deploy-operations'
+    current = json.loads(regular(operations / 'current.json', True, 4096))
+    need(current.get('schema') == 1 and SHA.fullmatch(current.get('request_sha256', '')))
+    operation_root = operations / current['request_sha256']
+    raw = regular(operation_root / 'request.json', True, 1048576)
+    need(digest(raw) == current['request_sha256'])
+    envelope = json.loads(raw)
+    state = json.loads(regular(operation_root / 'state.json', True, 4096))
+    need(envelope.get('schema') == 2 and state.get('state') in (('running','blocked','submitted','prepared','retry_prepared') if read_only else ('running',))
+         and state.get('request_sha256') == current['request_sha256'])
+    cgroup = Path('/proc/self/cgroup').read_text().splitlines()
+    need(read_only or any(line.endswith(':/system.slice/ultra-deploy-' + current['request_sha256'] + '.service') for line in cgroup))
+    request = envelope['preparation']
+    raw = regular(Path(request['state_directory']) / 'request.json', True, 1048576)
+    need(digest(raw) == request_sha and json.loads(raw) == request
+         and request['protocol'] == 'ultra-recovery-preparation-request-v1'
+         and request['tools_manifest_sha256'] == manifest)
+    admission = {'protocol':'ultra-recovery-preparation-admission-v1',
+                 'fence_sha256':request['retained_fence_sha256'],
+                 'baseline_manifest_sha256':request['baseline_manifest_sha256'],
+                 'config_sha256':request['config_sha256'],'phase':'sealed'}
+    need(json.loads(regular(ROOT / 'recovery-preparation-admission.json', True, 4096)) == admission
+         and json.loads(regular(ROOT / 'retained-primary-admission.json', True, 4096)) ==
+         {'protocol':'retained-primary-admission-v1','binding_sha256':admission['fence_sha256']}
+         and not os.path.lexists(ROOT / 'retained-primary-admission-open'))
+    if not prepared_schedules_restored(request, request_sha):
+        for name in ['ultra-recovery-reconcile.service','ultra-recovery-reconcile.timer']:
+            need(regular(UNIT.parent / (name + '.d') / '90-retained-primary.conf', limit=4096).decode() == recovery_blocked())
+    baseline_raw = regular(Path(request['baseline_manifest_path']), limit=1048576)
+    need(digest(baseline_raw) == admission['baseline_manifest_sha256'])
+    baseline = json.loads(baseline_raw)
+    assets = {item['name']:item['sha256'] for item in baseline['assets']}
+    context = {'request_sha256':request_sha,'operation_id':operation,'candidate':candidate,'assets':assets}
+    recovery_dropin(context)
+    return context
+
+
+def recovery_blocked():
+    return '[Unit]\nRefuseManualStart=yes\nConditionPathExists=/var/lib/ultra-ansible/retained-primary-admission-open\n'
+
+
+def recovery_authorization(context):
+    return {'protocol':'ultra-recovery-controller-handoff-v1','request_sha256':context['request_sha256'],
+            'operation_id':context['operation_id'],'candidate':context['candidate']}
+
+
+def recovery_dropin(context):
+    path = UNIT.parent / 'ultra-ansible-controller.service.d/90-retained-primary.conf'
+    content = regular(path, limit=4096).decode()
+    if content == recovery_blocked():
+        return False
+    auth = ROOT / ('recovery-controller-' + context['request_sha256'] + '.json')
+    expected = '[Unit]\nRefuseManualStart=no\nConditionPathExists=' + str(auth) + '\n'
+    need(content == expected and json.loads(regular(auth, True, 4096)) == recovery_authorization(context))
+    return True
+
+
+def stopped_identity(context):
+    # This is an artifact identity observation, never executor quiescence proof.
+    # The separately authenticated sealed origins established dispatch closure.
+    need(context is not None and CURRENT.is_symlink())
+    output = subprocess.run(['systemctl','show','--property=ActiveState,MainPID,ControlPID,FragmentPath,RefuseManualStart',
+                             'ultra-ansible-controller.service'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                            timeout=5,check=True).stdout.decode()
+    values = dict(line.split('=',1) for line in output.splitlines())
+    opened = recovery_dropin(context)
+    need(values['ActiveState'] in ('inactive','failed') and values['MainPID'] == values['ControlPID'] == '0'
+         and values['FragmentPath'] == str(UNIT) and values['RefuseManualStart'] == ('no' if opened else 'yes'))
+    directory = os.readlink(CURRENT)
+    observed = identity(directory, regular(UNIT, limit=65536))
+    candidate = context['candidate']
+    if directory == candidate['directory']:
+        need(opened and all(observed[k] == candidate[k] for k in ('installer_sha256','runtime_sha256','unit_sha256')))
+        sealed_candidate(candidate)
+    else:
+        need(not opened)
+        architecture = candidate['architecture']
+        need(observed['installer_sha256'] == context['assets']['ultra-install-linux-' + architecture]
+             and observed['runtime_sha256'] == context['assets']['ultra-ansible-runtime-linux-' + architecture + '.tar.gz'])
+    return observed
+
+
+def running_identity(recovery=None):
     output = subprocess.run(['systemctl', 'show', '--property=ActiveState,MainPID,FragmentPath,DropInPaths,ControlGroup',
                              'ultra-ansible-controller.service'], stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL, timeout=5, check=True).stdout.decode()
     values = dict(line.split('=', 1) for line in output.splitlines())
     need(values['ActiveState'] == 'active' and values['FragmentPath'] == str(UNIT)
-         and values['DropInPaths'] == '' and values['ControlGroup'] == '/system.slice/ultra-ansible-controller.service'
+         and (values['DropInPaths'] == '' or (recovery is not None and recovery_dropin(recovery) and values['DropInPaths'] == str(UNIT.parent / 'ultra-ansible-controller.service.d/90-retained-primary.conf'))) and values['ControlGroup'] == '/system.slice/ultra-ansible-controller.service'
          and values['MainPID'].isdigit() and int(values['MainPID']) > 1)
     proc = Path('/proc') / values['MainPID']
     need(proc.stat().st_uid == os.geteuid()
@@ -147,11 +235,15 @@ def running_identity():
     return directory, digest((proc / 'exe').read_bytes())
 
 
-def live_identity():
+def live_identity(recovery=None, allow_stopped=False):
     need(CURRENT.is_symlink())
     directory = os.readlink(CURRENT)
     result = identity(directory, regular(UNIT, limit=65536))
-    need(running_identity() == (directory, result['installer_sha256']))
+    try:
+        need(running_identity(recovery) == (directory, result['installer_sha256']))
+    except ValueError:
+        need(allow_stopped and recovery is not None)
+        need(stopped_identity(recovery) == result)
     return result
 
 
@@ -216,13 +308,17 @@ def save_intent(proof):
         os.close(directory)
 
 
-def transition_identity(proof):
+def transition_identity(proof, recovery=None):
     """Retry only the recorded old/new unit, symlink and process combinations."""
     need(intent_present(proof) and CURRENT.is_symlink())
     old, new = proof['rollback'], proof['candidate']
     selected = os.readlink(CURRENT)
     unit_sha = digest(regular(UNIT, limit=65536))
-    running = running_identity()
+    try:
+        running = running_identity(recovery)
+    except ValueError:
+        observed = stopped_identity(recovery)
+        running = (observed['directory'], observed['installer_sha256'])
     need(selected in (old['directory'], new['directory'])
          and unit_sha in (old['unit_sha256'], new['unit_sha256'])
          and running in ((old['directory'], old['installer_sha256']),
@@ -363,19 +459,238 @@ def verify(proof, operation, scope, manifest, candidate, phase='reserved', root=
     return lifecycle
 
 
+def observe_recovery_proof(p):
+    # This entrypoint has no publication/start/selection path. It is used by
+    # external reconciliation after a lost supervisor, never by module.execute.
+    proof=p['proof'];candidate=p['candidate']
+    phase='reserved' if p.get('require_candidate') else 'preflight'
+    lifecycle=verify(proof,p['operation_id'],p['scope_sha256'],p['manifest_sha256'],candidate,phase)
+    path=UNIT.parent/'ultra-ansible-controller.service.d/90-retained-primary.conf'
+    context = recovery_context(p['recovery_request_sha256'],p['operation_id'],candidate,p['manifest_sha256'],read_only=True) if os.path.lexists(path) else None
+    observed=live_identity(context,context is not None and not p.get('require_candidate'))
+    selected=all(observed[k]==candidate[k] for k in ('directory','installer_sha256','runtime_sha256','unit_sha256'))
+    need(selected or observed==proof['rollback'])
+    if lifecycle==proof['source_lifecycle']:
+        need(observed==proof['rollback'])
+    if p.get('require_candidate'):
+        need(selected);sealed_candidate(candidate)
+    return {'verified':True,'lifecycle':lifecycle}
+
+
+def open_recovery_controller(p, context):
+    need(context is not None and p['proof'] and intent_present(p['proof']))
+    lifecycle = verify(p['proof'],p['operation_id'],p['scope_sha256'],p['manifest_sha256'],p['candidate'],'before')
+    need(lifecycle == {'id':p['operation_id'],'phase':'applying'} and CURRENT.is_symlink()
+         and os.readlink(CURRENT) == p['candidate']['directory'])
+    observed = identity(p['candidate']['directory'],regular(UNIT,limit=65536))
+    need(all(observed[key] == p['candidate'][key] for key in ('installer_sha256','runtime_sha256','unit_sha256')))
+    sealed_candidate(p['candidate'])
+    output = subprocess.run(['systemctl','show','--property=ActiveState,MainPID,ControlPID','ultra-ansible-controller.service'],
+                            check=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=5).stdout.decode()
+    values = dict(line.split('=',1) for line in output.splitlines())
+    need(values['ActiveState'] in ('inactive','failed') and values['MainPID'] == values['ControlPID'] == '0')
+    auth = ROOT / ('recovery-controller-' + context['request_sha256'] + '.json')
+    raw = json.dumps(recovery_authorization(context),sort_keys=True,separators=(',',':')).encode()
+    if os.path.lexists(auth):
+        need(json.loads(regular(auth,True,4096)) == recovery_authorization(context))
+    else:
+        fd = os.open(auth,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'wb') as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
+        fd=os.open(ROOT,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+    path=UNIT.parent/'ultra-ansible-controller.service.d/90-retained-primary.conf'
+    content=('[Unit]\nRefuseManualStart=no\nConditionPathExists='+str(auth)+'\n').encode()
+    need(regular(path,limit=4096) in (recovery_blocked().encode(),content))
+    fd,name=tempfile.mkstemp(prefix='.recovery-controller-',dir=path.parent)
+    try:
+        os.fchmod(fd,0o644)
+        with os.fdopen(fd,'wb') as stream:stream.write(content);stream.flush();os.fsync(stream.fileno())
+        os.replace(name,path);fd=os.open(path.parent,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+    finally:
+        if os.path.lexists(name):os.unlink(name)
+    return p['proof']
+
+
+def prepared_tools_inventory(request, preparation_sha):
+    """Derive the live tools predecessor from the manifest-authenticated archive.
+
+    The original app manifest is deliberately not used for this prepared-only
+    identity. No claimed subset of a stored inventory may hide member drift.
+    """
+    release = Path(request['tools_release_directory'])
+    raw = regular(release / 'release-manifest.json', limit=1048576)
+    need(digest(raw) == request['tools_manifest_sha256'])
+    manifest = json.loads(raw)
+    assets = [asset for asset in manifest['assets'] if asset['name'] == 'ultra-recovery.tar.gz']
+    need(len(assets) == 1)
+    archive = regular(release / 'ultra-recovery.tar.gz', limit=32*1024*1024)
+    need(len(archive) == assets[0]['size'] and digest(archive) == assets[0]['sha256'])
+    expected = {}; hashes = {}; seen = set(); total = 0
+    with tarfile.open(fileobj=io.BytesIO(archive), mode='r:gz') as stream:
+        for member in stream:
+            need(member.isfile() and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)',member.name)
+                 and member.name not in seen and len(seen)<64 and 0<=member.size<=4*1024*1024)
+            seen.add(member.name); total += member.size; need(total<=32*1024*1024)
+            data = stream.extractfile(member).read(member.size+1); need(len(data)==member.size)
+            if member.name.startswith('test_'): continue
+            checksum = digest(data); hashes[member.name] = checksum
+            expected['/opt/ultra-recovery/'+member.name] = checksum
+            if not member.name.endswith('.py'):
+                expected['/etc/systemd/system/'+member.name] = checksum
+    need(all(name in hashes for name in ['recovery.py','db_connection.py','reconcile.py','monitor.py','heartbeat.py',
+                                        'ultra-recovery-backup.service','ultra-recovery-backup.timer']))
+    suspension = json.loads(regular('/etc/ultra-recovery/preparation-suspension.json', True, 1048576))
+    need(suspension.get('protocol') == 'ultra-recovery-preparation-suspension-v1'
+         and suspension.get('request_sha256') == preparation_sha
+         and suspension.get('tools_manifest_sha256') == request['tools_manifest_sha256']
+         and suspension.get('active_inventory') == expected)
+    for path, checksum in expected.items(): need(digest(regular(path)) == checksum)
+    return hashes
+
+
+def prepared_schedules_restored(request, preparation_sha):
+    path = Path('/etc/ultra-recovery/preparation-schedules-restored.json')
+    if not os.path.lexists(path):
+        return False
+    restored = json.loads(regular(path, True, 65536))
+    raw = regular('/etc/ultra-recovery/preparation-suspension.json', True, 1048576)
+    suspension = json.loads(raw)
+    need(restored == {'protocol':'ultra-recovery-preparation-schedules-restored-v1',
+         'request_sha256':preparation_sha,'suspension_sha256':digest(raw)}
+         and suspension.get('request_sha256') == preparation_sha
+         and suspension.get('tools_manifest_sha256') == request['tools_manifest_sha256']
+         and bool(suspension.get('active_inventory')))
+    for path, checksum in suspension['active_inventory'].items():
+        need(path.startswith(('/opt/ultra-recovery/','/etc/systemd/system/')) and digest(regular(path)) == checksum)
+    for name in ['ultra-recovery-reconcile.service','ultra-recovery-reconcile.timer']:
+        need(not os.path.lexists(UNIT.parent / (name + '.d') / '90-retained-primary.conf'))
+    for name in ['ultra-recovery-backup.service','ultra-recovery-reconcile.service']:
+        need(digest(regular(UNIT.parent / (name + '.d') / '95-deployment-background.conf')) == suspension['background_gate_sha256'])
+    return True
+
+
+def prepared_policy(p):
+    """Authenticate the post-handoff exception from existing protected records.
+
+    A claimed policy never falls back to ordinary rollback authorization.
+    This does not authorize opening or starting a retained controller.
+    """
+    policy = p.get('prepared_policy', {})
+    if not policy:
+        return False
+    need(isinstance(policy, dict) and set(policy) == {'policy','envelope_sha256','preparation_sha256','handoff_sha256',
+         'enforcement_sha256','operation_id','source_id','scope_sha256','plan_sha256','inventory_sha256',
+         'manifest_sha256','baseline_manifest_sha256','candidate'} and policy.get('policy') == 'retain-prepared-candidate'
+         and not p.get('recovery_request_sha256'))
+    operations = ROOT / 'deploy-operations'
+    current = json.loads(regular(operations / 'current.json', True, 4096))
+    envelope_sha = current.get('request_sha256', '')
+    need(current.get('schema') == 1 and SHA.fullmatch(envelope_sha)
+         and policy.get('envelope_sha256') == envelope_sha)
+    directory = operations / envelope_sha
+    raw = regular(directory / 'request.json', True, 1048576)
+    need(digest(raw) == envelope_sha)
+    envelope = json.loads(raw)
+    state = json.loads(regular(directory / 'state.json', True, 4096))
+    need(envelope.get('schema') == 2 and state.get('request_sha256') == envelope_sha
+         and state.get('state') == 'running' and state.get('stage') == 'upgrade'
+         and any(line.endswith(':/system.slice/ultra-deploy-' + envelope_sha + '.service')
+                 for line in Path('/proc/self/cgroup').read_text().splitlines()))
+    request = envelope['preparation']
+    state_dir = Path(request['state_directory'])
+    raw = regular(state_dir / 'request.json', True, 1048576)
+    need(json.loads(raw) == request and digest(raw) == policy.get('preparation_sha256')
+         and request.get('protocol') == 'ultra-recovery-preparation-request-v1')
+    for field, checksum in [('config_path','config_sha256'),('upgrade_config_path','upgrade_config_sha256'),
+                            ('baseline_manifest_path','baseline_manifest_sha256'),('known_hosts_path','known_hosts_sha256')]:
+        need(digest(regular(request[field])) == request[checksum])
+    need(digest(regular(Path(request['tools_release_directory']) / 'release-manifest.json')) == request['tools_manifest_sha256'])
+    need(request['tools_manifest_sha256'] == p['manifest_sha256'] == policy.get('manifest_sha256')
+         and request['baseline_manifest_sha256'] == policy.get('baseline_manifest_sha256'))
+    admission = {'protocol':'ultra-recovery-preparation-admission-v1','phase':'sealed',
+                 'fence_sha256':request['retained_fence_sha256'],'config_sha256':request['config_sha256'],
+                 'baseline_manifest_sha256':request['baseline_manifest_sha256']}
+    need(json.loads(regular(ROOT / 'recovery-preparation-admission.json', True, 4096)) == admission
+         and json.loads(regular(ROOT / 'retained-primary-admission.json', True, 4096)) ==
+         {'protocol':'retained-primary-admission-v1','binding_sha256':request['retained_fence_sha256']}
+         and not os.path.lexists(ROOT / 'retained-primary-admission-open'))
+    prepared_tools_inventory(request, policy['preparation_sha256'])
+    if not prepared_schedules_restored(request, policy['preparation_sha256']):
+        for name in ['ultra-recovery-reconcile.service','ultra-recovery-reconcile.timer']:
+            need(regular(UNIT.parent / (name + '.d') / '90-retained-primary.conf', limit=4096).decode() == recovery_blocked())
+    raw = regular(state_dir / 'broker-handoff.json', True, 1048576)
+    need(digest(raw) == policy.get('handoff_sha256'))
+    terminal = json.loads(raw)
+    descriptor = json.loads(regular(state_dir / 'broker-preflight.json', True, 1048576))
+    need(terminal.get('protocol') == 'ultra-recovery-broker-handoff-v1' and terminal.get('verified') is True
+         and terminal.get('request_sha256') == policy['preparation_sha256'] and terminal.get('preflight') == descriptor
+         and descriptor.get('protocol') == 'ultra-recovery-broker-preflight-v1'
+         and descriptor.get('request_sha256') == policy['preparation_sha256'])
+    for key in ['operation_id','source_id','scope_sha256','plan_sha256','inventory_sha256','enforcement_sha256']:
+        need(descriptor.get(key) == policy.get(key))
+    need(policy['operation_id'] == p['operation_id'] and policy['scope_sha256'] == p['scope_sha256']
+         and policy.get('candidate') == p['candidate'] and descriptor['source_id'] == p['proof']['source_lifecycle']['id'])
+    planned = Path(descriptor['directory'])
+    need(planned.parent == ROOT and digest(regular(planned / 'operator-plan.json', True)) == policy['plan_sha256']
+         and digest(regular(planned / 'recovery-upgrade-inventory.json', True)) == policy['inventory_sha256'])
+    raw = regular(planned / 'controller-enforcement.json', True, 1048576)
+    need(digest(raw) == policy['enforcement_sha256'] and json.loads(raw) == p['proof'])
+    job = state_dir / 'ansible-broker-handoff'
+    receipt_raw = regular(job / 'receipt.json', True, 1048576)
+    receipt = json.loads(receipt_raw)
+    job_raw = regular(job / 'job.json', True, 1048576); metadata = json.loads(job_raw)
+    request_raw = regular(job / 'request.json', True, 1048576)
+    complete = json.loads(regular(job / 'execution-completion.json', True, 1048576))
+    need(receipt.get('state') == 'succeeded' and receipt.get('result',{}).get('verified') is True
+         and receipt['result'].get('request_sha256') == policy['preparation_sha256']
+         and metadata.get('operation') == 'handoff-recovery-controller'
+         and metadata.get('request_sha256') == receipt.get('request_sha256') == digest(request_raw)
+         and metadata.get('binary_sha256') == receipt.get('binary_sha256')
+         and complete.get('outcome') == 'succeeded' and complete.get('local_cleanup') is True
+         and complete.get('receipt_sha256') == digest(receipt_raw)
+         and complete.get('fence',{}).get('job_directory') == str(job)
+         and complete['fence'].get('job_sha256') == digest(job_raw)
+         and complete['fence'].get('request_sha256') == digest(request_raw)
+         and complete['fence'].get('operation') == 'handoff-recovery-controller')
+    ack_name = terminal.get('acknowledgement','')
+    need(Path(ack_name).name == ack_name and ack_name.startswith('broker-handoff-ack-'))
+    ack = json.loads(regular(state_dir / ack_name, True, 65536))
+    need(ack.get('protocol') == 'ultra-recovery-broker-ack-v1' and ack.get('request_sha256') == policy['preparation_sha256']
+         and ack.get('operation_id') == p['operation_id'] and ack.get('scope_sha256') == p['scope_sha256'])
+    # Rechecking the exact instance prevents a new broker from inheriting an old ack.
+    out = subprocess.run(['systemctl','show','--property=MainPID','ultra-ansible-controller.service'],
+                         check=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=5).stdout.decode().strip()
+    pid = out.removeprefix('MainPID=')
+    need(pid.isdigit() and int(pid) > 1)
+    proc = Path('/proc') / pid
+    instance = {'pid':pid,'start_time':(proc/'stat').read_text().rsplit(')',1)[1].split()[19],
+                'installer_sha256':digest((proc/'exe').read_bytes()),'unit_sha256':digest(regular(UNIT,limit=65536))}
+    need(ack.get('instance') == instance)
+    live = live_identity()
+    need(all(live[key] == p['candidate'][key] for key in ('directory','installer_sha256','runtime_sha256','unit_sha256')))
+    sealed_candidate(p['candidate'])
+    latest = subprocess.run(['systemctl','show','--property=MainPID','ultra-ansible-controller.service'],
+                            check=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=5).stdout.decode().strip()
+    need(latest == out and (proc/'stat').read_text().rsplit(')',1)[1].split()[19] == instance['start_time'])
+    return True
+
+
 def execute(p):
     need(canonical_id(p['operation_id']) and SHA.fullmatch(p['scope_sha256'])
          and SHA.fullmatch(p['manifest_sha256']))
     validate_candidate(p['candidate'])
+    retain_prepared = prepared_policy(p)
+    recovery = recovery_context(p.get('recovery_request_sha256',''),p['operation_id'],p['candidate'],p['manifest_sha256'])
+    if p['action'] == 'open-recovery':
+        return open_recovery_controller(p,recovery)
     if p['action'] == 'probe' and not p['proof']:
         raw, ledger, _, lifecycle = snapshot(ROOT)
         need(lifecycle['phase'] == 'released')
-        rollback = live_identity()
+        rollback = live_identity(recovery, recovery is not None)
         candidate_raw = regular(p['candidate_executable'])
         need(digest(candidate_raw) == p['candidate']['installer_sha256'])
         probe(p['candidate_executable'], ledger)
         probe(Path(rollback['directory']) / 'ultra-install', ledger)
-        need(snapshot(ROOT)[0] == raw and snapshot(ROOT)[3] == lifecycle and live_identity() == rollback
+        need(snapshot(ROOT)[0] == raw and snapshot(ROOT)[3] == lifecycle and live_identity(recovery, recovery is not None) == rollback
              and digest(regular(p['candidate_executable'])) == p['candidate']['installer_sha256'])
         proof = {'schema': 1, 'operation_id': p['operation_id'], 'scope_sha256': p['scope_sha256'],
                  'manifest_sha256': p['manifest_sha256'], 'machine_sha256': machine_sha(),
@@ -385,18 +700,21 @@ def execute(p):
         proof = p['proof']
         lifecycle = verify(proof, p['operation_id'], p['scope_sha256'], p['manifest_sha256'],
                            p['candidate'], p['phase'])
+        if retain_prepared:
+            need(lifecycle == {'id':p['operation_id'],'phase':'applying'} or
+                 lifecycle == {'id':p['operation_id'],'phase':'checking'})
         old = proof['rollback']
         selected = p['candidate']
         if p['phase'] == 'staged':
-            transition_identity(proof)
+            transition_identity(proof, recovery)
             need(CURRENT.is_symlink() and os.readlink(CURRENT) == selected['directory'])
             live = identity(selected['directory'], regular(UNIT, limit=65536))
         else:
             try:
-                live = live_identity()
+                live = live_identity(recovery, recovery is not None and p['phase'] in ('preflight','reserved','before'))
             except ValueError:
                 need(p['phase'] in ('preflight', 'reserved', 'before'))
-                transition_identity(proof)
+                transition_identity(proof, recovery)
                 live = None
         old_selected = live == old
         candidate_selected = live is not None and all(live[key] == selected[key] for key in ('directory', 'installer_sha256', 'runtime_sha256', 'unit_sha256'))
@@ -414,7 +732,7 @@ def execute(p):
         if p['phase'] in ('candidate', 'completion'):
             need(candidate_selected)
         elif p['phase'] == 'rollback':
-            need(old_selected)
+            need(candidate_selected if retain_prepared else old_selected)
         elif p['phase'] == 'preflight' and lifecycle['phase'] == 'released':
             need(old_selected)
         if p['phase'] == 'before':
@@ -429,12 +747,14 @@ def execute(p):
 def main():
     from ansible.module_utils.basic import AnsibleModule
     module = AnsibleModule(argument_spec={
-        'action': {'type': 'str', 'choices': ['probe', 'verify'], 'required': True},
+        'action': {'type': 'str', 'choices': ['probe', 'verify', 'open-recovery'], 'required': True},
         'operation_id': {'type': 'str', 'required': True},
         'scope_sha256': {'type': 'str', 'required': True},
         'manifest_sha256': {'type': 'str', 'required': True},
         'candidate': {'type': 'dict', 'required': True},
         'candidate_executable': {'type': 'path'},
+        'recovery_request_sha256': {'type':'str','default':''},
+        'prepared_policy': {'type':'dict','default':{}},
         'proof': {'type': 'dict', 'default': {}},
         'phase': {'type': 'str', 'choices': ['preflight', 'reserved', 'before', 'staged', 'candidate', 'rollback', 'completion'], 'default': 'reserved'},
     }, supports_check_mode=True)
@@ -445,6 +765,7 @@ def main():
         existed = publishing and intent_present(p['proof'])
         proof = execute(module.params)
         module.exit_json(changed=publishing and not existed, verified=True, proof=proof,
+                         prepared_schedules_suspended=bool(p.get('prepared_policy')) and not os.path.lexists('/etc/ultra-recovery/preparation-schedules-restored.json'),
                          completion_ready=p['phase'] == 'completion' and snapshot(ROOT)[3] ==
                          {'id': p['operation_id'], 'phase': 'released'})
     except (OSError, ValueError, KeyError, TypeError, configparser.Error, subprocess.SubprocessError):

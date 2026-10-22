@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Transferred lifecycle durability/readiness guarantees, using synthetic inputs."""
 import hashlib
+import base64
 import importlib.util
 import json
 import os
@@ -134,8 +135,14 @@ class Contracts(unittest.TestCase):
         inspect = next(task for task in tasks if task.get('register') == 'release_inspection')
         self.assertTrue(inspect['no_log'])
         self.assertFalse(inspect['changed_when'])
-        self.assertEqual(inspect['ansible.builtin.script']['cmd'],
-                         '{{ playbook_dir }}/../roles/release/files/state.py')
+        env = Environment()
+        env.filters['to_json'] = lambda value, **kwargs: json.dumps(value)
+        env.filters['b64encode'] = lambda value: base64.b64encode(value.encode()).decode()
+        template = env.from_string(inspect['ansible.builtin.script']['cmd'])
+        self.assertEqual(template.render(playbook_dir='/bundle'), '/bundle/../roles/release/files/state.py')
+        policy = {'prepared_policy': {'bound': True}}
+        rendered = template.render(playbook_dir='/bundle', ultra_controller_enforcement_spec=policy)
+        self.assertEqual(json.loads(base64.b64decode(rendered.split(' --prepared-policy ')[1])), policy)
         # Reconcile needs the shared lock held across this strict inspection.
         # Retrying stale readiness here prevents the producer from refreshing it.
         for key in ('retries', 'delay', 'until', 'failed_when', 'ignore_errors', 'async'):
@@ -226,8 +233,8 @@ class Contracts(unittest.TestCase):
         direct = yaml.safe_load((root / 'roles/release/tasks/rollback-controller.yml').read_text())
         self.assertEqual(direct[0]['ansible.builtin.import_tasks'], 'controller-rollback-preflight.yml')
         self.assertNotIn('when', direct[0])
-        self.assertIn('ansible.builtin.copy', direct[2]['block'][1])
-        self.assertIn('ansible.builtin.systemd_service', direct[2]['block'][3])
+        self.assertIn('ansible.builtin.copy', direct[1]['block'][1]['block'][1])
+        self.assertIn('ansible.builtin.systemd_service', direct[1]['block'][1]['block'][3])
 
     def test_controller_rollback_rejects_retirement_state_and_preserves_absent_state(self):
         path = ROOT / 'deploy/ansible/roles/release/tasks/controller-rollback-preflight.yml'
@@ -298,12 +305,21 @@ class Contracts(unittest.TestCase):
         module = guard_tasks[-1]['block'][-1]['ultra_controller_enforcement']
         self.assertEqual(module['phase'], "{{ ultra_controller_enforcement_phase | default('before') }}")
         phases = []
-        for task in yaml.safe_load((path / 'controller.yml').read_text()):
+        controller = yaml.safe_load((path / 'controller.yml').read_text())
+        for task in [controller[0], *controller[1]['block']]:
             if task.get('ansible.builtin.import_tasks') == 'controller-rollback-preflight.yml':
                 phases.append(task.get('vars', {}).get('ultra_controller_enforcement_phase', 'before'))
         self.assertEqual(phases, ['before', 'staged', 'candidate'])
         rollback = yaml.safe_load((path / 'rollback-controller.yml').read_text())
-        self.assertEqual(rollback[-1]['block'][4]['vars']['ultra_controller_enforcement_phase'], 'rollback')
+        self.assertEqual(rollback[1]['block'][1]['block'][4]['vars']['ultra_controller_enforcement_phase'], 'rollback')
+        for tasks in (controller, rollback):
+            self.assertEqual(tasks[1]['when'], 'ultra_prepared_controller_policy | default({}) | length == 0')
+            self.assertEqual(tasks[2]['when'], 'ultra_prepared_controller_policy | default({}) | length > 0')
+            prepared = tasks[2]['block']
+            self.assertEqual(prepared[0]['ansible.builtin.include_tasks'], 'controller-rollback-preflight.yml')
+            self.assertEqual(prepared[1]['ansible.builtin.include_tasks'], 'backup-identity.yml')
+            self.assertEqual(prepared[1]['vars']['release_backup_controller_directory'], '{{ ultra_controller_directory }}')
+            self.assertEqual(len(prepared), 2, 'prepared broker must never be reinstalled, selected or restarted')
 
     def test_atomic_receipt_syncs_data_then_rename_then_directory(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -335,7 +351,7 @@ class Contracts(unittest.TestCase):
             output = b'25:25' if 'schema_migrations' in argv[-1] else b't'
             return types.SimpleNamespace(stdout=output, returncode=0)
         fake_reconcile = types.SimpleNamespace(desired_nodes=lambda *args: ([], set()), discover=lambda *args: [])
-        with patch.dict(sys.modules, {'reconcile': fake_reconcile}), patch.object(state, 'read', side_effect=lambda path: values[Path(path).name]), patch.object(state.time, 'time', return_value=110), patch.object(state.subprocess, 'run', side_effect=result), patch.object(state, 'database_query', side_effect=lambda database, query: result(['psql', query])), patch.object(sys, 'argv', ['state.py', '--status', '--expected', digest, '--not-before', '100']):
+        with patch.dict(sys.modules, {'reconcile': fake_reconcile}), patch.object(state, 'recovery_installation_reason', return_value=None), patch.object(state, 'read', side_effect=lambda path: values[Path(path).name]), patch.object(state.time, 'time', return_value=110), patch.object(state.subprocess, 'run', side_effect=result), patch.object(state, 'database_query', side_effect=lambda database, query: result(['psql', query])), patch.object(sys, 'argv', ['state.py', '--status', '--expected', digest, '--not-before', '100']):
             with self.assertRaisesRegex(ValueError, 'post_activation_evidence_required'):
                 state.main()
             values['recovery-reconcile-status.json']['updated_at'] = 101
@@ -345,6 +361,22 @@ class Contracts(unittest.TestCase):
             with patch('builtins.print') as output:
                 state.main()
             self.assertTrue(json.loads(output.call_args.args[0])['ready'])
+
+    def test_prepared_pause_never_bypasses_fresh_independent_readiness(self):
+        self.assertFalse(state.prepared_suspension(None))
+        with self.assertRaisesRegex(ValueError, 'prepared_suspension_unverified'):
+            state.prepared_suspension('invalid')
+        fake_reconcile=types.SimpleNamespace(desired_nodes=lambda *a:([],set()),discover=lambda *a:[])
+        with patch.dict(sys.modules, {'reconcile':fake_reconcile}), \
+             patch.object(state,'prepared_suspension',return_value=(True,{})), \
+             patch.object(state,'read',return_value={}), \
+             patch.object(state,'readiness',side_effect=ValueError('fresh_independent_backup_required')) as readiness, \
+             patch.object(state.subprocess,'run') as process, \
+             patch.object(sys,'argv',['state.py','--prepared-policy','bound']):
+            with self.assertRaisesRegex(ValueError,'fresh_independent_backup_required'):
+                state.main()
+            readiness.assert_called_once()
+            process.assert_not_called()
 
     def test_legacy_upgrade_preserves_barrier_and_defers_all_payload_acceptance(self):
         root = ROOT / 'deploy/ansible'
@@ -604,12 +636,34 @@ class Contracts(unittest.TestCase):
             checkpoint['configuration'] = {'changed': 'hash'}
             self.assertTrue(invoke()['failed'])
 
+    def test_only_authenticated_prepared_suspension_defers_sealed_timers(self):
+        tasks=yaml.safe_load((ROOT/'deploy/ansible/playbooks/resume-automation.yml').read_text())[0]['tasks']
+        timers=next(task for task in tasks if task['name']=='Resume owned timers')
+        env=NativeEnvironment();env.filters['bool']=bool
+        for suspended,expected in [(True,False),(False,True)]:
+            values={'ultra_legacy_bridge_maintenance':False,'release_resume_prepared':{'prepared_schedules_suspended':suspended}}
+            admitted=all(env.from_string('{{ '+condition+' }}').render(**values) for condition in timers['when'])
+            self.assertEqual(admitted,expected)
+        auth=next(task for task in tasks if task.get('register')=='release_resume_prepared')
+        self.assertEqual(auth['ultra_controller_enforcement']['action'],'verify')
+        self.assertEqual(auth['ultra_controller_enforcement']['phase'],'candidate')
+        self.assertIn('prepared_policy',auth['ultra_controller_enforcement'])
+        retention=yaml.safe_load((ROOT/'deploy/ansible/roles/release/tasks/retention.yml').read_text())
+        identity=next(task for task in retention if 'independent tools identity fallback' in task['name'])
+        self.assertEqual(identity['loop'],'{{ ultra_recovery_tools_identity_files | default([]) }}')
+        self.assertIn('tools-previous/identity-',identity['ansible.builtin.set_fact']['release_retention_expected'])
+
     def test_legacy_cleanup_restores_all_saved_states_before_receipt(self):
         tasks = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/resume-automation.yml').read_text())[0]['tasks']
         restore = next(task for task in tasks if 'ultra_upgrade_maintenance' in task)
         self.assertIn('restore-accepted', restore['ultra_upgrade_maintenance']['phase'])
         self.assertIn('restore-services', restore['ultra_upgrade_maintenance']['phase'])
-        self.assertIn('not (ultra_legacy_bridge_maintenance', tasks[0]['when'])
+        timers=next(task for task in tasks if task['name']=='Resume owned timers')
+        self.assertTrue(any('not (ultra_legacy_bridge_maintenance' in condition for condition in timers['when']))
+        self.assertTrue(any('prepared_schedules_suspended' in condition for condition in timers['when']))
+        auth=next(task for task in tasks if task.get('register')=='release_resume_prepared')
+        self.assertEqual(auth['ultra_controller_enforcement']['phase'],'candidate')
+        self.assertIn('prepared_policy',auth['ultra_controller_enforcement'])
         rollback = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/rollback.yml').read_text())[2]['tasks']
         restore = next(task for task in rollback if 'ultra_upgrade_maintenance' in task)
         self.assertEqual(restore['ultra_upgrade_maintenance']['phase'], 'restore-services')
@@ -869,6 +923,33 @@ class Contracts(unittest.TestCase):
             self.assertEqual(maintenance.checked_recovery_tool([digest], tool, owner_uid=os.geteuid()), digest)
             with self.assertRaises(ValueError):
                 maintenance.checked_recovery_tool(['0' * 64], tool, owner_uid=os.geteuid())
+
+
+class RecoveryInstallationDiagnostics(unittest.TestCase):
+    def test_absent_partial_complete_and_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertEqual(state.recovery_installation_reason(root), 'recovery_not_installed')
+            names = ('opt/ultra-recovery/release-manifest.json',
+                     'opt/ultra-recovery/recovery.py', 'opt/ultra-recovery/reconcile.py',
+                     'etc/ultra-recovery/backup.json', 'etc/ultra-recovery/reconcile.json')
+            for name in names:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('private contents must not be read')
+                if name != names[-1]:
+                    self.assertEqual(state.recovery_installation_reason(root), 'recovery_installation_incomplete')
+            self.assertIsNone(state.recovery_installation_reason(root))
+            path.unlink()
+            path.symlink_to(root / names[0])
+            self.assertEqual(state.recovery_installation_reason(root), 'recovery_installation_incomplete')
+
+    def test_status_classifies_missing_installation_before_discovery(self):
+        with patch.object(state, 'recovery_installation_reason', return_value='recovery_not_installed'), \
+                patch.object(sys, 'argv', ['state.py', '--status']), \
+                patch.object(state, 'database_query', side_effect=AssertionError('database queried')):
+            with self.assertRaisesRegex(ValueError, '^recovery_not_installed$'):
+                state.main()
 
 
 if __name__ == '__main__':

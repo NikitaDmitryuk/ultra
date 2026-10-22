@@ -11,6 +11,13 @@ import (
 // The recovery's original manifest and sealed request select the only relay
 // image safe to restart against the independently observed retained schema.
 func retainedReconcileRelayIdentity(in retainedPrimaryRebuildInput, manifestPath string) (string, string, error) {
+	return retainedReconcileRelayIdentitySnapshot(in, manifestPath, filepath.Dir(manifestPath), in.Directory)
+}
+
+func retainedReconcileRelayIdentitySnapshot(
+	in retainedPrimaryRebuildInput,
+	manifestPath, originalRelease, physicalEvidence string,
+) (string, string, error) {
 	fail := errors.New("retained_reconcile_relay_identity_invalid")
 	raw, err := readRebuildInput(manifestPath, false)
 	if err != nil || digestSHA256(raw) != in.ManifestSHA256 {
@@ -29,9 +36,11 @@ func retainedReconcileRelayIdentity(in retainedPrimaryRebuildInput, manifestPath
 	source, _ := bridge["ultra_relay_source"].(string)
 	sha, _ := bridge["ultra_relay_sha256"].(string)
 	name := filepath.Base(source)
+	physicalSource := filepath.Join(filepath.Dir(manifestPath), name)
 	if (name != "ultra-relay-linux-amd64" && name != "ultra-relay-linux-arm64") || !rebuildSHA.MatchString(sha) ||
-		source != filepath.Join(filepath.Dir(manifestPath), name) ||
-		rebuildNoSymlinkAncestors(source) != nil {
+		!filepath.IsAbs(originalRelease) || filepath.Clean(originalRelease) != originalRelease ||
+		source != filepath.Join(originalRelease, name) ||
+		rebuildNoSymlinkAncestors(physicalSource) != nil {
 		return "", "", fail
 	}
 	seen := map[string]bool{}
@@ -42,11 +51,11 @@ func retainedReconcileRelayIdentity(in retainedPrimaryRebuildInput, manifestPath
 		}
 		seen[asset.Name] = true
 		if asset.Name == name {
-			info, e := os.Lstat(source)
+			info, e := os.Lstat(physicalSource)
 			if e != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 || info.Size() != asset.Size || asset.SHA != sha {
 				return "", "", fail
 			}
-			sum, e := sourceSHA(source)
+			sum, e := sourceSHA(physicalSource)
 			if e != nil || sum != sha {
 				return "", "", fail
 			}
@@ -56,7 +65,7 @@ func retainedReconcileRelayIdentity(in retainedPrimaryRebuildInput, manifestPath
 	if !matched {
 		return "", "", fail
 	}
-	unit, err := readRebuildInput(filepath.Join(in.Directory, "execute/bundle/roles/relay/templates/ultra-relay.service.j2"), true)
+	unit, err := readRebuildInput(filepath.Join(physicalEvidence, "execute/bundle/roles/relay/templates/ultra-relay.service.j2"), true)
 	if err != nil || strings.Count(string(unit), "ExecStart=") != 1 ||
 		!strings.Contains(
 			string(unit),

@@ -1,0 +1,43 @@
+---
+- name: Inspect the current and retained tools identity bytes
+  ansible.builtin.stat:
+    path: "{{ item.destination }}"
+    checksum_algorithm: sha256
+    follow: false
+  loop: "{{ ultra_recovery_tools_identity_files | default([]) }}"
+  register: release_tools_identity_active
+- name: Require the exact inspected or target tools identity
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isreg | default(false) and not item.stat.islnk | default(false) and item.stat.uid == 0 and item.stat.mode == '0600')
+      - not item.stat.exists or item.stat.checksum in [item.item.previous_sha256, item.item.sha256]
+      - item.stat.exists or item.item.previous_sha256 == ''
+  loop: "{{ release_tools_identity_active.results }}"
+- name: Inspect each immutable tools identity fallback
+  ansible.builtin.stat:
+    path: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/tools-previous/identity-{{ item.name }}"
+    checksum_algorithm: sha256
+    follow: false
+  loop: "{{ ultra_recovery_tools_identity_files | default([]) }}"
+  register: release_tools_identity_fallback
+- name: Require exact tools identity fallback before changing live pointers
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isreg | default(false) and not item.stat.islnk | default(false) and item.stat.uid == 0 and item.stat.mode == '0600' and item.stat.checksum == item.item.previous_sha256)
+      - item.item.previous_sha256 == '' or item.item.previous_sha256 == item.item.sha256 or release_tools_identity_active.results[ansible_loop.index0].stat.checksum != item.item.sha256 or item.stat.exists
+  loop: "{{ release_tools_identity_fallback.results }}"
+  loop_control:
+    extended: true
+- name: Preserve the actual tools predecessor identity once
+  ansible.builtin.copy:
+    src: "{{ item.item.destination }}"
+    dest: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/tools-previous/identity-{{ item.item.name }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0600'
+    force: false
+  loop: "{{ release_tools_identity_active.results }}"
+  when:
+    - item.stat.exists
+    - item.stat.checksum == item.item.previous_sha256

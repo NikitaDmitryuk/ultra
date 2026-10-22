@@ -125,7 +125,7 @@ if action=='rollback' and (root/'recover-pre-state.py').exists():
 result=pathlib.Path(variables['ultra_result_file'])
 result.write_text(json.dumps({'verified':not (root/('unverified-'+action)).exists()}));result.chmod(0o600)
 `
-	if err = os.WriteFile(stub, []byte(source), 0700); err != nil {
+	if err = os.WriteFile(stub, withNormalAnsibleFailure(source), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("ULTRA_INSTALL_STATE_DIR", filepath.Join(root, "state"))

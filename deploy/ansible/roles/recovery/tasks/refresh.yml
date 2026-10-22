@@ -26,6 +26,18 @@
     mode: "{{ item.mode }}"
   loop: "{{ ultra_recovery_files | default(recovery_managed_files) }}"
   register: recovery_files
+- name: Keep verified unit source bytes in the canonical reconciliation bundle
+  ansible.builtin.copy:
+    src: "{{ item.destination }}"
+    dest: "/opt/ultra-recovery/{{ item.destination | basename }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ ultra_recovery_files | default(recovery_managed_files) }}"
+  when:
+    - inventory_hostname in groups['bridge']
+    - item.destination is match('^/etc/systemd/system/')
 - name: Reload changed recovery units only
   ansible.builtin.systemd_service:
     daemon_reload: true

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Root recovery reconciliation for already-owned, ready exits. No provisioning or migrations."""
 import argparse
+import importlib.util
 import contextlib
 import fcntl
 import hashlib
@@ -497,15 +498,21 @@ def ansible_apply(config, node, variables):
     atomic_json(directory / 'inventory.json', inventory)
     atomic_json(directory / 'variables.json', variables)
     executable = config.get('installer_binary', '/usr/local/bin/ultra-install')
+    if config.get('bundle_dir') == '/opt/ultra-recovery':
+        require_canonical_dispatcher(config)
+        import live_tools
+        live_tools.verify()
+    arguments = [executable, 'ansible-run', '--operation', 'reconcile',
+                 '--inventory', str(directory / 'inventory.json'), '--variables', str(directory / 'variables.json'), '--state-dir', str(attempt)]
+    if config.get('ansible_executable'):
+        if config.get('installer_binary') != '/opt/ultra-ansible/current/ultra-install' or config['ansible_executable'] != '/opt/ultra-ansible/current/venv/bin/ansible-playbook':
+            raise ValueError('recovery_tools_dispatcher_unverified')
+        arguments += ['--executable', config['ansible_executable']]
     process = None
     started_ns = time.time_ns()
     _deferring_budget = True
     try:
-        process = subprocess.Popen([executable, 'ansible-run', '--operation', 'reconcile',
-                             '--inventory', str(directory / 'inventory.json'),
-                             '--variables', str(directory / 'variables.json'),
-                             '--state-dir', str(attempt)],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = subprocess.Popen(arguments, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         _deferring_budget = False
         if _budget_expired:
             raise ReconcileBlocked('reconcile_budget_exhausted', attempt.name)
@@ -563,6 +570,9 @@ def ansible_apply(config, node, variables):
 
 def install(config, node, monitor=None, extra=None):
     base = Path(config['bundle_dir'])
+    if config['bundle_dir'] == '/opt/ultra-recovery':
+        import live_tools
+        live_tools.verify()
     directory = Path(config['state_dir']) / 'ansible-files'
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
     files = []
@@ -1095,13 +1105,105 @@ def reconcile(config):
             raise ValueError('reconciliation unavailable') from None
 
 
+def require_canonical_dispatcher(config):
+    if (config.get('bundle_dir') != '/opt/ultra-recovery'
+            or config.get('installer_binary') != '/opt/ultra-ansible/current/ultra-install'
+            or config.get('ansible_executable') != '/opt/ultra-ansible/current/venv/bin/ansible-playbook'):
+        raise ValueError('recovery_tools_dispatcher_unverified')
+
+
+def deployment_context(identity, terminal, started, watermark):
+    import live_tools
+    need = lambda condition: None if condition else (_ for _ in ()).throw(ValueError('deployment_reconcile_unverified'))
+    root = Path('/var/lib/ultra-ansible/deploy-operations')
+    pointer = json.loads(live_tools.regular(root / 'current.json', True))
+    need(pointer == {'schema':1, 'request_sha256':identity} and re.fullmatch('[a-f0-9]{64}',identity))
+    operation = root / identity
+    raw = live_tools.regular(operation / 'request.json', True)
+    need(hashlib.sha256(raw).hexdigest() == identity)
+    envelope = json.loads(raw)
+    state = json.loads(live_tools.regular(operation / 'state.json', True))
+    need(envelope.get('schema') in (1,2) and (envelope['schema']==2)==('preparation' in envelope)
+         and state.get('request_sha256') == identity and state.get('state') == 'running' and state.get('stage') in ('upgrade','status')
+         and any(line.endswith(':/system.slice/ultra-deploy-'+identity+'.service') for line in Path('/proc/self/cgroup').read_text().splitlines()))
+    target = Path(terminal)
+    need(target.parent == operation and re.fullmatch(r'post-activation-[1-9][0-9]{0,3}\.json',target.name))
+    intent = json.loads(live_tools.regular(target.with_name(target.stem+'.started.json'), True))
+    need(intent == {'request_sha256':identity,'watermark':watermark,'started_at':started} and started>0 and watermark>0 and not os.path.lexists(target))
+    args = envelope['args'];need(args[0]=='operator-upgrade')
+    flags = {};index=1
+    while index<len(args):
+        key=args[index];need(key not in flags)
+        if key in ('--lifecycle','--forward-only'):flags[key]=True;index+=1
+        else:need(index+1<len(args));flags[key]=args[index+1];index+=2
+    candidate = live_tools.regular('/opt/ultra-recovery/release-manifest.json',True)
+    need(hashlib.sha256(candidate).hexdigest()==flags['--manifest-sha256'])
+    need(hashlib.sha256(live_tools.regular(flags['--config'],True)).hexdigest()==flags['--config-sha256'])
+    tools = live_tools.verify()
+    need(tools['manifest_sha256']==flags['--manifest-sha256'])
+    return envelope
+
+
+def reconcile_deployment(config, identity, terminal, started, watermark):
+    envelope = deployment_context(identity,terminal,started,watermark)
+    require_canonical_dispatcher(config)
+    # Readiness timestamps are whole seconds. Even a very fast capture must
+    # be strictly later than the successful activation watermark.
+    remaining=watermark+1-time.time()
+    if remaining>2:
+        raise ValueError('deployment_activation_clock_unverified')
+    if remaining>0:
+        time.sleep(remaining)
+    # A prior still-fresh backup cannot establish postactivation evidence.
+    create(read_config(config['backup_config']))
+    reconcile(config)
+    preparation = envelope.get('preparation')
+    if preparation:
+        import live_tools
+        snapshot = Path('/opt/ultra-ansible/recovery-tools') / preparation['tools_manifest_sha256']
+        original = live_tools.regular(Path(preparation['state_directory'])/'request.json',True)
+        preparation_sha = hashlib.sha256(original).hexdigest()
+        if json.loads(original)!=preparation:
+            raise ValueError('deployment_reconcile_preparation_changed')
+        identity_doc = json.loads(live_tools.regular('/etc/ultra-recovery/recovery-tools.json',True))
+        source = snapshot / 'prepare.py';raw=live_tools.regular(source,True)
+        if identity_doc.get('request_sha256')!=preparation_sha or hashlib.sha256(raw).hexdigest()!=identity_doc['inventory']['prepare.py']:
+            raise ValueError('deployment_reconcile_preparation_changed')
+        spec=importlib.util.spec_from_file_location('deployment_schedule_restore',source)
+        helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
+        helper.restore_schedules({'request_sha256':preparation_sha})
+    value={'protocol':'ultra-deploy-post-activation-v1','request_sha256':identity,
+           'phase':'post_activation_reconciled','started_at':started,'verified':True}
+    target=Path(terminal)
+    fd,name=tempfile.mkstemp(prefix='.post-activation-',dir=target.parent)
+    try:
+        with os.fdopen(fd,'wb') as stream:
+            stream.write(json.dumps(value,sort_keys=True).encode());stream.flush();os.fsync(stream.fileno())
+        os.link(name,target)
+        directory=os.open(target.parent,os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+    finally:
+        os.unlink(name)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
+    parser.add_argument('--deployment')
+    parser.add_argument('--terminal')
+    parser.add_argument('--started-at',type=int)
+    parser.add_argument('--not-before',type=int)
     args = parser.parse_args()
     os.umask(0o077)
     try:
-        reconcile(read_config(args.config))
+        config=read_config(args.config)
+        if args.deployment:
+            reconcile_deployment(config,args.deployment,args.terminal,args.started_at,args.not_before)
+        elif any(value is not None for value in (args.terminal,args.started_at,args.not_before)):
+            raise ValueError('deployment_reconcile_unverified')
+        else:
+            reconcile(config)
     except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError):
         raise SystemExit('recovery reconciliation unavailable') from None
 

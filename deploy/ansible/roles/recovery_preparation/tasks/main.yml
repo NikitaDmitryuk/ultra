@@ -1,0 +1,143 @@
+---
+- name: Require proof-bound recovery-only staging paths
+  ansible.builtin.assert:
+    that:
+      - ultra_preparation_snapshot is ansible.builtin.match('^/opt/ultra-ansible/recovery-tools/[a-f0-9]{64}$')
+      - ultra_preparation_remote_directory is ansible.builtin.match('^/var/lib/ultra-ansible/recovery-preparation/[a-f0-9]{64}$')
+- name: Require existing fleet identity without generating or rotating it
+  ansible.builtin.stat:
+    path: /etc/ultra-fleet/id_ed25519
+    follow: false
+  register: recovery_fleet_identity
+- name: Fail closed when original installed fleet identity is unavailable
+  ansible.builtin.assert:
+    that:
+      - recovery_fleet_identity.stat.isreg | default(false)
+      - not recovery_fleet_identity.stat.islnk | default(false)
+    fail_msg: recovery_preparation_original_fleet_identity_required
+- name: Observe whether an old backup timer is installed
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=LoadState, --value, ultra-recovery-backup.timer]
+  register: recovery_preparation_backup_timer
+  changed_when: false
+- name: Pause only the backup timer without interrupting a running backup
+  ansible.builtin.systemd_service:
+    name: ultra-recovery-backup.timer
+    state: stopped
+  when: recovery_preparation_backup_timer.stdout | trim != 'not-found'
+- name: Inspect installed application baseline without installing applications
+  ansible.builtin.stat:
+    path: "{{ item.key }}"
+    checksum_algorithm: sha256
+    follow: false
+  loop: "{{ ultra_preparation_app_binaries | dict2items }}"
+  register: recovery_preparation_app_identity
+- name: Require every installed application to remain the original release
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - not item.stat.islnk | default(false)
+      - item.stat.checksum == item.item.value
+  loop: "{{ recovery_preparation_app_identity.results }}"
+- name: Require an idle existing backup service before changing its configuration
+  ultra_recovery_idle:
+    service: ultra-recovery-backup.service
+  register: recovery_preparation_backup_idle
+  changed_when: false
+  until: recovery_preparation_backup_idle.idle | default(false) | bool
+  retries: 20
+  delay: 3
+- name: Inspect all staging ancestors without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop: "{{ ultra_preparation_ancestors }}"
+  register: recovery_preparation_ancestors
+- name: Reject foreign writable or linked staging ancestors
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isdir | default(false) and not item.stat.islnk | default(false) and item.stat.uid == 0 and item.stat.mode in ['0700', '0755', '0750'])
+  loop: "{{ recovery_preparation_ancestors.results }}"
+- name: Create recovery-only private directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ '0755' if item in ['/usr/local/libexec', '/etc/systemd/system'] else '0700' }}"
+  loop: "{{ ultra_preparation_directories }}"
+- name: Inspect each existing baseline or immutable tools destination
+  ansible.builtin.stat:
+    path: "{{ item.destination }}"
+    follow: false
+    checksum_algorithm: sha256
+  loop: "{{ ultra_preparation_files }}"
+  register: recovery_preparation_existing
+  no_log: true
+- name: Reject replacement of existing baseline or immutable tools identity
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isreg | default(false) and not item.stat.islnk | default(false) and item.stat.checksum in (item.item.allowed_sha256 | default([item.item.sha256])))
+  loop: "{{ recovery_preparation_existing.results }}"
+  no_log: true
+- name: Verify local release sources before copying them
+  ansible.builtin.stat:
+    path: "{{ item.source }}"
+    checksum_algorithm: sha256
+    follow: false
+  delegate_to: localhost
+  become: false
+  loop: "{{ ultra_preparation_files }}"
+  register: recovery_preparation_sources
+  no_log: true
+- name: Require exact bound source hashes
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - not item.stat.islnk | default(false)
+      - item.stat.checksum == item.item.sha256
+  loop: "{{ recovery_preparation_sources.results }}"
+  no_log: true
+- name: Copy verified original baselines and separately identified recovery tools
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ item.destination }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop: "{{ ultra_preparation_files }}"
+  no_log: true
+- name: Verify every staged destination before executing any preparation helper
+  ansible.builtin.stat:
+    path: "{{ item.destination }}"
+    checksum_algorithm: sha256
+    follow: false
+  loop: "{{ ultra_preparation_files }}"
+  register: recovery_preparation_copied
+  no_log: true
+- name: Require exact staged baseline and tools hashes
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - not item.stat.islnk | default(false)
+      - item.stat.checksum == item.item.sha256
+  loop: "{{ recovery_preparation_copied.results }}"
+  no_log: true
+- name: Stage candidate runtime files through the normal controller renderer
+  ansible.builtin.include_role:
+    name: controller
+    tasks_from: runtime-files
+  vars:
+    ultra_controller_stage_only: true
+- name: Build recovery-only configuration using the normal guarded renderer
+  ansible.builtin.command:
+    argv: [python3, "{{ ultra_preparation_snapshot }}/prepare.py", stage]
+    stdin: "{{ ultra_preparation_payload | to_json(preprocess_unsafe=False) }}"
+  no_log: true
+  register: recovery_preparation_rendered
+- name: Return proof-bound staging evidence without application release acceptance
+  ansible.builtin.copy:
+    content: "{{ recovery_preparation_rendered.stdout }}"
+    dest: "{{ ultra_result_file }}"
+    mode: "0600"
+  delegate_to: localhost

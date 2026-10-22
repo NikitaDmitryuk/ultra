@@ -362,6 +362,53 @@ func (g *lifecycleGate) attach(id string) Response {
 	return Response{State: "applying", leaseOutputs: []*os.File{duplicate}}
 }
 
+// observe returns only an already-held same-operation OFD. Unlike attach it
+// never acquires a lock, promotes checking, or writes lifecycle metadata.
+func (g *lifecycleGate) observe(id string) Response {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	admission, err := recoveryAdmission(g.directory)
+	if err != nil {
+		return Response{Code: "recovery_fenced"}
+	}
+	defer admission()
+	if g.retired[id] {
+		return Response{Code: "lifecycle_retired"}
+	}
+	if !jobID.MatchString(id) || g.current.ID != id || (g.current.Phase != "applying" && g.current.Phase != "checking") {
+		return Response{Code: "lifecycle_not_owned"}
+	}
+	if g.lock == nil {
+		return Response{Code: "lifecycle_lock_unavailable"}
+	}
+	duplicate, err := retainInfrastructureLock(g.lock, filepath.Join(g.directory, "infrastructure.lock"))
+	if err != nil {
+		return Response{Code: "lifecycle_observation_failed"}
+	}
+	return Response{State: g.current.Phase, leaseOutputs: []*os.File{duplicate}}
+}
+
+// ObserveLifecycleOperationLock authenticates an existing broker lease without
+// creating a mutation-capable context or changing lifecycle phase.
+func (c Client) ObserveLifecycleOperationLock(ctx context.Context, directory, id string) error {
+	if !jobID.MatchString(id) {
+		return errors.New("invalid operation id")
+	}
+	response, err := c.exchange(ctx, Message{Action: "lease-observe", ID: id})
+	if err != nil {
+		return err
+	}
+	defer closeInputs(response.leaseOutputs)
+	if (response.State != "applying" && response.State != "checking") || len(response.leaseOutputs) != 1 {
+		return errors.New("invalid lifecycle observation state")
+	}
+	file, err := retainInfrastructureLock(response.leaseOutputs[0], filepath.Join(directory, "infrastructure.lock"))
+	if err != nil {
+		return errors.New("untrusted lifecycle descriptor")
+	}
+	return file.Close()
+}
+
 // WithLifecycleOperationLock resumes a bridge-local lease retained by the
 // broker. The operator must separately serialize its immutable attempt journal.
 func (c Client) WithLifecycleOperationLock(ctx context.Context, directory, id string) (context.Context, func(), error) {

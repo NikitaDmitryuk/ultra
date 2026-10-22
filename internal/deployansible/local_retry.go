@@ -83,7 +83,9 @@ func RetryFrozenBootstrap(ctx context.Context, directory, python, executable str
 
 func bootstrapRetryOperation(operation string) bool {
 	switch operation {
-	case "inspect-bootstrap",
+	case "stage-recovery-preparation",
+		"initialize-recovery-monitor",
+		"inspect-bootstrap",
 		"bootstrap",
 		"bootstrap-recovery-inspect",
 		"bootstrap-recovery-tools",
@@ -101,7 +103,7 @@ func bootstrapRetryOperation(operation string) bool {
 }
 
 func readRetryPrivate(path string) ([]byte, error) {
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -124,10 +126,188 @@ func retryAttempt(value any) (int, error) {
 	return int(n), nil
 }
 
+// A retry authorization is published while the old generation still matches its
+// exact callback/cleanup proof, before advancing job.json. A crash after the
+// rename can therefore finish that metadata transaction without adopting an
+// uncertain new execution. It never authorizes replay of a dispatched generation.
+type localRetryPreparation struct {
+	Schema           int            `json:"schema"`
+	OriginalJob      []byte         `json:"original_job"`
+	NextJobSHA256    string         `json:"next_job_sha256"`
+	ReceiptSHA256    string         `json:"receipt_sha256"`
+	CompletionSHA256 string         `json:"completion_sha256"`
+	Fence            ExecutionFence `json:"fence"`
+}
+
+var syncLocalRetryDirectory = syncDirectory
+
+func retryPreparationPath(directory string, attempt int) string {
+	return filepath.Join(directory, fmt.Sprintf("retry-preparation-%d.json", attempt))
+}
+
+func prepareRetryExecution(directory string) error {
+	if !completedExecution(directory) {
+		return ErrExecutionFenced
+	}
+	jobRaw, err := readRetryPrivate(filepath.Join(directory, "job.json"))
+	if err != nil {
+		return err
+	}
+	receiptRaw, err := readRetryPrivate(filepath.Join(directory, "receipt.json"))
+	if err != nil {
+		return err
+	}
+	completeRaw, err := readRetryPrivate(filepath.Join(directory, "execution-completion.json"))
+	if err != nil {
+		return err
+	}
+	var complete struct {
+		Fence ExecutionFence `json:"fence"`
+	}
+	var receipt struct {
+		State string `json:"state"`
+	}
+	if json.Unmarshal(receiptRaw, &receipt) != nil {
+		return ErrExecutionFenced
+	}
+	if receipt.State != "failed" {
+		return nil
+	}
+	var job map[string]any
+	if json.Unmarshal(completeRaw, &complete) != nil || json.Unmarshal(jobRaw, &job) != nil {
+		return ErrExecutionFenced
+	}
+	old, err := retryAttempt(job["attempt"])
+	if err != nil || old != complete.Fence.Attempt {
+		return ErrExecutionFenced
+	}
+	job["attempt"] = old + 1
+	next, err := json.Marshal(job)
+	if err != nil {
+		return err
+	}
+	intent := localRetryPreparation{1, jobRaw, executionHash(next), executionHash(receiptRaw), executionHash(completeRaw), complete.Fence}
+	raw, err := json.Marshal(intent)
+	if err != nil {
+		return err
+	}
+	path := retryPreparationPath(directory, old)
+	if saved, e := readRetryPrivate(path); e == nil {
+		if !bytes.Equal(saved, raw) {
+			return ErrExecutionFenced
+		}
+		return nil
+	} else if !os.IsNotExist(e) {
+		return e
+	}
+	file, err := os.CreateTemp(directory, ".retry-preparation-")
+	if err != nil {
+		return err
+	}
+	name := file.Name()
+	defer os.Remove(name) //nolint:errcheck
+	if _, err = file.Write(raw); err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err = os.Link(name, path); err != nil {
+		return err
+	}
+	if err = os.Remove(name); err != nil {
+		return err
+	}
+	return syncDirectory(directory)
+}
+
+func preparedRetryExecution(directory string) bool {
+	jobRaw, err := readRetryPrivate(filepath.Join(directory, "job.json"))
+	if err != nil {
+		return false
+	}
+	receiptRaw, err := readRetryPrivate(filepath.Join(directory, "receipt.json"))
+	if err != nil {
+		return false
+	}
+	var job, receipt map[string]any
+	if json.Unmarshal(jobRaw, &job) != nil || json.Unmarshal(receiptRaw, &receipt) != nil || receipt["state"] != "failed" {
+		return false
+	}
+	old, err := retryAttempt(receipt["attempt"])
+	if err != nil {
+		return false
+	}
+	current, err := retryAttempt(job["attempt"])
+	if err != nil || current != old+1 {
+		return false
+	}
+	raw, err := readRetryPrivate(retryPreparationPath(directory, old))
+	if err != nil {
+		return false
+	}
+	var intent localRetryPreparation
+	if json.Unmarshal(raw, &intent) != nil || intent.Schema != 1 || intent.NextJobSHA256 != executionHash(jobRaw) ||
+		intent.ReceiptSHA256 != executionHash(receiptRaw) ||
+		intent.Fence.Attempt != old ||
+		executionHash(intent.OriginalJob) != intent.Fence.JobSHA256 {
+		return false
+	}
+	complete, err := readRetryPrivate(filepath.Join(directory, "execution-completion.json"))
+	if err != nil || executionHash(complete) != intent.CompletionSHA256 {
+		return false
+	}
+	var saved struct {
+		Fence          ExecutionFence `json:"fence"`
+		ReceiptSHA256  string         `json:"receipt_sha256"`
+		LocalCleanup   bool           `json:"local_cleanup"`
+		Outcome        string         `json:"outcome"`
+		TerminalSHA256 string         `json:"terminal_sha256"`
+	}
+	if json.Unmarshal(complete, &saved) != nil || saved.Fence != intent.Fence || saved.ReceiptSHA256 != intent.ReceiptSHA256 ||
+		!saved.LocalCleanup {
+		return false
+	}
+	if saved.Outcome != "failed" || saved.TerminalSHA256 == "" {
+		return false
+	}
+	terminal, err := readRetryPrivate(filepath.Join(directory, "execution-terminal-"+intent.Fence.Generation+".json"))
+	if err != nil || executionHash(terminal) != saved.TerminalSHA256 {
+		return false
+	}
+	// Recompute every current bundle/request binding, substituting ONLY the
+	// write-ahead original job bytes and attempt already authenticated above.
+	binding, err := executionBinding(directory)
+	if err != nil {
+		return false
+	}
+	binding.JobSHA256 = executionHash(intent.OriginalJob)
+	binding.Attempt = old
+	binding.Generation = intent.Fence.Generation
+	if binding != intent.Fence {
+		return false
+	}
+	var original map[string]any
+	if json.Unmarshal(intent.OriginalJob, &original) != nil {
+		return false
+	}
+	original["attempt"] = old + 1
+	next, err := json.Marshal(original)
+	if err != nil || !bytes.Equal(next, jobRaw) {
+		return false
+	}
+	archived, err := readRetryPrivate(filepath.Join(directory, "history", fmt.Sprintf("attempt-%d.json", old)))
+	return err == nil && bytes.Equal(archived, receiptRaw)
+}
+
 // Caller holds the matching infrastructure lease. Archive, advance, and remove
 // are deliberately ordered: every interruption retains a recoverable failure.
 func retryFailedLocalAttempt(directory string) error {
-	return retryFailedLocalAttemptWith(directory, syncDirectory)
+	return retryFailedLocalAttemptWith(directory, syncLocalRetryDirectory)
 }
 
 func retryFailedLocalAttemptWith(directory string, syncDir func(string) error) error {

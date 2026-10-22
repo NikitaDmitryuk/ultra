@@ -225,6 +225,14 @@ func retainedReconcileUniqueJSON(raw []byte) error {
 }
 
 func loadRetainedReconcile(directory, config, manifest, journal string) (retainedPrimaryRebuildInput, retainedReconcileEvidence, error) {
+	return loadRetainedReconcileSnapshot(directory, config, manifest, journal, directory)
+}
+
+// The logical directory remains part of the authenticated historical request.
+// Relocation changes only where its bytes are read, never their binding.
+func loadRetainedReconcileSnapshot(
+	directory, config, manifest, journal, logicalDirectory string,
+) (retainedPrimaryRebuildInput, retainedReconcileEvidence, error) {
 	var in retainedPrimaryRebuildInput
 	e := retainedReconcileEvidence{Protocol: "ultra-retained-primary-reconcile-v1", Artifacts: map[string]string{}}
 	read := func(name, path string, private bool) ([]byte, error) {
@@ -241,7 +249,10 @@ func loadRetainedReconcile(directory, config, manifest, journal string) (retaine
 	if err = decodeRetainedReconcile(raw, &in); err != nil {
 		return in, e, err
 	}
-	if in.Directory != directory || validateRetainedPrimaryRebuild(in) != nil {
+	physical := in
+	physical.Directory = directory
+	if !filepath.IsAbs(logicalDirectory) || filepath.Clean(logicalDirectory) != logicalDirectory ||
+		in.Directory != logicalDirectory || validateRetainedPrimaryRebuild(physical) != nil {
 		return in, e, errors.New("retained_reconcile_prepared_invalid")
 	}
 	for _, a := range []struct {
@@ -339,20 +350,20 @@ func loadRetainedReconcile(directory, config, manifest, journal string) (retaine
 	if err != nil {
 		return in, e, err
 	}
-	if err = verifyRetainedReconcileBundle(filepath.Join(execute, "bundle"), seal, e.Artifacts["request"]); err != nil {
+	if err = verifyRetainedReconcileBundleSnapshot(filepath.Join(execute, "bundle"), filepath.Join(logicalDirectory, "execute", "bundle"), seal, e.Artifacts["request"]); err != nil {
 		return in, e, err
 	}
 	return in, e, nil
 }
 
-func verifyRetainedReconcileBundle(root string, raw []byte, request string) error {
+func verifyRetainedReconcileBundleSnapshot(root, logicalRoot string, raw []byte, request string) error {
 	var seal struct {
 		Schema    int               `json:"schema"`
 		Path      string            `json:"path"`
 		Identity  map[string]string `json:"identity"`
 		Inventory map[string][]any  `json:"inventory"`
 	}
-	if retainedReconcileUniqueJSON(raw) != nil || json.Unmarshal(raw, &seal) != nil || seal.Schema != 1 || seal.Path != root ||
+	if retainedReconcileUniqueJSON(raw) != nil || json.Unmarshal(raw, &seal) != nil || seal.Schema != 1 || seal.Path != logicalRoot ||
 		seal.Identity["request_sha256"] != request ||
 		len(seal.Inventory) == 0 {
 		return errors.New("retained_reconcile_bundle_seal_invalid")

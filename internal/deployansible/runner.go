@@ -222,7 +222,7 @@ func writeJSON(path string, value any) error {
 	return writePrivate(path, data)
 }
 
-// Execute can be repeated after interruption. A failed attempt requires a new job.
+// Execute never redispatches an uncertain mutating attempt.
 // Process output is suppressed because Ansible errors can include private inputs.
 func Execute(ctx context.Context, directory, python, executable string) (Result, error) {
 	if !filepath.IsAbs(directory) || !filepath.IsAbs(python) || !filepath.IsAbs(executable) {
@@ -233,6 +233,10 @@ func Execute(ctx context.Context, directory, python, executable string) (Result,
 		return Result{}, fenceErr
 	}
 	defer releaseRecovery()
+	fence, fenceErr := beginExecution(directory)
+	if fenceErr != nil {
+		return Result{}, fenceErr
+	}
 	bundle := filepath.Join(directory, "bundle")
 	command := exec.CommandContext(
 		ctx,
@@ -247,7 +251,15 @@ func Execute(ctx context.Context, directory, python, executable string) (Result,
 	)
 	isolateCommand(command)
 	command.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
-	err := command.Run()
+	if fence != nil {
+		command.Env = append(command.Env, "ULTRA_EXECUTION_GENERATION="+fence.Generation)
+	}
+	err := runContainedController(ctx, command, fence)
+	if fence != nil {
+		if closeErr := reconcileControllerExecution(*fence, err); closeErr != nil && err == nil {
+			return Result{}, closeErr
+		}
+	}
 	data, readErr := os.ReadFile(filepath.Join(directory, "receipt.json"))
 	var receipt Receipt
 	if readErr != nil || json.Unmarshal(data, &receipt) != nil {

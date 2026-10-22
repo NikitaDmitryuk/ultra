@@ -52,7 +52,7 @@ with (root/'operations').open('a') as stream: stream.write(operation+':'+str(var
 if variables.get('ultra_lifecycle_phase')=='released' and (root/'fail-release').exists(): sys.exit(1)
 result=pathlib.Path(variables['ultra_result_file']); result.write_text(json.dumps({'verified':True})); result.chmod(0o600)
 `
-			if err = os.WriteFile(stub, []byte(source), 0700); err != nil {
+			if err = os.WriteFile(stub, withNormalAnsibleFailure(source), 0700); err != nil {
 				t.Fatal(err)
 			}
 			ctx, release, err := deployansible.WithOperationLock(context.Background(), root)

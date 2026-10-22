@@ -483,6 +483,36 @@ scripts/test-load-pg-recovery.py --container <test PostgreSQL16 container>`.
 
 ## Проверки исполнителя Ansible
 
+`scripts/test-ansible-controller-fence.py` входит в `make test-ansible` и проверяет
+общий запрет dispatch после SIGKILL и потери receipt, включая другую job directory.
+Go-регрессии в `execution_fence_test.go` проверяют generation-bound completion и
+явный retry после обычного task failure. Отсутствующий receipt завершённой попытки
+не разрешает создать новое поколение той же попытки; обычное чтение failed-кеша
+также не создаёт новое поколение. Installer fixtures используют настоящий controller
+и неизменённый bundle через тестовый interpreter wrapper: правка controller после
+вычисления digest проверяла бы другой исполняемый комплект.
+
+`TestDeployOperationResubmitAfterStatusCrashPreservesCompletedUpgrade` проверяет
+границу между долговечным завершением upgrade и финальным status. Эти unit-тесты
+не подтверждают работу настоящего systemd или переживание потери SSH; для этого
+нужен отдельный стенд с настоящим service manager.
+
+Recovery-снимок переносит только полный проверяемый bundle, исходный release,
+привязанные config/journals и публичные SSH pins; subscription keys и приватные
+операторские ключи не входят в перенос. Исторические JSON и их логические пути
+не переписываются: меняется физический корень чтения. Импорт сохраняет режимы
+исходных файлов, включая immutable release `0400/0500`, и публикует каталог
+только после проверки хешей, inventory и retained-primary evidence.
+`TestRecoveryInputsOriginalSnapshotRoundTrip` дополнительно проверяет защищённый
+экспорт при явно заданном `ULTRA_TEST_RECOVERY_INPUT_ARCHIVE`; без него этот
+тест пропускается. Это проверка переноса и повторного импорта, без SSH и БД.
+
+`Client.ObserveLifecycleOperationLock` проверяет только уже удерживаемый same-ID
+OFD. В отличие от attach он не захватывает свободный lock и не переводит
+`checking` в `applying`. Тесты `TestLifecycleObservation*` проверяют неизменность
+журнала и lock, проверку дескриптора и его закрытие; для транспортной части нужны
+доступные Unix-сокеты и SCM_RIGHTS.
+
 Offline runtime архив нормализует владельца в tar-заголовках до root, а роль
 контроллера явно задаёт root при распаковке. Иначе UID сборочной машины переносится
 на сервер и проверка владения отклоняет комплект с `retention_foreign_tree`.

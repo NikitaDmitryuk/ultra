@@ -600,7 +600,7 @@ result=job/'result.json'
 result.write_text(json.dumps({'verified':True,'phase':action}))
 result.chmod(0o600)
 `
-			if err := os.WriteFile(executable, []byte(script), 0700); err != nil {
+			if err := os.WriteFile(executable, withNormalAnsibleFailure(script), 0700); err != nil {
 				t.Fatal(err)
 			}
 			marker, _ := json.Marshal(map[string]int{"version": 1, "generation": 3, "attempt": 2})

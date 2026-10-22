@@ -131,7 +131,7 @@ result=job/'result.json'
 result.write_text(json.dumps({'verified':True,'activated_at':n*100}))
 result.chmod(0o600)
 `
-	if err = os.WriteFile(executable, []byte(source), 0700); err != nil {
+	if err = os.WriteFile(executable, withNormalAnsibleFailure(source), 0700); err != nil {
 		t.Fatal(err)
 	}
 	inventory := map[string]any{}
@@ -241,7 +241,7 @@ func TestUpgradeInspectionFailureReleasesGateAndRetries(t *testing.T) {
 						var archive bytes.Buffer
 						zipped := gzip.NewWriter(&archive)
 						writer := tar.NewWriter(zipped)
-						for _, tool := range []string{"recovery.py", "db_connection.py", "monitor.py", "heartbeat.py", "reconcile.py", "ultra-recovery-backup.service", "ultra-recovery-backup.timer"} {
+						for _, tool := range []string{"recovery.py", "db_connection.py", "monitor.py", "heartbeat.py", "reconcile.py", "live_tools.py", "ultra-recovery-backup.service", "ultra-recovery-backup.timer"} {
 							if err := writer.WriteHeader(&tar.Header{Name: tool, Mode: 0600, Size: 4}); err != nil {
 								t.Fatal(err)
 							}
@@ -604,7 +604,7 @@ output=job/'result.json'
 output.write_text(json.dumps(result))
 output.chmod(0o600)
 `
-				if err := os.WriteFile(executable, []byte(source), 0700); err != nil {
+				if err := os.WriteFile(executable, withNormalAnsibleFailure(source), 0700); err != nil {
 					t.Fatal(err)
 				}
 				firstErr := ansibleUpgrade(ctx, p, release, directory, python, executable, false)

@@ -1,0 +1,18 @@
+---
+- name: Initialize monitoring with the verified original relay only
+  hosts: bridge
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Initialize approved service principal and preserve heartbeat identity
+      ansible.builtin.command:
+        argv: [python3, "{{ ultra_preparation_snapshot }}/prepare.py", monitor]
+        stdin: "{{ ultra_preparation_payload | to_json(preprocess_unsafe=False) }}"
+      no_log: true
+      register: recovery_monitor_result
+    - name: Return only bound terminal initialization evidence
+      ansible.builtin.copy:
+        content: "{{ recovery_monitor_result.stdout }}"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost

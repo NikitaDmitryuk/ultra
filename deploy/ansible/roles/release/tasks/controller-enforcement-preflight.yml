@@ -10,6 +10,7 @@
 - name: Require a regular private floor when present
   ansible.builtin.assert:
     that:
+      - ultra_prepared_controller_policy | default((ultra_controller_enforcement_spec | default({})).get('prepared_policy', {})) | length == 0 or release_enforcement_floor.stat.exists
       - release_enforcement_floor.stat.exists is defined
       - not (release_enforcement_floor.stat.islnk | default(false))
       - not release_enforcement_floor.stat.exists or (release_enforcement_floor.stat.isreg | default(false))
@@ -38,6 +39,8 @@
           {{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[release_enforcement_platform.stdout | trim] }}
     - name: Revalidate a retained operation proof
       ultra_controller_enforcement:
+        recovery_request_sha256: "{{ ultra_recovery_preparation_request_sha256 | default('') }}"
+        prepared_policy: "{{ ultra_controller_enforcement_spec.get('prepared_policy', {}) }}"
         action: verify
         operation_id: "{{ ultra_controller_enforcement_spec.operation_id }}"
         scope_sha256: "{{ ultra_controller_enforcement_spec.scope_sha256 }}"
@@ -67,6 +70,7 @@
             group: root
         - name: Exercise isolated broker enforcement without production jobs
           ultra_controller_enforcement:
+            recovery_request_sha256: "{{ ultra_recovery_preparation_request_sha256 | default('') }}"
             action: probe
             operation_id: "{{ ultra_controller_enforcement_spec.operation_id }}"
             scope_sha256: "{{ ultra_controller_enforcement_spec.scope_sha256 }}"
