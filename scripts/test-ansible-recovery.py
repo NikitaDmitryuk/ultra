@@ -65,7 +65,12 @@ def main():
                          '--executable',str(wrapped_playbook)]
                 ansible_error.unlink(missing_ok=True)
                 result=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=300)
-                receipt=json.loads((job/'receipt.json').read_text())
+                receipt_path=job/'receipt.json'
+                if not receipt_path.is_file():
+                    stderr=result.stderr.decode('utf-8','replace').strip()[-2000:]
+                    playbook_stderr=ansible_error.read_text(errors='replace')[-4000:] if ansible_error.exists() else ''
+                    raise ValueError(f"recovery receiver produced no receipt (exit {result.returncode}); {stderr}; ansible: {playbook_stderr}")
+                receipt=json.loads(receipt_path.read_text())
                 if expect_success and result.returncode:
                     stderr=result.stderr.decode('utf-8','replace').strip()[-2000:]
                     playbook_stderr=ansible_error.read_text(errors='replace')[-4000:] if ansible_error.exists() else ''
