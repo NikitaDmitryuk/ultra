@@ -301,8 +301,13 @@ func (p *Provisioner) reconcileReinstallFirewall(
 	return nil
 }
 
+// The controller owns a durable job and allows Ansible fifteen minutes. The
+// caller must leave time to observe that terminal receipt after SSH readiness.
+const exitSSHReadyTimeout = 5 * time.Minute
+const exitConfigurationTimeout = 16 * time.Minute
+
 func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance cloud.Instance) error {
-	c, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	c, cancel := context.WithTimeout(ctx, exitSSHReadyTimeout+exitConfigurationTimeout)
 	defer cancel()
 	remote, e := p.remote(op, instance)
 	if e != nil {
@@ -346,16 +351,19 @@ func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance
 			return e
 		}
 	}
+	sshReady, stopSSHReady := context.WithTimeout(c, exitSSHReadyTimeout)
+	defer stopSSHReady()
 	for {
-		if _, e = remote.Run(c, "true"); e == nil {
+		if _, e = remote.Run(sshReady, "true"); e == nil {
 			break
 		}
 		select {
-		case <-c.Done():
-			return c.Err()
+		case <-sshReady.Done():
+			return sshReady.Err()
 		case <-time.After(5 * time.Second):
 		}
 	}
+	stopSSHReady()
 	if !op.Reinstall {
 		node, e = p.node(c, op, instance)
 		if e != nil {
@@ -400,7 +408,7 @@ func (p *Provisioner) Install(ctx context.Context, op *cloud.Operation, instance
 	if op.Reinstall {
 		// Dispatch exactly the durably reserved identity, even if an input file
 		// changes between computing its digest and opening submission inputs.
-		result, err = p.Configurer.ConfigureExit(c, op.ReinstallJobID, binary, request)
+		result, err = p.configureExitJob(c, op.ReinstallJobID, binary, request)
 	} else {
 		result, err = p.configureExit(c, op, binary, request)
 	}
@@ -479,7 +487,17 @@ func (p *Provisioner) configureExit(
 	if err != nil {
 		return deployansible.Result{}, err
 	}
-	return p.Configurer.ConfigureExit(ctx, jobID, binary, request)
+	return p.configureExitJob(ctx, jobID, binary, request)
+}
+
+func (p *Provisioner) configureExitJob(
+	ctx context.Context,
+	jobID, binary string,
+	request deployansible.ExitRequest,
+) (deployansible.Result, error) {
+	c, cancel := context.WithTimeout(ctx, exitConfigurationTimeout)
+	defer cancel()
+	return p.Configurer.ConfigureExit(c, jobID, binary, request)
 }
 
 // Purchase identity stays stable; a changed desired configuration needs a new
