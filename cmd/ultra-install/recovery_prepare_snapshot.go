@@ -199,7 +199,7 @@ result=subprocess.run(['/usr/bin/ssh-keygen','-y','-P','','-f',str(root/'id_ed25
 assert result.returncode==0
 actual=result.stdout.strip().split()
 expected=(root/'id_ed25519.pub').read_text().strip().split()
-assert len(actual)==2 and actual[0]=='ssh-ed25519' and expected[:2]==actual
+assert len(actual)>=2 and actual[0]=='ssh-ed25519' and len(expected)>=2 and expected[:2]==actual[:2]
 `
 
 const recoveryPreparationPrimaryProgram = `

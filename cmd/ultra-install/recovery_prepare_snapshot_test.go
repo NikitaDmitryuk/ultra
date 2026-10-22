@@ -3,9 +3,56 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
+
+func TestRecoveryPreparationFleetIdentityAllowsPublicKeyComment(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "ultra-fleet")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, mode := range map[string]os.FileMode{"id_ed25519": 0600, "id_ed25519.pub": 0644} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("fixture"), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keygen := filepath.Join(t.TempDir(), "ssh-keygen")
+	program := strings.ReplaceAll(recoveryPreparationFleetIdentityProgram, "Path('/etc/ultra-fleet')", "Path("+strconv.Quote(root)+")")
+	program = strings.ReplaceAll(program, "'/usr/bin/ssh-keygen'", strconv.Quote(keygen))
+	program = strings.ReplaceAll(program, "for path in [root,*root.parents]:", "for path in [root]:")
+	program = strings.ReplaceAll(program, "info.st_uid==0", "info.st_uid==os.geteuid()")
+	program = strings.ReplaceAll(program, "allowed={0,pwd.getpwnam('ultra-relay').pw_uid}", "allowed={os.geteuid()}")
+	if strings.Contains(program, "Path('/etc/ultra-fleet')") || strings.Contains(program, "info.st_uid==0") {
+		t.Fatal("test fixture did not isolate host-specific checks")
+	}
+	for _, tc := range []struct {
+		name, generated, published string
+		wantSuccess                bool
+	}{
+		{"commented key", "ssh-ed25519 Zml4dHVyZQ== host-comment", "ssh-ed25519 Zml4dHVyZQ== published-comment", true},
+		{"uncommented key", "ssh-ed25519 Zml4dHVyZQ==", "ssh-ed25519 Zml4dHVyZQ==", true},
+		{"different key", "ssh-ed25519 ZGlmZmVyZW50", "ssh-ed25519 Zml4dHVyZQ==", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := []byte(tc.published + "\n")
+			if err := os.WriteFile(filepath.Join(root, "id_ed25519.pub"), pub, 0644); err != nil {
+				t.Fatal(err)
+			}
+			stub := "#!/bin/sh\nprintf '%s\\n' " + strconv.Quote(tc.generated) + "\n"
+			if err := os.WriteFile(keygen, []byte(stub), 0700); err != nil {
+				t.Fatal(err)
+			}
+			err := exec.Command("python3", "-I", "-c", program).Run()
+			if (err == nil) != tc.wantSuccess {
+				t.Fatalf("fleet public key validation success=%v, want %v: %v", err == nil, tc.wantSuccess, err)
+			}
+		})
+	}
+}
 
 func TestRecoveryPreparationRelocationPreservesHistoricalBinding(t *testing.T) {
 	in, original := reconcileFixture(t)
