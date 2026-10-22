@@ -4931,6 +4931,18 @@ class PreparedRecovery(unittest.TestCase):
             self.assertEqual((self.root/'operation.json').read_bytes(),self.old_raw)
             self.assertEqual(self.config.read_bytes(),self.original)
 
+    def test_preparation_import_failure_exposes_only_allowlisted_remote_code(self):
+        for stderr, expected in [
+                (b'deployment operation: recovery_inputs_archive_invalid\n',
+                 'preparation_import_failed: reason=recovery_inputs_archive_invalid exit_code=1'),
+                (b'deployment operation: /private/path: permission denied\n',
+                 'preparation_import_failed: reason=remote_exit exit_code=1'),
+                (b'deployment operation: recovery_inputs_archive_invalid\nsecret-host',
+                 'preparation_import_failed: reason=remote_exit exit_code=1')]:
+            with self.subTest(stderr=stderr):
+                result=SimpleNamespace(returncode=1,stderr=stderr,stderr_truncated=False)
+                self.assertEqual(D.preparation_import_failure(result),expected)
+
     def test_crash_at_pending_publication_prefix_restores_before_reexport(self):
         with self.assertRaises(D.DeployError):self.invoke(runner=lambda *a,**k: (_ for _ in ()).throw(D.DeployError('lost')))
         pending=json.loads((self.root/'operation.json').read_bytes())

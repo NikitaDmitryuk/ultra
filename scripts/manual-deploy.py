@@ -2467,6 +2467,38 @@ def remote_command(transport, commit, version, manifest_sha, config_sha, attempt
 
 STAGING_STDOUT_LIMIT = 16384
 STAGING_STDERR_LIMIT = 4096
+PREPARATION_IMPORT_FAILURE_CODES = frozenset({
+    'recovery_inputs_archive_incomplete',
+    'recovery_inputs_archive_invalid',
+    'recovery_inputs_archive_inventory_changed',
+    'recovery_inputs_descriptor_changed',
+    'recovery_inputs_descriptor_invalid',
+    'recovery_inputs_directory_invalid',
+    'recovery_inputs_existing_changed',
+    'recovery_inputs_existing_unsafe',
+    'recovery_inputs_file_changed',
+    'recovery_inputs_file_invalid',
+    'recovery_inputs_import_arguments_invalid',
+    'recovery_inputs_incomplete',
+    'recovery_inputs_kind_invalid',
+    'recovery_inputs_legacy_journal_changed',
+    'recovery_inputs_manifest_invalid',
+    'recovery_inputs_parent_missing',
+    'recovery_inputs_path_invalid',
+    'recovery_inputs_pins_changed',
+    'recovery_inputs_size_limit',
+})
+
+
+def preparation_import_failure(result):
+    reason = 'remote_exit' if result.returncode != 255 else 'transport_exit'
+    if result.returncode != 255 and not getattr(result, 'stderr_truncated', False):
+        match = re.fullmatch(rb'deployment operation: ([a-z_]+)\n', getattr(result, 'stderr', b'') or b'')
+        if match:
+            candidate = match[1].decode('ascii')
+            if candidate in PREPARATION_IMPORT_FAILURE_CODES:
+                reason = candidate
+    return 'preparation_import_failed: reason=' + reason + ' exit_code=' + str(result.returncode)
 
 
 def run_stage(command, *, cwd, stdin, timeout):
@@ -3484,7 +3516,8 @@ def rollout_prepared_recovery(repo, root, bundle, commit, version, config, sourc
                                                  'preparation-stage', descriptor_sha), cwd=repo, stdin=stream, timeout=300)
             except subprocess.TimeoutExpired:
                 raise DeployError('preparation_import_timeout') from None
-            require(result.returncode == 0 and not getattr(result, 'stdout_truncated', False), 'preparation_import_failed')
+            if result.returncode != 0 or getattr(result, 'stdout_truncated', False):
+                raise DeployError(preparation_import_failure(result))
             imported = json.loads(result.stdout)
             require(set(imported) == {'preparation_file','preparation_sha256'} and
                     imported['preparation_file'] == str(remote_root / 'preparation/preparation.json') and
