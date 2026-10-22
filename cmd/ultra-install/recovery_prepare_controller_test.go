@@ -43,7 +43,9 @@ func managedPreparationFixture(t *testing.T) (recoveryAdmissionFixture, string, 
 		assets = append(assets, map[string]any{"name": name, "size": len(raw), "sha256": digestSHA256(raw)})
 	}
 	manifest := filepath.Join(release, "release-manifest.json")
-	raw, _ := json.Marshal(map[string]any{"schema_version": 1, "version": "v0.0.1", "source_commit": strings.Repeat("0", 39) + "1", "assets": assets})
+	raw, _ := json.Marshal(
+		map[string]any{"schema_version": 1, "version": "v0.0.1", "source_commit": strings.Repeat("0", 39) + "1", "assets": assets},
+	)
 	write(manifest, raw)
 	inventory := map[string]any{}
 	if err := filepath.WalkDir(directory, func(path string, entry os.DirEntry, err error) error {
@@ -72,10 +74,25 @@ func managedPreparationFixture(t *testing.T) (recoveryAdmissionFixture, string, 
 		t.Fatal(err)
 	}
 	receipt := filepath.Join(f.state, "retention", digestSHA256([]byte(directory))+".json")
-	raw, _ = json.Marshal(map[string]any{"schema": 1, "path": directory, "identity": map[string]string{"ultra-install": digestSHA256(binary), "runtime.sha256": digestSHA256([]byte(runtimeSHA + "\n"))}, "inventory": inventory})
+	raw, _ = json.Marshal(
+		map[string]any{
+			"schema": 1,
+			"path":   directory,
+			"identity": map[string]string{
+				"ultra-install":  digestSHA256(binary),
+				"runtime.sha256": digestSHA256([]byte(runtimeSHA + "\n")),
+			},
+			"inventory": inventory,
+		},
+	)
 	write(receipt, raw)
 	process := filepath.Join(f.proc, "4242")
-	argv := []string{filepath.Join(directory, "ultra-install"), "ansible-controller", "--executable", filepath.Join(directory, "venv/bin/ansible-playbook")}
+	argv := []string{
+		filepath.Join(directory, "ultra-install"),
+		"ansible-controller",
+		"--executable",
+		filepath.Join(directory, "venv/bin/ansible-playbook"),
+	}
 	write(filepath.Join(process, "cmdline"), []byte(strings.Join(argv, "\x00")+"\x00"))
 	if err := os.Symlink(argv[0], filepath.Join(process, "exe")); err != nil {
 		t.Fatal(err)
@@ -86,7 +103,16 @@ func managedPreparationFixture(t *testing.T) (recoveryAdmissionFixture, string, 
 	write(filepath.Join(f.root, "active"), nil)
 	unit := filepath.Join(f.system, "ultra-ansible-controller.service")
 	write(unit, []byte("[Service]\nUser=root\nGroup=root\nKillMode=control-group\nExecStart="+strings.Join(argv, " ")+"\n"))
-	write(filepath.Join(f.root, "properties"), []byte(fmt.Sprintf("Id=ultra-ansible-controller.service\nSubState=running\nFragmentPath=%s\nControlGroup=/system.slice/ultra-ansible-controller.service\nUser=root\nGroup=root\nDropInPaths=%s.d/90-retained-primary.conf\n", unit, unit)))
+	write(
+		filepath.Join(f.root, "properties"),
+		[]byte(
+			fmt.Sprintf(
+				"Id=ultra-ansible-controller.service\nSubState=running\nFragmentPath=%s\nControlGroup=/system.slice/ultra-ansible-controller.service\nUser=root\nGroup=root\nDropInPaths=%s.d/90-retained-primary.conf\n",
+				unit,
+				unit,
+			),
+		),
+	)
 	f.program = strings.ReplaceAll(f.program, "/opt/ultra-ansible", base)
 	f.program = strings.ReplaceAll(f.program, "current.lstat().st_uid==0", "current.lstat().st_uid==os.geteuid()")
 	return f, directory, manifest, receipt
@@ -153,7 +179,12 @@ func TestRecoveryPreparationManagedController(t *testing.T) {
 				_ = os.Remove(receipt)
 				_ = os.Symlink(receipt+".copy", receipt)
 			case "replacement-before-stop":
-				f.program = strings.Replace(f.program, "    with (_fixture_root/'mutations').open", "    if args[1]=='daemon-reload':\n        path=_fixture_root/'proc/4242/stat'\n        path.write_text(path.read_text().replace(' 123',' 124'))\n    with (_fixture_root/'mutations').open", 1)
+				f.program = strings.Replace(
+					f.program,
+					"    with (_fixture_root/'mutations').open",
+					"    if args[1]=='daemon-reload':\n        path=_fixture_root/'proc/4242/stat'\n        path.write_text(path.read_text().replace(' 123',' 124'))\n    with (_fixture_root/'mutations').open",
+					1,
+				)
 			}
 			lease, err := startRecoveryPreparationAdmission(f.command(t, "seal"), "seal")
 			if kind == "valid" {
