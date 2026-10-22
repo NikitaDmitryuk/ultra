@@ -174,6 +174,34 @@ success marker блокируют роли. Candidate migration list долже�
 cluster system ID, database OID, schema и уникальная enabled main route с прежним
 address/port/UUID/pin. PostgreSQL provisioning/import/authorization не выполняются.
 
+### Проверка локальной исполнимости до admission
+
+Execute запускается только от root. До чтения входов, создания `--state-dir` и
+создания любого remote fence команда проверяет, что текущий процесс вообще способен
+диспатчить содержательную операцию: euid 0, root-owned исполняемые
+`/usr/bin/systemctl` и `/usr/bin/systemd-run` без group/world write, рабочий
+`systemctl show --property=Version`, а при существующем `/var/lib/ultra-ansible` —
+приватный root-owned каталог. Это `deployansible.PreflightLocalExecution`, тот же
+guard, который исполняется внутри executor.
+
+Причина обязательности: непроверенный локальный прогон проходил все CLI- и
+SSH-проверки, создавал одноразовый admission на узлах и падал на первом локальном
+guard-е, не оставив receipt. Пустой диагностический triple (`stage="" node=""
+code=""`) в отчёте означал именно это, а не отказ задачи Ansible.
+
+Отказ возвращается как `retained_primary_local_execution_preflight_failed: <code>`
+с одним из идентификаторов `execution_containment_unverified`,
+`execution_containment_unavailable`, `execution_namespace_insecure`. Такой прогон не
+создаёт state-dir, не читает входы и не касается fleet, поэтому повтор после
+исправления окружения не требует reconciliation.
+
+Любой отказ до диспатча executor-а теперь несёт стабильный идентификатор guard-а в
+`Diagnostic{Stage:"dispatch", Node:"local", Code:…}`, а execute печатает
+`retained_primary_execution_failed: stage=… node=… code=…`. Пустой triple больше не
+возможен: `code` либо приходит из guard-а, либо из текста ошибки fence.
+Источник: [containment.go](../internal/deployansible/containment.go),
+[local.go](../internal/deployansible/local.go).
+
 ### Одноразовый admission и остановка после сбоя
 
 Execute сначала read-only проверяет отсутствие
@@ -205,6 +233,42 @@ Vultr create/replica management; для этого после безопасно
 Источники provisioning boundary: [cloud service](../internal/cloud/service.go),
 [controller readiness](../internal/deployansible/service.go),
 [runtime wiring](../cmd/ultra-relay/cloud.go).
+
+### Отказ от недиспатчившейся попытки
+
+Попытка, которая создала marker, но не дошла до executor-а, не reconcilable: и
+`inspect`, и `activate-controller` требуют successful execute. Такой случай
+закрывает `ultra-install retained-primary-reconcile abandon-undispatched` с теми же
+`--state-dir`, `--config`, `--manifest`, `--original-journal` и новым `--receipt`.
+
+Команда доказывает недиспатч, а не предполагает его. Локально проверяются
+приватный `prepared-input.json` и его binding, неизменность исходных config,
+manifest и journal, а также точный состав `execute/`: только `bundle/`,
+`bundle.retention.json`, `job.json` и `request.json`, то есть ровно результат
+подготовки операции. Любой пятый элемент — dispatch claim, receipt или вывод
+executor-а — означает возможную мутацию и даёт
+`retained_abandon_workspace_dispatched`. Удалённо проверяются точные байты marker
+с ожидаемым binding, отсутствие `retained-primary-admission-open`,
+`recovery-fence.json` и `recovery-anchor.json`, побайтовое совпадение трёх
+drop-in-ов, неактивные units и отсутствие executor-процессов.
+
+Допускается только bridge-only попытка, у которой fence сохранённого exit
+отличается от собственного binding: two-host попытка связала retained exit тем же
+binding, и снятие одного bridge-marker-а оставило бы exit закрытым без локальной
+записи. Иначе возвращается `retained_abandon_scope_not_bridge_only`.
+
+Мутация выполняется под теми же локальным operator lock и двумя remote locks, что
+и reconciliation. Marker не удаляется, а переименовывается в
+`retained-primary-admission.abandoned-<sha256>.json`; удаляются только побайтово
+совпадающие drop-in-ы, затем выполняется `daemon-reload`. Новая попытка
+допускается лишь после того, как это доказано на удалённом узле: EOF или
+прерванный оператор никогда не считаются отказом от admission. Локально
+публикуется `ultra-retained-primary-undispatched-v1` с digest-ами артефактов,
+обоих binding-ов и marker-а. Команда не запускает Ansible и не меняет
+`retained-primary-admission-open`.
+
+Источники: [доказательство, remote proof и публикация](../cmd/ultra-install/retained_abandon.go),
+[negative tests](../cmd/ultra-install/retained_abandon_test.go).
 
 ### Reconciliation successful execute и открытие controller
 

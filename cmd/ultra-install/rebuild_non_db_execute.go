@@ -143,10 +143,11 @@ func runRetainedPrimaryRebuild(ctx context.Context, in retainedPrimaryRebuildInp
 	)
 	if err != nil {
 		return fmt.Errorf(
-			"retained_primary_execution_failed: stage=%q node=%q code=%q",
+			"retained_primary_execution_failed: stage=%q node=%q code=%q: %w",
 			result.Diagnostic.Stage,
 			result.Diagnostic.Node,
 			result.Diagnostic.Code,
+			err,
 		)
 	}
 	if result.State != "succeeded" || !rebuildSHA.MatchString(result.RequestSHA256) || !rebuildSHA.MatchString(result.BinarySHA256) {

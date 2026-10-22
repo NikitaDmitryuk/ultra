@@ -225,7 +225,15 @@ func TestBridgeReimageExitAdmissionPreflightRejectsForeignWithoutWriting(t *test
 		t.Run(scenario, func(t *testing.T) {
 			directory := t.TempDir()
 			path := filepath.Join(directory, "admission.json")
-			admission := recoveryPreparationAdmission{Protocol: "ultra-recovery-preparation-admission-v1", Phase: "sealed", FenceSHA256: strings.Repeat("a", 64), BaselineManifestSHA256: strings.Repeat("b", 64), ConfigSHA256: strings.Repeat("c", 64), ExitFenceSHA256: strings.Repeat("d", 64), BridgeGenesis: strings.Repeat("e", 64)}
+			admission := recoveryPreparationAdmission{
+				Protocol:               "ultra-recovery-preparation-admission-v1",
+				Phase:                  "sealed",
+				FenceSHA256:            strings.Repeat("a", 64),
+				BaselineManifestSHA256: strings.Repeat("b", 64),
+				ConfigSHA256:           strings.Repeat("c", 64),
+				ExitFenceSHA256:        strings.Repeat("d", 64),
+				BridgeGenesis:          strings.Repeat("e", 64),
+			}
 			raw, _ := json.Marshal(admission)
 			if scenario != "absent" {
 				saved := raw
@@ -245,7 +253,11 @@ func TestBridgeReimageExitAdmissionPreflightRejectsForeignWithoutWriting(t *test
 				}
 			}
 			before, _ := os.ReadFile(path)
-			program := strings.ReplaceAll(bridgeReimageExitAdmissionPreflight, "Path('/var/lib/ultra-ansible/recovery-preparation-admission.json')", "Path("+fmtPython(path)+")")
+			program := strings.ReplaceAll(
+				bridgeReimageExitAdmissionPreflight,
+				"Path('/var/lib/ultra-ansible/recovery-preparation-admission.json')",
+				"Path("+fmtPython(path)+")",
+			)
 			program = strings.ReplaceAll(program, "for parent in path.parents:", "for parent in [path.parent]:")
 			program = strings.ReplaceAll(program, "s.st_uid==0", "s.st_uid==os.geteuid()")
 			command := exec.Command("python3", "-c", program, base64.StdEncoding.EncodeToString(raw))

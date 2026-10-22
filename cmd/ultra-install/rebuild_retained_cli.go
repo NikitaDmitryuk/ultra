@@ -23,9 +23,16 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
+
+// A standalone mutation must prove the local containment prerequisites before it
+// creates a durable remote fence. Without this the run passes every CLI and SSH
+// check, admits itself on the fleet, and only then fails inside the executor with
+// no receipt: the empty stage/node/code triple observed in production.
+var retainedLocalExecutionPreflight = deployansible.PreflightLocalExecution
 
 // This is an explicit operator recovery, never a continuation or retirement of
 // the lost predecessor journal. Its controller fence survives failure/reboot.
@@ -61,6 +68,12 @@ func runRetainedPrimaryCommand(args []string) error {
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
 			return errors.New("retained_primary_absolute_paths_required")
 		}
+	}
+	// Prove this process can dispatch before anything is read, created or fenced.
+	// A failed run must not leave a workspace that blocks the retry, and it must
+	// never reach the fleet: the durable admission is one shot.
+	if err := retainedLocalExecutionPreflight(); err != nil {
+		return fmt.Errorf("retained_primary_local_execution_preflight_failed: %w", err)
 	}
 	configRaw, err := readRebuildInput(*config, true)
 	if err != nil {

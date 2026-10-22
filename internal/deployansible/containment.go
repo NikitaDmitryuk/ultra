@@ -39,6 +39,28 @@ func executionContainmentPreflight() error {
 	return nil
 }
 
+// PreflightLocalExecution reports whether this process can dispatch a contained
+// standalone operation. Callers must run it before creating a durable remote
+// fence: otherwise a non-root run passes every CLI and SSH check, fences the
+// fleet, and only then aborts inside beginExecution with no receipt to explain it.
+func PreflightLocalExecution() error {
+	root := executionFenceDirectory("")
+	if root != "/var/lib/ultra-ansible" {
+		return nil
+	}
+	if err := executionContainmentPreflight(); err != nil {
+		return err
+	}
+	info, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil || !info.IsDir() || !ownedByProcess(info) || info.Mode().Perm()&0077 != 0 {
+		return errors.New("execution_namespace_insecure")
+	}
+	return nil
+}
+
 // Python independently attests the actual unit, owner, command and KillMode
 // before dispatch. Standalone callers get one unit for the already frozen job.
 func runContainedController(ctx context.Context, command *exec.Cmd, fence *ExecutionFence) error {

@@ -70,6 +70,9 @@ minisign.pub
 .idea/
 .codex/
 
+.tmp*
+*.lock
+
 # Optional generated Graphify index and reports
 /graphify-out/
 

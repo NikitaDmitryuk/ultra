@@ -115,7 +115,15 @@ for command in sys.stdin:
 // Check before sealing the new bridge; the final exit lease checks again.
 func preflightBridgeReimageExitAdmission(ctx context.Context, p *installplan.InstallPlan, a recoveryPreparationAdmission) error {
 	raw, _ := json.Marshal(a)
-	_, err := retainedRemote(ctx, p, p.Exits[0].SSHHost, p.ExitSSHIdentity(p.Exits[0]), false, bridgeReimageExitAdmissionPreflight, []string{base64.StdEncoding.EncodeToString(raw)})
+	_, err := retainedRemote(
+		ctx,
+		p,
+		p.Exits[0].SSHHost,
+		p.ExitSSHIdentity(p.Exits[0]),
+		false,
+		bridgeReimageExitAdmissionPreflight,
+		[]string{base64.StdEncoding.EncodeToString(raw)},
+	)
 	if err != nil {
 		return errors.New("bridge_reimage_existing_exit_admission_unsupported")
 	}
