@@ -12,27 +12,28 @@ import (
 )
 
 type recoveryPreparationRequest struct {
-	KnownHostsPath          string `json:"known_hosts_path"`
-	KnownHostsSHA256        string `json:"known_hosts_sha256"`
-	EvidenceSourceDirectory string `json:"evidence_source_directory"`
-	BaselineSourceDirectory string `json:"baseline_source_directory"`
-	Protocol                string `json:"protocol"`
-	RetainedDirectory       string `json:"retained_directory"`
-	ConfigPath              string `json:"config_path"`
-	BaselineManifestPath    string `json:"baseline_manifest_path"`
-	OriginalJournalPath     string `json:"original_journal_path"`
-	ToolsReleaseDirectory   string `json:"tools_release_directory"`
-	UpgradeConfigPath       string `json:"upgrade_config_path"`
-	StateDirectory          string `json:"state_directory"`
-	Python                  string `json:"python"`
-	Executable              string `json:"executable"`
-	ConfigSHA256            string `json:"config_sha256"`
-	UpgradeConfigSHA256     string `json:"upgrade_config_sha256"`
-	BaselineManifestSHA256  string `json:"baseline_manifest_sha256"`
-	ToolsManifestSHA256     string `json:"tools_manifest_sha256"`
-	RetainedFenceSHA256     string `json:"retained_fence_sha256"`
-	LegacyJournalPath       string `json:"legacy_journal_path"`
-	LegacyJournalSHA256     string `json:"legacy_journal_sha256"`
+	BridgeReimage           *recoveryBridgeReimage `json:"bridge_reimage,omitempty"`
+	KnownHostsPath          string                 `json:"known_hosts_path"`
+	KnownHostsSHA256        string                 `json:"known_hosts_sha256"`
+	EvidenceSourceDirectory string                 `json:"evidence_source_directory"`
+	BaselineSourceDirectory string                 `json:"baseline_source_directory"`
+	Protocol                string                 `json:"protocol"`
+	RetainedDirectory       string                 `json:"retained_directory"`
+	ConfigPath              string                 `json:"config_path"`
+	BaselineManifestPath    string                 `json:"baseline_manifest_path"`
+	OriginalJournalPath     string                 `json:"original_journal_path"`
+	ToolsReleaseDirectory   string                 `json:"tools_release_directory"`
+	UpgradeConfigPath       string                 `json:"upgrade_config_path"`
+	StateDirectory          string                 `json:"state_directory"`
+	Python                  string                 `json:"python"`
+	Executable              string                 `json:"executable"`
+	ConfigSHA256            string                 `json:"config_sha256"`
+	UpgradeConfigSHA256     string                 `json:"upgrade_config_sha256"`
+	BaselineManifestSHA256  string                 `json:"baseline_manifest_sha256"`
+	ToolsManifestSHA256     string                 `json:"tools_manifest_sha256"`
+	RetainedFenceSHA256     string                 `json:"retained_fence_sha256"`
+	LegacyJournalPath       string                 `json:"legacy_journal_path"`
+	LegacyJournalSHA256     string                 `json:"legacy_journal_sha256"`
 }
 
 func (r recoveryPreparationRequest) digest() string {
@@ -57,6 +58,11 @@ func bindRecoveryPreparationRequest(ctx context.Context, r recoveryPreparationRe
 	in, err := loadRecoveryPreparationRetainedEvidence(r)
 	if err != nil {
 		return r, err
+	}
+	if r.BridgeReimage != nil {
+		if err = validateRecoveryBridgeReimage(r.BridgeReimage, legacyRaw, in.retained); err != nil {
+			return r, err
+		}
 	}
 	pins, err := readRebuildInput(r.KnownHostsPath, false)
 	if err != nil {
@@ -130,6 +136,15 @@ func validateRecoveryPreparationRequest(r recoveryPreparationRequest) (recoveryP
 	in, err := loadRecoveryPreparationRetainedEvidence(r)
 	if err != nil {
 		return zero, err
+	}
+	if r.BridgeReimage != nil {
+		legacy, e := readRebuildInput(r.LegacyJournalPath, true)
+		if e != nil {
+			return zero, e
+		}
+		if e = validateRecoveryBridgeReimage(r.BridgeReimage, legacy, in.retained); e != nil {
+			return zero, e
+		}
 	}
 	if in.admission.FenceSHA256 != r.RetainedFenceSHA256 || in.admission.ConfigSHA256 != r.ConfigSHA256 ||
 		in.admission.BaselineManifestSHA256 != r.BaselineManifestSHA256 {

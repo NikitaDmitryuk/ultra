@@ -12,7 +12,8 @@ receipt=base64.b64decode(encoded,validate=True)
 evidence=json.loads(receipt)
 cloud_expected_relay_sha256=evidence.get('relay_binary_sha256')
 cloud_expected_unit_sha256=evidence.get('relay_unit_sha256')
-assert role in ['bridge','exit'] and evidence['protocol']=='ultra-retained-primary-reconcile-v1' and evidence['fence_sha256']==binding
+expected_fence=evidence.get('retained_exit',{}).get('fence_sha256',evidence['fence_sha256']) if role=='exit' else evidence['fence_sha256']
+assert role in ['bridge','exit'] and evidence['protocol']=='ultra-retained-primary-reconcile-v1' and expected_fence==binding
 state=Path('/var/lib/ultra-ansible')
 system=Path('/etc/systemd/system')
 original='[Unit]\nRefuseManualStart=yes\nConditionPathExists=/var/lib/ultra-ansible/retained-primary-admission-open\n'
@@ -55,7 +56,7 @@ def fences():
  lifecycle=state/'lifecycle.json'
  if os.path.lexists(lifecycle):
   trusted(lifecycle,private=True);j=json.loads(lifecycle.read_text());assert j.get('phase')=='released'
- elif role=='bridge':raise ValueError('lifecycle_required')
+ elif role=='bridge' and not evidence.get('retained_exit'):raise ValueError('lifecycle_required')
  for unit in units:
   p=trusted(system/(unit+'.d/90-retained-primary.conf'));content=p.read_text()
   allowed=unit==units[0] and role=='bridge' and content==opened
@@ -81,12 +82,21 @@ def fences():
   assert saved.get('request_sha256')==metadata['request_sha256'] and saved.get('binary_sha256')==metadata.get('binary_sha256')
  census()
 def health():
+ if role=='exit' and evidence.get('retained_exit'):
+  expected=evidence['retained_exit']
+  p=Path('/etc/ultra-relay/spec.json');s=p.lstat()
+  assert stat.S_ISREG(s.st_mode) and s.st_nlink==1 and not s.st_mode&0o022
+  raw=p.read_bytes();spec=json.loads(raw)
+  assert hashlib.sha256(raw).hexdigest()==expected['spec_sha256']
+  assert spec['role']=='exit' and spec['exit']['tunnel_uuid']==expected['tunnel_uuid'] and spec['vless_port']==int(port)
  services=['ultra-relay.service']+(['ultra-bot.service'] if role=='bridge' else [])
  for unit in services:subprocess.run(['systemctl','is-active','--quiet',unit],check=True,timeout=10)
  hostname=bot_domain if role=='bridge' else exit_domain
  assert hostname
  with socket.create_connection(('127.0.0.1',443 if role=='bridge' else int(port)),timeout=5) as connection:
   with ssl.create_default_context().wrap_socket(connection,server_hostname=hostname) as secured:
+   if role=='exit' and evidence.get('retained_exit'):
+    assert hashlib.sha256(secured.getpeercert(binary_form=True)).hexdigest()==evidence['retained_exit']['certificate_sha256']
    if role=='bridge':
     secured.sendall(('GET /healthz HTTP/1.1\r\nHost: '+hostname+'\r\nConnection: close\r\n\r\n').encode())
     response=http.client.HTTPResponse(secured);response.begin();response.read(4096);assert response.status==200
@@ -96,6 +106,9 @@ if role=='bridge' and evidence.get('configure_cloud_runtime'):
  exec(` + strconv.Quote(retainedReconcileCloudProgram) + `,globals())
 print('verified',flush=True)
 command=sys.stdin.readline()
+while command=='recheck\n' and role=='exit':
+ fences();health();print('verified',flush=True)
+ command=sys.stdin.readline()
 if not command:sys.exit(0)
 assert command=='activate-controller\n' and role=='bridge'
 fences();health()

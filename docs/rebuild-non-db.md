@@ -4,6 +4,139 @@
 Он не разрешает переустановку или продолжение manual deploy. Текущий интерфейс
 описан в [автоматизации](automation.md#offline-preflight-переустановки-non-db-узлов).
 
+## Переустановлен только bridge
+
+`rebuild-retained-primary --bridge-only --retained-source-spec /private/sources.json
+--authorize-new-fleet-key` выбирает отдельный фиксированный playbook
+`rebuild-retained-bridge.yml`. Флаг `--accept-reimaged-fleet` несовместим с этим
+режимом. Остальные обязательные аргументы описаны ниже; `--prepare-only` проверяет
+входы без изменения серверов, а execute требует другой новый state-dir.
+
+Приватный descriptor `0600` использует формат `recoveryInputSources`: поля
+`retained_directory`, `baseline_release`, `original_config`, `original_journal`,
+`legacy_journal`. Первые четыре указывают на исходный successful retained-primary
+execute и его неизменённые доказательства. `legacy_journal` здесь не используется:
+активный operator journal не закрывается и не получает выдуманного terminal receipt.
+Исторические pins остаются частью исходных байтов; live SSH использует текущий
+канонический config с независимо подтверждённым pin переустановленного bridge.
+
+На bridge должны отсутствовать приложения, controller и admission marker.
+На exit необходим прежний marker из проверенной успешной попытки, закрытые
+controller/reconcile, отсутствие executor-ов и незавершённых jobs. Exit lease
+удерживает существующие locks и проверяется до и после выполнения. Сравниваются
+точные spec bytes, UUID и сертификат живого CA TLS listener, а также primary,
+schema и route identity. Новый одноразовый fence создаётся только на bridge;
+повтор после сбоя запрещён. Exit relay, spec, TLS и firewall не переустанавливаются.
+
+Единственная разрешённая запись на exit — отдельный блок публичного ключа нового
+bridge fleet identity в существующем `authorized_keys`. Поэтому обязателен
+`--authorize-new-fleet-key`: старые блоки сохраняются, Ansible создаёт backup и
+приватный `fleet-authorization-<binding>.json` с его путём. Отмена авторизации —
+отдельная операция с проверкой текущих ключей, без слепого восстановления файла.
+
+На bridge устанавливаются immutable controller runtime/unit, fleet identity и
+настроенный provider key. Controller закрыт до `retained-primary-reconcile inspect`,
+затем `activate-controller` с исходными config/manifest/journal и новым receipt.
+Для provider runtime добавляется `--configure-cloud-runtime`. Reconciliation
+проверяет отдельные bridge/exit fences; отсутствие старого lifecycle допустимо
+только для подтверждённого bridge-only execute на новой машине.
+
+Это не подтверждение полной готовности следующего `make deploy`: прежний dispatched
+operator journal, recovery automation, standby и независимые recovery generations
+требуют своих проверок и завершения штатных протоколов. Узкий путь не запускает
+`recovery_primary`, не создаёт replicas и не подменяет readiness зелёным VPN health.
+Источники: [CLI](../cmd/ultra-install/rebuild_retained_cli.go),
+[сохранение exit](../cmd/ultra-install/rebuild_retained_bridge.go),
+[playbook](../deploy/ansible/playbooks/rebuild-retained-bridge.yml).
+
+## Возврат к штатной выкладке после reimage bridge
+
+Для уже dispatched **supervised** manual operation есть отдельный исход
+`superseded-by-bridge-reimage`. Он не утверждает `no-mutation` и не восстанавливает
+утраченный executor. Не удаляй `operation.json` вручную. Нужны его точные байты,
+его прежний `recovery-source-<legacy-sha>` с исходным descriptor и predecessor,
+проверенный successful bridge-only execute и неизменённая primary/постоянный exit.
+Exporter повторно вычисляет старый descriptor и сверяет его с dispatched journal.
+Неполный архив, другой прежний static scope или чужой admission оставляют gate закрытым.
+
+Перед новым execute обнови **канонический** `install.config`: версия должна
+соответствовать проверенному полному candidate release, путь release должен быть
+доступен локально. Сохрани текущий dispatched journal отдельным приватным файлом
+для `--original-journal`. Заморозь canonical bytes до завершения execute и
+reconciliation. Для дальнейшего source descriptor используй отдельную точную
+копию этих bytes: manual wrapper позднее штатно обновит canonical release path,
+но исходные доказательства останутся неизменными.
+
+Полный приватный fleet inventory содержит все строки `exit_nodes` и
+`cloud_operations`, включая disabled/deleted/cancelled. Поля фиксированы в
+`bridgeReimageFleetRow`; `retirement_binding` — значение
+`body#>>'{provider_absence_retirement,binding_sha256}'` или пустая строка.
+Каждый live dynamic exit требует provider identity и pinned SSH census под lock;
+каждый deleted instance — свежий GET 404 и отсутствие во всех страницах provider
+inventory. Незарегистрированный live instance блокирует переход. Режим ограничен
+одним текущим Vultr account и одним постоянным exit; неизвестная история или
+другой provider не получает автоматического разрешения.
+
+Если оператор отдельно разрешил удалить dynamic node, `provider-delete` сначала
+сохраняет intent и проверяет точную provider identity, затем подтверждает GET 404
+и отсутствие в полном inventory. Утраченный ответ допускает только observation,
+не повторный DELETE. Эта команда не меняет БД или firewall. Для завершения записи
+**только этого** узла, после successful restore и до запуска controller:
+
+```bash
+ultra-install retained-primary-reconcile retire-deleted-provider \
+  --state-dir /private/new-bridge-execute --config /private/install.config \
+  --manifest /private/candidate/release-manifest.json \
+  --original-journal /private/dispatched-original.json \
+  --provider-deletion-receipt /private/provider-delete.json \
+  --fleet /private/fleet-before-retirement.json --receipt /private/retirement.json
+```
+
+Оба host lease остаются закрыты. Fresh provider absence и точные primary/schema,
+полный registry и operation/instance/exit проверяются перед одной транзакцией.
+Она использует штатные advisory locks, отключает один exit, снимает публикацию
+только его `vpn_locations`, сохраняет history/body и переводит одну operation в
+`deleted/cleanup`. Counts и binding записываются в body вместе с audit event в той
+же транзакции. Неверный count/binding откатывает всё; после потерянного ответа
+повтор с **прежним** inventory читает тот же результат. Пользователи, платежи,
+подписки, route credentials, прочие узлы и firewall не удаляются. `db.Open`,
+миграции, reset/import и ротация credentials не вызываются. Повторно собери реальный
+post-retirement inventory; не редактируй старый снимок для имитации результата.
+
+Затем выполни `retained-primary-reconcile activate-controller` с теми же
+restore inputs и `--configure-cloud-runtime`. Новый приватный source descriptor
+содержит usual пять полей: новый successful retained directory, его полный baseline
+release, frozen original config/journal и **активный** `operation.json` как
+`legacy_journal`. Следующий запуск штатного wrapper:
+
+```bash
+python3 scripts/manual-deploy.py --config /private/install.config \
+  --prepare-recovery-source-spec /private/new-bridge-sources.json \
+  --acknowledge-bridge-reimage --bridge-reimage-fleet /private/fleet-current.json \
+  --bridge-reimage-retirement /private/retirement.json
+```
+
+Последний флаг нужен только после описанного retirement. Wrapper сохраняет оба
+поколения journal/config/source и связывает их с новым coordinator до dispatch.
+Ошибка до dispatch сохраняет прежний journal; после неопределённой отправки
+допустим только attach к тем же inputs. Supervisor после полного census создаёт
+новый released genesis на bridge, сохраняя прежний exit fence, и публикует отдельный
+supersession receipt. Старый operation не становится «успешным» или «не мутировавшим».
+
+Далее идут существующие стадии tools/monitor/reconcile/readiness и upgrade/status.
+Это уже operational recovery: возможны создание monitor access, replication slots,
+standby и независимых recovery receivers/generations согласно штатным ролям.
+Они не входят в обещание «zero DB writes» узкого restore: сохранение schema/data и
+credentials не означает запрет этих явно необходимых operational изменений.
+Независимая свежая generation и проверенный readiness обязательны; локальный dump
+и зелёный health их не заменяют. Journal закрывается wrapper только после штатного
+успешного status. Ошибка любой стадии сохраняет gate и доказательства.
+
+Источники: [supersession](../cmd/ultra-install/recovery_prepare_reimage.go),
+[fleet census](../cmd/ultra-install/recovery_prepare_reimage_fleet.go),
+[точечный retirement](../cmd/ultra-install/provider_retire.go),
+[manual wrapper](../scripts/manual-deploy.py).
+
 ## Исполнимое восстановление с сохранённым primary
 
 Отдельная команда `ultra-install rebuild-retained-primary` устанавливает приложения
@@ -45,7 +178,7 @@ Binding включает уникальный nonce попытки. Persistent r
 закрывают controller/reconcile admission после reboot и ручного `systemctl start`.
 Primary не получает этот fence и не перезапускается.
 
-Любой существующий marker запрещает **все** следующие execute, включая ту же
+В этом two-host режиме любой существующий marker запрещает следующие execute, включая ту же
 привязку, новый state-dir, неуспешную попытку и successful Ansible receipt.
 SSH-held locks недостаточны: SIGKILL runner может освободить их раньше завершения
 оставшегося Ansible process tree. Автоматического terminal/drain verifier и снятия

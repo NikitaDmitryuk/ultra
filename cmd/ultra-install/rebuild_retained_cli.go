@@ -40,13 +40,21 @@ func runRetainedPrimaryCommand(args []string) error {
 	backupSHA := fs.String("backup-sha256", "", "expected encrypted backup digest")
 	python := fs.String("python", "/usr/bin/python3", "controller Python")
 	executable := fs.String("executable", "", "pinned operator Ansible executable")
+	bridgeOnly := fs.Bool("bridge-only", false, "rebuild only the reimaged bridge; preserve the live permanent exit")
+	authorizeFleet := fs.Bool(
+		"authorize-new-fleet-key",
+		false,
+		"append the new bridge fleet public key on the retained exit, preserving existing keys",
+	)
+	retainedSource := fs.String("retained-source-spec", "", "private descriptor of successful retained fleet evidence")
 	prepareOnly := fs.Bool("prepare-only", false, "validate and save private inputs without production mutation")
 	acceptFleet := fs.Bool(
 		"accept-reimaged-fleet",
 		false,
 		"operator attests former bridge/exit were reimaged and former dynamic exits removed",
 	)
-	if fs.Parse(args) != nil || fs.NArg() != 0 || !*acceptFleet {
+	if fs.Parse(args) != nil || fs.NArg() != 0 || (*bridgeOnly == *acceptFleet) || (*bridgeOnly != (*retainedSource != "")) ||
+		(*bridgeOnly != *authorizeFleet) {
 		return errors.New("retained_primary_explicit_operator_scope_required")
 	}
 	for _, p := range []string{*config, *manifestPath, *journal, *directory, *backup, *python, *executable} {
@@ -78,6 +86,14 @@ func runRetainedPrimaryCommand(args []string) error {
 		p.AdoptRuntime ||
 		p.Bridge.ReuseSpec {
 		return errors.New("retained_primary_scope_requires_one_fresh_bridge_exit_and_separate_database")
+	}
+	var prior retainedPrimaryRebuildInput
+	var priorEvidence retainedReconcileEvidence
+	if *bridgeOnly {
+		prior, priorEvidence, err = loadRetainedBridgeSource(*retainedSource, p)
+		if err != nil {
+			return err
+		}
 	}
 	credentialDSN, err := retainedExistingDatabaseCredentials(p)
 	if err != nil {
@@ -198,6 +214,11 @@ func runRetainedPrimaryCommand(args []string) error {
 	if err = prepareAnsibleDNS(p, variables); err != nil {
 		return err
 	}
+	if *bridgeOnly {
+		if err = prepareRetainedBridgeController(p, inspection["bridge"].Architecture, *directory, variables); err != nil {
+			return err
+		}
+	}
 	raw, _ := json.Marshal(inventory)
 	var normalized map[string]any
 	if json.Unmarshal(raw, &normalized) != nil {
@@ -220,6 +241,19 @@ func runRetainedPrimaryCommand(args []string) error {
 		return err
 	}
 	in.Primary = primary
+	if *bridgeOnly {
+		if primary != prior.Primary {
+			return errors.New("retained_bridge_primary_or_route_changed")
+		}
+		in.BridgeOnly = true
+		in.RetainedExit, err = observeRetainedBridgeExit(ctx, p, prior, priorEvidence)
+		if err != nil {
+			return err
+		}
+		if in.RetainedExit.TunnelUUID != retainedRoute.TunnelUUID {
+			return errors.New("retained_bridge_route_identity_changed")
+		}
+	}
 	if primary.MigrationVersions != migrationVersions {
 		return errors.New("retained_primary_candidate_migrations_mismatch")
 	}
@@ -237,19 +271,47 @@ func runRetainedPrimaryCommand(args []string) error {
 	if err = os.WriteFile(filepath.Join(*directory, "prepared-input.json"), prepared, 0600); err != nil {
 		return err
 	}
+	var exitLease *retainedReconcileLease
+	if *bridgeOnly {
+		if err = retainedLocalCensus(); err != nil {
+			return err
+		}
+		priorEvidence.RetainedExit = in.RetainedExit
+		raw, _ := json.Marshal(priorEvidence)
+		lease, e := openRetainedReconcileLease(
+			ctx,
+			p,
+			p.Exits[0].SSHHost,
+			p.ExitSSHIdentity(p.Exits[0]),
+			"exit",
+			priorEvidence.Fence,
+			raw,
+			p.Exits[0].Port,
+		)
+		if e != nil {
+			return e
+		}
+		exitLease = lease
+		defer lease.close()
+	}
+	if *bridgeOnly {
+		if _, e := retainedRemote(ctx, p, p.Bridge.SSHHost, p.BridgeSSHIdentity(), false, retainedBridgeFreshCheck, nil); e != nil {
+			return errors.New("retained_bridge_fresh_machine_required")
+		}
+	}
 	if *prepareOnly {
 		fmt.Println("retained-primary inputs validated; production unchanged")
 		return nil
 	}
 	// Check both hosts before either receives mutations. A local terminal receipt
 	// cannot establish that orphaned executors drained after a runner crash.
-	for _, entry := range []struct{ address, key string }{{p.Bridge.SSHHost, p.BridgeSSHIdentity()}, {p.Exits[0].SSHHost, p.ExitSSHIdentity(p.Exits[0])}} {
+	for _, entry := range retainedMutationTargets(p, *bridgeOnly) {
 		if _, e := retainedRemote(ctx, p, entry.address, entry.key, false, retainedFenceAdmissionCheck, nil); e != nil {
 			return errors.New("retained_primary_existing_admission_requires_manual_reconciliation")
 		}
 	}
-	for _, entry := range []struct{ address, key string }{{p.Bridge.SSHHost, p.BridgeSSHIdentity()}, {p.Exits[0].SSHHost, p.ExitSSHIdentity(p.Exits[0])}} {
-		release, e := holdRetainedFence(ctx, p, entry.address, entry.key, fenceBinding)
+	for _, entry := range retainedMutationTargets(p, *bridgeOnly) {
+		release, e := holdRetainedFence(ctx, p, entry.address, entry.key, fenceBinding, *bridgeOnly)
 		if e != nil {
 			return e
 		}
@@ -257,9 +319,24 @@ func runRetainedPrimaryCommand(args []string) error {
 	}
 	deps := retainedPrimaryRebuildDependencies{
 		VerifyFence: func(ctx context.Context, _ retainedPrimaryRebuildInput) error {
-			for _, entry := range []struct{ address, key string }{{p.Bridge.SSHHost, p.BridgeSSHIdentity()}, {p.Exits[0].SSHHost, p.ExitSSHIdentity(p.Exits[0])}} {
+			for _, entry := range retainedMutationTargets(p, *bridgeOnly) {
 				if _, e := retainedRemote(ctx, p, entry.address, entry.key, false, retainedFenceVerify, []string{fenceBinding}); e != nil {
 					return errors.New("retained_primary_fence_unverified")
+				}
+			}
+			if in.BridgeOnly {
+				if e := exitLease.recheck(); e != nil {
+					return e
+				}
+				if _, e := retainedRemote(ctx, p, p.Exits[0].SSHHost, p.ExitSSHIdentity(p.Exits[0]), false, retainedFenceVerify, []string{in.RetainedExit.FenceSHA256}); e != nil {
+					return e
+				}
+				observed, e := observeRetainedBridgeExit(ctx, p, prior, priorEvidence)
+				// The source proof is unchanged; the live hashes must match exactly.
+				if e != nil || observed.SpecSHA256 != in.RetainedExit.SpecSHA256 ||
+					observed.CertificateSHA256 != in.RetainedExit.CertificateSHA256 ||
+					observed.TunnelUUID != in.RetainedExit.TunnelUUID {
+					return errors.New("retained_bridge_exit_changed")
 				}
 			}
 			return nil
@@ -554,9 +631,10 @@ for proc in Path('/proc').iterdir():
 print('verified')
 `
 
-func holdRetainedFence(ctx context.Context, p *installplan.InstallPlan, address, key, binding string) (func(), error) {
+func holdRetainedFence(ctx context.Context, p *installplan.InstallPlan, address, key, binding string, freshBridge bool) (func(), error) {
 	args := retainedSSH(p, address, key, false, true)
-	args = append(args, strings.Join(quoteRetainedArgs([]string{"python3", "-u", "-c", retainedFenceLease, binding}), " "))
+	program := retainedFenceProgram(freshBridge)
+	args = append(args, strings.Join(quoteRetainedArgs([]string{"python3", "-u", "-c", program, binding}), " "))
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	input, err := cmd.StdinPipe()
 	if err != nil {

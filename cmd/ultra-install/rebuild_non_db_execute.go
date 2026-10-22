@@ -17,6 +17,7 @@ import (
 )
 
 const retainedPrimaryRebuildOperation = "rebuild-retained-primary"
+const retainedBridgeRebuildOperation = "rebuild-retained-bridge"
 
 type retainedPrimaryIdentity struct {
 	RouteSHA256       string `json:"route_sha256,omitempty"`
@@ -28,6 +29,8 @@ type retainedPrimaryIdentity struct {
 }
 
 type retainedPrimaryRebuildInput struct {
+	BridgeOnly                 bool                `json:",omitempty"`
+	RetainedExit               *retainedBridgeExit `json:",omitempty"`
 	Inventory                  map[string]any
 	Variables                  map[string]any
 	JournalSHA256              string
@@ -131,7 +134,7 @@ func runRetainedPrimaryRebuild(ctx context.Context, in retainedPrimaryRebuildInp
 	}
 	result, err := deps.Run(
 		ctx,
-		retainedPrimaryRebuildOperation,
+		retainedRebuildOperation(in),
 		in.Inventory,
 		vars,
 		filepath.Join(in.Directory, "execute"),
@@ -194,6 +197,9 @@ func runRetainedPrimaryRebuild(ctx context.Context, in retainedPrimaryRebuildInp
 
 func validateRetainedPrimaryRebuild(in retainedPrimaryRebuildInput) error {
 	fail := errors.New("retained_primary_inputs_invalid")
+	if in.BridgeOnly != (in.RetainedExit != nil) || (in.RetainedExit != nil && !in.RetainedExit.valid()) {
+		return errors.New("retained_bridge_scope_invalid")
+	}
 	for _, value := range []string{in.JournalSHA256, in.ConfigSHA256, in.ManifestSHA256, in.Primary.MigrationsSHA256, in.CandidateMigrationsSHA256, in.FenceEvidenceSHA256} {
 		if !rebuildSHA.MatchString(value) {
 			return fail

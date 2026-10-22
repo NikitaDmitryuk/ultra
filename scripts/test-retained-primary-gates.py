@@ -17,10 +17,10 @@ GATE = PLAYBOOKS / 'tasks/retained-primary-gate.yml'
 class RetainedPrimaryGateTests(unittest.TestCase):
     def mutation_plays(self):
         selected = []
-        for name in ['rebuild-retained-primary.yml', 'bootstrap-exit.yml', 'bootstrap-bridge.yml', 'ingress.yml', 'configure-bot.yml']:
+        for name in ['rebuild-retained-primary.yml', 'rebuild-retained-bridge.yml', 'bootstrap-exit.yml', 'bootstrap-bridge.yml', 'ingress.yml', 'configure-bot.yml']:
             for play in yaml.safe_load((PLAYBOOKS / name).read_text()):
                 host = play.get('hosts', '')
-                if host in ['localhost', 'databases', 'exits'] or not host:
+                if host in ['localhost', 'databases'] or not host or (host == 'exits' and not play.get('pre_tasks')):
                     continue
                 gates = [task for task in play.get('pre_tasks', []) if task.get('ansible.builtin.import_tasks') == 'tasks/retained-primary-gate.yml']
                 self.assertEqual(len(gates), 1, (name, play['name']))

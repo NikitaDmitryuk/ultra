@@ -32,6 +32,7 @@ func TestRecoveryPreparationRequiresOriginalCompleteBaseline(t *testing.T) {
 
 func TestRecoveryPreparationAdmissionRejectsMalformedDigests(t *testing.T) {
 	base := recoveryPreparationAdmission{
+		"", "",
 		"ultra-recovery-preparation-admission-v1",
 		strings.Repeat("a", 64),
 		strings.Repeat("b", 64),

@@ -18,6 +18,8 @@ import (
 const recoveryPreparationAdmissionPath = "/var/lib/ultra-ansible/recovery-preparation-admission.json"
 
 type recoveryPreparationAdmission struct {
+	ExitFenceSHA256        string `json:"exit_fence_sha256,omitempty"`
+	BridgeGenesis          string `json:"bridge_genesis,omitempty"`
 	Protocol               string `json:"protocol"`
 	FenceSHA256            string `json:"fence_sha256"`
 	BaselineManifestSHA256 string `json:"baseline_manifest_sha256"`
@@ -26,6 +28,10 @@ type recoveryPreparationAdmission struct {
 }
 
 func (a recoveryPreparationAdmission) valid() bool {
+	if (a.ExitFenceSHA256 == "") != (a.BridgeGenesis == "") ||
+		(a.ExitFenceSHA256 != "" && (!runtimeHostValidDigest(a.ExitFenceSHA256) || !runtimeHostValidDigest(a.BridgeGenesis))) {
+		return false
+	}
 	return a.Protocol == "ultra-recovery-preparation-admission-v1" && a.Phase == "sealed" && runtimeHostValidDigest(a.FenceSHA256) &&
 		runtimeHostValidDigest(a.BaselineManifestSHA256) &&
 		runtimeHostValidDigest(a.ConfigSHA256)
@@ -190,7 +196,11 @@ mode,role,encoded=sys.argv[1:]
 assert mode in ('seal','validate') and role in ('bridge','exit')
 payload=json.loads(base64.b64decode(encoded,validate=True))
 expected=payload['admission']
-assert set(expected)=={'protocol','fence_sha256','baseline_manifest_sha256','config_sha256','phase'}
+base={'protocol','fence_sha256','baseline_manifest_sha256','config_sha256','phase'}
+assert set(expected) in (base,base|{'exit_fence_sha256','bridge_genesis'})
+genesis=expected.get('bridge_genesis','')
+if genesis:assert all(re.fullmatch('[a-f0-9]{64}',expected[k]) for k in ['exit_fence_sha256','bridge_genesis'])
+host_fence=expected.get('exit_fence_sha256',expected['fence_sha256']) if role=='exit' else expected['fence_sha256']
 assert expected['protocol']=='ultra-recovery-preparation-admission-v1' and expected['phase']=='sealed'
 assert all(re.fullmatch('[a-f0-9]{64}',expected[k]) for k in ['fence_sha256','baseline_manifest_sha256','config_sha256'])
 state=Path('/var/lib/ultra-ansible')
@@ -228,12 +238,16 @@ def publish(path,raw,mode=0o600):
 def binding(value):return {k:v for k,v in value.items() if k!='phase'}
 trusted(state,True)
 assert not os.path.lexists(state/'retained-primary-admission-open')
-assert read(state/'retained-primary-admission.json')=={'protocol':'retained-primary-admission-v1','binding_sha256':expected['fence_sha256']}
+assert read(state/'retained-primary-admission.json')=={'protocol':'retained-primary-admission-v1','binding_sha256':host_fence}
 assert not os.path.lexists(state/'recovery-fence.json') and not os.path.lexists(state/'recovery-anchor.json')
 assert not os.path.lexists(state/'execution-fence.json')
 locks=[]
 lock_paths=[state/'infrastructure.lock',state/'operator-inputs/manual-deploy.lock']
 if role=='bridge' or os.path.lexists(state/'operator/infrastructure.lock'):lock_paths.append(state/'operator/infrastructure.lock')
+if genesis and role=='bridge' and mode=='seal' and not os.path.lexists(state/'operator/infrastructure.lock'):
+ assert not os.path.lexists(state/'lifecycle.json') and not os.path.lexists(state/'bridge-reimage-genesis.json')
+ (state/'operator').mkdir(mode=0o700,exist_ok=True);trusted(state/'operator',True)
+ fd=os.open(state/'operator/infrastructure.lock',os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);os.fsync(fd);os.close(fd)
 for path in lock_paths:
  trusted(path,private=True)
  fd=os.open(path,os.O_RDWR|os.O_NOFOLLOW);fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);locks.append(fd)
@@ -242,11 +256,15 @@ if os.path.lexists(record):
  assert binding(previous)==binding(expected) and previous.get('phase') in ('sealing','sealed')
 else:assert mode=='seal'
 lifecycle=read(state/'lifecycle.json') if os.path.lexists(state/'lifecycle.json') else {}
-assert lifecycle.get('phase')=='released' or (role=='exit' and not lifecycle)
+assert lifecycle.get('phase')=='released' or ((role=='exit' or genesis) and not lifecycle)
+if genesis and lifecycle and role=='bridge':
+ import uuid
+ assert lifecycle=={'id':str(uuid.UUID(hex=genesis[:32])),'phase':'released'}
+ assert read(state/'bridge-reimage-genesis.json')=={'protocol':'ultra-bridge-reimage-genesis-v1','binding_sha256':genesis}
 def queue():
  assert not os.path.lexists(state/'execution-fence.json')
  assert not os.path.lexists(state/'retained-primary-admission-open')
- assert read(state/'retained-primary-admission.json')=={'protocol':'retained-primary-admission-v1','binding_sha256':expected['fence_sha256']}
+ assert read(state/'retained-primary-admission.json')=={'protocol':'retained-primary-admission-v1','binding_sha256':host_fence}
  for job in state.iterdir():
   if not re.fullmatch('[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}',job.name):continue
   trusted(job,True)
@@ -376,6 +394,15 @@ if mode=='seal':
   properties=show(unit)
   assert properties.get('ActiveState') in ('inactive','failed') and properties.get('MainPID','0')=='0'
  publish(record,json.dumps(expected,sort_keys=True).encode())
+ if genesis and role=='bridge':
+  import uuid
+  # This is a NEW released genesis, never the lost operation's lifecycle.
+  marker={'protocol':'ultra-bridge-reimage-genesis-v1','binding_sha256':genesis}
+  if os.path.lexists(state/'bridge-reimage-genesis.json'):assert read(state/'bridge-reimage-genesis.json')==marker
+  publish(state/'bridge-reimage-genesis.json',json.dumps(marker,sort_keys=True).encode())
+  new_lifecycle={'id':str(uuid.UUID(hex=genesis[:32])),'phase':'released'}
+  if os.path.lexists(state/'lifecycle.json'):assert read(state/'lifecycle.json')==new_lifecycle
+  publish(state/'lifecycle.json',json.dumps(new_lifecycle,sort_keys=True).encode())
 sealed()
 print('verified',flush=True)
 for command in sys.stdin:

@@ -3391,14 +3391,15 @@ def immutable_preparation_file(path, raw):
         atomic_write(path, raw)
 
 
-def export_preparation_stream(installer, spec, pins, remote_root, manifest_sha, root, repo, stream):
+def export_preparation_stream(installer, spec, pins, remote_root, manifest_sha, root, repo, stream, bridge_reimage=False):
     # Binary archives stay on disk; neither tar stdout nor helper stderr enters
     # wrapper logs/memory. The first transport descriptor is explicitly bounded.
     with tempfile.TemporaryFile(dir=root) as errors:
         try:
             result = subprocess.run([str(installer), 'deploy-operation', 'export-preparation',
                 '--source-spec', str(spec), '--remote-directory', str(remote_root / 'preparation'),
-                '--tools-manifest-sha256', manifest_sha, '--known-hosts', str(pins)],
+                '--tools-manifest-sha256', manifest_sha, '--known-hosts', str(pins)] +
+                (['--acknowledge-bridge-reimage'] if bridge_reimage else []),
                 cwd=repo, stdout=stream, stderr=errors, timeout=300, check=False)
         except subprocess.TimeoutExpired:
             raise DeployError('preparation_source_export_timeout') from None
@@ -3425,7 +3426,7 @@ def export_preparation_stream(installer, spec, pins, remote_root, manifest_sha, 
     return sha(descriptor)
 
 
-def rollout_prepared_recovery(repo, root, bundle, commit, version, config, source_spec, retry_failed=False):
+def rollout_prepared_recovery(repo, root, bundle, commit, version, config, source_spec, retry_failed=False, bridge_reimage_fleet=None, bridge_reimage_retirement=None):
     """Keep the unresolved legacy attempt linked until the coordinator closes it.
 
     Export is read-only and precedes canonical publication. Once submission may
@@ -3436,7 +3437,8 @@ def rollout_prepared_recovery(repo, root, bundle, commit, version, config, sourc
     old_raw = private_file(journal)
     old = json.loads(old_raw)
     source_raw, sources = prepared_source_spec(source_spec)
-    if old.get('supervised_deploy') is True:
+    reimage = bridge_reimage_fleet is not None and old.get('preparation_source_spec_sha256') != sha(source_raw)
+    if old.get('supervised_deploy') is True and not reimage:
         require(isinstance(old.get('preparation_sha256'),str) and re.fullmatch('[a-f0-9]{64}',old['preparation_sha256']),
                 'manual_supervised_preparation_changed')
         require(old.get('preparation_source_spec_sha256') == sha(source_raw), 'preparation_source_spec_changed')
@@ -3454,7 +3456,7 @@ def rollout_prepared_recovery(repo, root, bundle, commit, version, config, sourc
             # inputs; a submitted record can never enter this recovery path.
             atomic_write(config, previous, preserve_mode=True)
             atomic_write(journal, historical)
-            return rollout_prepared_recovery(repo, root, bundle, commit, version, config, source_spec, False)
+            return rollout_prepared_recovery(repo, root, bundle, commit, version, config, source_spec, False, bridge_reimage_fleet, bridge_reimage_retirement)
         return resume_supervised_deployment(repo, root, bundle, config, old, commit, version, retry_failed)
     require(not retry_failed, 'preparation_retry_requires_submitted_operation')
     validate_dispatched_manual_operation(old)
@@ -3462,7 +3464,12 @@ def rollout_prepared_recovery(repo, root, bundle, commit, version, config, sourc
             sources['legacy_journal'] == str(journal) and private_file(Path(sources['legacy_journal'])) == old_raw,
             'preparation_legacy_journal_changed')
     current = canonical_file(config)
-    require(sha(current) == old.get('config_sha256'), 'canonical_config_changed_during_operation')
+    if reimage:
+        require(old.get('supervised_deploy') is True and
+                private_file(Path(sources['original_config'])) == current and
+                private_file(Path(sources['original_journal'])) == old_raw, 'bridge_reimage_restored_inputs_changed')
+    else:
+        require(sha(current) == old.get('config_sha256'), 'canonical_config_changed_during_operation')
     validate_config_policy(current)
     backup_name = old.get('backup', '')
     require(re.fullmatch(r'install\.config\.before-' + re.escape(old['version']) + r'-[0-9]+', backup_name) and
@@ -3470,7 +3477,7 @@ def rollout_prepared_recovery(repo, root, bundle, commit, version, config, sourc
     require(operator_requested(), 'preparation_explicit_bridge_transport_required')
     pins_snapshot = {}
     transport, binding = operator_transport(os.environ.get('ULTRA_OPERATOR_INVENTORY'), current, pins_snapshot=pins_snapshot)
-    require(binding == old.get('transport_binding'), 'preparation_legacy_transport_changed')
+    require(reimage or binding == old.get('transport_binding'), 'preparation_legacy_transport_changed')
     pin_options = [x.split('=',1)[1] for x in transport if x.startswith('UserKnownHostsFile=')]
     require(len(pin_options) == 1, 'preparation_public_pins_required')
     pins_raw = operator_pins(Path(pin_options[0]))
@@ -3494,6 +3501,21 @@ def rollout_prepared_recovery(repo, root, bundle, commit, version, config, sourc
     immutable_preparation_file(archive / 'canonical.config', current)
     immutable_preparation_file(archive / 'source-spec.original.json', source_raw)
     derived = dict(sources, legacy_journal=str(archive / 'legacy-journal.json'))
+    if reimage:
+        prior_archive = root / old.get('preparation_source_archive', '')
+        require(prior_archive.name == 'recovery-source-' + old.get('preparation_legacy_journal_sha256', ''),
+                'bridge_reimage_prior_archive_changed')
+        prior_config = private_file(root / backup_name)
+        prior_release = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + old['commit'] + '-' + old['remote_attempt']) / 'release'
+        superseded = config_candidate(remove_config_key(prior_config, 'ULTRA_UPGRADE_BASELINE_FILE'), old['version'], prior_release)
+        require(sha(superseded) == old['config_sha256'], 'bridge_reimage_original_config_unavailable')
+        immutable_preparation_file(archive / 'superseded.config', superseded)
+        immutable_preparation_file(archive / 'fleet.json', private_file(Path(bridge_reimage_fleet)))
+        if bridge_reimage_retirement:
+            immutable_preparation_file(archive / 'retirement.json', private_file(Path(bridge_reimage_retirement)))
+            derived['bridge_reimage_retirement'] = str(archive / 'retirement.json')
+        derived.update(bridge_reimage_config=str(archive / 'superseded.config'),
+                       bridge_reimage_archive=str(prior_archive), bridge_reimage_fleet=str(archive / 'fleet.json'))
     derived_path = archive / 'source-spec.json'
     immutable_preparation_file(derived_path, json.dumps(derived, sort_keys=True).encode())
     immutable_preparation_file(archive / 'known_hosts', pins_raw)
@@ -3509,7 +3531,7 @@ def rollout_prepared_recovery(repo, root, bundle, commit, version, config, sourc
     record = None
     submitted = False
     with tempfile.TemporaryFile(dir=root) as stream:
-        descriptor_sha = export_preparation_stream(installer, derived_path, archive / 'known_hosts', remote_root, manifest_sha, root, repo, stream)
+        descriptor_sha = export_preparation_stream(installer, derived_path, archive / 'known_hosts', remote_root, manifest_sha, root, repo, stream, **({'bridge_reimage': True} if reimage else {}))
         require(private_file(journal) == old_raw and canonical_file(config) == current, 'preparation_source_inputs_changed')
         try:
             receipt = stage_remote(repo, root, bundle, staged, transport, commit, version, manifest_sha,
@@ -4202,6 +4224,9 @@ def main():
     require(__debug__, 'python_optimization_disables_release_validation')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prepare-recovery-source-spec', help='absolute private retained-primary recovery source inventory; starts the single supervised preparation and upgrade')
+    parser.add_argument('--acknowledge-bridge-reimage', action='store_true', help='explicitly supersede the bound wiped bridge operation; never claims no mutation')
+    parser.add_argument('--bridge-reimage-retirement', help='private receipt for an explicitly deleted provider node retired from the registry')
+    parser.add_argument('--bridge-reimage-fleet', help='private complete DB fleet inventory, including deleted operations and disabled exits')
     parser.add_argument('--build-only', action='store_true', help='verify/build candidate without changing canonical config or remote hosts')
     parser.add_argument('--config', help='canonical install.config path; defaults to install.config in this checkout')
     parser.add_argument('--retry-failed', action='store_true', help='explicitly retry the same failed upgrade after recovery preflight')
@@ -4221,6 +4246,10 @@ def main():
     parser.add_argument('--attestation-bootstrap', help='exact retained recovery-tools-bootstrap-operation directory basename')
     parser.add_argument('--attestation-candidate', help='exact bootstrap candidate manifest SHA256')
     arguments = parser.parse_args()
+    require(arguments.acknowledge_bridge_reimage == bool(arguments.bridge_reimage_fleet) and
+            (not arguments.acknowledge_bridge_reimage or arguments.prepare_recovery_source_spec) and
+            (not arguments.bridge_reimage_retirement or arguments.acknowledge_bridge_reimage),
+            'bridge_reimage_explicit_scope_required')
     if arguments.prepare_recovery_source_spec:
         require(not any((arguments.build_only, arguments.forward_only, arguments.continue_forward_only,
                          arguments.subscription_probe_env_file, arguments.archive_reimaged_adoption,
@@ -4342,7 +4371,7 @@ def main():
                     operator_transport(os.environ.get('ULTRA_OPERATOR_INVENTORY'), current)
                 if arguments.prepare_recovery_source_spec:
                     rollout_prepared_recovery(repo, root, bundle, commit, version, config,
-                        Path(arguments.prepare_recovery_source_spec), arguments.retry_failed)
+                        Path(arguments.prepare_recovery_source_spec), arguments.retry_failed, arguments.bridge_reimage_fleet, arguments.bridge_reimage_retirement)
                 elif arguments.recover_bridge_preflight:
                     recover_bridge_preflight(repo, root, bundle, commit, version, config,
                         arguments.journal_sha256, arguments.backup_sha256, arguments.config_sha256)

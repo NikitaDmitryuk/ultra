@@ -193,6 +193,9 @@ func runBridgePreflightProof(args []string, out io.Writer) error {
 // The coordinator has already frozen the journal in its immutable request; it
 // uses the same source audit and protected publication as the operator adapter.
 func closeRecoveryPreparationLegacy(ctx context.Context, r recoveryPreparationRequest) error {
+	if r.BridgeReimage != nil {
+		return closeRecoveryBridgeReimage(ctx, r)
+	}
 	in, err := validateRecoveryPreparationRequest(r)
 	if err != nil {
 		return err

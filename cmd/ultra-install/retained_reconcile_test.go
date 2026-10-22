@@ -18,8 +18,16 @@ func reconcileFixture(t *testing.T) (retainedPrimaryRebuildInput, []string) {
 }
 
 func reconcileFixtureDNS(t *testing.T, historical bool) (retainedPrimaryRebuildInput, []string) {
+	return reconcileFixtureScoped(t, historical, false)
+}
+
+func reconcileFixtureScoped(t *testing.T, historical, bridge bool) (retainedPrimaryRebuildInput, []string) {
 	t.Helper()
 	in := retainedRebuildFixture(t)
+	if bridge {
+		in.BridgeOnly = true
+		in.RetainedExit = retainedBridgeExitFixture()
+	}
 	paths := []string{
 		in.Directory,
 		filepath.Join(in.Directory, "config"),
@@ -90,13 +98,13 @@ func reconcileFixtureDNS(t *testing.T, historical bool) (retainedPrimaryRebuildI
 	}
 	write(
 		filepath.Join(execute, "job.json"),
-		map[string]any{"schema_version": 1, "operation": retainedPrimaryRebuildOperation, "request_sha256": hash, "binary_sha256": hash},
+		map[string]any{"schema_version": 1, "operation": retainedRebuildOperation(in), "request_sha256": hash, "binary_sha256": hash},
 	)
 	write(
 		filepath.Join(execute, "receipt.json"),
 		map[string]any{
 			"schema_version": 1,
-			"operation":      retainedPrimaryRebuildOperation,
+			"operation":      retainedRebuildOperation(in),
 			"request_sha256": hash,
 			"binary_sha256":  hash,
 			"state":          "succeeded",

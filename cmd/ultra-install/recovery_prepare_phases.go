@@ -218,6 +218,13 @@ func runRecoveryPreparationPhase(ctx context.Context, phase string, r recoveryPr
 }
 
 func sealRecoveryPreparationOrigins(ctx context.Context, r recoveryPreparationRequest, in recoveryPreparationInputs) error {
+	if r.BridgeReimage != nil {
+		return withBridgeReimageFleet(ctx, r, in, func() error { return sealRecoveryPreparationOriginsLocked(ctx, r, in) })
+	}
+	return sealRecoveryPreparationOriginsLocked(ctx, r, in)
+}
+
+func sealRecoveryPreparationOriginsLocked(ctx context.Context, r recoveryPreparationRequest, in recoveryPreparationInputs) error {
 	p, _, err := recoveryPreparationTransportPlan(r, in)
 	if err != nil {
 		return err

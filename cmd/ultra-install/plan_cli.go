@@ -23,6 +23,10 @@ func handlePlanSubcommand(args []string) bool {
 		return true
 	}
 	switch args[0] {
+	case "provider-census":
+		exitOnErr("provider census", runProviderCensus(args[1:], os.Stdout))
+	case "provider-delete":
+		exitOnErr("provider deletion", runProviderDelete(args[1:], os.Stdout))
 	case "deploy-operation":
 		exitOnErr("deployment operation", runDeployOperationCommand(args[1:], os.Stdout))
 	case "retained-primary-reconcile":

@@ -60,6 +60,9 @@ func loadRecoveryPreparationInputs(directory, config, manifest, journal string) 
 		Protocol: "ultra-recovery-preparation-admission-v1", FenceSHA256: evidence.Fence,
 		BaselineManifestSHA256: in.ManifestSHA256, ConfigSHA256: in.ConfigSHA256, Phase: "sealed",
 	}, installers}
+	if in.BridgeOnly {
+		return result, errors.New("bridge_reimage_supervised_preparation_required")
+	}
 	if !result.admission.valid() {
 		return recoveryPreparationInputs{}, errors.New("recovery_preparation_binding_invalid")
 	}

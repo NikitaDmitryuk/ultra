@@ -279,6 +279,7 @@ func runLocal(
 		"bootstrap-exit":               true,
 		"bootstrap-bridge":             true,
 		"rebuild-retained-primary":     true,
+		"rebuild-retained-bridge":      true,
 		"bootstrap-automation":         true,
 		"verify-bootstrap-automation":  true,
 		"adopt":                        true,

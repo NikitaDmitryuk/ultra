@@ -48,6 +48,10 @@ func loadRecoveryPreparationRetainedEvidence(r recoveryPreparationRequest) (reco
 		Protocol: "ultra-recovery-preparation-admission-v1", FenceSHA256: evidence.Fence,
 		BaselineManifestSHA256: in.ManifestSHA256, ConfigSHA256: in.ConfigSHA256, Phase: "sealed",
 	}, installers}
+	if in.BridgeOnly && in.RetainedExit != nil && r.BridgeReimage != nil {
+		result.admission.ExitFenceSHA256 = in.RetainedExit.FenceSHA256
+		result.admission.BridgeGenesis = evidence.Binding
+	}
 	if !result.admission.valid() {
 		return recoveryPreparationInputs{}, errors.New("recovery_preparation_binding_invalid")
 	}
@@ -55,6 +59,9 @@ func loadRecoveryPreparationRetainedEvidence(r recoveryPreparationRequest) (reco
 }
 
 func verifyRecoveryPreparationLegacyClosure(r recoveryPreparationRequest) error {
+	if r.BridgeReimage != nil {
+		return verifyRecoveryBridgeReimageClosure(r)
+	}
 	fail := errors.New("recovery_preparation_legacy_closure_unverified")
 	if !runtimeHostValidDigest(r.LegacyJournalSHA256) {
 		return fail
@@ -117,6 +124,7 @@ func verifyRecoveryPreparationPrimary(ctx context.Context, r recoveryPreparation
 		return errors.New("recovery_preparation_primary_observation_failed")
 	}
 	var observed struct {
+		Fleet    []bridgeReimageFleetRow `json:"fleet"`
 		Identity retainedPrimaryIdentity `json:"identity"`
 		Primary  bool                    `json:"primary"`
 		Routes   []exits.BootstrapEntry  `json:"routes"`
@@ -124,6 +132,9 @@ func verifyRecoveryPreparationPrimary(ctx context.Context, r recoveryPreparation
 	}
 	if decodeRetainedReconcile(raw, &observed) != nil || !observed.Primary || observed.Pending != 0 {
 		return errors.New("recovery_preparation_primary_or_queue_changed")
+	}
+	if r.BridgeReimage != nil && !equalBridgeReimageFleet(observed.Fleet, r.BridgeReimage.Fleet) {
+		return errors.New("bridge_reimage_fleet_registry_changed")
 	}
 	route, err := validateRetainedRoute(p, observed.Routes)
 	if err != nil {
@@ -208,6 +219,13 @@ database,address,port,state=sys.argv[1:]
 parsed=dsn_from_runtime(database)
 query="""BEGIN READ ONLY;
 SELECT json_build_object(
+ 'fleet',(SELECT COALESCE(json_agg(r),'[]'::json) FROM (
+ SELECT json_build_object('kind','exit','id',id::text,'address',address,'port',port,'enabled',enabled,
+ 'pinned_peer_cert_sha256',COALESCE(pinned_peer_cert_sha256,'')) AS r FROM public.exit_nodes
+ UNION ALL
+ SELECT json_build_object('kind','cloud_operation','id',id::text,'state',state,'phase',COALESCE(body->>'phase',''),
+ 'instance_id',COALESCE(body->>'instance_id',''),'exit_id',COALESCE(body->>'exit_id',''),
+ 'occupies_slot',occupies_slot,'install_attempt',COALESCE(body->>'install_attempt',''),'retirement_binding',COALESCE(body#>>'{provider_absence_retirement,binding_sha256}','')) AS r FROM public.cloud_operations) fleet),
  'identity',json_build_object('system_identifier',(SELECT system_identifier::text FROM pg_control_system()),
    'database',current_database(),'database_oid',(SELECT oid::bigint FROM pg_database WHERE datname=current_database()),
    'migration_versions',(SELECT COALESCE(string_agg(version::text,',' ORDER BY version),'') FROM public.schema_migrations)),

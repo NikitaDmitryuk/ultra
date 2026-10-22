@@ -21,11 +21,15 @@ import (
 )
 
 type recoveryInputSources struct {
-	RetainedDirectory string `json:"retained_directory"`
-	BaselineRelease   string `json:"baseline_release"`
-	OriginalConfig    string `json:"original_config"`
-	OriginalJournal   string `json:"original_journal"`
-	LegacyJournal     string `json:"legacy_journal"`
+	BridgeReimageRetirement string `json:"bridge_reimage_retirement,omitempty"`
+	BridgeReimageFleet      string `json:"bridge_reimage_fleet,omitempty"`
+	BridgeReimageConfig     string `json:"bridge_reimage_config,omitempty"`
+	BridgeReimageArchive    string `json:"bridge_reimage_archive,omitempty"`
+	RetainedDirectory       string `json:"retained_directory"`
+	BaselineRelease         string `json:"baseline_release"`
+	OriginalConfig          string `json:"original_config"`
+	OriginalJournal         string `json:"original_journal"`
+	LegacyJournal           string `json:"legacy_journal"`
 }
 
 // Export copies only the evidence used by verification. In particular it never
@@ -68,7 +72,13 @@ func recoveryInputExportPlan(s recoveryInputSources, pins, destination, toolsSHA
 	if err != nil {
 		return snapshot, nil, err
 	}
-	if _, err = parseBridgePreflightJournal(legacy); err != nil {
+	var reimage *recoveryBridgeReimage
+	if s.BridgeReimageConfig != "" || s.BridgeReimageArchive != "" || s.BridgeReimageFleet != "" || s.BridgeReimageRetirement != "" {
+		reimage, err = buildRecoveryBridgeReimage(s, legacy, verified.retained)
+	} else {
+		_, err = parseBridgePreflightJournal(legacy)
+	}
+	if err != nil {
 		return snapshot, nil, err
 	}
 	pinBytes, err := readRebuildInput(pins, false)
@@ -89,6 +99,7 @@ func recoveryInputExportPlan(s recoveryInputSources, pins, destination, toolsSHA
 		return snapshot, nil, errors.New("recovery_inputs_public_pins_required")
 	}
 	r := sourceRequest
+	r.BridgeReimage = reimage
 	r.Protocol = "ultra-recovery-preparation-request-v1"
 	r.RetainedDirectory = filepath.Join(destination, "retained")
 	r.ConfigPath = filepath.Join(destination, "original.config")
@@ -257,6 +268,7 @@ func runExportRecoveryInputs(_ context.Context, args []string, out io.Writer) er
 	destination := fs.String("remote-directory", "", "fixed candidate preparation directory")
 	pins := fs.String("known-hosts", "", "accepted public SSH pins")
 	toolsSHA := fs.String("tools-manifest-sha256", "", "candidate tools manifest digest")
+	reimage := fs.Bool("acknowledge-bridge-reimage", false, "explicitly supersede the wiped bridge authority; never assert no mutation")
 	if fs.Parse(args) != nil || fs.NArg() != 0 || !runtimeHostValidDigest(*toolsSHA) ||
 		!regexp.MustCompile(`^/var/lib/ultra-ansible/operator-inputs/manual-[a-f0-9]{40}-[a-f0-9]{64}/preparation$`).
 			MatchString(*destination) {
@@ -266,6 +278,10 @@ func runExportRecoveryInputs(_ context.Context, args []string, out io.Writer) er
 	var sources recoveryInputSources
 	if err != nil || decodeRetainedReconcile(raw, &sources) != nil {
 		return errors.New("recovery_inputs_sources_invalid")
+	}
+	if (!*reimage && (sources.BridgeReimageFleet != "" || sources.BridgeReimageConfig != "" || sources.BridgeReimageArchive != "" || sources.BridgeReimageRetirement != "")) ||
+		*reimage != (sources.BridgeReimageConfig != "" && sources.BridgeReimageArchive != "" && sources.BridgeReimageFleet != "") {
+		return errors.New("bridge_reimage_explicit_scope_required")
 	}
 	snapshot, paths, err := recoveryInputExportPlan(sources, *pins, *destination, *toolsSHA)
 	if err != nil {

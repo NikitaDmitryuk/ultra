@@ -14,10 +14,10 @@ spec.loader.exec_module(controller)
 
 class OperationMappingTests(unittest.TestCase):
     def test_every_operation_resolves_to_one_existing_implementation(self):
-        self.assertEqual(len(controller.OPERATIONS), 52)
+        self.assertEqual(len(controller.OPERATIONS), 53)
         self.assertEqual(set(controller.PLAYBOOKS), controller.OPERATIONS)
         selected = {controller.operation_playbook(op) for op in controller.OPERATIONS}
-        self.assertEqual(len(selected), 50)
+        self.assertEqual(len(selected), 51)
         retired = {'adopt-replica-tunnels.yml', 'replica.yml', 'stop-replica.yml', 'bridge-migrate.yml', 'bridge-migrate-inspect.yml', 'bridge-migrate-fence.yml', 'bridge-migrate-probe.yml', 'bridge-migrate-rollback-peers.yml'}
         self.assertEqual(selected, {path.name for path in (SOURCE / 'playbooks').glob('*.yml')})
         for op in retired:

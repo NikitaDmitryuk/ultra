@@ -28,6 +28,7 @@ func preparationAdmissionFixture(t *testing.T) recoveryAdmissionFixture {
 		system: filepath.Join(root, "system"),
 		proc:   filepath.Join(root, "proc"),
 		proof: recoveryPreparationAdmission{
+			"", "",
 			"ultra-recovery-preparation-admission-v1",
 			strings.Repeat("a", 64),
 			strings.Repeat("b", 64),

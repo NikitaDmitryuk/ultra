@@ -27,6 +27,7 @@ import (
 )
 
 type retainedReconcileEvidence struct {
+	RetainedExit          *retainedBridgeExit     `json:"retained_exit,omitempty"`
 	Protocol              string                  `json:"protocol"`
 	Fence                 string                  `json:"fence_sha256"`
 	Binding               string                  `json:"binding_sha256"`
@@ -38,10 +39,11 @@ type retainedReconcileEvidence struct {
 }
 
 func runRetainedReconcile(args []string, out io.Writer) error {
-	if len(args) == 0 || (args[0] != "inspect" && args[0] != "activate-controller") {
+	if len(args) == 0 || (args[0] != "inspect" && args[0] != "activate-controller" && args[0] != "retire-deleted-provider") {
 		return errors.New("retained_reconcile_action_required")
 	}
 	activate := args[0] == "activate-controller"
+	retire := args[0] == "retire-deleted-provider"
 	f := flag.NewFlagSet("retained-primary-reconcile", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	directory := f.String("state-dir", "", "existing successful recovery workspace")
@@ -50,11 +52,16 @@ func runRetainedReconcile(args []string, out io.Writer) error {
 	journal := f.String("original-journal", "", "original journal, never modified")
 	receipt := f.String("receipt", "", "new private reconciliation evidence file")
 	configureCloud := f.Bool("configure-cloud-runtime", false, "repair fixed bridge provider runtime after controller readiness")
+	deletedProvider := f.String("provider-deletion-receipt", "", "verified exact provider deletion")
+	fleet := f.String("fleet", "", "private complete pre-retirement fleet inventory")
 	if f.Parse(args[1:]) != nil || f.NArg() != 0 {
 		return errors.New("retained_reconcile_arguments_invalid")
 	}
 	if *configureCloud && !activate {
 		return errors.New("retained_reconcile_cloud_requires_activation")
+	}
+	if retire != (*deletedProvider != "" && *fleet != "") || (!retire && (*deletedProvider != "" || *fleet != "")) {
+		return errors.New("retained_reconcile_retirement_scope_required")
 	}
 	for _, p := range []string{*directory, *config, *manifest, *journal, *receipt} {
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
@@ -116,7 +123,11 @@ func runRetainedReconcile(args []string, out io.Writer) error {
 		if n == 1 {
 			role = "exit"
 		}
-		l, e := openRetainedReconcileLease(ctx, p, target.address, target.key, role, evidence.Fence, raw, p.Exits[0].Port)
+		fence := evidence.Fence
+		if role == "exit" && in.RetainedExit != nil {
+			fence = in.RetainedExit.FenceSHA256
+		}
+		l, e := openRetainedReconcileLease(ctx, p, target.address, target.key, role, fence, raw, p.Exits[0].Port)
 		if e != nil {
 			return e
 		}
@@ -133,6 +144,20 @@ func runRetainedReconcile(args []string, out io.Writer) error {
 	}
 	if err != nil || !reflect.DeepEqual(again, evidence) {
 		return errors.New("retained_reconcile_inputs_changed")
+	}
+	if retire {
+		result, e := retireDeletedProvider(ctx, p, in, evidence, *deletedProvider, *fleet)
+		if e != nil {
+			return e
+		}
+		if e = publishRetainedReconcile(*receipt, result); e != nil {
+			return e
+		}
+		_, e = fmt.Fprintln(
+			out,
+			"provider absence retirement verified; exact node and operation retained as history; scoped counts recorded",
+		)
+		return e
 	}
 	if err = publishRetainedReconcile(*receipt, raw); err != nil {
 		return err
@@ -275,6 +300,7 @@ func loadRetainedReconcileSnapshot(
 	normalized, _ := json.Marshal(in)
 	normalizedBinding := digestSHA256(normalized)
 	e.Fence = in.FenceEvidenceSHA256
+	e.RetainedExit = in.RetainedExit
 	e.Primary = in.Primary
 	execute := filepath.Join(directory, "execute")
 	request, err := read("request", filepath.Join(execute, "request.json"), true)
@@ -321,7 +347,7 @@ func loadRetainedReconcileSnapshot(
 		}
 		saved = nil
 		if retainedReconcileUniqueJSON(v) != nil || json.Unmarshal(v, &saved) != nil || saved["schema_version"] != float64(1) ||
-			saved["operation"] != retainedPrimaryRebuildOperation ||
+			saved["operation"] != retainedRebuildOperation(in) ||
 			saved["request_sha256"] != e.Artifacts["request"] ||
 			saved["binary_sha256"] != e.Artifacts["request"] {
 			return in, e, errors.New("retained_reconcile_execute_identity_invalid")

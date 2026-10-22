@@ -4827,7 +4827,7 @@ class PreparedRecovery(unittest.TestCase):
         root='/var/lib/ultra-ansible/operator-inputs/manual-'+argv[5]+'-'+argv[9]
         return SimpleNamespace(returncode=0,stdout_truncated=False,stdout=json.dumps({'preparation_file':root+'/preparation/preparation.json','preparation_sha256':self.preparation_sha}).encode())
 
-    def invoke(self,runner=None,export=None,stage=None,importer=None,retry=False,ordinary_resume=False):
+    def invoke(self,runner=None,export=None,stage=None,importer=None,retry=False,ordinary_resume=False,reimage=False):
         with patch.object(D.platform,'system',return_value='Linux'),patch.object(D.platform,'machine',return_value='x86_64'), \
              patch.object(D,'operator_requested',return_value=True),patch.object(D,'operator_transport',side_effect=self.transport), \
              patch.object(D,'export_preparation_stream',side_effect=export or self.export) as exported, \
@@ -4843,8 +4843,63 @@ class PreparedRecovery(unittest.TestCase):
             if ordinary_resume:
                 D.rollout(self.repo,self.root,self.bundle,self.commit,self.version,False,self.config,retry)
             else:
-                D.rollout_prepared_recovery(self.repo,self.root,self.bundle,self.commit,self.version,self.config,self.spec,retry)
+                D.rollout_prepared_recovery(self.repo,self.root,self.bundle,self.commit,self.version,self.config,self.spec,retry,
+                    self.fleet if reimage else None, self.retirement if reimage else None)
         return exported,staged
+
+    def prepare_reimage(self):
+        self.old.update(supervised_deploy=True,preparation_sha256='1'*64,
+            preparation_descriptor_sha256='2'*64,preparation_source_spec_sha256='3'*64,
+            preparation_legacy_journal_sha256='4'*64,preparation_source_archive='recovery-source-'+'4'*64)
+        D.atomic_write(self.root/self.old_backup,self.original)
+        self.old['previous_sha256']=D.sha(self.original)
+        prior_release=Path('/var/lib/ultra-ansible/operator-inputs')/('manual-'+self.old['commit']+'-'+self.old['remote_attempt'])/'release'
+        self.superseded=D.config_candidate(D.remove_config_key(self.original,'ULTRA_UPGRADE_BASELINE_FILE'),self.old['version'],prior_release)
+        self.old['config_sha256']=D.sha(self.superseded)
+        self.old_raw=json.dumps(self.old).encode();D.atomic_write(self.root/'operation.json',self.old_raw)
+        source=json.loads(self.spec.read_bytes())
+        D.atomic_write(Path(source['original_config']),self.original)
+        D.atomic_write(Path(source['original_journal']),self.old_raw)
+        self.fleet=self.repo/'fleet.json';D.atomic_write(self.fleet,b'[]')
+        self.retirement=self.repo/'retirement.json';D.atomic_write(self.retirement,b'{"receipt":"bound"}')
+
+    def reimage_export(self,*args,**kwargs):
+        self.assertEqual(kwargs,{'bridge_reimage':True})
+        derived=json.loads(Path(args[1]).read_bytes())
+        self.assertEqual(Path(derived['bridge_reimage_config']).read_bytes(),self.superseded)
+        self.assertEqual(Path(derived['bridge_reimage_fleet']).read_bytes(),self.fleet.read_bytes())
+        self.assertEqual(Path(derived['bridge_reimage_retirement']).read_bytes(),self.retirement.read_bytes())
+        self.assertEqual(Path(derived['bridge_reimage_archive']).name,self.old['preparation_source_archive'])
+        return self.export(*args)
+
+    def test_bridge_reimage_links_dispatched_history_and_lost_ack_resumes_only(self):
+        self.prepare_reimage()
+        def lost(*a,**k):raise D.DeployError('lost acknowledgment')
+        with self.assertRaises(D.DeployError):self.invoke(reimage=True,export=self.reimage_export,runner=lost)
+        record=json.loads((self.root/'operation.json').read_bytes())
+        self.assertTrue(record['mutator_dispatched'])
+        archive=self.root/record['preparation_source_archive']
+        self.assertEqual((archive/'legacy-journal.json').read_bytes(),self.old_raw)
+        self.assertEqual((archive/'superseded.config').read_bytes(),self.superseded)
+        never=lambda *a,**k: (_ for _ in ()).throw(AssertionError('reexported dispatched recovery'))
+        self.invoke(reimage=True,export=never,stage=never,importer=never)
+        self.assertFalse((self.root/'operation.json').exists())
+        self.assertEqual((archive/'legacy-journal.json').read_bytes(),self.old_raw)
+
+    def test_bridge_reimage_pre_dispatch_crash_keeps_current_canonical_and_old_journal(self):
+        self.prepare_reimage()
+        def lost(*a,**k):raise D.DeployError('pre-dispatch failure')
+        with self.assertRaises(D.DeployError):self.invoke(reimage=True,export=self.reimage_export,stage=lost)
+        self.assertEqual(self.config.read_bytes(),self.original)
+        self.assertEqual((self.root/'operation.json').read_bytes(),self.old_raw)
+        self.invoke(reimage=True,export=self.reimage_export)
+
+    def test_bridge_reimage_rejects_unbound_restored_inputs_before_export(self):
+        self.prepare_reimage()
+        source=json.loads(self.spec.read_bytes());D.atomic_write(Path(source['original_journal']),b'wrong')
+        with self.assertRaisesRegex(D.DeployError,'bridge_reimage_restored_inputs_changed'):
+            self.invoke(reimage=True,export=lambda *a,**k:self.fail('unbound source exported'))
+        self.assertEqual((self.root/'operation.json').read_bytes(),self.old_raw)
 
     def test_current_legacy_journal_is_preserved_and_linked_until_single_coordinator(self):
         calls=[]
