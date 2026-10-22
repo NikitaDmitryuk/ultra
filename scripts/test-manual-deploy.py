@@ -5349,7 +5349,7 @@ class PerRoleOperatorIdentity(unittest.TestCase):
             config=("BRIDGE_IP=192.0.2.10\nMAIN_EXIT_IP=192.0.2.20\nDATABASE_IP=192.0.2.30\nBRIDGE_SSH_KEY="+str(bridge)+
                     "\nDATABASE_SSH_KEY=/tmp/database-key\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE="+str(pins)+
                     "\nULTRA_AUTOMATION_STATIC_NODES='[{\"name\":\"primary\",\"address\":\"192.0.2.20\"}]'\n").encode()
-            with patch.object(D.os, 'geteuid', return_value=1000), \
+            with patch.object(D.os, 'geteuid', return_value=bridge.stat().st_uid), \
                     patch.dict(os.environ,{'ULTRA_OPERATOR_IDENTITY':'','ULTRA_OPERATOR_KNOWN_HOSTS':''}), \
                     patch.object(D.subprocess,'run',return_value=subprocess.CompletedProcess([],0)):
                 argv,_=D.operator_transport(None,config)
@@ -5507,12 +5507,12 @@ class OperatorRootContract(unittest.TestCase):
             path = Path(temporary) / 'deploy.lock'
             path.write_bytes(b'')
             path.chmod(0o600)
-            fake = type('Stat', (), {'st_mode': path.stat().st_mode, 'st_nlink': 1, 'st_uid': 2000})()
+            fake = type('Stat', (), {'st_mode': path.stat().st_mode, 'st_nlink': 1, 'st_uid': os.geteuid() + 1})()
             with patch.object(D.os, 'fstat', return_value=fake), \
                  self.assertRaisesRegex(D.DeployError, '^operator_lock_owner_mismatch$'):
                 with D.lock(path):
                     pass
-            with patch.object(D.os, 'geteuid', return_value=1000):
+            with patch.object(D.os, 'geteuid', return_value=path.stat().st_uid):
                 held = os.open(path, os.O_RDWR)
                 try:
                     import fcntl
@@ -5534,7 +5534,7 @@ class OperatorRootContract(unittest.TestCase):
                     '--journal-sha256', 'b' * 64, '--backup-sha256', 'c' * 64,
                     '--config-sha256', 'd' * 64]
             with patch.object(D, '__file__', str(Path.cwd() / 'scripts/manual-deploy.py')), \
-                 patch.object(D.os, 'geteuid', return_value=1000), \
+                 patch.object(D.os, 'geteuid', return_value=config.stat().st_uid), \
                  patch.object(D, 'require_emergency_root', side_effect=AssertionError('remote root is sufficient')), \
                  patch.object(D, 'validate_operator_config'), \
                  patch.object(D, 'require_manual_state_directory'), \
