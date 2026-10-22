@@ -186,6 +186,8 @@ ansible-dist:
 
 test-ansible:
 	python3 scripts/test-ansible-controller-process.py
+	python3 scripts/test-ansible-controller-fence.py
+	python3 scripts/test-ansible-execution-containment.py
 	python3 scripts/test-upgrade-worker-drain.py
 	python3 scripts/test-ansible-release-contracts.py
 	python3 scripts/test-controller-enforcement.py
@@ -226,7 +228,7 @@ test-ansible-exit: build-install
 # Explicit operator action: builds committed HEAD in isolation, then rolls out.
 .PHONY: deploy deploy-build test-manual-deploy
 deploy:
-	python3 scripts/manual-deploy.py $(if $(INSTALL_CONFIG),--config "$(INSTALL_CONFIG)",) $(if $(filter 1,$(RETRY_FAILED)),--retry-failed,) $(if $(SUBSCRIPTION_PROBE_ENV_FILE),--subscription-probe-env-file "$(SUBSCRIPTION_PROBE_ENV_FILE)",)
+	python3 scripts/manual-deploy.py $(if $(INSTALL_CONFIG),--config "$(INSTALL_CONFIG)",) $(if $(filter 1,$(RETRY_FAILED)),--retry-failed,) $(if $(SUBSCRIPTION_PROBE_ENV_FILE),--subscription-probe-env-file "$(SUBSCRIPTION_PROBE_ENV_FILE)",) $(if $(PREPARE_RECOVERY_SOURCE_SPEC),--prepare-recovery-source-spec "$(PREPARE_RECOVERY_SOURCE_SPEC)",)
 
 deploy-build:
 	python3 scripts/manual-deploy.py --build-only

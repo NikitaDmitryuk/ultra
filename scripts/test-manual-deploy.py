@@ -2345,6 +2345,113 @@ class NativeDeploy(unittest.TestCase):
         self.bot_reader_mock.assert_called_once_with(self.config.parent / '.env')
         self.vultr_reader_mock.assert_called_once_with(self.config.parent / '.env')
 
+    def test_supervised_retry_attaches_without_restaging_or_reopening_secrets(self):
+        manifest = json.loads(self.manifest)
+        manifest['capabilities'] = ['supervised-deploy-v1']
+        self.manifest = json.dumps(manifest).encode()
+        (self.bundle / 'release-manifest.json').write_bytes(self.manifest)
+        def fail_upgrade(command, cwd, stage, **kwargs):
+            self.run_fixture(command, cwd, stage)
+            if stage == 'upgrade':
+                raise D.DeployError('operator_ssh_disconnected')
+        with self.assertRaisesRegex(D.DeployError, '^operator_ssh_disconnected$'):
+            self.rollout(runner=fail_upgrade)
+        pending = json.loads((self.root / 'operation.json').read_bytes())
+        self.assertIs(pending['supervised_deploy'], True)
+        frozen = self.config.read_bytes()
+        self.stage_mock.reset_mock()
+        self.bot_reader_mock.reset_mock()
+        self.vultr_reader_mock.reset_mock()
+        self.pins_bootstrap_mock.reset_mock()
+        self.calls.clear()
+        self.rollout()
+        self.stage_mock.assert_not_called()
+        self.bot_reader_mock.assert_not_called()
+        self.vultr_reader_mock.assert_not_called()
+        self.pins_bootstrap_mock.assert_not_called()
+        self.assertEqual([stage for stage, _ in self.calls], ['upgrade', 'status'])
+        self.assertEqual(self.config.read_bytes(), D.remove_config_key(frozen, 'ULTRA_UPGRADE_BASELINE_FILE'))
+        self.assertFalse((self.root / 'operation.json').exists())
+
+    def bridge_preflight_fixture(self):
+        commit = D.BRIDGE_PREFLIGHT_COMMIT
+        version = 'v0.0.' + str(int(commit, 16))
+        attempt = D.remote_attempt(D.projected_upgrade_config(self.original, 'upgrade-v2'), version)
+        release = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + commit + '-' + attempt) / 'release'
+        current = D.config_candidate(self.original, version, release)
+        D.atomic_write(self.config, current)
+        _, binding = D.operator_transport(str(self.operator / 'inventory.json'), current)
+        backup = self.root / ('install.config.before-' + version + '-123')
+        D.atomic_write(backup, self.original)
+        record = {'schema':1,'commit':commit,'version':version,'adopt':False,'backup':backup.name,
+            'previous_sha256':D.sha(self.original),'config_sha256':D.sha(current),'stage':'upgrade',
+            'mutator_dispatched':True,'transport_binding':binding,'manifest_sha256':'b'*64,
+            'remote_attempt':attempt,'probe_sha256':'','forward_only':False,'forward_journal_sha256':'',
+            'staged_config_sha256':D.sha(D.projected_upgrade_config(current,'upgrade-v2')),
+            'secrets_source':'installed-runtime','config_projection':'upgrade-v2','remote_architecture':'arm64'}
+        raw = json.dumps(record).encode()
+        D.atomic_write(self.root / 'operation.json', raw)
+        manifest = json.loads(self.manifest)
+        manifest['capabilities'] = ['bridge-preflight-closure-v1']
+        (self.bundle / 'release-manifest.json').write_bytes(json.dumps(manifest).encode())
+        receipt = {'protocol':'ultra-bridge-preflight-closure-v1','result':'preflight_failed_no_mutation',
+            'journal_sha256':D.sha(raw),'evidence_sha256':'c'*64,
+            'admission':{'protocol':'ultra-recovery-preparation-admission-v1','phase':'sealed',
+                'fence_sha256':'d'*64,'baseline_manifest_sha256':'e'*64,'config_sha256':'f'*64},
+            **{k:record[k] for k in ('commit','version','remote_attempt','staged_config_sha256','manifest_sha256')}}
+        return current, raw, receipt
+
+    def invoke_bridge_recovery(self, receipt):
+        popen = subprocess.Popen
+        def helper(command, **kwargs):
+            nonce = D.shlex.split(command[-1])[-1]
+            script = """import json,sys
+r=json.loads(sys.argv[1]);n=sys.argv[2]
+print(json.dumps({'nonce':n,'receipt':r}),flush=True)
+if sys.stdin.readline().strip()!='ack '+n:sys.exit(1)
+print('acknowledged '+n,flush=True)
+"""
+            return popen([sys.executable, '-c', script, json.dumps(receipt), nonce], **kwargs)
+        with patch.object(D.subprocess,'Popen',side_effect=helper):
+            return D.recover_bridge_preflight(self.repo,self.root,self.bundle,self.commit,self.version,self.config,
+                receipt['journal_sha256'],D.sha(self.original),D.sha(self.config.read_bytes()))
+
+    def test_bridge_preflight_archives_only_bound_proof_and_replays_after_rename(self):
+        current, raw, receipt = self.bridge_preflight_fixture()
+        archive = self.invoke_bridge_recovery(receipt)
+        self.assertEqual((archive/'operation.json').read_bytes(),raw)
+        self.assertEqual(json.loads((archive/'receipt.json').read_bytes()),receipt)
+        self.assertFalse((self.root/'operation.json').exists())
+        self.assertEqual(self.config.read_bytes(),current)
+        self.stage_mock.assert_called_once()
+        self.stage_mock.reset_mock()
+        self.assertEqual(self.invoke_bridge_recovery(receipt),archive)
+        self.stage_mock.assert_not_called()
+        self.bot_reader_mock.assert_not_called()
+        self.vultr_reader_mock.assert_not_called()
+        self.bot_bootstrap_mock.assert_not_called()
+        self.pins_bootstrap_mock.assert_not_called()
+
+    def test_bridge_preflight_rejects_unbound_or_unsealed_remote_proof(self):
+        for field,value in [('result','failed'),('manifest_sha256','0'*64),('admission',{})]:
+            with self.subTest(field=field):
+                current, raw, receipt = self.bridge_preflight_fixture()
+                receipt[field] = value
+                with self.assertRaises(D.DeployError):
+                    self.invoke_bridge_recovery(receipt)
+                self.assertEqual((self.root/'operation.json').read_bytes(),raw)
+                self.assertEqual(self.config.read_bytes(),current)
+
+    def test_bridge_preflight_retries_archive_publication_without_deleting_original(self):
+        current, raw, receipt = self.bridge_preflight_fixture()
+        with patch.object(D,'recovery_rename_exclusive',side_effect=OSError('synthetic interruption')):
+            with self.assertRaises(OSError):
+                self.invoke_bridge_recovery(receipt)
+        self.assertEqual((self.root/'operation.json').read_bytes(),raw)
+        archive = self.invoke_bridge_recovery(receipt)
+        self.assertEqual((archive/'operation.json').read_bytes(),raw)
+        self.assertEqual(self.config.read_bytes(),current)
+
     def test_pins_bootstrap_failure_prevents_doctor_and_mutator(self):
         self.pins_bootstrap_mock.side_effect = D.DeployError('bridge_known_hosts_timeout')
         with self.assertRaisesRegex(D.DeployError, 'bridge_known_hosts_timeout'):
@@ -3554,6 +3661,9 @@ class RemoteProgram(unittest.TestCase):
             self.assertEqual(args.count('--secrets-source'), 1)
             self.assertEqual(args[args.index('--secrets-source') + 1], 'installed-runtime')
             self.assertEqual(args[args.index('--config') + 1], str(self.root / 'install.config'))
+            if action == 'upgrade':
+                self.assertEqual(args[:3], ['deploy-operation', 'start', '--'])
+                args = args[3:]
             self.assertEqual(args[0], 'doctor' if action == 'doctor' else 'operator-upgrade')
         changed = self.execute('stage', self.archive())
         self.assertNotEqual(changed.returncode, 0)
@@ -3568,6 +3678,9 @@ class RemoteProgram(unittest.TestCase):
             result = self.execute('run', None, self.architecture, action)
             self.assertEqual(result.returncode, 0, result.stderr)
             args = json.loads(self.result.read_bytes())
+            if action == 'lifecycle_upgrade':
+                self.assertEqual(args[:3], ['deploy-operation', 'start', '--'])
+                args = args[3:]
             self.assertEqual(args[0], command)
             self.assertIn('--lifecycle', args)
 
@@ -3584,6 +3697,57 @@ class RemoteProgram(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b'manual_secrets_source_invalid', result.stderr)
 
+    def test_upgrade_rejects_unsupervised_legacy_candidate(self):
+        manifest = json.loads(self.manifest)
+        manifest.pop('capabilities')
+        self.manifest = json.dumps(manifest).encode()
+        staged = self.execute('stage', self.archive())
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        result = self.execute('run', None, self.architecture, 'upgrade')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'deployment_executor_capability_required', result.stderr)
+        self.assertFalse(self.result.exists())
+
+    def test_supervised_upgrade_releases_staging_lock_before_coordinator_wait(self):
+        binary = ('#!/usr/bin/env python3\nimport fcntl,json,sys\n'
+            'lock=open(' + repr(str(self.parent/'manual-deploy.lock')) + ',"rb")\n'
+            'fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)\n'
+            'open(' + repr(str(self.result)) + ',"w").write(json.dumps(sys.argv[1:]))\n').encode()
+        self.assets['ultra-install-linux-' + self.architecture] = binary
+        manifest = json.loads(self.manifest)
+        manifest['assets'] = [{'name':name,'size':len(raw),'sha256':D.sha(raw)} for name,raw in self.assets.items()]
+        self.manifest = json.dumps(manifest).encode()
+        staged = self.execute('stage', self.archive())
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        result = self.execute('run', None, self.architecture, 'lifecycle_upgrade')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.result.read_bytes())[:3], ['deploy-operation','start','--'])
+
+    def test_bridge_preflight_runs_only_verified_capable_helper_without_staging_lock(self):
+        binary = ('#!/usr/bin/env python3\nimport fcntl,json,sys\n'
+            'lock=open(' + repr(str(self.parent/'manual-deploy.lock')) + ',"rb")\n'
+            'fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)\n'
+            'open(' + repr(str(self.result)) + ',"w").write(json.dumps(sys.argv[1:]))\n').encode()
+        self.assets['ultra-install-linux-' + self.architecture] = binary
+        manifest = json.loads(self.manifest)
+        manifest['capabilities'].append('bridge-preflight-closure-v1')
+        manifest['assets'] = [{'name':name,'size':len(raw),'sha256':D.sha(raw)} for name,raw in self.assets.items()]
+        self.manifest = json.dumps(manifest).encode()
+        staged = self.execute('stage', self.archive())
+        self.assertEqual(staged.returncode,0,staged.stderr)
+        result = self.execute('preflight-proof',None,self.architecture,'e30=','b'*64,'c'*64)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads(self.result.read_bytes()),['bridge-preflight-proof','--journal-base64','e30=',
+            '--journal-sha256','b'*64,'--nonce','c'*64])
+
+    def test_bridge_preflight_never_uses_legacy_installer_without_capability(self):
+        staged = self.execute('stage',self.archive())
+        self.assertEqual(staged.returncode,0,staged.stderr)
+        result = self.execute('preflight-proof',None,self.architecture,'e30=','b'*64,'c'*64)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn(b'bridge_preflight_capability_required',result.stderr)
+        self.assertFalse(self.result.exists())
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -3598,7 +3762,7 @@ class RemoteProgram(unittest.TestCase):
         binary = ('#!/usr/bin/env python3\nimport json,sys\nopen(' + repr(str(self.result)) + ',"w").write(json.dumps(sys.argv[1:]))\n').encode()
         self.assets = {'ultra-install-linux-' + self.architecture: binary}
         self.assets.update({'fixture-' + str(i): b'fixture' for i in range(13)})
-        self.manifest = json.dumps({'source_commit': self.commit, 'version': self.version,
+        self.manifest = json.dumps({'source_commit': self.commit, 'version': self.version, 'capabilities':['supervised-deploy-v1'],
             'assets': [{'name': name, 'size': len(raw), 'sha256': D.sha(raw)} for name, raw in self.assets.items()]}).encode()
         self.config = b'SECRETS_ENV_FILE=/etc/ultra-relay/.env\n'
         # Run the actual remote implementation against a temporary local root;
@@ -4404,6 +4568,9 @@ class RemoteProgram(unittest.TestCase):
             run = self.execute('run', None, self.architecture, action)
             self.assertEqual(run.returncode, 0, run.stderr)
             argv = json.loads(self.result.read_bytes())
+            if action == 'upgrade':
+                self.assertEqual(argv[:3], ['deploy-operation', 'start', '--'])
+                argv = argv[3:]
             self.assertEqual(argv[:len(expected)], expected)
             self.assertEqual(argv[-2:], ['--config', str(self.root / 'install.config')])
         retried = self.execute('run', None, self.architecture, 'upgrade', '1')
@@ -4553,6 +4720,236 @@ class RemoteProgram(unittest.TestCase):
         self.assertEqual(len(staged), 2)
         new_root = next(p for p in staged if p != old_root)
         self.assertEqual((new_root / 'install.config').read_bytes(), self.config)
+
+
+    def prepared_remote_fixture(self):
+        binary = ('#!/usr/bin/env python3\nimport fcntl,hashlib,json,os,sys\nfrom pathlib import Path\n'
+            'lock=open('+repr(str(self.parent/'manual-deploy.lock'))+',"rb")\n'
+            'blocked=False\ntry: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)\nexcept BlockingIOError: blocked=True\n'
+            'result={"argv":sys.argv[1:],"lock_contended":blocked}\n'
+            'if sys.argv[1:3]==["deploy-operation","import-preparation"]:\n'
+            ' result["stdin"]=sys.stdin.buffer.read().decode()\n'
+            ' directory=Path(sys.argv[sys.argv.index("--directory")+1]);directory.mkdir(mode=0o700)\n'
+            ' parent=directory.parent;manifest=(parent/"release/release-manifest.json").read_bytes()\n'
+            ' request={"protocol":"ultra-recovery-preparation-request-v1","tools_manifest_sha256":hashlib.sha256(manifest).hexdigest(),"tools_release_directory":str(parent/"release"),"upgrade_config_path":str(parent/"install.config")}\n'
+            ' raw=json.dumps(request).encode();(directory/"preparation.json").write_bytes(raw);(directory/"preparation.json").chmod(0o600)\n'
+            ' print(json.dumps({"preparation_file":str(directory/"preparation.json"),"preparation_sha256":hashlib.sha256(raw).hexdigest()}))\n'
+            'open('+repr(str(self.result))+',"w").write(json.dumps(result))\n').encode()
+        self.assets['ultra-install-linux-'+self.architecture]=binary
+        manifest=json.loads(self.manifest);manifest['capabilities'].append('recovery-preparation-v1')
+        manifest['assets']=[{'name':name,'size':len(raw),'sha256':D.sha(raw)} for name,raw in self.assets.items()]
+        self.manifest=json.dumps(manifest).encode()
+        marker=('secrets-source.json',b'{"secrets_source":"installed-runtime"}')
+        staged=self.execute('stage',self.archive(mutate=lambda entries:entries+[marker]))
+        self.assertEqual(staged.returncode,0,staged.stderr)
+
+    def test_preparation_import_stream_keeps_staging_lock_then_start_releases_it(self):
+        self.prepared_remote_fixture()
+        imported=self.execute('preparation-stage',b'bounded synthetic snapshot','e'*64)
+        self.assertEqual(imported.returncode,0,imported.stderr)
+        receipt=json.loads(imported.stdout)
+        result=json.loads(self.result.read_bytes())
+        self.assertTrue(result['lock_contended']);self.assertEqual(result['stdin'],'bounded synthetic snapshot')
+        self.assertEqual(result['argv'],['deploy-operation','import-preparation','--directory',str(self.root/'preparation'),'--descriptor-sha256','e'*64])
+        started=self.execute('run',None,self.architecture,'lifecycle_prepared_upgrade','1','0','','',receipt['preparation_sha256'])
+        self.assertEqual(started.returncode,0,started.stderr)
+        result=json.loads(self.result.read_bytes());self.assertFalse(result['lock_contended'])
+        args=result['argv'];self.assertEqual(args[:7],['deploy-operation','start','--preparation-file',str(self.root/'preparation/preparation.json'),
+             '--preparation-sha256',receipt['preparation_sha256'],'--'])
+        self.assertIn('operator-upgrade',args);self.assertIn('--retry-failed',args);self.assertIn('--secrets-source',args)
+
+    def test_prepared_actions_reject_missing_foreign_digest_and_ordinary_fallback(self):
+        self.prepared_remote_fixture()
+        imported=self.execute('preparation-stage',b'synthetic','e'*64)
+        self.assertEqual(imported.returncode,0,imported.stderr)
+        digest=json.loads(imported.stdout)['preparation_sha256']
+        self.result.unlink()
+        for action,args in [('lifecycle_upgrade',()),('lifecycle_prepared_upgrade',()),
+                            ('lifecycle_prepared_upgrade',('0','0','','','a'*64)),
+                            ('lifecycle_prepared_upgrade',('0','0','','',digest,'extra'))]:
+            with self.subTest(action=action,args=args):
+                rejected=self.execute('run',None,self.architecture,action,*args)
+                self.assertNotEqual(rejected.returncode,0)
+                self.assertFalse(self.result.exists())
+        status=self.execute('run',None,self.architecture,'lifecycle_prepared_status','0','0','','',digest)
+        self.assertEqual(status.returncode,0,status.stderr)
+        self.assertEqual(json.loads(self.result.read_bytes())['argv'][0],'status')
+
+
+class PreparedRecovery(unittest.TestCase):
+    def setUp(self):
+        ManualDeploy.setUp(self)
+        self.original += b'ULTRA_UPGRADE_BASELINE_FILE=/obsolete/descriptor.json\nULTRA_AUTOMATION_KNOWN_HOSTS_FILE=' + str(self.repo/'pins').encode() + b'\n'
+        D.atomic_write(self.config, self.original)
+        self.pins=self.repo/'pins';D.atomic_write(self.pins,b'public pins fixture')
+        native=self.bundle/'ultra-install-linux-amd64';native.write_bytes(b'fixture executable');native.chmod(0o700)
+        manifest={'version':self.version,'source_commit':self.commit,'capabilities':['supervised-deploy-v1','recovery-preparation-v1'],
+                  'assets':[{'name':native.name,'size':native.stat().st_size,'sha256':D.sha(native.read_bytes())}]}
+        (self.bundle/'release-manifest.json').write_text(json.dumps(manifest))
+        old_commit='4'*40;old_version='v0.0.'+str(int(old_commit,16))
+        self.old_backup='install.config.before-'+old_version+'-100'
+        D.atomic_write(self.root/self.old_backup,b'old baseline config')
+        self.old={'schema':1,'commit':old_commit,'version':old_version,'adopt':False,'forward_only':False,
+                  'mutator_dispatched':True,'stage':'upgrade','backup':self.old_backup,'previous_sha256':D.sha(b'old baseline config'),
+                  'config_sha256':D.sha(self.original),'staged_config_sha256':'c'*64,'manifest_sha256':'d'*64,
+                  'transport_binding':'b'*64,'remote_attempt':'e'*64}
+        self.old_raw=json.dumps(self.old).encode();D.atomic_write(self.root/'operation.json',self.old_raw)
+        self.spec=self.repo/'source-spec.json'
+        source={key:str(self.repo/key) for key in ['retained_directory','baseline_release','original_config','original_journal']}
+        source['legacy_journal']=str(self.root/'operation.json')
+        D.atomic_write(self.spec,json.dumps(source).encode())
+        self.events=[]
+        self.preparation_sha='f'*64
+
+    def transport(self,*args,**kwargs):
+        if kwargs.get('pins_snapshot') is not None:kwargs['pins_snapshot']['sha256']=D.sha(self.pins.read_bytes())
+        return ['ssh','-o','UserKnownHostsFile='+str(self.pins),'root@192.0.2.10'],'b'*64
+
+    def export(self,installer,spec,pins,remote,manifest,root,repo,stream):
+        self.assertEqual(self.config.read_bytes(),self.original)
+        self.assertEqual((self.root/'operation.json').read_bytes(),self.old_raw)
+        derived=json.loads(Path(spec).read_bytes())
+        self.assertEqual(Path(derived['legacy_journal']).read_bytes(),self.old_raw)
+        self.assertNotEqual(derived['legacy_journal'],str(self.root/'operation.json'))
+        self.events.append('export');stream.write(b'streamed snapshot');stream.seek(0)
+        return 'a'*64
+
+    def stage(self,*args,**kwargs):
+        self.assertEqual(self.config.read_bytes(),self.original)
+        self.assertEqual(args[8],{'secrets-source.json':b'{"secrets_source":"installed-runtime"}'})
+        self.assertNotIn(b'ULTRA_UPGRADE_BASELINE_FILE',args[3])
+        self.events.append('stage')
+        return {'architecture':'amd64','manifest_sha256':args[7],'config_sha256':D.sha(args[3]),'attempt':D.remote_attempt(args[3],args[6])}
+
+    def import_snapshot(self,command,*,cwd,stdin,timeout):
+        argv=D.shlex.split(command[-1]);self.assertEqual(argv[4],'preparation-stage')
+        self.assertEqual(stdin.read(),b'streamed snapshot');self.events.append('import')
+        root='/var/lib/ultra-ansible/operator-inputs/manual-'+argv[5]+'-'+argv[9]
+        return SimpleNamespace(returncode=0,stdout_truncated=False,stdout=json.dumps({'preparation_file':root+'/preparation/preparation.json','preparation_sha256':self.preparation_sha}).encode())
+
+    def invoke(self,runner=None,export=None,stage=None,importer=None,retry=False,ordinary_resume=False):
+        with patch.object(D.platform,'system',return_value='Linux'),patch.object(D.platform,'machine',return_value='x86_64'), \
+             patch.object(D,'operator_requested',return_value=True),patch.object(D,'operator_transport',side_effect=self.transport), \
+             patch.object(D,'export_preparation_stream',side_effect=export or self.export) as exported, \
+             patch.object(D,'stage_remote',side_effect=stage or self.stage) as staged, \
+             patch.object(D,'run_stage',side_effect=importer or self.import_snapshot), \
+             patch.object(D,'run',side_effect=runner or (lambda *a,**k:self.events.append(a[2]))), \
+             patch.object(D,'bot_token_from_env',side_effect=AssertionError('env read')), \
+             patch.object(D,'vultr_key_from_env',side_effect=AssertionError('env read')), \
+             patch.object(D,'subscription_probe_from_env',side_effect=AssertionError('env read')), \
+             patch.object(D,'bootstrap_bridge_known_hosts',side_effect=AssertionError('pins bootstrap')), \
+             patch.object(D,'bootstrap_bridge_bot_token',side_effect=AssertionError('token bootstrap')), \
+             patch.object(D,'bootstrap_bridge_vultr_key',side_effect=AssertionError('key bootstrap')):
+            if ordinary_resume:
+                D.rollout(self.repo,self.root,self.bundle,self.commit,self.version,False,self.config,retry)
+            else:
+                D.rollout_prepared_recovery(self.repo,self.root,self.bundle,self.commit,self.version,self.config,self.spec,retry)
+        return exported,staged
+
+    def test_current_legacy_journal_is_preserved_and_linked_until_single_coordinator(self):
+        calls=[]
+        def runner(command,cwd,stage,**kwargs):
+            calls.append((stage,D.shlex.split(command[-1])))
+            record=json.loads((self.root/'operation.json').read_bytes())
+            self.assertEqual(record['preparation_legacy_journal_sha256'],D.sha(self.old_raw))
+            self.assertTrue(record['mutator_dispatched']);self.assertEqual(record['preparation_sha256'],self.preparation_sha)
+        self.invoke(runner=runner)
+        archive=self.root/('recovery-source-'+D.sha(self.old_raw))
+        self.assertEqual((archive/'legacy-journal.json').read_bytes(),self.old_raw)
+        self.assertEqual((archive/'canonical.config').read_bytes(),self.original)
+        self.assertNotIn(b'ULTRA_UPGRADE_BASELINE_FILE',self.config.read_bytes())
+        self.assertEqual([x[0] for x in calls],['upgrade','status'])
+        self.assertEqual(calls[0][1][11],'lifecycle_prepared_upgrade');self.assertEqual(calls[0][1][16],self.preparation_sha)
+        self.assertFalse((self.root/'operation.json').exists())
+
+    def test_before_submission_failures_restore_exact_old_config_and_journal(self):
+        for failure in ['export','stage','import']:
+            with self.subTest(failure=failure):
+                fail=lambda *a,**k: (_ for _ in ()).throw(D.DeployError('synthetic'))
+                with self.assertRaises(D.DeployError):self.invoke(**{dict(export='export',stage='stage',**{'import':'importer'})[failure]:fail})
+                self.assertEqual((self.root/'operation.json').read_bytes(),self.old_raw)
+                self.assertEqual(self.config.read_bytes(),self.original)
+
+    def test_lost_submission_ack_retains_inputs_and_resume_never_reexports(self):
+        def lost(*a,**k):raise D.DeployError('lost acknowledgement')
+        with self.assertRaises(D.DeployError):self.invoke(runner=lost)
+        record=json.loads((self.root/'operation.json').read_bytes());current=self.config.read_bytes()
+        self.assertTrue(record['mutator_dispatched']);self.assertEqual(record['preparation_sha256'],self.preparation_sha)
+        calls=[]
+        def runner(command,cwd,stage,**kwargs):calls.append((stage,D.shlex.split(command[-1])))
+        never=lambda *a,**k: (_ for _ in ()).throw(AssertionError('must attach only'))
+        self.invoke(runner=runner,export=never,stage=never,importer=never,retry=True,ordinary_resume=True)
+        self.assertEqual(calls[0][1][12],'1');self.assertEqual(calls[0][1][16],self.preparation_sha)
+        self.assertEqual(self.config.read_bytes(),current)
+
+    def test_missing_or_changed_preparation_cannot_fall_back_to_ordinary(self):
+        with self.assertRaises(D.DeployError):self.invoke(runner=lambda *a,**k: (_ for _ in ()).throw(D.DeployError('lost')))
+        record=json.loads((self.root/'operation.json').read_bytes())
+        for value in ['', 'foreign']:
+            broken=dict(record,preparation_sha256=value)
+            D.atomic_write(self.root/'operation.json',json.dumps(broken).encode())
+            with self.assertRaises(D.DeployError):self.invoke()
+        D.atomic_write(self.root/'operation.json',json.dumps(record).encode())
+        archive=self.root/record['preparation_source_archive']
+        D.atomic_write(archive/'legacy-journal.json',b'changed')
+        with self.assertRaises(D.DeployError):self.invoke()
+
+
+    def test_local_export_stream_checks_bounded_first_descriptor_before_staging(self):
+        remote=Path('/var/lib/ultra-ansible/operator-inputs/manual-'+self.commit+'-'+'e'*64)
+        legacy=self.root/'saved-legacy.json';D.atomic_write(legacy,self.old_raw)
+        spec=self.root/'derived-source.json';D.atomic_write(spec,json.dumps({'legacy_journal':str(legacy)}).encode())
+        descriptor={'schema':1,'request':{'tools_manifest_sha256':'a'*64,'tools_release_directory':str(remote/'release'),
+            'upgrade_config_path':str(remote/'install.config'),'known_hosts_sha256':D.sha(self.pins.read_bytes()),'legacy_journal_sha256':D.sha(self.old_raw)}}
+        def export_fixture(first_name='descriptor.json',extra=0):
+            binary=self.repo/'synthetic-exporter'
+            binary.write_text('#!/usr/bin/env python3\nimport io,sys,tarfile\nraw='+repr(json.dumps(descriptor).encode())+'\n'
+                'with tarfile.open(fileobj=sys.stdout.buffer,mode="w|gz") as archive:\n'
+                ' entry=tarfile.TarInfo('+repr(first_name)+');entry.size='+('8388609' if extra else 'len(raw)')+'\n'
+                ' archive.addfile(entry'+('' if extra else ',io.BytesIO(raw)')+')\n')
+            binary.chmod(0o700)
+            return binary
+        with tempfile.TemporaryFile(dir=self.root) as stream:
+            digest=D.export_preparation_stream(export_fixture(),spec,self.pins,remote,'a'*64,self.root,self.repo,stream)
+            self.assertEqual(digest,D.sha(json.dumps(descriptor).encode()))
+            self.assertEqual(stream.tell(),0)
+        for name,extra in [('wrong.json',0),('descriptor.json',1)]:
+            with self.subTest(name=name,extra=extra),tempfile.TemporaryFile(dir=self.root) as stream,self.assertRaises(D.DeployError):
+                D.export_preparation_stream(export_fixture(name,extra),spec,self.pins,remote,'a'*64,self.root,self.repo,stream)
+        self.assertEqual((self.root/'operation.json').read_bytes(),self.old_raw)
+        self.assertEqual(self.config.read_bytes(),self.original)
+
+    def test_import_receipt_with_failed_exit_or_truncated_stdout_cannot_publish(self):
+        for failure in ('exit','truncated'):
+            def importer(*args,**kwargs):
+                result=self.import_snapshot(*args,**kwargs)
+                if failure=='exit':result.returncode=1
+                else:result.stdout_truncated=True
+                return result
+            with self.subTest(failure=failure),self.assertRaisesRegex(D.DeployError,'preparation_import_failed'):
+                self.invoke(importer=importer)
+            self.assertEqual((self.root/'operation.json').read_bytes(),self.old_raw)
+            self.assertEqual(self.config.read_bytes(),self.original)
+
+    def test_crash_at_pending_publication_prefix_restores_before_reexport(self):
+        with self.assertRaises(D.DeployError):self.invoke(runner=lambda *a,**k: (_ for _ in ()).throw(D.DeployError('lost')))
+        pending=json.loads((self.root/'operation.json').read_bytes())
+        pending.update(stage='prepared',mutator_dispatched=False)
+        D.atomic_write(self.root/'operation.json',json.dumps(pending).encode())
+        self.events=[]
+        self.invoke()
+        self.assertEqual(self.events[:3],['export','stage','import'])
+        self.assertFalse((self.root/'operation.json').exists())
+        archive=self.root/pending['preparation_source_archive']
+        self.assertEqual((archive/'legacy-journal.json').read_bytes(),self.old_raw)
+        self.assertEqual((archive/'canonical.config').read_bytes(),self.original)
+
+    def test_preparation_rejects_secret_source_spec_before_export(self):
+        source=json.loads(self.spec.read_bytes());source['original_config']=str(self.repo/'.env')
+        D.atomic_write(self.spec,json.dumps(source).encode())
+        with self.assertRaisesRegex(D.DeployError,'preparation_source_spec_invalid'):
+            self.invoke(export=lambda *a,**k: self.fail('invalid source exported'))
+        self.assertEqual((self.root/'operation.json').read_bytes(),self.old_raw)
 
 
 class RuntimeReuse(unittest.TestCase):

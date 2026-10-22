@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Explicit operator deployment from clean, committed HEAD; never a scheduler."""
 import argparse
+import base64
 import contextlib
 import ctypes
 import errno
@@ -32,6 +33,7 @@ class DeployError(Exception):
 
 
 LOCAL_PREFLIGHT_COMMIT = '00ec0b85988a641e73779db7a6f63a3ab8eb980f'
+BRIDGE_PREFLIGHT_COMMIT = '4c287fd4d4b44f019c40668ae51bd396ff0aaa20'
 
 
 class RecoveryInputs:
@@ -1559,6 +1561,7 @@ if mode=='stage':
             print('ultra_stage_failure:'+str(error),file=sys.stderr)
     sys.excepthook=staging_exception
 probe_sha=(sys.argv[11] if len(sys.argv)>11 else '') if mode=='run' else (sys.argv[7] if len(sys.argv)>7 else '')
+if mode in ['preflight-proof','preparation-stage']: probe_sha=''
 if mode=='continue':
     attestation_phase='remote_setup'
     attestation_reasons=''' + repr(FORWARD_ATTESTATION_REASONS) + r'''
@@ -1598,7 +1601,7 @@ need(all(re.fullmatch('[a-f0-9]{64}',x) for x in [manifest_sha,config_sha,attemp
 need(os.geteuid()==0)
 parent=Path('/var/lib/ultra-ansible/operator-inputs')
 for directory in [parent.parent,parent]:
-    if mode=='continue': need(directory.exists(), 'manual_forward_continuation_inputs_missing')
+    if mode in ['continue','preflight-proof']: need(directory.exists(), 'manual_forward_continuation_inputs_missing')
     if not directory.exists(): directory.mkdir(mode=0o700)
     info=directory.lstat()
     need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and not info.st_mode&0o077)
@@ -1927,6 +1930,8 @@ def verify(directory):
         need(len(data)==row['size'] and digest(data)==row['sha256'])
     need({x.name for x in (directory/'release').iterdir()}==names|{'release-manifest.json'})
     top={x.name for x in directory.iterdir()}
+    if mode=='preparation-stage' or (mode=='run' and len(sys.argv)>8 and sys.argv[8] in ['lifecycle_prepared_upgrade','lifecycle_prepared_status']):
+        top.discard('preparation')
     need(top - {'baseline','subscription-probe-url','subscription-probe.sha256','forward-operation.json','forward-prior-operation.json','secrets-source.json'} == {'release','install.config'})
     if 'secrets-source.json' in top:
         need(read(directory/'secrets-source.json')==b'{"secrets_source":"installed-runtime"}', 'manual_secrets_source_invalid')
@@ -2332,28 +2337,72 @@ elif mode=='stage':
                           'forward_prior_journal_sha256':prior_journal_sha}))
     finally:
         if pending.exists(): shutil.rmtree(pending)
+elif mode=='preflight-proof':
+    need(len(sys.argv)==11 and sys.argv[7] in ['amd64','arm64'] and
+         all(re.fullmatch('[a-f0-9]{64}',x) for x in sys.argv[9:11]), 'bridge_preflight_arguments_invalid')
+    verify(root)
+    need('bridge-preflight-closure-v1' in json.loads(read(root/'release/release-manifest.json')).get('capabilities',[]),
+         'bridge_preflight_capability_required')
+    architecture={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine())
+    need(architecture==sys.argv[7], 'bridge_preflight_architecture_changed')
+    binary=root/'release'/('ultra-install-linux-'+architecture)
+    # The helper obtains all three original locks in its sealed-origin lease.
+    # This staging lock must not be inherited and deadlock that lease.
+    os.close(lock)
+    environment={k:v for k,v in os.environ.items() if not k.startswith('ULTRA_') and k not in ['DATABASE_URL','PYTHONPATH','PYTHONHOME','ANSIBLE_CONFIG']}
+    os.execve(binary,[str(binary),'bridge-preflight-proof','--journal-base64',sys.argv[8],
+                     '--journal-sha256',sys.argv[9],'--nonce',sys.argv[10]],environment)
+elif mode=='preparation-stage':
+    need(len(sys.argv)==8 and re.fullmatch('[a-f0-9]{64}',sys.argv[7]))
+    verify(root)
+    need('recovery-preparation-v1' in json.loads(read(root/'release/release-manifest.json')).get('capabilities',[]),
+         'recovery_preparation_capability_required')
+    architecture={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine())
+    need(architecture in ['amd64','arm64'])
+    binary=root/'release'/('ultra-install-linux-'+architecture);binary.chmod(0o700)
+    os.set_inheritable(lock,True)
+    environment={k:v for k,v in os.environ.items() if not k.startswith('ULTRA_') and k not in ['DATABASE_URL','PYTHONPATH','PYTHONHOME','ANSIBLE_CONFIG']}
+    os.execve(binary,[str(binary),'deploy-operation','import-preparation','--directory',str(root/'preparation'),
+                     '--descriptor-sha256',sys.argv[7]],environment)
 elif mode=='run':
     verify(root)
     architecture=sys.argv[7];need(architecture in ['amd64','arm64'])
     need(architecture=={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine()))
     action=sys.argv[8];need(action in ['doctor','adoption_check','adoption_apply','upgrade','operator-upgrade','status',
-        'lifecycle_doctor','lifecycle_upgrade','lifecycle_status'])
+        'lifecycle_doctor','lifecycle_upgrade','lifecycle_status','lifecycle_prepared_upgrade','lifecycle_prepared_status'])
     lifecycle=action.startswith('lifecycle_')
+    prepared=action in ['lifecycle_prepared_upgrade','lifecycle_prepared_status']
+    preparation_sha=sys.argv[13] if prepared and len(sys.argv)>13 else ''
     base_action=action[len('lifecycle_'):] if lifecycle else action
+    if prepared: base_action=base_action[len('prepared_'):]
     retry_failed=len(sys.argv)>9 and sys.argv[9]=='1'
     forward_only=len(sys.argv)>10 and sys.argv[10]=='1'
     continuation=len(sys.argv)>13 and sys.argv[13]=='1'
-    need((len(sys.argv)<=14 or (len(sys.argv) in [17,28] and bool(prior_journal_sha))) and
-         (len(sys.argv)<=13 or sys.argv[13] in ['0','1']) and
-         (not continuation or (forward_only and base_action=='upgrade' and
-          ((bool(prior_journal_sha) and len(sys.argv) in [17,28]) or (not prior_journal_sha and len(sys.argv)==14)))) and
-         (len(sys.argv)<=9 or sys.argv[9] in ['0','1']) and
-         (len(sys.argv)<=10 or sys.argv[10] in ['0','1']) and
-         (not forward_only or (base_action=='upgrade' and not retry_failed and bool(forward_journal_sha))) and
-         (not prior_journal_sha or (base_action in ['doctor','upgrade','status'] and len(sys.argv) in [17,28] and
-          sys.argv[14]==str(parent.parent/('upgrade-'+json.loads(read(root/'forward-prior-operation.json')).get('version',''))) and
-          sys.argv[15]==str(root/'forward-prior-operation.json'))),
-         'manual_forward_only_invalid')
+    if prepared:
+        need(len(sys.argv)==14 and re.fullmatch('[a-f0-9]{64}',preparation_sha) and not forward_only and
+             not probe_sha and not forward_journal_sha and not prior_journal_sha and sys.argv[10]=='0' and
+             sys.argv[9] in ['0','1'] and (base_action=='upgrade' or sys.argv[9]=='0'), 'preparation_action_binding_invalid')
+        info=(root/'preparation').lstat();need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and not info.st_mode&0o077)
+        raw=read(root/'preparation/preparation.json');need(digest(raw)==preparation_sha,'preparation_request_changed')
+        preparation=json.loads(raw)
+        need(preparation.get('protocol')=='ultra-recovery-preparation-request-v1' and
+             preparation.get('tools_manifest_sha256')==manifest_sha and
+             preparation.get('tools_release_directory')==str(root/'release') and
+             preparation.get('upgrade_config_path')==str(root/'install.config') and
+             'recovery-preparation-v1' in json.loads(read(root/'release/release-manifest.json')).get('capabilities',[]),
+             'preparation_request_changed')
+    else:
+        need((len(sys.argv)<=14 or (len(sys.argv) in [17,28] and bool(prior_journal_sha))) and
+             (len(sys.argv)<=13 or sys.argv[13] in ['0','1']) and
+             (not continuation or (forward_only and base_action=='upgrade' and
+              ((bool(prior_journal_sha) and len(sys.argv) in [17,28]) or (not prior_journal_sha and len(sys.argv)==14)))) and
+             (len(sys.argv)<=9 or sys.argv[9] in ['0','1']) and
+             (len(sys.argv)<=10 or sys.argv[10] in ['0','1']) and
+             (not forward_only or (base_action=='upgrade' and not retry_failed and bool(forward_journal_sha))) and
+             (not prior_journal_sha or (base_action in ['doctor','upgrade','status'] and len(sys.argv) in [17,28] and
+              sys.argv[14]==str(parent.parent/('upgrade-'+json.loads(read(root/'forward-prior-operation.json')).get('version',''))) and
+              sys.argv[15]==str(root/'forward-prior-operation.json'))),
+             'manual_forward_only_invalid')
     if continuation: verify_continuation(17 if len(sys.argv)==28 else None)
     binary=root/'release'/('ultra-install-linux-'+architecture)
     binary.chmod(0o700)
@@ -2384,9 +2433,19 @@ elif mode=='run':
     if base_action=='upgrade' and probe_sha:
         need((root/'subscription-probe-url').exists())
         args += ['--subscription-probe-url-file',str(root/'subscription-probe-url')]
+    if base_action=='upgrade':
+        need('supervised-deploy-v1' in json.loads(read(root/'release/release-manifest.json')).get('capabilities',[]),
+             'deployment_executor_capability_required')
+        # The bridge-owned unit survives this SSH client. Repeated invocations
+        # attach to its immutable request instead of spawning another mutator.
+        args = ['deploy-operation','start'] + (['--preparation-file',str(root/'preparation/preparation.json'),
+                 '--preparation-sha256',preparation_sha] if prepared else []) + ['--'] + args
     os.chdir(root)
-    # Keep the remote lock across exec and strip unchecked installer overrides.
-    os.set_inheritable(lock,True)
+    # The coordinator must acquire the origin admission locks itself. Keeping
+    # this SSH client's staging lock while it waits would deadlock preparation.
+    # Durable deploy-operation admission owns mutation exclusion after exec.
+    if base_action=='upgrade': os.close(lock)
+    else: os.set_inheritable(lock,True)
     environment={k:v for k,v in os.environ.items() if not k.startswith('ULTRA_') and k not in ['DATABASE_URL','PYTHONPATH','PYTHONHOME','ANSIBLE_CONFIG']}
     os.execve(binary,[str(binary)]+args+['--config',str(root/'install.config')],environment)
 elif mode=='cleanup':
@@ -3275,6 +3334,377 @@ def deployment_secrets_source(record, transport, adopt, commit, version):
     return source
 
 
+def prepared_source_spec(path):
+    path = Path(path)
+    require(path.is_absolute(), 'preparation_source_spec_absolute_required')
+    raw = private_file(path)
+    value = json.loads(raw)
+    require(isinstance(value, dict) and set(value) == {
+        'retained_directory','baseline_release','original_config','original_journal','legacy_journal'},
+        'preparation_source_spec_invalid')
+    require(all(isinstance(p, str) and Path(p).is_absolute() and os.path.normpath(p) == p and
+                '.env' not in Path(p).parts for p in value.values()), 'preparation_source_spec_invalid')
+    return raw, value
+
+
+def immutable_preparation_file(path, raw):
+    if os.path.lexists(path):
+        require(private_file(path) == raw, 'preparation_source_archive_changed')
+    else:
+        atomic_write(path, raw)
+
+
+def export_preparation_stream(installer, spec, pins, remote_root, manifest_sha, root, repo, stream):
+    # Binary archives stay on disk; neither tar stdout nor helper stderr enters
+    # wrapper logs/memory. The first transport descriptor is explicitly bounded.
+    with tempfile.TemporaryFile(dir=root) as errors:
+        try:
+            result = subprocess.run([str(installer), 'deploy-operation', 'export-preparation',
+                '--source-spec', str(spec), '--remote-directory', str(remote_root / 'preparation'),
+                '--tools-manifest-sha256', manifest_sha, '--known-hosts', str(pins)],
+                cwd=repo, stdout=stream, stderr=errors, timeout=300, check=False)
+        except subprocess.TimeoutExpired:
+            raise DeployError('preparation_source_export_timeout') from None
+    require(result.returncode == 0, 'preparation_source_export_failed')
+    stream.seek(0)
+    try:
+        with tarfile.open(fileobj=stream, mode='r|gz') as archive:
+            first = archive.next()
+            require(first is not None and first.name == 'descriptor.json' and first.isfile() and
+                    0 < first.size <= 8 * 1024 * 1024, 'preparation_descriptor_invalid')
+            descriptor = archive.extractfile(first).read(first.size + 1)
+            require(len(descriptor) == first.size, 'preparation_descriptor_invalid')
+    except (tarfile.TarError, EOFError):
+        raise DeployError('preparation_descriptor_invalid') from None
+    value = json.loads(descriptor)
+    request = value.get('request', {})
+    require(value.get('schema') == 1 and request.get('tools_manifest_sha256') == manifest_sha and
+            request.get('tools_release_directory') == str(remote_root / 'release') and
+            request.get('upgrade_config_path') == str(remote_root / 'install.config') and
+            request.get('legacy_journal_sha256') == sha(private_file(Path(json.loads(private_file(spec))['legacy_journal']))) and
+            request.get('known_hosts_sha256') == sha(private_file(pins)), 'preparation_descriptor_binding_changed')
+    stream.seek(0)
+    return sha(descriptor)
+
+
+def rollout_prepared_recovery(repo, root, bundle, commit, version, config, source_spec, retry_failed=False):
+    """Keep the unresolved legacy attempt linked until the coordinator closes it.
+
+    Export is read-only and precedes canonical publication. Once submission may
+    have occurred the exact new journal/inputs are retained for attach only.
+    """
+    config = Path(config)
+    journal = root / 'operation.json'
+    old_raw = private_file(journal)
+    old = json.loads(old_raw)
+    source_raw, sources = prepared_source_spec(source_spec)
+    if old.get('supervised_deploy') is True:
+        require(isinstance(old.get('preparation_sha256'),str) and re.fullmatch('[a-f0-9]{64}',old['preparation_sha256']),
+                'manual_supervised_preparation_changed')
+        require(old.get('preparation_source_spec_sha256') == sha(source_raw), 'preparation_source_spec_changed')
+        if old.get('mutator_dispatched') is False and old.get('stage') == 'prepared':
+            require(old.get('commit') == commit and old.get('version') == version and
+                    old.get('preparation_source_archive') == 'recovery-source-' + old.get('preparation_legacy_journal_sha256',''),
+                    'preparation_pending_publication_changed')
+            archive = root / old['preparation_source_archive']
+            historical = private_file(archive / 'legacy-journal.json')
+            previous = private_file(archive / 'canonical.config')
+            require(sha(historical) == old['preparation_legacy_journal_sha256'] and sha(previous) == old['previous_sha256'] and
+                    sha(canonical_file(config)) in (old['previous_sha256'], old['config_sha256']),
+                    'preparation_pending_publication_changed')
+            # This write-ahead prefix predates submission. Restore exact old
+            # inputs; a submitted record can never enter this recovery path.
+            atomic_write(config, previous, preserve_mode=True)
+            atomic_write(journal, historical)
+            return rollout_prepared_recovery(repo, root, bundle, commit, version, config, source_spec, False)
+        return resume_supervised_deployment(repo, root, bundle, config, old, commit, version, retry_failed)
+    require(not retry_failed, 'preparation_retry_requires_submitted_operation')
+    validate_dispatched_manual_operation(old)
+    require(old.get('adopt') is False and old.get('forward_only') is False and
+            sources['legacy_journal'] == str(journal) and private_file(Path(sources['legacy_journal'])) == old_raw,
+            'preparation_legacy_journal_changed')
+    current = canonical_file(config)
+    require(sha(current) == old.get('config_sha256'), 'canonical_config_changed_during_operation')
+    validate_config_policy(current)
+    backup_name = old.get('backup', '')
+    require(re.fullmatch(r'install\.config\.before-' + re.escape(old['version']) + r'-[0-9]+', backup_name) and
+            sha(private_file(root / backup_name)) == old.get('previous_sha256'), 'canonical_backup_changed')
+    require(operator_requested(), 'preparation_explicit_bridge_transport_required')
+    pins_snapshot = {}
+    transport, binding = operator_transport(os.environ.get('ULTRA_OPERATOR_INVENTORY'), current, pins_snapshot=pins_snapshot)
+    require(binding == old.get('transport_binding'), 'preparation_legacy_transport_changed')
+    pin_options = [x.split('=',1)[1] for x in transport if x.startswith('UserKnownHostsFile=')]
+    require(len(pin_options) == 1, 'preparation_public_pins_required')
+    pins_raw = operator_pins(Path(pin_options[0]))
+    require(sha(pins_raw) == pins_snapshot['sha256'], 'preparation_public_pins_changed')
+    manifest_raw = private_or_public_manifest(bundle / 'release-manifest.json')
+    manifest = json.loads(manifest_raw); manifest_sha = sha(manifest_raw)
+    require(manifest.get('source_commit') == commit and manifest.get('version') == version and
+            {'supervised-deploy-v1','recovery-preparation-v1'} <= set(manifest.get('capabilities', [])),
+            'recovery_preparation_capability_required')
+    architecture = {'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine())
+    require(platform.system() == 'Linux' and architecture, 'operator_requires_linux_amd64_or_arm64')
+    installer = bundle / ('ultra-install-linux-' + architecture)
+    asset = next((x for x in manifest.get('assets',[]) if x.get('name') == installer.name), {})
+    require(not installer.is_symlink() and installer.is_file() and sha(installer.read_bytes()) == asset.get('sha256') and
+            installer.stat().st_size == asset.get('size'), 'preparation_native_installer_changed')
+    archive = root / ('recovery-source-' + sha(old_raw))
+    archive.mkdir(mode=0o700, exist_ok=True)
+    require(not archive.is_symlink() and archive.stat().st_uid == os.geteuid() and stat.S_IMODE(archive.stat().st_mode) == 0o700,
+            'preparation_source_archive_invalid')
+    immutable_preparation_file(archive / 'legacy-journal.json', old_raw)
+    immutable_preparation_file(archive / 'canonical.config', current)
+    immutable_preparation_file(archive / 'source-spec.original.json', source_raw)
+    derived = dict(sources, legacy_journal=str(archive / 'legacy-journal.json'))
+    derived_path = archive / 'source-spec.json'
+    immutable_preparation_file(derived_path, json.dumps(derived, sort_keys=True).encode())
+    immutable_preparation_file(archive / 'known_hosts', pins_raw)
+    # The obsolete legacy descriptor cannot authorize a new baseline. Its bytes
+    # stay in canonical.config; the prepared upgrade verifies the original app
+    # manifest installed by the authenticated recovery phases instead.
+    base = projected_upgrade_config(remove_config_key(current, 'ULTRA_UPGRADE_BASELINE_FILE'), 'upgrade-v2')
+    attempt = remote_attempt(base, version)
+    remote_root = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + commit + '-' + attempt)
+    new = config_candidate(remove_config_key(current, 'ULTRA_UPGRADE_BASELINE_FILE'), version, remote_root / 'release')
+    staged = projected_upgrade_config(new, 'upgrade-v2')
+    backup = root / ('install.config.before-' + version + '-' + str(time.time_ns()))
+    record = None
+    submitted = False
+    with tempfile.TemporaryFile(dir=root) as stream:
+        descriptor_sha = export_preparation_stream(installer, derived_path, archive / 'known_hosts', remote_root, manifest_sha, root, repo, stream)
+        require(private_file(journal) == old_raw and canonical_file(config) == current, 'preparation_source_inputs_changed')
+        try:
+            receipt = stage_remote(repo, root, bundle, staged, transport, commit, version, manifest_sha,
+                                   {'secrets-source.json':b'{"secrets_source":"installed-runtime"}'})
+            require(receipt.get('attempt') == attempt and receipt.get('architecture') in ('amd64','arm64') and
+                    receipt.get('config_sha256') == sha(staged) and receipt.get('manifest_sha256') == manifest_sha,
+                    'bridge_staging_receipt_invalid')
+            try:
+                result = run_stage(remote_command(transport, commit, version, manifest_sha, sha(staged), attempt,
+                                                 'preparation-stage', descriptor_sha), cwd=repo, stdin=stream, timeout=300)
+            except subprocess.TimeoutExpired:
+                raise DeployError('preparation_import_timeout') from None
+            require(result.returncode == 0 and not getattr(result, 'stdout_truncated', False), 'preparation_import_failed')
+            imported = json.loads(result.stdout)
+            require(set(imported) == {'preparation_file','preparation_sha256'} and
+                    imported['preparation_file'] == str(remote_root / 'preparation/preparation.json') and
+                    isinstance(imported['preparation_sha256'], str) and re.fullmatch('[a-f0-9]{64}', imported['preparation_sha256']),
+                    'preparation_import_receipt_invalid')
+            atomic_write(backup, current)
+            record = {'schema':1,'commit':commit,'version':version,'adopt':False,'forward_only':False,
+                      'supervised_deploy':True,'backup':backup.name,'previous_sha256':sha(current),'config_sha256':sha(new),
+                      'staged_config_sha256':sha(staged),'manifest_sha256':manifest_sha,'transport_binding':binding,
+                      'remote_attempt':attempt,'remote_architecture':receipt['architecture'],'secrets_source':'installed-runtime',
+                      'config_projection':'upgrade-v2','probe_sha256':'','stage':'prepared','mutator_dispatched':False,
+                      'preparation_sha256':imported['preparation_sha256'],'preparation_descriptor_sha256':descriptor_sha,
+                      'preparation_source_spec_sha256':sha(source_raw),'preparation_legacy_journal_sha256':sha(old_raw),
+                      'preparation_source_archive':archive.name}
+            atomic_write(root / ('probe-binding-' + commit + '-' + attempt), b'')
+            atomic_write(journal, json.dumps(record).encode())
+            atomic_write(config, new, preserve_mode=True)
+            record['stage'], record['mutator_dispatched'] = 'upgrade', True
+            atomic_write(journal, json.dumps(record).encode())
+            submitted = True
+            # This is the submission boundary. Lost SSH acknowledgment cannot
+            # restore the old gate or start a different operation.
+            return resume_supervised_deployment(repo, root, bundle, config, record, commit, version, False)
+        except BaseException:
+            if not submitted:
+                if canonical_file(config) != current:
+                    require(record is not None and sha(canonical_file(config)) == record['config_sha256'], 'canonical_config_changed_during_operation')
+                    atomic_write(config, current, preserve_mode=True)
+                atomic_write(journal, old_raw)
+            raise
+
+
+def resume_supervised_deployment(repo, root, bundle, config, record, commit, version, retry_failed):
+    """Attach to the bridge authority without restaging inputs or credentials."""
+    require(record.get('schema') == 1 and record.get('supervised_deploy') is True and
+            record.get('adopt') is False and record.get('forward_only') is False and
+            record.get('mutator_dispatched') is True and record.get('stage') in ('upgrade', 'status') and
+            record.get('commit') == commit and record.get('version') == version,
+            'manual_supervised_operation_conflict')
+    validate_dispatched_manual_operation(dict(record, stage='upgrade'))
+    current = canonical_file(config)
+    require(sha(current) == record.get('config_sha256'), 'canonical_config_changed_during_operation')
+    validate_config_policy(current)
+    manifest = private_or_public_manifest(bundle / 'release-manifest.json')
+    require(sha(manifest) == record['manifest_sha256'] and
+            'supervised-deploy-v1' in json.loads(manifest).get('capabilities', []),
+            'manual_supervised_candidate_changed')
+    transport, binding = operator_transport(os.environ.get('ULTRA_OPERATOR_INVENTORY'), current)
+    require(binding == record.get('transport_binding') and
+            record.get('remote_architecture') in ('amd64', 'arm64'), 'manual_supervised_transport_changed')
+    backup = record.get('backup', '')
+    require(re.fullmatch(r'install\.config\.before-' + re.escape(version) + r'-[0-9]+', backup) and
+            sha(private_file(root / backup)) == record.get('previous_sha256'), 'canonical_backup_changed')
+    probe_sha = record.get('probe_sha256', '')
+    require(probe_sha == '' or re.fullmatch('[a-f0-9]{64}', probe_sha), 'manual_operation_probe_changed')
+    require(private_file(root / ('probe-binding-' + commit + '-' + record['remote_attempt'])) == probe_sha.encode(),
+            'manual_operation_probe_changed')
+    if probe_sha:
+        require(sha(subscription_probe_input(root / 'subscription-probe-url')) == probe_sha, 'manual_operation_probe_changed')
+    projection = record.get('config_projection')
+    require(projection in ('upgrade-v1', 'upgrade-v2'), 'manual_supervised_projection_changed')
+    prepared = 'preparation_sha256' in record or 'preparation_source_archive' in record
+    if prepared:
+        require('recovery-preparation-v1' in json.loads(manifest).get('capabilities', []) and
+                all(isinstance(record.get(k), str) and re.fullmatch('[a-f0-9]{64}', record[k]) for k in
+                    ('preparation_sha256','preparation_descriptor_sha256','preparation_source_spec_sha256','preparation_legacy_journal_sha256')) and
+                record.get('preparation_source_archive') == 'recovery-source-' + record['preparation_legacy_journal_sha256'],
+                'manual_supervised_preparation_changed')
+        archive = root / record['preparation_source_archive']
+        require(sha(private_file(archive / 'legacy-journal.json')) == record['preparation_legacy_journal_sha256'] and
+                sha(private_file(archive / 'source-spec.original.json')) == record['preparation_source_spec_sha256'],
+                'manual_supervised_preparation_changed')
+    def command(stage):
+        return remote_command(transport, commit, version, record['manifest_sha256'], record['staged_config_sha256'],
+                              record['remote_attempt'], 'run', record['remote_architecture'],
+                              ('lifecycle_prepared_' if prepared else 'lifecycle_') + stage,
+                              '1' if retry_failed and stage == 'upgrade' else '0', '0', probe_sha, '',
+                              *([record['preparation_sha256']] if prepared else []))
+    journal = root / 'operation.json'
+    if record['stage'] == 'upgrade':
+        run(command('upgrade'), repo, 'upgrade')
+        record['stage'] = 'status'
+        atomic_write(journal, json.dumps(record).encode())
+    run(command('status'), repo, 'status')
+    completed = remove_config_key(current, 'ULTRA_UPGRADE_BASELINE_FILE')
+    record['stage'], record['final_config_sha256'] = 'completed', sha(completed)
+    atomic_write(journal, json.dumps(record).encode())
+    atomic_write(config, completed, preserve_mode=True)
+    if probe_sha:
+        run(remote_command(transport, commit, version, record['manifest_sha256'], record['staged_config_sha256'],
+                           record['remote_attempt'], 'cleanup', probe_sha), repo, 'probe_cleanup')
+    (root / 'subscription-probe-url').unlink(missing_ok=True)
+    journal.unlink()
+
+
+def private_or_public_manifest(path):
+    require(path.is_file() and not path.is_symlink(), 'candidate_manifest_invalid')
+    return path.read_bytes()
+
+
+def validate_bridge_preflight_receipt(receipt, record, journal_sha):
+    require(isinstance(receipt, dict) and set(receipt) == {
+        'protocol','result','journal_sha256','commit','version','remote_attempt','staged_config_sha256',
+        'manifest_sha256','evidence_sha256','admission'} and
+        receipt['protocol'] == 'ultra-bridge-preflight-closure-v1' and
+        receipt['result'] == 'preflight_failed_no_mutation' and receipt['journal_sha256'] == journal_sha and
+        all(receipt[key] == record[key] for key in
+            ('commit','version','remote_attempt','staged_config_sha256','manifest_sha256')) and
+        re.fullmatch('[a-f0-9]{64}', receipt['evidence_sha256']), 'bridge_preflight_receipt_invalid')
+    admission = receipt['admission']
+    require(isinstance(admission, dict) and set(admission) == {
+        'protocol','phase','fence_sha256','baseline_manifest_sha256','config_sha256'} and
+        admission['protocol'] == 'ultra-recovery-preparation-admission-v1' and admission['phase'] == 'sealed' and
+        all(isinstance(admission[k], str) and re.fullmatch('[a-f0-9]{64}', admission[k]) for k in
+            ('fence_sha256','baseline_manifest_sha256','config_sha256')), 'bridge_preflight_admission_invalid')
+
+
+def recover_bridge_preflight(repo, root, bundle, commit, version, config, journal_sha, backup_sha, config_sha):
+    """Close only the audited bridge attempt after independently sealing origins.
+
+    Caller owns both existing wrapper/config locks. Staging a verified helper
+    does not change canonical config or execute upgrade/recovery preparation.
+    """
+    require(all(isinstance(x, str) and re.fullmatch('[a-f0-9]{64}', x) for x in
+                (journal_sha, backup_sha, config_sha)), 'bridge_preflight_explicit_pins_required')
+    journal = root / 'operation.json'
+    archive = root / ('operation.bridge-preflight-' + journal_sha)
+    original = journal if journal.exists() or journal.is_symlink() else archive / 'operation.json'
+    raw = private_input(original)
+    record = json.loads(raw)
+    validate_dispatched_manual_operation(record)
+    require(sha(raw) == journal_sha and record.get('commit') == BRIDGE_PREFLIGHT_COMMIT and
+            record.get('stage') == 'upgrade' and record.get('adopt') is False and
+            record.get('forward_only') is False and record.get('forward_journal_sha256') == '' and
+            record.get('secrets_source') == 'installed-runtime' and record.get('config_projection') == 'upgrade-v2',
+            'bridge_preflight_journal_class_invalid')
+    require(isinstance(record.get('backup'), str) and re.fullmatch(
+        'install.config.before-' + re.escape(record['version']) + '-[0-9]+', record['backup']),
+        'bridge_preflight_backup_invalid')
+    backup = root / record['backup']
+    current = canonical_file(config)
+    require(sha(current) == config_sha == record['config_sha256'] and
+            sha(private_input(backup)) == backup_sha == record['previous_sha256'], 'bridge_preflight_inputs_changed')
+    if original != journal:
+        require(not archive.is_symlink() and all(not p.is_symlink() for p in archive.parents) and
+                archive.stat().st_uid == os.geteuid() and stat.S_IMODE(archive.stat().st_mode) == 0o700 and
+                {p.name for p in archive.iterdir()} == {'operation.json','receipt.json','metadata.json'},
+                'bridge_preflight_archive_changed')
+        receipt_raw = private_input(archive / 'receipt.json')
+        validate_bridge_preflight_receipt(json.loads(receipt_raw), record, journal_sha)
+        require(json.loads(private_input(archive / 'metadata.json')) == {
+            'schema':1, 'journal_sha256':journal_sha, 'config_sha256':config_sha,
+            'backup_sha256':backup_sha, 'receipt_sha256':sha(receipt_raw)}, 'bridge_preflight_archive_changed')
+        return archive
+    pins = RecoveryInputs()
+    process = None
+    root_observation = None
+    try:
+        pins.retain(root, directory=True)
+        root_observation = pins.files.pop()
+        for path in (journal, config, backup):
+            pins.retain(path)
+        require(sha(private_input(journal)) == journal_sha and sha(canonical_file(config)) == config_sha and
+                sha(private_input(backup)) == backup_sha, 'bridge_preflight_inputs_changed')
+        transport, binding = operator_transport(os.environ.get('ULTRA_OPERATOR_INVENTORY'), current)
+        projected = projected_upgrade_config(current, record['config_projection'])
+        require(binding == record['transport_binding'] and remote_attempt(projected, record['version']) == record['remote_attempt'],
+                'bridge_preflight_transport_changed')
+        manifest_raw = (bundle / 'release-manifest.json').read_bytes()
+        require('bridge-preflight-closure-v1' in json.loads(manifest_raw).get('capabilities', []),
+                'bridge_preflight_capability_required')
+        attempt = remote_attempt(projected, version)
+        remote_root = Path('/var/lib/ultra-ansible/operator-inputs') / ('manual-' + commit + '-' + attempt)
+        staged = config_candidate(projected, version, remote_root / 'release')
+        stage = stage_remote(repo, root, bundle, staged, transport, commit, version, sha(manifest_raw),
+                             {'secrets-source.json':b'{"secrets_source":"installed-runtime"}'})
+        nonce = sha(os.urandom(32))
+        command = remote_command(transport, commit, version, sha(manifest_raw), sha(staged), attempt,
+            'preflight-proof', stage['architecture'], base64.b64encode(raw).decode(), journal_sha, nonce)
+        process = subprocess.Popen(command, cwd=repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL)
+        proof = json.loads(recovery_helper_line(process, timeout=60))
+        require(set(proof) == {'nonce','receipt'} and proof['nonce'] == nonce, 'bridge_preflight_challenge_invalid')
+        validate_bridge_preflight_receipt(proof['receipt'], record, journal_sha)
+        pins.unchanged()
+        process.stdin.write(('ack ' + nonce + '\n').encode()); process.stdin.flush()
+        require(recovery_helper_line(process, timeout=60) == 'acknowledged ' + nonce,
+                'bridge_preflight_remote_ack_invalid')
+        require(process.wait(timeout=10) == 0, 'bridge_preflight_remote_failed')
+        pins.unchanged()
+        if archive.exists() or archive.is_symlink():
+            require(not archive.is_symlink() and stat.S_IMODE(archive.stat().st_mode) == 0o700 and
+                    archive.stat().st_uid == os.geteuid() and
+                    {p.name for p in archive.iterdir()} <= {'receipt.json','metadata.json'}, 'bridge_preflight_archive_conflict')
+        else:
+            archive.mkdir(mode=0o700)
+        receipt_raw = json.dumps(proof['receipt'], sort_keys=True, separators=(',',':')).encode()
+        atomic_write(archive / 'receipt.json', receipt_raw)
+        atomic_write(archive / 'metadata.json', json.dumps({'schema':1,'journal_sha256':journal_sha,
+            'config_sha256':config_sha,'backup_sha256':backup_sha,'receipt_sha256':sha(receipt_raw)}, sort_keys=True).encode())
+        pins.unchanged()
+        with open_directory(root) as root_fd, open_directory(archive) as archive_fd:
+            require(os.path.samestat(os.fstat(root_fd), root_observation[2]), 'bridge_preflight_root_changed')
+            os.fsync(root_fd)
+            recovery_rename_exclusive('operation.json', root_fd, 'operation.json', archive_fd)
+            os.fsync(archive_fd)
+            os.fsync(root_fd)
+        return archive
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            process.stdin.close()
+            process.stdout.close()
+        pins.close()
+        if root_observation is not None:
+            os.close(root_observation[1])
+
+
 def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_failed=False, probe_env_file=None, forward_only=False, continue_forward_only=False):
     architecture = {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(platform.machine())
     require(platform.system() == 'Linux' and architecture, 'operator_requires_linux_amd64_or_arm64')
@@ -3283,6 +3713,10 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     abandoned_record = None
     status_replay_candidate = manual_status_replay_candidate(existing_record)
     config = Path(config_path) if config_path else repo / 'install.config'
+    if existing_record.get('supervised_deploy') is True and existing_record.get('stage') in ('upgrade', 'status'):
+        require(not adopt and not forward_only and not continue_forward_only and probe_env_file is None,
+                'manual_supervised_resume_arguments_invalid')
+        return resume_supervised_deployment(repo, root, bundle, config, existing_record, commit, version, retry_failed)
     if continue_forward_only:
         require(not adopt and not retry_failed and not forward_only and probe_env_file is None,
                 'manual_forward_continuation_arguments_invalid')
@@ -3562,6 +3996,9 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
                       'forward_journal_sha256': forward_journal_sha, 'secrets_source': secrets_source}
             if projection is not None:
                 record['config_projection'] = projection
+            if transport and not adopt and not forward_only and 'supervised-deploy-v1' in json.loads(
+                    (bundle / 'release-manifest.json').read_bytes()).get('capabilities', []):
+                record['supervised_deploy'] = True
             if continue_forward_only:
                 record['forward_retry_history'] = history.name
                 record['forward_retry_history_sha256'] = sha(private_file(history))
@@ -3725,6 +4162,7 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
 def main():
     require(__debug__, 'python_optimization_disables_release_validation')
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--prepare-recovery-source-spec', help='absolute private retained-primary recovery source inventory; starts the single supervised preparation and upgrade')
     parser.add_argument('--build-only', action='store_true', help='verify/build candidate without changing canonical config or remote hosts')
     parser.add_argument('--config', help='canonical install.config path; defaults to install.config in this checkout')
     parser.add_argument('--retry-failed', action='store_true', help='explicitly retry the same failed upgrade after recovery preflight')
@@ -3733,6 +4171,7 @@ def main():
     parser.add_argument('--subscription-probe-env-file', help='private local env file; read only ULTRA_SUBSCRIPTION_PROBE_URL (default: .env beside canonical config)')
     parser.add_argument('--archive-reimaged-adoption', action='store_true', help='archive obsolete adoption journal locally after every former target was wiped/reimaged')
     parser.add_argument('--recover-local-preflight', action='store_true', help='prove audited local upgrade never dispatched a production mutator, then archive its journal')
+    parser.add_argument('--recover-bridge-preflight', action='store_true', help='close the audited bridge readiness failure after separately sealing dispatch origins')
     parser.add_argument('--recovery-installer', help='absolute path to current verified installer with local-preflight-proof support')
     parser.add_argument('--acknowledge-former-hosts-reimaged', action='store_true')
     parser.add_argument('--archive-reason')
@@ -3743,10 +4182,19 @@ def main():
     parser.add_argument('--attestation-bootstrap', help='exact retained recovery-tools-bootstrap-operation directory basename')
     parser.add_argument('--attestation-candidate', help='exact bootstrap candidate manifest SHA256')
     arguments = parser.parse_args()
+    if arguments.prepare_recovery_source_spec:
+        require(not any((arguments.build_only, arguments.forward_only, arguments.continue_forward_only,
+                         arguments.subscription_probe_env_file, arguments.archive_reimaged_adoption,
+                         arguments.recover_local_preflight, arguments.recover_bridge_preflight, arguments.recovery_installer,
+                         arguments.acknowledge_former_hosts_reimaged, arguments.archive_reason, arguments.journal_sha256,
+                         arguments.backup_sha256, arguments.config_sha256, arguments.attest_recovery_state,
+                         arguments.attestation_bootstrap, arguments.attestation_candidate)) and os.environ.get('ADOPT','0') == '0',
+                'preparation_arguments_invalid')
+        prepared_source_spec(arguments.prepare_recovery_source_spec)
     if arguments.attest_recovery_state:
         require(not any((arguments.build_only, arguments.retry_failed, arguments.forward_only,
                          arguments.continue_forward_only, arguments.subscription_probe_env_file,
-                         arguments.archive_reimaged_adoption, arguments.recover_local_preflight,
+                         arguments.archive_reimaged_adoption, arguments.recover_local_preflight, arguments.recover_bridge_preflight,
                          arguments.recovery_installer, arguments.acknowledge_former_hosts_reimaged,
                          arguments.archive_reason, arguments.journal_sha256, arguments.backup_sha256,
                          arguments.config_sha256)) and os.environ.get('ADOPT', '0') == '0',
@@ -3763,11 +4211,11 @@ def main():
             'recovery_attestation_arguments_invalid')
     archive_fields = (arguments.acknowledge_former_hosts_reimaged, arguments.archive_reason,
                       arguments.journal_sha256, arguments.backup_sha256, arguments.config_sha256)
-    require(arguments.archive_reimaged_adoption or arguments.recover_local_preflight or not any(archive_fields), 'manual_archive_arguments_invalid')
+    require(arguments.archive_reimaged_adoption or arguments.recover_local_preflight or arguments.recover_bridge_preflight or not any(archive_fields), 'manual_archive_arguments_invalid')
     require(arguments.recover_local_preflight or not arguments.recovery_installer,
             'local_preflight_arguments_invalid')
     if arguments.recover_local_preflight:
-        require(not any((arguments.archive_reimaged_adoption, arguments.build_only, arguments.retry_failed,
+        require(not any((arguments.recover_bridge_preflight, arguments.archive_reimaged_adoption, arguments.build_only, arguments.retry_failed,
                          arguments.forward_only, arguments.continue_forward_only, arguments.subscription_probe_env_file,
                          arguments.archive_reason, arguments.acknowledge_former_hosts_reimaged)) and
                 os.environ.get('ADOPT', '0') == '0' and arguments.recovery_installer,
@@ -3788,6 +4236,14 @@ def main():
                                     arguments.backup_sha256, arguments.config_sha256, state_root)
         print('manual-deploy: local pre-readiness operation archived; canonical config preserved', flush=True)
         return
+    if arguments.recover_bridge_preflight:
+        require(not any((arguments.archive_reimaged_adoption, arguments.build_only, arguments.retry_failed,
+                         arguments.forward_only, arguments.continue_forward_only, arguments.subscription_probe_env_file,
+                         arguments.recovery_installer, arguments.archive_reason, arguments.acknowledge_former_hosts_reimaged)) and
+                os.environ.get('ADOPT', '0') == '0', 'bridge_preflight_arguments_invalid')
+        require(all(isinstance(x, str) and re.fullmatch('[a-f0-9]{64}', x) for x in
+                    (arguments.journal_sha256, arguments.backup_sha256, arguments.config_sha256)),
+                'bridge_preflight_explicit_pins_required')
     if arguments.archive_reimaged_adoption:
         require(not any((arguments.build_only, arguments.retry_failed, arguments.forward_only,
                          arguments.continue_forward_only, arguments.subscription_probe_env_file)) and
@@ -3845,8 +4301,15 @@ def main():
                     for executable in ['ssh', 'ssh-keygen']:
                         require(shutil.which(executable), 'missing_prerequisite_' + executable)
                     operator_transport(os.environ.get('ULTRA_OPERATOR_INVENTORY'), current)
-                rollout(repo, root, bundle, commit, version, os.environ.get('ADOPT') == '1', config, arguments.retry_failed,
-                        arguments.subscription_probe_env_file, arguments.forward_only, arguments.continue_forward_only)
+                if arguments.prepare_recovery_source_spec:
+                    rollout_prepared_recovery(repo, root, bundle, commit, version, config,
+                        Path(arguments.prepare_recovery_source_spec), arguments.retry_failed)
+                elif arguments.recover_bridge_preflight:
+                    recover_bridge_preflight(repo, root, bundle, commit, version, config,
+                        arguments.journal_sha256, arguments.backup_sha256, arguments.config_sha256)
+                else:
+                    rollout(repo, root, bundle, commit, version, os.environ.get('ADOPT') == '1', config, arguments.retry_failed,
+                            arguments.subscription_probe_env_file, arguments.forward_only, arguments.continue_forward_only)
     print('manual-deploy: complete', flush=True)
 
 
