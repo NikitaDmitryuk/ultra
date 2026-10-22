@@ -217,14 +217,13 @@ func TestExecutionFenceRealAnsibleTaskFailureRetry(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
-	ansible, err := exec.LookPath("ansible-playbook")
+	configuredAnsible := os.Getenv("ULTRA_TEST_ANSIBLE_PLAYBOOK")
+	if configuredAnsible == "" {
+		t.Skip("set ULTRA_TEST_ANSIBLE_PLAYBOOK to run the pinned Ansible integration test")
+	}
+	ansible, err := exec.LookPath(configuredAnsible)
 	if err != nil {
-		home, _ := os.UserHomeDir()
-		matches, _ := filepath.Glob(filepath.Join(home, ".cache", "ultra-install", "runtime-*", "venv", "bin", "ansible-playbook"))
-		if len(matches) == 0 {
-			t.Skip("pinned Ansible runtime unavailable")
-		}
-		ansible = matches[0]
+		t.Skip("configured Ansible unavailable")
 	}
 	marker := filepath.Join(root, "allow-success")
 	variables := map[string]any{"ultra_lock_directory": root, "fixture_toggle": marker}

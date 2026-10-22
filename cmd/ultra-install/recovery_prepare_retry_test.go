@@ -31,9 +31,13 @@ func TestRecoveryPreparationRetryRequiresExplicitControlAndEligiblePhase(t *test
 }
 
 func TestRecoveryPreparationNormalTaskFailureRetainsExactJobAndAllowsExplicitRetry(t *testing.T) {
-	ansible, err := exec.LookPath("ansible-playbook")
+	configuredAnsible := os.Getenv("ULTRA_TEST_ANSIBLE_PLAYBOOK")
+	if configuredAnsible == "" {
+		t.Skip("set ULTRA_TEST_ANSIBLE_PLAYBOOK to run the pinned Ansible integration test")
+	}
+	ansible, err := exec.LookPath(configuredAnsible)
 	if err != nil {
-		t.Skip("Ansible unavailable")
+		t.Skip("configured Ansible unavailable")
 	}
 	root := t.TempDir()
 	if err = os.Chmod(root, 0700); err != nil {

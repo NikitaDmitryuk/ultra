@@ -138,6 +138,8 @@ jobs:
         run: make test-ansible
       - name: Operator deployment and recovery regression tests
         run: make test-operator
+      - name: Verify pinned Ansible failure and retry proofs
+        run: ULTRA_TEST_ANSIBLE_PLAYBOOK="$(command -v ansible-playbook)" go test -count=1 ./cmd/ultra-install ./internal/deployansible -run '^(TestRecoveryPreparationNormalTaskFailureRetainsExactJobAndAllowsExplicitRetry|TestExecutionFenceRealAnsibleTaskFailureRetry)$'
   ansible-integration:
     name: Ansible SSH and offline runtime
     runs-on: ubuntu-latest
