@@ -20,6 +20,24 @@ import (
 	"syscall"
 )
 
+type recoveryInputPrefixReader struct {
+	reader io.Reader
+	prefix []byte
+}
+
+func (r *recoveryInputPrefixReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 && len(r.prefix) < 10 {
+		remaining := 10 - len(r.prefix)
+		captured := n
+		if captured > remaining {
+			captured = remaining
+		}
+		r.prefix = append(r.prefix, p[:captured]...)
+	}
+	return n, err
+}
+
 // The transport manifest describes an immutable copy, not a replacement for
 // retained-primary evidence. Original source paths remain in authenticated JSON.
 type recoveryInputEntry struct {
@@ -123,9 +141,21 @@ func validateRecoveryInputSnapshot(snapshot recoveryInputSnapshot, root string) 
 
 func readRecoveryInputSnapshot(stream io.Reader, root, descriptorSHA string) (recoveryInputSnapshot, *tar.Reader, *gzip.Reader, error) {
 	var snapshot recoveryInputSnapshot
-	gzipReader, err := gzip.NewReader(stream)
+	observed := &recoveryInputPrefixReader{reader: stream}
+	gzipReader, err := gzip.NewReader(observed)
 	if err != nil {
-		return snapshot, nil, nil, errors.New("recovery_inputs_gzip_header_invalid")
+		reason := "recovery_inputs_gzip_header_invalid"
+		switch {
+		case len(observed.prefix) == 0:
+			reason = "recovery_inputs_gzip_empty"
+		case len(observed.prefix) < 2:
+			reason = "recovery_inputs_gzip_truncated"
+		case observed.prefix[0] != 0x1f || observed.prefix[1] != 0x8b:
+			reason = "recovery_inputs_gzip_magic_invalid"
+		case len(observed.prefix) < 10:
+			reason = "recovery_inputs_gzip_truncated"
+		}
+		return snapshot, nil, nil, errors.New(reason)
 	}
 	archive := tar.NewReader(gzipReader)
 	header, err := archive.Next()

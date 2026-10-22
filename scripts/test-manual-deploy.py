@@ -4935,6 +4935,12 @@ class PreparedRecovery(unittest.TestCase):
         for stderr, expected in [
                 (b'deployment operation: recovery_inputs_gzip_header_invalid\n',
                  'preparation_import_failed: reason=recovery_inputs_gzip_header_invalid exit_code=1'),
+                (b'deployment operation: recovery_inputs_gzip_empty\n',
+                 'preparation_import_failed: reason=recovery_inputs_gzip_empty exit_code=1'),
+                (b'deployment operation: recovery_inputs_gzip_magic_invalid\n',
+                 'preparation_import_failed: reason=recovery_inputs_gzip_magic_invalid exit_code=1'),
+                (b'deployment operation: recovery_inputs_gzip_truncated\n',
+                 'preparation_import_failed: reason=recovery_inputs_gzip_truncated exit_code=1'),
                 (b'deployment operation: /private/path: permission denied\n',
                  'preparation_import_failed: reason=remote_exit exit_code=1'),
                 (b'deployment operation: recovery_inputs_archive_invalid\nsecret-host',

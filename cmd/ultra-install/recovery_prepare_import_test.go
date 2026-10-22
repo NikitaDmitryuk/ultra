@@ -146,9 +146,15 @@ func TestRecoveryInputsArchiveFailureNeverPublishesDestination(t *testing.T) {
 
 func TestRecoveryInputsArchiveParserReportsFailureStage(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "preparation")
-	if err := importRecoveryInputs(bytes.NewReader([]byte("not gzip")), root, strings.Repeat("a", 64)); err == nil ||
-		err.Error() != "recovery_inputs_gzip_header_invalid" {
-		t.Fatalf("gzip header error = %v", err)
+	for _, test := range []struct {
+		input []byte
+		want  string
+	}{{nil, "recovery_inputs_gzip_empty"}, {[]byte("x"), "recovery_inputs_gzip_truncated"},
+		{[]byte("not gzip"), "recovery_inputs_gzip_magic_invalid"}} {
+		if err := importRecoveryInputs(bytes.NewReader(test.input), root, strings.Repeat("a", 64)); err == nil ||
+			err.Error() != test.want {
+			t.Errorf("gzip header error for %q = %v, want %s", test.input, err, test.want)
+		}
 	}
 
 	snapshot := recoveryInputFixture(root)
