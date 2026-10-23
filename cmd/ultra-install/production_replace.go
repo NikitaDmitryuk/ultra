@@ -373,7 +373,7 @@ func runProductionReplacement(args []string, output io.Writer) error {
 		},
 		Bootstrap: func(ctx context.Context) error {
 			child := exec.CommandContext(ctx, executable, "bootstrap", "--config", *config, "--preserve-primary", "--primary-backup", *backup, "--primary-backup-sha256", *backupSHA)
-			child.Env = append(os.Environ(), "ULTRA_INSTALL_STATE_DIR="+filepath.Join(*state, "bootstrap"))
+			child.Env = replacementBootstrapEnv(os.Environ(), filepath.Join(*state, "bootstrap"), localExecutionState)
 			child.Stdout = output
 			child.Stderr = os.Stderr
 			return child.Run()
@@ -383,6 +383,16 @@ func runProductionReplacement(args []string, output io.Writer) error {
 }
 
 func mustReplacementJSON(value any) []byte { raw, _ := json.Marshal(value); return raw }
+
+func replacementBootstrapEnv(parent []string, stateDir, executionState string) []string {
+	env := make([]string, 0, len(parent)+2)
+	for _, value := range parent {
+		if !strings.HasPrefix(value, "ULTRA_INSTALL_STATE_DIR=") && !strings.HasPrefix(value, "ULTRA_OPERATOR_STATE_DIRECTORY=") {
+			env = append(env, value)
+		}
+	}
+	return append(env, "ULTRA_INSTALL_STATE_DIR="+stateDir, "ULTRA_OPERATOR_STATE_DIRECTORY="+executionState)
+}
 
 func replacementLocalQuiescence() error {
 	ancestors := map[string]bool{}
