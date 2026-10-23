@@ -1829,6 +1829,26 @@ with patch.object(d,'run',side_effect=run),patch.object(d,'subscription_probe_fr
         self.assertIn('--config-sha256', self.calls[1][1])
         self.assertFalse((self.root / 'operation.json').exists())
 
+    def test_nonroot_local_controller_passes_fixed_state_and_legacy_job_paths(self):
+        home = Path(D.pwd.getpwuid(os.geteuid()).pw_dir)
+        state = home / '.local/state/ultra-ansible'
+        cache = self.repo / 'cache'
+        with patch.dict(D.os.environ, {'ULTRA_OPERATOR_LOCAL_CONTROLLER': '1',
+                                       'ULTRA_OPERATOR_STATE_DIRECTORY': str(state),
+                                       'XDG_CACHE_HOME': str(cache)}):
+            self.rollout()
+        command = self.calls[1][1]
+        self.assertEqual(command[command.index('--operator-state-dir') + 1], str(state))
+        self.assertEqual(command[command.index('--job-dir') + 1],
+                         str(cache / 'ultra-ansible' / ('upgrade-' + self.version)))
+
+    def test_nonlocal_dispatch_does_not_add_operator_state_flags(self):
+        with patch.dict(D.os.environ, {'ULTRA_OPERATOR_LOCAL_CONTROLLER': ''}, clear=False):
+            D.os.environ.pop('ULTRA_OPERATOR_STATE_DIRECTORY', None)
+            self.rollout()
+        self.assertNotIn('--operator-state-dir', self.calls[1][1])
+        self.assertNotIn('--job-dir', self.calls[1][1])
+
     def test_status_failure_retries_only_read_only_status(self):
         def fail_status(command, cwd, stage, **kwargs):
             self.run_fixture(command, cwd, stage)
@@ -5548,6 +5568,80 @@ class OperatorRootContract(unittest.TestCase):
                  patch.object(D.sys, 'argv', argv), patch.dict(D.os.environ, {'ADOPT': '0'}):
                 D.main()
             recover.assert_called_once()
+
+    def test_missing_local_state_refuses_before_canonical_or_journal_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'scripts').mkdir()
+            config = root / 'install.config'
+            original = b'fixture canonical bytes\n'
+            config.write_bytes(original)
+            config.chmod(0o600)
+            commit = 'a' * 40
+            with patch.object(D, '__file__', str(root / 'scripts/manual-deploy.py')), \
+                 patch.object(D.shutil, 'which', return_value='/fixture'), \
+                 patch.object(D, 'run', side_effect=['', commit]), \
+                 patch.object(D, 'build_candidate', side_effect=AssertionError('must refuse before build')), \
+                 patch.object(D.sys, 'argv', ['manual-deploy.py', '--config', str(config)]), \
+                 patch.dict(D.os.environ, {'ULTRA_OPERATOR_LOCAL_CONTROLLER': '1',
+                                           'ULTRA_OPERATOR_STATE_DIRECTORY': ''}), \
+                 self.assertRaisesRegex(D.DeployError, '^operator_state_directory_required$'):
+                D.main()
+            self.assertEqual(config.read_bytes(), original)
+            self.assertFalse((root / 'dist/manual').exists())
+
+    def test_foreign_local_state_path_refuses_before_canonical_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'scripts').mkdir()
+            config = root / 'install.config'
+            original = b'fixture canonical bytes\n'
+            config.write_bytes(original)
+            config.chmod(0o600)
+            with patch.object(D, '__file__', str(root / 'scripts/manual-deploy.py')), \
+                 patch.object(D.shutil, 'which', return_value='/fixture'), \
+                 patch.object(D, 'run', side_effect=['', 'a' * 40]), \
+                 patch.object(D, 'build_candidate', side_effect=AssertionError('must refuse before build')), \
+                 patch.object(D.sys, 'argv', ['manual-deploy.py', '--config', str(config)]), \
+                 patch.dict(D.os.environ, {'ULTRA_OPERATOR_LOCAL_CONTROLLER': '1',
+                                           'ULTRA_OPERATOR_STATE_DIRECTORY': '/root'}), \
+                 self.assertRaisesRegex(D.DeployError, '^operator_state_directory_required$'):
+                D.main()
+            self.assertEqual(config.read_bytes(), original)
+            self.assertFalse((root / 'dist/manual').exists())
+
+    def test_foreign_uid_state_directory_is_rejected_from_live_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            expected = home / '.local/state/ultra-ansible'
+            expected.mkdir(parents=True, mode=0o700)
+            with self.assertRaisesRegex(D.DeployError, '^operator_state_directory_unsafe$'):
+                D.validate_operator_state_directory(str(expected), expected, home, os.geteuid() + 1)
+
+    def test_readonly_state_parent_is_rejected_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            parent = home / '.local/state'
+            parent.mkdir(parents=True)
+            parent.chmod(0o555)
+            expected = parent / 'ultra-ansible'
+            try:
+                with self.assertRaisesRegex(D.DeployError, '^operator_state_directory_unsafe$'):
+                    D.validate_operator_state_directory(str(expected), expected, home, os.geteuid())
+            finally:
+                parent.chmod(0o755)
+
+    def test_nonroot_prepared_source_reaches_private_source_validation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / 'source-spec.json'
+            source.write_text('{}\n')
+            source.chmod(0o644)
+            with patch.object(D.sys, 'argv', ['manual-deploy.py', '--prepare-recovery-source-spec', str(source)]), \
+                 patch.dict(D.os.environ, {'ULTRA_OPERATOR_LOCAL_CONTROLLER': '1',
+                                           'ULTRA_OPERATOR_STATE_DIRECTORY': ''}), \
+                 patch.object(D, 'require_emergency_root', side_effect=AssertionError('local root gate ran')):
+                with self.assertRaisesRegex(D.DeployError, '^canonical_config_requires_owned_regular_0600$'):
+                    D.main()
 
 
 if __name__ == '__main__':

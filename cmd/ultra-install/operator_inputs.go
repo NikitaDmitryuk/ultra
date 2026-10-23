@@ -13,13 +13,6 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 )
 
-func requireRootOperator() error {
-	if os.Geteuid() != 0 {
-		return errors.New("operator_root_required")
-	}
-	return nil
-}
-
 func resolveOperatorStateRoot(uid uint32, requested, home string) (string, error) {
 	if requested == "" {
 		if uid == 0 {
@@ -56,7 +49,7 @@ func configureOperatorExecutionState(requested string) error {
 }
 
 // The UID argument is explicit so fixtures can exercise the same checks without
-// privileged chown. Callers pass their operator UID; retained recovery requires zero.
+// privileged chown. Callers pass their operator UID.
 func openOperatorLock(path string, uid uint32) (*os.File, error) {
 	if err := rebuildNoSymlinkAncestors(filepath.Dir(path)); err != nil {
 		return nil, errors.New("operator_lock_unsafe")

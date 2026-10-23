@@ -125,7 +125,9 @@ func executionManagerArgs(args ...string) []string {
 	return args
 }
 
-var regexpExecutionUnit = regexp.MustCompile(`^ultra-(?:deploy-[a-f0-9]{64}|execution-[a-f0-9]{32}|ansible-controller|recovery-reconcile)\.service$`)
+var regexpExecutionUnit = regexp.MustCompile(
+	`^ultra-(?:deploy-[a-f0-9]{64}|execution-[a-f0-9]{32}|ansible-controller|recovery-reconcile)\.service$`,
+)
 
 func executionUnitGroup(unit, observed string) (string, error) {
 	if !regexpExecutionUnit.MatchString(unit) {

@@ -87,7 +87,7 @@ def main():
         (directory/'main.go').write_text(HELPER)
         helper = directory/'helper'
         run(['go','build','-o',str(helper),str(directory/'main.go')], env={**os.environ,'CGO_ENABLED':'0'})
-        (directory/'Dockerfile').write_text('FROM ubuntu:24.04\nENV container=docker\nRUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus openssh-server openssh-client python3 python3-venv && rm -rf /var/lib/apt/lists/* && mkdir -p /run/sshd /root/.ssh && ssh-keygen -A\nSTOPSIGNAL SIGRTMIN+3\nCMD ["/sbin/init"]\n')
+        (directory/'Dockerfile').write_text('FROM ubuntu:24.04\nENV container=docker\nRUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv libpam-systemd dbus dbus-user-session openssh-server openssh-client python3 python3-venv && rm -rf /var/lib/apt/lists/* && mkdir -p /run/sshd /root/.ssh && ssh-keygen -A\nSTOPSIGNAL SIGRTMIN+3\nCMD ["/sbin/init"]\n')
         image = 'ultra-execution-systemd-fixture'
         run(['docker','build','-q','-t',image,str(directory)])
         (directory/'runner').write_text(RUNNER)
@@ -118,8 +118,13 @@ def main():
                     account = command('getent','passwd','1000').split(':')
                     assert len(account)==7 and account[0]=='ubuntu' and account[2:4]==['1000','1000'] and account[5]=='/home/ubuntu', account
                     command('chown','-R','1000:1000','/fixture')
+                    command('systemctl','start','dbus.service','systemd-logind.service')
                     command('loginctl','enable-linger','ubuntu')
-                    command('systemctl','start','user@1000.service')
+                    try:
+                        command('systemctl','start','user@1000.service')
+                    except RuntimeError as error:
+                        journal = command('journalctl','--unit=user@1000.service','--no-pager','-n','60')
+                        raise RuntimeError(str(error) + '\nuser manager journal:\n' + journal) from error
                     wait(lambda: subprocess.run(['docker','exec','--user','1000','--env',
                         'XDG_RUNTIME_DIR=/run/user/1000',name,'systemctl','--user','show',
                         '--property=Version','--value'],capture_output=True).returncode==0)

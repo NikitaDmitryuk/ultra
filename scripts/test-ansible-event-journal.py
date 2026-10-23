@@ -234,7 +234,8 @@ class JournalTests(unittest.TestCase):
             'import importlib.util,sys;from pathlib import Path;'
             's=importlib.util.spec_from_file_location("fixture_controller",sys.argv[1]);'
             'm=importlib.util.module_from_spec(s);s.loader.exec_module(m);'
-            'm.EXECUTION_ROOT=Path(sys.argv[2]);sys.argv=[sys.argv[1],*sys.argv[3:]];m.main()')
+            'm.EXECUTION_ROOT=Path(sys.argv[2]);m.TEST_EXECUTION_NAMESPACE=True;'
+            'sys.argv=[sys.argv[1],*sys.argv[3:]];m.main()')
         process = subprocess.Popen([sys.executable, '-c', bootstrap, str(CONTROLLER_PATH),
             str(self.namespace), '--job', str(self.job), '--bundle', str(ROOT / 'deploy/ansible'),
             '--executable', str(executable), '--diagnostics-root', str(self.spool)],

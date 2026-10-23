@@ -19,7 +19,7 @@ func TestRetainedCLIPreflightPrecedesWorkspaceAndFleet(t *testing.T) {
 		return errors.New("execution_containment_unverified")
 	}
 	defer func() { retainedLocalExecutionPreflight = original }()
-	err := runRetainedPrimaryCommand([]string{
+	args := []string{
 		"--config", filepath.Join(root, "config.json"),
 		"--manifest", filepath.Join(root, "manifest.json"),
 		"--original-journal", filepath.Join(root, "journal.json"),
@@ -28,7 +28,9 @@ func TestRetainedCLIPreflightPrecedesWorkspaceAndFleet(t *testing.T) {
 		"--backup-sha256", strings.Repeat("a", 64),
 		"--executable", filepath.Join(root, "ansible-playbook"),
 		"--accept-reimaged-fleet",
-	})
+	}
+	args = append(args, operatorStateArgsForCurrentTest(t)...)
+	err := runRetainedPrimaryCommand(args)
 	if err == nil || !strings.Contains(err.Error(), "execution_containment_unverified") {
 		t.Fatalf("preflight failure not reported: %v", err)
 	}

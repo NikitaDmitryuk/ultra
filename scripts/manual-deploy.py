@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import pwd
 import re
 import select
 import shlex
@@ -1582,6 +1583,62 @@ def configure_operator_transport(config):
     require(identity and pins, 'operator_transport_required')
     os.environ['ULTRA_OPERATOR_IDENTITY'] = identity
     os.environ['ULTRA_OPERATOR_KNOWN_HOSTS'] = pins
+
+
+def validate_operator_state_directory(configured, expected, home, uid):
+    require(configured and Path(configured).is_absolute() and
+            str(Path(configured)) == os.path.normpath(configured) and Path(configured) == expected,
+            'operator_state_directory_required')
+    # Inspect every existing component before any operation journal or
+    # canonical-config write. Missing suffixes are created by the Go CLI's
+    # secure state initializer, but no existing component may redirect it.
+    require(expected == home / '.local/state/ultra-ansible',
+            'operator_state_directory_required')
+    local_paths = [expected]
+    cursor = expected.parent
+    while cursor != home:
+        local_paths.append(cursor)
+        cursor = cursor.parent
+    local_paths.append(home)
+    for path in local_paths:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == uid and not info.st_mode & 0o022
+                and info.st_mode & 0o300 == 0o300,
+                'operator_state_directory_unsafe')
+        if path == expected:
+            require(stat.S_IMODE(info.st_mode) == 0o700, 'operator_state_directory_unsafe')
+    for path in home.parents:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, uid) and not info.st_mode & 0o022,
+                'operator_state_directory_unsafe')
+
+
+def configure_operator_execution_state(version):
+    """Validate and describe the explicit state required by local operators.
+
+    Keep the local state namespace fixed to the passwd home. The job directory
+    retains os.UserCacheDir's historical location so an already frozen upgrade
+    is replayed against the same cache namespace.
+    """
+    if os.environ.get('ULTRA_OPERATOR_LOCAL_CONTROLLER') != '1' or os.geteuid() == 0:
+        return None
+    home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    expected = home / '.local/state/ultra-ansible'
+    validate_operator_state_directory(os.environ.get('ULTRA_OPERATOR_STATE_DIRECTORY'), expected,
+                                      home, os.geteuid())
+    cache = os.environ.get('XDG_CACHE_HOME') or str(home / '.cache')
+    cache_path = Path(cache)
+    require(cache_path.is_absolute() and str(cache_path) == os.path.normpath(cache),
+            'operator_cache_directory_invalid')
+    job = cache_path / 'ultra-ansible' / ('upgrade-' + version)
+    require(job.is_absolute(), 'operator_job_directory_invalid')
+    return expected, job
 
 
 # Executed only through pinned SSH. This helper never reads secret environment files.
@@ -3855,7 +3912,8 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
     validate_config_policy(current)
     operator_inventory = os.environ.get('ULTRA_OPERATOR_INVENTORY')
     pins_snapshot = {}
-    transport, transport_binding = operator_transport(operator_inventory, current, pins_snapshot=pins_snapshot) if operator_requested() else (None, None)
+    local_controller = os.environ.get('ULTRA_OPERATOR_LOCAL_CONTROLLER') == '1'
+    transport, transport_binding = operator_transport(operator_inventory, current, pins_snapshot=pins_snapshot) if operator_requested() and not local_controller else (None, None)
     secrets_source = deployment_secrets_source(existing_record, transport, adopt, commit, version)
     projection = deployment_config_projection(existing_record, transport, adopt, commit, version)
     staged_current = projected_upgrade_config(current, projection)
@@ -4139,6 +4197,11 @@ def rollout(repo, root, bundle, commit, version, adopt, config_path=None, retry_
                                       '--source-commit', commit, '--version', version,
                                       '--manifest-sha256', manifest_sha or sha((bundle / 'release-manifest.json').read_bytes()),
                                       '--config-sha256', sha(new)] + (['--lifecycle'] if projection in ('upgrade-v1', 'upgrade-v2', 'upgrade-v3') else []))]
+            local_state = configure_operator_execution_state(version)
+            if local_state is not None and transport is None:
+                state_directory, job_directory = local_state
+                commands[-1][1].extend(['--operator-state-dir', str(state_directory),
+                                        '--job-dir', str(job_directory)])
             if forward_only:
                 commands[-1][1].append('--forward-only')
             if probe_sha:
@@ -4312,7 +4375,8 @@ def main():
                          arguments.backup_sha256, arguments.config_sha256, arguments.attest_recovery_state,
                          arguments.attestation_bootstrap, arguments.attestation_candidate)) and os.environ.get('ADOPT','0') == '0',
                 'preparation_arguments_invalid')
-        require_emergency_root()
+        # This entrypoint exports operator-owned evidence and dispatches through
+        # pinned root SSH; remote import/start still enforce root independently.
         prepared_source_spec(arguments.prepare_recovery_source_spec)
     if arguments.attest_recovery_state:
         require(not any((arguments.build_only, arguments.retry_failed, arguments.forward_only,
@@ -4408,6 +4472,9 @@ def main():
     commit = run(['git', 'rev-parse', '--verify', 'HEAD'], repo, 'source_commit', capture=True)
     require(re.fullmatch('[0-9a-f]{40}', commit), 'source_commit_invalid')
     version = 'v0.0.' + str(int(commit, 16))
+    if (not arguments.build_only and not arguments.prepare_recovery_source_spec and
+            os.environ.get('ADOPT', '0') == '0'):
+        configure_operator_execution_state(version)
     root = repo / 'dist' / 'manual'
     require(not (repo / 'dist').is_symlink(), 'dist_must_not_be_symlink')
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -4426,7 +4493,7 @@ def main():
                 current = canonical_file(config)
                 validate_config_policy(current)
                 configure_operator_transport(current)
-                if operator_requested():
+                if operator_requested() and os.environ.get('ULTRA_OPERATOR_LOCAL_CONTROLLER') != '1':
                     for executable in ['ssh', 'ssh-keygen']:
                         require(shutil.which(executable), 'missing_prerequisite_' + executable)
                     operator_transport(os.environ.get('ULTRA_OPERATOR_INVENTORY'), current)

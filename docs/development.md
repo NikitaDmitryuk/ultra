@@ -80,8 +80,10 @@ Go учитывает `GOTMPDIR`: смена только `TMPDIR` не пере
 
 Перед каждым коммитом запусти `make format`, проверь получившийся diff, затем `make lint`.
 Форматирование обязательно, а не best-effort: `goimports`, `gofmt`, `golines` и
-`golangci-lint` имеют закреплённые версии в [Makefile](../Makefile). `make format`
-также выполняет `go mod tidy`. CI запускает те же `make format-check` и `make lint`;
+`golangci-lint` имеют закреплённые версии в [Makefile](../Makefile). Форматирование
+не сканирует локальные артефакты и защищённые каталоги под `dist/`; `go mod tidy`
+запускается отдельно через `make tidy` при изменении зависимостей. CI запускает
+те же `make format-check` и `make lint`;
 `format-check` завершится ошибкой, если форматирование изменило checkout. При обновлении
 инструментов меняй версию в Makefile и подтверждай, что локальный запуск и CI используют
 одинаковые команды.

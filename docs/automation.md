@@ -696,15 +696,17 @@ inputs без `sudo`, удерживает локальный lock, сверяе
 
 ```sh
 ultra-install operator-journal-reconcile inspect \
+  --operator-state-dir /home/operator/.local/state/ultra-ansible \
   --config /absolute/path/to/install.config \
   --original-journal /absolute/path/to/operation.json
 ```
 
 При необходимости inspect может также получить сохранённый workspace и manifest;
-эти параметры задаются парой и требуют локального root-доступа к retained evidence:
+эти параметры задаются парой; файлы должны принадлежать текущему оператору:
 
 ```sh
-sudo ultra-install operator-journal-reconcile inspect \
+ultra-install operator-journal-reconcile inspect \
+  --operator-state-dir /home/operator/.local/state/ultra-ansible \
   --config /absolute/path/to/install.config \
   --original-journal /absolute/path/to/operation.json \
   --state-dir /absolute/path/to/retained-state \

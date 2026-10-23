@@ -145,9 +145,9 @@ credentials не означает запрет этих явно необход�
 ## Исполнимое восстановление с сохранённым primary
 
 Отдельная команда `ultra-install rebuild-retained-primary` устанавливает приложения
-на уже переустановленные bridge и один постоянный exit. Это retained emergency:
-локальный запуск требует root и отдельные root-staged snapshots. Не меняй владельца
-canonical config между обычным запуском wrapper и emergency. Команда не вызывает provider
+на уже переустановленные bridge и один постоянный exit. Локальный запуск выполняется
+от обычного оператора; SSH на узлах использует root. Canonical config сохраняет
+своего владельца. Команда не вызывает provider
 reimage/delete, не продолжает прежнюю операцию и не архивирует её journal.
 Это узкий операторский путь: `--accept-reimaged-fleet` явно подтверждает выполненное
 оператором удаление прежних dynamic exits и переустановку известных non-DB узлов;
@@ -172,9 +172,9 @@ execute и не ослабляет независимую readiness. Прове�
 Age подтверждает аутентифицированное шифрование для настроенной identity, но не
 устанавливает личность подписавшего или создателя backup.
 
-`--config` указывает на явно подготовленную root-owned копию canonical bytes, а не
-на shared user-owned canonical file. `--state-dir` должен быть новым пустым каталогом root:root с режимом 0700; он
-создаётся таким же, если отсутствует. Все пути задаются явно и абсолютно.
+`--config` указывает на canonical config оператора с правами 0600.
+`--state-dir` должен быть новым пустым каталогом этого оператора с режимом 0700;
+он создаётся таким же, если отсутствует. Все пути задаются явно и абсолютно.
 
 Primary исключён из mutation inventory по точной host identity. Его Ansible-задачи
 выполняют только read-only SQL. Отдельный localhost gate перед каждой mutation play
@@ -187,18 +187,18 @@ address/port/UUID/pin. PostgreSQL provisioning/import/authorization не вып�
 
 ### Проверка локальной исполнимости до admission
 
-Execute запускается только от root. До чтения входов, создания `--state-dir` и
-создания любого remote fence команда проверяет, что текущий процесс вообще способен
-диспатчить содержательную операцию: euid 0, root-owned исполняемые
-`/usr/bin/systemctl` и `/usr/bin/systemd-run` без group/world write, рабочий
-`systemctl show --property=Version`, а при существующем `/var/lib/ultra-ansible` —
-приватный root-owned каталог. Это `deployansible.PreflightLocalExecution`, тот же
-guard, который исполняется внутри executor.
+Непривилегированный execute требует `--operator-state-dir` с абсолютным путём
+`<home из passwd>/.local/state/ultra-ansible`. Это постоянное общее пространство
+fence для всех попыток оператора; `HOME` и `SUDO_USER` его не меняют. Job workspace
+не заменяет этот каталог. До remote fence проверяются защищённый каталог 0700,
+доступность `systemctl --user` и исполнимость runtime. Root на удалённом controller
+продолжает использовать системный manager и `/var/lib/ultra-ansible`.
 
-Доверенные Python/Ansible executable и `ssh`, `age`, `pg_restore`, а также
-`systemctl`/`systemd-run` должны быть обычными root-owned executable без group/world
-write; все родительские каталоги — root-owned и без group/world write. Это исключает
-подмену локальной команды через writable path.
+Python/Ansible, `ssh`, `age`, `pg_restore` и их родительские каталоги должны
+принадлежать root либо текущему оператору, без group/world write; executable
+должны сохранять право исполнения. User-manager proof связывает UID, точный
+cgroup и generation. Исторический root proof не даёт user manager права объявить
+root workers остановленными: допускается лишь уже сохранённый точный drain receipt.
 
 Для execute `--execution-timeout` по умолчанию равен 20 минутам и входит в frozen
 request; изменение timeout при повторе означает другой запрос. Readiness имеет

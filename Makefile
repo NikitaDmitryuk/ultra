@@ -1,4 +1,4 @@
-.PHONY: build build-install build-bot test vet lint format format-check install bot-cert relay-logs verify-relay benchmark-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64 release-dist clean harness-check generate-db
+.PHONY: build build-install build-bot test vet lint format format-check tidy install bot-cert relay-logs verify-relay benchmark-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64 release-dist clean harness-check generate-db
 
 BINARY=ultra-relay
 INSTALL_BINARY=ultra-install
@@ -39,6 +39,8 @@ format:
 	git ls-files -z --cached --others --exclude-standard -- '*.go' | xargs -0 -r gofmt -s -w
 	@echo "Running golines..."
 	git ls-files -z --cached --others --exclude-standard -- '*.go' | xargs -0 -r go run $(GOLINES_PKG) --max-len=140 -w
+
+tidy:
 	go mod tidy
 
 format-check:

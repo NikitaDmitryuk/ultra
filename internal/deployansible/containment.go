@@ -39,7 +39,9 @@ func executionContainmentPreflight() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	raw, err := executionManagerCommand(exec.CommandContext(ctx, "/usr/bin/systemctl", executionManagerArgs("show", "--property=Version", "--value")...)).Output()
+	raw, err := executionManagerCommand(
+		exec.CommandContext(ctx, "/usr/bin/systemctl", executionManagerArgs("show", "--property=Version", "--value")...),
+	).Output()
 	if err != nil || strings.TrimSpace(string(raw)) == "" {
 		return errors.New("execution_containment_unavailable")
 	}
@@ -220,7 +222,24 @@ var observeContainmentUnit = containmentUnitState
 func containmentUnitState(unit string) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	raw, err := executionManagerCommand(exec.CommandContext(ctx, "/usr/bin/systemctl", executionManagerArgs("show", unit, "--property=LoadState", "--property=ActiveState", "--property=ControlGroup", "--property=KillMode", "--property=Delegate", "--property=User", "--property=MainPID", "--property=InvocationID", "--property=Result")...)).Output()
+	raw, err := executionManagerCommand(
+		exec.CommandContext(
+			ctx,
+			"/usr/bin/systemctl",
+			executionManagerArgs(
+				"show",
+				unit,
+				"--property=LoadState",
+				"--property=ActiveState",
+				"--property=ControlGroup",
+				"--property=KillMode",
+				"--property=Delegate",
+				"--property=User",
+				"--property=MainPID",
+				"--property=InvocationID",
+				"--property=Result",
+			)...),
+	).Output()
 	if err != nil {
 		return nil, err
 	}

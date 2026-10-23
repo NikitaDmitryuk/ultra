@@ -78,7 +78,10 @@ func runRetainedReconcile(args []string, out io.Writer) error {
 	defer cancel()
 	ctx, cancelTimeout := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancelTimeout()
-	lock, err := openOperatorLock(filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"), uint32(os.Geteuid()))
+	lock, err := openOperatorLock(
+		filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"),
+		uint32(os.Geteuid()),
+	)
 	if err != nil {
 		return err
 	}
