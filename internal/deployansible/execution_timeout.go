@@ -128,6 +128,27 @@ func frozenExecutionTimeout(raw []byte) (*int64, error) {
 	return &budget, nil
 }
 
+func frozenExitExecutionTimeout(raw []byte) (*int64, error) {
+	var request ExitRequest
+	if json.Unmarshal(raw, &request) != nil {
+		return nil, errors.New("invalid_frozen_execution_request")
+	}
+	canonical, err := json.Marshal(request)
+	if err != nil || !bytes.Equal(raw, canonical) {
+		return nil, errors.New("invalid_frozen_execution_request")
+	}
+	if request.ExecutionTimeoutSeconds < 0 {
+		return nil, errors.New("invalid_execution_timeout")
+	}
+	if request.ExecutionTimeoutSeconds == 0 {
+		return nil, nil
+	}
+	if !validExecutionTimeoutSeconds(request.ExecutionTimeoutSeconds) {
+		return nil, errors.New("invalid_execution_timeout")
+	}
+	return &request.ExecutionTimeoutSeconds, nil
+}
+
 // LocalRequestBytes reconstructs the exact request RunLocal will admit, including
 // its context budget and legacy default replay. It never writes or dispatches.
 func LocalRequestBytes(ctx context.Context, operation, directory string, inventory, variables map[string]any) ([]byte, error) {
@@ -169,22 +190,27 @@ func pinnedLocalExecutionRequest(
 }
 
 func preparedExecutionTimeout(directory string) (time.Duration, error) {
+	job, readErr := readRetryPrivate(filepath.Join(directory, "job.json"))
+	var value struct {
+		Operation string `json:"operation"`
+	}
+	if readErr != nil || json.Unmarshal(job, &value) != nil {
+		return 0, errors.New("invalid_execution_timeout")
+	}
 	raw, err := readRetryPrivate(filepath.Join(directory, "request.json"))
 	if err != nil {
 		return 0, err
 	}
-	budget, err := frozenExecutionTimeout(raw)
+	var budget *int64
+	if value.Operation == "configure-exit" {
+		budget, err = frozenExitExecutionTimeout(raw)
+	} else {
+		budget, err = frozenExecutionTimeout(raw)
+	}
 	if err != nil {
 		return 0, err
 	}
 	if budget == nil {
-		job, readErr := readRetryPrivate(filepath.Join(directory, "job.json"))
-		var value struct {
-			Operation string `json:"operation"`
-		}
-		if readErr != nil || json.Unmarshal(job, &value) != nil {
-			return 0, errors.New("invalid_execution_timeout")
-		}
 		// Missing fields belong to legacy frozen requests. Fresh upgrades always
 		// carry 3600 explicitly; never silently extend an old 1200s budget.
 		if value.Operation == "wait-upgrade-readiness" {

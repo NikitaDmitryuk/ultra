@@ -66,7 +66,12 @@ func TestExecutionRuntimeLimitSurvivesObserverCrashWithoutRetiringFence(t *testi
 
 func TestPreparedExecutionTimeoutRejectsChangedRequest(t *testing.T) {
 	directory := t.TempDir()
-	if err := writeJSON(filepath.Join(directory, "request.json"), map[string]any{"execution_timeout_seconds": 0}); err != nil {
+	if err := writeJSON(filepath.Join(directory, "request.json"), map[string]any{
+		"inventory": map[string]any{}, "variables": map[string]any{}, "execution_timeout_seconds": 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(directory, "job.json"), map[string]any{"operation": "bootstrap"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := preparedExecutionTimeout(directory); err == nil {
@@ -91,6 +96,60 @@ func TestLegacyUpgradeBudgetDoesNotInheritFreshDefault(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"execution_timeout_seconds":3600`) {
 		t.Fatal(string(raw))
+	}
+}
+
+func TestPreparedExecutionTimeoutSupportsConfigureExitRequest(t *testing.T) {
+	binary, request := fixture(t)
+	request.ExecutionTimeoutSeconds = 75
+	directory := filepath.Join(t.TempDir(), "job")
+	if err := Prepare(directory, binary, request); err != nil {
+		t.Fatal(err)
+	}
+	if budget, err := preparedExecutionTimeout(directory); err != nil || budget != 75*time.Second {
+		t.Fatalf("configure-exit timeout = %s, %v", budget, err)
+	}
+	legacyDirectory := filepath.Join(t.TempDir(), "job")
+	request.ExecutionTimeoutSeconds = 0
+	if err := Prepare(legacyDirectory, binary, request); err != nil {
+		t.Fatal(err)
+	}
+	if budget, err := preparedExecutionTimeout(legacyDirectory); err != nil || budget != 20*time.Minute {
+		t.Fatalf("legacy configure-exit timeout = %s, %v", budget, err)
+	}
+
+	changedDirectory := t.TempDir()
+	raw, err := os.ReadFile(filepath.Join(directory, "request.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := append([]byte(nil), raw[:len(raw)-1]...)
+	changed = append(changed, []byte(`,"unexpected":true}`)...)
+	if err := writePrivate(filepath.Join(changedDirectory, "request.json"), changed); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(changedDirectory, "job.json"), map[string]any{"operation": "configure-exit"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := preparedExecutionTimeout(changedDirectory); err == nil {
+		t.Fatal("unknown configure-exit request field accepted")
+	}
+	for _, value := range []string{"0", "null", "75.5", "-1", "9223371977", `"75"`} {
+		invalidDirectory := t.TempDir()
+		invalid := bytes.Replace(raw, []byte(`"execution_timeout_seconds":75`),
+			[]byte(`"execution_timeout_seconds":`+value), 1)
+		if bytes.Equal(invalid, raw) {
+			t.Fatal("timeout field missing from typed request")
+		}
+		if err := writePrivate(filepath.Join(invalidDirectory, "request.json"), invalid); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeJSON(filepath.Join(invalidDirectory, "job.json"), map[string]any{"operation": "configure-exit"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := preparedExecutionTimeout(invalidDirectory); err == nil {
+			t.Fatalf("invalid configure-exit timeout %s accepted", value)
+		}
 	}
 }
 
