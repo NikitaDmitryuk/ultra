@@ -3,7 +3,7 @@ package main
 // The connection is new and non-multiplexed. Only its own ancestry/session and
 // the independently resolved dedicated tunnel UID and known OS daemons are exempt.
 // Unknown sessions are never signalled by this read-only gate.
-const replacementSessionCensusDefinitions = `import os,sys,json,pwd,subprocess,re
+const replacementSessionCensusDefinitions = `import os,sys,json,pwd,subprocess,re,time
 from pathlib import Path
 def gate_error(code,pid=None,row=None):
  error=ValueError(code)
@@ -83,6 +83,22 @@ def read_sessions():
    except (FileNotFoundError,ProcessLookupError):continue
  except Exception:gate_error('replacement_session_census_unavailable')
  return rows
+def require_sessions_quiescent(self_pid,tunnel_uid=None):
+ rows=read_sessions()
+ try:return validate_sessions(rows,self_pid,tunnel_uid)
+ except ValueError as error:
+  offender=getattr(error,'offender',{})
+  pid=offender.get('pid');row=rows.get(pid,{})
+  if str(error)!='replacement_other_root_ssh_session' or row.get('comm')!='sshd-session' or row.get('sid')!=pid or row.get('cgroups')!=['/system.slice/ssh.service']:raise
+  # A just-closed probe can leave an sshd-session tail. Never exempt it:
+  # require a fresh complete census and disappearance of its entire session.
+  time.sleep(0.75)
+  current=read_sessions()
+  validate_sessions(current,self_pid,tunnel_uid)
+  for child_pid,child in current.items():
+   if child['sid']==pid:gate_error('replacement_other_root_ssh_session',child_pid,child)
+  return True
+
 def require_primary_idle(database):
  query="""BEGIN READ ONLY;
  SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend'
@@ -105,7 +121,7 @@ try:
  if primary:
   try:tunnel_uid=pwd.getpwnam('ultra-db-tunnel').pw_uid
   except KeyError:gate_error('replacement_tunnel_uid_unavailable')
- validate_sessions(read_sessions(),os.getpid(),tunnel_uid)
+ require_sessions_quiescent(os.getpid(),tunnel_uid)
  if primary:require_primary_idle(sys.argv[2])
  print(json.dumps({'quiescent':True,'code':''}))
 except Exception as error:

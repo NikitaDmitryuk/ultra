@@ -59,5 +59,10 @@ transaction, команда останавливается до удаления
 удалением локального журнала. Retained-primary recovery-команды и
 `rebuild-non-db preflight` для этого пути не используются.
 
+Краткоживущий root `sshd-session` в `ssh.service` подтверждается повторным полным
+census после паузы 0,75 с. Замена продолжится только если исчезла вся исходная
+session и новый census не обнаружил других blockers; оставшиеся процессы и новые
+SSH-сессии по-прежнему останавливают cleanup.
+
 См. [ADR 0023](adr/0023-destructive-production-replacement.md),
 [автоматизацию](automation.md) и [контракт отдельной БД](replication.md).

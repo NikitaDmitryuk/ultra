@@ -215,6 +215,71 @@ for state in ('active','idle in transaction','idle in transaction (aborted)'):
 	}
 }
 
+func TestProductionReplacementTransientSSHSessionConfirmation(t *testing.T) {
+	program := `import copy,sys
+exec(sys.stdin.read(),globals())
+def row(ppid,sid,uid,comm,*argv):
+ return {'ppid':ppid,'sid':sid,'uids':[uid]*4,'comm':comm,'argv':list(argv)}
+base={1:row(0,1,0,'systemd','/sbin/init'),2:row(1,2,0,'sshd','sshd: listener'),90:row(2,90,0,'sshd-session','sshd-session: root@notty'),100:row(90,90,0,'python3','python3','-')}
+tail=copy.deepcopy(base)
+tail[200]=row(2,200,0,'sshd-session','sshd-session: root@notty')
+tail[200]['cgroups']=['/system.slice/ssh.service']
+def check(first,second,code=None,pid=None,wait=True,uid=None):
+ global read_sessions
+ snapshots=[copy.deepcopy(first),copy.deepcopy(second)]
+ sleeps=[]
+ def read():
+  assert snapshots,'unexpected additional census'
+  return snapshots.pop(0)
+ read_sessions=read
+ time.sleep=lambda seconds:sleeps.append(seconds)
+ try:
+  assert require_sessions_quiescent(100,uid)
+ except ValueError as error:
+  assert str(error)==code,(str(error),code)
+  if pid is not None:assert error.offender['pid']==pid,error.offender
+ else:assert code is None,'unsafe session was accepted'
+ assert sleeps==([0.75] if wait else []),sleeps
+ assert len(snapshots)==(0 if wait else 1),snapshots
+# No delay for an idle census; one complete recheck for an exact transient tail.
+check(base,base,wait=False)
+check(tail,base)
+check(tail,tail,'replacement_other_root_ssh_session',200)
+# Even a leader transitioning to an otherwise accepted preauth shape must vanish.
+preauth=copy.deepcopy(tail);preauth[200]['argv']=['sshd-session: unknown [priv]']
+preauth[201]=row(200,200,983,'sshd-auth','sshd-auth: unknown [net]')
+assert validate_sessions(preauth,100)
+check(tail,preauth,'replacement_other_root_ssh_session',200)
+# A vanished leader cannot hide surviving/new children, even otherwise unknown
+# processes or non-root children which the ordinary root census ignores.
+for uid in (0,991):
+ child=copy.deepcopy(base)
+ child[201]=row(1,200,uid,'unknown-binary','/tmp/unknown-binary')
+ check(tail,child,'replacement_other_root_ssh_session',201)
+child=copy.deepcopy(base);child[201]=row(1,200,0,'sh','/bin/sh')
+check(tail,child,'replacement_unknown_root_helper',201)
+# Full validation also catches an unrelated blocker arriving during the wait.
+new=copy.deepcopy(base);new[300]=row(1,300,0,'python3','python3','/tmp/helper.py')
+check(tail,new,'replacement_unknown_root_helper',300)
+broken=copy.deepcopy(base);del broken[90]
+check(tail,broken,'replacement_session_census_unavailable')
+# Dedicated-tunnel handling remains in effect during the second census.
+tunnel=copy.deepcopy(base);tunnel[400]=row(2,400,0,'sshd-session','sshd-session: ultra-db-tunnel [priv]');tunnel[401]=row(400,401,991,'sshd-session','sshd-session: ultra-db-tunnel@notty')
+check(tail,tunnel,uid=991)
+# Other commands, units, and nonleader sessions still fail immediately.
+for mutation in ('comm','cgroup','sid'):
+ other=copy.deepcopy(tail)
+ if mutation=='comm':other[200]['comm']='sshd'
+ elif mutation=='cgroup':other[200]['cgroups']=['/system.slice/other.service']
+ else:other[200]['sid']=201
+ check(other,base,'replacement_other_root_ssh_session',200,wait=False)
+`
+	cmd := exec.Command("python3", "-c", program)
+	cmd.Stdin = strings.NewReader(replacementSessionCensusDefinitions)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("transient SSH session fixture: %v\n%s", err, out)
+	}
+}
 func TestProductionReplacementQuiescenceDiagnostics(t *testing.T) {
 	raw := []byte(`{"quiescent":false,"code":"replacement_unknown_root_helper","offender":{"pid":300,"ppid":1,"sid":300,"comm":"python3","argv_basenames":["python3","AnsiballZ_command.py"],"cgroups":["/system.slice/ultra-deploy-fixture.service"]}}`)
 	err := replacementQuiescenceResult(raw)
