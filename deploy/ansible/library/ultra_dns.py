@@ -7,39 +7,64 @@ from pathlib import Path
 from ansible.module_utils.basic import AnsibleModule
 
 
-def validate_backend_record(record):
+# Roles the ownership receipt may describe. A seed is an explicit operator
+# attestation, so it may claim any owned role, including the exit tunnel.
+PUBLIC = {'subscription', 'vpn'}
+OWNED = PUBLIC | {'backend', 'tunnel'}
+
+# Only bounded application codes reach the caller; raw provider payloads, request
+# bodies and credentials never leave this process.
+BOUNDED = re.compile(r'(?:dns|owned)_[a-z0-9_]{1,64}\Z')
+
+
+def validate_owned_record(record, code):
     if (not isinstance(record, dict) or set(record) != {'id', 'type', 'name', 'data', 'ttl'}
             or record['type'] != 'A' or not re.fullmatch(r'[A-Za-z0-9-]+', str(record['id']))
             or not isinstance(record['name'], str)
             or not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', record['name'])
             or type(record['ttl']) is not int or not 120 <= record['ttl'] <= 86400):
-        raise ValueError('owned_backend_receipt_required')
-    ipaddress.IPv4Address(record['data'])
+        raise ValueError(code)
+    try:
+        if str(ipaddress.IPv4Address(record['data'])) != record['data']:
+            raise ValueError(code)
+    except (TypeError, ValueError):
+        raise ValueError(code) from None
+
+
+def validate_backend_record(record):
+    validate_owned_record(record, 'owned_backend_receipt_required')
 
 
 def seed_receipt(application, receipt, seed, zone):
-    public = {'subscription', 'vpn'}
     records = seed.get('records', {})
     if (seed.get('version') != 1 or seed.get('zone') != zone or seed.get('pending')
-            or not isinstance(records, dict) or not public <= set(records) <= public | {'backend'}):
+            or not isinstance(records, dict) or not PUBLIC <= set(records) <= OWNED):
         raise ValueError('owned_dns_receipt_required')
-    if 'backend' in records:
-        validate_backend_record(records['backend'])
+    # A seeded role becomes owned, so every seeded row needs a complete identity
+    # before the application may adopt it instead of refusing it as foreign.
+    for role, record in records.items():
+        validate_owned_record(record, 'owned_dns_receipt_required')
     if receipt.exists() or receipt.is_symlink():
         existing = application.json.loads(application.private(receipt).read_bytes())
         current = existing.get('records', {})
         if (existing.get('version') != 1 or existing.get('zone') != zone
-                or not isinstance(current, dict) or not public <= set(current) <= public | {'backend'}
-                or any(current[role]['id'] != records[role]['id'] for role in public)):
+                or not isinstance(current, dict) or not PUBLIC <= set(current) <= OWNED
+                or any(current[role]['id'] != records[role]['id'] for role in PUBLIC)):
             raise ValueError('dns_ownership_drift')
-        # A public-only historical seed cannot discard an owned backend. If a seed
-        # claims that role too, require its complete identity to match, not just ID.
-        if 'backend' in current:
-            validate_backend_record(current['backend'])
-        if 'backend' in records and current.get('backend') != records['backend']:
-            raise ValueError('dns_backend_ownership_drift')
+        # A public-only historical seed cannot discard an owned backend or tunnel.
+        # If a seed claims those roles too, require their complete identity to match.
+        for role in OWNED - PUBLIC:
+            if role in current:
+                validate_owned_record(current[role], 'owned_backend_receipt_required')
+            if role in records and current.get(role) != records[role]:
+                raise ValueError('dns_backend_ownership_drift')
     else:
         application.save(receipt, seed)
+
+
+def bounded_code(error):
+    message = str(error)
+    return message if BOUNDED.fullmatch(message) else 'owned_dns_reconciliation_failed'
 
 
 def main():
@@ -66,8 +91,8 @@ def main():
         if module.params['wait']:
             application.wait_ready(module.params['config'], module.params['desired'])
         module.exit_json(changed=before != receipt.read_bytes(), ready=result['ready'])
-    except Exception:
-        module.fail_json(msg='owned_dns_reconciliation_failed')
+    except Exception as error:
+        module.fail_json(msg=bounded_code(error))
 
 
 if __name__ == '__main__':

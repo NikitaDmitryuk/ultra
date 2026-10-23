@@ -37,6 +37,8 @@ func handlePlanSubcommand(args []string) bool {
 		exitOnErr("retained primary recovery", runRetainedPrimaryCommand(args[1:]))
 	case "rebuild-non-db":
 		exitOnErr("rebuild non-DB preflight", runRebuildNonDB(args[1:], os.Stdout, time.Now()))
+	case "dns-attest":
+		exitOnErr("owned DNS attestation", runDNSAttestCommand(args[1:], os.Stdout))
 	case "config-values":
 		runConfigValuesCommand(args[1:])
 	case "bridge-migrate":

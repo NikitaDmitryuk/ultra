@@ -228,6 +228,13 @@ func checkExecutionAdmission(root string) error {
 		if receipt.State == "succeeded" || completedExecution(directory) || preparedRetryExecution(directory) {
 			continue
 		}
+		// A retired failed generation is preserved evidence, never a live claim.
+		if abandoned, abandonErr := savedAbandonment(directory); abandonErr != nil || abandoned != nil {
+			if abandonErr != nil {
+				return ErrExecutionFenced
+			}
+			continue
+		}
 		binding, err := executionBinding(directory)
 		if err != nil {
 			return ErrExecutionFenced
@@ -267,6 +274,12 @@ func beginExecution(directory string) (*ExecutionFence, error) {
 	}
 	if executionReadOnly(binding.Operation) {
 		return nil, nil
+	}
+	if abandoned, abandonErr := savedAbandonment(directory); abandonErr != nil || abandoned != nil {
+		if abandonErr != nil {
+			return nil, ErrExecutionFenced
+		}
+		return nil, ErrExecutionAbandoned
 	}
 	if !executionNamespaceFixture() {
 		if err = executionContainmentPreflight(); err != nil {

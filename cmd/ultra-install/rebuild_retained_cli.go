@@ -63,6 +63,11 @@ func runRetainedPrimaryCommand(args []string) error {
 		false,
 		"operator attests former bridge/exit were reimaged and former dynamic exits removed",
 	)
+	dnsAttestation := fs.String(
+		"dns-attestation",
+		"",
+		"private operator attestation of the DNS records the provider already holds",
+	)
 	if fs.Parse(args) != nil || fs.NArg() != 0 || (*bridgeOnly == *acceptFleet) || (*bridgeOnly != (*retainedSource != "")) ||
 		(*bridgeOnly != *authorizeFleet) {
 		return errors.New("retained_primary_explicit_operator_scope_required")
@@ -74,6 +79,11 @@ func runRetainedPrimaryCommand(args []string) error {
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
 			return errors.New("retained_primary_absolute_paths_required")
 		}
+	}
+	// The attestation is optional; when the operator names one it must already
+	// be an absolute canonical path, exactly like every other private input.
+	if *dnsAttestation != "" && (!filepath.IsAbs(*dnsAttestation) || filepath.Clean(*dnsAttestation) != *dnsAttestation) {
+		return errors.New("retained_primary_absolute_paths_required")
 	}
 	if err := configureOperatorExecutionState(*operatorStateDir); err != nil {
 		return err
@@ -249,7 +259,7 @@ func runRetainedPrimaryCommand(args []string) error {
 	variables["ultra_subscription_domain"] = p.PublicSubscriptionDomain()
 	variables["ultra_subscription_enabled"] = true
 	variables["ultra_bridge_ipv4"] = p.Bridge.Address
-	if err = prepareAnsibleDNS(p, variables); err != nil {
+	if err = prepareAnsibleDNSAttested(p, variables, *config, *dnsAttestation, nil); err != nil {
 		return err
 	}
 	if *bridgeOnly {

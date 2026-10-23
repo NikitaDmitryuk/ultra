@@ -40,12 +40,14 @@ type retainedReconcileEvidence struct {
 
 func runRetainedReconcile(args []string, out io.Writer) error {
 	if len(args) == 0 || (args[0] != "inspect" && args[0] != "activate-controller" &&
-		args[0] != "retire-deleted-provider" && args[0] != "abandon-undispatched") {
+		args[0] != "retire-deleted-provider" && args[0] != "abandon-undispatched" &&
+		args[0] != "retire-failed-execution") {
 		return errors.New("retained_reconcile_action_required")
 	}
 	activate := args[0] == "activate-controller"
 	retire := args[0] == "retire-deleted-provider"
 	abandon := args[0] == "abandon-undispatched"
+	retireExecution := args[0] == "retire-failed-execution"
 	f := flag.NewFlagSet("retained-primary-reconcile", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	operatorStateDir := f.String("operator-state-dir", "", "local Ansible state root for nonroot operators")
@@ -90,6 +92,11 @@ func runRetainedReconcile(args []string, out io.Writer) error {
 	// retired on its own path rather than through the reconciliation snapshot.
 	if abandon {
 		return abandonRetainedUndispatchedAdmission(ctx, out, *directory, *config, *manifest, *journal, *receipt)
+	}
+	// A dispatched attempt that failed without a completion proof is proved and
+	// retired on its own path for the same reason.
+	if retireExecution {
+		return retireFailedRetainedExecution(ctx, out, *directory, *config, *manifest, *journal, *receipt)
 	}
 	in, evidence, err := loadRetainedReconcile(*directory, *config, *manifest, *journal)
 	if err != nil {
