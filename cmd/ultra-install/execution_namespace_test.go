@@ -85,6 +85,7 @@ if len(sys.argv)>1 and pathlib.Path(sys.argv[1]).name=='controller.py' and '--jo
     module=importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.EXECUTION_ROOT=base/'.execution-namespace'
+    module.TEST_EXECUTION_NAMESPACE=True
     sys.argv=sys.argv[1:]
     module.main()
 else:

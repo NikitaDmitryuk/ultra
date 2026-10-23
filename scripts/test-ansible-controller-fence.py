@@ -118,9 +118,9 @@ class ExecutionFence(unittest.TestCase):
         fence['generation'] = 'a' * 32
         C.atomic(directory / 'receipt.json', {'state': 'succeeded',
                  'execution_generation': fence['generation']})
-        def mapped_path(value):
-            return self.namespace if str(value) == '/var/lib/ultra-ansible' else Path(value)
-        with patch.object(C, 'Path', mapped_path), self.assertRaisesRegex(ValueError, 'workers_live'):
+        with patch.object(C, 'EXECUTION_ROOT', self.namespace), \
+             patch.dict(C.os.environ, {'ULTRA_OPERATOR_STATE_DIRECTORY': str(self.namespace)}), \
+             self.assertRaisesRegex(ValueError, 'workers_live'):
             C.finish_execution(directory, self.bundle, self.namespace, fence)
         self.assertFalse((directory / 'execution-completion.json').exists())
         self.assertFalse((directory / 'execution-containment.json').exists())
@@ -137,9 +137,9 @@ class ExecutionFence(unittest.TestCase):
         before=C.execution_binding(directory,self.bundle,job,raw)
         # Exercise the canonical-only helper import without accessing the real
         # production namespace or claiming an execution generation.
-        def mapped_path(value):
-            return self.namespace if str(value)=='/var/lib/ultra-ansible' else Path(value)
-        with patch.object(C,'Path',mapped_path),self.assertRaisesRegex(ValueError,'fixture_containment_probe'):
+        with patch.object(C, 'EXECUTION_ROOT', self.namespace), \
+             patch.dict(C.os.environ, {'ULTRA_OPERATOR_STATE_DIRECTORY': str(self.namespace)}), \
+             self.assertRaisesRegex(ValueError,'fixture_containment_probe'):
             C.begin_execution(directory,self.bundle,job,raw,self.namespace)
         self.assertEqual(C.execution_binding(directory,self.bundle,job,raw),before)
         self.assertEqual(list(self.bundle.rglob('*.pyc')),[])

@@ -76,3 +76,19 @@ func TestRetainedWorkspaceAdmission(t *testing.T) {
 		}
 	}
 }
+
+func TestOperatorStateRootRequiresPasswdDefaultForNonroot(t *testing.T) {
+	home := "/home/operator"
+	want := filepath.Join(home, ".local", "state", "ultra-ansible")
+	if got, err := resolveOperatorStateRoot(1000, want, home); err != nil || got != want {
+		t.Fatalf("nonroot state root: %q %v", got, err)
+	}
+	for _, requested := range []string{"", filepath.Join(home, "other"), "relative"} {
+		if _, err := resolveOperatorStateRoot(1000, requested, home); err == nil {
+			t.Fatalf("nonroot accepted state root %q", requested)
+		}
+	}
+	if got, err := resolveOperatorStateRoot(0, "", ""); err != nil || got != "" {
+		t.Fatalf("root legacy namespace: %q %v", got, err)
+	}
+}

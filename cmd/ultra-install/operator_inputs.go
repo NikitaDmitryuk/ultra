@@ -5,8 +5,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"syscall"
+
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 )
 
 func requireRootOperator() error {
@@ -14,6 +18,41 @@ func requireRootOperator() error {
 		return errors.New("operator_root_required")
 	}
 	return nil
+}
+
+func resolveOperatorStateRoot(uid uint32, requested, home string) (string, error) {
+	if requested == "" {
+		if uid == 0 {
+			return "", nil // preserve the legacy root namespace
+		}
+		return "", errors.New("operator_state_dir_required")
+	}
+	if !filepath.IsAbs(requested) || filepath.Clean(requested) != requested {
+		return "", errors.New("operator_state_dir_invalid")
+	}
+	if uid != 0 {
+		if !filepath.IsAbs(home) || filepath.Clean(home) != home || requested != filepath.Join(home, ".local", "state", "ultra-ansible") {
+			return "", errors.New("operator_state_dir_must_be_passwd_default")
+		}
+	}
+	return requested, nil
+}
+
+func configureOperatorExecutionState(requested string) error {
+	uid := uint32(os.Geteuid())
+	var home string
+	if uid != 0 {
+		entry, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+		if err != nil || entry.HomeDir == "" {
+			return errors.New("operator_state_home_unavailable")
+		}
+		home = entry.HomeDir
+	}
+	root, err := resolveOperatorStateRoot(uid, requested, home)
+	if err != nil || root == "" {
+		return err
+	}
+	return deployansible.ConfigureLocalExecutionState(root)
 }
 
 // The UID argument is explicit so fixtures can exercise the same checks without
@@ -104,7 +143,8 @@ func trustedOperatorExecutable(path string) bool {
 		return false
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
-	return ok && st.Uid == 0 && trustedOperatorParents(path)
+	uid := uint32(os.Geteuid())
+	return ok && (st.Uid == 0 || st.Uid == uid) && trustedOperatorParents(path)
 }
 
 func trustedOperatorParents(path string) bool {
@@ -114,7 +154,8 @@ func trustedOperatorParents(path string) bool {
 			return false
 		}
 		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || st.Uid != 0 {
+		uid := uint32(os.Geteuid())
+		if !ok || (st.Uid != 0 && st.Uid != uid) {
 			return false
 		}
 		if filepath.Dir(dir) == dir {

@@ -46,6 +46,7 @@ func runAutomationCommand(action string, args []string) {
 	retryFailed := fs.Bool("retry-failed", false, "explicitly retry the same failed frozen Ansible job after recovery preflight")
 	probeFile := fs.String("subscription-probe-url-file", "", "private 0600 HTTPS subscription URL file for domain acceptance")
 	jobDirectory := fs.String("job-dir", "", "persistent private Ansible upgrade directory")
+	operatorStateDir := fs.String("operator-state-dir", "", "explicit local execution state root for an unprivileged operator")
 	python := fs.String("python", "/usr/bin/python3", "controller Python")
 	ansible := fs.String("ansible-playbook", "", "pinned Ansible executable; otherwise resolve exact release runtime")
 	secretsSource := fs.String("secrets-source", "canonical", "canonical or installed-runtime secret inputs (upgrade only)")
@@ -77,8 +78,12 @@ func runAutomationCommand(action string, args []string) {
 		defer cancel()
 		ctx, err := upgradeExecutionContext(ctx, fs, *executionTimeout)
 		exitOnErr("execution timeout", err)
-		if err = requireRootOperator(); err != nil {
+		if err = configureOperatorExecutionState(*operatorStateDir); err != nil {
 			exitOnErr("operator identity", err)
+			return
+		}
+		if os.Geteuid() != 0 && !filepath.IsAbs(*jobDirectory) {
+			exitOnErr("operator job directory", errors.New("operator_job_directory_absolute_required"))
 			return
 		}
 		publicKey := strings.TrimSpace(p.SourceValues["ULTRA_RELEASE_MINISIGN_PUBLIC_KEY"])
@@ -96,12 +101,15 @@ func runAutomationCommand(action string, args []string) {
 			return
 		}
 		selectedReleaseDir := *releaseDir
-		cache, err := os.UserCacheDir()
-		if err != nil {
-			exitOnErr("GitHub release cache", err)
-			return
+		stagingBase := filepath.Join(*operatorStateDir, "releases")
+		if os.Geteuid() == 0 {
+			cache, err := os.UserCacheDir()
+			if err != nil {
+				exitOnErr("GitHub release cache", err)
+				return
+			}
+			stagingBase = filepath.Join(cache, "ultra", "releases")
 		}
-		stagingBase := filepath.Join(cache, "ultra", "releases")
 		if selectedReleaseDir == "" {
 			verified, err := FetchVerifiedGitHubRelease(ctx, GitHubReleaseOptions{
 				Selector:     *releaseSelector,
@@ -176,6 +184,7 @@ func runOperatorUpgradeCommand(args []string) {
 	forwardPriorSHA := fs.String("forward-prior-journal-sha256", "", "SHA-256 of the archived failed candidate journal")
 	probeFile := fs.String("subscription-probe-url-file", "", "private 0600 HTTPS subscription URL file for domain acceptance")
 	jobDirectory := fs.String("job-dir", "", "persistent private Ansible upgrade directory")
+	operatorStateDir := fs.String("operator-state-dir", "", "explicit local execution state root for an unprivileged operator")
 	python := fs.String("python", "/usr/bin/python3", "controller Python")
 	ansible := fs.String("ansible-playbook", "", "pinned Ansible executable; otherwise resolve exact release runtime")
 	secretsSource := fs.String("secrets-source", "canonical", "canonical or installed-runtime secret inputs")
@@ -200,8 +209,12 @@ func runOperatorUpgradeCommand(args []string) {
 		exitOnErr("operator upgrade prior candidate", errors.New("complete prior candidate identity required"))
 		return
 	}
-	if err := requireRootOperator(); err != nil {
+	if err := configureOperatorExecutionState(*operatorStateDir); err != nil {
 		exitOnErr("operator identity", err)
+		return
+	}
+	if os.Geteuid() != 0 && !filepath.IsAbs(*jobDirectory) {
+		exitOnErr("operator job directory", errors.New("operator_job_directory_absolute_required"))
 		return
 	}
 	configRaw, err := readRebuildInput(*configPath, true)

@@ -23,7 +23,7 @@ const retainedBackupManifestLimit = 1 << 20
 
 var retainedBackupName = regexp.MustCompile(`^primary-db-(\d{8}T\d{6}Z)-([0-9a-f]{32})\.backup\.tar\.age$`)
 var retainedBackupSHA = regexp.MustCompile(`^[0-9a-f]{64}$`)
-var retainedBackupExpectedUID = func() uint32 { return 0 }
+var retainedBackupExpectedUID = func() uint32 { return uint32(os.Geteuid()) }
 var retainedBackupClock = time.Now
 
 type retainedBackupManifest struct {

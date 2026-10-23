@@ -48,6 +48,7 @@ func runRetainedReconcile(args []string, out io.Writer) error {
 	abandon := args[0] == "abandon-undispatched"
 	f := flag.NewFlagSet("retained-primary-reconcile", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
+	operatorStateDir := f.String("operator-state-dir", "", "local Ansible state root for nonroot operators")
 	directory := f.String("state-dir", "", "existing successful recovery workspace")
 	config := f.String("config", "", "original canonical config")
 	manifest := f.String("manifest", "", "original release manifest")
@@ -70,14 +71,14 @@ func runRetainedReconcile(args []string, out io.Writer) error {
 			return errors.New("retained_reconcile_absolute_paths_required")
 		}
 	}
-	if err := requireRootOperator(); err != nil {
+	if err := configureOperatorExecutionState(*operatorStateDir); err != nil {
 		return err
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	ctx, cancelTimeout := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancelTimeout()
-	lock, err := openOperatorLock(filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"), 0)
+	lock, err := openOperatorLock(filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"), uint32(os.Geteuid()))
 	if err != nil {
 		return err
 	}

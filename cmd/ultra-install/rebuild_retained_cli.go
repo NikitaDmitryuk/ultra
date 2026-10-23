@@ -43,6 +43,7 @@ func runRetainedPrimaryCommand(args []string) error {
 	manifestPath := fs.String("manifest", "", "verified local release manifest")
 	journal := fs.String("original-journal", "", "retained original journal, read only")
 	directory := fs.String("state-dir", "", "new private recovery workspace")
+	operatorStateDir := fs.String("operator-state-dir", "", "local Ansible state root for nonroot operators")
 	backup := fs.String("backup", "", "fresh age encrypted primary custom dump")
 	backupMaxAge := fs.Duration("backup-max-age", 30*time.Minute, "maximum verified snapshot age")
 	executionTimeout := fs.Duration("execution-timeout", 20*time.Minute, "maximum execution runtime")
@@ -73,6 +74,9 @@ func runRetainedPrimaryCommand(args []string) error {
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
 			return errors.New("retained_primary_absolute_paths_required")
 		}
+	}
+	if err := configureOperatorExecutionState(*operatorStateDir); err != nil {
+		return err
 	}
 	// Prove this process can dispatch before anything is read, created or fenced.
 	// A failed run must not leave a workspace that blocks the retry, and it must
@@ -150,12 +154,13 @@ func runRetainedPrimaryCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	lock, err := openOperatorLock(filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"), 0)
+	uid := uint32(os.Geteuid())
+	lock, err := openOperatorLock(filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"), uid)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	workspace, err := openRetainedWorkspace(*directory, 0)
+	workspace, err := openRetainedWorkspace(*directory, uid)
 	if err != nil {
 		return err
 	}

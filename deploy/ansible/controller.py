@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import signal
 import stat
@@ -407,7 +408,10 @@ def run_playbook(arguments, bundle, environment, timeout=900):
 
 # A single local controller namespace is shared across jobs, lifecycle leases,
 # and caller-selected workspace paths. No CLI/environment root override exists.
+TEST_EXECUTION_NAMESPACE = False
 EXECUTION_ROOT = Path('/var/lib/ultra-ansible')
+if os.geteuid() != 0 and not TEST_EXECUTION_NAMESPACE:
+    EXECUTION_ROOT = Path(pwd.getpwuid(os.geteuid()).pw_dir) / '.local/state/ultra-ansible'
 READ_ONLY_OPERATIONS = frozenset({
     'inspect-bootstrap', 'bootstrap-recovery-inspect', 'inspect-upgrade',
     'status-automation', 'inspect-release-hosts',
@@ -467,10 +471,12 @@ def deployment_execution_admission(root):
         raise ValueError('execution_uncertain_reconciliation_required')
 
 
-def begin_execution(directory, bundle, job, raw, root):
+def begin_execution(directory, bundle, job, raw, root, fixture=False):
     if job['operation'] in READ_ONLY_OPERATIONS:
         return None
-    if root == Path('/var/lib/ultra-ansible'):
+    if not (fixture or TEST_EXECUTION_NAMESPACE):
+        if root != EXECUTION_ROOT or (os.geteuid() != 0 and os.environ.get('ULTRA_OPERATOR_STATE_DIRECTORY') != str(EXECUTION_ROOT)):
+            raise ValueError('execution_state_configuration_required')
         import importlib.util
         source = Path(bundle) / 'library/ultra_execution_containment.py'
         spec = importlib.util.spec_from_file_location('ultra_execution_containment', source)
@@ -573,7 +579,7 @@ def completed_failure(directory, bundle, job, raw, receipt):
         return False
 
 
-def finish_execution(directory, bundle, root, fence, outcome="succeeded", terminal=None):
+def finish_execution(directory, bundle, root, fence, outcome="succeeded", terminal=None, fixture=False):
     if fence is None:
         return
     current = execution_binding(directory, bundle, validate(load_private(directory / 'job.json')),
@@ -581,7 +587,7 @@ def finish_execution(directory, bundle, root, fence, outcome="succeeded", termin
     current['generation'] = fence['generation']
     if current != fence:
         raise ValueError('execution_completion_conflict')
-    if root == Path('/var/lib/ultra-ansible'):
+    if not (fixture or TEST_EXECUTION_NAMESPACE):
         import importlib.util
         source = Path(bundle) / 'library/ultra_execution_containment.py'
         spec = importlib.util.spec_from_file_location('ultra_execution_containment', source)
@@ -595,14 +601,14 @@ def finish_execution(directory, bundle, root, fence, outcome="succeeded", termin
         'terminal_sha256': hashlib.sha256(terminal).hexdigest() if terminal else '',
         'receipt_sha256': hashlib.sha256(load_private(directory / 'receipt.json', raw=True)).hexdigest(),
     })
-    if os.environ.get('ULTRA_EXECUTION_GENERATION') or (root == Path('/var/lib/ultra-ansible') and proof['mode'] == 'transient'):
+    if os.environ.get('ULTRA_EXECUTION_GENERATION') or (not (fixture or TEST_EXECUTION_NAMESPACE) and proof['mode'] == 'transient'):
         return  # The Go dispatcher validates the completion before retiring it.
     lock = SafeJournal.open_private(root / 'execution-admission.lock', os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if load_private(root / 'execution-fence.json') != fence:
             raise ValueError('execution_completion_conflict')
-        if root == Path('/var/lib/ultra-ansible'):
+        if not (fixture or TEST_EXECUTION_NAMESPACE):
             # Preserve the already-observed census for historical rc2 retry;
             # its exact receipt also closes a crash before fence unlink.
             atomic(directory / ('execution-drain-' + fence['generation'] + '.json'), {
@@ -678,11 +684,11 @@ def execute(directory, executable, bundle, diagnostics_root=None, execution_root
             return saved
         if saved.get('state') == 'failed':
             if job['operation'] not in READ_ONLY_OPERATIONS and not completed_failure(directory, bundle, job, raw, saved):
-                begin_execution(directory, bundle, job, raw, execution_root or EXECUTION_ROOT)
+                begin_execution(directory, bundle, job, raw, execution_root or EXECUTION_ROOT, fixture=execution_root is not None)
             return saved  # Explicit retry creates a new attempt, never treats a failure as success.
     result_path = directory / 'result.json'
     result_path.unlink(missing_ok=True)
-    fence = begin_execution(directory, bundle, job, raw, execution_root or EXECUTION_ROOT)
+    fence = begin_execution(directory, bundle, job, raw, execution_root or EXECUTION_ROOT, fixture=execution_root is not None)
     journal = SafeJournal.create(diagnostics_root or SafeJournal.default_root(), directory, job['operation'])
     state = {**job, 'state': 'running', 'started_at': int(time.time())}
     if fence is not None:
@@ -752,7 +758,7 @@ def execute(directory, executable, bundle, diagnostics_root=None, execution_root
     journal.close()
     atomic(receipt, state)
     if state['state'] == 'succeeded' or normal_failure_proof is not None:
-        finish_execution(directory, bundle, execution_root or EXECUTION_ROOT, fence, state['state'], normal_failure_proof)
+        finish_execution(directory, bundle, execution_root or EXECUTION_ROOT, fence, state['state'], normal_failure_proof, fixture=execution_root is not None)
     return state
 
 

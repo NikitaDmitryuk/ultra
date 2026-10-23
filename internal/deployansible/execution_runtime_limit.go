@@ -35,7 +35,7 @@ func observeExecutionRuntimeLimit(fence ExecutionFence) error {
 	if err := savedExecutionRuntimeLimit(fence); err != nil {
 		return err
 	}
-	if executionFenceDirectory(fence.JobDirectory) != "/var/lib/ultra-ansible" {
+	if executionNamespaceFixture() {
 		return nil
 	}
 	if !regexp.MustCompile(`^[a-f0-9]{32}$`).MatchString(fence.Generation) {

@@ -33,7 +33,13 @@ var ErrExecutionFenced = errors.New("execution_uncertain_reconciliation_required
 // Package tests replace this resolver with an isolated private fixture.
 var executionFenceDirectory = productionExecutionFenceDirectory
 
-func productionExecutionFenceDirectory(string) string { return "/var/lib/ultra-ansible" }
+func productionExecutionFenceDirectory(string) string {
+	root, err := ExpectedLocalExecutionState()
+	if err != nil {
+		return ""
+	}
+	return root
+}
 
 func executionReadOnly(operation string) bool {
 	switch operation {
@@ -117,6 +123,11 @@ func executionRoot(directory string) (string, error) {
 }
 
 func prepareExecutionRoot(root string) (string, error) {
+	if !executionNamespaceFixture() {
+		if err := requireConfiguredExecutionState(); err != nil {
+			return "", err
+		}
+	}
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return "", err
 	}
@@ -257,7 +268,7 @@ func beginExecution(directory string) (*ExecutionFence, error) {
 	if executionReadOnly(binding.Operation) {
 		return nil, nil
 	}
-	if namespace == "/var/lib/ultra-ansible" {
+	if !executionNamespaceFixture() {
 		if err = executionContainmentPreflight(); err != nil {
 			return nil, err
 		}

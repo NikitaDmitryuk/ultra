@@ -40,6 +40,7 @@ func runOperatorJournalReconcile(args []string, out io.Writer) error {
 	manifest := fs.String("manifest", "", "original retained recovery release manifest")
 	receipt := fs.String("receipt", "", "new evidence file for abandonment")
 	confirmation := fs.String("confirm-journal-sha256", "", "explicit acknowledgement of exact journal for abandonment")
+	operatorStateDir := fs.String("operator-state-dir", "", "local Ansible state root for nonroot operators")
 	if fs.Parse(args[1:]) != nil || fs.NArg() != 0 {
 		return errors.New("operator_journal_arguments_invalid")
 	}
@@ -56,10 +57,8 @@ func runOperatorJournalReconcile(args []string, out io.Writer) error {
 	if (*state == "") != (*manifest == "") {
 		return errors.New("operator_journal_retained_inputs_required")
 	}
-	if *state != "" || args[0] == "abandon-undispatched" {
-		if err := requireRootOperator(); err != nil {
-			return err
-		}
+	if err := configureOperatorExecutionState(*operatorStateDir); err != nil {
+		return err
 	}
 	lock, err := openOperatorLock(
 		filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"),

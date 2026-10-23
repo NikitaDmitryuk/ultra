@@ -34,7 +34,7 @@ func TestExecutionTimeoutPolicy(t *testing.T) {
 func TestExecutionRuntimeLimitSurvivesObserverCrashWithoutRetiringFence(t *testing.T) {
 	fence, _ := containmentCompletionFixture(t)
 	resolver := executionFenceDirectory
-	executionFenceDirectory = func(string) string { return "/var/lib/ultra-ansible" }
+	executionFenceDirectory = productionExecutionFenceDirectory
 	t.Cleanup(func() { executionFenceDirectory = resolver })
 	mockContainmentObservation(t, func(string) (map[string]string, error) {
 		return map[string]string{
@@ -132,8 +132,14 @@ func TestExecutionTimeoutRequestBudgetIsImmutableAndLegacyReplayPreservesBytes(t
 
 func TestProductionContainmentNamespaceHasNoRequestOverride(t *testing.T) {
 	t.Setenv("ULTRA_EXECUTION_ROOT", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SUDO_USER", "untrusted")
+	expected, err := ExpectedLocalExecutionState()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, directory := range []string{"", t.TempDir(), "/var/lib/ultra-ansible", "/tmp/../tmp/untrusted"} {
-		if got := productionExecutionFenceDirectory(directory); got != "/var/lib/ultra-ansible" {
+		if got := productionExecutionFenceDirectory(directory); got != expected {
 			t.Fatalf("job path or environment changed production containment: %q", got)
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -21,18 +22,24 @@ var approvedExecutionGroup = regexp.MustCompile(
 var errExecutionContainmentStopUnverified = errors.New("execution_containment_stop_unverified")
 
 func executionContainmentPreflight() error {
+	if err := requireConfiguredExecutionState(); err != nil {
+		return err
+	}
 	if os.Geteuid() != 0 {
-		return errors.New("execution_containment_unverified")
+		info, err := os.Lstat("/run/user/" + strconv.Itoa(os.Geteuid()))
+		if err != nil || !info.IsDir() || !ownedByProcess(info) || info.Mode().Perm() != 0700 {
+			return errors.New("execution_containment_unavailable")
+		}
 	}
 	for _, path := range []string{"/usr/bin/systemctl", "/usr/bin/systemd-run"} {
 		info, err := os.Stat(path)
-		if err != nil || !info.Mode().IsRegular() || !ownedByProcess(info) || info.Mode().Perm()&0022 != 0 || info.Mode().Perm()&0111 == 0 {
+		if err != nil || !info.Mode().IsRegular() || !ownedByRoot(info) || info.Mode().Perm()&0022 != 0 || info.Mode().Perm()&0111 == 0 {
 			return errors.New("execution_containment_unavailable")
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	raw, err := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", "--property=Version", "--value").Output()
+	raw, err := executionManagerCommand(exec.CommandContext(ctx, "/usr/bin/systemctl", executionManagerArgs("show", "--property=Version", "--value")...)).Output()
 	if err != nil || strings.TrimSpace(string(raw)) == "" {
 		return errors.New("execution_containment_unavailable")
 	}
@@ -45,7 +52,7 @@ func executionContainmentPreflight() error {
 // fleet, and only then aborts inside beginExecution with no receipt to explain it.
 func PreflightLocalExecution() error {
 	root := executionFenceDirectory("")
-	if root != "/var/lib/ultra-ansible" {
+	if executionNamespaceFixture() {
 		return nil
 	}
 	if err := executionContainmentPreflight(); err != nil {
@@ -61,10 +68,15 @@ func PreflightLocalExecution() error {
 	return nil
 }
 
+func ownedByRoot(info os.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == 0
+}
+
 // Python independently attests the actual unit, owner, command and KillMode
 // before dispatch. Standalone callers get one unit for the already frozen job.
 func runContainedController(ctx context.Context, command *exec.Cmd, fence *ExecutionFence) error {
-	if fence == nil || executionFenceDirectory(fence.JobDirectory) != "/var/lib/ultra-ansible" {
+	if fence == nil || executionNamespaceFixture() {
 		return command.Run()
 	}
 	group, err := os.ReadFile("/proc/self/cgroup")
@@ -76,7 +88,7 @@ func runContainedController(ctx context.Context, command *exec.Cmd, fence *Execu
 			return command.Run()
 		}
 	}
-	if os.Geteuid() != 0 || !filepath.IsAbs(command.Path) || len(fence.Generation) != 32 ||
+	if !filepath.IsAbs(command.Path) || len(fence.Generation) != 32 ||
 		strings.Trim(fence.Generation, "0123456789abcdef") != "" {
 		return errors.New("execution_containment_unverified")
 	}
@@ -89,6 +101,15 @@ func runContainedController(ctx context.Context, command *exec.Cmd, fence *Execu
 	args := []string{"--unit=" + unit, "--wait", "--pipe", "--service-type=exec",
 		"--property=KillMode=control-group", "--property=Delegate=no", "--property=UMask=0077",
 		"--property=TimeoutStopSec=30", "--property=RuntimeMaxSec=" + strconv.FormatInt(int64(timeout/time.Second), 10), "--property=Restart=no"}
+	if os.Geteuid() != 0 {
+		root, stateErr := ExpectedLocalExecutionState()
+		if stateErr != nil {
+			return stateErr
+		}
+		command.Env = append(command.Env, "ULTRA_OPERATOR_STATE_DIRECTORY="+root)
+		args = append(executionManagerArgs(), args...)
+		args = append(args, "--property=Slice=app.slice")
+	}
 	for _, value := range command.Env {
 		args = append(args, "--setenv="+value)
 	}
@@ -96,7 +117,7 @@ func runContainedController(ctx context.Context, command *exec.Cmd, fence *Execu
 	args = append(args, command.Args[1:]...)
 	contained := exec.CommandContext(ctx, "/usr/bin/systemd-run", args...)
 	contained.Stdin, contained.Stdout, contained.Stderr = command.Stdin, command.Stdout, command.Stderr
-	contained.Env = command.Env
+	executionManagerCommand(contained)
 	contained.Cancel = func() error { return stopExecutionUnit(unit) }
 	contained.WaitDelay = 5 * time.Second
 	err = contained.Run()
@@ -121,9 +142,9 @@ func completeContainedExecution(fence ExecutionFence, unit string, runErr error,
 func stopExecutionUnit(unit string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
-	stopErr := exec.CommandContext(ctx, "/usr/bin/systemctl", "stop", unit).Run()
-	raw, err := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", unit,
-		"--property=LoadState", "--property=ActiveState").Output()
+	stopErr := executionManagerCommand(exec.CommandContext(ctx, "/usr/bin/systemctl", executionManagerArgs("stop", unit)...)).Run()
+	raw, err := executionManagerCommand(exec.CommandContext(ctx, "/usr/bin/systemctl", executionManagerArgs("show", unit,
+		"--property=LoadState", "--property=ActiveState", "--property=ControlGroup")...)).Output()
 	if err != nil {
 		return errors.Join(errExecutionContainmentStopUnverified, stopErr, err)
 	}
@@ -136,7 +157,11 @@ func stopExecutionUnit(unit string) error {
 	if values["LoadState"] != "not-found" && values["ActiveState"] != "inactive" && values["ActiveState"] != "failed" {
 		return errExecutionContainmentStopUnverified
 	}
-	events, err := os.ReadFile(filepath.Join("/sys/fs/cgroup/system.slice", unit, "cgroup.events"))
+	group, err := executionUnitGroup(unit, values["ControlGroup"])
+	if err != nil {
+		return errExecutionContainmentStopUnverified
+	}
+	events, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", group, "cgroup.events"))
 	if err == nil && !strings.Contains(string(events), "populated 0\n") || err != nil && !os.IsNotExist(err) {
 		return errExecutionContainmentStopUnverified
 	}
@@ -155,6 +180,9 @@ type containmentProcess struct {
 }
 type containmentProof struct {
 	Schema       int                  `json:"schema"`
+	Manager      string               `json:"manager,omitempty"`
+	UID          int                  `json:"uid,omitempty"`
+	ControlGroup string               `json:"control_group,omitempty"`
 	Fence        ExecutionFence       `json:"fence"`
 	Mode         string               `json:"mode"`
 	Unit         string               `json:"unit"`
@@ -168,15 +196,19 @@ func readContainmentProof(fence ExecutionFence) (containmentProof, error) {
 	if err != nil {
 		return proof, err
 	}
-	if json.Unmarshal(raw, &proof) != nil || proof.Schema != 1 || proof.Fence != fence ||
+	if json.Unmarshal(raw, &proof) != nil || (proof.Schema != 1 && proof.Schema != 2) || proof.Fence != fence ||
 		!regexp.MustCompile(`^[a-f0-9]{32}$`).MatchString(proof.InvocationID) {
 		return proof, ErrExecutionFenced
+	}
+	if _, err = containmentProofGroup(proof); err != nil {
+		return proof, err
 	}
 	return proof, nil
 }
 func finalizeTransientContainment(fence ExecutionFence, unit string) error {
 	proof, err := readContainmentProof(fence)
-	if err != nil || proof.Unit != unit || proof.Mode != "transient" {
+	if err != nil || proof.Unit != unit || proof.Mode != "transient" ||
+		(os.Geteuid() != 0 && !executionNamespaceFixture() && proof.Schema != 2) {
 		return ErrExecutionFenced
 	}
 	return persistVerifiedContainment(proof)
@@ -188,8 +220,7 @@ var observeContainmentUnit = containmentUnitState
 func containmentUnitState(unit string) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	raw, err := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", unit, "--property=LoadState", "--property=ActiveState", "--property=ControlGroup", "--property=KillMode", "--property=Delegate", "--property=User", "--property=MainPID", "--property=InvocationID", "--property=Result").
-		Output()
+	raw, err := executionManagerCommand(exec.CommandContext(ctx, "/usr/bin/systemctl", executionManagerArgs("show", unit, "--property=LoadState", "--property=ActiveState", "--property=ControlGroup", "--property=KillMode", "--property=Delegate", "--property=User", "--property=MainPID", "--property=InvocationID", "--property=Result")...)).Output()
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +233,15 @@ func containmentUnitState(unit string) (map[string]string, error) {
 	return values, nil
 }
 func emptyContainmentGroup(unit string) error {
-	events, err := os.ReadFile(filepath.Join("/sys/fs/cgroup/system.slice", unit, "cgroup.events"))
+	values, err := observeContainmentUnit(unit)
+	if err != nil {
+		return ErrExecutionFenced
+	}
+	group, err := executionUnitGroup(unit, values["ControlGroup"])
+	if err != nil {
+		return err
+	}
+	events, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", group, "cgroup.events"))
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -237,7 +276,7 @@ func readContainmentProcess(pid int) (containmentProcess, error) {
 	uidOK := false
 	for _, line := range strings.Split(string(status), "\n") {
 		if strings.HasPrefix(line, "Uid:") {
-			uidOK = strings.Join(strings.Fields(line)[1:], " ") == "0 0 0 0"
+			uidOK = strings.Join(strings.Fields(line)[1:], " ") == strings.TrimSpace(strings.Repeat(strconv.Itoa(os.Geteuid())+" ", 4))
 		}
 	}
 	if !uidOK {
@@ -266,9 +305,34 @@ func readContainmentProcess(pid int) (containmentProcess, error) {
 	}
 	return containmentProcess{pid, parent, fields[19], group, executionHash(exe), executionHash(argv)}, nil
 }
+func containmentProofGroup(proof containmentProof) (string, error) {
+	group := "/system.slice/" + proof.Unit
+	if proof.Schema == 2 {
+		if proof.Manager != "user" || proof.UID <= 0 || proof.UID != os.Geteuid() {
+			return "", ErrExecutionFenced
+		}
+		expected, err := executionUnitGroup(proof.Unit, proof.ControlGroup)
+		if err != nil || proof.ControlGroup == "" {
+			return "", ErrExecutionFenced
+		}
+		group = expected
+	} else if proof.Schema != 1 || proof.Manager != "" || proof.UID != 0 || proof.ControlGroup != "" {
+		return "", ErrExecutionFenced
+	}
+	return group, nil
+}
 func verifyContainmentProof(proof containmentProof) error {
+	// A committed exact drain receipt can authenticate imported historical root
+	// evidence. A user manager can never establish new facts about root workers.
+	if proof.Schema == 1 && os.Geteuid() != 0 && !executionNamespaceFixture() {
+		return ErrExecutionFenced
+	}
+	group, err := containmentProofGroup(proof)
+	if err != nil {
+		return err
+	}
 	transient := proof.Mode == "transient" && proof.Unit == "ultra-execution-"+proof.Fence.Generation+".service"
-	reuse := proof.Mode == "reuse" && approvedExecutionGroup.MatchString("0::/system.slice/"+proof.Unit)
+	reuse := proof.Schema == 1 && proof.Mode == "reuse" && approvedExecutionGroup.MatchString("0::/system.slice/"+proof.Unit)
 	if !transient && !reuse {
 		return ErrExecutionFenced
 	}
@@ -277,7 +341,7 @@ func verifyContainmentProof(proof containmentProof) error {
 	}
 	seen := map[int]bool{}
 	for i, member := range proof.Chain {
-		if member.PID <= 0 || member.Parent < 0 || seen[member.PID] || member.Group != "/system.slice/"+proof.Unit ||
+		if member.PID <= 0 || member.Parent < 0 || seen[member.PID] || member.Group != group ||
 			!regexp.MustCompile(`^[0-9]+$`).MatchString(member.Starttime) ||
 			!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(member.ExecutableSHA256) ||
 			!regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(member.ArgvSHA256) {
@@ -296,7 +360,7 @@ func verifyContainmentProof(proof containmentProof) error {
 		return emptyContainmentGroup(proof.Unit)
 	}
 	if !reuse || values["LoadState"] != "loaded" || values["ActiveState"] != "active" && values["ActiveState"] != "activating" ||
-		values["ControlGroup"] != "/system.slice/"+proof.Unit || values["KillMode"] != "control-group" || values["Delegate"] != "no" ||
+		values["ControlGroup"] != group || values["KillMode"] != "control-group" || values["Delegate"] != "no" ||
 		values["User"] != "" &&
 			values["User"] != "root" || values["InvocationID"] != proof.InvocationID || len(proof.Chain) == 0 || len(proof.Chain) > 64 {
 		return ErrExecutionFenced
@@ -307,7 +371,7 @@ func verifyContainmentProof(proof containmentProof) error {
 	}
 	allowed := map[int]containmentProcess{}
 	for i, member := range proof.Chain {
-		if member.PID <= 0 || member.Group != "/system.slice/"+proof.Unit {
+		if member.PID <= 0 || member.Group != group {
 			return ErrExecutionFenced
 		}
 		if _, ok := allowed[member.PID]; ok {
@@ -345,7 +409,7 @@ func validateExecutionContainment(fence ExecutionFence) error {
 	proof, err := readContainmentProof(fence)
 	// Private fixture roots do not run under the host systemd manager. If a
 	// fixture supplies evidence, validate it exactly as production does.
-	if os.IsNotExist(err) && executionFenceDirectory(fence.JobDirectory) != "/var/lib/ultra-ansible" {
+	if os.IsNotExist(err) && executionNamespaceFixture() {
 		return nil
 	}
 	if err != nil {
@@ -431,7 +495,7 @@ func persistVerifiedContainment(proof containmentProof) error {
 }
 func reconcileExecutionContainment(fence ExecutionFence) error {
 	proof, err := readContainmentProof(fence)
-	if os.IsNotExist(err) && executionFenceDirectory(fence.JobDirectory) != "/var/lib/ultra-ansible" {
+	if os.IsNotExist(err) && executionNamespaceFixture() {
 		return nil
 	}
 	if err != nil {
@@ -457,7 +521,15 @@ var observeContainmentMembers = containmentMembers
 
 func containmentMembers(unit string) ([]int, error) {
 	var members []int
-	err := filepath.WalkDir(filepath.Join("/sys/fs/cgroup/system.slice", unit), func(path string, entry os.DirEntry, err error) error {
+	values, err := observeContainmentUnit(unit)
+	if err != nil {
+		return nil, err
+	}
+	group, err := executionUnitGroup(unit, values["ControlGroup"])
+	if err != nil {
+		return nil, err
+	}
+	err = filepath.WalkDir(filepath.Join("/sys/fs/cgroup", group), func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

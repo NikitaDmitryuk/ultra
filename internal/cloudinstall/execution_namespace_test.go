@@ -23,7 +23,7 @@ func init() {
 			changed := strings.Replace(
 				string(source),
 				"EXECUTION_ROOT = Path('/var/lib/ultra-ansible')",
-				"EXECUTION_ROOT = Path("+string(quoted)+")",
+				"TEST_EXECUTION_NAMESPACE = True\nEXECUTION_ROOT = Path("+string(quoted)+")",
 				1,
 			)
 			if changed != string(source) {

@@ -23,6 +23,7 @@ class Containment(unittest.TestCase):
             'KillMode':'control-group','Delegate':'no','User':'root','MainPID':str(self.pid),
             'FragmentPath':'/run/systemd/transient/'+self.unit,'ExecStart':'{ path='+str(self.exe)+' ; argv[]=fixed ; }'}
         self.uid='0 0 0 0'
+        self.account_uid = 0
 
     def run_attestation(self):
         def text(path,*args,**kwargs):
@@ -36,6 +37,7 @@ class Containment(unittest.TestCase):
         with patch.object(Path,'read_text',text),patch.object(Path,'read_bytes',raw), \
              patch.object(Path,'resolve',lambda p,**kw:self.exe), \
              patch.object(C,'trusted',lambda p,**kw:Path(p)),patch.object(C.os,'getpid',return_value=self.pid), \
+             patch.object(C.os,'geteuid',return_value=self.account_uid), \
              patch.object(C.os.path,'samefile',side_effect=lambda a,b:str(a)==str(b)), \
              patch.object(C.subprocess,'run',return_value=result):
             return C.require_containment(Path(self.job),self.generation)
@@ -85,9 +87,10 @@ class Containment(unittest.TestCase):
             if identity_change and calls > 3:
                 result['starttime'] = 'reused'
             return result
-        result = subprocess.CompletedProcess([], 0, stdout='MainPID=101\nInvocationID=' + 'a' * 32 + '\n')
+        result = subprocess.CompletedProcess([], 0, stdout='MainPID=101\nControlGroup=' + group + '\nInvocationID=' + 'a' * 32 + '\n')
         with patch.object(C, 'require_containment', return_value=unit), \
              patch.object(C.os, 'getpid', return_value=303), \
+             patch.object(C.os, 'geteuid', return_value=0), \
              patch.object(C.subprocess, 'run', return_value=result), \
              patch.object(C, 'process_identity', side_effect=identity), \
              patch.object(C, 'cgroup_processes', return_value=set(members)):
@@ -116,6 +119,29 @@ class Containment(unittest.TestCase):
 
     def test_current_unapproved_process_cannot_dispatch(self):
         with self.assertRaises(ValueError):C.require_containment(Path(self.job),self.generation)
+
+    def test_user_manager_requires_exact_account_group_and_generation(self):
+        account = C.pwd.getpwuid(os.geteuid())
+        self.account_uid = os.geteuid()
+        if self.account_uid == 0:
+            self.skipTest('requires unprivileged account fixture')
+        uid = str(self.account_uid)
+        self.group = '/user.slice/user-' + uid + '.slice/user@' + uid + '.service/app.slice/' + self.unit
+        self.properties.update(ControlGroup=self.group, User='', FragmentPath='/run/user/' + uid + '/systemd/transient/' + self.unit)
+        self.uid = ' '.join([uid] * 4)
+        expected = str(Path(account.pw_dir) / '.local/state/ultra-ansible')
+        with patch.dict(C.os.environ, {'ULTRA_OPERATOR_STATE_DIRECTORY': expected}, clear=True):
+            self.assertEqual(self.run_attestation(), self.unit)
+            for key, value in [('ControlGroup', '/system.slice/' + self.unit), ('User', 'root'),
+                               ('FragmentPath', '/run/systemd/transient/' + self.unit)]:
+                original = self.properties[key]
+                self.properties[key] = value
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    self.run_attestation()
+                self.properties[key] = original
+        with patch.dict(C.os.environ, {'ULTRA_OPERATOR_STATE_DIRECTORY': '/tmp/other-namespace'}, clear=True):
+            with self.assertRaises(ValueError):
+                self.run_attestation()
 
 
 if __name__=='__main__':unittest.main()

@@ -3,16 +3,29 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import stat
 import subprocess
+
+
+def manager_command(*arguments):
+    environment = {'PATH': '/usr/bin:/bin'}
+    prefix = ['/usr/bin/systemctl']
+    if os.geteuid() != 0:
+        runtime = '/run/user/' + str(os.geteuid())
+        trusted(runtime, directory=True)
+        environment['XDG_RUNTIME_DIR'] = runtime
+        prefix.append('--user')
+    return subprocess.run([*prefix, *arguments], env=environment,
+                          capture_output=True, text=True, check=True, timeout=10)
 
 
 def trusted(path, directory=False):
     path = Path(path)
     for member in [path, *path.parents]:
         info = member.lstat()
-        if info.st_uid != 0 or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode):
+        if info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode):
             raise ValueError('execution_containment_unverified')
         if member == path and not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)):
             raise ValueError('execution_containment_unverified')
@@ -26,21 +39,33 @@ def require_containment(directory, generation):
     if len(groups) != 1:
         raise fail
     group = groups[0]
-    match = re.fullmatch(r'/system.slice/(ultra-(?:deploy-[a-f0-9]{64}|execution-[a-f0-9]{32}|ansible-controller|recovery-reconcile)\.service)', group)
+    if os.geteuid() == 0:
+        expression = r'/system.slice/(ultra-(?:deploy-[a-f0-9]{64}|execution-[a-f0-9]{32}|ansible-controller|recovery-reconcile)\.service)'
+        fragment_prefixes = ('/etc/systemd/system/', '/run/systemd/transient/')
+        users = ('', 'root')
+    else:
+        uid = str(os.geteuid())
+        prefix = '/user.slice/user-' + uid + '.slice/user@' + uid + '.service/app.slice/'
+        expression = re.escape(prefix) + r'(ultra-execution-[a-f0-9]{32}\.service)'
+        fragment_prefixes = ('/run/user/' + uid + '/systemd/transient/',)
+        users = ('', uid, pwd.getpwuid(os.geteuid()).pw_name)
+        expected_state = Path(pwd.getpwuid(os.geteuid()).pw_dir) / '.local/state/ultra-ansible'
+        if os.environ.get('ULTRA_OPERATOR_STATE_DIRECTORY') != str(expected_state):
+            raise fail
+        trusted(expected_state, directory=True)
+    match = re.fullmatch(expression, group)
     if not match:
         raise fail
     unit = match[1]
     names = ('LoadState', 'ActiveState', 'ControlGroup', 'KillMode', 'Delegate', 'User', 'MainPID', 'FragmentPath', 'ExecStart')
-    result = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--no-pager',
-                             *['--property=' + name for name in names]],
-                            capture_output=True, text=True, check=True, timeout=10)
+    result = manager_command('show', unit, '--no-pager', *['--property=' + name for name in names])
     values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
     if (values.get('LoadState') != 'loaded' or values.get('ActiveState') not in ('active', 'activating')
             or values.get('ControlGroup') != group or values.get('KillMode') != 'control-group'
-            or values.get('Delegate') != 'no' or values.get('User') not in ('', 'root')):
+            or values.get('Delegate') != 'no' or values.get('User') not in users):
         raise fail
     fragment = values.get('FragmentPath', '')
-    if not any(fragment.startswith(prefix) for prefix in ('/etc/systemd/system/', '/run/systemd/transient/')):
+    if not any(fragment.startswith(prefix) for prefix in fragment_prefixes):
         raise fail
     trusted(fragment)
     pid = int(values.get('MainPID', '0'))
@@ -50,7 +75,7 @@ def require_containment(directory, generation):
     if not any(line == '0::' + group for line in (process / 'cgroup').read_text().splitlines()):
         raise fail
     uid = next(line.split()[1:] for line in (process / 'status').read_text().splitlines() if line.startswith('Uid:'))
-    if uid != ['0', '0', '0', '0']:
+    if uid != [str(os.geteuid())] * 4:
         raise fail
     argv = [os.fsdecode(value) for value in (process / 'cmdline').read_bytes().rstrip(b'\0').split(b'\0')]
     executable = (process / 'exe').resolve(strict=True)
@@ -91,7 +116,7 @@ def process_identity(pid):
     process = Path('/proc') / str(pid)
     fields = (process / 'stat').read_text().rsplit(')', 1)[1].split()
     uid = next(line.split()[1:] for line in (process / 'status').read_text().splitlines() if line.startswith('Uid:'))
-    if uid != ['0'] * 4:
+    if uid != [str(os.geteuid())] * 4:
         raise ValueError('execution_containment_unverified')
     groups = (process / 'cgroup').read_text().splitlines()
     group = next(line[3:] for line in groups if line.startswith('0::'))
@@ -113,8 +138,7 @@ def cgroup_processes(group):
 
 def completion_containment(directory, fence):
     unit = require_containment(directory, fence['generation'])
-    result = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=MainPID',
-                             '--property=InvocationID'], capture_output=True, text=True, check=True, timeout=10)
+    result = manager_command('show', unit, '--property=MainPID', '--property=InvocationID', '--property=ControlGroup')
     values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
     owner = int(values['MainPID'])
     invocation = values.get('InvocationID', '')
@@ -126,7 +150,7 @@ def completion_containment(directory, fence):
         if pid <= 0 or len(chain) >= 64 or any(member['pid'] == pid for member in chain):
             raise ValueError('execution_containment_unverified')
         member = process_identity(pid)
-        if member['group'] != '/system.slice/' + unit:
+        if member['group'] != values.get('ControlGroup'):
             raise ValueError('execution_containment_unverified')
         chain.append(member)
         if pid == owner:
@@ -138,6 +162,9 @@ def completion_containment(directory, fence):
             raise ValueError('execution_containment_workers_live')
         if any(process_identity(member['pid']) != member for member in chain):
             raise ValueError('execution_containment_unverified')
-    return {'schema': 1, 'fence': fence, 'unit': unit, 'invocation_id': invocation,
-            'mode': 'reuse' if not unit.startswith('ultra-execution-') else 'transient',
-            'chain': chain}
+    proof = {'schema': 1, 'fence': fence, 'unit': unit, 'invocation_id': invocation,
+             'mode': 'reuse' if not unit.startswith('ultra-execution-') else 'transient',
+             'chain': chain}
+    if os.geteuid() != 0:
+        proof.update(schema=2, manager='user', uid=os.geteuid(), control_group=values['ControlGroup'])
+    return proof

@@ -140,7 +140,7 @@ func TestExecutionFenceGoControllerHandoff(t *testing.T) {
 		strings.Replace(
 			string(source),
 			"EXECUTION_ROOT = Path('/var/lib/ultra-ansible')",
-			"EXECUTION_ROOT = Path("+strconvQuote(root)+")",
+			"TEST_EXECUTION_NAMESPACE = True\nEXECUTION_ROOT = Path("+strconvQuote(root)+")",
 			1,
 		),
 	)
@@ -241,7 +241,7 @@ func TestExecutionFenceRealAnsibleTaskFailureRetry(t *testing.T) {
 		strings.Replace(
 			string(source),
 			"EXECUTION_ROOT = Path('/var/lib/ultra-ansible')",
-			"EXECUTION_ROOT = Path("+strconvQuote(root)+")",
+			"TEST_EXECUTION_NAMESPACE = True\nEXECUTION_ROOT = Path("+strconvQuote(root)+")",
 			1,
 		),
 	)
