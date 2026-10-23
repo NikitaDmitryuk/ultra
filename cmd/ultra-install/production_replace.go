@@ -220,6 +220,13 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	if *journal != filepath.Join(filepath.Dir(*config), "dist", "manual", "operation.json") {
 		return errors.New("replacement_manual_journal_scope_invalid")
 	}
+	localExecutionState, err := deployansible.ExpectedLocalExecutionState()
+	if err != nil {
+		return fmt.Errorf("replacement_local_execution_state: %w", err)
+	}
+	if err = deployansible.ConfigureLocalExecutionState(localExecutionState); err != nil {
+		return fmt.Errorf("replacement_local_execution_state: %w", err)
+	}
 	if err := deployansible.PreflightLocalExecution(); err != nil {
 		return fmt.Errorf("replacement_local_execution_preflight: %w", err)
 	}
