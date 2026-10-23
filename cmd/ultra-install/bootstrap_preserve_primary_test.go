@@ -32,9 +32,19 @@ func TestPreservedPrimaryDesiredExcludesProvisioningAndPreservesCredentials(t *t
 		t.Fatal(err)
 	}
 	ds.PostgresConfig = &install.PostgresConfig{DBName: "fixture", DBUser: "app", DBPassword: "fixture"}
-	inv["all"].(map[string]any)["children"].(map[string]any)["databases"] = map[string]any{"hosts": map[string]any{"database": map[string]any{}}}
+	inv["all"].(map[string]any)["children"].(map[string]any)["databases"] = map[string]any{
+		"hosts": map[string]any{"database": map[string]any{}},
+	}
 	directory := t.TempDir()
-	prior := []exits.BootstrapEntry{{Name: "primary", Address: "192.0.2.20", Port: 24443, TunnelUUID: "9c92f7c9-a088-4982-a977-9e4fd270b3b5", PinnedPeerCertSHA256: strings.Repeat("a", 64)}}
+	prior := []exits.BootstrapEntry{
+		{
+			Name:                 "primary",
+			Address:              "192.0.2.20",
+			Port:                 24443,
+			TunnelUUID:           "9c92f7c9-a088-4982-a977-9e4fd270b3b5",
+			PinnedPeerCertSHA256: strings.Repeat("a", 64),
+		},
+	}
 	ds.Bootstrap = append([]exits.BootstrapEntry(nil), prior...)
 	ds.Bootstrap[0].PinnedPeerCertSHA256 = "" // Fresh renderer has not observed the exit certificate.
 	if err := preparePreservedPrimaryDesired(p, ds, inv, directory, prior); err != nil {
@@ -78,9 +88,19 @@ func TestPreservedPrimaryDesiredExcludesProvisioningAndPreservesCredentials(t *t
 
 func TestPreservedPrimaryRoutesRetainExactTunnelIdentity(t *testing.T) {
 	p := &installplan.InstallPlan{Exits: []installplan.ExitNode{{Name: "main", DialAddr: "192.0.2.20", Port: 24443}}}
-	route := exits.BootstrapEntry{Name: "main", Address: "192.0.2.20", Port: 24443, TunnelUUID: "9c92f7c9-a088-4982-a977-9e4fd270b3b5", PinnedPeerCertSHA256: strings.Repeat("a", 64)}
+	route := exits.BootstrapEntry{
+		Name:                 "main",
+		Address:              "192.0.2.20",
+		Port:                 24443,
+		TunnelUUID:           "9c92f7c9-a088-4982-a977-9e4fd270b3b5",
+		PinnedPeerCertSHA256: strings.Repeat("a", 64),
+	}
 	inspection := func(raw []byte) map[string]bootstrapInspection {
-		wire, _ := json.Marshal(map[string]any{"files": []map[string]string{{"source": exits.BootstrapFileName, "content": base64.StdEncoding.EncodeToString(raw)}}})
+		wire, _ := json.Marshal(
+			map[string]any{
+				"files": []map[string]string{{"source": exits.BootstrapFileName, "content": base64.StdEncoding.EncodeToString(raw)}},
+			},
+		)
 		var i bootstrapInspection
 		if err := json.Unmarshal(wire, &i); err != nil {
 			t.Fatal(err)
@@ -92,7 +112,14 @@ func TestPreservedPrimaryRoutesRetainExactTunnelIdentity(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].TunnelUUID != route.TunnelUUID || got[0].PinnedPeerCertSHA256 != route.PinnedPeerCertSHA256 {
 		t.Fatalf("route identity not retained: %v", err)
 	}
-	dynamic := exits.BootstrapEntry{Name: "vultr-atl", Address: "192.0.2.99", Port: 51001, TunnelUUID: "44444444-4444-4444-8444-444444444444", Priority: 75, Enabled: exits.BootstrapEnabledPtr(true)}
+	dynamic := exits.BootstrapEntry{
+		Name:       "vultr-atl",
+		Address:    "192.0.2.99",
+		Port:       51001,
+		TunnelUUID: "44444444-4444-4444-8444-444444444444",
+		Priority:   75,
+		Enabled:    exits.BootstrapEnabledPtr(true),
+	}
 	full, _ := json.Marshal([]exits.BootstrapEntry{route, dynamic})
 	got, err = preservedPrimaryBootstrapRoutes(p, inspection(full))
 	if err != nil || len(got) != 1 || got[0].Name != route.Name || got[0].PinnedPeerCertSHA256 != route.PinnedPeerCertSHA256 {
@@ -205,7 +232,12 @@ func TestPreservedPrimaryIdentityAcrossComponentProcesses(t *testing.T) {
 		play := filepath.Join(directory, "play.yml")
 		write(play, []byte("- hosts: databases\n  gather_facts: false\n  tasks:\n    - ansible.builtin.import_tasks: "+task+"\n"), 0600)
 		cmd := exec.Command(ansible, "-i", filepath.Join(directory, "inventory.json"), play)
-		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "ANSIBLE_LOCAL_TEMP="+filepath.Join(directory, "local"), "ANSIBLE_REMOTE_TEMP="+filepath.Join(directory, "remote"))
+		cmd.Env = append(
+			os.Environ(),
+			"PATH="+bin+":"+os.Getenv("PATH"),
+			"ANSIBLE_LOCAL_TEMP="+filepath.Join(directory, "local"),
+			"ANSIBLE_REMOTE_TEMP="+filepath.Join(directory, "remote"),
+		)
 		output, err := cmd.CombinedOutput()
 		if (err == nil) != succeeds {
 			t.Fatalf("%s success=%v: %v\n%s", stage, succeeds, err, output)

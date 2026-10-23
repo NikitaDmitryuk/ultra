@@ -35,7 +35,18 @@ func TestProductionReplacementHelpIsReadOnly(t *testing.T) {
 
 func TestProductionReplacementBootstrapPassesOperatorExecutionState(t *testing.T) {
 	got := productionReplacementBootstrapArgs("config", "backup", "sha256", "/home/operator/.local/state/ultra-ansible")
-	want := []string{"bootstrap", "--config", "config", "--preserve-primary", "--primary-backup", "backup", "--primary-backup-sha256", "sha256", "--operator-state-dir", "/home/operator/.local/state/ultra-ansible"}
+	want := []string{
+		"bootstrap",
+		"--config",
+		"config",
+		"--preserve-primary",
+		"--primary-backup",
+		"backup",
+		"--primary-backup-sha256",
+		"sha256",
+		"--operator-state-dir",
+		"/home/operator/.local/state/ultra-ansible",
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("bootstrap args: %#v", got)
 	}
@@ -99,7 +110,28 @@ func TestProductionReplacementOrderAndFailClosedJournalRetirement(t *testing.T) 
 			}
 			err := executeProductionReplacement(ctx, targets, primary, steps)
 			if failure == "" {
-				want := []string{"discover-bridge", "discover-exit-0", "primary-before-fence", "fence-bridge", "fence-exit-0", "quiescence-before-cleanup-bridge", "quiescence-before-cleanup-exit-0", "quiescence-before-cleanup-primary", "clean-bridge", "clean-exit-0", "quiescence-after-cleanup-bridge", "quiescence-after-cleanup-exit-0", "quiescence-after-cleanup-primary", "quiescence-before-journal-bridge", "quiescence-before-journal-exit-0", "quiescence-before-journal-primary", "retire-local-journal", "bootstrap", "primary-after-bootstrap", "completed"}
+				want := []string{
+					"discover-bridge",
+					"discover-exit-0",
+					"primary-before-fence",
+					"fence-bridge",
+					"fence-exit-0",
+					"quiescence-before-cleanup-bridge",
+					"quiescence-before-cleanup-exit-0",
+					"quiescence-before-cleanup-primary",
+					"clean-bridge",
+					"clean-exit-0",
+					"quiescence-after-cleanup-bridge",
+					"quiescence-after-cleanup-exit-0",
+					"quiescence-after-cleanup-primary",
+					"quiescence-before-journal-bridge",
+					"quiescence-before-journal-exit-0",
+					"quiescence-before-journal-primary",
+					"retire-local-journal",
+					"bootstrap",
+					"primary-after-bootstrap",
+					"completed",
+				}
 				if err != nil || !reflect.DeepEqual(events, want) {
 					t.Fatalf("order: %v %v", events, err)
 				}
@@ -303,12 +335,16 @@ for mutation in ('comm','cgroup','sid'):
 	}
 }
 func TestProductionReplacementQuiescenceDiagnostics(t *testing.T) {
-	raw := []byte(`{"quiescent":false,"code":"replacement_unknown_root_helper","offender":{"pid":300,"ppid":1,"sid":300,"comm":"python3","argv_basenames":["python3","AnsiballZ_command.py"],"cgroups":["/system.slice/ultra-deploy-fixture.service"]}}`)
+	raw := []byte(
+		`{"quiescent":false,"code":"replacement_unknown_root_helper","offender":{"pid":300,"ppid":1,"sid":300,"comm":"python3","argv_basenames":["python3","AnsiballZ_command.py"],"cgroups":["/system.slice/ultra-deploy-fixture.service"]}}`,
+	)
 	err := replacementQuiescenceResult(raw)
-	if err == nil || !strings.Contains(err.Error(), `replacement_unknown_root_helper: offender={"pid":300`) || !strings.Contains(err.Error(), "AnsiballZ_command.py") {
+	if err == nil || !strings.Contains(err.Error(), `replacement_unknown_root_helper: offender={"pid":300`) ||
+		!strings.Contains(err.Error(), "AnsiballZ_command.py") {
 		t.Fatalf("missing offender: %v", err)
 	}
-	if err := replacementQuiescenceResult([]byte(`{"quiescent":false,"code":"unknown","offender":{"pid":300}}`)); err == nil || err.Error() != "replacement_quiescence_not_verified" {
+	if err := replacementQuiescenceResult([]byte(`{"quiescent":false,"code":"unknown","offender":{"pid":300}}`)); err == nil ||
+		err.Error() != "replacement_quiescence_not_verified" {
 		t.Fatalf("unknown code exposed: %v", err)
 	}
 }
@@ -380,8 +416,23 @@ func TestProductionReplacementKeyedRouteComparison(t *testing.T) {
 
 func TestProductionReplacementRestoreReceiptBinding(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	backup := retainedBackupMetadata{EncryptedSHA256: strings.Repeat("a", 64), DumpSHA256: strings.Repeat("b", 64), ExpectedSourceSHA: strings.Repeat("c", 64), SnapshotStarted: now.Add(-time.Minute)}
-	good := replacementRestoreReceipt{Protocol: "ultra-isolated-primary-restore-v1", BackupSHA: backup.EncryptedSHA256, DumpSHA: backup.DumpSHA256, SourceSHA: backup.ExpectedSourceSHA, Database: "fixture", Isolation: "postgres-network-none", RestoredAt: now.Format(time.RFC3339), PublicTables: 37, Migrations: "1,2"}
+	backup := retainedBackupMetadata{
+		EncryptedSHA256:   strings.Repeat("a", 64),
+		DumpSHA256:        strings.Repeat("b", 64),
+		ExpectedSourceSHA: strings.Repeat("c", 64),
+		SnapshotStarted:   now.Add(-time.Minute),
+	}
+	good := replacementRestoreReceipt{
+		Protocol:     "ultra-isolated-primary-restore-v1",
+		BackupSHA:    backup.EncryptedSHA256,
+		DumpSHA:      backup.DumpSHA256,
+		SourceSHA:    backup.ExpectedSourceSHA,
+		Database:     "fixture",
+		Isolation:    "postgres-network-none",
+		RestoredAt:   now.Format(time.RFC3339),
+		PublicTables: 37,
+		Migrations:   "1,2",
+	}
 	if err := validateReplacementRestoreReceipt(mustReplacementJSON(good), backup, "fixture", 2, now); err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +447,15 @@ func TestProductionReplacementRestoreReceiptBinding(t *testing.T) {
 
 func TestProductionReplacementPreviousTargetUnionAndDigestGate(t *testing.T) {
 	plan := func(bridge, exit string) *installplan.InstallPlan {
-		p := installplan.LegacyValuesToPlan(map[string]string{"BRIDGE_IP": bridge, "MAIN_EXIT_IP": exit, "BRIDGE_SSH_KEY": "/fixture/key", "MAIN_EXIT_SSH_KEY": "/fixture/key", "DATABASE_IP": "192.0.2.40"})
+		p := installplan.LegacyValuesToPlan(
+			map[string]string{
+				"BRIDGE_IP":         bridge,
+				"MAIN_EXIT_IP":      exit,
+				"BRIDGE_SSH_KEY":    "/fixture/key",
+				"MAIN_EXIT_SSH_KEY": "/fixture/key",
+				"DATABASE_IP":       "192.0.2.40",
+			},
+		)
 		return p
 	}
 	current, old := plan("192.0.2.10", "192.0.2.20"), plan("192.0.2.11", "192.0.2.21")
@@ -417,7 +476,8 @@ func TestProductionReplacementPreviousTargetUnionAndDigestGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	journal := []byte(`{"mutator_dispatched":true,"config_sha256":"` + strings.Repeat("a", 64) + `"}`)
-	if _, err = replacementPreviousTargets(journal, path, current, targets); err == nil || err.Error() != "replacement_exact_dispatched_config_required" {
+	if _, err = replacementPreviousTargets(journal, path, current, targets); err == nil ||
+		err.Error() != "replacement_exact_dispatched_config_required" {
 		t.Fatalf("unbound former config accepted: %v", err)
 	}
 }

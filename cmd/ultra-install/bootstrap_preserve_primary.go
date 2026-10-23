@@ -24,11 +24,15 @@ func preservingBootstrapPrimary(p *installplan.InstallPlan) bool {
 // operation or establish executor quiescence, and must retain those gates.
 func authorizePreservedPrimaryBootstrap(p *installplan.InstallPlan, backup, backupSHA string) error {
 	if !p.FullAutomation() || !p.Database.Enabled || p.AdoptRuntime || p.Database.PrimaryHost == "" ||
-		samePreservedPrimaryHost(p.Database.PrimaryHost, p.Bridge.Address) || samePreservedPrimaryHost(p.Database.PrimaryHost, p.Bridge.SSHHost) {
+		samePreservedPrimaryHost(
+			p.Database.PrimaryHost,
+			p.Bridge.Address,
+		) || samePreservedPrimaryHost(p.Database.PrimaryHost, p.Bridge.SSHHost) {
 		return errors.New("bootstrap_preserved_primary_separate_database_required")
 	}
 	for _, exit := range p.Exits {
-		if samePreservedPrimaryHost(p.Database.PrimaryHost, exit.SSHHost) || samePreservedPrimaryHost(p.Database.PrimaryHost, exit.DialAddr) {
+		if samePreservedPrimaryHost(p.Database.PrimaryHost, exit.SSHHost) ||
+			samePreservedPrimaryHost(p.Database.PrimaryHost, exit.DialAddr) {
 			return errors.New("bootstrap_preserved_primary_database_in_application_targets")
 		}
 	}
@@ -55,7 +59,10 @@ func samePreservedPrimaryHost(a, b string) bool {
 	return a == b || (net.ParseIP(a) != nil && net.ParseIP(a).Equal(net.ParseIP(b)))
 }
 
-func preservedPrimaryBootstrapRoutes(p *installplan.InstallPlan, inspection map[string]bootstrapInspection) ([]exits.BootstrapEntry, error) {
+func preservedPrimaryBootstrapRoutes(
+	p *installplan.InstallPlan,
+	inspection map[string]bootstrapInspection,
+) ([]exits.BootstrapEntry, error) {
 	raw, err := inspection["bridge"].file(exits.BootstrapFileName)
 	var routes []exits.BootstrapEntry
 	if err != nil || retainedReconcileUniqueJSON(raw) != nil || json.Unmarshal(raw, &routes) != nil || len(routes) == 0 {
@@ -92,7 +99,13 @@ func managedPreservedPrimaryRoutes(p *installplan.InstallPlan, routes []exits.Bo
 	return managed, nil
 }
 
-func preparePreservedPrimaryDesired(p *installplan.InstallPlan, ds *installplan.DesiredState, inventory map[string]any, directory string, prior []exits.BootstrapEntry) error {
+func preparePreservedPrimaryDesired(
+	p *installplan.InstallPlan,
+	ds *installplan.DesiredState,
+	inventory map[string]any,
+	directory string,
+	prior []exits.BootstrapEntry,
+) error {
 	credentialDSN, err := retainedExistingDatabaseCredentials(p)
 	if err != nil || ds.DBDSN != credentialDSN {
 		return errors.New("bootstrap_preserved_primary_credentials_changed")

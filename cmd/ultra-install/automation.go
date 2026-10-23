@@ -51,7 +51,11 @@ func runAutomationCommand(action string, args []string) {
 	ansible := fs.String("ansible-playbook", "", "pinned Ansible executable; otherwise resolve exact release runtime")
 	secretsSource := fs.String("secrets-source", "canonical", "canonical or installed-runtime secret inputs (upgrade only)")
 	lifecycle := fs.Bool("lifecycle", false, "explicit existing-deployment context (upgrade/status only)")
-	preservePrimary := fs.Bool("preserve-primary", false, "bootstrap application components while preserving the existing PostgreSQL primary")
+	preservePrimary := fs.Bool(
+		"preserve-primary",
+		false,
+		"bootstrap application components while preserving the existing PostgreSQL primary",
+	)
 	primaryBackup := fs.String("primary-backup", "", "fresh encrypted primary backup; required with --preserve-primary")
 	primaryBackupSHA := fs.String("primary-backup-sha256", "", "exact encrypted primary backup SHA256")
 	_ = fs.Parse(args)

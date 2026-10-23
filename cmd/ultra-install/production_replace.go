@@ -46,7 +46,12 @@ type replacementSteps struct {
 
 // Every host is discovered before the first fence; every fence is verified
 // before the first cleanup. Only explicit replacement calls this transaction.
-func executeProductionReplacement(ctx context.Context, targets []replacementTarget, expected replacementPrimary, steps replacementSteps) error {
+func executeProductionReplacement(
+	ctx context.Context,
+	targets []replacementTarget,
+	expected replacementPrimary,
+	steps replacementSteps,
+) error {
 	run := func(stage string, work func() error) error {
 		if err := steps.Checkpoint(stage); err != nil {
 			return err
@@ -151,7 +156,9 @@ func observeReplacementPrimary(ctx context.Context, p *installplan.InstallPlan) 
 	if err != nil {
 		return observed, err
 	}
-	if json.Unmarshal(raw, &observed) != nil || observed.Database != p.Database.Name || observed.SystemIdentifier == "" || observed.DatabaseOID == 0 || observed.Migrations == "" {
+	if json.Unmarshal(raw, &observed) != nil || observed.Database != p.Database.Name || observed.SystemIdentifier == "" ||
+		observed.DatabaseOID == 0 ||
+		observed.Migrations == "" {
 		return observed, errors.New("replacement_primary_observation_invalid")
 	}
 	return observed, nil
@@ -242,7 +249,15 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	verifiedBackup, err := verifyRetainedBackupBundle(*backup, *backupSHA, p.SourceValues["ULTRA_OPERATOR_AGE_IDENTITY_FILE"], retainedSourceSHA256(p.Database.PrimaryHost, p.Database.Name), p.Database.Name, 30*time.Minute, time.Now())
+	verifiedBackup, err := verifyRetainedBackupBundle(
+		*backup,
+		*backupSHA,
+		p.SourceValues["ULTRA_OPERATOR_AGE_IDENTITY_FILE"],
+		retainedSourceSHA256(p.Database.PrimaryHost, p.Database.Name),
+		p.Database.Name,
+		30*time.Minute,
+		time.Now(),
+	)
 	if err != nil {
 		return err
 	}
@@ -260,7 +275,10 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	lock, err := openOperatorLock(filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"), uint32(os.Geteuid()))
+	lock, err := openOperatorLock(
+		filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"),
+		uint32(os.Geteuid()),
+	)
 	if err != nil {
 		return err
 	}
@@ -344,14 +362,29 @@ func runProductionReplacement(args []string, output io.Writer) error {
 			if identity == "" {
 				identity = p.SSH.Identity
 			}
-			return checkReplacementQuiescence(ctx, p, replacementTarget{Address: p.Database.PrimaryHost, Identity: identity, Role: "primary"}, true)
+			return checkReplacementQuiescence(
+				ctx,
+				p,
+				replacementTarget{Address: p.Database.PrimaryHost, Identity: identity, Role: "primary"},
+				true,
+			)
 		},
 		Clean: func(ctx context.Context, target replacementTarget, _ []exits.BootstrapEntry) error {
 			return remote(ctx, target, "clean")
 		},
 		Checkpoint: func(stage string) error {
 			fmt.Fprintln(output, "replace-production: "+stage)
-			return replaceUpgradeMetadata(filepath.Join(*state, "stage.json"), mustReplacementJSON(map[string]string{"stage": stage, "config_sha256": digestSHA256(configRaw), "manifest_sha256": *manifestSHA, "backup_sha256": *backupSHA}))
+			return replaceUpgradeMetadata(
+				filepath.Join(*state, "stage.json"),
+				mustReplacementJSON(
+					map[string]string{
+						"stage":           stage,
+						"config_sha256":   digestSHA256(configRaw),
+						"manifest_sha256": *manifestSHA,
+						"backup_sha256":   *backupSHA,
+					},
+				),
+			)
 		},
 		RetireJournal: func() error {
 			raw, err := replacementJournalInput(*journal)
@@ -373,7 +406,10 @@ func runProductionReplacement(args []string, output io.Writer) error {
 			return syncUpgradeDirectory(filepath.Dir(*journal))
 		},
 		Bootstrap: func(ctx context.Context) error {
-			child := exec.CommandContext(ctx, executable, productionReplacementBootstrapArgs(*config, *backup, *backupSHA, localExecutionState)...)
+			child := exec.CommandContext(
+				ctx,
+				executable,
+				productionReplacementBootstrapArgs(*config, *backup, *backupSHA, localExecutionState)...)
 			child.Env = append(os.Environ(), "ULTRA_INSTALL_STATE_DIR="+filepath.Join(*state, "bootstrap"))
 			child.Stdout = output
 			child.Stderr = os.Stderr
@@ -384,7 +420,18 @@ func runProductionReplacement(args []string, output io.Writer) error {
 }
 
 func productionReplacementBootstrapArgs(config, backup, backupSHA, operatorState string) []string {
-	return []string{"bootstrap", "--config", config, "--preserve-primary", "--primary-backup", backup, "--primary-backup-sha256", backupSHA, "--operator-state-dir", operatorState}
+	return []string{
+		"bootstrap",
+		"--config",
+		config,
+		"--preserve-primary",
+		"--primary-backup",
+		backup,
+		"--primary-backup-sha256",
+		backupSHA,
+		"--operator-state-dir",
+		operatorState,
+	}
 }
 
 func mustReplacementJSON(value any) []byte { raw, _ := json.Marshal(value); return raw }
@@ -429,7 +476,9 @@ func replacementLocalQuiescence() error {
 		}
 		for _, arg := range strings.Split(string(raw), "\x00") {
 			name := filepath.Base(arg)
-			if name == "ultra-install" || strings.HasPrefix(name, "ultra-install-linux-") || name == "manual-deploy.py" || name == "ansible-playbook" || name == "controller.py" {
+			if name == "ultra-install" || strings.HasPrefix(name, "ultra-install-linux-") || name == "manual-deploy.py" ||
+				name == "ansible-playbook" ||
+				name == "controller.py" {
 				return errors.New("replacement_old_local_executor_active")
 			}
 		}

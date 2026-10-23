@@ -10,7 +10,10 @@ import (
 )
 
 func TestSetExecutionStateEnvironmentReplacesInheritedValue(t *testing.T) {
-	got := setExecutionStateEnvironment([]string{"PATH=/bin", "ULTRA_OPERATOR_STATE_DIRECTORY=/wrong", "LANG=C"}, "/home/operator/.local/state/ultra-ansible")
+	got := setExecutionStateEnvironment(
+		[]string{"PATH=/bin", "ULTRA_OPERATOR_STATE_DIRECTORY=/wrong", "LANG=C"},
+		"/home/operator/.local/state/ultra-ansible",
+	)
 	want := []string{"PATH=/bin", "LANG=C", "ULTRA_OPERATOR_STATE_DIRECTORY=/home/operator/.local/state/ultra-ansible"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("execution state environment = %v, want %v", got, want)

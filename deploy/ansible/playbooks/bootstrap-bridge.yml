@@ -58,7 +58,9 @@
     - name: Require the original exit identity before activating preserved-primary routes
       ansible.builtin.assert:
         that:
-          - item.pinned_peer_cert_sha256 | default('') == (bootstrap_pinned | selectattr('name', 'equalto', item.name) | first).pinned_peer_cert_sha256 | default('')
+          - >-
+            item.pinned_peer_cert_sha256 | default('') ==
+            (bootstrap_pinned | selectattr('name', 'equalto', item.name) | first).pinned_peer_cert_sha256 | default('')
           - item.tunnel_uuid == (bootstrap_pinned | selectattr('name', 'equalto', item.name) | first).tunnel_uuid
         fail_msg: preserved_primary_exit_identity_changed
       loop: "{{ ultra_preserved_primary_routes | default([]) }}"

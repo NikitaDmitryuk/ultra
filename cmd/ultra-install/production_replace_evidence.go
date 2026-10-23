@@ -14,7 +14,15 @@ import (
 )
 
 func checkReplacementQuiescence(ctx context.Context, p *installplan.InstallPlan, target replacementTarget, primary bool) error {
-	raw, err := retainedRemote(ctx, p, target.Address, target.Identity, primary, replacementQuiescenceProgram, []string{target.Role, p.Database.Name})
+	raw, err := retainedRemote(
+		ctx,
+		p,
+		target.Address,
+		target.Identity,
+		primary,
+		replacementQuiescenceProgram,
+		[]string{target.Role, p.Database.Name},
+	)
 	if err != nil {
 		return fmt.Errorf("replacement_quiescence_probe_unavailable: %w", err)
 	}
@@ -39,7 +47,13 @@ func replacementQuiescenceResult(raw []byte) error {
 	}
 	if !result.Quiescent {
 		switch result.Code {
-		case "replacement_other_root_ssh_session", "replacement_unknown_root_helper", "replacement_session_census_unavailable", "replacement_helper_session_unisolated", "replacement_tunnel_uid_unavailable", "replacement_primary_client_transactions_active", "replacement_primary_activity_unavailable":
+		case "replacement_other_root_ssh_session",
+			"replacement_unknown_root_helper",
+			"replacement_session_census_unavailable",
+			"replacement_helper_session_unisolated",
+			"replacement_tunnel_uid_unavailable",
+			"replacement_primary_client_transactions_active",
+			"replacement_primary_activity_unavailable":
 			if result.Offender != nil {
 				detail, _ := json.Marshal(result.Offender)
 				return fmt.Errorf("%s: offender=%s", result.Code, detail)
@@ -83,7 +97,13 @@ func validateReplacementRestoreReceipt(raw []byte, backup retainedBackupMetadata
 	for n := range versions {
 		versions[n] = strconv.Itoa(n + 1)
 	}
-	if receipt.Protocol != "ultra-isolated-primary-restore-v1" || receipt.BackupSHA != backup.EncryptedSHA256 || receipt.DumpSHA != backup.DumpSHA256 || receipt.SourceSHA != backup.ExpectedSourceSHA || receipt.Database != database || receipt.Isolation != "postgres-network-none" || receipt.PublicTables < 1 || receipt.Migrations != strings.Join(versions, ",") {
+	if receipt.Protocol != "ultra-isolated-primary-restore-v1" || receipt.BackupSHA != backup.EncryptedSHA256 ||
+		receipt.DumpSHA != backup.DumpSHA256 ||
+		receipt.SourceSHA != backup.ExpectedSourceSHA ||
+		receipt.Database != database ||
+		receipt.Isolation != "postgres-network-none" ||
+		receipt.PublicTables < 1 ||
+		receipt.Migrations != strings.Join(versions, ",") {
 		return fail
 	}
 	return nil
@@ -104,7 +124,12 @@ func replacementJournalInput(path string) ([]byte, error) {
 	return raw, nil
 }
 
-func replacementPreviousTargets(raw []byte, previousPath string, current *installplan.InstallPlan, targets []replacementTarget) ([]replacementTarget, error) {
+func replacementPreviousTargets(
+	raw []byte,
+	previousPath string,
+	current *installplan.InstallPlan,
+	targets []replacementTarget,
+) ([]replacementTarget, error) {
 	if len(raw) == 0 {
 		return targets, nil
 	}
