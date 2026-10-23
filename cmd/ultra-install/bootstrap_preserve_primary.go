@@ -58,25 +58,38 @@ func samePreservedPrimaryHost(a, b string) bool {
 func preservedPrimaryBootstrapRoutes(p *installplan.InstallPlan, inspection map[string]bootstrapInspection) ([]exits.BootstrapEntry, error) {
 	raw, err := inspection["bridge"].file(exits.BootstrapFileName)
 	var routes []exits.BootstrapEntry
-	if err != nil || retainedReconcileUniqueJSON(raw) != nil || json.Unmarshal(raw, &routes) != nil || len(routes) != len(p.Exits) {
+	if err != nil || retainedReconcileUniqueJSON(raw) != nil || json.Unmarshal(raw, &routes) != nil || len(routes) == 0 {
 		return nil, errors.New("bootstrap_preserved_primary_existing_routes_required")
 	}
+	return managedPreservedPrimaryRoutes(p, routes)
+}
+
+func managedPreservedPrimaryRoutes(p *installplan.InstallPlan, routes []exits.BootstrapEntry) ([]exits.BootstrapEntry, error) {
+	if p == nil || len(p.Exits) == 0 || len(routes) == 0 {
+		return nil, errors.New("bootstrap_preserved_primary_route_scope_changed")
+	}
+	managed := make([]exits.BootstrapEntry, 0, len(p.Exits))
 	seen := map[string]bool{}
 	for _, exit := range p.Exits {
-		found := false
+		var match *exits.BootstrapEntry
 		for _, route := range routes {
 			if route.Name == exit.Name && route.Address == exit.DialAddr && route.Port == exit.Port &&
-				uuid.Validate(route.TunnelUUID) == nil && !seen[route.Name] &&
+				uuid.Validate(route.TunnelUUID) == nil &&
 				(exit.TunnelUUID == "" || exit.TunnelUUID == route.TunnelUUID) {
-				found = true
-				seen[route.Name] = true
+				if match != nil {
+					return nil, errors.New("bootstrap_preserved_primary_route_scope_changed")
+				}
+				copy := route
+				match = &copy
 			}
 		}
-		if !found {
+		if match == nil || seen[exit.Name] {
 			return nil, errors.New("bootstrap_preserved_primary_route_scope_changed")
 		}
+		seen[exit.Name] = true
+		managed = append(managed, *match)
 	}
-	return routes, nil
+	return managed, nil
 }
 
 func preparePreservedPrimaryDesired(p *installplan.InstallPlan, ds *installplan.DesiredState, inventory map[string]any, directory string, prior []exits.BootstrapEntry) error {

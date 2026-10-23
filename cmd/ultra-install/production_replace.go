@@ -167,25 +167,15 @@ func validateReplacementTopology(p *installplan.InstallPlan, observed replacemen
 	if observed.Migrations != strings.Join(want, ",") {
 		return errors.New("replacement_candidate_would_change_schema")
 	}
-	if len(observed.Routes) != len(p.Exits) {
-		return errors.New("replacement_undeclared_database_exits")
-	}
-	for _, exit := range p.Exits {
-		count := 0
-		for _, route := range observed.Routes {
-			if route.Name == exit.Name && route.Address == exit.DialAddr && route.Port == exit.Port && (exit.TunnelUUID == "" || exit.TunnelUUID == route.TunnelUUID) {
-				count++
-			}
-		}
-		if count != 1 {
-			return errors.New("replacement_authoritative_topology_mismatch")
-		}
+	managedRoutes, err := managedPreservedPrimaryRoutes(p, observed.Routes)
+	if err != nil {
+		return errors.New("replacement_authoritative_topology_mismatch")
 	}
 	desired, err := installplan.RenderDesiredStateWithOptions(p, installplan.RenderOptions{PriorBootstrap: observed.Routes})
 	if err != nil {
 		return fmt.Errorf("replacement_render_preflight: %w", err)
 	}
-	if err = comparePreservedRouteIdentities(desired.Bootstrap, observed.Routes); err != nil {
+	if err = comparePreservedRouteIdentities(desired.Bootstrap, managedRoutes); err != nil {
 		return err
 	}
 	return nil

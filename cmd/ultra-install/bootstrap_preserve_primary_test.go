@@ -92,6 +92,16 @@ func TestPreservedPrimaryRoutesRetainExactTunnelIdentity(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].TunnelUUID != route.TunnelUUID || got[0].PinnedPeerCertSHA256 != route.PinnedPeerCertSHA256 {
 		t.Fatalf("route identity not retained: %v", err)
 	}
+	dynamic := exits.BootstrapEntry{Name: "vultr-atl", Address: "192.0.2.99", Port: 51001, TunnelUUID: "44444444-4444-4444-8444-444444444444", Priority: 75, Enabled: exits.BootstrapEnabledPtr(true)}
+	full, _ := json.Marshal([]exits.BootstrapEntry{route, dynamic})
+	got, err = preservedPrimaryBootstrapRoutes(p, inspection(full))
+	if err != nil || len(got) != 1 || got[0].Name != route.Name || got[0].PinnedPeerCertSHA256 != route.PinnedPeerCertSHA256 {
+		t.Fatalf("unmanaged database routes were not preserved outside the managed bootstrap subset: %v", err)
+	}
+	ambiguous, _ := json.Marshal([]exits.BootstrapEntry{route, route})
+	if _, err := preservedPrimaryBootstrapRoutes(p, inspection(ambiguous)); err == nil {
+		t.Fatal("ambiguous managed route accepted")
+	}
 	for _, invalid := range [][]byte{nil, []byte(`[]`), []byte(`[{"name":"main","name":"other"}]`)} {
 		if _, err := preservedPrimaryBootstrapRoutes(p, inspection(invalid)); err == nil {
 			t.Fatal("missing, changed or ambiguous route accepted")
