@@ -1,13 +1,27 @@
 package main
 
 // The connection is new and non-multiplexed. Only its own ancestry/session and
-// the independently resolved dedicated tunnel UID are exempt from the census.
+// the independently resolved dedicated tunnel UID and known OS daemons are exempt.
 // Unknown sessions are never signalled by this read-only gate.
 const replacementSessionCensusDefinitions = `import os,sys,json,pwd,subprocess,re
 from pathlib import Path
 def gate_error(code):raise ValueError(code)
 def is_ssh(row):
  return row['comm'].startswith('sshd') or any(os.path.basename(x).startswith('sshd') for x in row['argv'])
+def shared_ssh_listener(row):
+ return row['comm']=='sshd' and row['ppid']==1 and any('[listener]' in x or ': listener' in x for x in row['argv'])
+def preauth_ssh(pid,row,rows):
+ if row['comm']!='sshd-session' or row['argv']!=['sshd-session: unknown [priv]'] or row.get('loginuid')==0 or row.get('login_scope',False):return False
+ children=[child for child in rows.values() if child['ppid']==pid]
+ return bool(children) and all(child['comm']=='sshd-auth' and child['uids'] and 0 not in child['uids'] and child['argv']==['sshd-auth: unknown [net]'] for child in children)
+def os_service(row):
+ # Match the complete observed command, never a basename or cgroup alone.
+ groups=row.get('cgroups',[])
+ if '/system.slice/chrony.service' in groups and row['comm']=='chronyd-starter' and row['argv']==['/bin/sh','/usr/lib/systemd/scripts/chronyd-starter.sh','-n','-F','1']:return True
+ if '/system.slice/networkd-dispatcher.service' in groups and row['comm']=='networkd-dispat' and row['argv']==['/usr/bin/python3','/usr/bin/networkd-dispatcher','--run-startup-triggers']:return True
+ if '/user.slice/user-0.slice/user@0.service/init.scope' in groups:
+  return (row['comm']=='systemd' and row['argv']==['/usr/lib/systemd/systemd','--user']) or (row['comm']=='(sd-pam)' and row['argv']==['(sd-pam)'])
+ return False
 def root_helper(row):
  for arg in row['argv']:
   name=os.path.basename(arg)
@@ -39,6 +53,7 @@ def validate_sessions(rows,self_pid,tunnel_uid=None):
      allowed.add(parent);parent=rows[parent]['ppid']
  for pid,row in rows.items():
   if pid in allowed or row['sid']==sid or 0 not in row['uids']:continue
+  if shared_ssh_listener(row) or preauth_ssh(pid,row,rows) or os_service(row):continue
   if is_ssh(row) or row.get('loginuid')==0 or row.get('login_scope',False):gate_error('replacement_other_root_ssh_session')
   if root_helper(row):gate_error('replacement_unknown_root_helper')
  return True
@@ -52,8 +67,9 @@ def read_sessions():
     uid=next(x for x in (d/'status').read_text().splitlines() if x.startswith('Uid:'))
     argv=[x.decode(errors='replace') for x in (d/'cmdline').read_bytes().split(b'\0') if x]
     loginuid=int((d/'loginuid').read_text().strip())
-    login_scope=bool(re.search(r'/session-[^/\n]+\.scope(?:/|$)',(d/'cgroup').read_text(),re.M))
-    rows[int(d.name)]={'ppid':int(fields[1]),'sid':int(fields[3]),'uids':[int(x) for x in uid.split()[1:]],'comm':raw.split('(',1)[1].rsplit(') ',1)[0],'argv':argv,'loginuid':loginuid,'login_scope':login_scope}
+    cgroups=[line.split(':',2)[2] for line in (d/'cgroup').read_text().splitlines()]
+    login_scope=any(re.search(r'/session-[^/\n]+\.scope(?:/|$)',group) for group in cgroups)
+    rows[int(d.name)]={'ppid':int(fields[1]),'sid':int(fields[3]),'uids':[int(x) for x in uid.split()[1:]],'comm':raw.split('(',1)[1].rsplit(') ',1)[0],'argv':argv,'loginuid':loginuid,'login_scope':login_scope,'cgroups':cgroups}
    except (FileNotFoundError,ProcessLookupError):continue
  except Exception:gate_error('replacement_session_census_unavailable')
  return rows

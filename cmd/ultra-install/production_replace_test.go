@@ -123,12 +123,49 @@ assert validate_sessions(sshd_session,100)
 # A subprocess in this one fresh SSH session is the current probe, not an old worker.
 own=copy.deepcopy(base);own[101]=row(100,100,0,'sh','/bin/sh','-c','probe')
 assert validate_sessions(own,100)
+daemons=copy.deepcopy(base)
+def daemon(pid,comm,group,*argv):
+ daemons[pid]=row(1,pid,0,comm,*argv);daemons[pid].update(cgroups=[group],loginuid=0)
+daemon(996,'chronyd-starter','/system.slice/chrony.service','/bin/sh','/usr/lib/systemd/scripts/chronyd-starter.sh','-n','-F','1')
+daemon(1003,'networkd-dispat','/system.slice/networkd-dispatcher.service','/usr/bin/python3','/usr/bin/networkd-dispatcher','--run-startup-triggers')
+daemon(1004,'systemd','/user.slice/user-0.slice/user@0.service/init.scope','/usr/lib/systemd/systemd','--user')
+daemon(1005,'(sd-pam)','/user.slice/user-0.slice/user@0.service/init.scope','(sd-pam)')
+# A second shared root listener is not an authenticated foreign connection.
+daemon(1006,'sshd','/system.slice/ssh.service','sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups')
+assert validate_sessions(daemons,100)
 def rejected(rows,code,uid=None):
  try:validate_sessions(rows,100,uid)
  except ValueError as error:assert str(error)==code,(error,code)
  else:raise AssertionError('unsafe session was accepted')
+for pid in (996,1003,1004,1005):
+ for mutate in ('path','extra','cgroup','comm'):
+  foreign=copy.deepcopy(daemons);candidate=foreign[pid]
+  if mutate=='path':candidate['argv'][0]='/tmp/'+os.path.basename(candidate['argv'][0])
+  elif mutate=='extra':candidate['argv'].append('/tmp/foreign-hook')
+  elif mutate=='cgroup':candidate['cgroups']=['/system.slice/foreign.service']
+  else:candidate['comm']='foreign'
+  assert not os_service(candidate),(pid,mutate)
+  rejected(foreign,'replacement_other_root_ssh_session')
+for pid in (996,1003):
+ foreign=copy.deepcopy(daemons);candidate=foreign[pid];candidate['argv'][1]='/tmp/'+os.path.basename(candidate['argv'][1]);candidate['loginuid']=4294967295
+ assert not os_service(candidate)
+ rejected(foreign,'replacement_unknown_root_helper')
 foreign=copy.deepcopy(base);foreign[200]=row(2,200,0,'sshd','sshd: root@notty');foreign[201]=row(200,201,0,'python3','/usr/bin/python3','/tmp/ansible/AnsiballZ_command.py')
 rejected(foreign,'replacement_other_root_ssh_session')
+accepted=copy.deepcopy(base);accepted[32609]=row(2,32609,0,'sshd-session','sshd-session: [accepted]')
+rejected(accepted,'replacement_other_root_ssh_session')
+preauth=copy.deepcopy(daemons);preauth[33326]=row(2,33326,0,'sshd-session','sshd-session: unknown [priv]');preauth[33327]=row(33326,33326,983,'sshd-auth','sshd-auth: unknown [net]')
+assert validate_sessions(preauth,100)
+preauth[33329]=row(33326,33329,0,'sh','/bin/sh')
+rejected(preauth,'replacement_other_root_ssh_session')
+del preauth[33329];preauth[33326]['argv']=['sshd-session: root [priv]']
+rejected(preauth,'replacement_other_root_ssh_session')
+for pid in (996,1003):
+ worker=copy.deepcopy(daemons);worker[pid]['argv'].append('/tmp/ansible/AnsiballZ_command.py')
+ worker[pid]['loginuid']=4294967295
+ rejected(worker,'replacement_unknown_root_helper')
+foreign_manager=copy.deepcopy(daemons);foreign_manager[1007]=row(1004,1007,0,'python3','python3','unknown.py');foreign_manager[1007].update(cgroups=['/user.slice/user-0.slice/user@0.service/init.scope'],loginuid=0)
+rejected(foreign_manager,'replacement_other_root_ssh_session')
 module=copy.deepcopy(base);module[300]=row(1,300,0,'python3','/usr/bin/python3','/tmp/ansible/AnsiballZ_command.py')
 rejected(module,'replacement_unknown_root_helper')
 orphan=copy.deepcopy(base);orphan[301]=row(1,301,0,'unknown-binary','/tmp/unknown-binary');orphan[301]['loginuid']=0
