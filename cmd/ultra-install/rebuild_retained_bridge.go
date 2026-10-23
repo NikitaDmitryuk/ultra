@@ -116,8 +116,18 @@ func loadRetainedBridgeSource(path string, p *installplan.InstallPlan) (retained
 	}
 	// LegacyJournal belongs to a different protocol. It is neither consumed nor
 	// retired here; the active operator journal remains unchanged.
-	old, evidence, err = loadRetainedReconcile(source.RetainedDirectory, source.OriginalConfig,
-		filepath.Join(source.BaselineRelease, "release-manifest.json"), source.OriginalJournal)
+	prepared, err := readRebuildInput(filepath.Join(source.RetainedDirectory, "prepared-input.json"), true)
+	if err != nil {
+		return old, evidence, errors.New("retained_bridge_source_invalid")
+	}
+	var logical struct {
+		Directory string `json:"directory"`
+	}
+	if err = json.Unmarshal(prepared, &logical); err != nil {
+		return old, evidence, errors.New("retained_bridge_source_invalid")
+	}
+	old, evidence, err = loadRetainedReconcileSnapshot(source.RetainedDirectory, source.OriginalConfig,
+		filepath.Join(source.BaselineRelease, "release-manifest.json"), source.OriginalJournal, logical.Directory)
 	if err != nil {
 		return old, evidence, err
 	}
