@@ -192,7 +192,12 @@ def run(args,ok=True):
 def units():
  result=set(fixed)
  for args in (['systemctl','list-units','--all','--plain','--no-legend','--no-pager','ultra-*'],['systemctl','list-unit-files','--no-legend','--no-pager','ultra-*']):
-  for line in run(args).stdout.splitlines():
+  r=subprocess.run(args,capture_output=True,text=True,timeout=15)
+  # systemctl returns 1 (without diagnostics) when a unit-file pattern has no matches.
+  # The fixed inventory above still covers Ultra units which are absent from disk.
+  if r.returncode and not (args[1]=='list-unit-files' and r.returncode==1 and not r.stdout and not r.stderr):
+   raise ValueError('replacement_systemctl_failed')
+  for line in r.stdout.splitlines():
    fields=line.split()
    if fields and fields[0]=='●':fields=fields[1:]
    if fields and owned_unit(fields[0]):result.add(fields[0])

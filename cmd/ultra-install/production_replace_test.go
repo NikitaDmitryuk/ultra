@@ -319,21 +319,25 @@ try:
  active=True
  def run(args,**kw):
   global active
+  rc=0
   if args[0]=='ip':out='[{"addr_info":[{"local":"192.0.2.10"}]}]'
   elif args[1]=='list-units':out='ultra-deploy-'+('a'*64)+'.service loaded active running fixture\n'
-  elif args[1]=='list-unit-files':out='ultra-db-tunnel.service enabled\n'
+  elif args[1]=='list-unit-files':out='';rc=1
   elif args[1]=='show':out='LoadState='+('loaded' if active or (root/'etc/systemd/system'/args[2]).is_symlink() else 'not-found')+'\nActiveState='+('active' if active else 'inactive')+'\nMainPID='+('200' if active else '0')+'\nControlPID=0\nControlGroup=\n'
   else:active=False;out=''
-  return types.SimpleNamespace(returncode=0,stdout=out,stderr='')
+  return types.SimpleNamespace(returncode=rc,stdout=out,stderr='')
  subprocess.run=run
  os.geteuid=lambda:0
  os.kill=lambda pid,sig:shutil.rmtree(root/'proc'/str(pid))
  source=sys.stdin.read()
  for path in ('/etc','/proc','/sys/fs/cgroup','/run','/opt','/var/lib','/usr/local/bin','/usr/lib','/lib'):source=source.replace("'"+path,"'"+str(root)+path)
- for mode in ('fence','clean','clean'):
+ for mode in ('discover','fence','clean','clean'):
   sys.argv=['fixture',mode,'bridge','b'*64,'192.0.2.40','[]']
   exec(compile(source,'<replacement-host>','exec'),{})
   mask=root/'etc/systemd/system'/('ultra-deploy-'+('a'*64)+'.service')
+  if mode=='discover':
+   assert not mask.exists()
+   continue
   assert mask.is_symlink() and os.readlink(mask)=='/dev/null'
   assert (root/'etc/ultra-relay/fullchain.pem').read_text()=='fixture-certificate'
   assert (root/'etc/ultra-db-tunnel/id_ed25519').read_text()=='fixture-tunnel-key'
