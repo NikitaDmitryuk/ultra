@@ -111,6 +111,63 @@ class DriverTests(unittest.TestCase):
         self.assertTrue(directory.exists())
         self.assertEqual((self.namespace / 'execution-fence.json').read_text(), 'uncertain fixture evidence')
 
+    def test_timeout_diagnostics_emit_only_validated_allowlisted_fields(self):
+        self.model_owned_root_files()
+        directory = self.root / 'workspace'
+        directory.mkdir(mode=0o700)
+        state = directory / 'state'
+        state.mkdir(mode=0o700)
+        operation = '11111111-2222-3333-4444-555555555555'
+        job = state / operation
+        job.mkdir(mode=0o700)
+        generation = 'a' * 32
+        self.write(job / 'receipt.json', {'state': 'running', 'code': 'private-output-must-not-appear'})
+        self.namespace.mkdir(mode=0o700)
+        self.write(self.namespace / 'execution-fence.json', {
+            'schema_version': 1, 'operation': 'configure-exit',
+            'job_directory': str(job), 'generation': generation,
+        })
+        self.write(job / 'execution-containment.json', {
+            'schema': 1,
+            'unit': 'ultra-execution-' + generation + '.service',
+            'invocation_id': 'b' * 32,
+            'fence': {'schema_version': 1, 'operation': 'configure-exit',
+                      'job_directory': str(job), 'generation': generation},
+        })
+        logs = self.root / 'logs'
+        session = logs / (hashlib.sha256(str(job.absolute()).encode()).hexdigest() + '-' + 'c' * 32)
+        session.mkdir(parents=True, mode=0o700)
+        events = [
+            {'event': 'task_unreachable', 'code': 'ssh_connect_timeout'},
+            {'event': 'untrusted_event', 'code': 'private-output-must-not-appear', 'task': 'private-output-must-not-appear'},
+            {'event': 'task_start', 'code': 'private-output-must-not-appear', 'task': 'private-output-must-not-appear'},
+        ]
+        event_file = session / 'events.jsonl'
+        event_file.write_text(''.join(json.dumps(item) + '\n' for item in events))
+        event_file.chmod(0o600)
+        class Worker:
+            returncode = None
+            @staticmethod
+            def poll():
+                return None
+        stderr = tempfile.TemporaryFile(mode='w+b')
+        stderr.write(b'private-output-must-not-appear execution_runtime_limit')
+        with patch.object(D, 'DIAGNOSTIC_ROOT', logs), \
+             patch.object(D.subprocess, 'run', return_value=SimpleNamespace(
+                 returncode=0, stdout=b'loaded\nactive\nrunning\n')), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            D.timeout_diagnostics(directory, operation, Worker(), stderr)
+        stderr.close()
+        value = output.getvalue()
+        self.assertIn('"receipt": "running"', value)
+        self.assertIn('"fence": "matched"', value)
+        self.assertIn('"containment": "matched"', value)
+        self.assertIn('"last_event": "task_start"', value)
+        self.assertIn('"last_event_code": "none"', value)
+        self.assertIn('"worker_codes": "execution_runtime_limit"', value)
+        self.assertIn('loaded/active/running', value)
+        self.assertNotIn('private-output-must-not-appear', value)
+
     def cleanup_fixture(self):
         directory = self.root / 'workspace'
         job = directory / 'state' / '11111111-2222-3333-4444-555555555555'

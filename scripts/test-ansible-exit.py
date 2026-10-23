@@ -18,6 +18,29 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 NAMESPACE = Path('/var/lib/ultra-ansible')
 CONTROLLER_PYTHON = Path('/usr/bin/python3')
+DIAGNOSTIC_ROOT = Path('/var/log/ultra-ansible')
+UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
+GENERATION_PATTERN = re.compile(r'^[a-f0-9]{32}$')
+DIAGNOSTIC_EVENTS = {
+    'controller_start', 'controller_succeeded', 'controller_failed', 'controller_timeout',
+    'controller_interrupted', 'task_start', 'task_ok', 'task_skipped', 'task_failed',
+    'task_unreachable', 'task_retry', 'logging_degraded',
+}
+DIAGNOSTIC_CODES = {
+    'task_failed', 'host_unreachable', 'ssh_pin_mismatch', 'ssh_authentication_failed',
+    'ssh_banner_timeout', 'ssh_connection_refused', 'ssh_connect_timeout',
+    'ssh_connection_reset', 'ssh_control_path_too_long', 'ssh_temporary_directory_failed',
+    'execution_runtime_limit', 'execution_failed', 'ansible_failed', 'job_validation_failed',
+    'ingress_tls_hostname_mismatch', 'ingress_tls_certificate_verification_failed',
+    'ingress_tls_listener_unavailable', 'ingress_tls_timeout', 'ingress_tls_handshake_failed',
+    'ingress_tls_probe_failed', 'ingress_probe_failed', 'invalid_dump_exit_identity_input',
+    'database_import_receipt_mismatch', 'invalid_dump_exit_identity_route',
+    'invalid_dump_exit_identity_pin', 'duplicate_dump_exit_identity_route',
+    'database_import_identity_mismatch', 'dump_exit_identity_binding_mismatch',
+    'dump_exit_identity_mapping_not_unique', 'dump_exit_identity_route_disabled',
+    'dump_exit_identity_membership_changed', 'dump_exit_identity_changed',
+    'database_reconciliation_timeout', 'database_reconciliation_failed',
+}
 MANAGED_UNIT_FILES = tuple(Path(root) / 'ultra-ansible-controller.service' for root in (
     '/etc/systemd/system', '/run/systemd/system', '/usr/lib/systemd/system'))
 
@@ -70,6 +93,162 @@ def private_json(path):
             or info.st_nlink != 1 or info.st_size > 4 * 1024 * 1024):
         raise ValueError('fixture_evidence_not_private')
     return json.loads(path.read_bytes())
+
+
+def _private_json_if_present(path):
+    try:
+        return private_json(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _private_bytes_if_present(path, limit):
+    try:
+        info = path.lstat()
+        if (info.st_uid != 0 or info.st_mode & 0o077 or not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1 or info.st_size > limit):
+            return None
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+
+
+def timeout_diagnostics(directory, operation, worker, worker_stderr):
+    """Print only fixture-state enums and IDs validated against owned evidence."""
+    summary = {
+        'operation': operation if UUID_PATTERN.fullmatch(operation) else 'invalid',
+        'receipt': 'missing', 'receipt_code': 'none', 'fence': 'missing',
+        'generation': 'none', 'containment': 'missing', 'observer': 'missing',
+        'last_event': 'none', 'last_event_code': 'none', 'controller': 'unknown',
+        'worker_codes': 'none', 'systemd': 'unknown',
+    }
+    if summary['operation'] == 'invalid':
+        print('fixture timeout diagnostics: ' + json.dumps(summary, sort_keys=True), flush=True)
+        return
+
+    job = directory / 'state' / operation
+    try:
+        job_info = job.lstat()
+        if not stat.S_ISDIR(job_info.st_mode) or job_info.st_uid != 0 or job_info.st_mode & 0o077:
+            job = None
+    except OSError:
+        job = None
+    receipt = _private_json_if_present(job / 'receipt.json') if job else None
+    if isinstance(receipt, dict) and receipt.get('state') in {'running', 'failed', 'succeeded'}:
+        summary['receipt'] = receipt['state']
+        if receipt.get('code') in DIAGNOSTIC_CODES:
+            summary['receipt_code'] = receipt['code']
+
+    fence = _private_json_if_present(NAMESPACE / 'execution-fence.json')
+    generation = None
+    if (job is not None and isinstance(fence, dict) and fence.get('schema_version') == 1
+            and fence.get('job_directory') == str(job)
+            and fence.get('operation') == 'configure-exit'
+            and isinstance(fence.get('generation'), str)
+            and GENERATION_PATTERN.fullmatch(fence['generation'])):
+        generation = fence['generation']
+        summary['fence'] = 'matched'
+        summary['generation'] = generation
+
+    proof = _private_json_if_present(job / 'execution-containment.json') if job else None
+    if generation is None and isinstance(proof, dict):
+        proof_fence = proof.get('fence')
+        if (isinstance(proof_fence, dict) and proof_fence.get('schema_version') == 1
+                and proof_fence.get('operation') == 'configure-exit'
+                and proof_fence.get('job_directory') == str(job)
+                and isinstance(proof_fence.get('generation'), str)
+                and GENERATION_PATTERN.fullmatch(proof_fence['generation'])
+                and proof.get('schema') in {1, 2}
+                and proof.get('unit') == 'ultra-execution-' + proof_fence['generation'] + '.service'
+                and GENERATION_PATTERN.fullmatch(str(proof.get('invocation_id', '')))):
+            generation = proof_fence['generation']
+    if generation is not None:
+        if isinstance(proof, dict):
+            proof_fence = proof.get('fence')
+            summary['containment'] = ('matched' if isinstance(proof_fence, dict)
+                                      and proof_fence.get('schema_version') == 1
+                                      and proof_fence.get('operation') == 'configure-exit'
+                                      and proof_fence.get('generation') == generation
+                                      and proof_fence.get('job_directory') == str(job)
+                                      and proof.get('schema') in {1, 2}
+                                      and proof.get('unit') == 'ultra-execution-' + generation + '.service'
+                                      and GENERATION_PATTERN.fullmatch(str(proof.get('invocation_id', '')))
+                                      else 'present_unmatched')
+        observer = _private_json_if_present(job / ('execution-systemd-limit-' + generation + '.json'))
+        if observer is None:
+            observer = _private_json_if_present(job / ('execution-runtime-limit-' + generation + '.json'))
+        observer_fence = observer.get('fence') if isinstance(observer, dict) else None
+        observer_diagnostic = observer.get('diagnostic') if isinstance(observer, dict) else None
+        if (isinstance(observer_fence, dict) and observer_fence.get('schema_version') == 1
+                and observer_fence.get('operation') == 'configure-exit'
+                and observer_fence.get('job_directory') == str(job)
+                and observer_fence.get('generation') == generation):
+            summary['observer'] = observer_diagnostic.get('code') if (
+                isinstance(observer_diagnostic, dict) and observer_diagnostic.get('code') in DIAGNOSTIC_CODES
+            ) else 'present'
+        else:
+            summary['observer'] = 'missing'
+        unit = 'ultra-execution-' + generation + '.service'
+        try:
+            result = subprocess.run(
+                ['/usr/bin/systemctl', 'show', unit, '--property=LoadState', '--property=ActiveState',
+                 '--property=Result', '--value'], check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, timeout=3,
+            )
+            values = result.stdout.decode('ascii', errors='ignore').splitlines()
+            if result.returncode == 0 and len(values) == 3 and all(
+                    re.fullmatch(r'[A-Za-z0-9_-]{1,40}', value) for value in values):
+                summary['systemd'] = '/'.join(values)
+            else:
+                summary['systemd'] = 'unavailable'
+        except (OSError, subprocess.SubprocessError):
+            summary['systemd'] = 'unavailable'
+
+    job_hash = hashlib.sha256(str(job.absolute()).encode()).hexdigest() if job else ''
+    try:
+        sessions = sorted(
+            (path for path in DIAGNOSTIC_ROOT.iterdir()
+             if job and re.fullmatch(job_hash + r'-[a-f0-9]{32}', path.name)),
+            key=lambda path: path.stat().st_mtime, reverse=True,
+        )
+    except OSError:
+        sessions = []
+    for session in sessions[:1]:
+        try:
+            info = session.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+                continue
+            raw = _private_bytes_if_present(session / 'events.jsonl', 1024 * 1024) or b''
+            for line in reversed(raw.splitlines()):
+                try:
+                    event = json.loads(line)
+                except (ValueError, json.JSONDecodeError):
+                    continue
+                if isinstance(event, dict) and event.get('event') in DIAGNOSTIC_EVENTS:
+                    summary['last_event'] = event['event']
+                    if event.get('code') in DIAGNOSTIC_CODES:
+                        summary['last_event_code'] = event['code']
+                    break
+        except (OSError, ValueError):
+            pass
+
+    summary['controller'] = 'alive' if worker.poll() is None else 'exited_' + str(worker.returncode)
+    try:
+        worker_stderr.flush()
+        stderr_size = min(os.fstat(worker_stderr.fileno()).st_size, 4 * 1024 * 1024)
+        stderr_bytes = os.pread(worker_stderr.fileno(), stderr_size, 0)
+        codes = sorted({value for value in re.findall(
+            rb'\b(?:execution|ansible|controller|job|operation|lifecycle|exit_preparation)_[a-z_]{1,80}\b',
+            stderr_bytes,
+        ) if value.decode() in DIAGNOSTIC_CODES})
+        summary['worker_codes'] = ','.join(value.decode() for value in codes) or 'none'
+    except (OSError, ValueError):
+        summary['worker_codes'] = 'unavailable'
+    print('fixture timeout diagnostics: ' + json.dumps(summary, sort_keys=True), flush=True)
 
 
 def cleanup_owned_fixture(directory, owner):
@@ -174,6 +353,7 @@ def main():
         run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(identity)])
         container = run(['docker', 'run', '-d', '--network', 'bridge', '-p', '127.0.0.1::22', image])
         worker = None
+        worker_stderr = tempfile.TemporaryFile(mode='w+b')
         try:
             if arguments.runtime:
                 run(['docker', 'cp', arguments.runtime, container + ':/tmp/runtime.tar.gz'])
@@ -215,7 +395,7 @@ def main():
             worker = subprocess.Popen([arguments.installer, 'ansible-controller', '--state', str(directory / 'state'),
                                        '--socket', str(socket), '--python', str(CONTROLLER_PYTHON),
                                        '--executable', arguments.ansible_playbook, '--allowed-user', 'root'],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                      stdout=subprocess.DEVNULL, stderr=worker_stderr)
             deadline = time.monotonic() + 10
             while not socket.exists() and time.monotonic() < deadline:
                 if worker.poll() is not None:
@@ -228,6 +408,10 @@ def main():
                 try:
                     run([arguments.installer, 'ansible-exit', '--socket', str(socket), '--request', str(request_file),
                          '--binary', str(binary), '--id', operation], timeout=180)
+                except subprocess.TimeoutExpired:
+                    print('fixture ansible-exit timed out after 180 seconds', flush=True)
+                    timeout_diagnostics(directory, operation, worker, worker_stderr)
+                    raise
                 except subprocess.CalledProcessError:
                     receipt = directory / 'state' / operation / 'receipt.json'
                     if receipt.exists():
@@ -269,6 +453,7 @@ def main():
                 except subprocess.TimeoutExpired:
                     worker.kill()
                     worker.communicate()
+            worker_stderr.close()
             subprocess.run(['docker', 'rm', '-f', container], check=False, stdout=subprocess.DEVNULL)
 
 

@@ -139,7 +139,7 @@ func verifyRetainedBackupTarLayout(path string) error {
 			return errors.New("retained_primary_backup_archive_invalid")
 		}
 		sizeRaw := strings.Trim(string(header[124:136]), " \x00")
-		size, parseErr := strconv.ParseUint(sizeRaw, 8, 64)
+		size, parseErr := strconv.ParseUint(sizeRaw, 8, 63)
 		if parseErr != nil || (index == 0 && size > retainedBackupManifestLimit) {
 			return errors.New("retained_primary_backup_archive_invalid")
 		}
