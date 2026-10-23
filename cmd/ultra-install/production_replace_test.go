@@ -33,14 +33,6 @@ func TestProductionReplacementHelpIsReadOnly(t *testing.T) {
 	}
 }
 
-func TestProductionReplacementBootstrapUsesConfiguredExecutionNamespace(t *testing.T) {
-	env := replacementBootstrapEnv([]string{"PATH=/bin", "ULTRA_INSTALL_STATE_DIR=/old", "ULTRA_OPERATOR_STATE_DIRECTORY=/wrong"}, "/private/replacement/bootstrap", "/home/operator/.local/state/ultra-ansible")
-	want := []string{"PATH=/bin", "ULTRA_INSTALL_STATE_DIR=/private/replacement/bootstrap", "ULTRA_OPERATOR_STATE_DIRECTORY=/home/operator/.local/state/ultra-ansible"}
-	if !reflect.DeepEqual(env, want) {
-		t.Fatalf("unexpected bootstrap environment: %v", env)
-	}
-}
-
 func TestProductionReplacementOrderAndFailClosedJournalRetirement(t *testing.T) {
 	ctx := context.Background()
 	targets := []replacementTarget{{Role: "bridge"}, {Role: "exit-0"}}

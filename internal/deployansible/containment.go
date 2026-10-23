@@ -81,6 +81,13 @@ func runContainedController(ctx context.Context, command *exec.Cmd, fence *Execu
 	if fence == nil || executionNamespaceFixture() {
 		return command.Run()
 	}
+	if os.Geteuid() != 0 {
+		root, stateErr := ExpectedLocalExecutionState()
+		if stateErr != nil {
+			return stateErr
+		}
+		command.Env = setExecutionStateEnvironment(command.Env, root)
+	}
 	group, err := os.ReadFile("/proc/self/cgroup")
 	if err != nil {
 		return err
@@ -104,11 +111,6 @@ func runContainedController(ctx context.Context, command *exec.Cmd, fence *Execu
 		"--property=KillMode=control-group", "--property=Delegate=no", "--property=UMask=0077",
 		"--property=TimeoutStopSec=30", "--property=RuntimeMaxSec=" + strconv.FormatInt(int64(timeout/time.Second), 10), "--property=Restart=no"}
 	if os.Geteuid() != 0 {
-		root, stateErr := ExpectedLocalExecutionState()
-		if stateErr != nil {
-			return stateErr
-		}
-		command.Env = append(command.Env, "ULTRA_OPERATOR_STATE_DIRECTORY="+root)
 		args = append(executionManagerArgs(), args...)
 		args = append(args, "--property=Slice=app.slice")
 	}
@@ -130,6 +132,16 @@ func runContainedController(ctx context.Context, command *exec.Cmd, fence *Execu
 	// Exit status (including normal rc2) and cleanup are independent facts.
 	// No proof is published if the stop/drain observation fails.
 	return completeContainedExecution(*fence, unit, err, stopExecutionUnit)
+}
+
+func setExecutionStateEnvironment(env []string, root string) []string {
+	result := make([]string, 0, len(env)+1)
+	for _, value := range env {
+		if !strings.HasPrefix(value, "ULTRA_OPERATOR_STATE_DIRECTORY=") {
+			result = append(result, value)
+		}
+	}
+	return append(result, "ULTRA_OPERATOR_STATE_DIRECTORY="+root)
 }
 func completeContainedExecution(fence ExecutionFence, unit string, runErr error, drain func(string) error) error {
 	if drainErr := drain(unit); drainErr != nil {

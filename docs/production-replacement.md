@@ -55,8 +55,9 @@ read-only проверки и fencing/quiescence старых non-DB испол�
 Инвентаризация включает обязательный список известных Ultra-служб и найденные
 systemd units; `list-unit-files` с кодом 1 считается пустым совпадением только
 при пустых stdout и stderr, остальные ошибки systemd останавливают замену.
-Bootstrap получает отдельно приватный каталог операции и фиксированное
-per-user пространство execution admission, как обычный установщик.
+Contained bootstrap-controller получает фиксированное per-user пространство
+execution admission и при запуске в уже разрешённой systemd unit, и при создании
+отдельной transient unit.
 
 Если проверка обнаруживает неизвестный SSH helper/session или активную DB client
 transaction, команда останавливается до удаления. Сначала устранить указанную
