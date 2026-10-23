@@ -239,7 +239,7 @@ def check(first,second,code=None,pid=None,wait=True,uid=None):
   assert str(error)==code,(str(error),code)
   if pid is not None:assert error.offender['pid']==pid,error.offender
  else:assert code is None,'unsafe session was accepted'
- assert sleeps==([2.5] if wait else []),sleeps
+ assert sleeps==([5] if wait else []),sleeps
  assert len(snapshots)==(0 if wait else 1),snapshots
 # No delay for an idle census; one complete recheck for an exact transient tail.
 check(base,base,wait=False)
