@@ -372,7 +372,7 @@ func runProductionReplacement(args []string, output io.Writer) error {
 			return syncUpgradeDirectory(filepath.Dir(*journal))
 		},
 		Bootstrap: func(ctx context.Context) error {
-			child := exec.CommandContext(ctx, executable, "bootstrap", "--config", *config, "--preserve-primary", "--primary-backup", *backup, "--primary-backup-sha256", *backupSHA)
+			child := exec.CommandContext(ctx, executable, productionReplacementBootstrapArgs(*config, *backup, *backupSHA, localExecutionState)...)
 			child.Env = append(os.Environ(), "ULTRA_INSTALL_STATE_DIR="+filepath.Join(*state, "bootstrap"))
 			child.Stdout = output
 			child.Stderr = os.Stderr
@@ -380,6 +380,10 @@ func runProductionReplacement(args []string, output io.Writer) error {
 		},
 	}
 	return executeProductionReplacement(ctx, targets, before, steps)
+}
+
+func productionReplacementBootstrapArgs(config, backup, backupSHA, operatorState string) []string {
+	return []string{"bootstrap", "--config", config, "--preserve-primary", "--primary-backup", backup, "--primary-backup-sha256", backupSHA, "--operator-state-dir", operatorState}
 }
 
 func mustReplacementJSON(value any) []byte { raw, _ := json.Marshal(value); return raw }

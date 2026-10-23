@@ -173,6 +173,12 @@ func runAutomationCommand(action string, args []string) {
 		exitOnErr("Ansible status", ansibleAutomationStatus(ctx, p, *python, *ansible))
 		return
 	}
+	if action == "bootstrap" {
+		if err := configureOperatorExecutionState(*operatorStateDir); err != nil {
+			exitOnErr("operator identity", err)
+			return
+		}
+	}
 	applyPlanN(p, "human")
 }
 

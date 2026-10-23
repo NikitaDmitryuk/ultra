@@ -33,6 +33,14 @@ func TestProductionReplacementHelpIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestProductionReplacementBootstrapPassesOperatorExecutionState(t *testing.T) {
+	got := productionReplacementBootstrapArgs("config", "backup", "sha256", "/home/operator/.local/state/ultra-ansible")
+	want := []string{"bootstrap", "--config", "config", "--preserve-primary", "--primary-backup", "backup", "--primary-backup-sha256", "sha256", "--operator-state-dir", "/home/operator/.local/state/ultra-ansible"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("bootstrap args: %#v", got)
+	}
+}
+
 func TestProductionReplacementOrderAndFailClosedJournalRetirement(t *testing.T) {
 	ctx := context.Background()
 	targets := []replacementTarget{{Role: "bridge"}, {Role: "exit-0"}}
