@@ -34,7 +34,7 @@ func TestProductionReplacementHelpIsReadOnly(t *testing.T) {
 }
 
 func TestProductionReplacementBootstrapPassesOperatorExecutionState(t *testing.T) {
-	got := productionReplacementBootstrapArgs("config", "backup", "sha256", "/home/operator/.local/state/ultra-ansible")
+	got := productionReplacementBootstrapArgs("config", "backup", "sha256", "/home/operator/.local/state/ultra-ansible", 2*time.Hour)
 	want := []string{
 		"bootstrap",
 		"--config",
@@ -46,6 +46,8 @@ func TestProductionReplacementBootstrapPassesOperatorExecutionState(t *testing.T
 		"sha256",
 		"--operator-state-dir",
 		"/home/operator/.local/state/ultra-ansible",
+		"--primary-backup-max-age",
+		"2h0m0s",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("bootstrap args: %#v", got)
@@ -433,13 +435,13 @@ func TestProductionReplacementRestoreReceiptBinding(t *testing.T) {
 		PublicTables: 37,
 		Migrations:   "1,2",
 	}
-	if err := validateReplacementRestoreReceipt(mustReplacementJSON(good), backup, "fixture", 2, now); err != nil {
+	if err := validateReplacementRestoreReceipt(mustReplacementJSON(good), backup, "fixture", 2, defaultPrimaryBackupMaxAge, now); err != nil {
 		t.Fatal(err)
 	}
 	for _, mutate := range []func(*replacementRestoreReceipt){func(r *replacementRestoreReceipt) { r.BackupSHA = strings.Repeat("d", 64) }, func(r *replacementRestoreReceipt) { r.DumpSHA = "wrong" }, func(r *replacementRestoreReceipt) { r.SourceSHA = "wrong" }, func(r *replacementRestoreReceipt) { r.Isolation = "production" }, func(r *replacementRestoreReceipt) { r.PublicTables = 0 }, func(r *replacementRestoreReceipt) { r.Migrations = "1" }, func(r *replacementRestoreReceipt) { r.RestoredAt = now.Add(-time.Hour).Format(time.RFC3339) }} {
 		bad := good
 		mutate(&bad)
-		if err := validateReplacementRestoreReceipt(mustReplacementJSON(bad), backup, "fixture", 2, now); err == nil {
+		if err := validateReplacementRestoreReceipt(mustReplacementJSON(bad), backup, "fixture", 2, defaultPrimaryBackupMaxAge, now); err == nil {
 			t.Fatal("unbound/unverified restore accepted")
 		}
 	}
@@ -479,5 +481,44 @@ func TestProductionReplacementPreviousTargetUnionAndDigestGate(t *testing.T) {
 	if _, err = replacementPreviousTargets(journal, path, current, targets); err == nil ||
 		err.Error() != "replacement_exact_dispatched_config_required" {
 		t.Fatalf("unbound former config accepted: %v", err)
+	}
+}
+
+func TestPrimaryBackupMaxAgeBounds(t *testing.T) {
+	if defaultPrimaryBackupMaxAge != 30*time.Minute {
+		t.Fatal("default changed")
+	}
+	for _, age := range []time.Duration{time.Second, 2 * time.Hour, 24 * time.Hour} {
+		if err := validatePrimaryBackupMaxAge(age); err != nil {
+			t.Fatalf("%s: %v", age, err)
+		}
+	}
+	for _, age := range []time.Duration{0, -time.Second, time.Millisecond, 24*time.Hour + time.Second} {
+		if err := validatePrimaryBackupMaxAge(age); err == nil {
+			t.Fatalf("accepted %s", age)
+		}
+		if err := authorizePreservedPrimaryBootstrap(nil, "", "", age); err == nil || err.Error() != "primary_backup_max_age_invalid" {
+			t.Fatalf("bootstrap accepted %s: %v", age, err)
+		}
+		if err := runProductionReplacement([]string{"--primary-backup-max-age", age.String()}, io.Discard); err == nil || err.Error() != "primary_backup_max_age_invalid" {
+			t.Fatalf("CLI accepted %s: %v", age, err)
+		}
+	}
+}
+
+func TestReplacementRestoreReceiptExplicitMaxAge(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	backup := retainedBackupMetadata{EncryptedSHA256: strings.Repeat("a", 64), DumpSHA256: strings.Repeat("b", 64), ExpectedSourceSHA: strings.Repeat("c", 64), SnapshotStarted: now.Add(-2 * time.Hour)}
+	receipt := replacementRestoreReceipt{Protocol: "ultra-isolated-primary-restore-v1", BackupSHA: backup.EncryptedSHA256, DumpSHA: backup.DumpSHA256, SourceSHA: backup.ExpectedSourceSHA, Database: "fixture", Isolation: "postgres-network-none", RestoredAt: now.Add(-time.Hour).Format(time.RFC3339), PublicTables: 1, Migrations: "1"}
+	raw := mustReplacementJSON(receipt)
+	if err := validateReplacementRestoreReceipt(raw, backup, "fixture", 1, defaultPrimaryBackupMaxAge, now); err == nil {
+		t.Fatal("default accepted old restore")
+	}
+	if err := validateReplacementRestoreReceipt(raw, backup, "fixture", 1, 2*time.Hour, now); err != nil {
+		t.Fatal(err)
+	}
+	receipt.DumpSHA = strings.Repeat("d", 64)
+	if err := validateReplacementRestoreReceipt(mustReplacementJSON(receipt), backup, "fixture", 1, 24*time.Hour, now); err == nil {
+		t.Fatal("override bypassed digest binding")
 	}
 }

@@ -23,7 +23,7 @@ import (
 func TestPreservedPrimaryDesiredExcludesProvisioningAndPreservesCredentials(t *testing.T) {
 	p, ds, inv, inspection := dependencyFixture(t)
 	p.Database = installplan.DatabaseConfig{Enabled: true, Name: "fixture", User: "app", PrimaryHost: "192.0.2.40"}
-	p.SourceValues = map[string]string{preservePrimarySourceKey: strings.Repeat("a", 64)}
+	p.SourceValues = map[string]string{preservePrimarySourceKey: strings.Repeat("a", 64), preservePrimaryMaxAgeKey: "7200"}
 	path := filepath.Join(t.TempDir(), "credentials.json")
 	p.Secrets.DatabaseCredentialsFile = path
 	ds.DBDSN = "postgres://app:fixture@127.0.0.1:25432/fixture"
@@ -76,6 +76,14 @@ func TestPreservedPrimaryDesiredExcludesProvisioningAndPreservesCredentials(t *t
 	if err := validatePreservedPrimaryFrozenMode(p, inv); err != nil {
 		t.Fatal(err)
 	}
+	if common["ultra_preserved_primary_backup_max_age_seconds"] != "7200" {
+		t.Fatal("explicit backup age lost from frozen inventory")
+	}
+	common["ultra_preserved_primary_backup_max_age_seconds"] = "86400"
+	if err := validatePreservedPrimaryFrozenMode(p, inv); err == nil {
+		t.Fatal("changed frozen backup age accepted")
+	}
+	common["ultra_preserved_primary_backup_max_age_seconds"] = "7200"
 	delete(p.SourceValues, preservePrimarySourceKey)
 	if err := validatePreservedPrimaryFrozenMode(p, inv); err == nil {
 		t.Fatal("ordinary bootstrap reused a preserved-primary frozen request")
@@ -245,6 +253,15 @@ func TestPreservedPrimaryIdentityAcrossComponentProcesses(t *testing.T) {
 	}
 	run("before", true)
 	run("after", true)
+	vars["ultra_preserved_primary_backup_snapshot_unix"] = strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10)
+	write(filepath.Join(directory, "inventory.json"), mustPreservedJSON(t, inventory), 0600)
+	run("before", false)
+	vars["ultra_preserved_primary_backup_max_age_seconds"] = "7200"
+	write(filepath.Join(directory, "inventory.json"), mustPreservedJSON(t, inventory), 0600)
+	run("before", true)
+	vars["ultra_preserved_primary_backup_max_age_seconds"] = "86401"
+	write(filepath.Join(directory, "inventory.json"), mustPreservedJSON(t, inventory), 0600)
+	run("before", false)
 	write(observed, []byte(`{"system_identifier":"54321","database":"fixture","database_oid":16384,"primary":true}`), 0600)
 	run("after", false)
 }

@@ -194,6 +194,7 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	flags.SetOutput(output)
 	config := flags.String("config", "", "canonical config already pinned to the candidate")
 	backup := flags.String("primary-backup", "", "fresh encrypted primary backup")
+	backupMaxAge := flags.Duration("primary-backup-max-age", defaultPrimaryBackupMaxAge, "maximum verified primary backup and restore age (whole seconds, at most 24h)")
 	backupSHA := flags.String("primary-backup-sha256", "", "exact encrypted backup digest")
 	commit := flags.String("source-commit", "", "exact candidate source commit")
 	manifestSHA := flags.String("manifest-sha256", "", "exact candidate manifest digest")
@@ -206,6 +207,9 @@ func runProductionReplacement(args []string, output io.Writer) error {
 		return nil
 	} else if err != nil {
 		return errors.New("replacement_arguments_invalid")
+	}
+	if err := validatePrimaryBackupMaxAge(*backupMaxAge); err != nil {
+		return err
 	}
 	if flags.NArg() != 0 || *ack != productionReplacementAcknowledgement {
 		return errors.New("replacement_explicit_scope_required")
@@ -236,7 +240,7 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	if err != nil {
 		return errors.New("replacement_config_invalid")
 	}
-	if err = authorizePreservedPrimaryBootstrap(p, *backup, *backupSHA); err != nil {
+	if err = authorizePreservedPrimaryBootstrap(p, *backup, *backupSHA, *backupMaxAge); err != nil {
 		return err
 	}
 	if p.Bridge.ReuseSpec {
@@ -255,7 +259,7 @@ func runProductionReplacement(args []string, output io.Writer) error {
 		p.SourceValues["ULTRA_OPERATOR_AGE_IDENTITY_FILE"],
 		retainedSourceSHA256(p.Database.PrimaryHost, p.Database.Name),
 		p.Database.Name,
-		30*time.Minute,
+		*backupMaxAge,
 		time.Now(),
 	)
 	if err != nil {
@@ -265,7 +269,7 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	if err != nil {
 		return errors.New("replacement_isolated_restore_receipt_required")
 	}
-	if err = validateReplacementRestoreReceipt(receiptRaw, verifiedBackup, p.Database.Name, manifest.DatabaseSchemaMax, time.Now()); err != nil {
+	if err = validateReplacementRestoreReceipt(receiptRaw, verifiedBackup, p.Database.Name, manifest.DatabaseSchemaMax, *backupMaxAge, time.Now()); err != nil {
 		return err
 	}
 	if _, err = installplan.ReadPlanSecrets(p); err != nil {
@@ -409,7 +413,7 @@ func runProductionReplacement(args []string, output io.Writer) error {
 			child := exec.CommandContext(
 				ctx,
 				executable,
-				productionReplacementBootstrapArgs(*config, *backup, *backupSHA, localExecutionState)...)
+				productionReplacementBootstrapArgs(*config, *backup, *backupSHA, localExecutionState, *backupMaxAge)...)
 			child.Env = append(os.Environ(), "ULTRA_INSTALL_STATE_DIR="+filepath.Join(*state, "bootstrap"))
 			child.Stdout = output
 			child.Stderr = os.Stderr
@@ -419,7 +423,7 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	return executeProductionReplacement(ctx, targets, before, steps)
 }
 
-func productionReplacementBootstrapArgs(config, backup, backupSHA, operatorState string) []string {
+func productionReplacementBootstrapArgs(config, backup, backupSHA, operatorState string, maxAge time.Duration) []string {
 	return []string{
 		"bootstrap",
 		"--config",
@@ -431,6 +435,8 @@ func productionReplacementBootstrapArgs(config, backup, backupSHA, operatorState
 		backupSHA,
 		"--operator-state-dir",
 		operatorState,
+		"--primary-backup-max-age",
+		maxAge.String(),
 	}
 }
 

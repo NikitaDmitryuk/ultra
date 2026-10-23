@@ -216,6 +216,10 @@ func TestRetainedBackupBundleAttestationAndFreshness(t *testing.T) {
 		30*time.Minute, now); err == nil {
 		t.Fatal("backup that expires during decryption passed")
 	}
+	if _, err = verifyRetainedBackupBundle(path, cipherSHA, identity, manifest.SourceSHA256, manifest.Database,
+		2*time.Hour, now); err != nil {
+		t.Fatalf("explicit larger age rejected verified backup: %v", err)
+	}
 	decryptionNow = now.Add(30 * time.Minute)
 	if err = revalidateRetainedBackupFreshness(metadata, 30*time.Minute, now.Add(30*time.Minute)); err == nil {
 		t.Fatal("expired backup passed admission revalidation")

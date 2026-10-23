@@ -80,14 +80,17 @@ type replacementRestoreReceipt struct {
 
 // This is a private operator execution receipt from a real isolated pg_restore,
 // not a TOC/list check. The verified encrypted archive supplies all data bindings.
-func validateReplacementRestoreReceipt(raw []byte, backup retainedBackupMetadata, database string, schemaMax int, now time.Time) error {
+func validateReplacementRestoreReceipt(raw []byte, backup retainedBackupMetadata, database string, schemaMax int, maxAge time.Duration, now time.Time) error {
 	fail := errors.New("replacement_isolated_restore_receipt_invalid")
+	if err := validatePrimaryBackupMaxAge(maxAge); err != nil {
+		return err
+	}
 	var receipt replacementRestoreReceipt
 	if retainedReconcileUniqueJSON(raw) != nil || json.Unmarshal(raw, &receipt) != nil {
 		return fail
 	}
 	when, err := time.Parse(time.RFC3339, receipt.RestoredAt)
-	if err != nil || when.Before(backup.SnapshotStarted) || when.After(now.Add(5*time.Second)) || now.Sub(when) > 30*time.Minute {
+	if err != nil || when.Before(backup.SnapshotStarted) || when.After(now.Add(5*time.Second)) || now.Sub(when) > maxAge {
 		return fail
 	}
 	if schemaMax < 1 || schemaMax > 10000 {

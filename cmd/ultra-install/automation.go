@@ -57,8 +57,13 @@ func runAutomationCommand(action string, args []string) {
 		"bootstrap application components while preserving the existing PostgreSQL primary",
 	)
 	primaryBackup := fs.String("primary-backup", "", "fresh encrypted primary backup; required with --preserve-primary")
+	primaryBackupMaxAge := fs.Duration("primary-backup-max-age", defaultPrimaryBackupMaxAge, "maximum verified primary backup age with --preserve-primary (whole seconds, at most 24h)")
 	primaryBackupSHA := fs.String("primary-backup-sha256", "", "exact encrypted primary backup SHA256")
 	_ = fs.Parse(args)
+	if err := validatePrimaryBackupMaxAge(*primaryBackupMaxAge); err != nil {
+		exitOnErr("preserved primary arguments", err)
+		return
+	}
 	if *executionTimeout <= 0 || *executionTimeout%time.Second != 0 {
 		exitOnErr("execution timeout", errors.New("execution_timeout_invalid"))
 		return
@@ -74,13 +79,13 @@ func runAutomationCommand(action string, args []string) {
 	if action == "upgrade" && *plan == "" && *configPath == "" {
 		*configPath = "install.config"
 	}
-	if (*preservePrimary && action != "bootstrap") || (!*preservePrimary && (*primaryBackup != "" || *primaryBackupSHA != "")) {
+	if (*preservePrimary && action != "bootstrap") || (!*preservePrimary && (*primaryBackup != "" || *primaryBackupSHA != "" || *primaryBackupMaxAge != defaultPrimaryBackupMaxAge)) {
 		exitOnErr("preserved primary arguments", errors.New("bootstrap_preserved_primary_arguments_invalid"))
 		return
 	}
 	p := readDeploymentForOperationOrExit(*plan, *configPath, action == "upgrade" || action == "status")
 	if *preservePrimary {
-		if err := authorizePreservedPrimaryBootstrap(p, *primaryBackup, *primaryBackupSHA); err != nil {
+		if err := authorizePreservedPrimaryBootstrap(p, *primaryBackup, *primaryBackupSHA, *primaryBackupMaxAge); err != nil {
 			exitOnErr("preserved primary authorization", err)
 			return
 		}

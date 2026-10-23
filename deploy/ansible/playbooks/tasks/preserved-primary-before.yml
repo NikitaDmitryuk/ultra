@@ -8,7 +8,9 @@
       - ultra_preserved_primary_backup_sha256 is match('^[a-f0-9]{64}$')
       - ultra_preserved_primary_backup_snapshot_unix | default('') is match('^[1-9][0-9]+$')
       - now().timestamp() | int - ultra_preserved_primary_backup_snapshot_unix | int >= 0
-      - now().timestamp() | int - ultra_preserved_primary_backup_snapshot_unix | int <= 1800
+      - ultra_preserved_primary_backup_max_age_seconds | default('1800') | string is match('^[1-9][0-9]*$')
+      - ultra_preserved_primary_backup_max_age_seconds | default(1800) | int <= 86400
+      - now().timestamp() | int - ultra_preserved_primary_backup_snapshot_unix | int <= ultra_preserved_primary_backup_max_age_seconds | default(1800) | int
       - ultra_postgres is not defined
       - ultra_database_import_dump | default('') | length == 0
       - ultra_postgres_replica is not defined
