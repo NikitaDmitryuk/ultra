@@ -84,20 +84,32 @@ def read_sessions():
  except Exception:gate_error('replacement_session_census_unavailable')
  return rows
 def require_sessions_quiescent(self_pid,tunnel_uid=None):
+ def transient(error,rows):
+  pid=getattr(error,'offender',{}).get('pid');row=rows.get(pid,{})
+  return str(error)=='replacement_other_root_ssh_session' and row.get('comm')=='sshd-session' and row.get('sid')==pid and row.get('cgroups')==['/system.slice/ssh.service']
  rows=read_sessions()
  try:return validate_sessions(rows,self_pid,tunnel_uid)
  except ValueError as error:
-  offender=getattr(error,'offender',{})
-  pid=offender.get('pid');row=rows.get(pid,{})
-  if str(error)!='replacement_other_root_ssh_session' or row.get('comm')!='sshd-session' or row.get('sid')!=pid or row.get('cgroups')!=['/system.slice/ssh.service']:raise
-  # A just-closed probe can leave an sshd-session tail. Never exempt it:
-  # require a fresh complete census and disappearance of its entire session.
-  time.sleep(5)
+  if not transient(error,rows):raise
+  original_sid=error.offender['pid'];latest=error
+ deadline=time.monotonic()+15
+ # Never exempt a possible probe tail. Poll the complete census under one
+ # deadline, including disappearance of every UID in the original session.
+ while True:
+  remaining=deadline-time.monotonic()
+  if remaining<=0:raise latest
+  time.sleep(min(.25,remaining))
+  if time.monotonic()>=deadline:raise latest
   current=read_sessions()
-  validate_sessions(current,self_pid,tunnel_uid)
-  for child_pid,child in current.items():
-   if child['sid']==pid:gate_error('replacement_other_root_ssh_session',child_pid,child)
-  return True
+  try:
+   validate_sessions(current,self_pid,tunnel_uid)
+   for child_pid,child in current.items():
+    if child['sid']==original_sid:gate_error('replacement_other_root_ssh_session',child_pid,child)
+   if time.monotonic()>=deadline:raise latest
+   return True
+  except ValueError as error:
+   if not transient(error,current):raise
+   latest=error
 
 def require_primary_idle(database):
  query="""BEGIN READ ONLY;

@@ -224,55 +224,69 @@ base={1:row(0,1,0,'systemd','/sbin/init'),2:row(1,2,0,'sshd','sshd: listener'),9
 tail=copy.deepcopy(base)
 tail[200]=row(2,200,0,'sshd-session','sshd-session: root@notty')
 tail[200]['cgroups']=['/system.slice/ssh.service']
-def check(first,second,code=None,pid=None,wait=True,uid=None):
+def check(first,following,code=None,pid=None,wait=True,uid=None,elapsed=None):
  global read_sessions
- snapshots=[copy.deepcopy(first),copy.deepcopy(second)]
- sleeps=[]
+ snapshots=[copy.deepcopy(first)]+[copy.deepcopy(value) for value in following]
+ sleeps=[];clock=[0.0];reads=[0]
  def read():
-  assert snapshots,'unexpected additional census'
-  return snapshots.pop(0)
+  reads[0]+=1
+  if len(snapshots)>1:return snapshots.pop(0)
+  return snapshots[0]
+ def sleep(seconds):
+  assert 0<seconds<=.25,seconds
+  sleeps.append(seconds);clock[0]+=seconds
  read_sessions=read
- time.sleep=lambda seconds:sleeps.append(seconds)
+ time.sleep=sleep
+ time.monotonic=lambda:clock[0]
  try:
   assert require_sessions_quiescent(100,uid)
  except ValueError as error:
   assert str(error)==code,(str(error),code)
   if pid is not None:assert error.offender['pid']==pid,error.offender
  else:assert code is None,'unsafe session was accepted'
- assert sleeps==([5] if wait else []),sleeps
- assert len(snapshots)==(0 if wait else 1),snapshots
-# No delay for an idle census; one complete recheck for an exact transient tail.
-check(base,base,wait=False)
-check(tail,base)
-check(tail,tail,'replacement_other_root_ssh_session',200)
+ assert bool(sleeps)==wait,sleeps
+ if elapsed is not None:assert clock[0]==elapsed,(clock,elapsed)
+ assert reads[0]==(len(sleeps) if clock[0]==15 else len(sleeps)+1),reads
+# Idle hosts return immediately; a vanished tail returns at the first clean poll.
+check(base,[],wait=False,elapsed=0)
+check(tail,[base],elapsed=.25)
+# Persistent sessions stop at one absolute deadline and preserve diagnostics.
+check(tail,[tail],'replacement_other_root_ssh_session',200,elapsed=15)
 # Even a leader transitioning to an otherwise accepted preauth shape must vanish.
 preauth=copy.deepcopy(tail);preauth[200]['argv']=['sshd-session: unknown [priv]']
 preauth[201]=row(200,200,983,'sshd-auth','sshd-auth: unknown [net]')
 assert validate_sessions(preauth,100)
-check(tail,preauth,'replacement_other_root_ssh_session',200)
+check(tail,[preauth],'replacement_other_root_ssh_session',200,elapsed=15)
 # A vanished leader cannot hide surviving/new children, even otherwise unknown
 # processes or non-root children which the ordinary root census ignores.
 for uid in (0,991):
  child=copy.deepcopy(base)
  child[201]=row(1,200,uid,'unknown-binary','/tmp/unknown-binary')
- check(tail,child,'replacement_other_root_ssh_session',201)
+ check(tail,[child],'replacement_other_root_ssh_session',201,elapsed=.25)
 child=copy.deepcopy(base);child[201]=row(1,200,0,'sh','/bin/sh')
-check(tail,child,'replacement_unknown_root_helper',201)
+check(tail,[child],'replacement_unknown_root_helper',201,elapsed=.25)
 # Full validation also catches an unrelated blocker arriving during the wait.
 new=copy.deepcopy(base);new[300]=row(1,300,0,'python3','python3','/tmp/helper.py')
-check(tail,new,'replacement_unknown_root_helper',300)
+check(tail,[new],'replacement_unknown_root_helper',300,elapsed=.25)
 broken=copy.deepcopy(base);del broken[90]
-check(tail,broken,'replacement_session_census_unavailable')
+check(tail,[broken],'replacement_session_census_unavailable',elapsed=.25)
+# A replacement transient may disappear, but PID churn never renews the budget.
+next_tail=copy.deepcopy(base);next_tail[300]=copy.deepcopy(tail[200]);next_tail[300]['sid']=300
+check(tail,[next_tail,base],elapsed=.5)
+check(tail,[tail]*58+[next_tail],'replacement_other_root_ssh_session',300,elapsed=15)
+# A nonmatching root SSH blocker arriving during polling fails immediately.
+foreign=copy.deepcopy(next_tail);foreign[300]['cgroups']=['/system.slice/other.service']
+check(tail,[foreign],'replacement_other_root_ssh_session',300,elapsed=.25)
 # Dedicated-tunnel handling remains in effect during the second census.
 tunnel=copy.deepcopy(base);tunnel[400]=row(2,400,0,'sshd-session','sshd-session: ultra-db-tunnel [priv]');tunnel[401]=row(400,401,991,'sshd-session','sshd-session: ultra-db-tunnel@notty')
-check(tail,tunnel,uid=991)
+check(tail,[tunnel],uid=991,elapsed=.25)
 # Other commands, units, and nonleader sessions still fail immediately.
 for mutation in ('comm','cgroup','sid'):
  other=copy.deepcopy(tail)
  if mutation=='comm':other[200]['comm']='sshd'
  elif mutation=='cgroup':other[200]['cgroups']=['/system.slice/other.service']
  else:other[200]['sid']=201
- check(other,base,'replacement_other_root_ssh_session',200,wait=False)
+ check(other,[base],'replacement_other_root_ssh_session',200,wait=False,elapsed=0)
 `
 	cmd := exec.Command("python3", "-c", program)
 	cmd.Stdin = strings.NewReader(replacementSessionCensusDefinitions)

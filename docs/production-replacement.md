@@ -59,10 +59,11 @@ transaction, команда останавливается до удаления
 удалением локального журнала. Retained-primary recovery-команды и
 `rebuild-non-db preflight` для этого пути не используются.
 
-Краткоживущий root `sshd-session` в `ssh.service` подтверждается повторным полным
-census после паузы 5 с. Замена продолжится только если исчезла вся исходная
-session и новый census не обнаружил других blockers; оставшиеся процессы и новые
-SSH-сессии по-прежнему останавливают cleanup.
+Краткоживущий root `sshd-session` в `ssh.service` повторно проверяется полным
+census каждые 250 мс, не дольше 15 с по общему monotonic deadline. Replacement
+продолжится только после успешной полной проверки и исчезновения всех процессов
+исходной session; PID churn не продлевает deadline, а сохраняющиеся процессы,
+новые блокеры и ошибки census останавливают cleanup.
 
 См. [ADR 0023](adr/0023-destructive-production-replacement.md),
 [автоматизацию](automation.md) и [контракт отдельной БД](replication.md).
