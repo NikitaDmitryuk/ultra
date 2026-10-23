@@ -60,9 +60,12 @@ execution admission и при запуске в уже разрешённой sy
 отдельной transient unit.
 
 Если проверка обнаруживает неизвестный SSH helper/session или активную DB client
-transaction, команда останавливается до удаления. Сначала устранить указанную
-причину и повторить замену с теми же закреплёнными входами; не обходить проверку
-удалением локального журнала. Retained-primary recovery-команды и
+transaction, команда останавливается до удаления. Primary identity/schema
+считывается до fencing; после этого fencing затрагивает только non-DB targets,
+а перед очисткой отдельный primary census проверяет SSH sessions и активные DB
+transactions без ещё одного непосредственно предшествующего SSH probe к primary.
+Это сохраняет DB gate и не классифицирует хвост собственного probe как посторонний
+операторский сеанс. Retained-primary recovery-команды и
 `rebuild-non-db preflight` для этого пути не используются.
 
 Краткоживущий root `sshd-session` в `ssh.service` повторно проверяется полным

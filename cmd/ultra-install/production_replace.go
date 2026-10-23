@@ -90,9 +90,10 @@ func executeProductionReplacement(ctx context.Context, targets []replacementTarg
 			return err
 		}
 	}
-	if err := run("primary-before-cleanup", check); err != nil {
-		return err
-	}
+	// The primary identity/schema was captured before fencing. Fencing only
+	// targets non-DB hosts, so avoid opening a second primary SSH session here;
+	// the immediately following primary gate checks active transactions and
+	// must see unrelated root sessions without our own probe tail.
 	if err := quiescent("quiescence-before-cleanup"); err != nil {
 		return err
 	}

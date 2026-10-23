@@ -99,7 +99,7 @@ func TestProductionReplacementOrderAndFailClosedJournalRetirement(t *testing.T) 
 			}
 			err := executeProductionReplacement(ctx, targets, primary, steps)
 			if failure == "" {
-				want := []string{"discover-bridge", "discover-exit-0", "primary-before-fence", "fence-bridge", "fence-exit-0", "primary-before-cleanup", "quiescence-before-cleanup-bridge", "quiescence-before-cleanup-exit-0", "quiescence-before-cleanup-primary", "clean-bridge", "clean-exit-0", "quiescence-after-cleanup-bridge", "quiescence-after-cleanup-exit-0", "quiescence-after-cleanup-primary", "quiescence-before-journal-bridge", "quiescence-before-journal-exit-0", "quiescence-before-journal-primary", "retire-local-journal", "bootstrap", "primary-after-bootstrap", "completed"}
+				want := []string{"discover-bridge", "discover-exit-0", "primary-before-fence", "fence-bridge", "fence-exit-0", "quiescence-before-cleanup-bridge", "quiescence-before-cleanup-exit-0", "quiescence-before-cleanup-primary", "clean-bridge", "clean-exit-0", "quiescence-after-cleanup-bridge", "quiescence-after-cleanup-exit-0", "quiescence-after-cleanup-primary", "quiescence-before-journal-bridge", "quiescence-before-journal-exit-0", "quiescence-before-journal-primary", "retire-local-journal", "bootstrap", "primary-after-bootstrap", "completed"}
 				if err != nil || !reflect.DeepEqual(events, want) {
 					t.Fatalf("order: %v %v", events, err)
 				}
