@@ -5,7 +5,17 @@ package main
 // Unknown sessions are never signalled by this read-only gate.
 const replacementSessionCensusDefinitions = `import os,sys,json,pwd,subprocess,re
 from pathlib import Path
-def gate_error(code):raise ValueError(code)
+def gate_error(code,pid=None,row=None):
+ error=ValueError(code)
+ if row is not None:
+  def name(arg):
+   value=os.path.basename(arg)
+   return value if re.fullmatch(r'[A-Za-z0-9_.()+-]{1,64}',value) else '[redacted]'
+  command=row['argv'][0].split()[0].rstrip(':') if row['argv'] else ''
+  scripts=[name(arg) for arg in row['argv'][1:] if arg.startswith('/') and arg.endswith(('.py','.sh'))]
+  groups=[group if re.fullmatch(r'/(?:system\.slice/[A-Za-z][A-Za-z0-9_-]*\.(?:service|scope)|user\.slice/user-[0-9]+\.slice/(?:user@[0-9]+\.service/init\.scope|session-[0-9]+\.scope))',group) else '[redacted]' for group in row.get('cgroups',[])[:8]]
+  error.offender={'pid':pid,'ppid':row['ppid'],'sid':row['sid'],'comm':name(row['comm']),'argv_basenames':[name(command)]+scripts[:7],'cgroups':groups}
+ raise error
 def is_ssh(row):
  return row['comm'].startswith('sshd') or any(os.path.basename(x).startswith('sshd') for x in row['argv'])
 def shared_ssh_listener(row):
@@ -54,8 +64,8 @@ def validate_sessions(rows,self_pid,tunnel_uid=None):
  for pid,row in rows.items():
   if pid in allowed or row['sid']==sid or 0 not in row['uids']:continue
   if shared_ssh_listener(row) or preauth_ssh(pid,row,rows) or os_service(row):continue
-  if is_ssh(row) or row.get('loginuid')==0 or row.get('login_scope',False):gate_error('replacement_other_root_ssh_session')
-  if root_helper(row):gate_error('replacement_unknown_root_helper')
+  if is_ssh(row) or row.get('loginuid')==0 or row.get('login_scope',False):gate_error('replacement_other_root_ssh_session',pid,row)
+  if root_helper(row):gate_error('replacement_unknown_root_helper',pid,row)
  return True
 def read_sessions():
  rows={}
@@ -101,7 +111,9 @@ try:
 except Exception as error:
  code=str(error)
  if not code.startswith('replacement_'):code='replacement_session_census_unavailable'
- print(json.dumps({'quiescent':False,'code':code}))
+ result={'quiescent':False,'code':code}
+ if hasattr(error,'offender'):result['offender']=error.offender
+ print(json.dumps(result))
 `
 
 const replacementPrimaryProgram = `import subprocess,json,sys,os

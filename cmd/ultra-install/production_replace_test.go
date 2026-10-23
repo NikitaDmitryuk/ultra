@@ -168,6 +168,14 @@ foreign_manager=copy.deepcopy(daemons);foreign_manager[1007]=row(1004,1007,0,'py
 rejected(foreign_manager,'replacement_other_root_ssh_session')
 module=copy.deepcopy(base);module[300]=row(1,300,0,'python3','/usr/bin/python3','/tmp/ansible/AnsiballZ_command.py')
 rejected(module,'replacement_unknown_root_helper')
+module[300]['argv']+=['--token','secret-value','https://192.0.2.1/private']
+module[300]['cgroups']=['/system.slice/ultra-deploy-fixture.service','/system.slice/192.0.2.1.service']
+try:validate_sessions(module,100)
+except ValueError as error:
+ assert str(error)=='replacement_unknown_root_helper'
+ assert error.offender=={'pid':300,'ppid':1,'sid':300,'comm':'python3','argv_basenames':['python3','AnsiballZ_command.py'],'cgroups':['/system.slice/ultra-deploy-fixture.service','[redacted]']}
+ assert 'secret-value' not in json.dumps(error.offender) and '192.0.2.1' not in json.dumps(error.offender)
+else:raise AssertionError('helper was accepted')
 orphan=copy.deepcopy(base);orphan[301]=row(1,301,0,'unknown-binary','/tmp/unknown-binary');orphan[301]['loginuid']=0
 rejected(orphan,'replacement_other_root_ssh_session')
 orphan[301]['loginuid']=1000;orphan[301]['login_scope']=True
@@ -204,6 +212,17 @@ for state in ('active','idle in transaction','idle in transaction (aborted)'):
 	cmd.Stdin = strings.NewReader(replacementSessionCensusDefinitions)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("quiescence fixture: %v\n%s", err, out)
+	}
+}
+
+func TestProductionReplacementQuiescenceDiagnostics(t *testing.T) {
+	raw := []byte(`{"quiescent":false,"code":"replacement_unknown_root_helper","offender":{"pid":300,"ppid":1,"sid":300,"comm":"python3","argv_basenames":["python3","AnsiballZ_command.py"],"cgroups":["/system.slice/ultra-deploy-fixture.service"]}}`)
+	err := replacementQuiescenceResult(raw)
+	if err == nil || !strings.Contains(err.Error(), `replacement_unknown_root_helper: offender={"pid":300`) || !strings.Contains(err.Error(), "AnsiballZ_command.py") {
+		t.Fatalf("missing offender: %v", err)
+	}
+	if err := replacementQuiescenceResult([]byte(`{"quiescent":false,"code":"unknown","offender":{"pid":300}}`)); err == nil || err.Error() != "replacement_quiescence_not_verified" {
+		t.Fatalf("unknown code exposed: %v", err)
 	}
 }
 
