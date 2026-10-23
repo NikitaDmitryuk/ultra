@@ -69,7 +69,8 @@ transactions без ещё одного непосредственно пред�
 `rebuild-non-db preflight` для этого пути не используются.
 
 Краткоживущий root `sshd-session` в `ssh.service` повторно проверяется полным
-census каждые 250 мс, не дольше 15 с по общему monotonic deadline. Replacement
+census каждые 250 мс, не дольше 30 с по общему monotonic deadline, чтобы дать
+завершиться SSH session от предыдущего remote шага перед следующей проверкой. Replacement
 продолжится только после успешной полной проверки и исчезновения всех процессов
 исходной session; PID churn не продлевает deadline, а сохраняющиеся процессы,
 новые блокеры и ошибки census останавливают cleanup.

@@ -254,17 +254,17 @@ def check(first,following,code=None,pid=None,wait=True,uid=None,elapsed=None):
  else:assert code is None,'unsafe session was accepted'
  assert bool(sleeps)==wait,sleeps
  if elapsed is not None:assert clock[0]==elapsed,(clock,elapsed)
- assert reads[0]==(len(sleeps) if clock[0]==15 else len(sleeps)+1),reads
+ assert reads[0]==(len(sleeps) if clock[0]==30 else len(sleeps)+1),reads
 # Idle hosts return immediately; a vanished tail returns at the first clean poll.
 check(base,[],wait=False,elapsed=0)
 check(tail,[base],elapsed=.25)
 # Persistent sessions stop at one absolute deadline and preserve diagnostics.
-check(tail,[tail],'replacement_other_root_ssh_session',200,elapsed=15)
+check(tail,[tail],'replacement_other_root_ssh_session',200,elapsed=30)
 # Even a leader transitioning to an otherwise accepted preauth shape must vanish.
 preauth=copy.deepcopy(tail);preauth[200]['argv']=['sshd-session: unknown [priv]']
 preauth[201]=row(200,200,983,'sshd-auth','sshd-auth: unknown [net]')
 assert validate_sessions(preauth,100)
-check(tail,[preauth],'replacement_other_root_ssh_session',200,elapsed=15)
+check(tail,[preauth],'replacement_other_root_ssh_session',200,elapsed=30)
 # A vanished leader cannot hide surviving/new children, even otherwise unknown
 # processes or non-root children which the ordinary root census ignores.
 for uid in (0,991):
@@ -281,7 +281,7 @@ check(tail,[broken],'replacement_session_census_unavailable',elapsed=.25)
 # A replacement transient may disappear, but PID churn never renews the budget.
 next_tail=copy.deepcopy(base);next_tail[300]=copy.deepcopy(tail[200]);next_tail[300]['sid']=300
 check(tail,[next_tail,base],elapsed=.5)
-check(tail,[tail]*58+[next_tail],'replacement_other_root_ssh_session',300,elapsed=15)
+check(tail,[tail]*118+[next_tail],'replacement_other_root_ssh_session',300,elapsed=30)
 # A nonmatching root SSH blocker arriving during polling fails immediately.
 foreign=copy.deepcopy(next_tail);foreign[300]['cgroups']=['/system.slice/other.service']
 check(tail,[foreign],'replacement_other_root_ssh_session',300,elapsed=.25)

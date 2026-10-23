@@ -92,7 +92,7 @@ def require_sessions_quiescent(self_pid,tunnel_uid=None):
  except ValueError as error:
   if not transient(error,rows):raise
   original_sid=error.offender['pid'];latest=error
- deadline=time.monotonic()+15
+ deadline=time.monotonic()+30
  # Never exempt a possible probe tail. Poll the complete census under one
  # deadline, including disappearance of every UID in the original session.
  while True:
