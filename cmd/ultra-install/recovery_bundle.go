@@ -53,6 +53,7 @@ func extractRecoveryTools(archivePath, directory string, previous map[string]str
 			return nil, err
 		}
 		if member.Typeflag != tar.TypeReg ||
+			!filepath.IsLocal(member.Name) ||
 			(!regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]+\.(py|service|timer)$`).MatchString(member.Name) && member.Name != "ssh_policy.json") ||
 			seen[member.Name] ||
 			member.Size < 0 ||

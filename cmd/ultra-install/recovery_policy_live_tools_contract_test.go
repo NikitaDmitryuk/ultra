@@ -189,3 +189,31 @@ func parseRecoveryToolMode(raw string) (os.FileMode, error) {
 	}
 	return os.FileMode(mode), nil
 }
+
+func TestExtractRecoveryToolsRejectsArchivePathTraversal(t *testing.T) {
+	var archiveBytes bytes.Buffer
+	compressed := gzip.NewWriter(&archiveBytes)
+	archive := tar.NewWriter(compressed)
+	if err := archive.WriteHeader(&tar.Header{Name: "../escape.py", Mode: 0600, Size: 1, Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archive.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	archivePath := filepath.Join(root, "archive.tar.gz")
+	if err := os.WriteFile(archivePath, archiveBytes.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := extractRecoveryTools(archivePath, filepath.Join(root, "extracted"), nil, false)
+	if err == nil || err.Error() != "unsafe_recovery_member" {
+		t.Fatalf("path-traversing archive member error = %v, want unsafe_recovery_member", err)
+	}
+}
