@@ -272,6 +272,13 @@ func inspectBootstrapWithTopology(
 
 func bootstrapRenderOptions(p *installplan.InstallPlan, inspection map[string]bootstrapInspection) (installplan.RenderOptions, error) {
 	opts := installplan.RenderOptions{PreserveRuntime: p.AdoptRuntime}
+	if preservingBootstrapPrimary(p) {
+		routes, err := preservedPrimaryBootstrapRoutes(p, inspection)
+		if err != nil {
+			return opts, err
+		}
+		opts.PriorBootstrap = routes
+	}
 	raw, err := inspection["bridge"].file("spec.json")
 	if err != nil {
 		return opts, err
@@ -688,6 +695,9 @@ func freezeBootstrapInventory(
 				}
 			}
 		}
+		if err == nil {
+			err = validatePreservedPrimaryFrozenMode(p, frozen)
+		}
 		return frozen, err
 	}
 	if _, err := os.Lstat(target); err == nil {
@@ -703,6 +713,11 @@ func freezeBootstrapInventory(
 	desired, err := installplan.RenderDesiredStateWithOptions(p, options)
 	if err != nil {
 		return nil, err
+	}
+	if preservingBootstrapPrimary(p) {
+		if err = preparePreservedPrimaryDesired(p, desired, inventory, directory, options.PriorBootstrap); err != nil {
+			return nil, err
+		}
 	}
 	if err = prepareBootstrapVariables(p, desired, inventory, inspection, directory); err != nil {
 		return nil, err

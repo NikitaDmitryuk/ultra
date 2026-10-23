@@ -4,8 +4,10 @@
 приёмка перечислены в [Ansible TODO](../TODO.md). Реализация команды не означает
 подтверждённую production-приёмку.
 
-Ограничения переустановки non-DB узлов и восстановления неполного upgrade-журнала
-описаны в [границах recovery non-DB](rebuild-non-db.md).
+При замене версии старые non-DB узлы и незавершённые deployment-операции считаются
+одноразовыми. Поддерживаемая политика описана в
+[production replacement](production-replacement.md); восстановление или продолжение
+старой выкладки не является целью.
 
 [Наглядное объяснение Ansible](ansible-explained.html) показывает путь задания,
 границы ответственности, обновление и откат.
@@ -39,56 +41,23 @@ upgrade сверяет их только с receipt-управляемым пу�
 Следующее поколение копий содержит runtime активной версии; чужая идентичность
 блокирует изменение. Источник: [контракт восстановления контроллера](../deploy/ansible/roles/release/tasks/backup-identity.yml).
 
-## Offline preflight переустановки non-DB узлов
+## Полная замена production
 
-`ultra-install rebuild-non-db preflight` принимает приватный envelope наблюдений,
-исходный manual journal, канонический config и candidate manifest. Это законченный
-этап проверки формы входов и сохранения заблокированного evidence record;
-исполнения переустановки и разблокировки deploy эта команда не предоставляет.
-Единственный допустимый результат для структурно корректных входов — JSON
-`state=blocked-unverified` и ненулевой exit code. Поля `fleet_verified`,
-`primary_verified`, `execution_supported` и `gate_released` всегда равны `false`.
-Действия `execute`, `resume`, `complete` и `force` отклоняются.
+При замене не запускай `resume`, `retry`, `rollback`, retained-primary recovery
+или offline `rebuild-non-db preflight`. Старые non-DB узлы и незавершённый journal
+удаляются; новая версия устанавливается на чистый non-DB парк. PostgreSQL primary
+остаётся на месте и не проходит bootstrap, reset, import или restore.
 
-Аргументы: `preflight --proof <absolute-0600-envelope> --original-journal
-<absolute-0600-operation.json> --config <absolute-0600-install.config> --manifest
-<absolute-manifest.json> --state-dir <separate-existing-0700-directory>`.
-Используй отдельный пустой каталог, не каталог действующего journal. Команда
-читает файлы локально, не читает `.env`/SSH keys и не обращается к сети.
-Исходный `operation.json`, config, manifest и envelope не изменяются.
+Перед удалением узлов используй процедуру из
+[production replacement](production-replacement.md): свежий зашифрованный dump,
+аутентификация архива, restore в изолированную тестовую БД и сравнение primary/
+schema до и после. Удаление одного локального `operation.json` не завершает старые
+удалённые jobs. Операторский replacement должен сначала удалить старые non-DB
+исполнители. Текущий `make deploy` пока не предоставляет этот полный режим и может
+остановиться на `manual_supervised_operation_conflict`.
 
-Контракт `ultra-rebuild-non-db-preflight-v1` задан типами в
-[rebuild_non_db_proof.go](../cmd/ultra-install/rebuild_non_db_proof.go).
-Envelope содержит base64 payload и подпись длиной 64 байта, но текущий контракт
-не связывает signer с доверенным collector. Подпись и заявления внутри payload
-не проверены независимыми наблюдениями: подходящая форма не доказывает полноту
-fleet, остановку workers или идентичность primary. Прикладной публичный ключ
-рядом с proof не принимается как trust root.
-
-Проверка формы требует свежие наблюдения в пределах срока envelope не более
-300 секунд, complete/pagination claims с точным количеством targets, однозначные
-instance/SSH identities, один bridge и exits, отдельный primary с system identifier,
-DB OID, migration/DSN bindings, отсутствие writers и сохранённую авторизацию доступа.
-План ограничен точными стадиями `rebuild-exits`, `rebuild-bridge`, `activate-bot`
-и соответствующими non-DB targets; это предлагаемые стадии, а не исполнимые
-playbooks. DB import/restore, schema/role/slot/pg_hba и изменение авторизации
-primary в этом контракте отсутствуют. Неизвестные/повторные JSON fields и null
-вместо обязательных значений отклоняются.
-
-Приватный `rebuild-preflight.json` сохраняет unverified envelope и привязки
-к хешам входов. Публикация синхронизируется на диск и не перезаписывает файл;
-повтор с теми же байтами допустим, изменение входов и неизвестные checkpoints
-(включая остаток прерванной публикации) блокируют повтор. Это evidence record,
-не completion receipt, lifecycle reservation или разрешение продолжить manual deploy.
-Для новых наблюдений нужен отдельный каталог; старые records сохраняются.
-
-Неподключённый экспериментальный collector удалён. Текущие provider observations
-сами по себе не доказывают полноту исторического fleet или владение статическими
-узлами других providers.
-Для исполнения остаются обязательными live independent observations через
-provider API и pinned SSH, привязка полномочий collector, перенос controller fence,
-одинаковая scope validation в installer/controller и DB-excluded executor.
-До их реализации существующие forward-only/adoption guards продолжают действовать.
+Историческая команда `rebuild-non-db preflight` не выполняет замену и больше не
+является эксплуатационным путём.
 
 ## Канонические входы
 
@@ -686,52 +655,14 @@ sudo python3 scripts/operator-inputs.py --from-uid <previous-uid> \
   --path /absolute/path/to/root-staged-emergency-input
 ```
 
-### Осмотр operator journal
+### Старые deployment-журналы
 
-Для диагностики незавершённой операции используй только абсолютные пути к canonical
-config и исходным байтам journal. Обычный `inspect` выполняется от владельца этих
-inputs без `sudo`, удерживает локальный lock, сверяет config binding и собирает
-ограниченные remote observations; её вывод
-`next_action` и `may_abandon` — отчёт, а не разрешение выполнить действие:
-
-```sh
-ultra-install operator-journal-reconcile inspect \
-  --operator-state-dir /home/operator/.local/state/ultra-ansible \
-  --config /absolute/path/to/install.config \
-  --original-journal /absolute/path/to/operation.json
-```
-
-При необходимости inspect может также получить сохранённый workspace и manifest;
-эти параметры задаются парой; файлы должны принадлежать текущему оператору:
-
-```sh
-ultra-install operator-journal-reconcile inspect \
-  --operator-state-dir /home/operator/.local/state/ultra-ansible \
-  --config /absolute/path/to/install.config \
-  --original-journal /absolute/path/to/operation.json \
-  --state-dir /absolute/path/to/retained-state \
-  --manifest /absolute/path/to/release-manifest.json
-```
-
-`--state-dir` и `--manifest` для `inspect` указываются вместе. Только явно
-подтверждённая недиспатчившаяся попытка может перейти в
-`abandon-undispatched`; команда требует точный SHA-256 journal, совпадающий с
-переданными исходными байтами, исходный state/manifest и новый receipt path.
-Отсутствующий receipt сам по себе не доказывает, что dispatch не было: неполный,
-диспатченный или неизвестный stage блокирует действие. Успешный abandon сохраняет
-marker переименованием и публикует отдельный receipt, не переписывая исходный
-journal. Источники: [journal reconcile](../cmd/ultra-install/operator_journal.go),
-[strict undispatched proof](../cmd/ultra-install/retained_abandon.go).
-
-```sh
-sudo ultra-install operator-journal-reconcile abandon-undispatched \
-  --config /absolute/path/to/install.config \
-  --original-journal /absolute/path/to/operation.json \
-  --state-dir /absolute/path/to/retained-state \
-  --manifest /absolute/path/to/release-manifest.json \
-  --receipt /absolute/path/to/abandonment-receipt.json \
-  --confirm-journal-sha256 <sha256-of-the-exact-journal-bytes>
-```
+`operator-journal-reconcile` и retained-primary recovery — исторические механизмы,
+не часть новой production-выкладки. При полной замене старую операцию не
+возобновляют: сначала останавливают/удаляют старые non-DB исполнители, затем
+удаляют старый журнал и поднимают текущую версию. Один лишь unlink журнала не
+останавливает удалённые процессы. Актуальная политика и статус CLI описаны в
+[production replacement](production-replacement.md).
 
 Операторский SSH подключается напрямую к bridge, а bridge-контроллер открывает Ansible
 SSH-соединения к exit. Exit не используется как jump host для входа оператора на
@@ -1085,19 +1016,11 @@ broker. При отсутствующих, неоднозначных или п�
 сравнения восстанавливают прежний локальный config и очищают журнал новой операции.
 Если `--forward-only` уже архивировал dispatched predecessor, такой сбой восстанавливает
 его исходный журнал в активный путь, чтобы повторный обычный deploy оставался заблокирован.
-После отправки
-`upgrade` или `apply` при ошибке новый config и приватный журнал сохраняются, так
-как удалённое задание может продолжаться. `ultra-install status` сообщает о
-готовности сервисов, но не доказывает завершение старого удалённого задания и не
-снимает блокировку выкладки. Для dispatched `upgrade` используйте описанный выше
-явный `--forward-only` только после его preflight. Dispatched `adoption_apply`
-текущий wrapper продолжить не умеет: он блокирует retry, пока отдельный протокол не
-сделает fencing всех источников dispatch и host-bound подтверждение drain на frozen
-target set. Для такого журнала не восстанавливайте config вручную, не удаляйте
-журнал и не запускайте другой commit; одного `status` недостаточно. Если upgrade
-вернул успех и wrapper уже записал `stage=status`, повтор запускает только read-only
-проверку `status` для того же commit и config, не повторяя upgrade. Ошибка самого
-upgrade остаётся заблокированной до отдельного recovery. Канонический `install.config`
+После отправки `upgrade` или `apply` старый wrapper может сохранять config и журнал,
+а обычный deploy — блокироваться. Это поведение относится к legacy-команде; новая
+полная замена должна остановить старые non-DB исполнители, удалить их deployment state
+и начать с закреплённого кандидата без resume/rollback старой операции. См.
+[production replacement](production-replacement.md). Канонический `install.config`
 должен оставаться обычным файлом владельца с правами 0600.
 Группам и другим пользователям запрещена запись.
 

@@ -23,6 +23,8 @@ func handlePlanSubcommand(args []string) bool {
 		return true
 	}
 	switch args[0] {
+	case "replace-production":
+		exitOnErr("production replacement", runProductionReplacement(args[1:], os.Stdout))
 	case "provider-census":
 		exitOnErr("provider census", runProviderCensus(args[1:], os.Stdout))
 	case "provider-delete":
