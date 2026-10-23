@@ -92,7 +92,7 @@ def require_sessions_quiescent(self_pid,tunnel_uid=None):
   if str(error)!='replacement_other_root_ssh_session' or row.get('comm')!='sshd-session' or row.get('sid')!=pid or row.get('cgroups')!=['/system.slice/ssh.service']:raise
   # A just-closed probe can leave an sshd-session tail. Never exempt it:
   # require a fresh complete census and disappearance of its entire session.
-  time.sleep(0.75)
+  time.sleep(2.5)
   current=read_sessions()
   validate_sessions(current,self_pid,tunnel_uid)
   for child_pid,child in current.items():
