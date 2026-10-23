@@ -14,10 +14,13 @@
   roles:
     - role: fleet_access
       fleet_access_ultra_stage: authorize
-- name: Install independent controller and guarded primary recovery automation
+- name: Install independent controller and optional primary recovery automation
   hosts: bridge
   gather_facts: false
   any_errors_fatal: true
   roles:
     - controller
-    - recovery_primary
+    - role: fleet_provider
+      when: not (ultra_bootstrap_recovery_enabled | default(true) | bool)
+    - role: recovery_primary
+      when: ultra_bootstrap_recovery_enabled | default(true) | bool

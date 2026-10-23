@@ -6,20 +6,73 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
-func TestProductionReplacementExplicitScopePrecedesJournalAccess(t *testing.T) {
-	for _, args := range [][]string{nil, {"--acknowledge", "force"}, {"--manual-journal", "/private/operation.json"}} {
-		if err := runProductionReplacement(args, io.Discard); err == nil || err.Error() != "replacement_explicit_scope_required" {
-			t.Fatalf("implicit journal bypass: %v", err)
-		}
+func TestReplacementIncludesFormerConfiguredHosts(t *testing.T) {
+	current := &installplan.InstallPlan{
+		SSH:      installplan.SSHConfig{Identity: "/keys/current"},
+		Bridge:   installplan.BridgeConfig{SSHHost: "203.0.113.10"},
+		Exits:    []installplan.ExitNode{{Name: "current", SSHHost: "203.0.113.11"}},
+		Database: installplan.DatabaseConfig{PrimaryHost: "203.0.113.20"},
+	}
+	previous := &installplan.InstallPlan{
+		SSH:      installplan.SSHConfig{Identity: "/keys/previous"},
+		Bridge:   installplan.BridgeConfig{SSHHost: "203.0.113.12"},
+		Exits:    []installplan.ExitNode{{Name: "former", SSHHost: "203.0.113.11"}, {Name: "removed", SSHHost: "203.0.113.13"}},
+		Database: installplan.DatabaseConfig{PrimaryHost: "203.0.113.20"},
+	}
+	targets, err := replacementTargets(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err = unionReplacementPreviousTargets(current, previous, targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 4 || targets[2].Address != "203.0.113.12" || targets[2].Role != "former-2" ||
+		targets[3].Address != "203.0.113.13" || targets[3].Role != "former-3" {
+		t.Fatalf("replacement omitted former hosts or duplicated current hosts: %#v", targets)
+	}
+	previous.Database.PrimaryHost = "203.0.113.21"
+	if _, err := unionReplacementPreviousTargets(current, previous, targets); err == nil ||
+		err.Error() != "replacement_previous_primary_changed" {
+		t.Fatalf("changed database primary was accepted: %v", err)
+	}
+}
+
+func TestProductionReplacementRequiresPinnedInputsAndRejectsLegacyGates(t *testing.T) {
+	if err := runProductionReplacement(nil, io.Discard); err == nil || err.Error() != "replacement_absolute_paths_required" {
+		t.Fatalf("missing pinned inputs: %v", err)
+	}
+	if err := runProductionReplacement([]string{"--acknowledge", "force"}, io.Discard); err == nil {
+		t.Fatal("legacy acknowledgement flag is still supported")
+	}
+	if err := runProductionReplacement([]string{"--primary-backup", "/tmp/dump"}, io.Discard); err == nil {
+		t.Fatal("routine replacement still requires a database backup")
+	}
+}
+
+func TestProductionReplacementJournalRemovalIsOptionalAndDurable(t *testing.T) {
+	directory := t.TempDir()
+	journal := filepath.Join(directory, "operation.json")
+	if err := removeProductionReplacementJournal(journal); err != nil {
+		t.Fatalf("absent obsolete journal blocked replacement: %v", err)
+	}
+	if err := os.WriteFile(journal, []byte("obsolete"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeProductionReplacementJournal(journal); err != nil {
+		t.Fatalf("remove obsolete journal: %v", err)
+	}
+	if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("journal remains after removal: %v", err)
 	}
 }
 
@@ -28,26 +81,21 @@ func TestProductionReplacementHelpIsReadOnly(t *testing.T) {
 	if err := runProductionReplacement([]string{"--help"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "primary-backup-sha256") || !strings.Contains(out.String(), "acknowledge") {
-		t.Fatal("missing explicit operator inputs")
+	if strings.Contains(out.String(), "primary-backup") || strings.Contains(out.String(), "acknowledge") ||
+		!strings.Contains(out.String(), "previous-config") {
+		t.Fatal("obsolete recovery gates remain in the replacement interface")
 	}
 }
 
 func TestProductionReplacementBootstrapPassesOperatorExecutionState(t *testing.T) {
-	got := productionReplacementBootstrapArgs("config", "backup", "sha256", "/home/operator/.local/state/ultra-ansible", 2*time.Hour)
+	got := productionReplacementBootstrapArgs("config", "/home/operator/.local/state/ultra-ansible")
 	want := []string{
 		"bootstrap",
 		"--config",
 		"config",
 		"--preserve-primary",
-		"--primary-backup",
-		"backup",
-		"--primary-backup-sha256",
-		"sha256",
 		"--operator-state-dir",
 		"/home/operator/.local/state/ultra-ansible",
-		"--primary-backup-max-age",
-		"2h0m0s",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("bootstrap args: %#v", got)
@@ -359,15 +407,17 @@ try:
  (root/'etc/ultra-relay/fullchain.pem').write_text('fixture-certificate')
  (root/'etc/ultra-relay/privkey.pem').write_text('fixture-key')
  (root/'etc/ultra-db-tunnel/id_ed25519').write_text('fixture-tunnel-key')
+ replica_unit=root/'etc/systemd/system/ultra-postgres-replica.service';replica_unit.write_text('fixture-retained-replica-unit')
  (root/'usr/local/bin/ultra-client').write_text('obsolete-client')
  (root/'etc/systemd/system/multi-user.target.wants/ultra-relay.service').symlink_to('../ultra-relay.service')
+ replica_link=root/'etc/systemd/system/multi-user.target.wants/ultra-postgres-replica.service';replica_link.symlink_to('../ultra-postgres-replica.service')
  worker=root/'proc/200';worker.mkdir();(worker/'cmdline').write_bytes(b'/usr/local/bin/ultra-install\0operator-upgrade\0');(worker/'stat').write_text('200 (ultra-install) S '+'0 '*18+'123')
  active=True
  def run(args,**kw):
   global active
   rc=0
   if args[0]=='ip':out='[{"addr_info":[{"local":"192.0.2.10"}]}]'
-  elif args[1]=='list-units':out='ultra-deploy-'+('a'*64)+'.service loaded active running fixture\n'
+  elif args[1]=='list-units':out='ultra-deploy-'+('a'*64)+'.service loaded active running fixture\nultra-postgres-replica.service loaded active running fixture\n'
   elif args[1]=='list-unit-files':out='';rc=1
   elif args[1]=='show':out='LoadState='+('loaded' if active or (root/'etc/systemd/system'/args[2]).is_symlink() else 'not-found')+'\nActiveState='+('active' if active else 'inactive')+'\nMainPID='+('200' if active else '0')+'\nControlPID=0\nControlGroup=\n'
   else:active=False;out=''
@@ -387,6 +437,8 @@ try:
   assert mask.is_symlink() and os.readlink(mask)=='/dev/null'
   assert (root/'etc/ultra-relay/fullchain.pem').read_text()=='fixture-certificate'
   assert (root/'etc/ultra-db-tunnel/id_ed25519').read_text()=='fixture-tunnel-key'
+  assert replica_unit.read_text()=='fixture-retained-replica-unit'
+  assert replica_link.is_symlink() and os.readlink(replica_link)=='../ultra-postgres-replica.service'
   if mode=='clean':
    assert not (root/'etc/systemd/system/ultra-auto-upgrade.timer').is_symlink()
    assert not (root/'etc/systemd/system/ultra-recovery-backup.service').is_symlink()
@@ -413,112 +465,5 @@ func TestProductionReplacementKeyedRouteComparison(t *testing.T) {
 	two.TunnelUUID = one.TunnelUUID
 	if err := comparePreservedRouteIdentities([]exits.BootstrapEntry{one, two}, []exits.BootstrapEntry{one, one}); err == nil {
 		t.Fatal("duplicate/mismatched routes accepted")
-	}
-}
-
-func TestProductionReplacementRestoreReceiptBinding(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	backup := retainedBackupMetadata{
-		EncryptedSHA256:   strings.Repeat("a", 64),
-		DumpSHA256:        strings.Repeat("b", 64),
-		ExpectedSourceSHA: strings.Repeat("c", 64),
-		SnapshotStarted:   now.Add(-time.Minute),
-	}
-	good := replacementRestoreReceipt{
-		Protocol:     "ultra-isolated-primary-restore-v1",
-		BackupSHA:    backup.EncryptedSHA256,
-		DumpSHA:      backup.DumpSHA256,
-		SourceSHA:    backup.ExpectedSourceSHA,
-		Database:     "fixture",
-		Isolation:    "postgres-network-none",
-		RestoredAt:   now.Format(time.RFC3339),
-		PublicTables: 37,
-		Migrations:   "1,2",
-	}
-	if err := validateReplacementRestoreReceipt(mustReplacementJSON(good), backup, "fixture", 2, defaultPrimaryBackupMaxAge, now); err != nil {
-		t.Fatal(err)
-	}
-	for _, mutate := range []func(*replacementRestoreReceipt){func(r *replacementRestoreReceipt) { r.BackupSHA = strings.Repeat("d", 64) }, func(r *replacementRestoreReceipt) { r.DumpSHA = "wrong" }, func(r *replacementRestoreReceipt) { r.SourceSHA = "wrong" }, func(r *replacementRestoreReceipt) { r.Isolation = "production" }, func(r *replacementRestoreReceipt) { r.PublicTables = 0 }, func(r *replacementRestoreReceipt) { r.Migrations = "1" }, func(r *replacementRestoreReceipt) { r.RestoredAt = now.Add(-time.Hour).Format(time.RFC3339) }} {
-		bad := good
-		mutate(&bad)
-		if err := validateReplacementRestoreReceipt(mustReplacementJSON(bad), backup, "fixture", 2, defaultPrimaryBackupMaxAge, now); err == nil {
-			t.Fatal("unbound/unverified restore accepted")
-		}
-	}
-}
-
-func TestProductionReplacementPreviousTargetUnionAndDigestGate(t *testing.T) {
-	plan := func(bridge, exit string) *installplan.InstallPlan {
-		p := installplan.LegacyValuesToPlan(
-			map[string]string{
-				"BRIDGE_IP":         bridge,
-				"MAIN_EXIT_IP":      exit,
-				"BRIDGE_SSH_KEY":    "/fixture/key",
-				"MAIN_EXIT_SSH_KEY": "/fixture/key",
-				"DATABASE_IP":       "192.0.2.40",
-			},
-		)
-		return p
-	}
-	current, old := plan("192.0.2.10", "192.0.2.20"), plan("192.0.2.11", "192.0.2.21")
-	targets, err := replacementTargets(current)
-	if err != nil {
-		t.Fatal(err)
-	}
-	union, err := unionReplacementPreviousTargets(current, old, targets)
-	if err != nil || len(union) != 4 {
-		t.Fatalf("old workers omitted: %v %v", union, err)
-	}
-	old.Database.PrimaryHost = "192.0.2.41"
-	if _, err = unionReplacementPreviousTargets(current, old, targets); err == nil {
-		t.Fatal("old primary silently changed")
-	}
-	path := t.TempDir() + "/previous.config"
-	if err = os.WriteFile(path, []byte("fixture"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	journal := []byte(`{"mutator_dispatched":true,"config_sha256":"` + strings.Repeat("a", 64) + `"}`)
-	if _, err = replacementPreviousTargets(journal, path, current, targets); err == nil ||
-		err.Error() != "replacement_exact_dispatched_config_required" {
-		t.Fatalf("unbound former config accepted: %v", err)
-	}
-}
-
-func TestPrimaryBackupMaxAgeBounds(t *testing.T) {
-	if defaultPrimaryBackupMaxAge != 30*time.Minute {
-		t.Fatal("default changed")
-	}
-	for _, age := range []time.Duration{time.Second, 2 * time.Hour, 24 * time.Hour} {
-		if err := validatePrimaryBackupMaxAge(age); err != nil {
-			t.Fatalf("%s: %v", age, err)
-		}
-	}
-	for _, age := range []time.Duration{0, -time.Second, time.Millisecond, 24*time.Hour + time.Second} {
-		if err := validatePrimaryBackupMaxAge(age); err == nil {
-			t.Fatalf("accepted %s", age)
-		}
-		if err := authorizePreservedPrimaryBootstrap(nil, "", "", age); err == nil || err.Error() != "primary_backup_max_age_invalid" {
-			t.Fatalf("bootstrap accepted %s: %v", age, err)
-		}
-		if err := runProductionReplacement([]string{"--primary-backup-max-age", age.String()}, io.Discard); err == nil || err.Error() != "primary_backup_max_age_invalid" {
-			t.Fatalf("CLI accepted %s: %v", age, err)
-		}
-	}
-}
-
-func TestReplacementRestoreReceiptExplicitMaxAge(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	backup := retainedBackupMetadata{EncryptedSHA256: strings.Repeat("a", 64), DumpSHA256: strings.Repeat("b", 64), ExpectedSourceSHA: strings.Repeat("c", 64), SnapshotStarted: now.Add(-2 * time.Hour)}
-	receipt := replacementRestoreReceipt{Protocol: "ultra-isolated-primary-restore-v1", BackupSHA: backup.EncryptedSHA256, DumpSHA: backup.DumpSHA256, SourceSHA: backup.ExpectedSourceSHA, Database: "fixture", Isolation: "postgres-network-none", RestoredAt: now.Add(-time.Hour).Format(time.RFC3339), PublicTables: 1, Migrations: "1"}
-	raw := mustReplacementJSON(receipt)
-	if err := validateReplacementRestoreReceipt(raw, backup, "fixture", 1, defaultPrimaryBackupMaxAge, now); err == nil {
-		t.Fatal("default accepted old restore")
-	}
-	if err := validateReplacementRestoreReceipt(raw, backup, "fixture", 1, 2*time.Hour, now); err != nil {
-		t.Fatal(err)
-	}
-	receipt.DumpSHA = strings.Repeat("d", 64)
-	if err := validateReplacementRestoreReceipt(mustReplacementJSON(receipt), backup, "fixture", 1, 24*time.Hour, now); err == nil {
-		t.Fatal("override bypassed digest binding")
 	}
 }

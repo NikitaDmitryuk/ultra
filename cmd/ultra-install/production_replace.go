@@ -20,8 +20,6 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
-const productionReplacementAcknowledgement = "replace-non-db-preserve-postgresql"
-
 type replacementPrimary struct {
 	SystemIdentifier string                 `json:"system_identifier"`
 	Database         string                 `json:"database"`
@@ -31,6 +29,15 @@ type replacementPrimary struct {
 }
 
 type replacementTarget struct{ Address, Identity, Role string }
+
+type replacementConfigPaths []string
+
+func (paths *replacementConfigPaths) String() string { return strings.Join(*paths, ",") }
+
+func (paths *replacementConfigPaths) Set(path string) error {
+	*paths = append(*paths, path)
+	return nil
+}
 
 type replacementSteps struct {
 	Observe          func(context.Context) (replacementPrimary, error)
@@ -146,6 +153,30 @@ func replacementTargets(p *installplan.InstallPlan) ([]replacementTarget, error)
 	return targets, nil
 }
 
+func unionReplacementPreviousTargets(current, previous *installplan.InstallPlan, targets []replacementTarget) ([]replacementTarget, error) {
+	if !samePreservedPrimaryHost(previous.Database.PrimaryHost, current.Database.PrimaryHost) {
+		return nil, errors.New("replacement_previous_primary_changed")
+	}
+	old, err := replacementTargets(previous)
+	if err != nil {
+		return nil, err
+	}
+	for _, target := range old {
+		found := false
+		for _, existing := range targets {
+			if samePreservedPrimaryHost(existing.Address, target.Address) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			target.Role = "former-" + strconv.Itoa(len(targets))
+			targets = append(targets, target)
+		}
+	}
+	return targets, nil
+}
+
 func observeReplacementPrimary(ctx context.Context, p *installplan.InstallPlan) (replacementPrimary, error) {
 	key := p.Database.SSHIdentity
 	if key == "" {
@@ -193,35 +224,30 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("replace-production", flag.ContinueOnError)
 	flags.SetOutput(output)
 	config := flags.String("config", "", "canonical config already pinned to the candidate")
-	backup := flags.String("primary-backup", "", "fresh encrypted primary backup")
-	backupMaxAge := flags.Duration("primary-backup-max-age", defaultPrimaryBackupMaxAge, "maximum verified primary backup and restore age (whole seconds, at most 24h)")
-	backupSHA := flags.String("primary-backup-sha256", "", "exact encrypted backup digest")
+	var previousConfigs replacementConfigPaths
+	flags.Var(&previousConfigs, "previous-config", "prior successful/attempted config; may be repeated")
 	commit := flags.String("source-commit", "", "exact candidate source commit")
 	manifestSHA := flags.String("manifest-sha256", "", "exact candidate manifest digest")
 	state := flags.String("state-dir", "", "new private replacement workspace")
-	journal := flags.String("manual-journal", "", "exact obsolete local manual journal")
-	previousConfig := flags.String("previous-config", "", "exact config bytes pinned by the dispatched journal")
-	restoreReceipt := flags.String("primary-restore-receipt", "", "private receipt from real isolated PostgreSQL restore of this backup")
-	ack := flags.String("acknowledge", "", "required destructive non-DB scope acknowledgment")
 	if err := flags.Parse(args); errors.Is(err, flag.ErrHelp) {
 		return nil
 	} else if err != nil {
 		return errors.New("replacement_arguments_invalid")
 	}
-	if err := validatePrimaryBackupMaxAge(*backupMaxAge); err != nil {
-		return err
+	if flags.NArg() != 0 {
+		return errors.New("replacement_arguments_invalid")
 	}
-	if flags.NArg() != 0 || *ack != productionReplacementAcknowledgement {
-		return errors.New("replacement_explicit_scope_required")
-	}
-	for _, path := range []string{*config, *backup, *state, *journal, *restoreReceipt} {
+	for _, path := range []string{*config, *state} {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 			return errors.New("replacement_absolute_paths_required")
 		}
 	}
-	if *journal != filepath.Join(filepath.Dir(*config), "dist", "manual", "operation.json") {
-		return errors.New("replacement_manual_journal_scope_invalid")
+	for _, path := range previousConfigs {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return errors.New("replacement_absolute_paths_required")
+		}
 	}
+	journal := filepath.Join(filepath.Dir(*config), "dist", "manual", "operation.json")
 	localExecutionState, err := deployansible.ExpectedLocalExecutionState()
 	if err != nil {
 		return fmt.Errorf("replacement_local_execution_state: %w", err)
@@ -240,7 +266,7 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	if err != nil {
 		return errors.New("replacement_config_invalid")
 	}
-	if err = authorizePreservedPrimaryBootstrap(p, *backup, *backupSHA, *backupMaxAge); err != nil {
+	if err = authorizePreservedPrimaryBootstrap(p); err != nil {
 		return err
 	}
 	if p.Bridge.ReuseSpec {
@@ -249,27 +275,14 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	if err = installplan.ValidateBootstrapPlan(p); err != nil {
 		return err
 	}
-	manifest, err := verifyOperatorUpgradeRelease(p.Automation.ReleaseDir, *commit, p.Automation.Version, *manifestSHA, "/proc/self/exe")
-	if err != nil {
-		return err
-	}
-	verifiedBackup, err := verifyRetainedBackupBundle(
-		*backup,
-		*backupSHA,
-		p.SourceValues["ULTRA_OPERATOR_AGE_IDENTITY_FILE"],
-		retainedSourceSHA256(p.Database.PrimaryHost, p.Database.Name),
-		p.Database.Name,
-		*backupMaxAge,
-		time.Now(),
+	manifest, err := verifyProductionCandidateRelease(
+		p.Automation.ReleaseDir,
+		*commit,
+		p.Automation.Version,
+		*manifestSHA,
+		"/proc/self/exe",
 	)
 	if err != nil {
-		return err
-	}
-	receiptRaw, err := readRebuildInput(*restoreReceipt, true)
-	if err != nil {
-		return errors.New("replacement_isolated_restore_receipt_required")
-	}
-	if err = validateReplacementRestoreReceipt(receiptRaw, verifiedBackup, p.Database.Name, manifest.DatabaseSchemaMax, *backupMaxAge, time.Now()); err != nil {
 		return err
 	}
 	if _, err = installplan.ReadPlanSecrets(p); err != nil {
@@ -278,6 +291,21 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	targets, err := replacementTargets(p)
 	if err != nil {
 		return err
+	}
+	for _, previousConfig := range previousConfigs {
+		previousRaw, readErr := readRebuildInput(previousConfig, true)
+		if readErr != nil {
+			return errors.New("replacement_previous_config_unavailable")
+		}
+		previous, loadErr := installplan.LoadLifecycleConfig(previousConfig)
+		unchanged, verifyErr := readRebuildInput(previousConfig, true)
+		if loadErr != nil || verifyErr != nil || string(unchanged) != string(previousRaw) {
+			return errors.New("replacement_previous_config_invalid")
+		}
+		targets, err = unionReplacementPreviousTargets(p, previous, targets)
+		if err != nil {
+			return err
+		}
 	}
 	lock, err := openOperatorLock(
 		filepath.Join(filepath.Dir(*config), "."+filepath.Base(*config)+".manual-deploy.lock"),
@@ -290,14 +318,6 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	if err = replacementLocalQuiescence(); err != nil {
 		return err
 	}
-	journalRaw, err := replacementJournalInput(*journal)
-	if err != nil {
-		return err
-	}
-	targets, err = replacementPreviousTargets(journalRaw, *previousConfig, p, targets)
-	if err != nil {
-		return err
-	}
 	current, err := readRebuildInput(*config, true)
 	if err != nil || string(current) != string(configRaw) {
 		return errors.New("replacement_config_changed")
@@ -306,9 +326,6 @@ func runProductionReplacement(args []string, output io.Writer) error {
 		return errors.New("replacement_new_workspace_required")
 	}
 	if err = replaceUpgradeMetadata(filepath.Join(*state, "config.original"), configRaw); err != nil {
-		return err
-	}
-	if err = replaceUpgradeMetadata(filepath.Join(*state, "isolated-restore-receipt.json"), receiptRaw); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
@@ -377,7 +394,9 @@ func runProductionReplacement(args []string, output io.Writer) error {
 			return remote(ctx, target, "clean")
 		},
 		Checkpoint: func(stage string) error {
-			fmt.Fprintln(output, "replace-production: "+stage)
+			if _, err := fmt.Fprintln(output, "replace-production: "+stage); err != nil {
+				return err
+			}
 			return replaceUpgradeMetadata(
 				filepath.Join(*state, "stage.json"),
 				mustReplacementJSON(
@@ -385,35 +404,18 @@ func runProductionReplacement(args []string, output io.Writer) error {
 						"stage":           stage,
 						"config_sha256":   digestSHA256(configRaw),
 						"manifest_sha256": *manifestSHA,
-						"backup_sha256":   *backupSHA,
 					},
 				),
 			)
 		},
 		RetireJournal: func() error {
-			raw, err := replacementJournalInput(*journal)
-			if err != nil {
-				return err
-			}
-			if string(raw) != string(journalRaw) {
-				return errors.New("replacement_previous_journal_changed")
-			}
-			if len(raw) == 0 {
-				return nil
-			}
-			if err = replaceUpgradeMetadata(filepath.Join(*state, "discarded-manual-journal.json"), raw); err != nil {
-				return err
-			}
-			if err = os.Remove(*journal); err != nil {
-				return err
-			}
-			return syncUpgradeDirectory(filepath.Dir(*journal))
+			return removeProductionReplacementJournal(journal)
 		},
 		Bootstrap: func(ctx context.Context) error {
 			child := exec.CommandContext(
 				ctx,
 				executable,
-				productionReplacementBootstrapArgs(*config, *backup, *backupSHA, localExecutionState, *backupMaxAge)...)
+				productionReplacementBootstrapArgs(*config, localExecutionState)...)
 			child.Env = append(os.Environ(), "ULTRA_INSTALL_STATE_DIR="+filepath.Join(*state, "bootstrap"))
 			child.Stdout = output
 			child.Stderr = os.Stderr
@@ -423,20 +425,24 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	return executeProductionReplacement(ctx, targets, before, steps)
 }
 
-func productionReplacementBootstrapArgs(config, backup, backupSHA, operatorState string, maxAge time.Duration) []string {
+func removeProductionReplacementJournal(path string) error {
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return syncUpgradeDirectory(filepath.Dir(path))
+}
+
+func productionReplacementBootstrapArgs(config, operatorState string) []string {
 	return []string{
 		"bootstrap",
 		"--config",
 		config,
 		"--preserve-primary",
-		"--primary-backup",
-		backup,
-		"--primary-backup-sha256",
-		backupSHA,
 		"--operator-state-dir",
 		operatorState,
-		"--primary-backup-max-age",
-		maxAge.String(),
 	}
 }
 

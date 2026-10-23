@@ -233,7 +233,7 @@ class SafeJournal:
         self._degraded = False
         return True
 
-LOCAL_OPERATIONS = {'handoff-recovery-controller', 'stage-recovery-preparation', 'initialize-recovery-monitor', 'rebuild-retained-primary', 'rebuild-retained-bridge', 'bootstrap-recovery-inspect', 'bootstrap-recovery-tools', 'wait-upgrade-readiness', 'bootstrap-forward-broker', 'contain-upgrade', 'drain-upgrade-workers', 'retain-artifacts', 'resume-schedules', 'rollback-adoption', 'reserve-rolledback-bootstrap', 'resume-adoption', 'lifecycle', 'prepare-controller', 'inspect-upgrade', 'preflight-retry', 'status-automation', 'inspect-release-hosts', 'resume-automation', 'configure-bot', 'configure-exit-operator', 'inspect-bootstrap', 'bootstrap', 'bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'bootstrap-automation', 'verify-bootstrap-automation', 'adopt', 'adopt-topology', 'upgrade', 'rollback', 'verify-release', 'commit-release', 'publish-release', 'ingress', 'reconcile', 'restore', 'restore-database', 'restore-peer', 'domain-cutover', 'backend-domain', 'upgrade-dns-migration', 'inspect-upgrade-runtime', 'inspect-upgrade-maintenance', 'upgrade-runtime', 'inspect-upgrade-domains', 'upgrade-domain'}
+LOCAL_OPERATIONS = {'bootstrap-recovery-tools', 'retain-artifacts', 'resume-schedules', 'rollback-adoption', 'reserve-rolledback-bootstrap', 'resume-adoption', 'lifecycle', 'prepare-controller', 'status-automation', 'resume-automation', 'configure-bot', 'configure-exit-operator', 'inspect-bootstrap', 'bootstrap', 'bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'bootstrap-automation', 'verify-bootstrap-automation', 'adopt', 'adopt-topology', 'ingress', 'reconcile', 'restore', 'restore-database', 'restore-peer', 'domain-cutover', 'backend-domain'}
 OPERATIONS = {'configure-exit'} | LOCAL_OPERATIONS
 
 # Operation identities and authorization stay distinct even when implementation
@@ -413,9 +413,7 @@ EXECUTION_ROOT = Path('/var/lib/ultra-ansible')
 if os.geteuid() != 0 and not TEST_EXECUTION_NAMESPACE:
     EXECUTION_ROOT = Path(pwd.getpwuid(os.geteuid()).pw_dir) / '.local/state/ultra-ansible'
 READ_ONLY_OPERATIONS = frozenset({
-    'inspect-bootstrap', 'bootstrap-recovery-inspect', 'inspect-upgrade',
-    'status-automation', 'inspect-release-hosts',
-    'inspect-upgrade-maintenance', 'inspect-upgrade-domains', 'wait-upgrade-readiness',
+    'inspect-bootstrap', 'status-automation',
 })
 
 
@@ -437,40 +435,6 @@ def execution_binding(directory, bundle, job, raw):
             'attempt': job.get('attempt', 1)}
 
 
-def deployment_execution_admission(root):
-    operations = root / 'deploy-operations'
-    try:
-        operations.lstat()
-    except FileNotFoundError:
-        return
-    SafeJournal.directory(operations)
-    def read(path, raw=False):
-        fd = SafeJournal.open_private(path, os.O_RDONLY)
-        with os.fdopen(fd, 'rb') as stream:
-            data = stream.read(1024 * 1024 + 1)
-        if len(data) > 1024 * 1024:
-            raise ValueError('execution_uncertain_reconciliation_required')
-        return data if raw else json.loads(data)
-    try:
-        current = read(operations / 'current.json')
-    except FileNotFoundError:
-        return
-    identity = current.get('request_sha256')
-    if current.get('schema') != 1 or not isinstance(identity, str) or not re.fullmatch('[a-f0-9]{64}', identity):
-        raise ValueError('execution_uncertain_reconciliation_required')
-    operation = operations / identity
-    SafeJournal.directory(operation)
-    request = read(operation / 'request.json', raw=True)
-    state = read(operation / 'state.json')
-    if hashlib.sha256(request).hexdigest() != identity or state.get('schema') != 1 or state.get('request_sha256') != identity or not state.get('stage'):
-        raise ValueError('execution_uncertain_reconciliation_required')
-    if state.get('state') == 'completed' and state['stage'] == 'status':
-        return
-    suffix = ':/system.slice/ultra-deploy-' + identity + '.service'
-    if state.get('state') != 'running' or not any(line.endswith(suffix) for line in Path('/proc/self/cgroup').read_text().splitlines()):
-        raise ValueError('execution_uncertain_reconciliation_required')
-
-
 def begin_execution(directory, bundle, job, raw, root, fixture=False):
     if job['operation'] in READ_ONLY_OPERATIONS:
         return None
@@ -488,7 +452,6 @@ def begin_execution(directory, bundle, job, raw, root, fixture=False):
     lock = SafeJournal.open_private(root / 'execution-admission.lock', os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        deployment_execution_admission(root)
         binding = execution_binding(directory, bundle, job, raw)
         generation = os.environ.get('ULTRA_EXECUTION_GENERATION')
         fence_path = root / 'execution-fence.json'
@@ -632,8 +595,7 @@ def execute(directory, executable, bundle, diagnostics_root=None, execution_root
     job = validate(load_private(directory / 'job.json'))
     raw = load_private(directory / 'request.json', raw=True)
     request = json.loads(raw)
-    # Fresh Go requests carry their policy explicitly. Missing fields retain the
-    # legacy execution budget rather than adopting a new upgrade default.
+    # The timeout is frozen into the operation request and bounded here.
     timeout = request.get('execution_timeout_seconds', 1200)
     if type(timeout) is not int or timeout <= 0 or timeout > 9223371976:
         raise ValueError('invalid_execution_timeout')
@@ -706,7 +668,7 @@ def execute(directory, executable, bundle, diagnostics_root=None, execution_root
             str(executable), '-i', str(directory / 'inventory.yml'),
             str(Path(bundle) / 'playbooks' / operation_playbook(job['operation'])),
             '--extra-vars', '@' + str(directory / 'variables.yml'),
-        ], bundle, environment, timeout=700 if job['operation'] == 'wait-upgrade-readiness' else timeout)
+        ], bundle, environment, timeout=timeout)
         if exit_code:
             if (directory / 'diagnostic.json').exists():
                 state['diagnostic'] = load_private(directory / 'diagnostic.json')

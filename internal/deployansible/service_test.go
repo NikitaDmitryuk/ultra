@@ -202,7 +202,9 @@ path.chmod(0o600)
 	if !ready {
 		stopCompletion()
 		cancel()
-		<-done
+		if err := <-done; err != nil {
+			t.Fatalf("worker shutdown failed: %v", err)
+		}
 		t.Fatal("worker did not normally complete before fixture attestation")
 	}
 	publishWorkerFixtureContainment(t, directory)

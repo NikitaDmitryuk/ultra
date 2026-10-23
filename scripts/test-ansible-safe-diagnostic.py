@@ -18,14 +18,6 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 callback = module.CallbackModule()
 
-# The readiness script returns only public status/reservation fields. Ansible
-# censors no_log results before callback delivery, including SSH error classes.
-readiness_tasks = yaml.safe_load((ROOT / 'deploy/ansible/playbooks/wait-upgrade-readiness.yml').read_text())[0]['tasks']
-assert readiness_tasks[0].get('no_log') is not True
-assert '--wait-readiness' in readiness_tasks[0]['ansible.builtin.script']['cmd']
-assert readiness_tasks[1]['no_log'] is True
-
-
 def read_diagnostic(target, result):
     if not target.exists():
         raise AssertionError(

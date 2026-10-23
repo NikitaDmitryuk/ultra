@@ -22,11 +22,9 @@ func TestExecutionTimeoutPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if executionTimeoutSeconds(ctx, "upgrade") != 7200 || executionTimeoutSeconds(ctx, "wait-upgrade-readiness") != 700 ||
-		executionTimeoutSeconds(
-			context.Background(),
-			"upgrade",
-		) != 3600 || executionTimeoutSeconds(context.Background(), "bootstrap") != 1200 {
+	if executionTimeoutSeconds(ctx, "bootstrap") != 7200 || executionTimeoutSeconds(ctx, "restore-database") != 7200 ||
+		executionTimeoutSeconds(context.Background(), "bootstrap") != 1200 ||
+		executionTimeoutSeconds(context.Background(), "restore-database") != 1200 {
 		t.Fatal("timeout policy")
 	}
 }
@@ -79,22 +77,22 @@ func TestPreparedExecutionTimeoutRejectsChangedRequest(t *testing.T) {
 	}
 }
 
-func TestLegacyUpgradeBudgetDoesNotInheritFreshDefault(t *testing.T) {
+func TestLegacyFixedOperationBudgetUsesCommonDefault(t *testing.T) {
 	directory := t.TempDir()
 	if err := writeJSON(filepath.Join(directory, "request.json"), map[string]any{"inventory": map[string]any{}, "variables": map[string]any{}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeJSON(filepath.Join(directory, "job.json"), map[string]any{"operation": "upgrade"}); err != nil {
+	if err := writeJSON(filepath.Join(directory, "job.json"), map[string]any{"operation": "bootstrap"}); err != nil {
 		t.Fatal(err)
 	}
 	if budget, err := preparedExecutionTimeout(directory); err != nil || budget != 20*time.Minute {
 		t.Fatal(budget, err)
 	}
-	raw, err := LocalRequestBytes(context.Background(), "upgrade", filepath.Join(directory, "fresh"), map[string]any{}, map[string]any{})
+	raw, err := LocalRequestBytes(context.Background(), "bootstrap", filepath.Join(directory, "fresh"), map[string]any{}, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"execution_timeout_seconds":3600`) {
+	if !strings.Contains(string(raw), `"execution_timeout_seconds":1200`) {
 		t.Fatal(string(raw))
 	}
 }
@@ -276,30 +274,30 @@ func TestPinnedLegacySameOperationGenerationPreservesSourceWireBytes(t *testing.
 
 func TestFrozenCustomBudgetContinuesWithoutOverrideAndRejectsChangedOverride(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "job")
-	ctx, err := WithOperationExecutionTimeout(context.Background(), "upgrade", 2*time.Hour)
+	ctx, err := WithOperationExecutionTimeout(context.Background(), "bootstrap", 2*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := localExecutionRequest(ctx, "upgrade", directory, map[string]any{}, map[string]any{})
+	request, err := localExecutionRequest(ctx, "bootstrap", directory, map[string]any{}, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = prepareLocalOperation(directory, "upgrade", request, executionHash(request), Export); err != nil {
+	if err = prepareLocalOperation(directory, "bootstrap", request, executionHash(request), Export); err != nil {
 		t.Fatal(err)
 	}
-	continued, err := localExecutionRequest(context.Background(), "upgrade", directory, map[string]any{}, map[string]any{})
+	continued, err := localExecutionRequest(context.Background(), "bootstrap", directory, map[string]any{}, map[string]any{})
 	if err != nil || !bytes.Equal(continued, request) {
 		t.Fatal("custom budget lost on continuation", string(continued), err)
 	}
-	ctx, err = WithOperationExecutionTimeout(context.Background(), "upgrade", time.Hour)
+	ctx, err = WithOperationExecutionTimeout(context.Background(), "bootstrap", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changed, err := localExecutionRequest(ctx, "upgrade", directory, map[string]any{}, map[string]any{})
+	changed, err := localExecutionRequest(ctx, "bootstrap", directory, map[string]any{}, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = prepareLocalOperation(directory, "upgrade", changed, executionHash(changed), Export); err == nil {
+	if err = prepareLocalOperation(directory, "bootstrap", changed, executionHash(changed), Export); err == nil {
 		t.Fatal("explicit changed budget admitted")
 	}
 	for _, invalid := range []string{
@@ -314,7 +312,7 @@ func TestFrozenCustomBudgetContinuesWithoutOverrideAndRejectsChangedOverride(t *
 		if err = os.WriteFile(filepath.Join(directory, "request.json"), []byte(invalid), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err = localExecutionRequest(context.Background(), "upgrade", directory, map[string]any{}, map[string]any{}); err == nil {
+		if _, err = localExecutionRequest(context.Background(), "bootstrap", directory, map[string]any{}, map[string]any{}); err == nil {
 			t.Fatalf("invalid frozen budget accepted: %s", invalid)
 		}
 	}

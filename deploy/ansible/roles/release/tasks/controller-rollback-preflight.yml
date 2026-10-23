@@ -12,9 +12,6 @@
 - name: Reject a linked or nonregular controller floor
   ansible.builtin.assert:
     that:
-      - >-
-        ultra_prepared_controller_policy | default((ultra_controller_enforcement_spec | default({})).get('prepared_policy', {})) | length == 0 or
-        release_controller_rollback_retirement.stat.exists
       - release_controller_rollback_retirement.stat.exists is defined
       - not (release_controller_rollback_retirement.stat.islnk | default(false))
       - not release_controller_rollback_retirement.stat.exists or (release_controller_rollback_retirement.stat.isreg | default(false))
@@ -39,8 +36,6 @@
         fail_msg: controller_rollback_enforcement_migration_required
     - name: Revalidate both runtimes and the unchanged live ledger
       ultra_controller_enforcement:
-        recovery_request_sha256: "{{ ultra_recovery_preparation_request_sha256 | default('') }}"
-        prepared_policy: "{{ ultra_prepared_controller_policy | default({}) }}"
         action: verify
         operation_id: "{{ ultra_lifecycle_id }}"
         scope_sha256: "{{ ultra_controller_enforcement_spec.scope_sha256 }}"

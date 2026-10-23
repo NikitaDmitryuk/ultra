@@ -183,7 +183,7 @@
 - name: Allow managed public bridge ports on an enabled guest firewall
   ansible.builtin.command:
     argv: [/usr/sbin/ufw, allow, "{{ item | string }}/tcp"]
-  loop: "{{ ultra_bridge_ports | default([ultra_spec.vless_port]) | unique }}"
+  loop: "{{ ((ultra_bridge_ports | default([])) + ([ultra_spec.vless_port] if ultra_spec is defined else [])) | unique }}"
   register: relay_bridge_firewall
   changed_when: "'Skipping' not in relay_bridge_firewall.stdout"
   when:

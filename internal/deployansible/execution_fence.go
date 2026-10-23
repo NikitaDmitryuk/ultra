@@ -44,13 +44,7 @@ func productionExecutionFenceDirectory(string) string {
 func executionReadOnly(operation string) bool {
 	switch operation {
 	case "inspect-bootstrap",
-		"bootstrap-recovery-inspect",
-		"inspect-upgrade",
-		"status-automation",
-		"inspect-release-hosts",
-		"inspect-upgrade-maintenance",
-		"inspect-upgrade-domains",
-		"wait-upgrade-readiness":
+		"status-automation":
 		return true
 	}
 	return false
@@ -188,9 +182,6 @@ func executionAdmission(directory string) error {
 // Adopt uncertain legacy jobs already in the canonical queue namespace before
 // admitting any newer job. An old failed receipt is not proof of SSH quiescence.
 func checkExecutionAdmission(root string) error {
-	if err := deploymentExecutionAdmission(root); err != nil {
-		return err
-	}
 	fence, err := inspectExecutionFence(root)
 	if err != nil {
 		return err

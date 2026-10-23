@@ -1,14 +1,8 @@
 package main
 
 import (
-	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"strings"
-
-	"github.com/NikitaDmitryuk/ultra/internal/cloud"
-	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
 type providerRetirementRequest struct {
@@ -75,71 +69,6 @@ func providerRetirementPlan(
 	result.Address = deletion.Intent.Address
 	raw, _ := json.Marshal(result)
 	result.Binding = digestSHA256(raw)
-	return result, nil
-}
-
-// The pre-retirement inventory stays immutable on retries. A committed receipt
-// lives in the exact operation's JSON body in the SAME transaction as retirement.
-// A lost SSH acknowledgment therefore resumes by observation, not a second write.
-func retireDeletedProvider(
-	ctx context.Context,
-	p *installplan.InstallPlan,
-	in retainedPrimaryRebuildInput,
-	evidence retainedReconcileEvidence,
-	deletionPath, fleetPath string,
-) ([]byte, error) {
-	deletion, err := readRebuildInput(deletionPath, true)
-	if err != nil {
-		return nil, err
-	}
-	fleet, err := readRebuildInput(fleetPath, true)
-	if err != nil {
-		return nil, err
-	}
-	request, err := providerRetirementPlan(in, evidence, deletion, fleet)
-	if err != nil {
-		return nil, err
-	}
-	values, err := readProviderSecretValues(p)
-	if err != nil {
-		return nil, errors.New("provider_retirement_credential_unavailable")
-	}
-	key := strings.TrimSpace(values["ULTRA_VULTR_API_KEY"])
-	if key == "" && p.Automation.CloudKeyFile != "" {
-		raw, e := readRebuildInput(p.Automation.CloudKeyFile, true)
-		if e != nil {
-			return nil, errors.New("provider_retirement_credential_unavailable")
-		}
-		key = strings.TrimSpace(string(raw))
-	}
-	if key == "" {
-		return nil, errors.New("provider_retirement_credential_unavailable")
-	}
-	if err = observeDeletedProviderInstance(ctx, cloud.NewVultr(key), request.InstanceID); err != nil {
-		return nil, err
-	}
-	raw, _ := json.Marshal(request)
-	identity := p.Database.SSHIdentity
-	if identity == "" {
-		identity = p.SSH.Identity
-	}
-	result, err := retainedMutation(
-		ctx,
-		p,
-		p.Database.PrimaryHost,
-		identity,
-		true,
-		providerRetirementRemote,
-		[]string{p.Database.Name, base64.StdEncoding.EncodeToString(raw)},
-	)
-	if err != nil {
-		return nil, errors.New("provider_retirement_transaction_unverified")
-	}
-	var receipt map[string]json.RawMessage
-	if decodeRetainedReconcile(result, &receipt) != nil || reimageJournalString(receipt, "binding_sha256") != request.Binding ||
-		reimageJournalString(receipt, "protocol") != request.Protocol {
-		return nil, errors.New("provider_retirement_receipt_unverified")
-	}
 	return result, nil
 }
 

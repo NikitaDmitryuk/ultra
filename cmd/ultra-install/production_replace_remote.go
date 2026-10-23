@@ -183,8 +183,9 @@ if role.startswith('exit-'):
   need(hashlib.sha256(cert).hexdigest()==matches[0]['pinned_peer_cert_sha256'],'replacement_exit_tls_pin_mismatch')
 fixed={'ultra-relay.service','ultra-bot.service','ultra-ansible-controller.service','ultra-ansible-controller.socket',
  'ultra-recovery-backup.service','ultra-recovery-backup.timer','ultra-recovery-reconcile.service','ultra-recovery-reconcile.timer','ultra-auto-upgrade.service','ultra-auto-upgrade.timer'}
+# These two units carry the retained primary data path across non-DB replacement.
 unit_re=re.compile(r'ultra-[A-Za-z0-9_.@-]+\.(?:service|socket|timer|path)\Z')
-def owned_unit(name):return bool(unit_re.fullmatch(name)) and not name.startswith('ultra-db-tunnel.')
+def owned_unit(name):return bool(unit_re.fullmatch(name)) and name!='ultra-postgres-replica.service' and not name.startswith('ultra-db-tunnel.')
 def run(args,ok=True):
  r=subprocess.run(args,capture_output=True,text=True,timeout=15)
  need(not ok or r.returncode==0,'replacement_systemctl_failed')

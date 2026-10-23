@@ -7,6 +7,14 @@
     - name: Verify preserved primary
       ansible.builtin.import_tasks: tasks/preserved-primary-before.yml
       when: ultra_preserve_primary | default(false) | bool
+    - name: Restore replica-state observation on the preserved primary
+      ansible.builtin.include_role:
+        name: postgres
+        tasks_from: monitor
+      vars:
+        postgres_monitor_database_name: "{{ ultra_preserved_primary_database }}"
+        postgres_monitor_database_user: "{{ ultra_preserved_primary_user }}"
+      when: ultra_preserve_primary | default(false) | bool
 - name: Reconcile dedicated exit DNS before component certificate issuance
   hosts: bridge
   gather_facts: false
@@ -52,6 +60,9 @@
       ansible.builtin.include_role:
         name: postgres
         tasks_from: monitor
+      vars:
+        postgres_monitor_database_name: "{{ ultra_postgres.name }}"
+        postgres_monitor_database_user: "{{ ultra_postgres.user }}"
       when: not (ultra_preserve_primary | default(false) | bool) and ultra_postgres is defined
 - name: Authorize application database tunnel
   hosts: databases

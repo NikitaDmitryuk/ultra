@@ -93,8 +93,8 @@ class ExecutionFence(unittest.TestCase):
                 self.run_job(directory)
         self.assertFalse(self.marker.exists())
 
-    def test_upgrade_timeout_and_readiness_have_separate_budgets(self):
-        for operation, timeout in (('upgrade', 1200), ('bootstrap', 1200), ('wait-upgrade-readiness', 700)):
+    def test_current_bootstrap_operations_use_common_budget(self):
+        for operation in ('bootstrap', 'bootstrap-automation'):
             directory = self.job('budget-' + operation, operation=operation)
             budgets = []
             def runner(*args, **kwargs):
@@ -103,7 +103,7 @@ class ExecutionFence(unittest.TestCase):
                 return 0
             with patch.object(C, 'run_playbook', runner):
                 self.run_job(directory)
-            self.assertEqual(budgets, [timeout])
+            self.assertEqual(budgets, [1200])
 
     def test_live_cgroup_worker_prevents_cleanup_completion_publication(self):
         library = self.bundle / 'library'
@@ -144,32 +144,6 @@ class ExecutionFence(unittest.TestCase):
         self.assertEqual(C.execution_binding(directory,self.bundle,job,raw),before)
         self.assertEqual(list(self.bundle.rglob('*.pyc')),[])
         self.assertFalse((self.namespace/'execution-fence.json').exists())
-
-    def test_active_deployment_blocks_other_dispatchers_between_generations(self):
-        self.namespace.mkdir(mode=0o700)
-        operations=self.namespace/'deploy-operations'
-        operations.mkdir(mode=0o700)
-        raw=b'{"schema":2,"args":["operator-upgrade"]}'
-        identity=hashlib.sha256(raw).hexdigest()
-        directory=operations/identity;directory.mkdir(mode=0o700)
-        (directory/'request.json').write_bytes(raw);(directory/'request.json').chmod(0o600)
-        C.atomic(operations/'current.json',{'schema':1,'request_sha256':identity})
-        state={'schema':1,'request_sha256':identity,'stage':'recovery_reconciled','state':'running'}
-        C.atomic(directory/'state.json',state)
-        job=self.job('outside-coordinator')
-        with self.assertRaisesRegex(ValueError,'execution_uncertain'):
-            self.run_job(job)
-        self.assertFalse(self.marker.exists())
-        original=Path.read_text
-        def cgroup(path,*args,**kwargs):
-            return '0::/system.slice/ultra-deploy-'+identity+'.service\n' if str(path)=='/proc/self/cgroup' else original(path,*args,**kwargs)
-        with patch.object(Path,'read_text',cgroup):
-            C.deployment_execution_admission(self.namespace)
-            state['state']='blocked';C.atomic(directory/'state.json',state)
-            with self.assertRaisesRegex(ValueError,'execution_uncertain'):
-                C.deployment_execution_admission(self.namespace)
-        state['state']='completed';state['stage']='status';C.atomic(directory/'state.json',state)
-        C.deployment_execution_admission(self.namespace)
 
     def test_sigkill_blocks_same_job_and_different_job(self):
         first = self.job('one', delay=20)

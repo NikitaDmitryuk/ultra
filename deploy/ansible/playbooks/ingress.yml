@@ -3,10 +3,6 @@
   hosts: forward_ingress
   gather_facts: false
   any_errors_fatal: true
-  pre_tasks:
-    - name: Gate retained-primary recovery before any mutation
-      ansible.builtin.import_tasks: tasks/retained-primary-gate.yml
-      when: ultra_retained_recovery_binding_sha256 is defined
   tasks:
     - name: Configure forwarding ingress
       ansible.builtin.include_role:
@@ -21,10 +17,6 @@
   hosts: bridge
   gather_facts: false
   any_errors_fatal: true
-  pre_tasks:
-    - name: Gate retained-primary recovery before any mutation
-      ansible.builtin.import_tasks: tasks/retained-primary-gate.yml
-      when: ultra_retained_recovery_binding_sha256 is defined
   tasks:
     - name: Bind acceptance and retirement to the retained-alias cutover plan
       ansible.builtin.set_fact:

@@ -8,11 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	ansibleassets "github.com/NikitaDmitryuk/ultra/deploy/ansible"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
@@ -23,7 +21,7 @@ import (
 func TestPreservedPrimaryDesiredExcludesProvisioningAndPreservesCredentials(t *testing.T) {
 	p, ds, inv, inspection := dependencyFixture(t)
 	p.Database = installplan.DatabaseConfig{Enabled: true, Name: "fixture", User: "app", PrimaryHost: "192.0.2.40"}
-	p.SourceValues = map[string]string{preservePrimarySourceKey: strings.Repeat("a", 64), preservePrimaryMaxAgeKey: "7200"}
+	p.SourceValues = map[string]string{preservePrimarySourceKey: "true"}
 	path := filepath.Join(t.TempDir(), "credentials.json")
 	p.Secrets.DatabaseCredentialsFile = path
 	ds.DBDSN = "postgres://app:fixture@127.0.0.1:25432/fixture"
@@ -73,17 +71,17 @@ func TestPreservedPrimaryDesiredExcludesProvisioningAndPreservesCredentials(t *t
 	if common["ultra_generate_exit_tls"] != false || common["ultra_preserve_primary"] != true {
 		t.Fatal("preserved primary or TLS mode missing")
 	}
+	if common["ultra_preserved_primary_database"] != "fixture" || common["ultra_preserved_primary_user"] != "app" {
+		t.Fatal("preserved primary monitor target missing")
+	}
 	if err := validatePreservedPrimaryFrozenMode(p, inv); err != nil {
 		t.Fatal(err)
 	}
-	if common["ultra_preserved_primary_backup_max_age_seconds"] != "7200" {
-		t.Fatal("explicit backup age lost from frozen inventory")
-	}
-	common["ultra_preserved_primary_backup_max_age_seconds"] = "86400"
+	common["ultra_preserve_primary"] = false
 	if err := validatePreservedPrimaryFrozenMode(p, inv); err == nil {
-		t.Fatal("changed frozen backup age accepted")
+		t.Fatal("changed frozen preservation mode accepted")
 	}
-	common["ultra_preserved_primary_backup_max_age_seconds"] = "7200"
+	common["ultra_preserve_primary"] = true
 	delete(p.SourceValues, preservePrimarySourceKey)
 	if err := validatePreservedPrimaryFrozenMode(p, inv); err == nil {
 		t.Fatal("ordinary bootstrap reused a preserved-primary frozen request")
@@ -163,6 +161,9 @@ for name,text in json.load(sys.stdin).items():
   if play['name']=='Prepare primary replication slot and identity':
    for task in play['tasks']:
     assert 'not (ultra_preserve_primary' in task.get('when',''), (name,task)
+  monitor=[task for task in plays[0]['tasks'] if task.get('name')=='Restore replica-state observation on the preserved primary']
+  assert len(monitor)==1 and monitor[0]['when']=='ultra_preserve_primary | default(false) | bool', (name,monitor)
+  assert monitor[0]['vars']=={'postgres_monitor_database_name':'{{ ultra_preserved_primary_database }}','postgres_monitor_database_user':'{{ ultra_preserved_primary_user }}'}, (name,monitor)
 `
 	payload := map[string]string{}
 	for _, name := range []string{"bootstrap.yml", "bootstrap-postgres.yml"} {
@@ -171,6 +172,16 @@ for name,text in json.load(sys.stdin).items():
 			t.Fatal(err)
 		}
 		payload[name] = string(raw)
+	}
+	monitor, err := os.ReadFile(filepath.Join("..", "..", "deploy", "ansible", "roles", "postgres", "tasks", "monitor.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitorSQL := string(monitor)
+	for _, forbidden := range []string{"DROP ", "TRUNCATE ", "INSERT INTO ", "UPDATE ", "DELETE FROM ", "ALTER TABLE "} {
+		if strings.Contains(strings.ToUpper(monitorSQL), forbidden) {
+			t.Fatalf("replica monitor changes application data: %s", forbidden)
+		}
 	}
 	raw, _ := json.Marshal(payload)
 	cmd := exec.Command("python3", "-c", program)
@@ -216,10 +227,10 @@ func TestPreservedPrimaryIdentityAcrossComponentProcesses(t *testing.T) {
 	write(filepath.Join(bin, "runuser"), []byte("#!/bin/sh\ncat "+shellQuote(observed)+"\n"), 0700)
 	vars := map[string]any{
 		"ultra_preserve_primary": true, "ultra_preserved_primary_database": "fixture",
-		"ultra_preserved_primary_host": "192.0.2.40", "ultra_preserved_primary_backup_sha256": strings.Repeat("a", 64),
-		"ultra_preserved_primary_backup_snapshot_unix": strconv.FormatInt(time.Now().Unix(), 10),
-		"ultra_preserved_primary_identity_file":        filepath.Join(directory, "primary.json"),
-		"ansible_connection":                           "local", "ansible_python_interpreter": "/usr/bin/python3",
+		"ultra_preserved_primary_user":          "app",
+		"ultra_preserved_primary_host":          "192.0.2.40",
+		"ultra_preserved_primary_identity_file": filepath.Join(directory, "primary.json"),
+		"ansible_connection":                    "local", "ansible_python_interpreter": "/usr/bin/python3",
 	}
 	inventory := map[string]any{"all": map[string]any{"vars": vars, "children": map[string]any{
 		"bridge":    map[string]any{"hosts": map[string]any{"bridge": map[string]any{"ansible_host": "192.0.2.10"}}},
@@ -253,15 +264,6 @@ func TestPreservedPrimaryIdentityAcrossComponentProcesses(t *testing.T) {
 	}
 	run("before", true)
 	run("after", true)
-	vars["ultra_preserved_primary_backup_snapshot_unix"] = strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10)
-	write(filepath.Join(directory, "inventory.json"), mustPreservedJSON(t, inventory), 0600)
-	run("before", false)
-	vars["ultra_preserved_primary_backup_max_age_seconds"] = "7200"
-	write(filepath.Join(directory, "inventory.json"), mustPreservedJSON(t, inventory), 0600)
-	run("before", true)
-	vars["ultra_preserved_primary_backup_max_age_seconds"] = "86401"
-	write(filepath.Join(directory, "inventory.json"), mustPreservedJSON(t, inventory), 0600)
-	run("before", false)
 	write(observed, []byte(`{"system_identifier":"54321","database":"fixture","database_oid":16384,"primary":true}`), 0600)
 	run("after", false)
 }

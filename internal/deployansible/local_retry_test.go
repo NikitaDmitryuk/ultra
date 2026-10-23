@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 )
@@ -307,93 +306,7 @@ func TestFrozenBootstrapRetryRejectsMissingOrInvalidLock(t *testing.T) {
 	}
 }
 
-func TestUpgradeCompensationRetryExactRequestAndReceipt(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python unavailable")
-	}
-	for _, test := range []struct{ operation, action string }{
-		{"upgrade-runtime", "prepare"}, {"upgrade-runtime", "commit"}, {"upgrade-runtime", "rollback"}, {"upgrade-runtime", "tls-release"},
-		{"rollback", "rollback"},
-		{"upgrade-domain", "apply"}, {"upgrade-domain", "accept"}, {"upgrade-domain", "rollback"}, {"upgrade-domain", "retire"}, {"upgrade-domain", "finalize"},
-		{"upgrade-dns-migration", "prepare"}, {"upgrade-dns-migration", "promote"}, {"upgrade-dns-migration", "retire"}, {"upgrade-dns-migration", "rollback"},
-	} {
-		operation := test.operation
-		t.Run(operation+"/"+test.action, func(t *testing.T) {
-			root := t.TempDir()
-			if err := os.Chmod(root, 0700); err != nil {
-				t.Fatal(err)
-			}
-			ctx, unlock, err := WithOperationLock(context.Background(), root)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer unlock()
-			executable := filepath.Join(root, "ansible")
-			source := "#!" + python + "\n" + `import json,pathlib,sys
-job=pathlib.Path(sys.argv[-1][1:]).parent
-count=job/'calls'
-n=int(count.read_text())+1 if count.exists() else 1
-count.write_text(str(n))
-if n==1:sys.exit(1)
-result=job/'result.json'
-result.write_text(json.dumps({'verified':True}))
-result.chmod(0o600)
-`
-			if err := os.WriteFile(executable, []byte(source), 0700); err != nil {
-				t.Fatal(err)
-			}
-			variables := map[string]any{
-				"ultra_lock_directory":        root,
-				"ultra_runtime_action":        "rollback",
-				"ultra_runtime_effect_inputs": map[string]string{"bridge": "exact"},
-				"ultra_upgrade_domain_action": "rollback",
-				"ultra_dns_migration_action":  "rollback",
-			}
-			if test.action == "tls-release" {
-				variables["ultra_managed_tunnel_requests"] = map[string]string{"exit_fixture": "exact"}
-				variables["ultra_managed_tunnel_hook_sha256"] = strings.Repeat("a", 64)
-			}
-			variables["ultra_runtime_action"] = test.action
-			variables["ultra_upgrade_domain_action"] = test.action
-			variables["ultra_dns_migration_action"] = test.action
-			stage := filepath.Join(root, "rollback")
-			if _, err := RunLocal(ctx, operation, map[string]any{}, variables, stage, python, executable); err == nil {
-				t.Fatal("missing failed rollback")
-			}
-			original, err := os.ReadFile(filepath.Join(stage, "request.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := RunLocal(ctx, operation, map[string]any{}, variables, stage, python, executable); err == nil {
-				t.Fatal("ordinary replay retried failed rollback")
-			}
-			variables["changed"] = true
-			if _, err := RunLocalRetryFailed(ctx, operation, map[string]any{}, variables, stage, python, executable); err == nil {
-				t.Fatal("changed compensation accepted")
-			}
-			delete(variables, "changed")
-			for range 2 {
-				if _, err := RunLocalRetryFailed(ctx, operation, map[string]any{}, variables, stage, python, executable); !errors.Is(
-					err,
-					ErrExecutionFenced,
-				) {
-					t.Fatal("uncertain compensation replay accepted", err)
-				}
-			}
-			after, err := os.ReadFile(filepath.Join(stage, "request.json"))
-			if err != nil || !bytes.Equal(original, after) {
-				t.Fatal("frozen request changed", err)
-			}
-			calls, _ := os.ReadFile(filepath.Join(stage, "calls"))
-			if string(calls) != "1" {
-				t.Fatalf("executions: %s", calls)
-			}
-			if _, err := os.Stat(filepath.Join(stage, "history", "attempt-1.json")); !os.IsNotExist(err) {
-				t.Fatal("blocked retry advanced the attempt", err)
-			}
-		})
-	}
+func TestLocalRetryOnlyAllowsCurrentBootstrapAndIngressOperations(t *testing.T) {
 	for _, action := range []string{"prepare", "activate", "adopt", "retire-experiment"} {
 		if !localRetryOperation("ingress", map[string]any{"ultra_ingress_action": action}) {
 			t.Fatalf("ingress retry not enabled: %s", action)
@@ -405,15 +318,8 @@ result.chmod(0o600)
 		}
 	}
 	for _, operation := range []string{"upgrade", "restore", "upgrade-runtime", "upgrade-domain", "upgrade-dns-migration", "rollback"} {
-		if localRetryOperation(
-			operation,
-			map[string]any{
-				"ultra_runtime_action":        "apply",
-				"ultra_upgrade_domain_action": "arbitrary",
-				"ultra_dns_migration_action":  "arbitrary",
-			},
-		) {
-			t.Fatalf("unauthorized retry: %s", operation)
+		if localRetryOperation(operation, map[string]any{}) {
+			t.Fatalf("retired operation retry enabled: %s", operation)
 		}
 	}
 }

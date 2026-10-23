@@ -87,7 +87,6 @@ func bootstrapRetryOperation(operation string) bool {
 		"initialize-recovery-monitor",
 		"inspect-bootstrap",
 		"bootstrap",
-		"bootstrap-recovery-inspect",
 		"bootstrap-recovery-tools",
 		"bootstrap-postgres",
 		"bootstrap-exit",

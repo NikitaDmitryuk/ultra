@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -254,50 +253,6 @@ func TestOperatorRuntimePython314Alias(t *testing.T) {
 				t.Fatalf("unsafe runtime alias: %v", err)
 			}
 		})
-	}
-}
-
-func TestCompletedUpgradeReplayRejectsReplacementSourceWithoutExecuting(t *testing.T) {
-	root := t.TempDir()
-	_ = os.Chmod(root, 0700)
-	directory := retentionOperationFixture(t, root, "v1.0.0")
-	release := filepath.Join(root, "release")
-	plan := &installplan.InstallPlan{
-		SchemaVersion: installplan.CurrentSchemaVersion,
-		Bridge:        installplan.BridgeConfig{SSHHost: "192.0.2.1", ReuseSpec: true},
-		Exits:         []installplan.ExitNode{{SSHHost: "192.0.2.2"}},
-	}
-	completeDeploymentFixture(plan, release, "/pins")
-	if err := installplan.ValidatePlan(plan); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(directory, "operator-plan.json")); err != nil {
-		t.Fatal(err)
-	}
-	if err := freezeOperatorPlan(directory, plan, release); err != nil {
-		t.Fatal(err)
-	}
-	manifest := &automationRelease{Version: "v1.0.0", SourceCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-	if err := sealCompletedOperatorOperation(directory, "upgrade", manifest, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"); err != nil {
-		t.Fatal(err)
-	}
-	if err := collectCompletedOperatorArtifacts(root, &automationRelease{Version: "v3.0.0"}); err != nil {
-		t.Fatal(err)
-	}
-	// These executor paths cannot run; success therefore proves a metadata cache.
-	if err := ansibleUpgrade(context.Background(), plan, release, directory, "/missing/python", "/missing/ansible", false); err != nil {
-		t.Fatal("absent-source cache failed", err)
-	}
-	if err := os.Mkdir(release, 0700); err != nil {
-		t.Fatal(err)
-	}
-	for _, contents := range []string{`{"version":"v2.0.0","source_commit":"cccccccccccccccccccccccccccccccccccccccc"}`, `malformed`} {
-		if err := os.WriteFile(filepath.Join(release, "release-manifest.json"), []byte(contents), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := ansibleUpgrade(context.Background(), plan, release, directory, "/missing/python", "/missing/ansible", false); err == nil {
-			t.Fatal("replaced same-path source silently cached")
-		}
 	}
 }
 

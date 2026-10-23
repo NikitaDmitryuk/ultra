@@ -1,7 +1,0 @@
----
-- name: Stage retained-primary recovery without activating applications or broker
-  hosts: bridge
-  gather_facts: false
-  any_errors_fatal: true
-  roles:
-    - recovery_preparation

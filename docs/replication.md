@@ -35,10 +35,16 @@ Ansible PostgreSQL bootstrap устанавливает в прикладной 
 Схема `ultra_monitor` — управляемая инфраструктура: logical dump исключает её
 через `--exclude-schema=ultra_monitor`, чтобы restore с `--no-owner --no-acl`
 не менял владельца SECURITY DEFINER и не открывал его `PUBLIC`.
-Оба bootstrap playbook устанавливают монитор в `post_tasks` после возможного
-`database_import`, сохраняя проверку пустой целевой БД; роль `restore_database`
-устанавливает его после подтверждённого восстановления. При ручном logical dump
-используйте то же исключение; состояние монитора не переносится из архива.
+Оба обычных bootstrap playbook устанавливают монитор в `post_tasks` после
+возможного `database_import`, сохраняя проверку пустой целевой БД; роль
+`restore_database` устанавливает его после подтверждённого восстановления.
+В режиме полной non-DB замены installer отдельно повторно устанавливает только
+этот монитор на сохранённом primary с прежними именем БД и application role.
+Так восстанавливается `/api/cloud/replicas` без пересоздания таблиц, строк,
+пользовательских ролей, primary или standby. Это узкое изменение каталога
+PostgreSQL, не прикладная миграция; прикладной schema migration version остаётся
+неизменной. При ручном logical dump используйте то же исключение; состояние
+монитора не переносится из архива.
 
 Ответ содержит одну запись `id=bridge`, `source=primary`, `state`,
 `replay_lag_bytes` (nullable) и `checked_at` в UTC. `streaming` означает
@@ -158,11 +164,16 @@ relay. Инструкции: [recovery](../deploy/recovery/README.md).
 
 Управляемое перемещение primary на bridge, promotion, автоматический failover и
 произвольный выбор replica-host не поддерживаются. При полной замене non-DB
-окружения primary остаётся на месте; проверенный dump служит восстановлению данных,
-а не разрешением сбрасывать здоровую БД. Незавершённый deployment-журнал не является
-блокером новой замены. См. [production replacement](production-replacement.md).
+окружения primary и schema остаются без изменений. Обычный deploy не создаёт
+dump, не выполняет restore/import/migrations; legacy deployment journals не
+являются основанием блокировать или продолжать новую замену. DB backup/restore
+остаются отдельными явными recovery tools. См.
+[production replacement](production-replacement.md).
 
-### Начальная загрузка данных
+### Отдельный bootstrap базы и импорт данных
+
+Этот путь предназначен только для отдельного fresh DB bootstrap или явно
+порученного импорта данных. Он не вызывается обычным `make deploy`.
 
 Для чистого DB-хоста `DATABASE_DUMP` задаёт путь к локальному приватному
 custom-format архиву `pg_dump`. Нужен локальный `pg_restore`: установщик проверяет

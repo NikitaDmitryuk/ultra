@@ -1,0 +1,7 @@
+[Service]
+Environment=ULTRA_VULTR_SSH_KEY_FILE=/etc/ultra-fleet/id_ed25519
+{% if ultra_fleet_provider_key_source | default('') | length > 0 or fleet_provider_existing_key | default(false) | bool %}
+Environment=ULTRA_VULTR_KEY_FILE=/var/lib/ultra-relay/automation/vultr-api-key
+{% endif %}
+Environment=ULTRA_VULTR_BRIDGE_IP={{ ultra_fleet_provider_bridge_ip }}
+Environment=ULTRA_ANSIBLE_SOCKET=/run/ultra-ansible/controller.sock

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -107,52 +106,4 @@ func openRetainedWorkspace(path string, uid uint32) (*os.File, error) {
 		return fail("retained_primary_new_workspace_required")
 	}
 	return f, nil
-}
-
-func retainedRuntimePreflight(python, ansible string) error {
-	for _, path := range []string{python, ansible} {
-		if !filepath.IsAbs(path) {
-			return errors.New("retained_primary_runtime_path_invalid")
-		}
-		// Python/venv entrypoints may be system-owned symlinks. Validate their
-		// resolved target and every ancestor before accepting executable code.
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil || !trustedOperatorExecutable(resolved) || !trustedOperatorParents(path) {
-			return errors.New("retained_primary_runtime_unavailable")
-		}
-	}
-	for _, name := range []string{"ssh", "age", "pg_restore"} {
-		path, err := exec.LookPath(name)
-		if err != nil || !trustedOperatorExecutable(path) || !trustedOperatorParents(path) {
-			return errors.New("retained_primary_tool_unavailable: " + name)
-		}
-	}
-	return nil
-}
-
-func trustedOperatorExecutable(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0022 != 0 || info.Mode().Perm()&0111 == 0 {
-		return false
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	uid := uint32(os.Geteuid())
-	return ok && (st.Uid == 0 || st.Uid == uid) && trustedOperatorParents(path)
-}
-
-func trustedOperatorParents(path string) bool {
-	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
-		info, err := os.Stat(dir)
-		if err != nil || !info.IsDir() || info.Mode().Perm()&0022 != 0 {
-			return false
-		}
-		st, ok := info.Sys().(*syscall.Stat_t)
-		uid := uint32(os.Geteuid())
-		if !ok || (st.Uid != 0 && st.Uid != uid) {
-			return false
-		}
-		if filepath.Dir(dir) == dir {
-			return true
-		}
-	}
 }

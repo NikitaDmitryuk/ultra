@@ -175,7 +175,7 @@ class JournalTests(unittest.TestCase):
         raw = json.dumps({'inventory': {}, 'variables': {}}).encode()
         (self.job / 'request.json').write_bytes(raw)
         (self.job / 'job.json').write_text(json.dumps({
-            'schema_version': 1, 'operation': 'reconcile',
+            'schema_version': 1, 'operation': 'bootstrap',
             'request_sha256': hashlib.sha256(raw).hexdigest(), 'binary_sha256': '0' * 64,
         }))
         for path in self.job.iterdir():

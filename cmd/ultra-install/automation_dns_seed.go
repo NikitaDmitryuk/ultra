@@ -12,8 +12,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -38,56 +36,6 @@ type dnsAttestation struct {
 
 // dnsRecordFetch reads the provider's view of one zone. It never writes.
 type dnsRecordFetch func(zone string) ([]dnsAttestedRecord, error)
-
-// The attestation lives beside the canonical configuration it describes.
-func dnsAttestationPath(config, requested string) string {
-	if requested != "" {
-		return requested
-	}
-	return filepath.Join(filepath.Dir(config), "dns-attestation.json")
-}
-
-// prepareAnsibleDNSAttested adds the ownership seed when the operator attested
-// the rows that already exist for this exact plan, and confirms each one with the
-// provider before any variable is set. Without an attestation it changes nothing.
-func prepareAnsibleDNSAttested(
-	p *installplan.InstallPlan,
-	variables map[string]any,
-	config, requested string,
-	fetch dnsRecordFetch,
-) error {
-	path := dnsAttestationPath(config, requested)
-	if _, err := os.Lstat(path); os.IsNotExist(err) {
-		return prepareAnsibleDNS(p, variables)
-	}
-	raw, err := readRebuildInput(path, true)
-	if err != nil {
-		return errors.New("dns_attestation_unavailable")
-	}
-	var attestation dnsAttestation
-	if decodeRetainedReconcile(raw, &attestation) != nil || attestation.Protocol != dnsAttestationProtocol {
-		return errors.New("dns_attestation_invalid")
-	}
-	if err = validateDNSAttestation(attestation, p); err != nil {
-		return err
-	}
-	if err = prepareAnsibleDNS(p, variables); err != nil {
-		return err
-	}
-	if fetch == nil {
-		key, _ := variables["ultra_dns_api_key"].(string)
-		if key == "" {
-			return errors.New("dns_attestation_provider_credential_required")
-		}
-		fetch = vultrRecordFetch(key, nil)
-	}
-	if err = verifyDNSAttestationOnline(attestation, fetch); err != nil {
-		return err
-	}
-	variables["ultra_dns_receipt_seed"] = dnsAttestationSeed(attestation)
-	variables["ultra_dns_attestation_sha256"] = dnsAttestedFingerprint(attestation)
-	return nil
-}
 
 // dnsAttestationDesired derives the only rows this plan may ever own. Both the
 // attestation check and the attestation writer read it from the same place.
@@ -164,25 +112,6 @@ func dnsAttestedFingerprint(a dnsAttestation) string {
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
-}
-
-// verifyDNSAttestationOnline rejects every attested row the provider does not
-// confirm, so an attestation can only describe what is really published.
-func verifyDNSAttestationOnline(a dnsAttestation, fetch dnsRecordFetch) error {
-	published, err := fetch(a.Zone)
-	if err != nil {
-		return err
-	}
-	byID := map[string]dnsAttestedRecord{}
-	for _, record := range published {
-		byID[record.ID] = record
-	}
-	for _, attested := range a.Records {
-		if live, ok := byID[attested.ID]; !ok || live != attested {
-			return errors.New("dns_attestation_provider_mismatch")
-		}
-	}
-	return nil
 }
 
 // vultrRecordFetch only reads. The credential stays in the request header and no

@@ -1,6 +1,5 @@
 """Attest the real systemd owner before a production mutator dispatches."""
 import hashlib
-import json
 import os
 from pathlib import Path
 import pwd
@@ -40,7 +39,7 @@ def require_containment(directory, generation):
         raise fail
     group = groups[0]
     if os.geteuid() == 0:
-        expression = r'/system.slice/(ultra-(?:deploy-[a-f0-9]{64}|execution-[a-f0-9]{32}|ansible-controller|recovery-reconcile)\.service)'
+        expression = r'/system.slice/(ultra-(?:execution-[a-f0-9]{32}|ansible-controller|recovery-reconcile)\.service)'
         fragment_prefixes = ('/etc/systemd/system/', '/run/systemd/transient/')
         users = ('', 'root')
     else:
@@ -99,15 +98,6 @@ def require_containment(directory, generation):
         if argv[1:] != ['/opt/ultra-recovery/reconcile.py', '--config', '/etc/ultra-recovery/reconcile.json']:
             raise fail
         trusted('/opt/ultra-recovery/reconcile.py')
-    else:
-        identity = unit[len('ultra-deploy-'):-len('.service')]
-        operation = Path('/var/lib/ultra-ansible/deploy-operations') / identity
-        raw = trusted(operation / 'request.json').read_bytes()
-        pointer = json.loads(trusted(operation.parent / 'current.json').read_bytes())
-        if hashlib.sha256(raw).hexdigest() != identity or pointer != {'schema': 1, 'request_sha256': identity}:
-            raise fail
-        if argv[1:] != ['deploy-operation', 'run', '--directory', str(operation)]:
-            raise fail
     return unit
 
 

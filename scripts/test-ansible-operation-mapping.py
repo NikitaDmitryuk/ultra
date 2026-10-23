@@ -14,34 +14,44 @@ spec.loader.exec_module(controller)
 
 class OperationMappingTests(unittest.TestCase):
     def test_every_operation_resolves_to_one_existing_implementation(self):
-        self.assertEqual(len(controller.OPERATIONS), 53)
+        self.assertEqual(len(controller.OPERATIONS), 29)
         self.assertEqual(set(controller.PLAYBOOKS), controller.OPERATIONS)
         selected = {controller.operation_playbook(op) for op in controller.OPERATIONS}
-        self.assertEqual(len(selected), 51)
-        retired = {'adopt-replica-tunnels.yml', 'replica.yml', 'stop-replica.yml', 'bridge-migrate.yml', 'bridge-migrate-inspect.yml', 'bridge-migrate-fence.yml', 'bridge-migrate-probe.yml', 'bridge-migrate-rollback-peers.yml'}
-        self.assertEqual(selected, {path.name for path in (SOURCE / 'playbooks').glob('*.yml')})
-        for op in retired:
+        self.assertEqual(len(selected), 27)
+        retired = {
+            'commit-release.yml', 'publish-release.yml', 'verify-release.yml',
+        }
+        current = {path.name for path in (SOURCE / 'playbooks').glob('*.yml')} - retired
+        self.assertEqual(selected, current)
+        for operation in ('upgrade', 'rollback', 'commit-release',
+                          'publish-release', 'verify-release', 'rebuild-retained-primary',
+                          'rebuild-retained-bridge', 'inspect-upgrade'):
             with self.assertRaisesRegex(ValueError, 'unsupported_operation'):
-                controller.operation_playbook(op.removesuffix('.yml'))
+                controller.operation_playbook(operation)
 
     def test_shared_implementation_does_not_merge_operation_identities(self):
-        aliases = {'domain-cutover': 'ingress', 'configure-exit-operator': 'configure-exit',
-                   'configure-replica': 'replica'}
+        aliases = {'domain-cutover': 'ingress', 'configure-exit-operator': 'configure-exit'}
         for operation in controller.OPERATIONS:
             self.assertEqual(controller.operation_playbook(operation), aliases.get(operation, operation) + '.yml')
         self.assertIn('configure-exit-operator', controller.LOCAL_OPERATIONS)
         self.assertIn('reserve-rolledback-bootstrap', controller.LOCAL_OPERATIONS)
+        self.assertIn('rollback-adoption', controller.LOCAL_OPERATIONS)
         self.assertIn('retain-artifacts', controller.LOCAL_OPERATIONS)
         self.assertIn('restore-database', controller.LOCAL_OPERATIONS)
-        for operation in ('bootstrap-recovery-inspect', 'bootstrap-recovery-tools'):
+        self.assertIn('reconcile', controller.LOCAL_OPERATIONS)
+        self.assertEqual(controller.operation_playbook('reconcile'), 'reconcile.yml')
+        self.assertNotIn('bootstrap-recovery-inspect', controller.LOCAL_OPERATIONS)
+        for operation in ('bootstrap-recovery-tools',):
             self.assertIn(operation, controller.LOCAL_OPERATIONS)
             self.assertEqual(controller.operation_playbook(operation), operation + '.yml')
         self.assertEqual(controller.OPERATIONS - controller.LOCAL_OPERATIONS, {'configure-exit'})
         for operation in ('bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge'):
             self.assertIn(operation, controller.LOCAL_OPERATIONS)
         self.assertNotIn('configure-exit', controller.LOCAL_OPERATIONS)
-        self.assertNotIn('configure-replica', controller.LOCAL_OPERATIONS)
-        self.assertNotIn('stop-replica', controller.LOCAL_OPERATIONS)
+        for operation in ('upgrade', 'rollback', 'commit-release',
+                          'publish-release', 'verify-release', 'inspect-upgrade',
+                          'rebuild-retained-primary', 'rebuild-retained-bridge'):
+            self.assertNotIn(operation, controller.LOCAL_OPERATIONS)
 
     def test_components_reuse_native_roles_and_durable_pins(self):
         postgres = (SOURCE / 'playbooks/bootstrap-postgres.yml').read_text()

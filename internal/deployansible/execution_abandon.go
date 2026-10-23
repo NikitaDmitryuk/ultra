@@ -75,10 +75,6 @@ func AbandonExecutionFence(expected ExecutionFence, prove func(ExecutionFence) e
 		return ErrExecutionFenced
 	}
 	defer lock.Close() //nolint:errcheck
-	// A supervised deployment operation is itself an executor of the fleet.
-	if err = deploymentExecutionAdmission(root); err != nil {
-		return ErrExecutionFenced
-	}
 	if err = verifyFailedGeneration(root, expected); err != nil {
 		return err
 	}

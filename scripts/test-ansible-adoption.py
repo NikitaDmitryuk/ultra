@@ -13,6 +13,7 @@ from unittest.mock import patch
 import yaml
 import ansible.module_utils
 
+ROOT = Path(__file__).resolve().parents[1]
 ansible.module_utils.__path__.append(str(Path(__file__).resolve().parents[1] / 'deploy/ansible/module_utils'))
 
 source = Path(__file__).resolve().parents[1] / 'deploy/ansible/library/ultra_adoption_guard.py'
@@ -353,8 +354,10 @@ for kwargs in [{'state': 'unknown'}, {'load': 'error'}, {'load': 'masked'},
 # Every wait after pausing timers must use the same predicate and retain its
 # bounded retry policy. No wait is allowed to stop a recovery service.
 ansible_root = source.parents[1]
+for service in ('ultra-recovery-backup.service', 'ultra-recovery-reconcile.service'):
+    unit = (ROOT / 'deploy/recovery' / service).read_text()
+    assert 'deploy-operation' not in unit, service
 for name, register in [('playbooks/prepare-controller.yml', 'adoption_cycle'),
-                       ('playbooks/upgrade.yml', 'release_cycle'),
                        ('playbooks/reserve-rolledback-bootstrap.yml', 'adoption_retry_cycle'),
                        ('roles/recovery_primary/tasks/main.yml', 'recovery_primary_copy_active')]:
     tasks = yaml.safe_load((ansible_root / name).read_text())

@@ -9,11 +9,13 @@ SSH-туннель. Перенос VPN-хоста не должен восста
 их протокол предусматривал перенос локального PostgreSQL и физические реплики.
 Они требуют отдельной переработки перед применением к dedicated DB архитектуре.
 Не запускайте прежние playbooks вручную. Для новой версии действует отдельная
-[политика полной замены production](production-replacement.md): старые non-DB
-исполнители и журнал удаляются в рамках новой установки, а dedicated PostgreSQL
-primary сохраняется.
+[политика полной замены production](production-replacement.md): `make deploy`
+отбрасывает старый non-DB runtime и deployment state, сохраняя dedicated
+PostgreSQL primary и schema. Обычный deploy не выполняет DB bootstrap, import,
+restore или migrations.
 
-Bootstrap поднимает новую БД либо применяет миграции через запуск relay.
+Отдельный DB bootstrap поднимает новую БД; relay migrations для изменения схемы
+не входят в обычный deploy и требуют отдельной операции.
 Повторная установка с сохранением spec принимает только уже настроенный
 DB-туннель. Перенос существующих данных выполняется явно и отдельно от
 переноса bridge. Контракт: [отдельная БД](replication.md) и

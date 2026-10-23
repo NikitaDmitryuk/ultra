@@ -23,7 +23,7 @@ func WithOperationExecutionTimeout(ctx context.Context, operation string, timeou
 }
 
 // WithExecutionTimeout fixes the execution budget in subsequently prepared job
-// requests. It does not change readiness budgets or grant retry authorization.
+// requests. It does not grant retry authorization.
 func WithExecutionTimeout(ctx context.Context, timeout time.Duration) (context.Context, error) {
 	if timeout <= 0 || timeout%time.Second != 0 || timeout > time.Duration(1<<63-1)-time.Minute {
 		return ctx, errors.New("invalid_execution_timeout")
@@ -32,25 +32,16 @@ func WithExecutionTimeout(ctx context.Context, timeout time.Duration) (context.C
 }
 
 func executionTimeoutSeconds(ctx context.Context, operation string) int64 {
-	if operation == "wait-upgrade-readiness" {
-		return 700
-	}
 	if seconds, ok := ctx.Value(operationExecutionTimeoutKey(operation)).(int64); ok {
 		return seconds
 	}
 	if seconds, ok := ctx.Value(executionTimeoutKey{}).(int64); ok {
 		return seconds
 	}
-	if operation == "upgrade" {
-		return 3600
-	}
 	return 1200
 }
 
 func explicitExecutionTimeout(ctx context.Context, operation string) bool {
-	if operation == "wait-upgrade-readiness" {
-		return false
-	}
 	_, scoped := ctx.Value(operationExecutionTimeoutKey(operation)).(int64)
 	_, all := ctx.Value(executionTimeoutKey{}).(int64)
 	return scoped || all
@@ -70,7 +61,7 @@ func localExecutionRequest(ctx context.Context, operation, directory string, inv
 			return nil, err
 		}
 	}
-	if priorErr == nil && !explicitExecutionTimeout(ctx, operation) && operation != "wait-upgrade-readiness" {
+	if priorErr == nil && !explicitExecutionTimeout(ctx, operation) {
 		if frozenSeconds != nil {
 			candidate, err := json.Marshal(
 				map[string]any{"inventory": inventory, "variables": variables, "execution_timeout_seconds": *frozenSeconds},
@@ -84,9 +75,6 @@ func localExecutionRequest(ctx context.Context, operation, directory string, inv
 		}
 	}
 	legacySeconds := int64(1200)
-	if operation == "wait-upgrade-readiness" {
-		legacySeconds = 700
-	}
 	if !explicitExecutionTimeout(ctx, operation) || seconds == legacySeconds {
 		legacy, err := json.Marshal(map[string]any{"inventory": inventory, "variables": variables})
 		if err != nil {
@@ -211,11 +199,7 @@ func preparedExecutionTimeout(directory string) (time.Duration, error) {
 		return 0, err
 	}
 	if budget == nil {
-		// Missing fields belong to legacy frozen requests. Fresh upgrades always
-		// carry 3600 explicitly; never silently extend an old 1200s budget.
-		if value.Operation == "wait-upgrade-readiness" {
-			return 700 * time.Second, nil
-		}
+		// Missing fields belong to legacy frozen requests and retain their budget.
 		return 1200 * time.Second, nil
 	}
 	seconds := *budget

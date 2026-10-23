@@ -1,27 +1,14 @@
 # Переустановка non-DB production
 
-Этот документ заменяет прежний runbook безопасного восстановления non-DB узлов.
-Для новой production-версии старые bridge/exit узлы, незавершённые deployment
-journals, admission markers и worker jobs считаются disposable. Старую выкладку
-не возобновляем, не откатываем и не пытаемся согласовать с новой: non-DB инфраструктуру можно
-удалить и развернуть заново, допуская полный простой.
+Эта страница заменяет прежний runbook восстановления non-DB узлов. Используйте
+только штатный [`make deploy`](production-replacement.md) для полной замены.
+Для production deployment используйте только штатный путь полной замены,
+описанный в [production replacement](production-replacement.md).
 
-**Сохраняем PostgreSQL primary и данные.** До удаления узлов сделай свежую
-зашифрованную копию, проверь её аутентификацию и полный архив, затем проверь
-восстановление в изолированную тестовую БД. Убедись, что primary исключена из
-целей удаления, и после установки сверь идентичность primary и схему. Не
-переустанавливай БД и не восстанавливай дамп поверх исправной primary. Процедуры
-аварийного восстановления самих данных остаются в [DB recovery](../deploy/recovery/README.md).
-
-Локальный journal можно удалить только как часть остановки или удаления старой
-non-DB инфраструктуры. Удаление `operation.json` само по себе не останавливает
-удалённые исполнители и не делает безопасным запуск нового controller.
-
-## Реализация CLI
-
-Политика полной замены описана в [production replacement](production-replacement.md).
-На данный момент `make deploy` ещё может завершиться
-`manual_supervised_operation_conflict`; отдельный destructive replacement CLI
-не реализован. Старые команды `rebuild-non-db preflight` и
-`rebuild-retained-primary` не являются поддерживаемым путём выкладки новой
-версии. Не запускай production-операции по этому устаревшему runbook.
+Старые non-DB серверы и связанные с ними deployment journals, markers и jobs
+отбрасываются; старую операцию не возобновляют, не откатывают и не согласуют.
+PostgreSQL primary, прикладные таблицы, данные и версия миграций сохраняются.
+Обычная замена не выполняет dump, restore, import или migration прикладной БД;
+она может восстановить служебные объекты `ultra_monitor` для replica status.
+Аварийные DB backup/restore-процедуры
+описаны отдельно в [DB recovery](../deploy/recovery/README.md).

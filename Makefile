@@ -34,11 +34,11 @@ vet:
 format:
 	python3 scripts/generate-ansible-ssh-policy.py
 	@echo "Running goimports..."
-	git ls-files -z --cached --others --exclude-standard -- '*.go' | xargs -0 -r go run $(GOIMPORTS_PKG) -w
+	rg --files -0 -g '*.go' | xargs -0 -r go run $(GOIMPORTS_PKG) -w
 	@echo "Running gofmt -s..."
-	git ls-files -z --cached --others --exclude-standard -- '*.go' | xargs -0 -r gofmt -s -w
+	rg --files -0 -g '*.go' | xargs -0 -r gofmt -s -w
 	@echo "Running golines..."
-	git ls-files -z --cached --others --exclude-standard -- '*.go' | xargs -0 -r go run $(GOLINES_PKG) --max-len=140 -w
+	rg --files -0 -g '*.go' | xargs -0 -r go run $(GOLINES_PKG) --max-len=140 -w
 
 tidy:
 	go mod tidy
@@ -164,7 +164,6 @@ build-bench:
 .PHONY: test-ui
 test-ui:
 	python3 scripts/test-mobile-bootstrap.py
-	python3 scripts/test-database-preservation.py
 	python3 scripts/test-verify-miniapp.py
 	python3 scripts/test-ingress-ssh.py
 	python3 scripts/test-bridge-subscription.py
@@ -194,9 +193,6 @@ test-ansible:
 	python3 scripts/test-ansible-controller-process.py
 	python3 scripts/test-ansible-controller-fence.py
 	python3 scripts/test-ansible-execution-containment.py
-	python3 scripts/test-upgrade-worker-drain.py
-	python3 scripts/test-ansible-release-contracts.py
-	python3 scripts/test-controller-enforcement.py
 	python3 scripts/test-ansible-db-tunnel-authorization.py
 	python3 scripts/test-db-tunnel-reuse.py
 	python3 scripts/test-ansible-safe-diagnostic.py
@@ -205,17 +201,9 @@ test-ansible:
 	python3 scripts/test-ansible-input-types.py
 	python3 scripts/test-relay-environment.py
 	python3 scripts/test-ansible-operation-mapping.py
-	python3 scripts/test-retained-primary-gates.py
 	python3 scripts/test-subscription-key-projection.py
-	python3 scripts/test-recovery-tools-bootstrap.py
-	python3 scripts/test-ansible-dns-migration.py
-	python3 scripts/test-ansible-upgrade-runtime.py
-	python3 scripts/test-ansible-accepted-resume.py
-	python3 scripts/test-ansible-upgrade-domain.py
 	python3 scripts/test-ansible-runtime-effects.py
-	python3 scripts/test-ansible-lifecycle-retry.py
 	python3 scripts/test-ansible-release-identity.py
-	python3 scripts/test-ansible-upgrade-baseline.py
 	python3 scripts/test-ansible-release-retention.py
 	python3 scripts/test-ansible-ingress.py
 	python3 scripts/test-ansible-retire-experiment.py
@@ -231,22 +219,14 @@ test-ansible:
 test-ansible-exit: build-install
 	python3 scripts/test-ansible-exit.py --installer "$(CURDIR)/ultra-install" --ansible-playbook "$$(command -v ansible-playbook)"
 
-# Explicit operator action: builds committed HEAD in isolation, then rolls out.
+# Explicit operator action: builds committed HEAD in isolation, then replaces
+# every configured non-DB host while preserving the PostgreSQL primary.
 .PHONY: deploy deploy-build test-manual-deploy
 deploy:
-	python3 scripts/manual-deploy.py $(if $(INSTALL_CONFIG),--config "$(INSTALL_CONFIG)",) $(if $(filter 1,$(RETRY_FAILED)),--retry-failed,) $(if $(SUBSCRIPTION_PROBE_ENV_FILE),--subscription-probe-env-file "$(SUBSCRIPTION_PROBE_ENV_FILE)",) $(if $(PREPARE_RECOVERY_SOURCE_SPEC),--prepare-recovery-source-spec "$(PREPARE_RECOVERY_SOURCE_SPEC)",)
+	python3 scripts/manual-deploy.py $(if $(INSTALL_CONFIG),--config "$(INSTALL_CONFIG)",)
 
 deploy-build:
 	python3 scripts/manual-deploy.py --build-only
-
-# The installer and canonical config must already name the same verified candidate.
-.PHONY: replace-production replace-production-help
-replace-production-help:
-	@echo 'replace-production requires REPLACEMENT_INSTALLER, PRIMARY_BACKUP, PRIMARY_BACKUP_SHA256, PRIMARY_RESTORE_RECEIPT, REPLACEMENT_COMMIT, REPLACEMENT_MANIFEST_SHA256, REPLACEMENT_STATE_DIR and ACKNOWLEDGE_REPLACEMENT=replace-non-db-preserve-postgresql; PREVIOUS_INSTALL_CONFIG is required for a dispatched old journal; INSTALL_CONFIG defaults to the canonical install.config; optional PRIMARY_BACKUP_MAX_AGE defaults to 30m and must be at most 24h.'
-
-replace-production:
-	@test -n "$(REPLACEMENT_INSTALLER)" -a -n "$(PRIMARY_BACKUP)" -a -n "$(PRIMARY_BACKUP_SHA256)" -a -n "$(PRIMARY_RESTORE_RECEIPT)" -a -n "$(REPLACEMENT_COMMIT)" -a -n "$(REPLACEMENT_MANIFEST_SHA256)" -a -n "$(REPLACEMENT_STATE_DIR)" -a "$(ACKNOWLEDGE_REPLACEMENT)" = "replace-non-db-preserve-postgresql" || { echo "replace-production: explicit installer, backup/digest/restore receipt, candidate pins, new state directory and destructive acknowledgment required" >&2; exit 2; }
-	"$(REPLACEMENT_INSTALLER)" replace-production --config "$(if $(INSTALL_CONFIG),$(INSTALL_CONFIG),$(CURDIR)/install.config)" --primary-backup "$(PRIMARY_BACKUP)" --primary-backup-sha256 "$(PRIMARY_BACKUP_SHA256)" $(if $(PRIMARY_BACKUP_MAX_AGE),--primary-backup-max-age "$(PRIMARY_BACKUP_MAX_AGE)",) --primary-restore-receipt "$(PRIMARY_RESTORE_RECEIPT)" $(if $(PREVIOUS_INSTALL_CONFIG),--previous-config "$(PREVIOUS_INSTALL_CONFIG)",) --source-commit "$(REPLACEMENT_COMMIT)" --manifest-sha256 "$(REPLACEMENT_MANIFEST_SHA256)" --state-dir "$(REPLACEMENT_STATE_DIR)" --manual-journal "$(dir $(if $(INSTALL_CONFIG),$(INSTALL_CONFIG),$(CURDIR)/install.config))dist/manual/operation.json" --acknowledge "$(ACKNOWLEDGE_REPLACEMENT)"
 
 test-manual-deploy:
 	python3 scripts/test-manual-deploy.py

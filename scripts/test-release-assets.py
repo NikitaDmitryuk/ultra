@@ -116,7 +116,7 @@ def validate_bundle(directory, workflow):
             for python in [312, 313, 314]:
                 assert any('-none-any.whl' in name or '-cp' + str(python) + '-' in name or re.search(r'-cp(\d+)-abi3-', name) and int(re.search(r'-cp(\d+)-abi3-', name)[1]) <= python for name in wheels), 'wheel missing for Python ' + str(python) + ': ' + package
     ansible = archive_files(directory / 'ultra-ansible.tar.gz')
-    assert {'ansible.cfg', 'requirements.txt', 'controller.py', 'playbooks/bootstrap.yml', 'playbooks/upgrade.yml'} <= ansible.keys(), 'incomplete Ansible sources'
+    assert {'ansible.cfg', 'requirements.txt', 'controller.py', 'playbooks/bootstrap.yml', 'playbooks/bootstrap-automation.yml'} <= ansible.keys(), 'incomplete Ansible sources'
     expected_ansible = {path.relative_to(ROOT / 'deploy/ansible').as_posix() for path in (ROOT / 'deploy/ansible').rglob('*') if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc' and (path.relative_to(ROOT / 'deploy/ansible').parts[0] in ['playbooks', 'roles', 'library', 'callback_plugins', 'module_utils'] or path.name in ['ansible.cfg', 'requirements.txt', 'controller.py'])}
     assert set(ansible) == expected_ansible, 'incomplete Ansible source inventory'
     for name, raw in ansible.items():

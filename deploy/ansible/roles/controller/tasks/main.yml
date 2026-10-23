@@ -13,18 +13,6 @@
   ansible.builtin.import_tasks: runtime.yml
 - name: Record the private physical deployment identity
   ansible.builtin.import_tasks: identity.yml
-- name: Open only the exact proof-bound recovery candidate before startup
-  ultra_controller_enforcement:
-    action: open-recovery
-    recovery_request_sha256: "{{ ultra_recovery_preparation_request_sha256 }}"
-    operation_id: "{{ ultra_lifecycle_id }}"
-    scope_sha256: "{{ ultra_controller_enforcement_spec.scope_sha256 }}"
-    manifest_sha256: "{{ ultra_release_manifest_sha256 }}"
-    candidate: "{{ ultra_controller_enforcement_spec.candidates[ultra_architecture].identity }}"
-    proof: "{{ ultra_controller_enforcement_spec.proof }}"
-    phase: before
-  when: ultra_recovery_preparation_request_sha256 | default('') | length > 0
-  no_log: true
 - name: Ensure the controller is running
   ansible.builtin.systemd_service:
     name: ultra-ansible-controller.service

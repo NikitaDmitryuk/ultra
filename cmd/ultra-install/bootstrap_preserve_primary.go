@@ -6,44 +6,22 @@ import (
 	"net"
 	"path/filepath"
 	"strconv"
-	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 	"github.com/google/uuid"
 )
 
-const preservePrimarySourceKey = "_BOOTSTRAP_PRESERVE_PRIMARY_BACKUP_SHA256"
-const defaultPrimaryBackupMaxAge = 30 * time.Minute
-const maximumPrimaryBackupMaxAge = 24 * time.Hour
-const preservePrimaryMaxAgeKey = "_BOOTSTRAP_PRESERVE_PRIMARY_BACKUP_MAX_AGE_SECONDS"
-
-func validatePrimaryBackupMaxAge(age time.Duration) error {
-	if age <= 0 || age > maximumPrimaryBackupMaxAge || age%time.Second != 0 {
-		return errors.New("primary_backup_max_age_invalid")
-	}
-	return nil
-}
-
-func preservedPrimaryMaxAgeSeconds(p *installplan.InstallPlan) string {
-	if value := p.SourceValues[preservePrimaryMaxAgeKey]; value != "" {
-		return value
-	}
-	return strconv.FormatInt(int64(defaultPrimaryBackupMaxAge/time.Second), 10)
-}
-
-const preservePrimarySnapshotKey = "_BOOTSTRAP_PRESERVE_PRIMARY_BACKUP_SNAPSHOT_UNIX"
+const preservePrimarySourceKey = "_BOOTSTRAP_PRESERVE_PRIMARY"
 
 func preservingBootstrapPrimary(p *installplan.InstallPlan) bool {
 	return p.SourceValues[preservePrimarySourceKey] != ""
 }
 
-// This mode reinstalls application components only. It does not retire an old
-// operation or establish executor quiescence, and must retain those gates.
-func authorizePreservedPrimaryBootstrap(p *installplan.InstallPlan, backup, backupSHA string, maxAge time.Duration) error {
-	if err := validatePrimaryBackupMaxAge(maxAge); err != nil {
-		return err
-	}
+// This mode reinstalls application components while retaining the configured
+// PostgreSQL primary. Replacement orchestration observes identity and schema
+// before and after; no DB backup is required for this non-DB operation.
+func authorizePreservedPrimaryBootstrap(p *installplan.InstallPlan) error {
 	if !p.FullAutomation() || !p.Database.Enabled || p.AdoptRuntime || p.Database.PrimaryHost == "" ||
 		samePreservedPrimaryHost(
 			p.Database.PrimaryHost,
@@ -63,17 +41,10 @@ func authorizePreservedPrimaryBootstrap(p *installplan.InstallPlan, backup, back
 	if p.Secrets.DatabaseDumpFile != "" {
 		return errors.New("bootstrap_preserved_primary_import_forbidden")
 	}
-	metadata, err := verifyRetainedBackupBundle(backup, backupSHA, p.SourceValues["ULTRA_OPERATOR_AGE_IDENTITY_FILE"],
-		retainedSourceSHA256(p.Database.PrimaryHost, p.Database.Name), p.Database.Name, maxAge, time.Now())
-	if err != nil {
-		return err
-	}
 	if p.SourceValues == nil {
 		p.SourceValues = map[string]string{}
 	}
-	p.SourceValues[preservePrimaryMaxAgeKey] = strconv.FormatInt(int64(maxAge/time.Second), 10)
-	p.SourceValues[preservePrimarySourceKey] = backupSHA
-	p.SourceValues[preservePrimarySnapshotKey] = strconv.FormatInt(metadata.SnapshotStarted.Unix(), 10)
+	p.SourceValues[preservePrimarySourceKey] = "true"
 	return nil
 }
 
@@ -139,11 +110,9 @@ func preparePreservedPrimaryDesired(
 	common := inventory["all"].(map[string]any)["vars"].(map[string]any)
 	common["ultra_preserve_primary"] = true
 	common["ultra_preserved_primary_database"] = p.Database.Name
+	common["ultra_preserved_primary_user"] = p.Database.User
 	common["ultra_preserved_primary_host"] = p.Database.PrimaryHost
 	common["ultra_preserved_primary_identity_file"] = filepath.Join(directory, "preserved-primary-identity.json")
-	common["ultra_preserved_primary_backup_sha256"] = p.SourceValues[preservePrimarySourceKey]
-	common["ultra_preserved_primary_backup_snapshot_unix"] = p.SourceValues[preservePrimarySnapshotKey]
-	common["ultra_preserved_primary_backup_max_age_seconds"] = preservedPrimaryMaxAgeSeconds(p)
 	common["ultra_generate_exit_tls"] = false
 	// Pin preservation is verified against the actual post-install certificate by
 	// the bridge playbook before it writes or activates bootstrap routes.
@@ -183,10 +152,7 @@ func comparePreservedRouteIdentities(desired, prior []exits.BootstrapEntry) erro
 func validatePreservedPrimaryFrozenMode(p *installplan.InstallPlan, inventory map[string]any) error {
 	common := inventory["all"].(map[string]any)["vars"].(map[string]any)
 	preserved, _ := common["ultra_preserve_primary"].(bool)
-	if preserved != preservingBootstrapPrimary(p) || (preserved &&
-		(common["ultra_preserved_primary_backup_sha256"] != p.SourceValues[preservePrimarySourceKey] ||
-			common["ultra_preserved_primary_backup_snapshot_unix"] != p.SourceValues[preservePrimarySnapshotKey] ||
-			common["ultra_preserved_primary_backup_max_age_seconds"] != preservedPrimaryMaxAgeSeconds(p))) {
+	if preserved != preservingBootstrapPrimary(p) {
 		return errors.New("bootstrap_preserved_primary_frozen_mode_changed")
 	}
 	return nil

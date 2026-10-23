@@ -94,6 +94,9 @@ func applyReservedBootstrap(
 		}
 	}
 	operationVars := map[string]any{"ultra_lock_directory": stateRoot}
+	if preservingBootstrapPrimary(p) {
+		operationVars["ultra_bootstrap_ingress_enabled"] = p.Automation != nil && p.Automation.Ingress != nil
+	}
 	emitInstallEvent(format, installplan.EventStep, "", "applying Ansible bootstrap", "")
 	components, engineErr := bootstrapUsesComponents(directory)
 	if engineErr != nil {
@@ -146,7 +149,13 @@ func applyReservedBootstrap(
 			return err
 		}
 	}
-	if p.FullAutomation() {
+	// Fleet access and the controller serve user cloud lifecycle operations.
+	// Replacement omits recovery automation and its readiness gate only.
+	if p.FullAutomation() && preservingBootstrapPrimary(p) {
+		if err := bootstrapReplacementController(ctx, p, inventory, directory, inspection["bridge"].Architecture, python, executable, generation); err != nil {
+			return err
+		}
+	} else if p.FullAutomation() {
 		if err := ansibleBootstrapAutomationGeneration(ctx, p, inventory, directory, inspection["bridge"].Architecture, python, executable, generation); err != nil {
 			return err
 		}
@@ -165,5 +174,47 @@ func applyReservedBootstrap(
 		return err
 	}
 	_, err = resumeBootstrapFinalization(ctx, p, directory, planRoot, python, executable)
+	return err
+}
+
+func bootstrapReplacementController(
+	ctx context.Context,
+	p *installplan.InstallPlan,
+	inventory map[string]any,
+	directory, architecture, python, executable string,
+	generation int,
+) error {
+	a := p.Automation
+	manifest, err := verifyAutomationRelease(a.ReleaseDir, a.Version)
+	if err != nil {
+		return err
+	}
+	installer, err := upgradeAsset(manifest, "ultra-install-linux-"+architecture)
+	if err != nil {
+		return err
+	}
+	runtime, err := upgradeAsset(manifest, "ultra-ansible-runtime-linux-"+architecture+".tar.gz")
+	if err != nil {
+		return err
+	}
+	stage := filepath.Join(directory, "controller-sources")
+	if err = os.MkdirAll(stage, 0700); err != nil {
+		return err
+	}
+	providerKey, err := prepareComputeProviderSecret(p, stage)
+	if err != nil {
+		return err
+	}
+	_, err = runBootstrapMutationStage(ctx, "bootstrap-automation", inventory, map[string]any{
+		"ultra_bootstrap_recovery_enabled": false,
+		"ultra_fleet_provider_key_source":  providerKey,
+		"ultra_fleet_provider_bridge_ip":   a.BridgeIPv4,
+		"ultra_controller_directory":       managedControllerDirectory(a.Version),
+		"ultra_controller_bridge_address":  p.Bridge.Address,
+		"ultra_controller_runtime_archive": filepath.Join(a.ReleaseDir, runtime.Name),
+		"ultra_controller_runtime_sha256":  runtime.SHA,
+		"ultra_install_source":             filepath.Join(a.ReleaseDir, installer.Name),
+		"ultra_install_sha256":             installer.SHA,
+	}, directory, "automation", generation, python, executable)
 	return err
 }

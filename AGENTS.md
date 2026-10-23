@@ -10,6 +10,7 @@ ultra — Go-проект: relay с ролями bridge/exit, SSH-установ
 - [ADR](docs/adr/README.md): долгосрочные решения и правила их отбора.
 - [Архитектура](docs/architecture.md): потоки данных, границы и источники состояния.
 - [Разработка](docs/development.md): проверки, SQL, миграции, встроенные ресурсы.
+- [Production replacement](docs/production-replacement.md) и [rebuild non-DB](docs/rebuild-non-db.md): полная non-DB замена с сохранением PostgreSQL.
 - [README](README.md): сборка, установка, эксплуатация и API.
 - [Перенос bridge](docs/bridge-migration.md): подготовка, cutover и rollback между серверами.
 - [Мобильная установка](deploy/MOBILE_INSTALL.md) и [TLS](deploy/TLS.md).

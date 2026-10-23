@@ -1,7 +1,7 @@
 ---
 - name: Install restricted live bridge replication observation
   ansible.builtin.command:
-    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --dbname, "{{ ultra_postgres.name }}"]
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --dbname, "{{ postgres_monitor_database_name }}"]
     stdin: |
       BEGIN;
       CREATE SCHEMA IF NOT EXISTS ultra_monitor AUTHORIZATION postgres;
@@ -30,8 +30,8 @@
       $monitor$;
       ALTER FUNCTION ultra_monitor.bridge_replication_status() OWNER TO postgres;
       REVOKE ALL ON FUNCTION ultra_monitor.bridge_replication_status() FROM PUBLIC;
-      SELECT format('GRANT USAGE ON SCHEMA ultra_monitor TO %I', '{{ ultra_postgres.user }}') \gexec
-      SELECT format('GRANT EXECUTE ON FUNCTION ultra_monitor.bridge_replication_status() TO %I', '{{ ultra_postgres.user }}') \gexec
+      SELECT format('GRANT USAGE ON SCHEMA ultra_monitor TO %I', '{{ postgres_monitor_database_user }}') \gexec
+      SELECT format('GRANT EXECUTE ON FUNCTION ultra_monitor.bridge_replication_status() TO %I', '{{ postgres_monitor_database_user }}') \gexec
       COMMIT;
   changed_when: false
   no_log: true
