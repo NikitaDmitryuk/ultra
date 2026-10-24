@@ -66,6 +66,9 @@ func validatePlanRoles(p *InstallPlan) error {
 	if strings.TrimSpace(p.SSH.User) == "" {
 		p.SSH.User = "root"
 	}
+	if p.SSH.User != "root" {
+		return errors.New("remote deployment requires ssh.user=root")
+	}
 	if p.SSH.ConnectTimeoutSec == 0 {
 		p.SSH.ConnectTimeoutSec = 10
 	}
@@ -241,6 +244,9 @@ func validatePlanRoles(p *InstallPlan) error {
 		}
 		if p.Database.SSHUser == "" {
 			p.Database.SSHUser = p.SSH.User
+		}
+		if p.Database.SSHUser != "root" {
+			return errors.New("remote deployment requires database.ssh_user=root")
 		}
 		if p.Database.SSHIdentity == "" {
 			p.Database.SSHIdentity = p.SSH.Identity

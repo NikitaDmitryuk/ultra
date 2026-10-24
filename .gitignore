@@ -30,6 +30,7 @@ profile.cov
 # Go workspace file
 go.work
 go.work.sum
+.gocache/
 
 # env file
 .env
@@ -37,6 +38,8 @@ go.work.sum
 # Локальные параметры установки (IP, SSH-ключ)
 install.config
 /install.config.before-domain-cutover
+# Приватная квитанция владения DNS-записями (id записей провайдера)
+/dns-attestation.json
 
 # Local dev TLS material (generate with openssl — see README)
 examples/test-cert.pem
@@ -68,6 +71,9 @@ minisign.pub
 .claude/
 .idea/
 .codex/
+
+.tmp*
+*.lock
 
 # Optional generated Graphify index and reports
 /graphify-out/

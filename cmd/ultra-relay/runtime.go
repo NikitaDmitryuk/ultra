@@ -305,11 +305,26 @@ func (r *bridgeRuntime) applyLocked(reason string, force bool) (err error) {
 
 // refresh performs control work outside applyMu. Local failover is never waiting
 // for a database retry or provider API request.
-func (r *bridgeRuntime) refresh(ctx context.Context, database *db.DB, users *auth.DBManager, nodes *exits.Manager) error {
+func (r *bridgeRuntime) refresh(ctx context.Context, database *db.DB, users *auth.DBManager, nodes *exits.Manager) (err error) {
+	started, stage := time.Now(), "refresh_lock"
+	defer func() {
+		if err != nil && r.log != nil {
+			r.log.Warn(
+				"runtime refresh failed",
+				"stage",
+				stage,
+				"duration_ms",
+				time.Since(started).Milliseconds(),
+				"deadline_exceeded",
+				errors.Is(err, context.DeadlineExceeded),
+			)
+		}
+	}()
 	r.refreshMu.Lock()
 	defer r.refreshMu.Unlock()
 	c, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+	stage = "database_ping"
 	if err := database.Pool.Ping(c); err != nil {
 		return err
 	}
@@ -320,30 +335,38 @@ func (r *bridgeRuntime) refresh(ctx context.Context, database *db.DB, users *aut
 	if recovering {
 		checkpoint = r.collector.CheckpointFull
 	}
+	stage = "traffic_checkpoint"
 	if err := checkpoint(c); err != nil {
 		return err
 	}
 	quotas := db.NewQuotaRepo(database)
+	stage = "traffic_pending_batches"
 	pendingBatches, err := r.state.PendingBatches(0)
 	if err != nil {
 		return err
 	}
+	stage = "quota_preflight"
 	if err = quotas.PreflightBatches(c, pendingBatches); err != nil {
 		return err
 	}
+	stage = "traffic_replay"
 	if err := r.collector.Replay(c); err != nil {
 		return err
 	}
 	routes := db.NewRouteRepo(database)
+	stage = "quota_recalculate"
 	if _, err := quotas.Recalculate(c, r.now()); err != nil {
 		return err
 	}
+	stage = "route_prepare"
 	if err := routes.PrepareManual(c); err != nil {
 		return err
 	}
+	stage = "users_refresh"
 	if err := users.Refresh(c); err != nil {
 		return err
 	}
+	stage = "nodes_refresh"
 	if err := nodes.Refresh(c); err != nil {
 		return err
 	}
@@ -354,10 +377,12 @@ func (r *bridgeRuntime) refresh(ctx context.Context, database *db.DB, users *aut
 			live = append(live, u)
 		}
 	}
+	stage = "quota_limits"
 	limits, err := quotas.RuntimeLimits(c, r.now())
 	if err != nil {
 		return err
 	}
+	stage = "quota_snapshot"
 	acknowledgements, err := quotas.Snapshot(c)
 	if err != nil {
 		return err
@@ -383,15 +408,18 @@ func (r *bridgeRuntime) refresh(ctx context.Context, database *db.DB, users *aut
 	if err != nil {
 		return err
 	}
+	stage = "runtime_commit"
 	err = r.commitCandidate(payload, now, data)
 
 	if err != nil {
 		r.setError("runtime_apply_failed")
 		return err
 	}
+	stage = "quota_acknowledge"
 	if err = quotas.Acknowledge(c, acknowledgements); err != nil {
 		return err
 	}
+	stage = "route_acknowledge"
 	return routes.AppliedManual(c)
 }
 

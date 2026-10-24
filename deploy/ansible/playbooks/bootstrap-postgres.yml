@@ -1,4 +1,20 @@
 ---
+- name: Verify preserved primary before application mutation
+  hosts: databases
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Verify preserved primary
+      ansible.builtin.import_tasks: tasks/preserved-primary-before.yml
+      when: ultra_preserve_primary | default(false) | bool
+    - name: Restore replica-state observation on the preserved primary
+      ansible.builtin.include_role:
+        name: postgres
+        tasks_from: monitor
+      vars:
+        postgres_monitor_database_name: "{{ ultra_preserved_primary_database }}"
+        postgres_monitor_database_user: "{{ ultra_preserved_primary_user }}"
+      when: ultra_preserve_primary | default(false) | bool
 - name: Reconcile dedicated exit DNS before component certificate issuance
   hosts: bridge
   gather_facts: false
@@ -28,23 +44,26 @@
     - name: Install client tools for archive validation
       ansible.builtin.include_role:
         name: postgres_client
-      when: ultra_database_import_dump | default('') | length > 0
+      when: not (ultra_preserve_primary | default(false) | bool) and ultra_database_import_dump | default('') | length > 0
     - name: Check archive and existing database before provisioning
       ansible.builtin.include_role:
         name: database_import
         tasks_from: preflight
-      when: ultra_database_import_dump | default('') | length > 0
+      when: not (ultra_preserve_primary | default(false) | bool) and ultra_database_import_dump | default('') | length > 0
   roles:
     - role: postgres
-      when: ultra_postgres is defined
+      when: not (ultra_preserve_primary | default(false) | bool) and ultra_postgres is defined
     - role: database_import
-      when: ultra_database_import_dump | default('') | length > 0
+      when: not (ultra_preserve_primary | default(false) | bool) and ultra_database_import_dump | default('') | length > 0
   post_tasks:
     - name: Configure managed bridge replication observation after database import
       ansible.builtin.include_role:
         name: postgres
         tasks_from: monitor
-      when: ultra_postgres is defined
+      vars:
+        postgres_monitor_database_name: "{{ ultra_postgres.name }}"
+        postgres_monitor_database_user: "{{ ultra_postgres.user }}"
+      when: not (ultra_preserve_primary | default(false) | bool) and ultra_postgres is defined
 - name: Authorize application database tunnel
   hosts: databases
   gather_facts: false
@@ -66,6 +85,7 @@
   any_errors_fatal: true
   tasks:
     - name: Observe primary cluster identity
+      when: not (ultra_preserve_primary | default(false) | bool)
       ansible.builtin.command:
         argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only, --no-align]
         stdin: |
@@ -73,9 +93,11 @@
       register: postgres_replica_primary_identity
       changed_when: false
     - name: Require a primary system identifier
+      when: not (ultra_preserve_primary | default(false) | bool)
       ansible.builtin.assert:
         that: postgres_replica_primary_identity.stdout | trim is match('^[0-9]+$')
     - name: Observe recovery parameters and reject external tablespaces
+      when: not (ultra_preserve_primary | default(false) | bool)
       ansible.builtin.command:
         argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only, --no-align]
         stdin: |
@@ -88,6 +110,7 @@
       register: postgres_replica_primary_parameters
       changed_when: false
     - name: Ensure bounded persistent bridge replication slot
+      when: not (ultra_preserve_primary | default(false) | bool)
       ansible.builtin.command:
         argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only]
         stdin: |
@@ -110,6 +133,7 @@
   any_errors_fatal: true
   roles:
     - role: postgres_replica
+      when: not (ultra_preserve_primary | default(false) | bool)
 - name: Confirm completed database component
   hosts: localhost
   gather_facts: false

@@ -105,41 +105,8 @@ func ansibleLifecycle(
 	directory, python, executable, phase string,
 	drain bool,
 ) error {
-	_, err := ansibleLifecycleTransition(ctx, p, inventory, directory, python, executable, phase, drain, false)
+	_, err := ansibleLifecycleTransition(ctx, p, inventory, directory, python, executable, phase, drain)
 	return err
-}
-
-// ansibleLifecycleReserve returns only after the broker confirms this exact
-// operation ID and phase. Callers may then safely install same-ID recovery
-// before attempting any operation that can fail after reservation.
-func ansibleLifecycleReserve(
-	ctx context.Context,
-	p *installplan.InstallPlan,
-	inventory map[string]any,
-	directory, python, executable, phase string,
-) (deployansible.Receipt, error) {
-	id := lifecycleID(directory)
-	if localLifecycleBridge(p) {
-		socket := os.Getenv("ULTRA_ANSIBLE_SOCKET")
-		if socket == "" {
-			socket = "/run/ultra-ansible/controller.sock"
-		}
-		if err := (deployansible.Client{Socket: socket}).LifecycleWithOperationLock(ctx, id, phase); err != nil {
-			return deployansible.Receipt{}, err
-		}
-		return deployansible.Receipt{
-			Result: deployansible.Result{Values: map[string]any{"verified": true, "reservation_id": id, "reservation_phase": phase}},
-		}, nil
-	}
-	receipt, err := ansibleLifecycleTransition(ctx, p, inventory, directory, python, executable, phase, false, true)
-	if err != nil {
-		return deployansible.Receipt{}, err
-	}
-	values := receipt.Result.Values
-	if values["verified"] != true || values["reservation_id"] != id || values["reservation_phase"] != phase {
-		return deployansible.Receipt{}, errors.New("lifecycle_reservation_unverified")
-	}
-	return receipt, nil
 }
 
 func ansibleLifecycleTransition(
@@ -147,14 +114,14 @@ func ansibleLifecycleTransition(
 	p *installplan.InstallPlan,
 	inventory map[string]any,
 	directory, python, executable, phase string,
-	drain, reserveOnly bool,
+	drain bool,
 ) (deployansible.Receipt, error) {
 	id := lifecycleID(directory)
 	if localLifecycleBridge(p) {
 		if err := (deployansible.Client{Socket: lifecycleSocket()}).LifecycleWithOperationLock(ctx, id, phase); err != nil {
 			return deployansible.Receipt{}, err
 		}
-		if phase == "applying" && !reserveOnly {
+		if phase == "applying" {
 			if drain {
 				if err := drainLocalLifecycle(ctx); err != nil {
 					return deployansible.Receipt{}, err
@@ -170,10 +137,9 @@ func ansibleLifecycleTransition(
 	// A native remote root module performs the exact same fixed transition and
 	// drain. For local bridge it is idempotent after the OFD handoff above.
 	variables := map[string]any{
-		"ultra_lifecycle_id":           id,
-		"ultra_lifecycle_phase":        phase,
-		"ultra_lifecycle_drain":        drain,
-		"ultra_lifecycle_reserve_only": reserveOnly,
+		"ultra_lifecycle_id":    id,
+		"ultra_lifecycle_phase": phase,
+		"ultra_lifecycle_drain": drain,
 	}
 	stage, err := os.MkdirTemp(directory, "lifecycle-"+phase+"-")
 	if err != nil {

@@ -1,0 +1,59 @@
+---
+- name: Publish the authenticated target tools identity separately from the app manifest
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ item.destination }}"
+    owner: root
+    group: root
+    mode: '0600'
+  loop: "{{ ultra_recovery_tools_identity_files | default([]) }}"
+- name: Verify the complete live bundle against its exact manifest and archive
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, /opt/ultra-recovery/live_tools.py, verify-staged]
+  changed_when: false
+  when: ultra_recovery_tools_identity_files | default([]) | length > 0
+
+- name: Read private backup identity before retaining the current canonical tools
+  ansible.builtin.slurp:
+    src: /etc/ultra-recovery/backup.json
+  register: release_tools_backup_policy
+  when: ultra_recovery_tools_identity_files | default([]) | length > 0
+  no_log: true
+- name: Include the complete current tools identity and source bundle in recovery artifacts
+  ansible.builtin.copy:
+    content: >-
+      {{ release_tools_backup_policy.content | b64decode | from_json |
+      combine({'artifact_paths': ((release_tools_backup_policy.content | b64decode | from_json).artifact_paths +
+      (ultra_recovery_tools_identity_files | map(attribute='destination') | list) +
+      (ultra_recovery_files | map(attribute='destination') | list) +
+      (ultra_recovery_files | selectattr('destination', 'match', '^/etc/systemd/system/') |
+      map(attribute='destination') | map('basename') | map('regex_replace', '^', '/opt/ultra-recovery/') | list)) | unique | sort}) |
+      to_nice_json(preprocess_unsafe=False) }}
+    dest: /etc/ultra-recovery/backup.json
+    owner: root
+    group: root
+    mode: '0600'
+  when: ultra_recovery_tools_identity_files | default([]) | length > 0
+  no_log: true
+  diff: false
+- name: Read the private runtime reconciliation policy
+  ansible.builtin.slurp:
+    src: /etc/ultra-recovery/reconcile.json
+  register: release_tools_reconcile_policy
+  when: ultra_recovery_tools_identity_files | default([]) | length > 0
+  no_log: true
+- name: Keep live reconciliation on the selected verified controller and current complete bundle
+  ansible.builtin.copy:
+    content: >-
+      {{ release_tools_reconcile_policy.content | b64decode | from_json |
+      combine({'bundle_dir': '/opt/ultra-recovery',
+      'installer_binary': '/opt/ultra-ansible/current/ultra-install',
+      'ansible_executable': '/opt/ultra-ansible/current/venv/bin/ansible-playbook'}) |
+      to_nice_json(preprocess_unsafe=False) }}
+    dest: /etc/ultra-recovery/reconcile.json
+    owner: root
+    group: root
+    mode: '0600'
+  when: ultra_recovery_tools_identity_files | default([]) | length > 0
+  no_log: true
+  diff: false

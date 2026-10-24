@@ -9,6 +9,16 @@ import vm_topology
 
 
 class PreservedTopology(unittest.TestCase):
+    def test_every_guest_can_reach_dedicated_primary_and_restore_ports(self):
+        for index in range(len(vm_topology.NODES)):
+            options=vm_topology.topology_arguments(index).split(',guestfwd=')
+            peers=','.join(options)
+            self.assertIn('restrict=on',peers)
+            for peer in range(len(vm_topology.NODES)):
+                for port in (22,15432):
+                    route='tcp:'+vm_topology.endpoint(peer)+':'+str(port)+'-cmd:socat STDIO TCP:127.0.0.1:'+str(vm_topology.forwarded(peer,port))
+                    self.assertIn(route,peers)
+
     def setup_fixture(self, root):
         saved={'synthetic_only':True,'network_restrict':True,'isolation_verified_at':123,
                'nodes':{name:vm_topology.endpoint(index) for index,name in enumerate(vm_topology.NODES)},

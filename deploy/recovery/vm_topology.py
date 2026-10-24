@@ -42,7 +42,7 @@ def topology_arguments(index):
                'guestfwd=tcp:198.18.0.20:443-cmd:socat STDIO TCP:127.0.0.1:' + str(18443 + index)]
     for port in PORTS:
         options.append('hostfwd=tcp:127.0.0.1:' + str(forwarded(index, port)) + '-:' + str(port))
-    for peer in range(4):
+    for peer in range(len(NODES)):
         for port in PORTS:
             options.append('guestfwd=tcp:' + endpoint(peer) + ':' + str(port) + '-cmd:socat STDIO TCP:127.0.0.1:' + str(forwarded(peer, port)))
     return ','.join(options)
@@ -134,7 +134,7 @@ def verify(args):
                 time.sleep(3)
     saved['isolation_verified_at'] = int(time.time())
     (directory / 'topology.json').write_text(json.dumps(saved))
-    print(json.dumps({'all_four_guests_ready': True, 'external_tcp_blocked': True}))
+    print(json.dumps({'all_guests_ready': True, 'external_tcp_blocked': True}))
 
 
 def resume(args):

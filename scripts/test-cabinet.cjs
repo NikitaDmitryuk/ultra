@@ -966,23 +966,26 @@ test("diagnostics separates primary database identity from bridge standby observ
   assert.ok(primaryRow);
   assert.match(primaryRow, /Доступен · primary/);
   assert.doesNotMatch(primaryRow, /127\.0\.0\.1/);
-  let standbyRow = html
-    .split(/(?=<div class="route-row">)/)
-    .find((row) => row.includes("Bridge PostgreSQL standby"));
-  assert.ok(standbyRow);
-  assert.match(standbyRow, /streaming/);
-  assert.match(standbyRow, /badge good/);
+  let replicaHTML = p.el("#network-replication").innerHTML;
+  assert.match(replicaHTML, /Bridge PostgreSQL standby/);
+  assert.match(replicaHTML, /Поток репликации работает/);
+  assert.match(replicaHTML, /badge good/);
+
+  p.responses["/api/cloud/replicas"] = [
+    { id: "bridge", state: "syncing" },
+  ];
+  await vm.runInContext("diagnostics()", p.context);
+  replicaHTML = p.el("#network-replication").innerHTML;
+  assert.match(replicaHTML, /Копия синхронизируется/);
+  assert.match(replicaHTML, /badge wait/);
 
   p.responses["/api/cloud/replicas"] = [
     { id: "bridge", state: "disconnected" },
   ];
   await vm.runInContext("diagnostics()", p.context);
-  standbyRow = p.el("#network-health").innerHTML
-    .split(/(?=<div class="route-row">)/)
-    .find((row) => row.includes("Bridge PostgreSQL standby"));
-  assert.ok(standbyRow);
-  assert.match(standbyRow, /badge bad/);
-  assert.match(standbyRow, /disconnected/);
+  replicaHTML = p.el("#network-replication").innerHTML;
+  assert.match(replicaHTML, /badge bad/);
+  assert.match(replicaHTML, /Нет потока репликации/);
 
   p.responses["/api/cloud/replicas"] = [
     { id: "bridge", state: "streaming" },
@@ -995,11 +998,42 @@ test("diagnostics separates primary database identity from bridge standby observ
     .find((row) => row.includes("Primary PostgreSQL"));
   assert.ok(primaryRow);
   assert.match(primaryRow, /Состояние неизвестно/);
-  standbyRow = html
-    .split(/(?=<div class="route-row">)/)
-    .find((row) => row.includes("Bridge PostgreSQL standby"));
-  assert.ok(standbyRow);
-  assert.match(standbyRow, /streaming/);
+  replicaHTML = p.el("#network-replication").innerHTML;
+  assert.match(replicaHTML, /Поток репликации работает/);
+});
+
+test("replica status remains visible when network health is unavailable", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/health": new Error("health unavailable"),
+    "/api/alerts/recent?limit=10": [],
+    "/api/cloud/replicas": [
+      { id: "bridge", state: "streaming", replay_lag_bytes: 12 },
+    ],
+    "/api/database": { primary_host: "192.0.2.40", reachable: true },
+  });
+  await flush();
+  await vm.runInContext("diagnostics()", p.context);
+  assert.match(p.el("#network-health").innerHTML, /Состояние сети/);
+  assert.match(p.el("#network-health").innerHTML, /Повторить/);
+  assert.match(p.el("#network-replication").innerHTML, /Поток репликации работает/);
+  assert.match(p.el("#network-replication").innerHTML, /Отставание WAL: 12 байт/);
+});
+
+test("replica endpoint failure is shown separately from unknown replica state", async () => {
+  const p = page(false, {
+    "/api/me": { is_admin: true },
+    "/api/health": { bridge: { internet_ok: true }, exits: [] },
+    "/api/alerts/recent?limit=10": [],
+    "/api/cloud/replicas": new Error("replica endpoint unavailable"),
+    "/api/database": { primary_host: "192.0.2.40", reachable: true },
+  });
+  await flush();
+  await vm.runInContext("diagnostics()", p.context);
+  assert.match(p.el("#network-replication").innerHTML, /Реплика PostgreSQL/);
+  assert.match(p.el("#network-replication").innerHTML, /Данные временно недоступны/);
+  assert.match(p.el("#network-replication").innerHTML, /Повторить/);
+  assert.doesNotMatch(p.el("#network-replication").innerHTML, /Нет потока репликации/);
 });
 
 test("overview brings monthly history and config ranking into the main cabinet", async () => {

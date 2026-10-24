@@ -266,15 +266,5 @@ class RuntimeEffectsTests(unittest.TestCase):
             self.assertTrue(alias.is_symlink())
             self.assertFalse(any(call[1] in ('enable', 'disable') for call in host.calls if call[0].endswith('systemctl')))
 
-    def test_coordinated_playbook_quiesces_before_exits_and_commit_never_restarts(self):
-        play = (ROOT / 'deploy/ansible/playbooks/upgrade-runtime.yml').read_text()
-        self.assertLess(play.index('Validate complete fleet bindings'), play.index('Quiesce bridge traffic'))
-        self.assertLess(play.index('Quiesce bridge traffic'), play.index('Transition exits serially'))
-        self.assertLess(play.index('Transition exits serially'), play.index('Transition bridge and verify'))
-        commit = play.split('- name: Commit only', 1)[1].split('- name: Return only exact fleet', 1)[0]
-        self.assertNotIn('systemd_service', commit)
-        self.assertIn('action: commit', commit)
-
-
 if __name__ == '__main__':
     unittest.main()

@@ -87,21 +87,3 @@ func runAnsibleLocal(args []string) {
 	exitOnErr("Ansible operation", err)
 	fmt.Println("Ansible operation: ready")
 }
-
-// This compatibility entry point resumes an old immutable bootstrap bundle.
-// Inventory and infrastructure lease come only from the original frozen job.
-func runAnsibleRetryBootstrap(args []string) {
-	flags := flag.NewFlagSet("ansible-retry-bootstrap", flag.ExitOnError)
-	directory := flags.String("state-dir", "", "original private bootstrap stage directory")
-	python := flags.String("python", "/usr/bin/python3", "controller Python")
-	executable := flags.String("executable", "/opt/ultra-ansible/current/venv/bin/ansible-playbook", "pinned Ansible")
-	_ = flags.Parse(args)
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	runtimeRelease, err := pinExplicitOperatorRuntime(*directory, *executable)
-	exitOnErr("retry runtime lease", err)
-	defer runtimeRelease()
-	_, err = retryFrozenBootstrapOperator(ctx, *directory, *python, *executable)
-	exitOnErr("Ansible bootstrap retry", err)
-	fmt.Println("Ansible bootstrap retry: ready")
-}

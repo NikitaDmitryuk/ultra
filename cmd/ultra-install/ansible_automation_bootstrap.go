@@ -47,12 +47,14 @@ func ansibleBootstrapAutomationGeneration(
 	if err != nil {
 		return err
 	}
+	if err = requireUpgradeTool(tools, "live_tools.py"); err != nil {
+		return err
+	}
 	members := []string{}
 	selected := []map[string]any{}
 	for _, tool := range tools {
 		name := filepath.Base(tool["destination"].(string))
-		if !strings.HasPrefix(name, "test_") &&
-			(filepath.Ext(name) == ".py" || filepath.Ext(name) == ".service" || filepath.Ext(name) == ".timer") {
+		if !strings.HasPrefix(name, "test_") && isRecoveryToolName(name) {
 			selected = append(selected, tool)
 			members = append(members, name)
 		}
@@ -122,12 +124,21 @@ func ansibleBootstrapAutomationGeneration(
 	if err := os.WriteFile(plannerPath, planner, 0600); err != nil {
 		return err
 	}
+	liveManifestSHA, liveErr := sourceSHA(filepath.Join(a.ReleaseDir, "release-manifest.json"))
+	if liveErr != nil {
+		return liveErr
+	}
+	liveIdentity, liveErr := upgradeLiveToolsIdentity(stage, a.ReleaseDir, liveManifestSHA, tools, nil)
+	if liveErr != nil {
+		return liveErr
+	}
 	variables := map[string]any{
 		"ultra_controller_directory":       controllerDirectory,
 		"ultra_controller_runtime_archive": filepath.Join(a.ReleaseDir, runtime.Name), "ultra_controller_runtime_sha256": runtime.SHA,
 		"ultra_install_source": filepath.Join(a.ReleaseDir, installer.Name), "ultra_install_sha256": installer.SHA,
 		"ultra_automation_configuration": configuration, "ultra_automation_tools": selected,
-		"ultra_automation_planner_source": plannerPath, "ultra_automation_pins_source": a.KnownHostsFile,
+		"ultra_automation_tools_identity_files": liveIdentity,
+		"ultra_automation_planner_source":       plannerPath, "ultra_automation_pins_source": a.KnownHostsFile,
 		"ultra_automation_cloud_source":     providerKey,
 		"ultra_automation_manifest_source":  filepath.Join(a.ReleaseDir, "release-manifest.json"),
 		"ultra_automation_emergency_source": filepath.Join(a.ReleaseDir, emergency.Name),

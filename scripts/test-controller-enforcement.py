@@ -283,5 +283,20 @@ class EnforcementTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     guard.sealed_candidate(candidate)
 
+    def test_subsequent_probe_uses_actual_predecessor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root,operation,_,candidate,_=self.fixture(temporary)
+            predecessor=dict(candidate,tree_sha256='1'*64,unit='target');predecessor.pop('architecture')
+            executable=root/'next-installer';executable.write_bytes(b'next')
+            next_candidate=dict(candidate,directory='/opt/ultra-ansible/releases/managed-v0.0.2',installer_sha256=guard.digest(b'next'))
+            params=self.params(operation,{},next_candidate,'preflight')
+            params.update(action='probe',candidate_executable=str(executable))
+            with patch.object(guard,'ROOT',root),patch.object(guard,'machine_sha',return_value='f'*64), \
+                 patch.object(guard,'live_identity',return_value=predecessor),patch.object(guard,'probe'):
+                proof=guard.execute(params)
+                self.assertEqual(proof['rollback'],predecessor)
+                self.assertEqual(proof['candidate'],next_candidate)
+
+
 if __name__ == '__main__':
     unittest.main()

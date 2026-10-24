@@ -21,6 +21,8 @@ import (
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
+var ansibleControllerPython = "/usr/bin/python3"
+
 func runBackendDomainCommand(args []string) {
 	fs := flag.NewFlagSet("backend-domain", flag.ExitOnError)
 	file := fs.String("config", "install.config", "canonical deployment parameters")
@@ -164,7 +166,7 @@ func applyBackendDomain(p *installplan.InstallPlan, file, domain, zone, action, 
 	if err != nil {
 		return err
 	}
-	python := "/usr/bin/python3"
+	python := ansibleControllerPython
 	if err = ansibleLifecycle(ctx, p, inventory, directory, python, executable, "applying", true); err != nil {
 		return err
 	}

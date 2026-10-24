@@ -1,4 +1,4 @@
-.PHONY: build build-install build-bot test vet lint format format-check install bot-cert relay-logs verify-relay benchmark-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64 release-dist clean harness-check generate-db
+.PHONY: build build-install build-bot test vet lint format format-check tidy install bot-cert relay-logs verify-relay benchmark-relay verify-miniapp build-linux-amd64 build-install-linux-amd64 build-bot-linux-amd64 build-linux-arm64 build-install-linux-arm64 build-bot-linux-arm64 release-dist clean harness-check generate-db
 
 BINARY=ultra-relay
 INSTALL_BINARY=ultra-install
@@ -20,7 +20,7 @@ build-bot:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BOT_BINARY) ./cmd/ultra-bot
 
 test:
-	CGO_ENABLED=0 go test ./...
+	CGO_ENABLED=0 go test -timeout 20m ./...
 
 generate-db:
 	go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION) generate
@@ -32,12 +32,15 @@ vet:
 	go vet ./...
 
 format:
+	python3 scripts/generate-ansible-ssh-policy.py
 	@echo "Running goimports..."
-	go run $(GOIMPORTS_PKG) -w .
+	rg --files -0 -g '*.go' | xargs -0 -r go run $(GOIMPORTS_PKG) -w
 	@echo "Running gofmt -s..."
-	gofmt -s -w .
+	rg --files -0 -g '*.go' | xargs -0 -r gofmt -s -w
 	@echo "Running golines..."
-	go run $(GOLINES_PKG) --max-len=140 -w .
+	rg --files -0 -g '*.go' | xargs -0 -r go run $(GOLINES_PKG) --max-len=140 -w
+
+tidy:
 	go mod tidy
 
 format-check:
@@ -131,7 +134,7 @@ release-dist: ansible-dist build-client-release build-linux-amd64 build-install-
 	cp $(BINARY)-linux-amd64 $(INSTALL_BINARY)-linux-amd64 $(BOT_BINARY)-linux-amd64 \
 	   $(BINARY)-linux-arm64 $(INSTALL_BINARY)-linux-arm64 $(BOT_BINARY)-linux-arm64 \
 	   ultra-client-linux-amd64 ultra-client-linux-arm64 deploy/mobile-bootstrap.sh dist/
-	tar -czf dist/ultra-recovery.tar.gz -C deploy/recovery $$(cd deploy/recovery && find . -maxdepth 1 -type f \( -name "*.py" -o -name "*.service" -o -name "*.timer" \) ! -name "test_*" ! -name "vm_*" ! -name "test-*" -printf "%f\n" | sort)
+	tar -czf dist/ultra-recovery.tar.gz -C deploy/recovery $$(cd deploy/recovery && find . -maxdepth 1 -type f \( -name "*.py" -o -name "*.service" -o -name "*.timer" -o -name "ssh_policy.json" \) ! -name "test_*" ! -name "vm_*" ! -name "test-*" -printf "%f\n" | sort)
 	(cd dist && sha256sum \
 	   $(BINARY)-linux-amd64 $(INSTALL_BINARY)-linux-amd64 $(BOT_BINARY)-linux-amd64 \
 	   $(BINARY)-linux-arm64 $(INSTALL_BINARY)-linux-arm64 $(BOT_BINARY)-linux-arm64 \
@@ -161,7 +164,6 @@ build-bench:
 .PHONY: test-ui
 test-ui:
 	python3 scripts/test-mobile-bootstrap.py
-	python3 scripts/test-database-preservation.py
 	python3 scripts/test-verify-miniapp.py
 	python3 scripts/test-ingress-ssh.py
 	python3 scripts/test-bridge-subscription.py
@@ -169,7 +171,7 @@ test-ui:
 	node --test scripts/test-happ-import.cjs scripts/test-cabinet.cjs scripts/test-miniapp-preview.cjs
 
 test-race:
-	go test -race -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' ./...
+	go test -timeout 20m -race -gcflags='github.com/xtls/xray-core/proxy/vless/...=-d=checkptr=0' ./...
 
 .PHONY: build-client-release
 build-client-release:
@@ -180,15 +182,17 @@ build-client-release:
 
 ansible-dist:
 	mkdir -p dist
-	tar --exclude=__pycache__ --exclude=\*.pyc -czf dist/ultra-ansible.tar.gz -C deploy/ansible ansible.cfg requirements.txt controller.py playbooks roles library callback_plugins
+	tar --exclude=__pycache__ --exclude=\*.pyc -czf dist/ultra-ansible.tar.gz -C deploy/ansible ansible.cfg requirements.txt controller.py playbooks roles library callback_plugins module_utils
 	python3 scripts/manual-deploy-runtime.py --architecture amd64 --output dist/ultra-ansible-runtime-linux-amd64.tar.gz
 	python3 scripts/manual-deploy-runtime.py --architecture arm64 --output dist/ultra-ansible-runtime-linux-arm64.tar.gz
 
 test-ansible:
+	python3 scripts/generate-ansible-ssh-policy.py --check
+	python3 scripts/test-ansible-ssh-policy.py
+	python3 scripts/test-ansible-exit-driver.py
 	python3 scripts/test-ansible-controller-process.py
-	python3 scripts/test-upgrade-worker-drain.py
-	python3 scripts/test-ansible-release-contracts.py
-	python3 scripts/test-controller-enforcement.py
+	python3 scripts/test-ansible-controller-fence.py
+	python3 scripts/test-ansible-execution-containment.py
 	python3 scripts/test-ansible-db-tunnel-authorization.py
 	python3 scripts/test-db-tunnel-reuse.py
 	python3 scripts/test-ansible-safe-diagnostic.py
@@ -197,17 +201,9 @@ test-ansible:
 	python3 scripts/test-ansible-input-types.py
 	python3 scripts/test-relay-environment.py
 	python3 scripts/test-ansible-operation-mapping.py
-	python3 scripts/test-retained-primary-gates.py
 	python3 scripts/test-subscription-key-projection.py
-	python3 scripts/test-recovery-tools-bootstrap.py
-	python3 scripts/test-ansible-dns-migration.py
-	python3 scripts/test-ansible-upgrade-runtime.py
-	python3 scripts/test-ansible-accepted-resume.py
-	python3 scripts/test-ansible-upgrade-domain.py
 	python3 scripts/test-ansible-runtime-effects.py
-	python3 scripts/test-ansible-lifecycle-retry.py
 	python3 scripts/test-ansible-release-identity.py
-	python3 scripts/test-ansible-upgrade-baseline.py
 	python3 scripts/test-ansible-release-retention.py
 	python3 scripts/test-ansible-ingress.py
 	python3 scripts/test-ansible-retire-experiment.py
@@ -223,10 +219,11 @@ test-ansible:
 test-ansible-exit: build-install
 	python3 scripts/test-ansible-exit.py --installer "$(CURDIR)/ultra-install" --ansible-playbook "$$(command -v ansible-playbook)"
 
-# Explicit operator action: builds committed HEAD in isolation, then rolls out.
+# Explicit operator action: builds committed HEAD in isolation, then replaces
+# every configured non-DB host while preserving the PostgreSQL primary.
 .PHONY: deploy deploy-build test-manual-deploy
 deploy:
-	python3 scripts/manual-deploy.py $(if $(INSTALL_CONFIG),--config "$(INSTALL_CONFIG)",) $(if $(filter 1,$(RETRY_FAILED)),--retry-failed,) $(if $(SUBSCRIPTION_PROBE_ENV_FILE),--subscription-probe-env-file "$(SUBSCRIPTION_PROBE_ENV_FILE)",)
+	python3 scripts/manual-deploy.py $(if $(INSTALL_CONFIG),--config "$(INSTALL_CONFIG)",)
 
 deploy-build:
 	python3 scripts/manual-deploy.py --build-only
@@ -237,6 +234,7 @@ test-manual-deploy:
 # Offline operator/recovery scripts are explicitly gated; Docker checks stay separate.
 .PHONY: test-operator
 test-operator: test-manual-deploy
+	python3 scripts/test-operator-inputs.py
 	python3 scripts/test-forward-broker-guard.py
 	python3 scripts/test-operator-db-dump.py
 	python3 scripts/test-recover-bootstrap-dns.py

@@ -93,7 +93,7 @@
 </ol>
 <div class="grid" style="margin-top:24px"><article class="card tint"><h3>Когда можно сказать «успех»</h3><p>Целевой код активирован, проверки сервиса и инфраструктуры завершены, а квитанции относятся к этой попытке и этому комплекту.</p><p class="subtle">Успех одной Ansible-стадии — только часть доказательства.</p></article><article class="card warn"><h3>Если проверка провалилась</h3><p>Остановить дальнейшую выкладку и выполнить допустимый совместимый откат. Операция сохраняет статус неудачной, даже если сервис удалось вернуть.</p><p class="subtle">Автоматически снова активировать ту же failed-версию нельзя.</p></article></div>
 <p class="subtle"><strong>Пример проверки, которую нельзя заменить повторяемостью:</strong> запущенная служба создания копии должна действительно закончить работу. Код возврата команды проверки статуса сам по себе не доказывает завершение фонового процесса. Идемпотентная роль не исправляет ошибочное ожидание.</p>
-<p class="source">Источники: <a href="automation.md">обновление и откат</a>, <a href="../deploy/ansible/playbooks/upgrade.yml">upgrade playbook</a>, <a href="../deploy/ansible/playbooks/rollback.yml">rollback playbook</a>.</p>
+<p class="source">Источники: <a href="automation.md">полная замена production</a>, <a href="production-replacement.md">production deployment</a>.</p>
 </section>
 <section class="section" id="scenarios">
 <div class="num">05 / ПОНЯТНЫЕ СЦЕНАРИИ</div><h2>Что происходит при повторе и сбое</h2>
@@ -117,7 +117,7 @@
 </section>
 <section class="section" id="sources">
 <div class="num">ДАЛЬШЕ ПО ТЕМЕ</div><h2>Где сверить детали</h2>
-<ul class="sources"><li><a href="adr/0020-ansible-infrastructure.md">ADR 0020</a> — проблема, решение и границы Ansible.</li><li><a href="automation.md">Автоматизация</a> — канонические входы, задания, обновление и восстановление.</li><li><a href="architecture.md">Архитектура</a> — компоненты, трафик и источники состояния.</li><li><a href="development.md">Разработка</a> — что проверяют тесты и чего они не подтверждают.</li><li><a href="../TODO.md">TODO</a> — критерии MVP и последующие проверки.</li><li><a href="../deploy/ansible/playbooks/upgrade.yml">Upgrade</a> и <a href="../deploy/ansible/playbooks/rollback.yml">rollback</a> — порядок активации и отката.</li></ul>
+<ul class="sources"><li><a href="adr/0020-ansible-infrastructure.md">ADR 0020</a> — проблема, решение и границы Ansible.</li><li><a href="automation.md">Автоматизация</a> — канонические входы и production deployment.</li><li><a href="production-replacement.md">Полная замена production</a> — поддерживаемый deployment path и границы базы данных.</li><li><a href="architecture.md">Архитектура</a> — компоненты, трафик и источники состояния.</li><li><a href="development.md">Разработка</a> — что проверяют тесты и чего они не подтверждают.</li><li><a href="../TODO.md">TODO</a> — критерии MVP и последующие проверки.</li></ul>
 </section>
 <footer>Автономный HTML-документ: схемы SVG встроены, внешние шрифты, скрипты и сетевые ресурсы не используются. Для бумажной версии — печать браузера в PDF. Ссылки на исходники работают при открытии документа внутри checkout ultra.</footer>
 </main>

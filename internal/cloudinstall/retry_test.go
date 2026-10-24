@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,11 +71,91 @@ func TestAuthorizedCloudRetryEscapesFailedWorkerReceipt(t *testing.T) {
 	root := t.TempDir()
 	socket, state := filepath.Join(root, "worker.sock"), filepath.Join(root, "state")
 	stub, calls := filepath.Join(root, "ansible-playbook"), filepath.Join(root, "calls")
+	// This fixture runs the real controller without the host systemd manager.
+	// Attest only its copied controller's normal completion, never production
+	// code or the Status gate. Both failed and successful attempts retain their
+	// exact real callback/completion bytes and ordinary broker restart behavior.
+	originalNamespace := fixtureExecutionNamespace
+	t.Cleanup(func() { fixtureExecutionNamespace = originalNamespace })
+	fixtureExecutionNamespace = func(directory string) string {
+		namespace := originalNamespace(directory)
+		if !strings.HasPrefix(directory, state+string(os.PathSeparator)) {
+			return namespace
+		}
+		controller := filepath.Join(directory, "bundle", "controller.py")
+		source, e := os.ReadFile(controller)
+		if e != nil || strings.Contains(string(source), "# rootless cloud cleanup fixture") {
+			return namespace
+		}
+		insertion := `    # rootless cloud cleanup fixture: the test owns this copied controller.
+    proof = {'schema': 1, 'fence': fence, 'mode': 'transient',
+             'unit': 'ultra-execution-' + fence['generation'] + '.service',
+             'invocation_id': 'a' * 32,
+             'chain': [{'pid': 123, 'parent': 1, 'starttime': '99',
+                        'group': '/system.slice/ultra-execution-' + fence['generation'] + '.service',
+                        'executable_sha256': 'a' * 64, 'argv_sha256': 'b' * 64}]}
+    atomic(directory / 'execution-containment.json', proof)
+    atomic(directory / ('execution-drain-' + fence['generation'] + '.json'), {
+        'proof': proof, 'completion_sha256': hashlib.sha256(
+            load_private(directory / 'execution-completion.json', raw=True)).hexdigest()})
+`
+		marker := "    if os.environ.get('ULTRA_EXECUTION_GENERATION') or ("
+		changed := strings.Replace(string(source), marker, insertion+marker, 1)
+		if changed == string(source) {
+			return namespace
+		}
+		// Reseal only this test-owned copy before the first fence/dispatch. The
+		// production collector/status must see its exact original frozen inventory.
+		if _, e = os.Lstat(filepath.Join(namespace, "execution-fence.json")); e == nil || !os.IsNotExist(e) {
+			t.Error("fixture transform attempted after fence publication")
+			return namespace
+		}
+		if e = os.WriteFile(controller, []byte(changed), 0600); e != nil {
+			t.Error(e)
+			return namespace
+		}
+		jobRaw, e := os.ReadFile(filepath.Join(directory, "job.json"))
+		if e != nil {
+			t.Error(e)
+			return namespace
+		}
+		var job struct {
+			Request string `json:"request_sha256"`
+		}
+		if e = json.Unmarshal(jobRaw, &job); e != nil {
+			t.Error(e)
+			return namespace
+		}
+		ownership := filepath.Join(directory, "bundle.retention.json")
+		if e = os.Remove(ownership); e != nil && !os.IsNotExist(e) {
+			t.Error(e)
+			return namespace
+		}
+		if e = deployansible.WriteRetentionReceipt(filepath.Join(directory, "bundle"), filepath.Join(directory, "bundle"), ownership, map[string]string{"request_sha256": job.Request}); e != nil {
+			t.Error(e)
+		}
+		return namespace
+	}
 	source := "#!" + python + "\n" + `import json,pathlib,sys
 counter=pathlib.Path(` + "'" + calls + "'" + `)
 count=int(counter.read_text())+1 if counter.exists() else 1
 counter.write_text(str(count))
-if count == 1: sys.exit(1)
+if count == 1:
+ # A completed remote task failure has a terminal callback; bare process exit
+ # would leave the global execution fence closed and must never permit retry.
+ import os, types, importlib.util
+ base=types.ModuleType('ansible.plugins.callback');base.CallbackBase=object
+ sys.modules['ansible']=types.ModuleType('ansible')
+ sys.modules['ansible.plugins']=types.ModuleType('ansible.plugins')
+ sys.modules['ansible.plugins.callback']=base
+ spec=importlib.util.spec_from_file_location('fixture_safe_result',pathlib.Path(os.environ['ULTRA_ANSIBLE_SOURCE_ROOT'])/'callback_plugins'/'safe_result.py')
+ module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+ callback=module.CallbackModule()
+ host=types.SimpleNamespace(name='fixture_target')
+ task=types.SimpleNamespace(_uuid='completed_fixture_task',async_val=0)
+ callback.execution_task(host,task);callback.execution_task(host,task,True)
+ callback.v2_playbook_on_stats(types.SimpleNamespace(processed={'fixture_target':1},summarize=lambda host:{'failures':1,'unreachable':0}))
+ sys.exit(2)
 value=json.loads((pathlib.Path(sys.argv[-1][1:]).parent/'variables.json').read_text())
 path=pathlib.Path(value['ultra_result_file'])
 path.write_text(json.dumps({'cert_pin':'b'*64}))

@@ -19,6 +19,19 @@ def read(path):
     return json.loads(source.read_text())
 
 
+def recovery_installation_reason(root=Path('/')):
+    """Classify installation without reading private recovery configuration."""
+    names = ('opt/ultra-recovery/release-manifest.json',
+             'opt/ultra-recovery/recovery.py', 'opt/ultra-recovery/reconcile.py',
+             'etc/ultra-recovery/backup.json', 'etc/ultra-recovery/reconcile.json')
+    paths = [root / name for name in names]
+    if not any(path.exists() or path.is_symlink() for path in paths):
+        return 'recovery_not_installed'
+    if not all(path.is_file() and not path.is_symlink() for path in paths):
+        return 'recovery_installation_incomplete'
+    return None
+
+
 def database_query(database, query):
     sys.path.insert(0, '/opt/ultra-recovery')
     import db_connection
@@ -156,6 +169,10 @@ def main():
         return
     if args.lifecycle_id or args.reservation_pending:
         raise ValueError('invalid_readiness_probe_arguments')
+    if args.status:
+        reason = recovery_installation_reason()
+        if reason:
+            raise ValueError(reason)
     sys.path.insert(0, '/opt/ultra-recovery')
     import reconcile
     config = read('/etc/ultra-recovery/reconcile.json')
@@ -209,6 +226,12 @@ def main():
         for source in prior_directory.iterdir():
             if source.is_file() and not source.is_symlink() and source.stat().st_size <= 4 * 1024 * 1024:
                 tool_hashes[source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
+    tool_identity = {}
+    if Path('/opt/ultra-recovery/tools-inventory.json').exists():
+        import live_tools
+        live = live_tools.verify()
+        tool_hashes = live['members']
+        tool_identity = live_tools.identity_hashes()
     controller_directory = str(Path('/opt/ultra-ansible/current').resolve())
     if not re.fullmatch(r'/opt/ultra-ansible/releases/[A-Za-z0-9][A-Za-z0-9._-]{0,95}', controller_directory):
         raise ValueError('adopted_controller_required')
@@ -218,7 +241,7 @@ def main():
     controller_unit_hash = hashlib.sha256(controller_unit.read_bytes()).hexdigest()
     auto_policy = read('/etc/ultra-ansible/auto-upgrade.json') if Path('/etc/ultra-ansible/auto-upgrade.json').exists() else {'enabled': False}
     print(json.dumps({'nodes': nodes, 'runtime_nodes': {n['id']: {k: n.get(k) for k in ('name', 'managed', 'tunnel_identity_digest', 'certificate_pin')} for n in nodes}, 'topology_sha256': digest, 'architecture': architecture, 'observed_at': int(now), 'database_schema': schema_max, 'active_relay_sha256': active_relay_sha256(),
-                      'identity': identity.read_text(), 'previous_manifest': previous, 'previous_manifest_sha256': hashlib.sha256(Path('/opt/ultra-recovery/release-manifest.json').read_bytes()).hexdigest(), 'tool_hashes': tool_hashes, 'auto_policy': auto_policy, 'controller_directory': controller_directory, 'controller_unit_sha256': controller_unit_hash}))
+                      'identity': identity.read_text(), 'previous_manifest': previous, 'previous_manifest_sha256': hashlib.sha256(Path('/opt/ultra-recovery/release-manifest.json').read_bytes()).hexdigest(), 'tool_hashes': tool_hashes, 'tool_identity_hashes': tool_identity, 'auto_policy': auto_policy, 'controller_directory': controller_directory, 'controller_unit_sha256': controller_unit_hash}))
 
 
 if __name__ == '__main__':
@@ -227,6 +250,7 @@ if __name__ == '__main__':
     except Exception as failure:
         if '--status' in sys.argv:
             allowed = {'state_unavailable', 'fresh_independent_backup_required', 'replica_not_ready',
+                       'recovery_not_installed', 'recovery_installation_incomplete',
                        'partial_database_schema', 'database_invalid', 'previous_version_invalid'}
             reason = str(failure) if isinstance(failure, ValueError) and str(failure) in allowed else 'readiness_evidence_unavailable'
             print(json.dumps({'ready': False, 'independent': False, 'reasons': [reason]}))

@@ -23,12 +23,14 @@ func handlePlanSubcommand(args []string) bool {
 		return true
 	}
 	switch args[0] {
-	case "retained-primary-reconcile":
-		exitOnErr("retained primary reconciliation", runRetainedReconcile(args[1:], os.Stdout))
-	case "rebuild-retained-primary":
-		exitOnErr("retained primary recovery", runRetainedPrimaryCommand(args[1:]))
-	case "rebuild-non-db":
-		exitOnErr("rebuild non-DB preflight", runRebuildNonDB(args[1:], os.Stdout, time.Now()))
+	case "replace-production":
+		exitOnErr("production replacement", runProductionReplacement(args[1:], os.Stdout))
+	case "provider-census":
+		exitOnErr("provider census", runProviderCensus(args[1:], os.Stdout))
+	case "provider-delete":
+		exitOnErr("provider deletion", runProviderDelete(args[1:], os.Stdout))
+	case "dns-attest":
+		exitOnErr("owned DNS attestation", runDNSAttestCommand(args[1:], os.Stdout))
 	case "config-values":
 		runConfigValuesCommand(args[1:])
 	case "bridge-migrate":
@@ -37,28 +39,18 @@ func handlePlanSubcommand(args []string) bool {
 		runDeploymentConfigRewrite(args[1:])
 	case "release-probe":
 		runReleaseProbeCommand(args[1:])
-	case "runtime-probe":
-		runRuntimeProbeCommand(args[1:])
 	case "ansible-lease":
 		runAnsibleLease(args[1:])
 	case "ansible-run":
 		runAnsibleLocal(args[1:])
-	case "ansible-retry-bootstrap":
-		runAnsibleRetryBootstrap(args[1:])
 	case "ansible-bootstrap-components":
 		runAnsibleBootstrapComponents(args[1:])
 	case "ansible-controller":
 		runAnsibleController(args[1:])
 	case "ansible-exit":
 		runAnsibleExit(args[1:])
-	case "bootstrap", "status", "upgrade":
+	case "bootstrap", "status":
 		runAutomationCommand(args[0], args[1:])
-	case "operator-upgrade":
-		runOperatorUpgradeCommand(args[1:])
-	case "local-preflight-proof":
-		runLocalPreflightProof(args[1:])
-	case "recovery-tools-bootstrap":
-		runRecoveryToolsBootstrapCommand(args[1:])
 	case "domain-cutover":
 		runDomainCutoverCommand(args[1:])
 	case "backend-domain":
@@ -344,10 +336,6 @@ func exitOnErr(prefix string, err error) {
 
 func readDeploymentOrExit(planPath, configPath string) *installplan.InstallPlan {
 	return readDeploymentForOperationOrExit(planPath, configPath, false)
-}
-
-func readLifecycleDeploymentOrExit(planPath, configPath string) *installplan.InstallPlan {
-	return readDeploymentForOperationOrExit(planPath, configPath, true)
 }
 
 func readDeploymentForOperationOrExit(planPath, configPath string, lifecycle bool) *installplan.InstallPlan {

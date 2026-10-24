@@ -3,10 +3,6 @@
   hosts: bridge
   gather_facts: false
   any_errors_fatal: true
-  pre_tasks:
-    - name: Gate retained-primary recovery before any mutation
-      ansible.builtin.import_tasks: tasks/retained-primary-gate.yml
-      when: ultra_retained_recovery_binding_sha256 is defined
   tasks:
     - name: Inspect required HTTPS certificate
       ansible.builtin.stat:

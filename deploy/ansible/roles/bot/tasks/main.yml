@@ -7,9 +7,13 @@
 - name: Reject foreign or modified bot service definition before activation
   ansible.builtin.assert:
     that:
-      - not bot_unit_current.stat.exists or (not bot_unit_current.stat.islnk and bot_unit_current.stat.isreg)
       - >-
         not bot_unit_current.stat.exists or
+        ((ultra_preserve_primary | default(false) | bool) and bot_unit_current.stat.islnk and bot_unit_current.stat.lnk_source == '/dev/null') or
+        (not bot_unit_current.stat.islnk and bot_unit_current.stat.isreg)
+      - >-
+        not bot_unit_current.stat.exists or
+        ((ultra_preserve_primary | default(false) | bool) and bot_unit_current.stat.islnk and bot_unit_current.stat.lnk_source == '/dev/null') or
         bot_unit_current.stat.checksum == (lookup('template', 'ultra-bot.service.j2') | hash('sha256')) or
         bot_unit_current.stat.checksum == (ultra_previous_bot_unit_sha256 | default(''))
     fail_msg: bot_service_definition_requires_explicit_adoption
@@ -63,6 +67,7 @@
   ansible.builtin.template:
     src: ultra-bot.service.j2
     dest: /etc/systemd/system/ultra-bot.service
+    follow: false
     owner: root
     group: root
     mode: "0644"

@@ -36,7 +36,7 @@
 - name: Allow managed forwarding listeners on enabled guest firewall
   ansible.builtin.command:
     argv: [/usr/sbin/ufw, allow, "{{ item | string }}/tcp"]
-  loop: "{{ [80, 443, ultra_forward_bot_port] | unique }}"
+  loop: "{{ ([80, 443] + ([ultra_forward_bot_port] if ultra_forward_bot_port is defined else [])) | unique }}"
   register: forward_ingress_firewall_rule
   changed_when: "'Skipping' not in forward_ingress_firewall_rule.stdout"
   when:
@@ -75,7 +75,7 @@
         host: 127.0.0.1
         port: "{{ item }}"
         timeout: 15
-      loop: "{{ [80, 443, ultra_forward_bot_port] | unique }}"
+      loop: "{{ ([80, 443] + ([ultra_forward_bot_port] if ultra_forward_bot_port is defined else [])) | unique }}"
   rescue:
     - name: Restore forwarding configuration before images
       ultra_owned_file:

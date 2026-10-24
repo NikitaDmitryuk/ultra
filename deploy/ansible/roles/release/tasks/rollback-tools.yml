@@ -24,3 +24,67 @@
 - name: Reload restored service definitions
   ansible.builtin.systemd_service:
     daemon_reload: true
+
+- name: Keep restored unit sources aligned with the actual rollback predecessor
+  ansible.builtin.copy:
+    src: "{{ item.destination }}"
+    dest: "/opt/ultra-recovery/{{ item.destination | basename }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ ultra_recovery_files }}"
+  when:
+    - inventory_hostname in groups['bridge']
+    - item.destination is match('^/etc/systemd/system/')
+- name: Inspect the protected independent tools fallback before rollback
+  ansible.builtin.stat:
+    path: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/tools-previous/identity-{{ item.name }}"
+    checksum_algorithm: sha256
+    follow: false
+  loop: "{{ ultra_recovery_tools_identity_files | default([]) }}"
+  register: release_tools_identity_rollback
+- name: Reject any drift in the recorded tools identity fallback
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - not item.stat.islnk | default(false)
+      - item.stat.uid == 0
+      - item.stat.mode == '0600'
+      - item.stat.checksum == item.item.previous_sha256
+  loop: "{{ release_tools_identity_rollback.results }}"
+  when: item.item.previous_sha256 != ''
+- name: Restore the exact independent tools identity fallback
+  ansible.builtin.copy:
+    src: "/var/lib/ultra-ansible/releases/{{ ultra_release_version }}/tools-previous/identity-{{ item.name }}"
+    dest: "{{ item.destination }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0600'
+  loop: "{{ ultra_recovery_tools_identity_files | default([]) }}"
+  when: item.previous_sha256 != ''
+- name: Inspect target-only identity before returning to an older legacy predecessor
+  ansible.builtin.stat:
+    path: "{{ item.destination }}"
+    checksum_algorithm: sha256
+    follow: false
+  loop: "{{ ultra_recovery_tools_identity_files | default([]) }}"
+  register: release_tools_legacy_identity
+- name: Reject unexpected target-only identity before legacy rollback
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isreg | default(false) and not item.stat.islnk | default(false) and item.stat.checksum == item.item.sha256)
+  loop: "{{ release_tools_legacy_identity.results }}"
+  when: item.item.previous_sha256 == ''
+- name: Remove only this target identity when the predecessor had no tools identity
+  ansible.builtin.file:
+    path: "{{ item.destination }}"
+    state: absent
+  loop: "{{ ultra_recovery_tools_identity_files | default([]) }}"
+  when: item.previous_sha256 == ''
+- name: Verify the restored complete bundle independently of the app fallback
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, /opt/ultra-recovery/live_tools.py, verify-staged]
+  changed_when: false
+  when: ultra_recovery_tools_identity_files | default([]) | selectattr('previous_sha256', 'ne', '') | list | length == 3

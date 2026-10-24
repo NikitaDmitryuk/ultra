@@ -122,6 +122,10 @@ systemd. Даже `-dry-run` читает bridge по SSH до проверки 
 На bridge задайте `ULTRA_VULTR_KEY_FILE` (отдельный файл, не весь локальный `.env`),
 `ULTRA_VULTR_SSH_KEY_FILE` и `ULTRA_VULTR_BRIDGE_IP`. У исполнителя должны быть права
 на каталог `ULTRA_VULTR_STATE_DIR` (по умолчанию `/var/lib/ultra-relay/vultr`).
+При `make deploy` controller и cloud lifecycle drop-in устанавливаются отдельно
+от recovery automation. API-ключ передаётся из локального канонического secrets
+input; если новый ключ не задан, уже установленный на bridge ключ сохраняется.
+На чистом bridge без ключа Vultr create/configure операции работать не смогут.
 Файл API-ключа должен принадлежать пользователю relay unit (в штатной установке
 `ultra-relay`) и иметь права `600`: файл `root:root` с такими правами сервис
 прочитать не сможет, даже если root успешно проверил API тем же ключом.
@@ -175,8 +179,7 @@ IP назначения, который не отправляется в SNI. П
 main участвует в ACME checkpoint. Неизвестный узел, отсутствующий pin или несовпадение
 сертификата блокируют обновление. Изменение tunnel port по-прежнему требует отдельного
 DB checkpoint и не разрешается этой поддержкой смешанного TLS.
-Источники: [запросы обновления](../cmd/ultra-install/upgrade_runtime_integration.go),
-[проверка узла](../cmd/ultra-install/upgrade_runtime_host.go).
+Источник: [проверка узла](../cmd/ultra-install/runtime_host.go).
 
 Для неопубликованного VPS с ошибкой на этапе `verify` доступна отдельная команда
 «Переустановить на этом VPS». Она возвращает ту же операцию на этап установки с

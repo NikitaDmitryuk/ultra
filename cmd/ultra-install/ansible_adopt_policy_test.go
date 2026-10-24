@@ -429,3 +429,13 @@ func TestPrepareAdoptionPolicyRejectsAmbiguousController(t *testing.T) {
 		})
 	}
 }
+
+func TestAdoptionBackupExtrasOwnsSharedSSHPolicy(t *testing.T) {
+	got, err := adoptionBackupExtras([]string{"/opt/ultra-recovery/ssh_policy.py", "/opt/ultra-recovery/ssh_policy.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("shared SSH policy should be regenerated from release assets, got backup extras %v", got)
+	}
+}

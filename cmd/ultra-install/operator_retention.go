@@ -926,6 +926,9 @@ func operatorWinningChain(directory, kind string, manifest *automationRelease, m
 		if err != nil {
 			return err
 		}
+		if bootstrapPreservesPrimaryInventory(frozen) {
+			return provePreservedBootstrapStages(directory, frozen, generation, successful)
+		}
 		if err = successful(bootstrapMutationStage(directory, "automation", generation), "bootstrap-automation", false); err != nil {
 			return err
 		}
@@ -945,6 +948,72 @@ func operatorWinningChain(directory, kind string, manifest *automationRelease, m
 		}
 	default:
 		return errors.New("operator_retention_kind_invalid")
+	}
+	return nil
+}
+
+func bootstrapPreservesPrimaryInventory(inventory map[string]any) bool {
+	all, _ := inventory["all"].(map[string]any)
+	variables, _ := all["vars"].(map[string]any)
+	preserve, _ := variables["ultra_preserve_primary"].(bool)
+	return preserve
+}
+
+func provePreservedBootstrapStages(
+	directory string,
+	inventory map[string]any,
+	generation int,
+	successful func(string, string, bool) error,
+) error {
+	type stageProof struct{ stage, operation string }
+	components, err := bootstrapUsesComponents(directory)
+	if err != nil {
+		return err
+	}
+	stages := []stageProof{{"apply", "bootstrap"}}
+	if components {
+		stages = []stageProof{{"bootstrap-postgres", "bootstrap-postgres"}}
+		aliases, err := bootstrapComponentExits(inventory)
+		if err != nil {
+			return err
+		}
+		for _, alias := range aliases {
+			stages = append(stages, stageProof{"bootstrap-" + alias, "bootstrap-exit"})
+		}
+		stages = append(stages, stageProof{"bootstrap-bridge", "bootstrap-bridge"})
+	}
+	// The core request binds whether ingress was requested. Older attempts did
+	// not record this flag, so they retain the stricter ingress requirement.
+	anchor := bootstrapMutationStage(directory, stages[0].stage, generation)
+	if err = successful(anchor, stages[0].operation, false); err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(filepath.Join(anchor, "request.json"))
+	if err != nil {
+		return err
+	}
+	var request struct {
+		Variables map[string]any `json:"variables"`
+	}
+	if json.Unmarshal(raw, &request) != nil {
+		return errors.New("operator_retention_bootstrap_request_invalid")
+	}
+	ingress, recorded := request.Variables["ultra_bootstrap_ingress_enabled"].(bool)
+	if !recorded || ingress {
+		stages = append(stages, stageProof{"ingress-prepare", "ingress"}, stageProof{"ingress-activate", "ingress"})
+	}
+	all, _ := inventory["all"].(map[string]any)
+	children, _ := all["children"].(map[string]any)
+	group, _ := children["bridge"].(map[string]any)
+	hosts, _ := group["hosts"].(map[string]any)
+	bridge, _ := hosts["bridge"].(map[string]any)
+	if enabled, _ := bridge["ultra_bot_enabled"].(bool); enabled {
+		stages = append(stages, stageProof{"bot", "configure-bot"})
+	}
+	for _, stage := range stages {
+		if err := successful(bootstrapMutationStage(directory, stage.stage, generation), stage.operation, false); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1019,6 +1088,11 @@ func proveBootstrapEmergencySources(directory string, manifest *automationReleas
 	frozen, _, err := bootstrapFinalizationInputs(directory)
 	if err != nil {
 		return err
+	}
+	if bootstrapPreservesPrimaryInventory(frozen) {
+		// Replacement does not install emergency automation sources. Its release
+		// manifest is still verified by finalization before sealing the operation.
+		return nil
 	}
 	generation, err := bootstrapMutationGeneration(directory, frozen)
 	if err != nil {
@@ -1127,30 +1201,4 @@ func operatorStageReferenceCompleted(stage string) bool {
 	}
 	hash, err := sourceSHA(filepath.Join(stage, "request.json"))
 	return err == nil && hash == job.Hash
-}
-
-// A removed source permits historical replay. A present source must still be
-// exactly the completed target; replacing a same-named release is never cached.
-func matchCompletedOperatorRelease(directory, releaseDir string) error {
-	path := filepath.Join(releaseDir, "release-manifest.json")
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
-		return errors.New("operator_retention_completed_release_changed")
-	}
-	raw, err := os.ReadFile(filepath.Join(directory, operatorCompletionFile))
-	if err != nil {
-		return err
-	}
-	var state operatorCompletion
-	if json.Unmarshal(raw, &state) != nil {
-		return errors.New("operator_retention_completion_invalid")
-	}
-	hash, err := sourceSHA(path)
-	if err != nil || hash != state.ManifestSHA {
-		return errors.New("operator_retention_completed_release_changed")
-	}
-	return nil
 }

@@ -45,3 +45,4 @@ ADR фиксирует долгосрочный выбор границ комп
 | [0020 — Общий исполнитель инфраструктуры Ansible](0020-ansible-infrastructure.md) | accepted |
 | [0021 — PostgreSQL на отдельном сервере](0021-dedicated-database.md) | superseded |
 | [0022 — Реплика PostgreSQL на bridge](0022-bridge-postgres-replica.md) | accepted |
+| [0023 — Destructive production replacement preserving the database](0023-destructive-production-replacement.md) | accepted |

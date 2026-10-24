@@ -1,0 +1,47 @@
+---
+- name: Require a separate existing primary and prohibit database provisioning
+  ansible.builtin.assert:
+    that:
+      - groups['databases'] == ['database']
+      - inventory_hostname == 'database'
+      - ansible_host == ultra_preserved_primary_host
+      - ultra_postgres is not defined
+      - ultra_database_import_dump | default('') | length == 0
+      - ultra_postgres_replica is not defined
+      - ansible_host != hostvars[item].ansible_host
+  loop: "{{ groups['bridge'] + groups['exits'] }}"
+  no_log: true
+- name: Observe existing primary database identity without schema writes
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only, --no-align, --dbname, "{{ ultra_preserved_primary_database }}"]
+    stdin: |
+      BEGIN READ ONLY;
+      SELECT json_build_object('system_identifier', (SELECT system_identifier::text FROM pg_control_system()),
+        'database', current_database(), 'database_oid', (SELECT oid::bigint FROM pg_database WHERE datname = current_database()),
+        'primary', NOT pg_is_in_recovery());
+      ROLLBACK;
+  environment:
+    PGOPTIONS: -c default_transaction_read_only=on
+  changed_when: false
+  register: preserved_primary_before
+  no_log: true
+- name: Require an existing primary database
+  ansible.builtin.assert:
+    that:
+      - (preserved_primary_before.stdout_lines | select('match', '^\{') | first | from_json).primary
+      - (preserved_primary_before.stdout_lines | select('match', '^\{') | first | from_json).database == ultra_preserved_primary_database
+  no_log: true
+- name: Freeze original primary identity across component executor invocations
+  ansible.builtin.copy:
+    content: "{{ preserved_primary_before.stdout }}"
+    dest: "{{ ultra_preserved_primary_identity_file }}"
+    mode: "0600"
+    force: false
+  delegate_to: localhost
+  become: false
+  no_log: true
+- name: Reject primary identity changes on a retry
+  ansible.builtin.assert:
+    that:
+      - lookup('file', ultra_preserved_primary_identity_file) == preserved_primary_before.stdout
+  no_log: true

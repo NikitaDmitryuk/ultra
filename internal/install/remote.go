@@ -6,6 +6,9 @@ import (
 	"errors"
 	"net"
 	"os/exec"
+	"strconv"
+
+	"github.com/NikitaDmitryuk/ultra/internal/operatorssh"
 )
 
 // Remote is a bounded, non-logging transport used by provisioning workers.
@@ -31,7 +34,7 @@ func (r Remote) args() ([]string, error) {
 		"-o",
 		"UserKnownHostsFile=" + r.KnownHosts,
 		"-o",
-		"ConnectTimeout=5",
+		"ConnectTimeout=" + strconv.Itoa(operatorssh.DefaultPolicy.ProbeConnectTimeoutSeconds),
 		"-o",
 		"ServerAliveInterval=5",
 		"-o",

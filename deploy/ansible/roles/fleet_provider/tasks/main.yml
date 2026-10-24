@@ -1,0 +1,36 @@
+---
+- name: Create relay-private provider credential directory
+  ansible.builtin.file:
+    path: /var/lib/ultra-relay/automation
+    state: directory
+    owner: ultra-relay
+    group: ultra-relay
+    mode: "0700"
+- name: Install configured provider credential
+  ansible.builtin.copy:
+    src: "{{ ultra_fleet_provider_key_source }}"
+    dest: /var/lib/ultra-relay/automation/vultr-api-key
+    owner: ultra-relay
+    group: ultra-relay
+    mode: "0600"
+  when: ultra_fleet_provider_key_source | default('') | length > 0
+  no_log: true
+  diff: false
+- name: Preserve an existing provider credential when no replacement is supplied
+  ansible.builtin.stat:
+    path: /var/lib/ultra-relay/automation/vultr-api-key
+  register: fleet_provider_existing_key_stat
+- name: Record whether an existing provider credential can be retained
+  ansible.builtin.set_fact:
+    fleet_provider_existing_key: "{{ fleet_provider_existing_key_stat.stat.exists and fleet_provider_existing_key_stat.stat.isreg }}"
+- name: Create relay service drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/ultra-relay.service.d
+    state: directory
+    mode: "0755"
+- name: Configure relay cloud lifecycle independently of recovery
+  ansible.builtin.template:
+    src: provider.conf.j2
+    dest: /etc/systemd/system/ultra-relay.service.d/automation.conf
+    mode: "0644"
+  notify: Restart provider relay

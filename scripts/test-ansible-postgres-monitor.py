@@ -13,7 +13,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 task = yaml.safe_load((ROOT / 'deploy/ansible/roles/postgres/tasks/monitor.yml').read_text())[0]
-sql = task['ansible.builtin.command']['stdin'].replace('{{ ultra_postgres.user }}', 'fixture_app')
+sql = task['ansible.builtin.command']['stdin']
+for variable in ('ultra_postgres.user', 'postgres_monitor_database_user'):
+    sql = sql.replace('{{ ' + variable + ' }}', 'fixture_app')
 assert '{{' not in sql
 # Infrastructure objects must be installed after the empty-target import gate.
 for filename in ['bootstrap.yml', 'bootstrap-postgres.yml']:
@@ -26,6 +28,10 @@ assert 'monitor.yml' not in (ROOT / 'deploy/ansible/roles/postgres/tasks/main.ym
 restore = yaml.safe_load((ROOT / 'deploy/ansible/roles/restore_database/tasks/main.yml').read_text())
 assert restore[-2]['name'] == 'Require verified database restore acknowledgement'
 assert restore[-1]['ansible.builtin.include_role'] == {'name': 'postgres', 'tasks_from': 'monitor'}
+assert restore[-1]['vars'] == {
+    'postgres_monitor_database_name': '{{ ultra_postgres.name }}',
+    'postgres_monitor_database_user': '{{ ultra_postgres.user }}',
+}
 container = 'ultra-pg-monitor-' + uuid.uuid4().hex[:12]
 
 

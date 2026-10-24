@@ -67,6 +67,43 @@ func TestCanonicalRetiredRoleInputsAreRejected(t *testing.T) {
 	}
 }
 
+func TestRemoteDeploymentUsersMustBeRoot(t *testing.T) {
+	bridgeUserPlan, err := CanonicalValuesToPlan(canonicalFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	completePlanFixture(bridgeUserPlan)
+	bridgeUserPlan.SSH.User = "nikita"
+	if err := ValidatePlan(bridgeUserPlan); err == nil || !strings.Contains(err.Error(), "ssh.user=root") {
+		t.Fatalf("non-root bridge/exit user accepted: %v", err)
+	}
+
+	databaseUserPlan, err := CanonicalValuesToPlan(canonicalFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	completePlanFixture(databaseUserPlan)
+	databaseUserPlan.Database.Enabled = true
+	databaseUserPlan.Database.PrimaryHost = "192.0.2.40"
+	databaseUserPlan.Database.SSHUser = "nikita"
+	if err := ValidatePlan(databaseUserPlan); err == nil || !strings.Contains(err.Error(), "database.ssh_user=root") {
+		t.Fatalf("non-root database user accepted: %v", err)
+	}
+}
+
+func TestLegacyNonRootSSHUserParsingRemainsButDeploymentIsRejected(t *testing.T) {
+	p := LegacyValuesToPlan(map[string]string{
+		"BRIDGE_IP": "192.0.2.1", "MAIN_EXIT_IP": "192.0.2.2", "SSH_USER": "nikita",
+	})
+	if p.SSH.User != "nikita" || p.Database.SSHUser != "nikita" {
+		t.Fatal("legacy parser compatibility changed")
+	}
+	completePlanFixture(p)
+	if err := ValidatePlan(p); err == nil || !strings.Contains(err.Error(), "ssh.user=root") {
+		t.Fatalf("legacy non-root user reached deployment validation: %v", err)
+	}
+}
+
 func TestDNSRoleValidation(t *testing.T) {
 	for _, value := range []string{"../vpn", "edge.example.com", "-vpn", "vpn_", ""} {
 		p, _ := CanonicalValuesToPlan(canonicalFixture())

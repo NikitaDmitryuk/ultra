@@ -61,6 +61,34 @@ func Doctor(ctx context.Context, p *InstallPlan, opts DoctorOptions) DoctorRepor
 			}
 		}
 	}
+	if opts.DialTCP != nil {
+		if p.Bridge.TunnelPort > 0 {
+			if err := opts.DialTCP(ctx, p.Bridge.Address, p.Bridge.TunnelPort); err != nil {
+				issues = append(
+					issues,
+					Issue{
+						Severity: SeverityError,
+						Code:     CodePortBlocked,
+						Node:     "bridge",
+						Message:  fmt.Sprintf("bridge VPN port %d is not reachable: %v", p.Bridge.TunnelPort, err),
+					},
+				)
+			}
+		}
+		if p.Bot.Enabled || (p.Automation != nil && p.Automation.Ingress != nil) {
+			if err := opts.DialTCP(ctx, p.Bridge.Address, 80); err != nil {
+				issues = append(
+					issues,
+					Issue{
+						Severity: SeverityError,
+						Code:     CodePortBlocked,
+						Node:     "ingress",
+						Message:  fmt.Sprintf("bridge ingress port 80 is not reachable: %v", err),
+					},
+				)
+			}
+		}
+	}
 	if p.Bot.Enabled {
 		var tokenErr error
 		if p.SecretResolver != nil {
@@ -92,18 +120,16 @@ func Doctor(ctx context.Context, p *InstallPlan, opts DoctorOptions) DoctorRepor
 			}
 		}
 		if opts.DialTCP != nil {
-			for _, port := range []int{80, p.Bot.Port} {
-				if err := opts.DialTCP(ctx, p.Bridge.Address, port); err != nil {
-					issues = append(
-						issues,
-						Issue{
-							Severity: SeverityWarning,
-							Code:     CodePortBlocked,
-							Node:     "bot",
-							Message:  fmt.Sprintf("bridge %s:%d is not reachable: %v", p.Bridge.Address, port, err),
-						},
-					)
-				}
+			if err := opts.DialTCP(ctx, p.Bridge.Address, p.Bot.Port); err != nil {
+				issues = append(
+					issues,
+					Issue{
+						Severity: SeverityError,
+						Code:     CodePortBlocked,
+						Node:     "bot",
+						Message:  fmt.Sprintf("bridge bot port %d is not reachable: %v", p.Bot.Port, err),
+					},
+				)
 			}
 		}
 	}
