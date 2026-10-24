@@ -24,3 +24,15 @@
       when: not (ultra_bootstrap_recovery_enabled | default(true) | bool)
     - role: recovery_primary
       when: ultra_bootstrap_recovery_enabled | default(true) | bool
+  post_tasks:
+    - name: Flush controller handlers before acknowledging bootstrap
+      ansible.builtin.meta: flush_handlers
+      when: not (ultra_bootstrap_recovery_enabled | default(true) | bool)
+    - name: Save bootstrap acknowledgement
+      ansible.builtin.copy:
+        content: "{{ {'verified': true} | to_json(preprocess_unsafe=False) }}\n"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: not (ultra_bootstrap_recovery_enabled | default(true) | bool)

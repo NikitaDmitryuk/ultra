@@ -199,7 +199,7 @@ func TestBootstrapAutomationKeepsFleetControllerWhenRecoveryDisabled(t *testing.
 		t.Fatal(err)
 	}
 	playbook := string(raw)
-	for _, required := range []string{"- postgres_client", "- role: fleet_access", "fleet_access_ultra_stage: generate", "fleet_access_ultra_stage: authorize", "- controller", "- role: fleet_provider\n      when: not (ultra_bootstrap_recovery_enabled | default(true) | bool)", "- role: recovery_primary\n      when: ultra_bootstrap_recovery_enabled | default(true) | bool"} {
+	for _, required := range []string{"- postgres_client", "- role: fleet_access", "fleet_access_ultra_stage: generate", "fleet_access_ultra_stage: authorize", "- controller", "- role: fleet_provider\n      when: not (ultra_bootstrap_recovery_enabled | default(true) | bool)", "- role: recovery_primary\n      when: ultra_bootstrap_recovery_enabled | default(true) | bool", "post_tasks:", "ansible.builtin.meta: flush_handlers", "name: Save bootstrap acknowledgement", "content: \"{{ {'verified': true} | to_json(preprocess_unsafe=False) }}\\n\"", "dest: \"{{ ultra_result_file }}\"", "mode: \"0600\"", "delegate_to: localhost", "become: false", "when: not (ultra_bootstrap_recovery_enabled | default(true) | bool)"} {
 		if !strings.Contains(playbook, required) {
 			t.Fatalf("missing required controller/recovery split: %s", required)
 		}
