@@ -100,3 +100,6 @@
   ansible.builtin.include_role:
     name: postgres
     tasks_from: monitor
+  vars:
+    postgres_monitor_database_name: "{{ ultra_postgres.name }}"
+    postgres_monitor_database_user: "{{ ultra_postgres.user }}"

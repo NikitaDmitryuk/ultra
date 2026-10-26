@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Root recovery reconciliation for already-owned, ready exits. No provisioning or migrations."""
 import argparse
+import importlib.util
 import contextlib
 import fcntl
 import hashlib
@@ -497,15 +498,21 @@ def ansible_apply(config, node, variables):
     atomic_json(directory / 'inventory.json', inventory)
     atomic_json(directory / 'variables.json', variables)
     executable = config.get('installer_binary', '/usr/local/bin/ultra-install')
+    if config.get('bundle_dir') == '/opt/ultra-recovery':
+        require_canonical_dispatcher(config)
+        import live_tools
+        live_tools.verify()
+    arguments = [executable, 'ansible-run', '--operation', 'reconcile',
+                 '--inventory', str(directory / 'inventory.json'), '--variables', str(directory / 'variables.json'), '--state-dir', str(attempt)]
+    if config.get('ansible_executable'):
+        if config.get('installer_binary') != '/opt/ultra-ansible/current/ultra-install' or config['ansible_executable'] != '/opt/ultra-ansible/current/venv/bin/ansible-playbook':
+            raise ValueError('recovery_tools_dispatcher_unverified')
+        arguments += ['--executable', config['ansible_executable']]
     process = None
     started_ns = time.time_ns()
     _deferring_budget = True
     try:
-        process = subprocess.Popen([executable, 'ansible-run', '--operation', 'reconcile',
-                             '--inventory', str(directory / 'inventory.json'),
-                             '--variables', str(directory / 'variables.json'),
-                             '--state-dir', str(attempt)],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = subprocess.Popen(arguments, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         _deferring_budget = False
         if _budget_expired:
             raise ReconcileBlocked('reconcile_budget_exhausted', attempt.name)
@@ -563,6 +570,9 @@ def ansible_apply(config, node, variables):
 
 def install(config, node, monitor=None, extra=None):
     base = Path(config['bundle_dir'])
+    if config['bundle_dir'] == '/opt/ultra-recovery':
+        import live_tools
+        live_tools.verify()
     directory = Path(config['state_dir']) / 'ansible-files'
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
     files = []
@@ -1093,6 +1103,13 @@ def reconcile(config):
                     status['attempt'] = error.attempt
             write_status(config, status)
             raise ValueError('reconciliation unavailable') from None
+
+
+def require_canonical_dispatcher(config):
+    if (config.get('bundle_dir') != '/opt/ultra-recovery'
+            or config.get('installer_binary') != '/opt/ultra-ansible/current/ultra-install'
+            or config.get('ansible_executable') != '/opt/ultra-ansible/current/venv/bin/ansible-playbook'):
+        raise ValueError('recovery_tools_dispatcher_unverified')
 
 
 def main():

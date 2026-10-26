@@ -323,56 +323,6 @@ func TestInstalledRuntimeSecretsSourceFreeze(t *testing.T) {
 	}
 }
 
-func runtimeSourceEvidence(t *testing.T, path, source string) string {
-	t.Helper()
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var value map[string]any
-	if err := json.Unmarshal(raw, &value); err != nil {
-		t.Fatal(err)
-	}
-	value["secrets_source"] = source
-	raw, _ = json.Marshal(value)
-	if err := os.WriteFile(path, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	return digestSHA256(raw)
-}
-
-func TestInstalledRuntimeSecretsForwardEvidence(t *testing.T) {
-	for _, source := range []string{installedRuntimeSecrets, "unknown", "canonical"} {
-		t.Run("old/"+source, func(t *testing.T) {
-			proof, root, directory := forwardFixture(t)
-			runtimeSourceEvidence(t, filepath.Join(directory, "operator-plan.json"), installedRuntimeSecrets)
-			proof.SHA256 = runtimeSourceEvidence(t, proof.Path, source)
-			_, err := discoverForwardOldOperation(proof, root)
-			if (err == nil) != (source == installedRuntimeSecrets) {
-				t.Fatalf("old source binding: %v", err)
-			}
-		})
-		t.Run("prior/"+source, func(t *testing.T) {
-			proof, old, root, directory, prior := forwardPriorRecoveryFixture(t)
-			runtimeSourceEvidence(t, filepath.Join(prior.Directory, "operator-plan.json"), installedRuntimeSecrets)
-			prior.SHA256 = runtimeSourceEvidence(t, prior.Journal, source)
-			err := verifyForwardPriorCandidate(proof, old, root, directory, prior)
-			if (err == nil) != (source == installedRuntimeSecrets) {
-				t.Fatalf("prior source binding: %v", err)
-			}
-		})
-		t.Run("post-handoff/"+source, func(t *testing.T) {
-			f := forwardChainFixture(t)
-			runtimeSourceEvidence(t, filepath.Join(f.prior.Directory, "operator-plan.json"), installedRuntimeSecrets)
-			f.prior.SHA256 = runtimeSourceEvidence(t, f.prior.Journal, source)
-			err := verifyForwardPostHandoffCandidate(f.proof, f.old, f.root, f.directory, f.prior)
-			if (err == nil) != (source == installedRuntimeSecrets) {
-				t.Fatalf("post-handoff source binding: %v", err)
-			}
-		})
-	}
-}
-
 func TestInstalledRuntimeSecretsMissingInputs(t *testing.T) {
 	for _, content := range []string{"", "ULTRA_DB_DSN=fixture\n", "TELEGRAM_BOT_TOKEN=\n", "TELEGRAM_BOT_TOKEN=x\nTELEGRAM_BOT_TOKEN=y\n"} {
 		resolve := installedRuntimeResolver(true, false, func(string) ([]byte, error) { return []byte(content), nil })

@@ -82,27 +82,14 @@ func TestLifecycleCLIPlanAndDoctorIgnoreLocalBootstrapArchive(t *testing.T) {
 	}
 }
 
-func TestLifecycleCLIUpgradeStatusAndRepairLoadLifecycleConfig(t *testing.T) {
-	config, raw := lifecycleCLIFixture(t)
-	for _, args := range [][]string{
-		{"operator-upgrade", "--config", config, "--release-dir", "/missing/lifecycle-fixture-release",
-			"--source-commit", strings.Repeat("a", 40), "--version", "v2.3.1",
-			"--manifest-sha256", strings.Repeat("b", 64), "--config-sha256", digestSHA256(raw)},
-		{"status", "--config", config, "--ansible-playbook", "/missing/lifecycle-fixture-ansible"},
-		{"recovery-tools-bootstrap", "--config", config, "--release-dir", "/missing/lifecycle-fixture-release",
-			"--version", "v2.3.1", "--candidate-sha256", strings.Repeat("b", 64), "--manual-consumers-excluded"},
+func TestLegacyDeploymentCommandsAreUnavailable(t *testing.T) {
+	for _, command := range []string{
+		"upgrade", "operator-upgrade", "deploy-operation", "retained-primary-reconcile",
+		"operator-journal-reconcile", "rebuild-retained-primary", "rebuild-non-db",
+		"recovery-prepare", "recovery-tools-bootstrap", "ansible-retry-bootstrap",
 	} {
-		if args[0] == "operator-upgrade" || args[0] == "status" {
-			args = append(args, "--lifecycle")
-		}
-		out, err := lifecycleCLI(t, args...)
-		if err == nil || strings.Contains(string(out), "DATABASE_DUMP") || strings.Contains(string(out), "explicit traffic budgets") {
-			t.Fatalf("%s did not reach safe local lifecycle boundary: %s %v", args[0], out, err)
-		}
-		want := map[string]string{"operator-upgrade": "operator upgrade release verification:",
-			"status": "ansible executable unavailable", "recovery-tools-bootstrap": "bootstrap_must_execute_on_attested_bridge"}[args[0]]
-		if !strings.Contains(string(out), want) {
-			t.Fatalf("%s failed at unexpected boundary: %s", args[0], out)
+		if handlePlanSubcommand([]string{command}) {
+			t.Fatalf("legacy deployment command still handled: %s", command)
 		}
 	}
 }

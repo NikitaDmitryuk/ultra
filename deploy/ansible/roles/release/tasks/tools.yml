@@ -6,6 +6,8 @@
     owner: root
     group: root
     mode: "0700"
+- name: Bind the current tools identity before any tool replacement
+  ansible.builtin.include_tasks: tools-identity-seed.yml
 - name: Inspect exact local tools
   ansible.builtin.stat:
     path: "{{ item.source }}"
@@ -88,3 +90,6 @@
   when:
     - inventory_hostname in groups['bridge']
     - item.destination != '/usr/local/bin/ultra-client'
+
+- name: Publish and verify the independent current tools generation
+  ansible.builtin.include_tasks: tools-identity-publish.yml

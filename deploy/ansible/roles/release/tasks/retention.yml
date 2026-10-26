@@ -12,6 +12,13 @@
     release_retention_expected: "{{ release_retention_expected | combine({'tools-previous/' + item.backup_name: item.previous_sha256}) }}"
   loop: "{{ ultra_recovery_files }}"
   when: item.previous_sha256 != ''
+- name: Include the exact independent tools identity fallback in the complete rollback inventory
+  ansible.builtin.set_fact:
+    release_retention_expected: "{{ release_retention_expected | combine({'tools-previous/identity-' + item.name: item.previous_sha256}) }}"
+  loop: "{{ ultra_recovery_tools_identity_files | default([]) }}"
+  when:
+    - inventory_hostname in groups['bridge']
+    - item.previous_sha256 != ''
 - name: Resolve the bridge emergency component identities
   ansible.builtin.set_fact:
     release_retention_bridge_expected:

@@ -66,9 +66,23 @@ func bootstrapInventoryWithNativeAttestation(
 	directory string,
 	attest func(*installplan.InstallPlan) (string, error),
 ) (map[string]any, error) {
-
+	sshTimeout := p.SSH.ConnectTimeoutSec
+	if sshTimeout == 0 {
+		sshTimeout = 10
+	}
+	if sshTimeout < 1 || sshTimeout > 300 {
+		return nil, fmt.Errorf("SSH connect timeout must be between 1 and 300 seconds")
+	}
+	if (p.SSH.User != "" && p.SSH.User != "root") || (p.Database.Enabled && p.Database.SSHUser != "" && p.Database.SSHUser != "root") {
+		return nil, fmt.Errorf("operator_root_transport_required")
+	}
 	if p.Bridge.RemoteDir != "/etc/ultra-relay" {
 		return nil, fmt.Errorf("ansible bootstrap requires canonical remote directory /etc/ultra-relay")
+	}
+	if p.LifecycleOnly && p.SourceValues["BRIDGE_SSH_KEY"] == installedFleetIdentity {
+		if err := attestInstalledRuntimeTransport(p); err != nil {
+			return nil, err
+		}
 	}
 	if p.BridgeSSHIdentity() == "" {
 		return nil, fmt.Errorf("explicit pinned SSH identity required")
@@ -92,8 +106,9 @@ func bootstrapInventoryWithNativeAttestation(
 		return nil, err
 	}
 	common := map[string]any{
-		"ansible_user":                 p.SSH.User,
-		"ansible_become":               p.SSH.User != "root",
+		"ansible_ssh_timeout":          sshTimeout,
+		"ansible_user":                 "root",
+		"ansible_become":               false,
 		"ansible_become_method":        "sudo",
 		"ansible_become_flags":         "-H -S -n",
 		"ansible_ssh_private_key_file": identity,
@@ -142,7 +157,7 @@ func bootstrapInventoryWithNativeAttestation(
 		}
 		dbUser := p.Database.SSHUser
 		if dbUser == "" {
-			dbUser = p.SSH.User
+			dbUser = "root"
 		}
 		db["database"] = map[string]any{
 			"ansible_host":                 p.Database.PrimaryHost,
@@ -265,6 +280,13 @@ func inspectBootstrapWithTopology(
 
 func bootstrapRenderOptions(p *installplan.InstallPlan, inspection map[string]bootstrapInspection) (installplan.RenderOptions, error) {
 	opts := installplan.RenderOptions{PreserveRuntime: p.AdoptRuntime}
+	if preservingBootstrapPrimary(p) {
+		routes, err := preservedPrimaryBootstrapRoutes(p, inspection)
+		if err != nil {
+			return opts, err
+		}
+		opts.PriorBootstrap = routes
+	}
 	raw, err := inspection["bridge"].file("spec.json")
 	if err != nil {
 		return opts, err
@@ -681,6 +703,9 @@ func freezeBootstrapInventory(
 				}
 			}
 		}
+		if err == nil {
+			err = validatePreservedPrimaryFrozenMode(p, frozen)
+		}
 		return frozen, err
 	}
 	if _, err := os.Lstat(target); err == nil {
@@ -696,6 +721,11 @@ func freezeBootstrapInventory(
 	desired, err := installplan.RenderDesiredStateWithOptions(p, options)
 	if err != nil {
 		return nil, err
+	}
+	if preservingBootstrapPrimary(p) {
+		if err = preparePreservedPrimaryDesired(p, desired, inventory, directory, options.PriorBootstrap); err != nil {
+			return nil, err
+		}
 	}
 	if err = prepareBootstrapVariables(p, desired, inventory, inspection, directory); err != nil {
 		return nil, err

@@ -1,0 +1,27 @@
+---
+# Called only for absent PGDATA, after IDENTIFY_SYSTEM authenticated the tunnel.
+- name: Recover only an inactive lost managed physical slot on the preserved primary
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only, --no-align]
+    stdin: |
+      DO $$
+      DECLARE slot record;
+      BEGIN
+        IF pg_is_in_recovery() OR (SELECT system_identifier::text FROM pg_control_system()) <>
+          '{{ hostvars['database'].postgres_replica_primary_identity.stdout | trim }}' THEN
+          RAISE EXCEPTION 'unexpected_replica_primary';
+        END IF;
+        SELECT * INTO slot FROM pg_replication_slots WHERE slot_name = 'ultra_bridge';
+        IF NOT FOUND OR slot.slot_type <> 'physical' OR slot.temporary OR slot.active THEN
+          RAISE EXCEPTION 'unsafe_replica_slot';
+        END IF;
+        IF slot.wal_status = 'lost' THEN
+          PERFORM pg_drop_replication_slot('ultra_bridge');
+          PERFORM pg_create_physical_replication_slot('ultra_bridge');
+          RAISE NOTICE 'ULTRA_REPLICA_LOST_SLOT_RESET';
+        END IF;
+      END
+      $$;
+  delegate_to: database
+  register: postgres_replica_reset_slot
+  changed_when: "'ULTRA_REPLICA_LOST_SLOT_RESET' in postgres_replica_reset_slot.stderr"

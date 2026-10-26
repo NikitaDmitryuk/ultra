@@ -3,7 +3,7 @@
   ansible.builtin.assert:
     that:
       - >-
-        item.destination is match(('^(/opt/ultra-recovery/[A-Za-z0-9][A-Za-z0-9_.-]*\.py|/usr/local/bin/ultra-client
+        item.destination is match(('^(/opt/ultra-recovery/(ssh_policy\.json|[A-Za-z0-9][A-Za-z0-9_.-]*\.py)|/usr/local/bin/ultra-client
         |/etc/systemd/system/ultra-(recovery-(backup|prune|reconcile)\.(service|timer)|monitor\.(service|timer)|monitor-probe\.service))$')
         | regex_replace('\\s+', ''))
       - item.mode in ['0644', '0755']
@@ -26,6 +26,18 @@
     mode: "{{ item.mode }}"
   loop: "{{ ultra_recovery_files | default(recovery_managed_files) }}"
   register: recovery_files
+- name: Keep verified unit source bytes in the canonical reconciliation bundle
+  ansible.builtin.copy:
+    src: "{{ item.destination }}"
+    dest: "/opt/ultra-recovery/{{ item.destination | basename }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ ultra_recovery_files | default(recovery_managed_files) }}"
+  when:
+    - inventory_hostname in groups['bridge']
+    - item.destination is match('^/etc/systemd/system/')
 - name: Reload changed recovery units only
   ansible.builtin.systemd_service:
     daemon_reload: true

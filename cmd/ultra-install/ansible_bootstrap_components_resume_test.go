@@ -51,7 +51,7 @@ r={'verified':True}
 if operation=='bootstrap-exit':r.update(exit_host=v['ultra_bootstrap_exit_host'],cert_pin='a'*64)
 f=job/'result.json';f.write_text(json.dumps(r));f.chmod(0o600)
 `
-	if err = os.WriteFile(stub, []byte(source), 0700); err != nil {
+	if err = os.WriteFile(stub, withNormalAnsibleFailure(source), 0700); err != nil {
 		t.Fatal(err)
 	}
 	ctx, release, err := deployansible.WithOperationLock(context.Background(), root)

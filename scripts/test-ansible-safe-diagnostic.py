@@ -9,6 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 source = ROOT / 'deploy/ansible/callback_plugins/safe_result.py'
@@ -16,7 +17,6 @@ spec = importlib.util.spec_from_file_location('safe_result', source)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 callback = module.CallbackModule()
-
 
 def read_diagnostic(target, result):
     if not target.exists():
@@ -94,21 +94,23 @@ for message, expected in [
         ('Timeout during banner exchange private-host.example:22', 'ssh_banner_timeout'),
         ('Connection timed out private-host.example:22', 'ssh_connect_timeout'),
         ('Connection reset by peer private-host.example:22', 'ssh_connection_reset'),
+        ('Connection reset by peer secret=do-not-log', 'ssh_connection_reset'),
         ('Timeout during banner exchange; Permission denied (publickey)', 'ssh_authentication_failed'),
         ('Connection timed out; Host key verification failed', 'ssh_pin_mismatch'),
         ('connect to host private-host.example:22: Network is unreachable', 'host_unreachable')]:
-    with tempfile.TemporaryDirectory(prefix='ultra-ansible-diagnostic-') as directory:
-        target = Path(directory) / 'diagnostic.json'
-        os.environ['ULTRA_ANSIBLE_DIAGNOSTIC_FILE'] = str(target)
-        try:
-            result = SimpleNamespace(_task=SimpleNamespace(name='SSH probe', action='command'),
-                                     _host=SimpleNamespace(name='bridge'), _result={'msg': message})
-            callback.v2_runner_on_unreachable(result)
-        finally:
-            os.environ.pop('ULTRA_ANSIBLE_DIAGNOSTIC_FILE', None)
-        saved_text = target.read_text()
-        assert json.loads(saved_text)['code'] == expected, saved_text
-        assert 'private-host' not in saved_text and 'Network is unreachable' not in saved_text, saved_text
+    for no_log in (False, True):
+        with tempfile.TemporaryDirectory(prefix='ultra-ansible-diagnostic-') as directory:
+            target = Path(directory) / 'diagnostic.json'
+            os.environ['ULTRA_ANSIBLE_DIAGNOSTIC_FILE'] = str(target)
+            try:
+                result = SimpleNamespace(_task=SimpleNamespace(name='SSH probe', action='command', no_log=no_log),
+                                         _host=SimpleNamespace(name='bridge'), _result={'msg': message})
+                callback.v2_runner_on_unreachable(result)
+            finally:
+                os.environ.pop('ULTRA_ANSIBLE_DIAGNOSTIC_FILE', None)
+            saved_text = target.read_text()
+            assert json.loads(saved_text)['code'] == expected, saved_text
+            assert all(value not in saved_text for value in ('private-host', 'Network is unreachable', 'do-not-log', 'msg', 'stdout', 'args')), saved_text
 
 ansible_playbook = shutil.which('ansible-playbook')
 assert ansible_playbook, 'ansible-playbook is required for the no_log callback regression'

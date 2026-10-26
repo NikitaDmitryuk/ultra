@@ -85,7 +85,7 @@ func runAdoptCommand(arguments []string) {
 	}()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	python := "/usr/bin/python3"
+	python := ansibleControllerPython
 	runtimePlan := p
 	if preparation {
 		manifest, manifestErr := verifyAutomationRelease(*releaseDirectory, "")

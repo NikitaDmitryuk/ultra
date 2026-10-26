@@ -5,5 +5,5 @@ import "embed"
 
 // Bundle contains source files only, never inventory or credentials.
 //
-//go:embed ansible.cfg playbooks roles library callback_plugins controller.py requirements.txt
+//go:embed ansible.cfg playbooks roles library callback_plugins controller.py requirements.txt module_utils
 var Bundle embed.FS

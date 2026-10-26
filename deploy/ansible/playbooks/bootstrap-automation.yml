@@ -14,10 +14,25 @@
   roles:
     - role: fleet_access
       fleet_access_ultra_stage: authorize
-- name: Install independent controller and guarded primary recovery automation
+- name: Install independent controller and optional primary recovery automation
   hosts: bridge
   gather_facts: false
   any_errors_fatal: true
   roles:
     - controller
-    - recovery_primary
+    - role: fleet_provider
+      when: not (ultra_bootstrap_recovery_enabled | default(true) | bool)
+    - role: recovery_primary
+      when: ultra_bootstrap_recovery_enabled | default(true) | bool
+  post_tasks:
+    - name: Flush controller handlers before acknowledging bootstrap
+      ansible.builtin.meta: flush_handlers
+      when: not (ultra_bootstrap_recovery_enabled | default(true) | bool)
+    - name: Save bootstrap acknowledgement
+      ansible.builtin.copy:
+        content: "{{ {'verified': true} | to_json(preprocess_unsafe=False) }}\n"
+        dest: "{{ ultra_result_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: not (ultra_bootstrap_recovery_enabled | default(true) | bool)

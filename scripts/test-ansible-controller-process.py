@@ -2,7 +2,6 @@
 """Controller cleanup must precede infrastructure lease release."""
 import importlib.util
 from pathlib import Path
-import re
 import subprocess
 import sys
 import tempfile
@@ -28,15 +27,9 @@ class ProcessCleanup(unittest.TestCase):
         self.assertEqual(local['ansible_connection'], 'local')
         self.assertEqual(local['ansible_remote_tmp'], '/dev/shm')
         self.assertNotIn('localhost', inventory['all']['children']['bridge']['hosts'])
-        for name in ('inspect-upgrade-runtime.yml', 'inspect-release-hosts.yml',
-                     'inspect-bootstrap.yml', 'upgrade-runtime.yml',
-                     'drain-upgrade-workers.yml', 'contain-upgrade.yml'):
+        for name in ('inspect-bootstrap.yml',):
             text = (ROOT / 'deploy/ansible/playbooks' / name).read_text()
             self.assertNotRegex(text, r'^\s+hosts: all\s*$', name)
-        for name in ('inspect-upgrade-runtime.yml', 'upgrade-runtime.yml', 'contain-upgrade.yml'):
-            text = (ROOT / 'deploy/ansible/playbooks' / name).read_text()
-            for match in re.finditer(r"groups\[['\"]all['\"]\]", text):
-                self.assertIn('difference', text[match.start():match.start() + 80], name)
 
     def test_localhost_is_added_when_optional_all_inventory_is_omitted(self):
         inventory = {}

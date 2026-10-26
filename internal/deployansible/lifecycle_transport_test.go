@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -106,11 +107,11 @@ result.chmod(0o600)
 		t.Fatal(err)
 	}
 	defer release()
-	if _, err = RetryFrozenBootstrap(ctx, stage, python, executable); err != nil {
-		t.Fatal("frozen bootstrap retry did not reuse broker attachment", err)
+	if _, err = RetryFrozenBootstrap(ctx, stage, python, executable); !errors.Is(err, ErrExecutionFenced) {
+		t.Fatal("broker attachment cleared uncertain legacy timeout", err)
 	}
-	if _, err = os.Stat(filepath.Join(stage, "history", "attempt-1.json")); err != nil {
-		t.Fatal("failed bootstrap receipt not preserved", err)
+	if _, err = os.Stat(filepath.Join(stage, "history", "attempt-1.json")); !os.IsNotExist(err) {
+		t.Fatal("blocked timeout retry advanced attempt", err)
 	}
 	requireCloseOnExec(t, ctx.Value(operationLeaseKey{}).(*operationLease).file)
 	if ctx.Value(operationLeaseKey{}) == nil {

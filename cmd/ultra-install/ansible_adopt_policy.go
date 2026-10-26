@@ -266,7 +266,7 @@ func adoptionBackupExtras(paths []string, regeneratedController ...string) ([]st
 	// Makefile. Directory, extension and prefix matches would erase custom hooks.
 	for _, name := range []string{
 		"bootstrap_plan.py", "db_connection.py", "cutover_contract.py", "dns.py", "domain_cutover.py", "heartbeat.py", "monitor.py",
-		"operator_access.py", "reconcile.py", "recovery.py", "recovery_key.py", "recovery_status.py", "restore.py",
+		"operator_access.py", "ssh_policy.py", "ssh_policy.json", "reconcile.py", "recovery.py", "recovery_key.py", "recovery_status.py", "restore.py",
 		"restore_ansible.py", "restore_database.py", "restore_firewall.py", "restore_common.py", "restore_host.py", "restore_peer.py", "smoke.py",
 		"ultra-monitor-probe.service", "ultra-monitor.service", "ultra-monitor.timer",
 		"ultra-recovery-backup.service", "ultra-recovery-backup.timer", "ultra-recovery-prune.service", "ultra-recovery-prune.timer",

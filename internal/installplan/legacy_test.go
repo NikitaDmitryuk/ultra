@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -141,8 +142,40 @@ func TestConfigSeparatesBridgeAddressFromSSHTarget(t *testing.T) {
 	if len(sshTargets) != 2 || sshTargets[0] != "192.0.2.10" || sshTargets[1] != "192.0.2.20" {
 		t.Fatalf("doctor SSH targets = %v", sshTargets)
 	}
-	if len(dialTargets) != 2 || dialTargets[0] != "192.0.2.10" || dialTargets[1] != "192.0.2.10" {
+	if len(dialTargets) != 3 || dialTargets[0] != "192.0.2.10" ||
+		dialTargets[1] != "192.0.2.10" || dialTargets[2] != "192.0.2.10" {
 		t.Fatalf("doctor service targets = %v", dialTargets)
+	}
+
+	p.Bot.Enabled = false
+	var corePorts []int
+	report = Doctor(context.Background(), p, DoctorOptions{DialTCP: func(_ context.Context, host string, port int) error {
+		if host != p.Bridge.Address {
+			t.Fatalf("doctor probed non-bridge address %q", host)
+		}
+		corePorts = append(corePorts, port)
+		if port == p.Bridge.TunnelPort {
+			return errors.New("vpn unavailable")
+		}
+		return nil
+	}})
+	if report.OK || len(report.Issues) != 1 || report.Issues[0].Node != "bridge" {
+		t.Fatalf("doctor must fail on VPN port even with bot disabled: %#v", report)
+	}
+	if len(corePorts) != 1 || corePorts[0] != p.Bridge.TunnelPort {
+		t.Fatalf("doctor core ports = %v", corePorts)
+	}
+	p.Automation.Ingress = nil
+	corePorts = nil
+	report = Doctor(context.Background(), p, DoctorOptions{DialTCP: func(_ context.Context, host string, port int) error {
+		if host != p.Bridge.Address {
+			t.Fatalf("doctor probed non-bridge address %q", host)
+		}
+		corePorts = append(corePorts, port)
+		return nil
+	}})
+	if !report.OK || len(corePorts) != 1 || corePorts[0] != p.Bridge.TunnelPort {
+		t.Fatalf("doctor without configured HTTP services should probe only VPN port: report=%#v ports=%v", report, corePorts)
 	}
 }
 
@@ -459,7 +492,7 @@ func TestDedicatedDatabaseUsesTunnelAndExplicitSSHIdentity(t *testing.T) {
 			"BRIDGE_IP":         "192.0.2.1",
 			"MAIN_EXIT_IP":      "192.0.2.2",
 			"DATABASE_IP":       "192.0.2.40",
-			"SSH_USER":          "db-admin",
+			"SSH_USER":          "root",
 			"DATABASE_SSH_KEY":  "/keys/db",
 			"BRIDGE_SSH_KEY":    "/keys/vpn",
 			"REUSE_BRIDGE_SPEC": "false",
@@ -471,7 +504,7 @@ func TestDedicatedDatabaseUsesTunnelAndExplicitSSHIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Database.SSHIdentity != "/keys/db" || p.Database.SSHUser != "db-admin" {
+	if p.Database.SSHIdentity != "/keys/db" || p.Database.SSHUser != "root" {
 		t.Fatal("database SSH access lost")
 	}
 	if !strings.Contains(ds.DBDSN, "@127.0.0.1:25432/") || ds.PostgresConfig == nil {

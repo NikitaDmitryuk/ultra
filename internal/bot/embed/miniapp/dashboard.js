@@ -36,6 +36,36 @@ function healthSummary(h) {
     tone: good ? "good" : "wait",
   };
 }
+function replicaStatusHTML(result) {
+  if (result.status !== "fulfilled" || !Array.isArray(result.value))
+    return panelError("Реплика PostgreSQL", "retry-replicas");
+  const replica = result.value.find((item) => item.id === "bridge");
+  const state = replica?.state || "unknown";
+  const labels = {
+    streaming: "Поток репликации работает",
+    syncing: "Копия синхронизируется",
+    unknown: "Состояние неизвестно",
+  };
+  const label =
+    labels[state] || "Нет потока репликации";
+  const tone =
+    state === "streaming"
+      ? "good"
+      : state === "unknown" || state === "syncing"
+        ? "wait"
+        : "bad";
+  const details = [
+    replica?.replay_lag_bytes == null
+      ? ""
+      : `Отставание WAL: ${esc(replica.replay_lag_bytes)} байт`,
+    replica?.checked_at
+      ? `Проверено: ${esc(dateLabel(replica.checked_at))}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return `<div class="card"><div class="row wrap"><h2>Bridge PostgreSQL standby · реплика</h2><span class="badge ${tone}">${esc(label)}</span></div><small>Физическая реплика primary${details ? ` · ${details}` : ""}</small></div>`;
+}
 async function overview() {
   const version = ++viewVersion;
   app.innerHTML = `<div class="page-heading"><div><p class="eyebrow">ПУЛЬТ УПРАВЛЕНИЯ</p><h1>Обзор сети</h1><p class="muted">Трафик, доступ и состояние вашей сети.</p></div><button class="btn secondary compact" id="refresh-overview">Обновить</button></div><section id="overview-summary" class="metrics" aria-label="Сводка">Загружаем сводку…</section><section id="overview-health"></section><div class="section-heading"><h2>Использование подписок</h2><small>Только трафик с известным выходом · UTC</small></div><section id="overview-traffic"></section><div class="dashboard-grid"><section id="overview-history"></section><section id="overview-top"></section></div>`;
@@ -152,7 +182,7 @@ async function diagnostics() {
   clearTimeout(refreshTimer);
   currentTab = "service";
   const version = ++viewVersion;
-  app.innerHTML = `<p class="eyebrow">ИНФРАСТРУКТУРА</p><h1>Сервис</h1><div class="section-tabs"><button id="servers-view">Серверы</button><button class="active" id="diagnostics-view">Диагностика</button></div><div class="page-heading"><p class="muted">Проверки с сервера. Подключение устройства проверяйте в Happ.</p><button class="btn secondary compact" id="refresh-diagnostics">Обновить</button></div><section id="network-health"></section><section id="network-alerts"></section>`;
+  app.innerHTML = `<p class="eyebrow">ИНФРАСТРУКТУРА</p><h1>Сервис</h1><div class="section-tabs"><button id="servers-view">Серверы</button><button class="active" id="diagnostics-view">Диагностика</button></div><div class="page-heading"><p class="muted">Проверки с сервера. Подключение устройства проверяйте в Happ.</p><button class="btn secondary compact" id="refresh-diagnostics">Обновить</button></div><section id="network-health"></section><section id="network-replication" aria-live="polite"></section><section id="network-alerts"></section>`;
   button("servers-view", () => {
     viewVersion++;
     return service();
@@ -166,18 +196,9 @@ async function diagnostics() {
   ]);
   if (version !== viewVersion) return;
   const target = document.querySelector("#network-health");
-  const bridgeStandby =
-    replicas.status === "fulfilled" && Array.isArray(replicas.value)
-      ? replicas.value.find((replica) => replica.id === "bridge")
-      : null;
-  const standbyState = bridgeStandby?.state
-    ? esc(bridgeStandby.state)
-    : "Состояние неизвестно";
-  const standbyTone = bridgeStandby?.state === "streaming"
-    ? "good"
-    : bridgeStandby?.state && bridgeStandby.state !== "unknown"
-      ? "bad"
-      : "wait";
+  const replicaTarget = document.querySelector("#network-replication");
+  replicaTarget.innerHTML = replicaStatusHTML(replicas);
+  button("retry-replicas", diagnostics);
   const primary = database.status === "fulfilled" ? database.value : null;
   const primaryHost = primary?.primary_host
     ? esc(primary.primary_host)
@@ -193,7 +214,7 @@ async function diagnostics() {
     const h = health.value,
       state = healthSummary(h),
       exits = h.exits?.length ? h.exits : h.exit ? [h.exit] : [];
-    target.innerHTML = `<div class="card"><div class="row wrap"><h2>Состояние сети</h2><span class="badge ${state.tone}">${esc(state.label)}</span></div><small>Проверено: ${esc(dateLabel(h.checked_at))}</small><div class="route-row"><span>Bridge · интернет<small>Задержка ${latencyLabel(h.bridge?.internet_latency_ms)}</small></span><strong class="${h.bridge?.internet_ok ? "good" : "bad"}">${h.bridge?.internet_ok ? "Доступен" : "Недоступен"}</strong></div><div class="route-row"><span>Primary PostgreSQL<small>Сервер: ${primaryHost} · проверка через пул приложения</small></span><span class="badge ${primary?.reachable && primary.observed_role === "primary" ? "good" : "wait"}">${primaryState}</span></div><div class="route-row"><span>Bridge PostgreSQL standby · реплика<small>Физическая реплика primary</small></span><span class="badge ${standbyTone}">${standbyState}</span></div>${exits.map((e) => `<div class="route-row"><span>${esc(e.name || e.id)}<small>${e.active ? "Активный выход" : "Резервный выход"} · туннель ${latencyLabel(e.tunnel_latency_ms)} · интернет ${latencyLabel(e.internet_latency_ms)}</small></span><span class="badge ${e.reachable && e.internet_ok ? "good" : "bad"}">${e.reachable && e.internet_ok ? "Доступен" : e.reachable ? "Нет интернета" : "Нет туннеля"}</span></div>`).join("")}${ingressHealthHTML(h.public_ingresses || [])}</div>`;
+    target.innerHTML = `<div class="card"><div class="row wrap"><h2>Состояние сети</h2><span class="badge ${state.tone}">${esc(state.label)}</span></div><small>Проверено: ${esc(dateLabel(h.checked_at))}</small><div class="route-row"><span>Bridge · интернет<small>Задержка ${latencyLabel(h.bridge?.internet_latency_ms)}</small></span><strong class="${h.bridge?.internet_ok ? "good" : "bad"}">${h.bridge?.internet_ok ? "Доступен" : "Недоступен"}</strong></div><div class="route-row"><span>Primary PostgreSQL<small>Сервер: ${primaryHost} · проверка через пул приложения</small></span><span class="badge ${primary?.reachable && primary.observed_role === "primary" ? "good" : "wait"}">${primaryState}</span></div>${exits.map((e) => `<div class="route-row"><span>${esc(e.name || e.id)}<small>${e.active ? "Активный выход" : "Резервный выход"} · туннель ${latencyLabel(e.tunnel_latency_ms)} · интернет ${latencyLabel(e.internet_latency_ms)}</small></span><span class="badge ${e.reachable && e.internet_ok ? "good" : "bad"}">${e.reachable && e.internet_ok ? "Доступен" : e.reachable ? "Нет интернета" : "Нет туннеля"}</span></div>`).join("")}${ingressHealthHTML(h.public_ingresses || [])}</div>`;
   } else {
     target.innerHTML = panelError("Состояние сети", "retry-health");
     button("retry-health", diagnostics);

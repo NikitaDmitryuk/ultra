@@ -1,0 +1,50 @@
+---
+- name: Observe preserved primary system identity
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only, --no-align]
+    stdin: |
+      BEGIN READ ONLY;
+      SELECT system_identifier FROM pg_control_system() WHERE NOT pg_is_in_recovery();
+      ROLLBACK;
+  register: postgres_replica_preserved_identity
+  changed_when: false
+- name: Require the original preserved primary identity
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname == 'database'
+      - ultra_preserve_primary | bool
+      - ultra_postgres is not defined
+      - ultra_database_import_dump | default('') | length == 0
+      - postgres_replica_preserved_identity.stdout_lines | select('match', '^[0-9]+$') | list | length == 1
+      - >-
+        (postgres_replica_preserved_identity.stdout_lines | select('match', '^[0-9]+$') | first)
+        == (lookup('file', ultra_preserved_primary_identity_file).split('\n') | select('match', '^\{') | first | from_json).system_identifier
+- name: Project validated primary identity for the canonical standby role
+  ansible.builtin.set_fact:
+    postgres_replica_primary_identity:
+      stdout: "{{ postgres_replica_preserved_identity.stdout_lines | select('match', '^[0-9]+$') | first }}"
+- name: Observe preserved primary recovery parameters and restricted replication identity
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only, --no-align]
+    stdin: |
+      BEGIN READ ONLY;
+      SELECT 1 / count(*) FROM pg_roles WHERE rolname = 'ultra_replication'
+        AND rolcanlogin AND rolreplication AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole
+        AND NOT rolbypassrls AND NOT rolinherit
+        AND NOT EXISTS (SELECT 1 FROM pg_auth_members WHERE member = pg_roles.oid);
+      SELECT 1 / count(*) FROM pg_replication_slots
+        WHERE slot_name = 'ultra_bridge' AND slot_type = 'physical' AND NOT temporary;
+      SELECT 1 / CASE WHEN EXISTS (SELECT 1 FROM pg_tablespace WHERE spcname NOT IN ('pg_default', 'pg_global')) THEN 0 ELSE 1 END;
+      SELECT json_build_object('max_connections', current_setting('max_connections')::int,
+        'max_worker_processes', current_setting('max_worker_processes')::int,
+        'max_wal_senders', current_setting('max_wal_senders')::int,
+        'max_prepared_transactions', current_setting('max_prepared_transactions')::int,
+        'max_locks_per_transaction', current_setting('max_locks_per_transaction')::int);
+      ROLLBACK;
+  register: postgres_replica_preserved_parameters
+  changed_when: false
+- name: Project validated recovery parameters for the canonical standby role
+  ansible.builtin.set_fact:
+    postgres_replica_primary_parameters:
+      stdout_lines: >-
+        {{ postgres_replica_preserved_parameters.stdout_lines | select('match', '^\{') | list }}

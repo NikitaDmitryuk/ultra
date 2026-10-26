@@ -16,9 +16,13 @@
 - name: Reject foreign or modified relay service definition before activation
   ansible.builtin.assert:
     that:
-      - not relay_unit_current.stat.exists or (not relay_unit_current.stat.islnk and relay_unit_current.stat.isreg)
       - >-
         not relay_unit_current.stat.exists or
+        ((ultra_preserve_primary | default(false) | bool) and relay_unit_current.stat.islnk and relay_unit_current.stat.lnk_source == '/dev/null') or
+        (not relay_unit_current.stat.islnk and relay_unit_current.stat.isreg)
+      - >-
+        not relay_unit_current.stat.exists or
+        ((ultra_preserve_primary | default(false) | bool) and relay_unit_current.stat.islnk and relay_unit_current.stat.lnk_source == '/dev/null') or
         relay_unit_current.stat.checksum == (lookup('template', 'ultra-relay.service.j2') | hash('sha256')) or
         relay_unit_current.stat.checksum == (ultra_previous_relay_unit_sha256 | default(''))
     fail_msg: relay_service_definition_requires_explicit_adoption
@@ -142,6 +146,7 @@
   ansible.builtin.template:
     src: ultra-relay.service.j2
     dest: /etc/systemd/system/ultra-relay.service
+    follow: false
     owner: root
     group: root
     mode: "0644"
@@ -178,7 +183,7 @@
 - name: Allow managed public bridge ports on an enabled guest firewall
   ansible.builtin.command:
     argv: [/usr/sbin/ufw, allow, "{{ item | string }}/tcp"]
-  loop: "{{ ultra_bridge_ports | default([ultra_spec.vless_port]) | unique }}"
+  loop: "{{ ((ultra_bridge_ports | default([])) + ([ultra_spec.vless_port] if ultra_spec is defined else [])) | unique }}"
   register: relay_bridge_firewall
   changed_when: "'Skipping' not in relay_bridge_firewall.stdout"
   when:

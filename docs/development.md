@@ -12,25 +12,19 @@
 | Только инструкции или документация | `make harness-check`; содержательная сверка с источниками |
 | Состав релиза, manifest или публикация GitHub Release | `python3 scripts/test-release-assets.py`, затем `python3 scripts/test-release-assets.py --dist dist`: реальный комплект должен совпадать с manifest, SHA-256, архитектурами ELF, исходными архивами и закреплёнными offline wheels |
 | Проверяющий инструмент harness | `go test ./tools/harnesscheck`; `make harness-check`; `go vet ./tools/harnesscheck` |
-| Offline rebuild-non-db preflight | `env -u DATABASE_URL go test ./cmd/ultra-install -run '^TestRebuild' -count=1`: strict evidence/scope, неподтверждённое доверие, приватность входов, blocked journal/replay/crash; тесты не подключаются к production |
-| Retained-primary recovery execute | `env -u DATABASE_URL go test ./cmd/ultra-install -run '^TestRetained' -count=1`; `python3 scripts/test-retained-primary-gates.py`; `python3 scripts/test-subscription-key-projection.py`; syntax check `rebuild-retained-primary.yml` закреплённым Ansible runtime. Проверяются orphan/SIGKILL replay, обязательные прежние DB credentials, точная route identity, frozen binding без потери integer precision и hard localhost gates при DB unreachable; production execute этими тестами не запускается |
 | Go-код | Тесты затронутых пакетов, затем `make test`, `make vet`, `make lint` |
 | Конфигурация Xray, маршрутизация, failover | Тесты `./internal/config ./internal/exits ./internal/proxy`; сборка relay |
-| Ansible upgrade с DNS/domain/runtime effects | `python3 scripts/test-ansible-dns-migration.py`, `test-ansible-upgrade-domain.py`, `test-ansible-upgrade-runtime.py`, `test-ansible-runtime-effects.py`, `test-ansible-accepted-resume.py`, operation mapping и syntax check закреплённым Ansible runtime |
 | Блокировка продления managed tunnel TLS и приватный checkpoint | `python3 scripts/test-managed-tls-fence.py`; тот же набор включён в `go test ./cmd/ultra-install` и использует только синтетические hosts и локальный тестовый CA |
-| Forward-only lifecycle recovery / broker bootstrap | `go test ./cmd/ultra-install ./internal/deployansible`; `python3 scripts/test-manual-deploy.py`; `python3 scripts/test-forward-broker-guard.py`; operation mapping, release retention и syntax check `bootstrap-forward-broker.yml` |
-| Восстановление recovery-инструментов перед readiness | `python3 scripts/test-recovery-tools-bootstrap.py`; Go-тесты `TestRecoveryBootstrap`; operation mapping и syntax check `bootstrap-recovery-inspect.yml`, `bootstrap-recovery-tools.yml`; crash/resume, fallback и завершённый replay |
-| Совместимость controller при retirement floor | `python3 scripts/test-controller-enforcement.py`; `python3 scripts/test-ansible-release-contracts.py`; focused Go tests `TestUpgradeEnforcement`, `TestEnforcementPreflightRetention`, `TestControllerEnforcementProtocol`; syntax check `inspect-upgrade.yml` |
+| Операторские входы, UID ownership и SSH policy | `python3 scripts/test-manual-deploy.py`; `python3 scripts/test-operator-inputs.py`; `python3 deploy/recovery/test_ssh_policy.py`; проверки используют локальные fixtures и не подключаются к production |
 | SQL, репозитории, миграции | Генерация SQLC при изменении схемы/запросов; `go test ./internal/db` с отдельной тестовой БД |
 | Восстановление DB tunnel identity | `env -u DATABASE_URL go test ./internal/installplan ./cmd/ultra-install -run 'DatabaseTunnel|TunnelReuse'`; `python3 scripts/test-db-tunnel-reuse.py`; operation mapping, Ansible syntax check `bootstrap.yml` и `bootstrap-postgres.yml`; `make harness-check` |
 | Встроенные web-ресурсы или установочные скрипты | Тесты затронутого Go-пакета, пересборка соответствующего бинарника; для UI — `make test-ui` (Node.js 22+) и проверка затронутого сценария в браузере |
 
 Сборка бинарников: `make build`, `make build-install`, `make build-bot`.
 
-`rebuild-retained-primary` реализует отдельный узкий execute, а не продолжение
-`rebuild-non-db preflight`. Admission намеренно одноразовый: existing remote marker
-запрещает повтор даже после successful receipt, пока не выполнена независимая ручная
-reconciliation. Проверки и границы описаны в [rebuild recovery](rebuild-non-db.md).
+Для полной production-замены используй только описанный в
+[production replacement](production-replacement.md) `make deploy`. Старые
+upgrade, rollback, resume и retained-primary deployment workflows удалены.
 
 CI запускает независимые группы Go lint/vet, обычных Go-тестов с PostgreSQL,
 race-тестов с отдельной PostgreSQL, сборки,
@@ -42,8 +36,20 @@ Ansible-валидации и SSH-интеграции, Nginx, Mini App/release-
 можно выполнить как `env -u DATABASE_URL make test`, чтобы не использовать случайно
 унаследованный DSN. Пропущенную DB-интеграцию явно указывай в результате.
 
-`make test-operator` объединяет offline-регрессии manual deploy, forward broker,
-operator DB dump и восстановления DNS; этот target обязателен в Ansible CI.
+`make test` и `make test-race` выделяют каждому пакету 20 минут: installer содержит
+последовательную матрицу сбоев и повторов с записью immutable bundle и `fsync`.
+Это бюджет тестового исполнителя; тайм-ауты рабочих операций он не меняет.
+
+`make test-operator` объединяет offline-регрессии manual deploy, миграции точно
+перечисленных operator inputs, forward broker, operator DB dump и восстановления
+DNS; этот target обязателен в Ansible CI. `python3 deploy/recovery/test_ssh_policy.py`
+проверяет общую версионированную SSH policy отдельно. Её источник —
+`deploy/recovery/ssh_policy.json`; `make format` генерирует автономный
+`deploy/ansible/module_utils/ultra_ssh_policy.py` из JSON и общего Python-конструктора.
+Ansible доставляет этот модуль вместе с задачей, поэтому первая проверка нового
+узла не зависит от уже установленного `/opt/ultra-recovery`.
+`scripts/test-ansible-ssh-policy.py` проверяет актуальность генерации и реальную
+доставку через локальный Ansible; он входит в `make test-ansible`.
 Проверка PostgreSQL credential repair отдельно выполняется на PostgreSQL 16 в
 SSH integration job; тот же job запускает атомарный import protocol в отдельном
 PostgreSQL 16 контейнере без сети. `test-ui` не повторяет release/controller проверки из
@@ -66,11 +72,33 @@ Go учитывает `GOTMPDIR`: смена только `TMPDIR` не пере
 
 Перед каждым коммитом запусти `make format`, проверь получившийся diff, затем `make lint`.
 Форматирование обязательно, а не best-effort: `goimports`, `gofmt`, `golines` и
-`golangci-lint` имеют закреплённые версии в [Makefile](../Makefile). `make format`
-также выполняет `go mod tidy`. CI запускает те же `make format-check` и `make lint`;
+`golangci-lint` имеют закреплённые версии в [Makefile](../Makefile). Форматирование
+не сканирует локальные артефакты и защищённые каталоги под `dist/`; `go mod tidy`
+запускается отдельно через `make tidy` при изменении зависимостей. CI запускает
+те же `make format-check` и `make lint`;
 `format-check` завершится ошибкой, если форматирование изменило checkout. При обновлении
 инструментов меняй версию в Makefile и подтверждай, что локальный запуск и CI используют
 одинаковые команды.
+
+Go-форматтеры обрабатывают отслеживаемые и неигнорируемые Go-файлы, не обходя
+checkout рекурсивно. Так они не заходят в игнорируемую root-owned историю операций
+под `dist/manual`: это защищённое состояние выкладки может быть недоступно build user.
+
+Проверки local execution preflight должны сравнивать файлы namespace до и после:
+проверка admission перед remote fencing не имеет права вызывать dispatcher
+`checkExecutionAdmission`, который может принять orphan job и записать fence.
+Отсутствующий namespace также не создаётся. После preflight dispatcher сохраняет
+свою окончательную проверку под admission lock. Replacement-only классификация
+failed generation также read-only; её retirement проверяется реальной
+`AbandonExecutionFence` в транзакционных тестах с global lock, изменённым scope,
+конкурирующей generation и отказами quiescence. Running/missing receipt не
+превращается в failed для продолжения. Источники:
+[регрессии preflight](../internal/deployansible/preflight_test.go),
+[транзакция replacement](../cmd/ultra-install/production_replace_execution_test.go).
+
+Тест timeout проверяет сериализованный bootstrap inventory без обязательной
+зависимости от Ansible в Go job; при установленном Ansible дополнительно
+проверяется реальное наследование `ansible_ssh_timeout` всеми SSH-hosts.
 
 ## PostgreSQL, SQLC и ORM
 
@@ -151,118 +179,7 @@ Mini App встраивается из `internal/bot/embed/miniapp`, Admin UI �
 1.4.4 ([исходник с лицензией MIT](../internal/bot/embed/miniapp/vendor/qrcode.js));
 для графиков и QR внешние CDN не нужны.
 
-Upgrade проецирует управляемые runtime-настройки на самом целевом узле: spec,
-environment и точные rollback images не передаются в receipts. Fixed transport
-проверяет installer по manifest и связывает host journal с digest неизменяемого
-запроса; exit proof строится из bridge DB inspection и frozen strict SSH inventory.
-Каждая повторная попытка activation использует отдельную runtime transaction.
-Источники: [transport](../cmd/ultra-install/upgrade_runtime_probe.go),
-[caller](../cmd/ultra-install/upgrade_runtime_integration.go).
-
-Незавершённый manual journal с `mutator_dispatched=true` блокирует обычный повтор,
-`--retry-failed` и использование release как baseline. Одноразовый `--forward-only`
-принимает только exact journal прерванного upgrade: удерживает broker lease,
-проверяет свежим playbook единственное дерево прежнего worker на bridge и каждом
-узле замороженного inventory, записывает write-ahead handoff и затем меняет lifecycle ID.
-Для legacy journal без digest staged-конфига wrapper требует совпадения канонической
-конфигурации, attempt и закреплённого SSH transport, затем получает недостающий digest
-read-only attestation точного remote root, manifest и request-bound job/receipt;
-installer всё равно независимо проверяет конфигурацию, frozen plan и handoff.
-Свободный flock, `status` и локальные поля `drained`/`quiescent` сами по себе не
-доказывают остановку workers. Перед мутацией создаётся свежий DB snapshot, проверяется
-читаемость custom archive через `pg_restore --list` и независимая доставка. Это не
-репетиция восстановления: успешный список TOC не доказывает, что данные можно восстановить.
-При ошибке forward-only не возвращает старый бинарник и не откатывает БД; он повторно
-закрепляет тот же lifecycle gate, останавливает bot/relay и принадлежащие upgrade
-таймеры/службы на замороженном inventory и подтверждает их состояние. Если gate или
-остановку подтвердить не удалось, команда завершается ошибкой; считать production
-безопасно переведённым в maintenance нельзя.
-
-Для сбоя `--forward-only` до handoff операторский путь
-`scripts/manual-deploy.py --continue-forward-only --config <canonical-config>`
-сохраняет исходный production-журнал и отдельно привязывает журнал предыдущего
-кандидата. Installer повторно проверяет оба журнала, staged config/release, frozen
-plan, lifecycle и отсутствие activation. Допускаются сохранённый handoff с его
-drain evidence и частичные broker-bootstrap stages; все файлы проверяются на
-приватность, а installer сверяет содержимое bundle с подписанным Ansible archive.
-Broker recovery читает controller identity из host variables единственного `bridge`
-в frozen request inventory; lifecycle ID остаётся привязан к request variables.
-Фикстуры должны сохранять это production-размещение полей.
-В сохранённом drain stage допускаются точные генерируемые controller артефакты:
-обычный приватный `execution.lock` и приватное дерево `.ansible` (Ansible HOME).
-Workspace проверяется рекурсивно по владельцу, типам, правам и лимитам размера;
-symlink и посторонние элементы stage блокируют продолжение. Наличие lock-файла
-не подтверждает quiescence: operator lease, lifecycle и свежий fleet census
-проверяются независимо.
-Историческое дерево предыдущего успешного upgrade может содержать inspect, host,
-runtime и Ansible job artifacts; безопасное дерево проверяется без предположения,
-что в нём ровно три элемента, а request/job/receipt activation сверяются отдельно.
-
-Если действующий controller не поддерживает атомарный supersede, recovery под
-удерживаемым predecessor OFD проверяет broker по systemd MainPID, executable и
-unit hashes, устанавливает только immutable broker runtime/unit из подписанного
-кандидата и перезапускает controller. Он повторно принимает тот же OFD, проверяет
-неизменный `oldID/applying`, делает новый полный fleet census и только затем
-сохраняет intent и вызывает атомарный supersede. Повтор может продолжить только тот
-же кандидат с подтверждёнными request/job/receipt; неоднозначный либо неполный
-bootstrap stage блокирует действие. При аварии процесс может потерять kernel OFD,
-но durable `applying` gate остаётся закрытым, пока новый controller не примет тот
-же ID и descriptor. Rollback неизвестного relay и изменение БД этим recovery-путём
-не выполняются.
-
-Изменение staged input/SSH transport, неизвестные файлы, чужая broker identity,
-activation, retirement-конфликт или несовпадение remote attestation блокируют
-продолжение. `--retry-failed` не заменяет этот путь и не разрешает использовать
-неудавшийся candidate как predecessor.
-
-Retirement ledger устанавливает сохраняемый floor контроллера. Обычный upgrade
-может сохранить его по точному operation-bound proof candidate и rollback broker:
-до reservation оба executable проходят behavioral probes в изолированных state/socket,
-а после reservation, при выборе runtime и после restart доказательство проверяется
-по текущим identities и неизменным bytes ledger. Начальный envelope — ledger v1
-без handoff и lifecycle `released`; retry допускает только тот же operation lifecycle.
-Приватный `controller-enforcement.json` входит в completion metadata; write-ahead
-intent на bridge сохраняет допустимые old/new combinations при частичном переключении.
-Crash после публикации intent восстанавливается только по exact same-inode sibling
-pair; произвольные hardlinks не допускаются. Отдельный local release-intent связывает
-успешные commit/finalize/resume receipts до release. Retry при нём выполняет только
-свежую проверку exact candidate/ledger/own lifecycle, при необходимости завершающий
-release и повторную read-only проверку, затем seal completion. Ни reserve, ни стадии
-upgrade не переисполняются; отсутствие intent или drift сохраняют отказ.
-Rollback и restore без собственного точного proof блокируются до первой мутации.
-Backup включает оба lifecycle journal и аутентифицирует `controller_enforcement_floor`.
-Collector всегда перечитывает фиксированный retirement ledger даже при старой backup policy.
-Restore поколения с таким floor выдаёт `controller_enforcement_migration_required`:
-текущий формат не доказывает совместимость восстановленного контроллера.
-Более старый snapshot на новом узле не содержит актуального floor: для его безопасной
-миграции нужен независимый от snapshot монотонный checkpoint enforcement/retirement.
-Эти ограничения не доказывают quiescence ранее прерванной попытки.
-Источники: [manual gate](../scripts/manual-deploy.py),
-[operation proof](../cmd/ultra-install/upgrade_enforcement.go),
-[isolated verifier](../deploy/ansible/library/ultra_controller_enforcement.py),
-[rollback preflight](../deploy/ansible/roles/release/tasks/controller-rollback-preflight.yml),
-[проверка restore](../deploy/recovery/restore_common.py).
-
-Роли и systemd-шаблоны Ansible встраиваются в `ultra-install` из
-[deploy/ansible](../deploy/ansible/assets.go). Изменение установленного YAML отдельно
-от бинарника не меняет уже зафиксированное задание: оно использует собственный
-неизменяемый комплект. Источники системной подготовки и PostgreSQL —
-[роль host](../deploy/ansible/roles/host/tasks/main.yml) и
-[роль postgres](../deploy/ansible/roles/postgres/tasks/main.yml).
-
-SSH-проверки, `make install`, выдача сертификатов и эксплуатационные скрипты могут
-обращаться к рабочим узлам. Они не входят в безопасную локальную проверку изменений.
-Условия их применения описаны в [README](../README.md),
-[MOBILE_INSTALL](../deploy/MOBILE_INSTALL.md) и [TLS](../deploy/TLS.md).
-
-При обновлении бинарников сначала останови бота, запусти relay и дождись готовности
-Xray, затем запускай бота: `Type=simple` не означает готовность локального прокси,
-а загрузка geo-правил может занять дольше нескольких секунд. Готовность нового relay
-можно проверить по `reload.count > 0` и пустому `reload.error` в `/v1/hardening`;
-после этого отдельно проверь полный туннель. Бот открывает ту же БД и обращается
-к Telegram через локальный прокси при запуске. Источники:
-[запуск relay](../cmd/ultra-relay/main.go), [запуск бота](../cmd/ultra-bot/main.go),
-[systemd unit](../deploy/ansible/roles/relay/templates/ultra-relay.service.j2).
+Локальные проверки legacy deployment journal, resume, rollback и reconciliation удалены вместе с этими workflows. Обычный deploy сверяет identity primary до и после, не меняет прикладные таблицы, данные или версию миграций; он может восстановить служебные объекты `ultra_monitor` для replica status. DB backup/restore остаётся отдельным инструментом.
 
 ## Проверка контекста
 
@@ -483,6 +400,29 @@ scripts/test-load-pg-recovery.py --container <test PostgreSQL16 container>`.
 
 ## Проверки исполнителя Ansible
 
+`scripts/test-ansible-controller-fence.py` входит в `make test-ansible` и проверяет
+общий запрет dispatch после SIGKILL и потери receipt, включая другую job directory.
+Go-регрессии в `execution_fence_test.go` проверяют generation-bound completion и
+явный retry после обычного task failure. Отсутствующий receipt завершённой попытки
+не разрешает создать новое поколение той же попытки; обычное чтение failed-кеша
+также не создаёт новое поколение. Installer fixtures используют настоящий controller
+и неизменённый bundle через тестовый interpreter wrapper: правка controller после
+вычисления digest проверяла бы другой исполняемый комплект.
+
+`scripts/test-execution-systemd.py` в Ansible integration CI проверяет
+переживание потери SSH и завершение удалённых workers. Он запускает
+изолированный Docker-стенд с настоящим systemd и pinned root SSH, без host mounts:
+transient unit timeout, SIGKILL dispatcher с поздним observer, отмена, живой потомок
+и потеря первого SSH-ответа readiness. Проверка отличает runtime-limit evidence от
+доказанной остановки workers: при живом потомке completion не публикуется даже при
+успешном receipt. Синтетические `systemctl`-ответы этих гарантий не подтверждают.
+
+`Client.ObserveLifecycleOperationLock` проверяет только уже удерживаемый same-ID
+OFD. В отличие от attach он не захватывает свободный lock и не переводит
+`checking` в `applying`. Тесты `TestLifecycleObservation*` проверяют неизменность
+журнала и lock, проверку дескриптора и его закрытие; для транспортной части нужны
+доступные Unix-сокеты и SCM_RIGHTS.
+
 Offline runtime архив нормализует владельца в tar-заголовках до root, а роль
 контроллера явно задаёт root при распаковке. Иначе UID сборочной машины переносится
 на сервер и проверка владения отклоняет комплект с `retention_foreign_tree`.
@@ -502,10 +442,15 @@ payload без удаления квитанций и операторских �
 
 
 `make test-ansible` запускает закреплённый `ansible-lint` и syntax checks.
-`make test-ansible-exit` требует Docker и Ansible: он применяет роль через настоящий
-SSH в одноразовом контейнере, проверяет сохранение UUID/сертификата и отсутствие
-повторной активации неизменной конфигурации. Service manager контейнера подменён;
-этот тест не подтверждает настоящий systemd boot или передачу через туннель.
+`make test-ansible-exit` требует Docker, закреплённый Ansible и явный запуск driver
+от root на одноразовой VM с настоящим systemd. Driver отказывает при существующем
+`/var/lib/ultra-ansible` или установленном controller unit; CLI и Makefile сами
+не повышают права. CI вызывает driver через `sudo -n` и проверяет настоящее локальное
+systemd containment. Роль применяется через SSH в одноразовом контейнере; проверяются
+сохранение UUID/сертификата и отсутствие повторной активации неизменной конфигурации.
+Service manager целевого контейнера подменён: тест не подтверждает его настоящий
+systemd boot или передачу через туннель. При неопределённом завершении driver сохраняет
+fence и generated evidence до уничтожения тестовой VM; произвольной очистки нет.
 Отдельная регрессия сохраняет Jinja-подобный текст буквально и проверяет отсутствие
 lookup на управляющем узле. Генерируются только временные fixture-ключи; production-конфигурация не читается.
 
@@ -539,3 +484,23 @@ reload, восстановление прежних файлов после ош
 Перед их запуском нужен собранный или установленный `ultra-install`;
 `ULTRA_INSTALL_BIN` позволяет указать его абсолютный путь. Секретные ключи
 в `install.config` и NUL внутри значения отклоняются.
+
+Replacement reservation тестируется настоящим конкурирующим `RunLocal` после
+retirement и до bootstrap, передачей inherited open-file-description дочернему
+процессу и отказом поддельного grant. Отдельный subprocess-тест убивает владельца:
+SSH supervisor удерживает lock до собственного deadline, после чего новый fresh
+replacement может проверить точную сохранённую область. Ошибка native mutation
+сохраняет reservation; её нельзя объявлять успешно завершённой по одному exit
+локального SSH или отсутствию execution receipt.
+
+`make test-replacement-ssh` выполняет реальный SSHD regression в disposable
+loopback-only контейнере с синтетическими ключами. Relay удерживает backend TCP
+после гибели SFTP client, но не отвечает на encrypted ClientAlive: без policy
+census остаётся закрытым, с root policy 10/2 новый полный census дожидается drain.
+Тест также проверяет реальный Ubuntu Include layout, effective настройки,
+конфликт, отказ от реального listener с custom `-f`/`-o` и завершение активации
+после публикации owned disk pair без reload. Он обязателен в CI job
+`Ansible SSH and offline runtime`; Go fixtures проверяют отдельные SID/UID,
+одновременное исчезновение нескольких SSH parents, reparenting, PAM scope, rollback
+после ошибки activation, неизвестных helpers и запрет app teardown до проверки
+SSH всего парка. Проверки не используют production configuration или credentials.

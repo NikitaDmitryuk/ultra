@@ -36,6 +36,7 @@ class JournalTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.spool = self.root / 'logs'
+        self.namespace = self.root / 'execution'
         self.job = self.root / 'job'
         self.job.mkdir(mode=0o700)
 
@@ -174,7 +175,7 @@ class JournalTests(unittest.TestCase):
         raw = json.dumps({'inventory': {}, 'variables': {}}).encode()
         (self.job / 'request.json').write_bytes(raw)
         (self.job / 'job.json').write_text(json.dumps({
-            'schema_version': 1, 'operation': 'reconcile',
+            'schema_version': 1, 'operation': 'bootstrap',
             'request_sha256': hashlib.sha256(raw).hexdigest(), 'binary_sha256': '0' * 64,
         }))
         for path in self.job.iterdir():
@@ -202,18 +203,23 @@ class JournalTests(unittest.TestCase):
         self.spool.mkdir(mode=0o755)
         with patch.object(CONTROLLER, 'run_playbook') as run:
             with self.assertRaisesRegex(ValueError, 'unsafe_diagnostic_directory'):
-                CONTROLLER.execute(self.job, executable, ROOT / 'deploy/ansible', self.spool)
+                CONTROLLER.execute(self.job, executable, ROOT / 'deploy/ansible', self.spool, self.namespace)
             run.assert_not_called()
 
-    def test_real_runner_timeout_retains_last_task_and_legacy_receipt(self):
+    def test_real_runner_timeout_retains_last_task_and_execution_evidence(self):
         executable = self.fixture()
         original = CONTROLLER.run_playbook
         def short_run(arguments, bundle, environment, timeout):
             return original(arguments, bundle, environment, timeout=.5)
         with patch.object(CONTROLLER, 'run_playbook', side_effect=short_run):
-            receipt = CONTROLLER.execute(self.job, executable, ROOT / 'deploy/ansible', self.spool)
-        self.assertEqual((receipt['state'], receipt['code']), ('failed', 'execution_failed'))
-        self.assertNotIn('diagnostic', receipt)
+            receipt = CONTROLLER.execute(self.job, executable, ROOT / 'deploy/ansible', self.spool, self.namespace)
+        self.assertEqual((receipt['state'], receipt['code']), ('failed', 'execution_runtime_limit'))
+        self.assertEqual(receipt['diagnostic'], {'stage': 'execute', 'node': 'local', 'code': 'execution_runtime_limit'})
+        generation = receipt['execution_generation']
+        evidence = self.job / ('execution-runtime-limit-' + generation + '.json')
+        self.assertEqual(json.loads(evidence.read_text())['fence'],
+                         json.loads((self.namespace / 'execution-fence.json').read_text()))
+        self.assertFalse((self.job / 'execution-completion.json').exists())
         self.assertNotIn('task', receipt)
         self.assertEqual(self.checkpoint()['event'], 'controller_timeout')
         self.assertEqual(self.checkpoint()['task']['line'], 23)
@@ -222,9 +228,18 @@ class JournalTests(unittest.TestCase):
 
     def test_sigterm_retains_last_task_and_interrupted_receipt(self):
         executable = self.fixture()
-        process = subprocess.Popen([sys.executable, str(CONTROLLER_PATH), '--job', str(self.job),
-            '--bundle', str(ROOT / 'deploy/ansible'), '--executable', str(executable),
-            '--diagnostics-root', str(self.spool)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Exercise the real CLI/signals and unchanged source bundle in a private
+        # test namespace. No production CLI/env namespace override is introduced.
+        bootstrap = (
+            'import importlib.util,sys;from pathlib import Path;'
+            's=importlib.util.spec_from_file_location("fixture_controller",sys.argv[1]);'
+            'm=importlib.util.module_from_spec(s);s.loader.exec_module(m);'
+            'm.EXECUTION_ROOT=Path(sys.argv[2]);m.TEST_EXECUTION_NAMESPACE=True;'
+            'sys.argv=[sys.argv[1],*sys.argv[3:]];m.main()')
+        process = subprocess.Popen([sys.executable, '-c', bootstrap, str(CONTROLLER_PATH),
+            str(self.namespace), '--job', str(self.job), '--bundle', str(ROOT / 'deploy/ansible'),
+            '--executable', str(executable), '--diagnostics-root', str(self.spool)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
@@ -315,6 +330,42 @@ class CallbackTests(unittest.TestCase):
         self.assertTrue(task_events[1]['censored'])
         self.assertNotIn('changed', task_events[1])
         self.assertEqual(json.loads((journal.path / 'first-failure.json').read_text())['event'], 'task_failed')
+    def test_no_log_terminal_proof_uses_only_known_static_execution_metadata(self):
+        with patch.dict(os.environ, {'ANSIBLE_LOCAL_TEMP': str(self.root / 'ansible-tmp')}):
+            module = load('safe_result_censored', ROOT / 'deploy/ansible/callback_plugins/safe_result.py')
+        host = SimpleNamespace(name='bridge')
+        stats = SimpleNamespace(processed={'bridge': 1},
+                                summarize=lambda host: {'failures': 1, 'unreachable': 0})
+        for name, attributes, safe in [
+                ('synchronous', {'async_val': 0, 'delegate_to': None}, True),
+                ('asynchronous', {'async_val': 30, 'delegate_to': None}, False),
+                ('delegated', {'async_val': 0, 'delegate_to': 'receiver'}, False),
+                ('templated_async', {'async_val': '{{ secret }}', 'delegate_to': None}, False),
+                ('unknown_async', {'delegate_to': None}, False),
+                ('unknown_delegate', {'async_val': 0}, False),
+                ('async_status', {'async_val': 0, 'delegate_to': None,
+                                  'action': 'ansible.builtin.async_status'}, False)]:
+            with self.subTest(name=name):
+                callback = module.CallbackModule()
+                callback._journal = None
+                values = {'no_log': True, '_uuid': name, 'action': 'ansible.builtin.command', **attributes}
+                task = SimpleNamespace(**values)
+                class Censored:
+                    _task = task
+                    _host = host
+                    @property
+                    def _result(self):
+                        raise AssertionError('no_log result must never be inspected')
+                target = self.root / (name + '-terminal.json')
+                with patch.dict(os.environ, {'ULTRA_EXECUTION_TERMINAL_FILE': str(target),
+                                             'ULTRA_EXECUTION_BINDING': '{"generation":"fixture"}'}):
+                    callback.v2_runner_on_start(host, task)
+                    callback.v2_runner_on_failed(Censored(), ignore_errors=True)
+                    callback.v2_playbook_on_stats(stats)
+                self.assertEqual(target.exists(), safe)
+                if safe:
+                    self.assertFalse(json.loads(target.read_text())['unmanaged_async'])
+
     def test_lifecycle_redaction_and_static_source_coordinates(self):
         # Ansible imports initialize their own local scratch directory.
         with patch.dict(os.environ, {'ANSIBLE_LOCAL_TEMP': str(self.root / 'ansible-tmp')}):

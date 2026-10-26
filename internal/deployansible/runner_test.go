@@ -3,6 +3,7 @@ package deployansible
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -150,7 +151,7 @@ func TestFailedAttemptCannotReuseStaleResult(t *testing.T) {
 	}
 }
 
-func TestInterruptedExecutionResumesWithoutOldResult(t *testing.T) {
+func TestInterruptedExecutionRequiresExplicitReconciliation(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 unavailable")
@@ -196,8 +197,8 @@ result.chmod(0o600)
 	if !started {
 		t.Fatal("execution never started")
 	}
-	result, err := Execute(context.Background(), directory, python, stub)
-	if err != nil || result.CertPin != strings.Repeat("c", 64) {
-		t.Fatalf("resume failed: %v", err)
+	_, err = Execute(context.Background(), directory, python, stub)
+	if !errors.Is(err, ErrExecutionFenced) {
+		t.Fatalf("interrupted execution redispatched: %v", err)
 	}
 }

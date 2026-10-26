@@ -345,16 +345,7 @@ func (s *Service) Action(ctx context.Context, actor int64, id, action string) er
 	return s.Store.Save(ctx, op)
 }
 func (s *Service) Run(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			_ = s.Step(ctx)
-		}
-	}
+	s.run(ctx, 5*time.Second)
 }
 
 // Step advances one stage per operation so an ambiguous purchase cannot starve another node.

@@ -1,0 +1,22 @@
+---
+- name: Reobserve preserved primary database identity
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only, --no-align, --dbname, "{{ ultra_preserved_primary_database }}"]
+    stdin: |
+      BEGIN READ ONLY;
+      SELECT json_build_object('system_identifier', (SELECT system_identifier::text FROM pg_control_system()),
+        'database', current_database(), 'database_oid', (SELECT oid::bigint FROM pg_database WHERE datname = current_database()),
+        'primary', NOT pg_is_in_recovery());
+      ROLLBACK;
+  environment:
+    PGOPTIONS: -c default_transaction_read_only=on
+  changed_when: false
+  register: preserved_primary_after
+  no_log: true
+- name: Reject a changed primary or replaced database
+  ansible.builtin.assert:
+    that:
+      - >-
+        lookup('file', ultra_preserved_primary_identity_file) | from_json ==
+        (preserved_primary_after.stdout_lines | select('match', '^\\{') | first | from_json)
+  no_log: true

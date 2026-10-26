@@ -29,9 +29,9 @@ func statusPlanWithRelease(p *installplan.InstallPlan, directory string) (*insta
 	return &copyPlan, nil
 }
 
-func ansibleAutomationStatus(ctx context.Context, p *installplan.InstallPlan, python, executable string) error {
+func ansibleAutomationStatus(ctx context.Context, p *installplan.InstallPlan, python, executable string, showDetails bool) error {
 	return retryAutomationStatus(ctx, func(ctx context.Context) error {
-		return ansibleAutomationStatusAttempt(ctx, p, python, executable)
+		return ansibleAutomationStatusAttempt(ctx, p, python, executable, showDetails)
 	})
 }
 
@@ -59,7 +59,7 @@ func retryAutomationStatus(ctx context.Context, attemptFunc func(context.Context
 	return last
 }
 
-func ansibleAutomationStatusAttempt(ctx context.Context, p *installplan.InstallPlan, python, executable string) error {
+func ansibleAutomationStatusAttempt(ctx context.Context, p *installplan.InstallPlan, python, executable string, showDetails bool) error {
 	if err := installplan.ValidatePlan(p); err != nil {
 		return err
 	}
@@ -105,7 +105,9 @@ func ansibleAutomationStatusAttempt(ctx context.Context, p *installplan.InstallP
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(raw))
+	if showDetails {
+		fmt.Println(string(raw))
+	}
 	if receipt.Result.Values["ready"] != true {
 		return errors.New("automation_not_ready")
 	}

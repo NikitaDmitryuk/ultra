@@ -77,7 +77,7 @@ func runBootstrapComponentsAdapted(
 		if runErr != nil {
 			return receipt, runErr
 		}
-		if err := verifyBootstrapComponentReceipt(target, operation, inventory, vars); err != nil {
+		if err := verifyBootstrapComponentReceipt(target, operation, inventory, vars, ctx); err != nil {
 			return receipt, err
 		}
 		return receipt, nil
@@ -128,12 +128,15 @@ func bootstrapComponentExits(inventory map[string]any) ([]string, error) {
 
 // Successful cache entries are usable only if they prove this exact operation,
 // request, and attempt. A plausible result alone must never skip a component.
-func verifyBootstrapComponentReceipt(directory, operation string, inventory, variables map[string]any) error {
+func verifyBootstrapComponentReceipt(directory, operation string, inventory, variables map[string]any, contexts ...context.Context) error {
 	request, err := readBootstrapGenerationInput(filepath.Join(directory, "request.json"))
 	if err != nil {
 		return err
 	}
-	expected, err := json.Marshal(map[string]any{"inventory": inventory, "variables": variables})
+	expected, err := expectedFrozenLocalRequest(request, inventory, variables)
+	if len(contexts) > 0 {
+		expected, err = deployansible.LocalRequestBytes(contexts[0], operation, directory, inventory, variables)
+	}
 	if err != nil {
 		return err
 	}

@@ -108,9 +108,7 @@ func recordBootstrapRollbackProof(directory string, inventory map[string]any, ge
 	if err != nil {
 		return false, err
 	}
-	expected, err := json.Marshal(
-		map[string]any{"inventory": inventory, "variables": map[string]any{"ultra_lifecycle_id": lifecycleID(directory)}},
-	)
+	expected, err := expectedFrozenLocalRequest(request, inventory, map[string]any{"ultra_lifecycle_id": lifecycleID(directory)})
 	if err != nil {
 		return false, err
 	}
@@ -231,9 +229,7 @@ func resumeBootstrapMutationGeneration(
 			return 0, err
 		}
 		request, requestErr := readBootstrapGenerationInput(filepath.Join(stage, "request.json"))
-		expected, marshalErr := json.Marshal(
-			map[string]any{"inventory": inventory, "variables": map[string]any{"ultra_lifecycle_id": lifecycleID(directory)}},
-		)
+		expected, marshalErr := expectedFrozenLocalRequest(request, inventory, map[string]any{"ultra_lifecycle_id": lifecycleID(directory)})
 		var job map[string]any
 		digest := sha256.Sum256(request)
 		if requestErr != nil || marshalErr != nil || !bytes.Equal(request, expected) || json.Unmarshal(jobRaw, &job) != nil ||

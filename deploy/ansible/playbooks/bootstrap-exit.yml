@@ -15,9 +15,6 @@
   gather_facts: false
   any_errors_fatal: true
   pre_tasks:
-    - name: Gate retained-primary recovery before any mutation
-      ansible.builtin.import_tasks: tasks/retained-primary-gate.yml
-      when: ultra_retained_recovery_binding_sha256 is defined
     - name: Require an exact frozen exit target
       ansible.builtin.assert:
         that:

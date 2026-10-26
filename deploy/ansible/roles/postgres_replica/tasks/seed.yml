@@ -1,4 +1,7 @@
 ---
+- name: Reconcile lost managed slot only for a fresh preserved-primary standby
+  ansible.builtin.include_tasks: reset_lost_slot.yml
+  when: ultra_preserve_primary | default(false) | bool
 - name: Create PostgreSQL 16 data parent
   ansible.builtin.file:
     path: /var/lib/postgresql/16

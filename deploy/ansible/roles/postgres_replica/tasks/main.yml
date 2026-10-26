@@ -80,6 +80,17 @@
 - name: Require tunnel replication protocol to reach the same cluster
   ansible.builtin.assert:
     that: postgres_replica_remote_identity.stdout.split('|')[0] == hostvars['database'].postgres_replica_primary_identity.stdout | trim
+- name: Require usable slot before reusing an existing preserved standby
+  ansible.builtin.command:
+    argv: [runuser, -u, postgres, --, psql, --no-psqlrc, --set, ON_ERROR_STOP=1, --tuples-only, --no-align]
+    stdin: |
+      BEGIN READ ONLY;
+      SELECT 1 / count(*) FROM pg_replication_slots WHERE slot_name = 'ultra_bridge'
+        AND slot_type = 'physical' AND NOT temporary AND (wal_status IS NULL OR wal_status <> 'lost');
+      ROLLBACK;
+  delegate_to: database
+  changed_when: false
+  when: (ultra_preserve_primary | default(false) | bool) and postgres_replica_data.stat.exists
 - name: Seed only a missing owned bridge standby
   ansible.builtin.include_tasks: seed.yml
   when: not postgres_replica_data.stat.exists

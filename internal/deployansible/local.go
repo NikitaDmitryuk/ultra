@@ -12,12 +12,9 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"syscall"
-	"time"
 )
 
 type operationLeaseKey struct{}
-type readinessProbeKey struct{}
 type operationLease struct {
 	directory string
 	file      *os.File
@@ -67,121 +64,6 @@ func RunLocal(
 	return runLocal(ctx, operation, inventory, variables, directory, python, executable, false, "")
 }
 
-// WaitUpgradeReadiness is the sole unlocked operation. Its fixed playbook reads
-// recovery evidence and the protected lifecycle journal only. The caller must
-// still inspect under its lease.
-// Temporary observations are never reused as upgrade authorization or receipts.
-func WaitUpgradeReadiness(
-	ctx context.Context,
-	inventory map[string]any,
-	lockDirectory, python, executable, lifecycleID string,
-	pending bool,
-	diagnosticDirectory string,
-) error {
-	if !jobID.MatchString(lifecycleID) {
-		return errors.New("invalid_readiness_lifecycle_id")
-	}
-	if _, leased := ctx.Value(operationLeaseKey{}).(*operationLease); leased {
-		return errors.New("readiness_probe_requires_unleased_context")
-	}
-	ctx, cancel := context.WithTimeout(ctx, 780*time.Second)
-	defer cancel()
-	ctx = context.WithValue(ctx, readinessProbeKey{}, true)
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		temporary, err := os.MkdirTemp("", "ultra-readiness-")
-		if err != nil {
-			return err
-		}
-		receipt, runErr := RunLocal(ctx, "wait-upgrade-readiness", inventory,
-			map[string]any{
-				"ultra_lock_directory":                lockDirectory,
-				"ultra_readiness_lifecycle_id":        lifecycleID,
-				"ultra_readiness_reservation_pending": pending,
-			}, filepath.Join(temporary, "probe"), python, executable)
-		_ = os.RemoveAll(temporary)
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if runErr != nil {
-			lastErr = runErr
-			if diagnosticDirectory != "" {
-				if diagnosticErr := persistReadinessDiagnostic(diagnosticDirectory, receipt.Diagnostic); diagnosticErr != nil {
-					return errors.Join(runErr, errors.New("readiness_diagnostic_persist_failed"))
-				}
-			}
-			if !transientSSHDiagnostic(receipt.Diagnostic.Code) || attempt == 2 {
-				return runErr
-			}
-		} else {
-			if receipt.Result.Values["verified"] != true || ((pending || receipt.Result.Values["ready"] != true) &&
-				(receipt.Result.Values["reservation_id"] != lifecycleID || receipt.Result.Values["reservation_phase"] != "applying")) {
-				return errors.New("upgrade_readiness_probe_unverified")
-			}
-			return nil
-		}
-		timer := time.NewTimer(250 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
-	return lastErr
-}
-
-func transientSSHDiagnostic(code string) bool {
-	switch code {
-	case "ssh_banner_timeout", "ssh_connect_timeout", "ssh_connection_reset":
-		return true
-	}
-	return false
-}
-
-// persistReadinessDiagnostic retains only the fixed callback fields after a
-// failed temporary readiness probe. The request, inventory, result, and raw
-// Ansible output remain private and are still removed with the probe directory.
-func persistReadinessDiagnostic(directory string, diagnostic Diagnostic) error {
-	if diagnostic.Code == "" || diagnostic.Stage == "" || diagnostic.Node == "" ||
-		len(diagnostic.Code) > 64 || len(diagnostic.Stage) > 160 || len(diagnostic.Node) > 128 {
-		return nil
-	}
-	info, err := os.Lstat(directory)
-	if err != nil || !info.IsDir() || !ownedByProcess(info) || info.Mode().Perm()&0077 != 0 {
-		return errors.New("private readiness diagnostic directory required")
-	}
-	raw, err := json.Marshal(diagnostic)
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(directory, fmt.Sprintf("readiness-diagnostic-%d.json", time.Now().UnixNano()))
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
-	if err != nil {
-		return err
-	}
-	if _, err = file.Write(raw); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err = file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err = file.Close(); err != nil {
-		return err
-	}
-	directoryFile, err := os.Open(directory)
-	if err != nil {
-		return err
-	}
-	defer directoryFile.Close() //nolint:errcheck
-	return directoryFile.Sync()
-}
-
 // RunLocalRetryFailed is an explicit operator retry. Successful cached stages stay
 // cached; terminal failures are archived before a new attempt can execute.
 // It is not used by typed workers or automatic upgrades.
@@ -212,34 +94,36 @@ func localRetryOperation(operation string, variables map[string]any) bool {
 	if bootstrapRetryOperation(operation) {
 		return true
 	}
-	switch operation {
-	case "upgrade-runtime":
-		switch variables["ultra_runtime_action"] {
-		case "prepare", "commit", "rollback":
-			return true
-		case "tls-release":
-			requests, ok := variables["ultra_managed_tunnel_requests"].(map[string]string)
-			hook, hookOK := variables["ultra_managed_tunnel_hook_sha256"].(string)
-			decoded, err := hex.DecodeString(hook)
-			return ok && len(requests) == 1 && hookOK && err == nil && len(decoded) == sha256.Size
-		}
-	case "upgrade-domain":
-		switch variables["ultra_upgrade_domain_action"] {
-		case "apply", "accept", "rollback", "retire", "finalize":
-			return true
-		}
-	case "upgrade-dns-migration":
-		switch variables["ultra_dns_migration_action"] {
-		case "prepare", "promote", "retire", "rollback":
-			return true
-		}
-	case "rollback":
-		inputs, ok := variables["ultra_runtime_effect_inputs"].(map[string]string)
-		return ok && len(inputs) > 0
-	}
 	return false
 }
 
+// localDispatchFailure reports a failure that happened before the controller
+// completed. A zero Receipt used to erase the reason, so callers printed an empty
+// stage/node/code triple. code is the stable guard identifier; err is preserved.
+func localDispatchFailure(code string, err error) (Receipt, error) {
+	if len(code) > 64 {
+		code = code[:64]
+	}
+	return Receipt{Diagnostic: Diagnostic{Stage: "dispatch", Node: "local", Code: code}}, err
+}
+
+// dispatchCode bounds an error that carries no stable identifier of its own. The
+// identifier form is preserved so execution_uncertain_reconciliation_required
+// stays recognizable to callers that match on it.
+func dispatchCode(err error) string {
+	if err == nil {
+		return "dispatch_failed"
+	}
+	code := err.Error()
+	if len(code) > 64 {
+		code = code[:64]
+	}
+	return code
+}
+
+// runLocal reports which local guard stopped the operation. A guard that fails
+// before the controller runs leaves no receipt, and an empty stage/node/code
+// triple reads exactly like an Ansible task failure.
 func runLocal(
 	ctx context.Context,
 	operation string,
@@ -249,12 +133,7 @@ func runLocal(
 	source string,
 ) (Receipt, error) {
 	allowed := map[string]bool{
-		"bootstrap-recovery-inspect":   true,
 		"bootstrap-recovery-tools":     true,
-		"wait-upgrade-readiness":       true,
-		"bootstrap-forward-broker":     true,
-		"contain-upgrade":              true,
-		"drain-upgrade-workers":        true,
 		"retain-artifacts":             true,
 		"resume-schedules":             true,
 		"rollback-adoption":            true,
@@ -263,10 +142,7 @@ func runLocal(
 		"lifecycle":                    true,
 		"prepare-controller":           true,
 		"inspect-bootstrap":            true,
-		"inspect-upgrade":              true,
-		"preflight-retry":              true,
 		"status-automation":            true,
-		"inspect-release-hosts":        true,
 		"resume-automation":            true,
 		"configure-bot":                true,
 		"configure-exit-operator":      true,
@@ -275,35 +151,23 @@ func runLocal(
 		"bootstrap-postgres":           true,
 		"bootstrap-exit":               true,
 		"bootstrap-bridge":             true,
-		"rebuild-retained-primary":     true,
 		"bootstrap-automation":         true,
 		"verify-bootstrap-automation":  true,
+		"reconcile":                    true,
 		"adopt":                        true,
 		"adopt-topology":               true,
-		"upgrade":                      true,
-		"rollback":                     true,
-		"reconcile":                    true,
 		"restore":                      true,
 		"restore-database":             true,
 		"restore-peer":                 true,
-		"verify-release":               true,
-		"commit-release":               true,
-		"publish-release":              true,
 		"domain-cutover":               true,
 		"backend-domain":               true,
-		"upgrade-dns-migration":        true,
-		"inspect-upgrade-runtime":      true,
-		"inspect-upgrade-maintenance":  true,
-		"upgrade-runtime":              true,
-		"inspect-upgrade-domains":      true,
-		"upgrade-domain":               true,
 	}
 	if !allowed[operation] || !filepath.IsAbs(directory) || !filepath.IsAbs(python) || !filepath.IsAbs(executable) {
-		return Receipt{}, errors.New("invalid local operation or executor paths")
+		return localDispatchFailure("operation_not_allowed", errors.New("invalid local operation or executor paths"))
 	}
 	parent := filepath.Dir(directory)
 	if err := os.MkdirAll(parent, 0700); err != nil {
-		return Receipt{}, err
+		return localDispatchFailure("lock_directory_unavailable", err)
 	}
 	lockDirectory := parent
 	if lease, ok := ctx.Value(operationLeaseKey{}).(*operationLease); ok {
@@ -311,13 +175,13 @@ func runLocal(
 	}
 	if configured, ok := variables["ultra_lock_directory"].(string); ok {
 		if !filepath.IsAbs(configured) {
-			return Receipt{}, errors.New("absolute operation lock directory required")
+			return localDispatchFailure("lock_directory_not_absolute", errors.New("absolute operation lock directory required"))
 		}
 		lockDirectory = configured
 	}
 	lockInfo, err := os.Lstat(lockDirectory)
 	if err != nil || !lockInfo.IsDir() || !ownedByProcess(lockInfo) || lockInfo.Mode().Perm()&0077 != 0 {
-		return Receipt{}, errors.New("private operation lock directory required")
+		return localDispatchFailure("lock_directory_insecure", errors.New("private operation lock directory required"))
 	}
 	if lease, ok := ctx.Value(operationLeaseKey{}).(*operationLease); ok {
 		lease.run.Lock()
@@ -325,35 +189,27 @@ func runLocal(
 	}
 	admission, fenceErr := recoveryAdmission(lockDirectory)
 	if fenceErr != nil {
-		return Receipt{}, fenceErr
+		return localDispatchFailure("recovery_admission_refused", fenceErr)
 	}
 	defer admission()
-	unlocked, _ := ctx.Value(readinessProbeKey{}).(bool)
-	if operation == "wait-upgrade-readiness" && !unlocked {
-		return Receipt{}, errors.New("readiness_probe_requires_dedicated_entrypoint")
-	}
-	if unlocked && (operation != "wait-upgrade-readiness" || retry || source != "") {
-		return Receipt{}, errors.New("invalid_unlocked_readiness_probe")
-	}
-	if unlocked {
-		if _, leased := ctx.Value(operationLeaseKey{}).(*operationLease); leased {
-			return Receipt{}, errors.New("readiness_probe_requires_unleased_context")
-		}
-	} else if lease, ok := ctx.Value(operationLeaseKey{}).(*operationLease); ok {
+	if lease, ok := ctx.Value(operationLeaseKey{}).(*operationLease); ok {
 		if !lease.active.Load() || lease.directory != lockDirectory {
-			return Receipt{}, errors.New("operation lease directory mismatch")
+			return localDispatchFailure("operation_lease_mismatch", errors.New("operation lease directory mismatch"))
 		}
 	} else {
 		lock, err := controllerLock(filepath.Join(lockDirectory, "infrastructure.lock"))
 		if err != nil {
-			return Receipt{}, err
+			return localDispatchFailure("infrastructure_lock_busy", err)
 		}
 		defer lock.Close() //nolint:errcheck
 	}
 	admission() // The infrastructure lease now tracks this admitted stage.
-	raw, err := json.Marshal(map[string]any{"inventory": inventory, "variables": variables})
+	raw, err := localExecutionRequest(ctx, operation, directory, inventory, variables)
+	if source != "" && err == nil {
+		raw, err = pinnedLocalExecutionRequest(ctx, operation, directory, source, inventory, variables)
+	}
 	if err != nil {
-		return Receipt{}, err
+		return localDispatchFailure("request_unencodable", err)
 	}
 
 	// codeql[go/weak-sensitive-data-hashing] This deterministic digest binds a frozen operation request for idempotency; it is not used to authenticate a password or stored as a credential verifier.
@@ -363,19 +219,43 @@ func runLocal(
 	if source != "" {
 		export, err = pinnedBootstrapExporter(source, directory, operation, raw)
 		if err != nil {
-			return Receipt{}, err
+			return localDispatchFailure("bootstrap_exporter_unpinned", err)
 		}
 	}
 	if receipt, cached, cacheErr := collectedRetentionResult(operation, directory, raw, id); cached {
 		return receipt, cacheErr
 	}
 	if err = prepareLocalOperation(directory, operation, raw, id, export); err != nil {
-		return Receipt{}, err
+		return localDispatchFailure("job_preparation_failed", err)
 	}
 	if retry {
-		if err = retryFailedLocalAttempt(directory); err != nil {
-			return Receipt{}, err
+		if !executionReadOnly(operation) {
+			if err = executionAdmission(directory); err != nil {
+				return localDispatchFailure("execution_admission_refused", err)
+			}
+			if prior, readErr := os.ReadFile(filepath.Join(directory, "receipt.json")); readErr == nil {
+				var state struct {
+					State string `json:"state"`
+				}
+				if json.Unmarshal(prior, &state) != nil ||
+					(state.State != "succeeded" && !completedExecution(directory) && !preparedRetryExecution(directory)) {
+					_, _ = beginExecutionContext(ctx, directory) // Adopt a legacy uncertain mutator without dispatch.
+					return localDispatchFailure("execution_uncertain_reconciliation_required", ErrExecutionFenced)
+				}
+			}
+			if completedExecution(directory) {
+				if err = prepareRetryExecution(directory); err != nil {
+					return localDispatchFailure("retry_preparation_failed", err)
+				}
+			}
 		}
+		if err = retryFailedLocalAttempt(directory); err != nil {
+			return localDispatchFailure("retry_archive_failed", err)
+		}
+	}
+	fence, fenceErr := beginExecutionContext(ctx, directory)
+	if fenceErr != nil {
+		return localDispatchFailure(dispatchCode(fenceErr), fenceErr)
 	}
 	bundle := filepath.Join(directory, "bundle")
 	command := exec.CommandContext(
@@ -391,13 +271,28 @@ func runLocal(
 	)
 	isolateCommand(command)
 	command.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
-	runErr := command.Run()
+	if fence != nil {
+		command.Env = append(command.Env, "ULTRA_EXECUTION_GENERATION="+fence.Generation)
+	}
+	runErr := runContainedController(ctx, command, fence)
+	if fence != nil {
+		if closeErr := reconcileControllerExecution(*fence, runErr); closeErr != nil && runErr == nil {
+			return localDispatchFailure("execution_drain_unverified", closeErr)
+		}
+	}
 	data, err := os.ReadFile(filepath.Join(directory, "receipt.json"))
 	var receipt Receipt
 	if err != nil || json.Unmarshal(data, &receipt) != nil {
-		return Receipt{}, errors.New("local operation receipt unavailable")
+		return localDispatchFailure("local_receipt_unavailable", errors.New("local operation receipt unavailable"))
 	}
 	if runErr != nil || receipt.State != "succeeded" {
+		if fence != nil && errors.Is(observeExecutionRuntimeLimit(*fence), errExecutionRuntimeLimit) {
+			receipt.Diagnostic = Diagnostic{Stage: "execute", Node: "local", Code: "execution_runtime_limit"}
+			return receipt, errExecutionRuntimeLimit
+		}
+		if receipt.Diagnostic == (Diagnostic{}) {
+			receipt.Diagnostic = Diagnostic{Stage: "execute", Node: "local", Code: dispatchCode(runErr)}
+		}
 		return receipt, fmt.Errorf("ansible operation failed: %s", receipt.Code)
 	}
 	return receipt, nil

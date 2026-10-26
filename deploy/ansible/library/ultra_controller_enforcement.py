@@ -127,6 +127,8 @@ def identity(directory, unit_raw):
             'tree_sha256': tree_digest(root), 'unit': unit_raw.decode()}
 
 
+
+
 def running_identity():
     output = subprocess.run(['systemctl', 'show', '--property=ActiveState,MainPID,FragmentPath,DropInPaths,ControlGroup',
                              'ultra-ansible-controller.service'], stdout=subprocess.PIPE,
@@ -361,6 +363,8 @@ def verify(proof, operation, scope, manifest, candidate, phase='reserved', root=
     rollback = proof['rollback']
     need(identity(rollback['directory'], rollback['unit'].encode()) == rollback)
     return lifecycle
+
+
 
 
 def execute(p):

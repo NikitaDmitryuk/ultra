@@ -6,12 +6,18 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import signal
 import stat
 import subprocess
+import sys
 import time
 import uuid
+
+# This process imports helpers from the frozen bundle before comparing its
+# execution digest. Bytecode caches would change that digest before dispatch.
+sys.dont_write_bytecode = True
 
 
 class SafeJournal:
@@ -227,7 +233,7 @@ class SafeJournal:
         self._degraded = False
         return True
 
-LOCAL_OPERATIONS = {'rebuild-retained-primary', 'bootstrap-recovery-inspect', 'bootstrap-recovery-tools', 'wait-upgrade-readiness', 'bootstrap-forward-broker', 'contain-upgrade', 'drain-upgrade-workers', 'retain-artifacts', 'resume-schedules', 'rollback-adoption', 'reserve-rolledback-bootstrap', 'resume-adoption', 'lifecycle', 'prepare-controller', 'inspect-upgrade', 'preflight-retry', 'status-automation', 'inspect-release-hosts', 'resume-automation', 'configure-bot', 'configure-exit-operator', 'inspect-bootstrap', 'bootstrap', 'bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'bootstrap-automation', 'verify-bootstrap-automation', 'adopt', 'adopt-topology', 'upgrade', 'rollback', 'verify-release', 'commit-release', 'publish-release', 'ingress', 'reconcile', 'restore', 'restore-database', 'restore-peer', 'domain-cutover', 'backend-domain', 'upgrade-dns-migration', 'inspect-upgrade-runtime', 'inspect-upgrade-maintenance', 'upgrade-runtime', 'inspect-upgrade-domains', 'upgrade-domain'}
+LOCAL_OPERATIONS = {'bootstrap-recovery-tools', 'retain-artifacts', 'resume-schedules', 'rollback-adoption', 'reserve-rolledback-bootstrap', 'resume-adoption', 'lifecycle', 'prepare-controller', 'status-automation', 'resume-automation', 'configure-bot', 'configure-exit-operator', 'inspect-bootstrap', 'bootstrap', 'bootstrap-postgres', 'bootstrap-exit', 'bootstrap-bridge', 'bootstrap-automation', 'verify-bootstrap-automation', 'adopt', 'adopt-topology', 'ingress', 'reconcile', 'restore', 'restore-database', 'restore-peer', 'domain-cutover', 'backend-domain'}
 OPERATIONS = {'configure-exit'} | LOCAL_OPERATIONS
 
 # Operation identities and authorization stay distinct even when implementation
@@ -355,8 +361,36 @@ def validate(job):
     return job
 
 
+def wait_local_process_group(group, timeout=5):
+    """Wait for signalled local workers, ignoring already dead zombie entries.
+
+    This proves only local process-group cleanup, never remote SSH quiescence.
+    Linux /proc is required so permission/read failures fail closed.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        alive = False
+        for path in Path('/proc').iterdir():
+            if not path.name.isdigit():
+                continue
+            try:
+                raw = (path / 'stat').read_text()
+            except FileNotFoundError:
+                continue
+            fields = raw[raw.rindex(')') + 2:].split()
+            if int(fields[2]) == group and fields[0] not in ('Z', 'X'):
+                alive = True
+                break
+        if not alive:
+            return
+        if time.monotonic() >= deadline:
+            raise OSError('local_worker_cleanup_unconfirmed')
+        time.sleep(.01)
+
+
 def run_playbook(arguments, bundle, environment, timeout=900):
-    # SSH workers must stop before a terminal receipt releases the fleet lease.
+    # Clean up local SSH workers before recording normal completion. This does
+    # not prove remote quiescence after a failed/ambiguous SSH transport.
     # A separate session lets cleanup cover descendants even if the leader exits.
     process = subprocess.Popen(arguments, cwd=bundle, env=environment,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -369,15 +403,202 @@ def run_playbook(arguments, bundle, environment, timeout=900):
         except ProcessLookupError:
             pass
         process.wait()
+        wait_local_process_group(process.pid)
 
 
-def execute(directory, executable, bundle, diagnostics_root=None):
+# A single local controller namespace is shared across jobs, lifecycle leases,
+# and caller-selected workspace paths. No CLI/environment root override exists.
+TEST_EXECUTION_NAMESPACE = False
+EXECUTION_ROOT = Path('/var/lib/ultra-ansible')
+if os.geteuid() != 0 and not TEST_EXECUTION_NAMESPACE:
+    EXECUTION_ROOT = Path(pwd.getpwuid(os.geteuid()).pw_dir) / '.local/state/ultra-ansible'
+READ_ONLY_OPERATIONS = frozenset({
+    'inspect-bootstrap', 'status-automation',
+})
+
+
+def execution_binding(directory, bundle, job, raw):
+    digest = hashlib.sha256()
+    for path in sorted(Path(bundle).rglob('*')):
+        if path.is_symlink():
+            raise ValueError('unsafe_execution_bundle')
+        if path.is_file():
+            digest.update(path.relative_to(bundle).as_posix().encode() + b'\0')
+            digest.update(hashlib.sha256(path.read_bytes()).hexdigest().encode() + b'\n')
+    return {'schema_version': 1, 'generation': '', 'operation': job['operation'],
+            'job_directory': str(directory),
+            'job_sha256': hashlib.sha256(load_private(directory / 'job.json', raw=True)).hexdigest(),
+            'request_sha256': job['request_sha256'], 'bundle_sha256': digest.hexdigest(),
+            # Hash the frozen request bytes, including its exact inventory and SSH
+            # inputs; do not normalize away differences in a retry's inventory.
+            'inventory_sha256': hashlib.sha256(raw).hexdigest(),
+            'attempt': job.get('attempt', 1)}
+
+
+def begin_execution(directory, bundle, job, raw, root, fixture=False):
+    if job['operation'] in READ_ONLY_OPERATIONS:
+        return None
+    if not (fixture or TEST_EXECUTION_NAMESPACE):
+        if root != EXECUTION_ROOT or (os.geteuid() != 0 and os.environ.get('ULTRA_OPERATOR_STATE_DIRECTORY') != str(EXECUTION_ROOT)):
+            raise ValueError('execution_state_configuration_required')
+        import importlib.util
+        source = Path(bundle) / 'library/ultra_execution_containment.py'
+        spec = importlib.util.spec_from_file_location('ultra_execution_containment', source)
+        containment = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(containment)
+        containment.require_containment(directory, os.environ.get('ULTRA_EXECUTION_GENERATION'))
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    SafeJournal.directory(root)
+    lock = SafeJournal.open_private(root / 'execution-admission.lock', os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        binding = execution_binding(directory, bundle, job, raw)
+        generation = os.environ.get('ULTRA_EXECUTION_GENERATION')
+        fence_path = root / 'execution-fence.json'
+        try:
+            saved = load_private(fence_path)
+        except FileNotFoundError:
+            saved = None
+        if generation:
+            binding['generation'] = generation
+            if saved != binding:
+                raise ValueError('execution_uncertain_reconciliation_required')
+            # Consume the admission exactly once. A second controller using the
+            # same generation must not dispatch while the first may still run.
+        else:
+            if saved is not None:
+                raise ValueError('execution_uncertain_reconciliation_required')
+            legacy_uncertain = False
+            # Historical canonical queue jobs must fence newer job IDs too.
+            for candidate in sorted(root.iterdir()):
+                if candidate.is_dir() and (candidate / 'job.json').exists() and (candidate / 'receipt.json').exists():
+                    previous = load_private(candidate / 'receipt.json')
+                    old_job = validate(load_private(candidate / 'job.json'))
+                    if (previous.get('state') != 'succeeded' and old_job['operation'] not in READ_ONLY_OPERATIONS
+                            and not completed_failure(candidate, candidate / 'bundle', old_job,
+                                                      load_private(candidate / 'request.json', raw=True), previous)):
+                        binding = execution_binding(candidate, candidate / 'bundle', old_job,
+                                                    load_private(candidate / 'request.json', raw=True))
+                        legacy_uncertain = True
+                        break
+            if not legacy_uncertain and (directory / 'receipt.json').exists():
+                previous = load_private(directory / 'receipt.json')
+                legacy_uncertain = previous.get('state') != 'succeeded'
+            for claim in directory.glob('execution-dispatch-*.json'):
+                prior = load_private(claim)
+                prior['generation'] = ''
+                if prior == binding:
+                    legacy_uncertain = True
+            binding['generation'] = uuid.uuid4().hex
+            fd = SafeJournal.open_private(fence_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, 'w') as stream:
+                json.dump(binding, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            parent = os.open(root, os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+            if legacy_uncertain:
+                raise ValueError('legacy_execution_uncertain')
+        # Durable per-generation dispatch claim survives SIGKILL, unlike flock.
+        claim = directory / ('execution-dispatch-' + binding['generation'] + '.json')
+        fd = SafeJournal.open_private(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(binding, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        parent = os.open(directory, os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+        return binding
+    finally:
+        os.close(lock)
+
+
+def completed_failure(directory, bundle, job, raw, receipt):
+    """A cached failed result is reusable only with its exact terminal proof."""
+    try:
+        complete = load_private(directory / 'execution-completion.json')
+        fence = execution_binding(directory, bundle, job, raw)
+        fence['generation'] = receipt['execution_generation']
+        if (complete.get('fence') != fence or complete.get('outcome') != 'failed'
+                or complete.get('local_cleanup') is not True
+                or receipt.get('code') != 'ansible_failed' or receipt.get('exit_code') != 2
+                or complete.get('receipt_sha256') != hashlib.sha256(
+                    load_private(directory / 'receipt.json', raw=True)).hexdigest()):
+            return False
+        terminal_raw = load_private(directory / ('execution-terminal-' + fence['generation'] + '.json'), raw=True)
+        terminal = json.loads(terminal_raw)
+        return (complete.get('terminal_sha256') == hashlib.sha256(terminal_raw).hexdigest()
+                and terminal.get('fence') == fence and terminal.get('outcome') == 'failed'
+                and type(terminal.get('contacted_hosts')) is int and terminal['contacted_hosts'] > 0
+                and terminal.get('pending_tasks') == 0 and terminal.get('unreachable_hosts') == 0
+                and terminal.get('unmanaged_async') is False)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def finish_execution(directory, bundle, root, fence, outcome="succeeded", terminal=None, fixture=False):
+    if fence is None:
+        return
+    current = execution_binding(directory, bundle, validate(load_private(directory / 'job.json')),
+                                load_private(directory / 'request.json', raw=True))
+    current['generation'] = fence['generation']
+    if current != fence:
+        raise ValueError('execution_completion_conflict')
+    if not (fixture or TEST_EXECUTION_NAMESPACE):
+        import importlib.util
+        source = Path(bundle) / 'library/ultra_execution_containment.py'
+        spec = importlib.util.spec_from_file_location('ultra_execution_containment', source)
+        containment = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(containment)
+        proof = containment.completion_containment(directory, fence)
+        # Transient proof is finalized by Go only after systemd stop/drain.
+        atomic(directory / 'execution-containment.json', proof)
+    atomic(directory / 'execution-completion.json', {
+        'fence': fence, 'local_cleanup': True, 'outcome': outcome,
+        'terminal_sha256': hashlib.sha256(terminal).hexdigest() if terminal else '',
+        'receipt_sha256': hashlib.sha256(load_private(directory / 'receipt.json', raw=True)).hexdigest(),
+    })
+    if os.environ.get('ULTRA_EXECUTION_GENERATION') or (not (fixture or TEST_EXECUTION_NAMESPACE) and proof['mode'] == 'transient'):
+        return  # The Go dispatcher validates the completion before retiring it.
+    lock = SafeJournal.open_private(root / 'execution-admission.lock', os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if load_private(root / 'execution-fence.json') != fence:
+            raise ValueError('execution_completion_conflict')
+        if not (fixture or TEST_EXECUTION_NAMESPACE):
+            # Preserve the already-observed census for historical rc2 retry;
+            # its exact receipt also closes a crash before fence unlink.
+            atomic(directory / ('execution-drain-' + fence['generation'] + '.json'), {
+                'proof': proof, 'completion_sha256': hashlib.sha256(
+                    load_private(directory / 'execution-completion.json', raw=True)).hexdigest(),
+            })
+        (root / 'execution-fence.json').unlink()
+        parent = os.open(root, os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+    finally:
+        os.close(lock)
+
+
+def execute(directory, executable, bundle, diagnostics_root=None, execution_root=None):
     directory = Path(directory)
     if directory.is_symlink() or directory.stat().st_mode & 0o077 or directory.stat().st_uid != os.geteuid():
         raise ValueError('private_job_required')
     job = validate(load_private(directory / 'job.json'))
     raw = load_private(directory / 'request.json', raw=True)
     request = json.loads(raw)
+    # The timeout is frozen into the operation request and bounded here.
+    timeout = request.get('execution_timeout_seconds', 1200)
+    if type(timeout) is not int or timeout <= 0 or timeout > 9223371976:
+        raise ValueError('invalid_execution_timeout')
     if hashlib.sha256(raw).hexdigest() != job['request_sha256']:
         raise ValueError('request_changed')
     if job['operation'] in LOCAL_OPERATIONS:
@@ -424,24 +645,42 @@ def execute(directory, executable, bundle, diagnostics_root=None):
         if saved.get('state') == 'succeeded':
             return saved
         if saved.get('state') == 'failed':
+            if job['operation'] not in READ_ONLY_OPERATIONS and not completed_failure(directory, bundle, job, raw, saved):
+                begin_execution(directory, bundle, job, raw, execution_root or EXECUTION_ROOT, fixture=execution_root is not None)
             return saved  # Explicit retry creates a new attempt, never treats a failure as success.
     result_path = directory / 'result.json'
     result_path.unlink(missing_ok=True)
+    fence = begin_execution(directory, bundle, job, raw, execution_root or EXECUTION_ROOT, fixture=execution_root is not None)
     journal = SafeJournal.create(diagnostics_root or SafeJournal.default_root(), directory, job['operation'])
     state = {**job, 'state': 'running', 'started_at': int(time.time())}
+    if fence is not None:
+        state['execution_generation'] = fence['generation']
     atomic(receipt, state)
     environment = playbook_environment(directory, bundle, journal)
+    terminal_path = directory / ('execution-terminal-' + fence['generation'] + '.json') if fence else None
+    if fence:
+        environment['ULTRA_EXECUTION_BINDING'] = json.dumps(fence)
+        environment['ULTRA_EXECUTION_TERMINAL_FILE'] = str(terminal_path)
+    normal_failure_proof = None
     observation = 'controller_failed'
     try:
         exit_code = run_playbook([
             str(executable), '-i', str(directory / 'inventory.yml'),
             str(Path(bundle) / 'playbooks' / operation_playbook(job['operation'])),
             '--extra-vars', '@' + str(directory / 'variables.yml'),
-        ], bundle, environment, timeout=700 if job['operation'] == 'wait-upgrade-readiness' else 900)
+        ], bundle, environment, timeout=timeout)
         if exit_code:
             if (directory / 'diagnostic.json').exists():
                 state['diagnostic'] = load_private(directory / 'diagnostic.json')
             state.update(state='failed', code='ansible_failed', exit_code=exit_code)
+            if exit_code == 2 and fence and terminal_path.exists():
+                candidate_raw = load_private(terminal_path, raw=True)
+                candidate = json.loads(candidate_raw)
+                if (candidate.get('fence') == fence and candidate.get('outcome') == 'failed'
+                        and type(candidate.get('contacted_hosts')) is int and candidate['contacted_hosts'] > 0
+                        and candidate.get('pending_tasks') == 0 and candidate.get('unreachable_hosts') == 0
+                        and candidate.get('unmanaged_async') is False):
+                    normal_failure_proof = candidate_raw
         else:
             result = load_private(result_path)
             ca_name = (bootstrap_ca_name(inventory, variables.get('ultra_bootstrap_exit_host'))
@@ -459,12 +698,19 @@ def execute(directory, executable, bundle, diagnostics_root=None):
             state.update(state='succeeded', result=result)
             observation = 'controller_succeeded'
     except InterruptedError:
-        # Operator/service cancellation is resumable, unlike a terminal timeout.
-        # The process group is already gone before this nonterminal receipt.
+        # Local cleanup does not establish remote quiescence. Keep the durable
+        # fence closed for explicit reconciliation after cancellation.
         state.update(state='running', code='interrupted')
         observation = 'controller_interrupted'
     except subprocess.TimeoutExpired:
-        state.update(state='failed', code='execution_failed')
+        diagnostic = {'stage': 'execute', 'node': 'local', 'code': 'execution_runtime_limit'}
+        state.update(state='failed', code='execution_runtime_limit', diagnostic=diagnostic)
+        # Never claim normal completion or worker quiescence from a deadline.
+        # Preserve an immutable generation-bound timeout fact separately.
+        if fence is not None:
+            exclusive_atomic(directory / ('execution-runtime-limit-' + fence['generation'] + '.json'),
+                             {'schema': 1, 'fence': fence, 'diagnostic': diagnostic,
+                              'source': 'controller', 'timeout_seconds': timeout})
         observation = 'controller_timeout'
     except (OSError, ValueError, subprocess.SubprocessError):
         state.update(state='failed', code='execution_failed')
@@ -473,7 +719,28 @@ def execute(directory, executable, bundle, diagnostics_root=None):
     journal.best_effort(observation)
     journal.close()
     atomic(receipt, state)
+    if state['state'] == 'succeeded' or normal_failure_proof is not None:
+        finish_execution(directory, bundle, execution_root or EXECUTION_ROOT, fence, state['state'], normal_failure_proof, fixture=execution_root is not None)
     return state
+
+
+def exclusive_atomic(path, value):
+    """Publish complete durable bytes without replacing earlier evidence."""
+    temporary = path.with_name('.' + path.name + '-' + uuid.uuid4().hex)
+    try:
+        atomic(temporary, value)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if load_private(path) != value:
+                raise ValueError('execution_runtime_limit_conflict')
+        fd = os.open(path.parent, os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def main():

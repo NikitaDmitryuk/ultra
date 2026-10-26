@@ -29,12 +29,21 @@ func runIngressCommand(args []string) {
 	identity := flags.String("identity", "", "SSH identity file")
 	knownHosts := flags.String("known-hosts", "", "verified known_hosts file")
 	binary := flags.String("relay-binary", "", "deprecated: update pinned release before ingress changes")
+	operatorStateDir := flags.String("operator-state-dir", "", "local Ansible state root for nonroot operators")
 	_ = flags.Parse(args)
 	if *canonical != "" {
 		if *host != "" || *planFile != "" || *identity != "" || *knownHosts != "" || *binary != "" {
 			exitOnErr("ingress config", fmt.Errorf("config is exclusive with manual ingress options"))
 		}
+		if err := configureOperatorExecutionState(*operatorStateDir); err != nil {
+			exitOnErr("operator identity", err)
+			return
+		}
 		exitOnErr("configured Ansible ingress", applyConfiguredIngress(*canonical, *action))
+		return
+	}
+	if *operatorStateDir != "" {
+		exitOnErr("ingress execution state", fmt.Errorf("operator state directory requires canonical config"))
 		return
 	}
 	if *action == "retire-experiment" {
@@ -44,7 +53,7 @@ func runIngressCommand(args []string) {
 		exitOnErr("ingress inputs", fmt.Errorf("host, plan, identity and absolute verified known-hosts required"))
 	}
 	if *binary != "" {
-		exitOnErr("ingress binary", fmt.Errorf("install a compatible pinned release with upgrade before changing ingress"))
+		exitOnErr("ingress binary", fmt.Errorf("install a compatible pinned release with make deploy before changing ingress"))
 	}
 	switch *action {
 	case "stage", "activate", "retire-experiment", "rollback", "status", "notice":
