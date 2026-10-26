@@ -53,7 +53,7 @@ func runIngressCommand(args []string) {
 		exitOnErr("ingress inputs", fmt.Errorf("host, plan, identity and absolute verified known-hosts required"))
 	}
 	if *binary != "" {
-		exitOnErr("ingress binary", fmt.Errorf("install a compatible pinned release with upgrade before changing ingress"))
+		exitOnErr("ingress binary", fmt.Errorf("install a compatible pinned release with make deploy before changing ingress"))
 	}
 	switch *action {
 	case "stage", "activate", "retire-experiment", "rollback", "status", "notice":
