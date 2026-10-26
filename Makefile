@@ -178,7 +178,7 @@ build-client-release:
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ultra-client-linux-amd64 ./cmd/ultra-client
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ultra-client-linux-arm64 ./cmd/ultra-client
 
-.PHONY: ansible-dist test-ansible test-ansible-exit
+.PHONY: ansible-dist test-ansible test-ansible-exit test-replacement-ssh
 
 ansible-dist:
 	mkdir -p dist
@@ -219,6 +219,10 @@ test-ansible:
 # Disposable container: real SSH/Ansible with a simulated service manager.
 test-ansible-exit: build-install
 	python3 scripts/test-ansible-exit.py --installer "$(CURDIR)/ultra-install" --ansible-playbook "$$(command -v ansible-playbook)"
+
+# Real SSHD and TCP-preserving proxy in a disposable loopback-only container.
+test-replacement-ssh:
+	python3 scripts/test-replacement-ssh-liveness.py
 
 # Explicit operator action: builds committed HEAD in isolation, then replaces
 # every configured non-DB host while preserving the PostgreSQL primary.

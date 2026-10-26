@@ -59,6 +59,28 @@ execution namespace. Повреждённый fence, running или отсутс
 описывать только текущие и явно сохранённые предыдущие цели с pinned root transport,
 а `primary-before.json` именно её workspace — ту же identity primary.
 
+Перед остановкой приложений на всём non-DB парке replacement проверяет и
+подготавливает root SSH liveness: `ClientAliveInterval 10`, `ClientAliveCountMax 2`.
+Управляемый Include добавляется только в конец `sshd_config`, а root-only policy
+проверяется через `sshd -t` и `sshd -T -C`: остальные effective root-настройки и
+настройки non-root не меняются. Конфликт, чужой файл, неизвестный suffix после
+managed Include или ошибка reload останавливают работу до app fencing; изменение
+обоих файлов откатывается. До записи проверяются `ssh.service` MainPID/ExecStart,
+реальный executable и startup args listener: поддерживается штатный
+`/usr/sbin/sshd -D` с optional `-e`; custom `-f`/`-o`, неизвестные overrides и
+заменённый executable закрывают gate. Проверенный listener получает SIGHUP через
+pidfd, независимо от ExecReload unit. Активация обязательна и при идентичных
+управляемых файлах: предыдущий процесс мог завершиться до reload.
+Primary SSH config не затрагивается.
+
+Census не исключает и не завершает чужие SSH/PAM sessions. Он повторяет полную
+проверку до 40 секунд и отслеживает все наблюдавшиеся SSH-деревья процессов, SID и PAM scope
+после смены UID или reparenting. Timeout и неизвестные helpers оставляют gate закрытым.
+Server-side liveness ограничивает жизнь новых неотвечающих SSH clients даже когда
+TCP proxy удерживает backend-соединение; уже открытые до policy сеансы не получают
+новую настройку. Responsive sessions и отделившиеся workers по-прежнему блокируют
+замену. Первый rollout не может считать старые unknown sessions безопасными.
+
 Перед fencing проверяется локальная quiescence. Затем под глобальным admission
 lock штатная замена обнаруживает и останавливает весь non-DB парк, проверяет
 remote sessions, workers и primary transactions, повторяет identity/schema/routes

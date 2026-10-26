@@ -106,12 +106,18 @@ func TestProductionReplacementOrderAndFailClosedJournalRetirement(t *testing.T) 
 	ctx := context.Background()
 	targets := []replacementTarget{{Role: "bridge"}, {Role: "exit-0"}}
 	primary := replacementPrimary{SystemIdentifier: "123", Database: "fixture", DatabaseOID: 42, Migrations: "1,2"}
-	for _, failure := range []string{"", "discover-exit-0", "fence-exit-0", "clean-exit-0", "bootstrap", "changed-schema", "quiescence-before-cleanup-exit-0", "quiescence-before-cleanup-primary", "quiescence-after-cleanup-bridge", "quiescence-before-journal-primary"} {
+	for _, failure := range []string{"", "discover-exit-0", "prepare-ssh-exit-0", "fence-exit-0", "clean-exit-0", "bootstrap", "changed-schema", "quiescence-before-cleanup-exit-0", "quiescence-before-cleanup-primary", "quiescence-after-cleanup-bridge", "quiescence-before-journal-primary"} {
 		t.Run(failure, func(t *testing.T) {
 			var events []string
 			retired := false
 			stage := ""
 			steps := replacementSteps{
+				PrepareSSH: func(context.Context, replacementTarget) error {
+					if stage == failure {
+						return errors.New("fixture")
+					}
+					return nil
+				},
 				Checkpoint: func(s string) error { stage = s; events = append(events, s); return nil },
 				Observe: func(context.Context) (replacementPrimary, error) {
 					v := primary
@@ -164,6 +170,7 @@ func TestProductionReplacementOrderAndFailClosedJournalRetirement(t *testing.T) 
 					"discover-bridge",
 					"discover-exit-0",
 					"primary-before-fence",
+					"prepare-ssh-bridge", "prepare-ssh-exit-0",
 					"fence-bridge",
 					"fence-exit-0",
 					"quiescence-before-cleanup-bridge",
@@ -190,6 +197,13 @@ func TestProductionReplacementOrderAndFailClosedJournalRetirement(t *testing.T) 
 			}
 			if failure != "" && failure != "bootstrap" && retired {
 				t.Fatal("journal retired before all target fences and cleanup succeeded")
+			}
+			if strings.HasPrefix(failure, "prepare-ssh-") {
+				for _, event := range events {
+					if strings.HasPrefix(event, "fence-") {
+						t.Fatal("application teardown before fleet SSH verification")
+					}
+				}
 			}
 			if strings.HasPrefix(failure, "quiescence-before-cleanup") {
 				for _, event := range events {
@@ -336,23 +350,44 @@ def check(first,following,code=None,pid=None,wait=True,uid=None,elapsed=None):
  else:assert code is None,'unsafe session was accepted'
  assert bool(sleeps)==wait,sleeps
  if elapsed is not None:assert clock[0]==elapsed,(clock,elapsed)
- assert reads[0]==(len(sleeps) if clock[0]==30 else len(sleeps)+1),reads
+ assert reads[0]==(len(sleeps) if clock[0]==40 else len(sleeps)+1),reads
 # Idle hosts return immediately; a vanished tail returns at the first clean poll.
 check(base,[],wait=False,elapsed=0)
 check(tail,[base],elapsed=.25)
 # Persistent sessions stop at one absolute deadline and preserve diagnostics.
-check(tail,[tail],'replacement_other_root_ssh_session',200,elapsed=30)
+check(tail,[tail],'replacement_other_root_ssh_session',200,elapsed=40)
 # Even a leader transitioning to an otherwise accepted preauth shape must vanish.
 preauth=copy.deepcopy(tail);preauth[200]['argv']=['sshd-session: unknown [priv]']
 preauth[201]=row(200,200,983,'sshd-auth','sshd-auth: unknown [net]')
 assert validate_sessions(preauth,100)
-check(tail,[preauth],'replacement_other_root_ssh_session',200,elapsed=30)
+check(tail,[preauth],'replacement_other_root_ssh_session',200,elapsed=40)
+# Remember every observed descendant across setsid, UID change and reparenting.
+detached=copy.deepcopy(tail)
+detached[201]=row(200,201,991,'unknown-binary','/tmp/unknown-binary')
+reparented=copy.deepcopy(base);reparented[201]=copy.deepcopy(detached[201]);reparented[201]['ppid']=1
+check(detached,[reparented],'replacement_other_root_ssh_session',201,elapsed=40)
+check(detached,[reparented,base],elapsed=.5)
+# Every blocked tree must be seeded, including a child of the second tree.
+# Both SSH parents disappear in the same poll; UID/SID and PPID exemptions
+# must not discard the already observed surviving descendant.
+multi=copy.deepcopy(tail)
+multi[300]=row(2,300,0,'sshd-session','sshd-session: root@notty')
+multi[301]=row(300,301,991,'unknown-binary','/tmp/unknown-binary')
+remaining=copy.deepcopy(base);remaining[301]=copy.deepcopy(multi[301]);remaining[301]['ppid']=1
+check(multi,[remaining],'replacement_other_root_ssh_session',301,elapsed=40)
+check(multi,[remaining,base],elapsed=.5)
+# New trees observed on later snapshots must also be remembered in full.
+check(tail,[multi,remaining],'replacement_other_root_ssh_session',301,elapsed=40)
+# PAM scopes retain descendants whose parent vanished between observations.
+pam=copy.deepcopy(tail);pam[200]['cgroups']=['/user.slice/user-0.slice/session-42.scope']
+late=copy.deepcopy(base);late[202]=row(1,202,991,'unknown-binary','/tmp/unknown-binary');late[202]['cgroups']=pam[200]['cgroups']
+check(pam,[late],'replacement_other_root_ssh_session',202,elapsed=40)
 # A vanished leader cannot hide surviving/new children, even otherwise unknown
 # processes or non-root children which the ordinary root census ignores.
 for uid in (0,991):
  child=copy.deepcopy(base)
  child[201]=row(1,200,uid,'unknown-binary','/tmp/unknown-binary')
- check(tail,[child],'replacement_other_root_ssh_session',201,elapsed=.25)
+ check(tail,[child],'replacement_other_root_ssh_session',201,elapsed=40)
 child=copy.deepcopy(base);child[201]=row(1,200,0,'sh','/bin/sh')
 check(tail,[child],'replacement_unknown_root_helper',201,elapsed=.25)
 # Full validation also catches an unrelated blocker arriving during the wait.
@@ -363,20 +398,20 @@ check(tail,[broken],'replacement_session_census_unavailable',elapsed=.25)
 # A replacement transient may disappear, but PID churn never renews the budget.
 next_tail=copy.deepcopy(base);next_tail[300]=copy.deepcopy(tail[200]);next_tail[300]['sid']=300
 check(tail,[next_tail,base],elapsed=.5)
-check(tail,[tail]*118+[next_tail],'replacement_other_root_ssh_session',300,elapsed=30)
-# A nonmatching root SSH blocker arriving during polling fails immediately.
+check(tail,[tail]*158+[next_tail],'replacement_other_root_ssh_session',300,elapsed=40)
+# Other root SSH layouts are also waited for, without being accepted.
 foreign=copy.deepcopy(next_tail);foreign[300]['cgroups']=['/system.slice/other.service']
-check(tail,[foreign],'replacement_other_root_ssh_session',300,elapsed=.25)
+check(tail,[foreign],'replacement_other_root_ssh_session',300,elapsed=40)
 # Dedicated-tunnel handling remains in effect during the second census.
 tunnel=copy.deepcopy(base);tunnel[400]=row(2,400,0,'sshd-session','sshd-session: ultra-db-tunnel [priv]');tunnel[401]=row(400,401,991,'sshd-session','sshd-session: ultra-db-tunnel@notty')
 check(tail,[tunnel],uid=991,elapsed=.25)
-# Other commands, units, and nonleader sessions still fail immediately.
+# All SSH layouts use the same deadline; they are never exempted.
 for mutation in ('comm','cgroup','sid'):
  other=copy.deepcopy(tail)
  if mutation=='comm':other[200]['comm']='sshd'
  elif mutation=='cgroup':other[200]['cgroups']=['/system.slice/other.service']
  else:other[200]['sid']=201
- check(other,[base],'replacement_other_root_ssh_session',200,wait=False,elapsed=0)
+ check(other,[base],elapsed=.25)
 `
 	cmd := exec.Command("python3", "-c", program)
 	cmd.Stdin = strings.NewReader(replacementSessionCensusDefinitions)

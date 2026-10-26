@@ -492,3 +492,15 @@ SSH supervisor удерживает lock до собственного deadline,
 replacement может проверить точную сохранённую область. Ошибка native mutation
 сохраняет reservation; её нельзя объявлять успешно завершённой по одному exit
 локального SSH или отсутствию execution receipt.
+
+`make test-replacement-ssh` выполняет реальный SSHD regression в disposable
+loopback-only контейнере с синтетическими ключами. Relay удерживает backend TCP
+после гибели SFTP client, но не отвечает на encrypted ClientAlive: без policy
+census остаётся закрытым, с root policy 10/2 новый полный census дожидается drain.
+Тест также проверяет реальный Ubuntu Include layout, effective настройки,
+конфликт, отказ от реального listener с custom `-f`/`-o` и завершение активации
+после публикации owned disk pair без reload. Он обязателен в CI job
+`Ansible SSH and offline runtime`; Go fixtures проверяют отдельные SID/UID,
+одновременное исчезновение нескольких SSH parents, reparenting, PAM scope, rollback
+после ошибки activation, неизвестных helpers и запрет app teardown до проверки
+SSH всего парка. Проверки не используют production configuration или credentials.

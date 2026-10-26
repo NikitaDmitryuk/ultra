@@ -45,6 +45,7 @@ type replacementSteps struct {
 	AdmitFailedExecution func(context.Context, func() error) error
 	Observe              func(context.Context) (replacementPrimary, error)
 	Discover             func(context.Context, replacementTarget) error
+	PrepareSSH           func(context.Context, replacementTarget) error
 	Fence                func(context.Context, replacementTarget) error
 	Quiescent            func(context.Context, replacementTarget) error
 	PrimaryQuiescent     func(context.Context) error
@@ -100,6 +101,15 @@ func executeProductionReplacement(
 		}
 		if err := run("primary-before-fence", check); err != nil {
 			return err
+		}
+		if steps.PrepareSSH == nil {
+			return errors.New("replacement_ssh_liveness_preparer_required")
+		}
+		// Validate the entire fleet transport before stopping any application.
+		for _, target := range targets {
+			if err := run("prepare-ssh-"+target.Role, func() error { return steps.PrepareSSH(ctx, target) }); err != nil {
+				return err
+			}
 		}
 		for _, target := range targets {
 			if err := run("fence-"+target.Role, func() error { return steps.Fence(ctx, target) }); err != nil {
@@ -432,6 +442,16 @@ func runProductionReplacement(args []string, output io.Writer) (result error) {
 	steps := replacementSteps{
 		Observe:  observe,
 		Discover: func(ctx context.Context, target replacementTarget) error { return remote(ctx, target, "discover") },
+		PrepareSSH: func(ctx context.Context, target replacementTarget) error {
+			if err := reservation.SetPhase("mutating"); err != nil {
+				return err
+			}
+			raw, err := prepareReplacementSSH(ctx, p, target)
+			if err != nil {
+				return err
+			}
+			return replaceUpgradeMetadata(filepath.Join(*state, "ssh-liveness-"+target.Role+".json"), raw)
+		},
 		Fence: func(ctx context.Context, target replacementTarget) error {
 			if err := reservation.SetPhase("mutating"); err != nil {
 				return err

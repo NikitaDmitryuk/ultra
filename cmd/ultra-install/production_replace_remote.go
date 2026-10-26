@@ -37,7 +37,7 @@ def root_helper(row):
   name=os.path.basename(arg)
   if name in ('sh','bash','dash','zsh','ksh','fish','perl','ruby','node','nodejs','busybox','ansible-playbook','ansible.cli.playbook','ultra-install','manual-deploy.py') or name.startswith(('python','ultra-install-linux-','AnsiballZ_')):return True
  return False
-def validate_sessions(rows,self_pid,tunnel_uid=None):
+def session_blockers(rows,self_pid,tunnel_uid=None):
  if self_pid not in rows:gate_error('replacement_session_census_unavailable')
  ancestors=set();pid=self_pid
  while pid:
@@ -61,11 +61,15 @@ def validate_sessions(rows,self_pid,tunnel_uid=None):
      chain.add(parent)
      if not is_ssh(rows[parent]):break
      allowed.add(parent);parent=rows[parent]['ppid']
+ blockers=[]
  for pid,row in rows.items():
   if pid in allowed or row['sid']==sid or 0 not in row['uids']:continue
   if shared_ssh_listener(row) or preauth_ssh(pid,row,rows) or os_service(row):continue
-  if is_ssh(row) or row.get('loginuid')==0 or row.get('login_scope',False):gate_error('replacement_other_root_ssh_session',pid,row)
-  if root_helper(row):gate_error('replacement_unknown_root_helper',pid,row)
+  if is_ssh(row) or row.get('loginuid')==0 or row.get('login_scope',False):blockers.append(('replacement_other_root_ssh_session',pid,row))
+  elif root_helper(row):blockers.append(('replacement_unknown_root_helper',pid,row))
+ return blockers
+def validate_sessions(rows,self_pid,tunnel_uid=None):
+ for code,pid,row in session_blockers(rows,self_pid,tunnel_uid):gate_error(code,pid,row)
  return True
 def read_sessions():
  rows={}
@@ -79,37 +83,60 @@ def read_sessions():
     loginuid=int((d/'loginuid').read_text().strip())
     cgroups=[line.split(':',2)[2] for line in (d/'cgroup').read_text().splitlines()]
     login_scope=any(re.search(r'/session-[^/\n]+\.scope(?:/|$)',group) for group in cgroups)
-    rows[int(d.name)]={'ppid':int(fields[1]),'sid':int(fields[3]),'uids':[int(x) for x in uid.split()[1:]],'comm':raw.split('(',1)[1].rsplit(') ',1)[0],'argv':argv,'loginuid':loginuid,'login_scope':login_scope,'cgroups':cgroups}
+    rows[int(d.name)]={'ppid':int(fields[1]),'start':fields[19],'sid':int(fields[3]),'uids':[int(x) for x in uid.split()[1:]],'comm':raw.split('(',1)[1].rsplit(') ',1)[0],'argv':argv,'loginuid':loginuid,'login_scope':login_scope,'cgroups':cgroups}
    except (FileNotFoundError,ProcessLookupError):continue
  except Exception:gate_error('replacement_session_census_unavailable')
  return rows
 def require_sessions_quiescent(self_pid,tunnel_uid=None):
- def transient(error,rows):
-  pid=getattr(error,'offender',{}).get('pid');row=rows.get(pid,{})
-  return str(error)=='replacement_other_root_ssh_session' and row.get('comm')=='sshd-session' and row.get('sid')==pid and row.get('cgroups')==['/system.slice/ssh.service']
- rows=read_sessions()
- try:return validate_sessions(rows,self_pid,tunnel_uid)
- except ValueError as error:
-  if not transient(error,rows):raise
-  original_sid=error.offender['pid'];latest=error
- deadline=time.monotonic()+30
- # Never exempt a possible probe tail. Poll the complete census under one
- # deadline, including disappearance of every UID in the original session.
+ # Waiting never authorizes a session, changes configuration or signals it.
+ # One deadline covers PAM scopes, old/new OpenSSH layouts and PID churn.
+ deadline=time.monotonic()+40
+ tracked={};sids=set();scopes=set();latest=None
+ def identity(pid,row):return row.get('start',str(pid))
+ def remember(rows,seed=None):
+  if seed is not None:
+   # Climb only per-connection SSH ancestors, never the shared listener.
+   pid=seed
+   while pid in rows:
+    parent=rows[pid]['ppid']
+    if parent in own_ancestry or parent not in rows or not is_ssh(rows[parent]) or shared_ssh_listener(rows[parent]):break
+    pid=parent
+   tracked[pid]=identity(pid,rows[pid])
+  for _ in range(len(rows)+1):
+   added=False
+   alive={pid for pid,value in tracked.items()if pid in rows and identity(pid,rows[pid])==value}
+   for pid,row in rows.items():
+    session_scopes={cg for cg in row.get('cgroups',[])if re.search(r'/session-[^/]+\.scope(?:/|$)',cg)}
+    if pid in alive or row['ppid'] in alive or row['sid'] in sids or session_scopes&scopes:
+     if pid not in tracked or tracked[pid]!=identity(pid,row):tracked[pid]=identity(pid,row);added=True
+     if row['sid']==pid:sids.add(pid)
+     scopes.update(session_scopes)
+   if not added:break
  while True:
+  rows=read_sessions()
+  own_ancestry=set();ancestor=self_pid
+  while ancestor in rows and ancestor not in own_ancestry:
+   own_ancestry.add(ancestor);ancestor=rows[ancestor]['ppid']
+  # Classify once, using exactly the snapshot validator's exemptions. Seed
+  # every SSH tree before any parent can disappear between polls.
+  blockers=session_blockers(rows,self_pid,tunnel_uid)
+  for code,pid,row in blockers:
+   if code=='replacement_other_root_ssh_session':remember(rows,pid)
+  remember(rows)
+  try:
+   for code,pid,row in blockers:gate_error(code,pid,row)
+   for pid,value in tracked.items():
+    if pid in rows and identity(pid,rows[pid])==value:gate_error('replacement_other_root_ssh_session',pid,rows[pid])
+   return True
+  except ValueError as error:
+   if str(error)!='replacement_other_root_ssh_session':raise
+   pid=getattr(error,'offender',{}).get('pid')
+   if pid not in rows:raise
+   remember(rows,pid);latest=error
   remaining=deadline-time.monotonic()
   if remaining<=0:raise latest
   time.sleep(min(.25,remaining))
   if time.monotonic()>=deadline:raise latest
-  current=read_sessions()
-  try:
-   validate_sessions(current,self_pid,tunnel_uid)
-   for child_pid,child in current.items():
-    if child['sid']==original_sid:gate_error('replacement_other_root_ssh_session',child_pid,child)
-   if time.monotonic()>=deadline:raise latest
-   return True
-  except ValueError as error:
-   if not transient(error,current):raise
-   latest=error
 
 def require_primary_idle(database):
  query="""BEGIN READ ONLY;

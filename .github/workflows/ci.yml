@@ -166,6 +166,8 @@ jobs:
           sudo -n /usr/bin/python3 scripts/test-ansible-exit.py --installer "$PWD/ultra-install" --ansible-playbook "$(command -v ansible-playbook)" --runtime /tmp/ultra-ansible-runtime.tar.gz
       - name: Verify isolated systemd execution faults and containment
         run: python3 scripts/test-execution-systemd.py
+      - name: Verify replacement orphan SSH liveness
+        run: python3 scripts/test-replacement-ssh-liveness.py
       - name: Verify forward role through SSH
         run: |
           python3 scripts/test-ansible-forward-role.py --ansible-playbook "$(command -v ansible-playbook)"

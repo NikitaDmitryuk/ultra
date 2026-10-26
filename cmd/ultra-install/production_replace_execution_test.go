@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -197,6 +198,7 @@ func TestFailedExecutionReplacementRunsRealRetirementBeforeCleanup(t *testing.T)
 			localCalls := 0
 			cleaned := false
 			steps := replacementSteps{
+				PrepareSSH: func(context.Context, replacementTarget) error { return nil },
 				Checkpoint: func(stage string) error { events = append(events, stage); return nil },
 				Observe: func(context.Context) (replacementPrimary, error) {
 					value := f.primary
@@ -429,5 +431,120 @@ func TestReplacementReservationScopeBindsExactCrashedParent(t *testing.T) {
 				t.Fatalf("%s: %v", change, err)
 			}
 		})
+	}
+}
+
+func TestReplacementFailedSSHPreparationReservationCanBeReclaimed(t *testing.T) {
+	const ownerEnv = "ULTRA_TEST_FAILED_SSH_OWNER"
+	if os.Getenv(ownerEnv) == "1" {
+		root := os.Getenv("ULTRA_TEST_FAILED_SSH_ROOT")
+		fixtureExecutionNamespace = func(string) string { return root }
+		var binding deployansible.ReplacementBinding
+		if err := json.Unmarshal([]byte(os.Getenv("ULTRA_TEST_FAILED_SSH_BINDING")), &binding); err != nil {
+			t.Fatal(err)
+		}
+		ctx, lease, err := deployansible.ReserveReplacement(context.Background(), binding, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = lease.Close() }()
+		primary := replacementPrimary{SystemIdentifier: "123", Database: "fixture", DatabaseOID: 42}
+		steps := replacementSteps{
+			Checkpoint: func(string) error { return nil },
+			Discover:   func(context.Context, replacementTarget) error { return nil },
+			Observe:    func(context.Context) (replacementPrimary, error) { return primary, nil },
+			PrepareSSH: func(context.Context, replacementTarget) error {
+				if err := lease.SetPhase("mutating"); err != nil {
+					return err
+				}
+				return errors.New("fixture policy rejected")
+			},
+			Fence: func(context.Context, replacementTarget) error {
+				t.Fatal("app teardown after failed transport policy")
+				return nil
+			},
+		}
+		if err = executeProductionReplacement(ctx, []replacementTarget{{Role: "bridge"}}, primary, steps); err == nil {
+			t.Fatal("failed SSH policy accepted")
+		}
+		if lease.SafeToFinish() {
+			t.Fatal("native mutation uncertainty was erased")
+		}
+		return
+	}
+	f := replacementFailedFixture(t)
+	if err := deployansible.AbandonExecutionFence(f.fence, func(deployansible.ExecutionFence) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	state, err := replacementExecutionState(f.fence.JobDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primaryRaw, err := os.ReadFile(filepath.Join(state, "primary-before.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetsRaw, err := os.ReadFile(filepath.Join(state, "targets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := deployansible.ReplacementBinding{
+		Workspace:     state,
+		TargetsSHA256: digestSHA256(targetsRaw),
+		PrimarySHA256: digestSHA256(primaryRaw),
+	}
+	raw, err := json.Marshal(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := exec.Command(os.Args[0], "-test.run=^TestReplacementFailedSSHPreparationReservationCanBeReclaimed$")
+	owner.Env = append(os.Environ(), ownerEnv+"=1", "ULTRA_TEST_FAILED_SSH_ROOT="+f.root, "ULTRA_TEST_FAILED_SSH_BINDING="+string(raw))
+	if out, err := owner.CombinedOutput(); err != nil {
+		t.Fatalf("native failure owner: %v %s", err, out)
+	}
+	if fence, err := deployansible.PreflightExecutionReplacement(); err != nil || fence != nil {
+		t.Fatalf("native failure invented an execution fence: %v %v", fence, err)
+	}
+	corrected := binding
+	corrected.Workspace = filepath.Join(f.root, "replacement-corrected")
+	if err = os.Mkdir(corrected.Workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	foreign := errors.New("foreign retained scope")
+	if _, _, err = deployansible.ReserveReplacement(context.Background(), corrected, func(record deployansible.ReplacementReservation) error {
+		wrong := *f.plan
+		wrong.Database.PrimaryHost = "192.0.2.99"
+		if validateReplacementReservationScope(record, &wrong, []*installplan.InstallPlan{&wrong, f.plan}, f.primary) == nil {
+			t.Fatal("foreign primary accepted")
+		}
+		return foreign
+	}); !errors.Is(
+		err,
+		foreign,
+	) {
+		t.Fatal(err)
+	}
+	_, lease, err := deployansible.ReserveReplacement(
+		context.Background(),
+		corrected,
+		func(record deployansible.ReplacementReservation) error {
+			return validateReplacementReservationScope(record, f.plan, []*installplan.InstallPlan{f.plan}, f.primary)
+		},
+	)
+	if err != nil {
+		t.Fatal("corrected canonical attempt blocked by failed SSH policy", err)
+	}
+	defer func() { _ = lease.Close() }()
+	if lease.SafeToFinish() {
+		t.Fatal("takeover erased native uncertainty")
+	}
+	if _, _, err = deployansible.ReserveReplacement(context.Background(), corrected, func(deployansible.ReplacementReservation) error { t.Fatal("live owner reached takeover"); return nil }); !errors.Is(
+		err,
+		deployansible.ErrReplacementReserved,
+	) {
+		t.Fatal(err)
+	}
+	if err = lease.Finish(); err != nil {
+		t.Fatal(err)
 	}
 }
