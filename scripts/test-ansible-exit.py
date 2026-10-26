@@ -2,6 +2,7 @@
 """Actual SSH/Ansible exit-role test in a disposable container, without production inputs."""
 import argparse
 from contextlib import contextmanager
+import errno
 import fcntl
 import hashlib
 import json
@@ -258,7 +259,12 @@ def cleanup_owned_fixture(directory, owner):
             raise ValueError('fixture_owned_directory_changed')
     if private_json(NAMESPACE / '.fixture-owner.json') != owner:
         raise ValueError('fixture_namespace_ownership_changed')
-    if {entry.name for entry in NAMESPACE.iterdir()} - {'.fixture-owner.json', 'execution-admission.lock'}:
+    expected_entries = {
+        '.fixture-owner.json',
+        'execution-admission.lock',
+        'replacement-reservation.lock',
+    }
+    if {entry.name for entry in NAMESPACE.iterdir()} != expected_entries:
         raise ValueError('fixture_namespace_has_uncertain_or_foreign_evidence')
     jobs = [path for path in (directory / 'state').iterdir() if path.is_dir()]
     if not jobs:
@@ -297,19 +303,51 @@ def cleanup_owned_fixture(directory, owner):
             raise ValueError('fixture_execution_cgroup_not_empty')
     # Only our initially absent namespace may be removed, while holding its
     # admission lock after the worker and every exact execution unit have exited.
-    lock_path = NAMESPACE / 'execution-admission.lock'
-    info = lock_path.lstat()
-    if info.st_uid != 0 or info.st_mode & 0o077 or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-        raise ValueError('fixture_admission_lock_changed')
-    with os.fdopen(os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW), 'r+b') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if private_json(NAMESPACE / '.fixture-owner.json') != owner or (
-                {entry.name for entry in NAMESPACE.iterdir()} != {'.fixture-owner.json', 'execution-admission.lock'}):
-            raise ValueError('fixture_namespace_changed_during_cleanup')
-        (NAMESPACE / '.fixture-owner.json').unlink()
-        (NAMESPACE / 'execution-admission.lock').unlink()
-        NAMESPACE.rmdir()
+    with fixture_cleanup_lock('replacement-reservation.lock', 'fixture_replacement_lock_changed'):
+        with fixture_cleanup_lock('execution-admission.lock', 'fixture_admission_lock_changed'):
+            for path in (directory, NAMESPACE):
+                info = path.lstat()
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+                    raise ValueError('fixture_owned_directory_changed')
+            if private_json(NAMESPACE / '.fixture-owner.json') != owner or (
+                    {entry.name for entry in NAMESPACE.iterdir()} != expected_entries):
+                raise ValueError('fixture_namespace_changed_during_cleanup')
+            # Durable execution/reservation records and every unknown entry stay
+            # forbidden while both gates are held in dispatcher lock order.
+            (NAMESPACE / '.fixture-owner.json').unlink()
+            (NAMESPACE / 'execution-admission.lock').unlink()
+            (NAMESPACE / 'replacement-reservation.lock').unlink()
+            NAMESPACE.rmdir()
     shutil.rmtree(directory)
+
+
+@contextmanager
+def fixture_cleanup_lock(name, error_code):
+    path = NAMESPACE / name
+    try:
+        info = path.lstat()
+        if (info.st_uid != 0 or info.st_mode & 0o077 or not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1 or info.st_size != 0):
+            raise ValueError(error_code)
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+        opened = os.fstat(fd)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_mode & 0o077 or opened.st_nlink != 1
+                or opened.st_size != 0 or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)):
+            os.close(fd)
+            raise ValueError(error_code)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as err:
+            os.close(fd)
+            if err.errno in (errno.EACCES, errno.EAGAIN):
+                raise ValueError(error_code + '_busy') from err
+            raise ValueError(error_code) from err
+        with os.fdopen(fd, 'r+b') as lock:
+            yield lock
+    except ValueError:
+        raise
+    except OSError as err:
+        raise ValueError(error_code) from err
 
 
 @contextmanager
@@ -324,6 +362,11 @@ def fixture_workspace(installer):
         json.dump(owner, stream)
         stream.flush()
         os.fsync(stream.fileno())
+    for name in ('execution-admission.lock', 'replacement-reservation.lock'):
+        lock_path = NAMESPACE / name
+        with lock_path.open('xb'):
+            pass
+        lock_path.chmod(0o600)
     try:
         copied = directory / 'ultra-install'
         shutil.copyfile(installer, copied)

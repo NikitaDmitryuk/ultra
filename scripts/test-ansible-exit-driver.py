@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Rootless driver guard/cleanup tests. No Docker, SSH, or real systemd actions."""
 import contextlib
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -25,6 +26,7 @@ class DriverTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.namespace = self.root / 'canonical'
+        self.cleanup_fixture_count = 0
         self.addCleanup(patch.stopall)
         patch.object(D, 'NAMESPACE', self.namespace).start()
         patch.object(D, 'MANAGED_UNIT_FILES', ()).start()
@@ -39,7 +41,7 @@ class DriverTests(unittest.TestCase):
             info = original(path, *args, **kwargs)
             if path == self.root or self.root in path.parents:
                 return SimpleNamespace(st_uid=0, st_mode=info.st_mode, st_nlink=info.st_nlink,
-                                       st_size=info.st_size)
+                                       st_size=info.st_size, st_dev=info.st_dev, st_ino=info.st_ino)
             return info
         patch.object(Path, 'lstat', lstat).start()
 
@@ -169,14 +171,20 @@ class DriverTests(unittest.TestCase):
         self.assertNotIn('private-output-must-not-appear', value)
 
     def cleanup_fixture(self):
-        directory = self.root / 'workspace'
+        self.cleanup_fixture_count += 1
+        directory = self.root / ('workspace-' + str(self.cleanup_fixture_count))
+        self.namespace = self.root / ('canonical-' + str(self.cleanup_fixture_count))
+        patch.object(D, 'NAMESPACE', self.namespace).start()
         job = directory / 'state' / '11111111-2222-3333-4444-555555555555'
         job.mkdir(parents=True, mode=0o700)
         directory.chmod(0o700)
         self.namespace.mkdir(mode=0o700)
         owner = {'schema': 1, 'directory': str(directory), 'identity': 'owned-fixture'}
         self.write(self.namespace / '.fixture-owner.json', owner)
-        self.write(self.namespace / 'execution-admission.lock', {})
+        for name in ('execution-admission.lock', 'replacement-reservation.lock'):
+            lock = self.namespace / name
+            lock.touch(mode=0o600)
+            lock.chmod(0o600)
         generation = 'a' * 32
         fence = {'job_directory': str(job), 'generation': generation}
         receipt = {'state': 'succeeded', 'execution_generation': generation}
@@ -215,6 +223,53 @@ class DriverTests(unittest.TestCase):
             run.assert_not_called()
             self.assertTrue(directory.exists())
             self.assertTrue(self.namespace.exists())
+
+    def test_cleanup_rejects_foreign_reservation_marker(self):
+        directory, owner, _ = self.cleanup_fixture()
+        self.model_owned_root_files()
+        self.write(self.namespace / 'replacement-reservation.json', {'foreign': True})
+        with patch.object(D, 'run', return_value='LoadState=not-found\nActiveState=inactive'):
+            with self.assertRaisesRegex(ValueError, 'uncertain_or_foreign'):
+                D.cleanup_owned_fixture(directory, owner)
+        self.assertTrue(directory.exists())
+        self.assertTrue((self.namespace / 'replacement-reservation.json').exists())
+
+    def test_cleanup_rejects_replacement_gate_symlink_nonprivate_or_nonempty(self):
+        for condition in ('symlink', 'nonprivate', 'nonempty'):
+            with self.subTest(condition=condition):
+                directory, owner, _ = self.cleanup_fixture()
+                self.model_owned_root_files()
+                gate = self.namespace / 'replacement-reservation.lock'
+                if condition == 'symlink':
+                    target = self.root / 'foreign-lock-target'
+                    target.write_text('preserve')
+                    gate.unlink()
+                    gate.symlink_to(target)
+                elif condition == 'nonprivate':
+                    gate.chmod(0o644)
+                else:
+                    gate.write_text('foreign bytes')
+                    gate.chmod(0o600)
+                with patch.object(D, 'run', return_value='LoadState=not-found\nActiveState=inactive'):
+                    with self.assertRaisesRegex(ValueError, 'replacement_lock_changed'):
+                        D.cleanup_owned_fixture(directory, owner)
+                self.assertTrue(directory.exists())
+                self.assertTrue(self.namespace.exists())
+                if condition == 'symlink':
+                    self.assertEqual(target.read_text(), 'preserve')
+
+    def test_cleanup_rejects_live_replacement_or_admission_gate(self):
+        for name in ('replacement-reservation.lock', 'execution-admission.lock'):
+            with self.subTest(name=name):
+                directory, owner, _ = self.cleanup_fixture()
+                self.model_owned_root_files()
+                with (self.namespace / name).open('r+b') as held:
+                    fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    with patch.object(D, 'run', return_value='LoadState=not-found\nActiveState=inactive'):
+                        with self.assertRaisesRegex(ValueError, '_busy'):
+                            D.cleanup_owned_fixture(directory, owner)
+                self.assertTrue(directory.exists())
+                self.assertTrue(self.namespace.exists())
 
     def test_cleanup_requires_actual_inactive_empty_unit_before_deleting_own_state(self):
         directory, owner, job = self.cleanup_fixture()
