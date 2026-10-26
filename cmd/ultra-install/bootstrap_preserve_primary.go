@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/url"
 	"path/filepath"
 	"strconv"
 
@@ -107,6 +108,22 @@ func preparePreservedPrimaryDesired(
 		return err
 	}
 	ds.PostgresConfig = nil
+	// The application primary remains untouched. The bridge standby uses the
+	// same derived replication credential as ordinary PostgreSQL bootstrap.
+	u, err := url.Parse(credentialDSN)
+	if err != nil || u.User == nil {
+		return errors.New("bootstrap_preserved_primary_credentials_changed")
+	}
+	password, ok := u.User.Password()
+	if !ok || password == "" {
+		return errors.New("bootstrap_preserved_primary_credentials_changed")
+	}
+	children := inventory["all"].(map[string]any)["children"].(map[string]any)
+	bridge := children["bridge"].(map[string]any)["hosts"].(map[string]any)["bridge"].(map[string]any)
+	bridge["ultra_postgres_replica"] = map[string]any{
+		"primary_host": p.Database.PrimaryHost,
+		"password":     postgresReplicationPassword(password),
+	}
 	common := inventory["all"].(map[string]any)["vars"].(map[string]any)
 	common["ultra_preserve_primary"] = true
 	common["ultra_preserved_primary_database"] = p.Database.Name

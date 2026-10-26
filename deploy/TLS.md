@@ -102,7 +102,7 @@ host-local состояние операция останавливается; b
 |----------|--------|
 | `acme_letsencrypt` | Публичный сертификат (часто Let’s Encrypt) на **домен**, совпадающий с ожидаемым SNI/host в канале. |
 | `user_provided` | Файлы `fullchain.pem` / `privkey.pem` подготовлены вручную (коммерческий CA, свой PKI и т.д.). |
-| `self_signed` | Самоподписанный сертификат (например `openssl` или флаг `ultra-install -generate-exit-tls`). Проще в развёртывании; цепочка доверия не совпадает с публичным CDN — учитывайте при планировании окружения. |
+| `self_signed` | Самоподписанный сертификат (например `openssl` или канонический bootstrap с `GENERATE_EXIT_TLS=true`). Проще в развёртывании; цепочка доверия не совпадает с публичным CDN — учитывайте при планировании окружения. |
 
 Пустое значение допускается для старых конфигов.
 
@@ -130,13 +130,13 @@ openssl req -x509 -newkey rsa:2048 \
 
 Нужен **SAN** (не только CN): иначе при проверке имени хоста Go 1.23+ выдаёт `certificate relies on legacy Common Name field, use SANs instead`.
 
-При `tunnel_tls_provision: self_signed` bridge→exit outbound использует **`pinnedPeerCertSha256`** (SHA-256 leaf-сертификата exit) вместо удалённого в Xray 26 `allowInsecure`. Pin записывается в `exit_nodes.bootstrap.json` / PostgreSQL при `make install`.
+При `tunnel_tls_provision: self_signed` bridge→exit outbound использует **`pinnedPeerCertSha256`** (SHA-256 leaf-сертификата exit) вместо удалённого в Xray 26 `allowInsecure`. Pin записывается в `exit_nodes.bootstrap.json` / PostgreSQL при `make deploy`.
 
 В `spec` для роли `exit` укажите `exit_cert.cert_file` / `key_file` на эти пути и при необходимости `tunnel_tls_provision`: `self_signed`.
 
 ## Несколько exit VPS
 
-Каждая exit-нода — отдельный VPS со своим `spec.json` и **своим** `exit.tunnel_uuid` (регистрация на bridge через Admin API / Mini App). TLS-сертификат (`exit_cert`) выпускается **на каждом** exit-хосте (например `ultra-install -generate-exit-tls` или `-exit-only`). SAN/CN сертификата должны соответствовать `splithttp_host` / `splithttp_tls.server_name`, общим для всех exit в паре с bridge. Bridge хранит dial-адреса и UUID в PostgreSQL (`exit_nodes`), не в `spec.exit`.
+Каждая exit-нода — отдельный VPS со своим `spec.json` и **своим** `exit.tunnel_uuid` (регистрация на bridge через Admin API / Mini App). TLS-сертификат (`exit_cert`) выпускается **на каждом** exit-хосте при bootstrap или управляемой установке cloud exit. SAN/CN сертификата должны соответствовать `splithttp_host` / `splithttp_tls.server_name`, общим для всех exit в паре с bridge. Bridge хранит dial-адреса и UUID в PostgreSQL (`exit_nodes`), не в `spec.exit`.
 
 ## Публичный XHTTP/TLS
 

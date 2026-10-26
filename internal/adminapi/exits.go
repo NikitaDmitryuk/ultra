@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -38,11 +37,10 @@ type patchExitReq struct {
 }
 
 type exitDeployHints struct {
-	TunnelUUID     string `json:"tunnel_uuid"`
-	SplithttpPath  string `json:"splithttp_path"`
-	SplithttpHost  string `json:"splithttp_host"`
-	TunnelPort     int    `json:"tunnel_port"`
-	InstallExample string `json:"install_example"`
+	TunnelUUID    string `json:"tunnel_uuid"`
+	SplithttpPath string `json:"splithttp_path"`
+	SplithttpHost string `json:"splithttp_host"`
+	TunnelPort    int    `json:"tunnel_port"`
 }
 
 func (s *Server) deployHints(n exits.Node) exitDeployHints {
@@ -52,20 +50,11 @@ func (s *Server) deployHints(n exits.Node) exitDeployHints {
 	}
 	host := strings.TrimSpace(s.spec.SplithttpHost)
 	path := strings.TrimSpace(s.spec.SplithttpPath)
-	transport := string(s.spec.TunnelTransport)
-	if transport == "" {
-		transport = "splithttp"
-	}
-	example := fmt.Sprintf(
-		`ultra-install -exit-only -exit %s -tunnel-uuid %s -tunnel-port %d -transport %s`,
-		n.Address, n.TunnelUUID, tunnelPort, transport,
-	)
 	return exitDeployHints{
-		TunnelUUID:     n.TunnelUUID,
-		SplithttpPath:  path,
-		SplithttpHost:  host,
-		TunnelPort:     tunnelPort,
-		InstallExample: example,
+		TunnelUUID:    n.TunnelUUID,
+		SplithttpPath: path,
+		SplithttpHost: host,
+		TunnelPort:    tunnelPort,
 	}
 }
 

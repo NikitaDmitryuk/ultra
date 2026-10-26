@@ -61,8 +61,9 @@ func TestPreservedPrimaryDesiredExcludesProvisioningAndPreservesCredentials(t *t
 		}
 	}
 	bridge := dependencyVars(inv, "bridge", "bridge")
-	if _, found := bridge["ultra_postgres_replica"]; found {
-		t.Fatal("standby recreation input leaked")
+	replica, found := bridge["ultra_postgres_replica"].(map[string]any)
+	if !found || replica["primary_host"] != p.Database.PrimaryHost || replica["password"] != postgresReplicationPassword("fixture") {
+		t.Fatal("preserved primary standby lost its existing derived credential")
 	}
 	common := inv["all"].(map[string]any)["vars"].(map[string]any)
 	if common["ultra_preserved_primary_routes"].([]exits.BootstrapEntry)[0].PinnedPeerCertSHA256 != prior[0].PinnedPeerCertSHA256 {
@@ -154,13 +155,25 @@ for name,text in json.load(sys.stdin).items():
  plays=yaml.safe_load(text)
  assert plays[0]['hosts']=='databases'
  assert plays[0]['tasks'][0]['ansible.builtin.import_tasks']=='tasks/preserved-primary-before.yml'
+ standby=[role for play in plays for role in play.get('roles',[]) if isinstance(role,dict) and role.get('role')=='postgres_replica']
+ assert len(standby)==1 and standby[0]['when']=='ultra_postgres_replica is defined', (name,standby)
+ prerequisites=[task for play in plays for task in play.get('tasks',[]) if task.get('name')=='Observe preserved primary replica prerequisites without provisioning']
+ assert len(prerequisites)==1, (name,prerequisites)
  for play in plays:
   for role in play.get('roles',[]):
-   if isinstance(role,dict) and role.get('role') in ('postgres','database_import','postgres_replica'):
+   if isinstance(role,dict) and role.get('role') in ('postgres','database_import'):
     assert 'not (ultra_preserve_primary' in role.get('when',''), (name,role)
+   if isinstance(role,dict) and role.get('role') == 'postgres_replica':
+    assert role.get('when') == 'ultra_postgres_replica is defined', (name,role)
   if play['name']=='Prepare primary replication slot and identity':
+   preserved_index=next(i for i,task in enumerate(play['tasks']) if task.get('name')=='Observe preserved primary replica prerequisites without provisioning')
+   assert all(i < preserved_index for i,task in enumerate(play['tasks']) if task.get('register') in ('postgres_replica_primary_identity','postgres_replica_primary_parameters')), (name,'skipped registers overwrite preserved projections')
    for task in play['tasks']:
-    assert 'not (ultra_preserve_primary' in task.get('when',''), (name,task)
+    if task.get('name') == 'Observe preserved primary replica prerequisites without provisioning':
+     assert task['ansible.builtin.include_role'] == {'name':'postgres_replica','tasks_from':'preserved_primary'}
+     assert task['when'] == 'ultra_preserve_primary | default(false) | bool'
+    else:
+     assert 'not (ultra_preserve_primary' in task.get('when',''), (name,task)
   monitor=[task for task in plays[0]['tasks'] if task.get('name')=='Restore replica-state observation on the preserved primary']
   assert len(monitor)==1 and monitor[0]['when']=='ultra_preserve_primary | default(false) | bool', (name,monitor)
   assert monitor[0]['vars']=={'postgres_monitor_database_name':'{{ ultra_preserved_primary_database }}','postgres_monitor_database_user':'{{ ultra_preserved_primary_user }}'}, (name,monitor)

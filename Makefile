@@ -194,6 +194,7 @@ test-ansible:
 	python3 scripts/test-ansible-controller-fence.py
 	python3 scripts/test-ansible-execution-containment.py
 	python3 scripts/test-ansible-db-tunnel-authorization.py
+	python3 scripts/test-ansible-preserved-replica.py
 	python3 scripts/test-db-tunnel-reuse.py
 	python3 scripts/test-ansible-safe-diagnostic.py
 	python3 scripts/test-release-ci.py

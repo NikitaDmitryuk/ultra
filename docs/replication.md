@@ -38,10 +38,10 @@ Ansible PostgreSQL bootstrap устанавливает в прикладной 
 Оба обычных bootstrap playbook устанавливают монитор в `post_tasks` после
 возможного `database_import`, сохраняя проверку пустой целевой БД; роль
 `restore_database` устанавливает его после подтверждённого восстановления.
-В режиме полной non-DB замены installer отдельно повторно устанавливает только
+В режиме полной non-DB замены installer повторно устанавливает
 этот монитор на сохранённом primary с прежними именем БД и application role.
 Так восстанавливается `/api/cloud/replicas` без пересоздания таблиц, строк,
-пользовательских ролей, primary или standby. Это узкое изменение каталога
+пользовательских ролей или primary. Это узкое изменение каталога
 PostgreSQL, не прикладная миграция; прикладной schema migration version остаётся
 неизменной. При ручном logical dump используйте то же исключение; состояние
 монитора не переносится из архива.
@@ -216,3 +216,29 @@ keys и служебный ключ; новому bridge разрешаются 
 остаётся операторским. Недоступность статического exit блокирует активацию с
 требованием проверить provider firewall и SSH, затем повторить восстановление. Этот шаг
 не создаёт реплик и не меняет данные БД.
+
+## Standby после замены или переустановки bridge
+
+Сохранение primary не исключает физическую standby из bootstrap. Installer
+проверяет прежний system identifier, существующую ограниченную роль
+`ultra_replication`, fixed physical slot `ultra_bridge` и параметры восстановления.
+Пароль репликации выводится тем же способом из сохранённого application credential;
+primary role/password и прикладная схема не изменяются. Проверка replication
+протокола через DB tunnel обязана вернуть тот же system identifier до создания
+данных standby или изменения slot.
+
+Если `/var/lib/postgresql/16/ultra-replica` отсутствует, каноническая роль
+`postgres_replica` создаёт новый base backup и публикует его атомарно. Только
+в этом случае допускается пересоздание неактивного persistent physical slot
+`ultra_bridge` со статусом `lost` на подтверждённом primary. Другие slots,
+активный slot, отсутствующая роль или slot, logical/temporary slot и существующий
+PGDATA не удаляются и не заменяются. При существующей standby потерянный slot
+останавливает выполнение; её данные автоматически не стираются. Проверка
+ограничений повторяется непосредственно перед reset, а занятый при гонке slot
+PostgreSQL не разрешит удалить.
+
+Завершение требует recovery mode, receiver `streaming` и replay свежего WAL marker
+primary; доступность SSH или работающая служба этого не доказывают. Источники:
+[подготовка сохранённого primary](../deploy/ansible/roles/postgres_replica/tasks/preserved_primary.yml),
+[ограниченное восстановление slot](../deploy/ansible/roles/postgres_replica/tasks/reset_lost_slot.yml),
+[создание standby](../deploy/ansible/roles/postgres_replica/tasks/seed.yml).

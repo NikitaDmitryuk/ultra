@@ -127,13 +127,18 @@
             AND (wal_status IS NULL OR wal_status <> 'lost');
       register: postgres_replica_slot
       changed_when: "'ULTRA_REPLICA_SLOT_CREATED' in postgres_replica_slot.stderr"
+    - name: Observe preserved primary replica prerequisites without provisioning
+      ansible.builtin.include_role:
+        name: postgres_replica
+        tasks_from: preserved_primary
+      when: ultra_preserve_primary | default(false) | bool
 - name: Configure bridge physical standby
   hosts: bridge
   gather_facts: false
   any_errors_fatal: true
   roles:
     - role: postgres_replica
-      when: not (ultra_preserve_primary | default(false) | bool)
+      when: ultra_postgres_replica is defined
 - name: Configure initial exits serially
   hosts: exits
   gather_facts: false
