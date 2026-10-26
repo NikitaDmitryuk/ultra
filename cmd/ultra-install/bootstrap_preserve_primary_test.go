@@ -234,7 +234,11 @@ func TestPreservedPrimaryIdentityAcrossComponentProcesses(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write(observed, []byte(`{"system_identifier":"12345","database":"fixture","database_oid":16384,"primary":true}`), 0600)
+	write(
+		observed,
+		[]byte("BEGIN\n{\"system_identifier\":\"12345\",\"database\":\"fixture\",\"database_oid\":16384,\"primary\":true}\nROLLBACK\n"),
+		0600,
+	)
 	// Replace only the PostgreSQL executable with a fixture. The actual Ansible
 	// tasks, assertions and local identity publication run unmodified.
 	write(filepath.Join(bin, "runuser"), []byte("#!/bin/sh\ncat "+shellQuote(observed)+"\n"), 0700)
@@ -277,7 +281,20 @@ func TestPreservedPrimaryIdentityAcrossComponentProcesses(t *testing.T) {
 	}
 	run("before", true)
 	run("after", true)
-	write(observed, []byte(`{"system_identifier":"54321","database":"fixture","database_oid":16384,"primary":true}`), 0600)
+	identity, err := os.ReadFile(filepath.Join(directory, "primary.json"))
+	if err != nil || !json.Valid(identity) {
+		t.Fatalf("preserved primary identity is not valid JSON: %v", err)
+	}
+	var saved map[string]any
+	if err = json.Unmarshal(identity, &saved); err != nil || saved["system_identifier"] != "12345" ||
+		saved["database"] != "fixture" || saved["database_oid"] != float64(16384) || saved["primary"] != true {
+		t.Fatalf("preserved primary identity snapshot changed: %v", err)
+	}
+	write(
+		observed,
+		[]byte("BEGIN\n{\"system_identifier\":\"54321\",\"database\":\"fixture\",\"database_oid\":16384,\"primary\":true}\nROLLBACK\n"),
+		0600,
+	)
 	run("after", false)
 }
 

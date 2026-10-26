@@ -257,7 +257,11 @@ func (e Executor) ReadOnly(ctx context.Context, role string, args []string, stdi
 	return nil, &Error{Kind: kind, Reason: DiagnosticReason(last), Attempts: attempts, ExitCode: last.ExitCode}
 }
 
-type ExecRunner struct{}
+type ExecRunner struct {
+	// Prepare attaches a caller-owned lifetime guard before starting SSH.
+	// It must preserve argument boundaries and the pinned SSH transport.
+	Prepare func(context.Context, *exec.Cmd) error
+}
 type bounded struct {
 	data      []byte
 	max       int
@@ -278,11 +282,16 @@ func (b *bounded) Write(p []byte) (int, error) {
 	}
 	return n, nil
 }
-func (ExecRunner) Run(ctx context.Context, args []string, stdin []byte, maxOut, maxErr int) Result {
+func (runner ExecRunner) Run(ctx context.Context, args []string, stdin []byte, maxOut, maxErr int) Result {
 	if len(args) == 0 {
 		return Result{Err: context.Canceled, ExitCode: -1}
 	}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	if runner.Prepare != nil {
+		if err := runner.Prepare(ctx, cmd); err != nil {
+			return Result{Err: err, ExitCode: -1}
+		}
+	}
 	cmd.Stdin = strings.NewReader(string(stdin))
 	out := &bounded{max: maxOut}
 	stderr := &bounded{max: maxErr}

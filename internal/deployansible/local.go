@@ -239,7 +239,7 @@ func runLocal(
 				}
 				if json.Unmarshal(prior, &state) != nil ||
 					(state.State != "succeeded" && !completedExecution(directory) && !preparedRetryExecution(directory)) {
-					_, _ = beginExecution(directory) // Adopt a legacy uncertain mutator without dispatch.
+					_, _ = beginExecutionContext(ctx, directory) // Adopt a legacy uncertain mutator without dispatch.
 					return localDispatchFailure("execution_uncertain_reconciliation_required", ErrExecutionFenced)
 				}
 			}
@@ -253,7 +253,7 @@ func runLocal(
 			return localDispatchFailure("retry_archive_failed", err)
 		}
 	}
-	fence, fenceErr := beginExecution(directory)
+	fence, fenceErr := beginExecutionContext(ctx, directory)
 	if fenceErr != nil {
 		return localDispatchFailure(dispatchCode(fenceErr), fenceErr)
 	}

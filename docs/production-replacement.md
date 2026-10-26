@@ -51,6 +51,37 @@ fencing-шага и остаётся до успешной замены, что�
 Обычный `make deploy` не требует предоставленного оператором backup, backup
 digest, restore receipt или дополнительного ACK.
 
+До первого remote fencing installer read-only проверяет фиксированный локальный
+execution namespace. Повреждённый fence, running или отсутствующий receipt,
+неизвестная операция и активный локальный исполнитель останавливают замену до
+отключения сервисов. Точная failed generation прежней канонической replacement
+может быть автоматически оставлена как evidence: её неизменяемый request должен
+описывать только текущие и явно сохранённые предыдущие цели с pinned root transport,
+а `primary-before.json` именно её workspace — ту же identity primary.
+
+Перед fencing проверяется локальная quiescence. Затем под глобальным admission
+lock штатная замена обнаруживает и останавливает весь non-DB парк, проверяет
+remote sessions, workers и primary transactions, повторяет identity/schema/routes
+primary и локальную quiescence. Только после этих проверок existing abandonment
+protocol сохраняет failed receipt/dispatch и закрывает точную generation. Cleanup
+и новый bootstrap выполняются после retirement; старый workspace не возобновляется.
+Ошибка любой проверки сохраняет fence и запрещает cleanup/bootstrap.
+От первой мутации до завершения bootstrap фиксированный account-global reservation
+исключает любой другой поддерживаемый mutating dispatch, включая промежуток после
+retirement. Дочерний bootstrap получает тот же locked descriptor с проверкой private
+record, PID/start родителя и точного workspace; переменные окружения сами по себе
+доступа не дают. Native SSH выполняется под локальным supervisor, который удерживает
+lock и собственный ограниченный deadline при смерти родителя.
+
+После успешного завершения reservation удаляется. Ошибка после начала remote
+изменений сохраняет private marker и immutable scope. Следующий канонический запуск
+может автоматически принять только запись умершего владельца с завершёнными
+локальными исполнителями, теми же сохранёнными целями и identity primary; он заново
+проводит полный remote fencing и quiescence перед cleanup. Живой исполнитель,
+неизвестная область или повреждённая запись продолжают блокировать запуск.
+Без fence порядок обычной замены сохраняется под тем же reservation. Локальный execution namespace не является
+простым disposable каталогом bridge: его нельзя очищать вместо этих проверок.
+
 Backup и restore PostgreSQL остаются отдельными явными инструментами для
 аварийного восстановления или специально порученной операции с данными. Они не
 являются предварительным условием `make deploy` и не должны применяться поверх

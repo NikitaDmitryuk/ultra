@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 	"github.com/NikitaDmitryuk/ultra/internal/installplan"
 )
 
@@ -36,6 +37,10 @@ func applyPlanN(p *installplan.InstallPlan, format string) {
 	planHash := sha256.Sum256(planJSON)
 	stateRoot, err := bootstrapStateRoot()
 	exitOnErr("bootstrap state directory", err)
+	ctx, releaseReservation, err := deployansible.ImportReplacementReservation(ctx, stateRoot)
+	exitOnErr("replacement reservation handoff", err)
+	defer releaseReservation()
+
 	planRoot := filepath.Join(stateRoot, "bootstrap-"+hex.EncodeToString(planHash[:]))
 	exitOnErr("private bootstrap state", ensurePrivateBootstrapDirectory(stateRoot))
 	exitOnErr("private bootstrap workspace", ensurePrivateBootstrapDirectory(planRoot))

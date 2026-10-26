@@ -1,6 +1,7 @@
 package deployansible
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -258,6 +259,10 @@ func persistExecutionFence(root string, binding *ExecutionFence) error {
 }
 
 func beginExecution(directory string) (*ExecutionFence, error) {
+	return beginExecutionContext(context.Background(), directory)
+}
+
+func beginExecutionContext(ctx context.Context, directory string) (*ExecutionFence, error) {
 	namespace := executionFenceDirectory(directory)
 	binding, err := executionBinding(directory)
 	if err != nil {
@@ -266,6 +271,16 @@ func beginExecution(directory string) (*ExecutionFence, error) {
 	if executionReadOnly(binding.Operation) {
 		return nil, nil
 	}
+	gateRoot, err := prepareExecutionRoot(namespace)
+	if err != nil {
+		return nil, err
+	}
+	release, err := replacementDispatchAdmission(ctx, gateRoot, directory)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	if abandoned, abandonErr := savedAbandonment(directory); abandonErr != nil || abandoned != nil {
 		if abandonErr != nil {
 			return nil, ErrExecutionFenced

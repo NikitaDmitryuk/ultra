@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strconv"
 	"time"
+
+	"github.com/NikitaDmitryuk/ultra/internal/deployansible"
 
 	"github.com/NikitaDmitryuk/ultra/internal/operatorssh"
 )
@@ -16,7 +19,7 @@ func runRetainedMutationSSH(ctx context.Context, role string, args []string, std
 	defer cancel()
 	start := time.Now()
 	policy := operatorssh.DefaultPolicy
-	result := (operatorssh.ExecRunner{}).Run(ctx, args, stdin, policy.MaxStdoutBytes, policy.MaxStderrBytes)
+	result := replacementSSHRunner().Run(ctx, args, stdin, policy.MaxStdoutBytes, policy.MaxStderrBytes)
 	kind := operatorssh.Classify(result)
 	if ctx.Err() != nil {
 		kind = "cancelled"
@@ -50,7 +53,7 @@ func runRetainedMutationSSH(ctx context.Context, role string, args []string, std
 // runRetainedReadOnlySSH is the adapter for retainedRemote's non-mutating reads.
 // Mutation paths must continue using direct SSH execution without retries.
 func runRetainedReadOnlySSH(ctx context.Context, role string, args []string, stdin []byte, log func(string)) ([]byte, error) {
-	executor := operatorssh.Executor{Policy: operatorssh.DefaultPolicy}
+	executor := operatorssh.Executor{Policy: operatorssh.DefaultPolicy, Runner: replacementSSHRunner()}
 	if log != nil {
 		executor.Log = func(role string, attempt, max, rc int, kind, reason string, elapsed time.Duration) {
 			log(
@@ -102,4 +105,10 @@ func retainedLogReason(reason string) string {
 	default:
 		return "unknown"
 	}
+}
+
+func replacementSSHRunner() operatorssh.ExecRunner {
+	return operatorssh.ExecRunner{Prepare: func(ctx context.Context, command *exec.Cmd) error {
+		return deployansible.RetainReplacementSSH(ctx, command)
+	}}
 }

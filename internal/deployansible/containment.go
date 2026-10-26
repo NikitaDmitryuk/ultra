@@ -54,18 +54,64 @@ func executionContainmentPreflight() error {
 // fleet, and only then aborts inside beginExecution with no receipt to explain it.
 func PreflightLocalExecution() error {
 	root := executionFenceDirectory("")
-	if executionNamespaceFixture() {
-		return nil
+	if !executionNamespaceFixture() {
+		if err := executionContainmentPreflight(); err != nil {
+			return err
+		}
 	}
-	if err := executionContainmentPreflight(); err != nil {
-		return err
+	if record, err := inspectReplacementReservation(root); err != nil || record != nil {
+		return ErrReplacementReserved
 	}
+	return preflightExecutionAdmission(root)
+}
+
+// This observation never adopts a queued job, creates a lock or retires proof.
+// Dispatch still repeats its authoritative admission check under its lock.
+func preflightExecutionAdmission(root string) error {
 	info, err := os.Lstat(root)
 	if os.IsNotExist(err) {
 		return nil
 	}
 	if err != nil || !info.IsDir() || !ownedByProcess(info) || info.Mode().Perm()&0077 != 0 {
 		return errors.New("execution_namespace_insecure")
+	}
+	if fence, err := inspectExecutionFence(root); err != nil || fence != nil {
+		return ErrExecutionFenced
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		directory := filepath.Join(root, entry.Name())
+		if _, err := os.Lstat(filepath.Join(directory, "job.json")); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return ErrExecutionFenced
+		}
+		raw, err := readRetryPrivate(filepath.Join(directory, "receipt.json"))
+		if os.IsNotExist(err) {
+			continue
+		}
+		var receipt struct{ State string }
+		if err != nil || json.Unmarshal(raw, &receipt) != nil {
+			return ErrExecutionFenced
+		}
+		if receipt.State == "succeeded" || completedExecution(directory) || preparedRetryExecution(directory) {
+			continue
+		}
+		if abandoned, err := savedAbandonment(directory); err != nil {
+			return ErrExecutionFenced
+		} else if abandoned != nil {
+			continue
+		}
+		binding, err := executionBinding(directory)
+		if err != nil || !executionReadOnly(binding.Operation) {
+			return ErrExecutionFenced
+		}
 	}
 	return nil
 }

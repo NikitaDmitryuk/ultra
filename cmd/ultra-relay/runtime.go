@@ -142,6 +142,7 @@ type bridgeRuntime struct {
 	collector       *stats.Collector
 	log             *slog.Logger
 	now             func() time.Time
+	dbPhaseTimeout  time.Duration // zero uses the production 15-second database phase budget
 }
 
 func (r *bridgeRuntime) List() []auth.User {
@@ -322,7 +323,11 @@ func (r *bridgeRuntime) refresh(ctx context.Context, database *db.DB, users *aut
 	}()
 	r.refreshMu.Lock()
 	defer r.refreshMu.Unlock()
-	c, cancel := context.WithTimeout(ctx, 15*time.Second)
+	timeout := r.dbPhaseTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	c, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	stage = "database_ping"
 	if err := database.Pool.Ping(c); err != nil {
@@ -408,19 +413,30 @@ func (r *bridgeRuntime) refresh(ctx context.Context, database *db.DB, users *aut
 	if err != nil {
 		return err
 	}
+	// Local validation/reload has its own lifecycle and can outlast a DB phase.
+	// Never spend the acknowledgement deadline while committing local state.
+	cancel()
 	stage = "runtime_commit"
+	if err = ctx.Err(); err != nil {
+		return err
+	}
 	err = r.commitCandidate(payload, now, data)
 
 	if err != nil {
 		r.setError("runtime_apply_failed")
 		return err
 	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	ackContext, ackCancel := context.WithTimeout(ctx, timeout)
+	defer ackCancel()
 	stage = "quota_acknowledge"
-	if err = quotas.Acknowledge(c, acknowledgements); err != nil {
+	if err = quotas.Acknowledge(ackContext, acknowledgements); err != nil {
 		return err
 	}
 	stage = "route_acknowledge"
-	return routes.AppliedManual(c)
+	return routes.AppliedManual(ackContext)
 }
 
 // commitCandidate holds only the local apply lock. Failed preparation restores

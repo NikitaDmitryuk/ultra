@@ -40,15 +40,18 @@ func (paths *replacementConfigPaths) Set(path string) error {
 }
 
 type replacementSteps struct {
-	Observe          func(context.Context) (replacementPrimary, error)
-	Discover         func(context.Context, replacementTarget) error
-	Fence            func(context.Context, replacementTarget) error
-	Quiescent        func(context.Context, replacementTarget) error
-	PrimaryQuiescent func(context.Context) error
-	Clean            func(context.Context, replacementTarget, []exits.BootstrapEntry) error
-	RetireJournal    func() error
-	Bootstrap        func(context.Context) error
-	Checkpoint       func(string) error
+	// AdmitFailedExecution holds the exact old generation's admission lock while
+	// prepare fences and proves the fleet. Nil preserves the no-fence path.
+	AdmitFailedExecution func(context.Context, func() error) error
+	Observe              func(context.Context) (replacementPrimary, error)
+	Discover             func(context.Context, replacementTarget) error
+	Fence                func(context.Context, replacementTarget) error
+	Quiescent            func(context.Context, replacementTarget) error
+	PrimaryQuiescent     func(context.Context) error
+	Clean                func(context.Context, replacementTarget, []exits.BootstrapEntry) error
+	RetireJournal        func() error
+	Bootstrap            func(context.Context) error
+	Checkpoint           func(string) error
 }
 
 // Every host is discovered before the first fence; every fence is verified
@@ -89,24 +92,34 @@ func executeProductionReplacement(
 		}
 		return run(label+"-primary", func() error { return steps.PrimaryQuiescent(ctx) })
 	}
-	for _, target := range targets {
-		if err := run("discover-"+target.Role, func() error { return steps.Discover(ctx, target) }); err != nil {
+	prepare := func() error {
+		for _, target := range targets {
+			if err := run("discover-"+target.Role, func() error { return steps.Discover(ctx, target) }); err != nil {
+				return err
+			}
+		}
+		if err := run("primary-before-fence", check); err != nil {
 			return err
 		}
-	}
-	if err := run("primary-before-fence", check); err != nil {
-		return err
-	}
-	for _, target := range targets {
-		if err := run("fence-"+target.Role, func() error { return steps.Fence(ctx, target) }); err != nil {
+		for _, target := range targets {
+			if err := run("fence-"+target.Role, func() error { return steps.Fence(ctx, target) }); err != nil {
+				return err
+			}
+		}
+		// The primary identity/schema was captured before fencing. Fencing only
+		// targets non-DB hosts, so avoid opening a second primary SSH session here;
+		// the immediately following primary gate checks active transactions and
+		// must see unrelated root sessions without our own probe tail.
+		if err := quiescent("quiescence-before-cleanup"); err != nil {
 			return err
 		}
+		return nil
 	}
-	// The primary identity/schema was captured before fencing. Fencing only
-	// targets non-DB hosts, so avoid opening a second primary SSH session here;
-	// the immediately following primary gate checks active transactions and
-	// must see unrelated root sessions without our own probe tail.
-	if err := quiescent("quiescence-before-cleanup"); err != nil {
+	if steps.AdmitFailedExecution != nil {
+		if err := run("retire-failed-execution", func() error { return steps.AdmitFailedExecution(ctx, prepare) }); err != nil {
+			return err
+		}
+	} else if err := prepare(); err != nil {
 		return err
 	}
 	for _, target := range targets {
@@ -220,7 +233,7 @@ func validateReplacementTopology(p *installplan.InstallPlan, observed replacemen
 	return nil
 }
 
-func runProductionReplacement(args []string, output io.Writer) error {
+func runProductionReplacement(args []string, output io.Writer) (result error) {
 	flags := flag.NewFlagSet("replace-production", flag.ContinueOnError)
 	flags.SetOutput(output)
 	config := flags.String("config", "", "canonical config already pinned to the candidate")
@@ -255,7 +268,8 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	if err = deployansible.ConfigureLocalExecutionState(localExecutionState); err != nil {
 		return fmt.Errorf("replacement_local_execution_state: %w", err)
 	}
-	if err := deployansible.PreflightLocalExecution(); err != nil {
+	failedExecution, err := deployansible.PreflightExecutionReplacement()
+	if err != nil {
 		return fmt.Errorf("replacement_local_execution_preflight: %w", err)
 	}
 	configRaw, err := readRebuildInput(*config, true)
@@ -292,6 +306,7 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
+	scopePlans := []*installplan.InstallPlan{p}
 	for _, previousConfig := range previousConfigs {
 		previousRaw, readErr := readRebuildInput(previousConfig, true)
 		if readErr != nil {
@@ -305,6 +320,17 @@ func runProductionReplacement(args []string, output io.Writer) error {
 		targets, err = unionReplacementPreviousTargets(p, previous, targets)
 		if err != nil {
 			return err
+		}
+		scopePlans = append(scopePlans, previous)
+	}
+	var failedScope *replacementExecutionScope
+	if failedExecution != nil {
+		failedScope, err = validateReplacementExecutionScope(*failedExecution, p, scopePlans)
+		if err != nil {
+			return err
+		}
+		if err = deployansible.ProveFailedExecutionQuiescent(*failedExecution); err != nil {
+			return fmt.Errorf("replacement_failed_execution_still_active: %w", err)
 		}
 	}
 	lock, err := openOperatorLock(
@@ -338,6 +364,11 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	if err = validateReplacementTopology(p, before, manifest.DatabaseSchemaMax); err != nil {
 		return err
 	}
+	if failedScope != nil {
+		if err = failedScope.verifyPrimary(before); err != nil {
+			return err
+		}
+	}
 	routesRaw, _ := json.Marshal(before.Routes)
 	targetsRaw, _ := json.Marshal(targets)
 	if err = replaceUpgradeMetadata(filepath.Join(*state, "targets.json"), targetsRaw); err != nil {
@@ -346,6 +377,33 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	if err = replaceUpgradeMetadata(filepath.Join(*state, "primary-before.json"), mustReplacementJSON(before)); err != nil {
 		return err
 	}
+	binding := deployansible.ReplacementBinding{
+		Workspace:     *state,
+		TargetsSHA256: digestSHA256(targetsRaw),
+		PrimarySHA256: digestSHA256(mustReplacementJSON(before)),
+	}
+	ctx, reservation, err := deployansible.ReserveReplacement(ctx, binding, func(previous deployansible.ReplacementReservation) error {
+		return validateReplacementReservationScope(previous, p, scopePlans, before)
+	})
+	if err != nil {
+		return fmt.Errorf("replacement_reservation: %w", err)
+	}
+	defer func() { _ = reservation.Close() }()
+	// A dispatcher may have started after the pure initial preflight but before
+	// the reservation. Reclassify while holding the continuous global gate.
+	admitted, admissionErr := deployansible.PreflightExecutionReplacement()
+	if admissionErr != nil || !reflect.DeepEqual(admitted, failedExecution) {
+		if reservation.SafeToFinish() {
+			_ = reservation.Finish()
+		}
+		return errors.New("replacement_execution_changed_before_reservation")
+	}
+	completed := false
+	defer func() {
+		if completed || reservation.SafeToFinish() {
+			result = errors.Join(result, reservation.Finish())
+		}
+	}()
 	remote := func(ctx context.Context, target replacementTarget, mode string) error {
 		parameters := []string{mode, target.Role, digestSHA256(configRaw), p.Database.PrimaryHost, string(routesRaw)}
 		var raw []byte
@@ -374,7 +432,12 @@ func runProductionReplacement(args []string, output io.Writer) error {
 	steps := replacementSteps{
 		Observe:  observe,
 		Discover: func(ctx context.Context, target replacementTarget) error { return remote(ctx, target, "discover") },
-		Fence:    func(ctx context.Context, target replacementTarget) error { return remote(ctx, target, "fence") },
+		Fence: func(ctx context.Context, target replacementTarget) error {
+			if err := reservation.SetPhase("mutating"); err != nil {
+				return err
+			}
+			return remote(ctx, target, "fence")
+		},
 		Quiescent: func(ctx context.Context, target replacementTarget) error {
 			return checkReplacementQuiescence(ctx, p, target, false)
 		},
@@ -412,17 +475,28 @@ func runProductionReplacement(args []string, output io.Writer) error {
 			return removeProductionReplacementJournal(journal)
 		},
 		Bootstrap: func(ctx context.Context) error {
+			if err := reservation.SetPhase("bootstrap"); err != nil {
+				return err
+			}
 			child := exec.CommandContext(
 				ctx,
 				executable,
 				productionReplacementBootstrapArgs(*config, localExecutionState)...)
 			child.Env = append(os.Environ(), "ULTRA_INSTALL_STATE_DIR="+filepath.Join(*state, "bootstrap"))
+			if err := reservation.Handoff(child); err != nil {
+				return err
+			}
 			child.Stdout = output
 			child.Stderr = os.Stderr
 			return child.Run()
 		},
 	}
-	return executeProductionReplacement(ctx, targets, before, steps)
+	if failedExecution != nil {
+		steps.AdmitFailedExecution = admitReplacementFailedExecution(*failedExecution, failedScope, before, steps)
+	}
+	executionErr := executeProductionReplacement(ctx, targets, before, steps)
+	completed = executionErr == nil
+	return executionErr
 }
 
 func removeProductionReplacementJournal(path string) error {

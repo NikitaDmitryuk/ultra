@@ -16,5 +16,7 @@
 - name: Reject a changed primary or replaced database
   ansible.builtin.assert:
     that:
-      - lookup('file', ultra_preserved_primary_identity_file) == preserved_primary_after.stdout
+      - >-
+        lookup('file', ultra_preserved_primary_identity_file) | from_json ==
+        (preserved_primary_after.stdout_lines | select('match', '^\\{') | first | from_json)
   no_log: true

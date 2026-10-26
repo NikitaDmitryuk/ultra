@@ -237,7 +237,7 @@ func Execute(ctx context.Context, directory, python, executable string) (Result,
 		return Result{}, fenceErr
 	}
 	defer releaseRecovery()
-	fence, fenceErr := beginExecution(directory)
+	fence, fenceErr := beginExecutionContext(ctx, directory)
 	if fenceErr != nil {
 		return Result{}, fenceErr
 	}

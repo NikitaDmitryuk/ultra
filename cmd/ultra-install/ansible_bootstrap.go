@@ -66,6 +66,13 @@ func bootstrapInventoryWithNativeAttestation(
 	directory string,
 	attest func(*installplan.InstallPlan) (string, error),
 ) (map[string]any, error) {
+	sshTimeout := p.SSH.ConnectTimeoutSec
+	if sshTimeout == 0 {
+		sshTimeout = 10
+	}
+	if sshTimeout < 1 || sshTimeout > 300 {
+		return nil, fmt.Errorf("SSH connect timeout must be between 1 and 300 seconds")
+	}
 	if (p.SSH.User != "" && p.SSH.User != "root") || (p.Database.Enabled && p.Database.SSHUser != "" && p.Database.SSHUser != "root") {
 		return nil, fmt.Errorf("operator_root_transport_required")
 	}
@@ -99,6 +106,7 @@ func bootstrapInventoryWithNativeAttestation(
 		return nil, err
 	}
 	common := map[string]any{
+		"ansible_ssh_timeout":          sshTimeout,
 		"ansible_user":                 "root",
 		"ansible_become":               false,
 		"ansible_become_method":        "sudo",

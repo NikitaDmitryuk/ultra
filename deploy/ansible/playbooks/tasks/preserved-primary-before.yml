@@ -33,7 +33,7 @@
   no_log: true
 - name: Freeze original primary identity across component executor invocations
   ansible.builtin.copy:
-    content: "{{ preserved_primary_before.stdout }}"
+    content: "{{ (preserved_primary_before.stdout_lines | select('match', '^\\{') | first | from_json) | to_json }}"
     dest: "{{ ultra_preserved_primary_identity_file }}"
     mode: "0600"
     force: false
@@ -43,5 +43,7 @@
 - name: Reject primary identity changes on a retry
   ansible.builtin.assert:
     that:
-      - lookup('file', ultra_preserved_primary_identity_file) == preserved_primary_before.stdout
+      - >-
+        lookup('file', ultra_preserved_primary_identity_file) | from_json ==
+        (preserved_primary_before.stdout_lines | select('match', '^\\{') | first | from_json)
   no_log: true

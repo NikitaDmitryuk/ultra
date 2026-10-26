@@ -72,6 +72,9 @@ func validatePlanRoles(p *InstallPlan) error {
 	if p.SSH.ConnectTimeoutSec == 0 {
 		p.SSH.ConnectTimeoutSec = 10
 	}
+	if p.SSH.ConnectTimeoutSec < 1 || p.SSH.ConnectTimeoutSec > 300 {
+		return errors.New("ssh.connect_timeout_sec must be between 1 and 300 seconds")
+	}
 	if strings.TrimSpace(p.Bridge.Address) == "" {
 		p.Bridge.Address = p.Bridge.SSHHost
 	}

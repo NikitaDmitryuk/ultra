@@ -84,6 +84,22 @@ Go-форматтеры обрабатывают отслеживаемые и �
 checkout рекурсивно. Так они не заходят в игнорируемую root-owned историю операций
 под `dist/manual`: это защищённое состояние выкладки может быть недоступно build user.
 
+Проверки local execution preflight должны сравнивать файлы namespace до и после:
+проверка admission перед remote fencing не имеет права вызывать dispatcher
+`checkExecutionAdmission`, который может принять orphan job и записать fence.
+Отсутствующий namespace также не создаётся. После preflight dispatcher сохраняет
+свою окончательную проверку под admission lock. Replacement-only классификация
+failed generation также read-only; её retirement проверяется реальной
+`AbandonExecutionFence` в транзакционных тестах с global lock, изменённым scope,
+конкурирующей generation и отказами quiescence. Running/missing receipt не
+превращается в failed для продолжения. Источники:
+[регрессии preflight](../internal/deployansible/preflight_test.go),
+[транзакция replacement](../cmd/ultra-install/production_replace_execution_test.go).
+
+Тест timeout проверяет сериализованный bootstrap inventory без обязательной
+зависимости от Ansible в Go job; при установленном Ansible дополнительно
+проверяется реальное наследование `ansible_ssh_timeout` всеми SSH-hosts.
+
 ## PostgreSQL, SQLC и ORM
 
 DB-интеграционные тесты читают `DATABASE_URL`; без него вызывают `t.Skip`.
@@ -468,3 +484,11 @@ reload, восстановление прежних файлов после ош
 Перед их запуском нужен собранный или установленный `ultra-install`;
 `ULTRA_INSTALL_BIN` позволяет указать его абсолютный путь. Секретные ключи
 в `install.config` и NUL внутри значения отклоняются.
+
+Replacement reservation тестируется настоящим конкурирующим `RunLocal` после
+retirement и до bootstrap, передачей inherited open-file-description дочернему
+процессу и отказом поддельного grant. Отдельный subprocess-тест убивает владельца:
+SSH supervisor удерживает lock до собственного deadline, после чего новый fresh
+replacement может проверить точную сохранённую область. Ошибка native mutation
+сохраняет reservation; её нельзя объявлять успешно завершённой по одному exit
+локального SSH или отсутствию execution receipt.
