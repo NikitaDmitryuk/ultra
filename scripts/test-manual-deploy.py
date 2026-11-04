@@ -69,6 +69,31 @@ class ManualReplacement(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             D.main()
 
+    def test_replacement_output_is_private_and_preserves_exit_status(self):
+        for returncode in (0, 17):
+            with self.subTest(returncode=returncode):
+                state = self.manual_root / ('replacement-test' + str(returncode))
+                log_path, output = D.replacement_output_file(self.manual_root, state)
+                self.assertEqual(log_path.name, state.name + '.log')
+                self.assertEqual(log_path.parent.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
+
+                def child(*args, **kwargs):
+                    kwargs['stdout'].write(b'private child diagnostic\n')
+                    return type('Result', (), {'returncode': returncode})()
+
+                with output, patch.object(D.subprocess, 'run', side_effect=child):
+                    if returncode:
+                        with self.assertRaisesRegex(D.DeployError, 'replace_production_failed_exit_17'):
+                            D.run(['replace-production'], self.repo, 'replace_production', output=output)
+                    else:
+                        D.run(['replace-production'], self.repo, 'replace_production', output=output)
+
+                self.assertEqual(log_path.read_bytes(), b'private child diagnostic\n')
+                self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
+                with self.assertRaises(FileExistsError):
+                    D.replacement_output_file(self.manual_root, state)
+
     def test_build_only_preserves_config_and_avoids_replacement(self):
         self.run_main(['--build-only'])
         self.assertEqual(self.config.read_bytes(), self.original)
