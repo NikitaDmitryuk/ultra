@@ -40,6 +40,7 @@ type Provisioner struct {
 	Identity, StateDir, BridgeIP, Binary string
 	Apply                                func(context.Context) error
 	Refresh                              func(context.Context) error
+	RefreshQuota                         func(context.Context) error
 }
 
 func (p *Provisioner) port() int {
@@ -754,6 +755,14 @@ func (p *Provisioner) ApplyRoute(ctx context.Context, op *cloud.Operation) error
 		return err
 	} else if applied {
 		return p.Refresh(ctx)
+	}
+	// A new budget has no provider observation yet. Applying it immediately
+	// would confirm a location whose credential still falls back for quota.
+	if p.RefreshQuota == nil {
+		return cloud.ErrUnavailable
+	}
+	if e := p.RefreshQuota(ctx); e != nil {
+		return e
 	}
 	if e := p.Apply(ctx); e != nil {
 		return e
