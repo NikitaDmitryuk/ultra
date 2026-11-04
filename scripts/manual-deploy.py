@@ -401,11 +401,11 @@ def main():
             state = Path(tempfile.mkdtemp(prefix='replacement-', dir=root))
             state.rmdir()
             command = replacement_command(bundle, config, commit, state, previous_configs)
-            output_path, output = replacement_output_file(root, state)
             try:
+                output_path, output = replacement_output_file(root, state)
                 with output:
                     run(command, repo, 'replace_production', output=output)
-            except DeployError:
+            except (DeployError, OSError):
                 if not attempt_preexisted and not replacement_may_have_mutated(state):
                     attempted.unlink(missing_ok=True)
                 raise
