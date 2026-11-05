@@ -102,6 +102,9 @@ failed generation также read-only; её retirement проверяется �
 опции OpenSSH без соединения через `ssh -G`. Bootstrap задаёт отключение multiplexing
 и native keepalive policy в раннем `ansible_ssh_args`: поздний `common_args` не
 переопределяет первое значение `ControlMaster`, добавленное самим Ansible.
+Bootstrap передаёт модули через SFTP-файл, без SSH stdin pipelining. Это
+консервативный обход неоднозначного data-send failure, а не гарантия от сетевых
+обрывов; автоматический повтор удалённых мутаций по такому отказу запрещён.
 Callback сохраняет только фиксированные SSH failure codes, включая closed, broken
 pipe, key-exchange timeout и transfer failure; raw transport messages не сохраняются.
 

@@ -249,6 +249,12 @@ class CallbackModule(CallbackBase):
         if code == 'host_unreachable':
             if re.search(r'(?i)connection(?:\s+to\s+[^\r\n]+?)?\s+closed\b', text):
                 code = 'ssh_connection_closed'
+            # Pinned Ansible ssh.py has two different failure branches. Match
+            # their full fixed framing only; never retain host or stderr text.
+            elif re.fullmatch(r"Data could not be sent to remote host [^\r\n]+\. Make sure this host can be reached over SSH\.", text):
+                code = 'ssh_stdin_write_failed'
+            elif re.fullmatch(r'Data could not be sent to remote host "[^\r\n]*"\. Make sure this host can be reached over ssh: [\s\S]*', text):
+                code = 'ssh_remote_exit_255'
             elif 'Data could not be sent' in text:
                 code = 'ssh_data_send_failed'
             elif any(fragment in text for fragment in ('Failed to connect to the host via sftp:',

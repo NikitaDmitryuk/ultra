@@ -103,6 +103,18 @@ for message, expected in [
         ('Connection timed out during key exchange secret=do-not-log', 'ssh_key_exchange_timeout'),
         ('kex_exchange_identification: read: Connection timed out secret=do-not-log', 'ssh_key_exchange_timeout'),
         ('Data could not be sent to remote host private-host.example secret=do-not-log', 'ssh_data_send_failed'),
+        ("Data could not be sent to remote host 'private-host.example/token=do-not-log'. Make sure this host can be reached over SSH.",
+         'ssh_stdin_write_failed'),
+        ('Data could not be sent to remote host "private-host.example". Make sure this host can be reached over ssh: token=do-not-log',
+         'ssh_remote_exit_255'),
+        ('Data could not be sent to remote host "private-host.example". Make sure this host can be reached over ssh: '
+         'token=do-not-log\nadditional private stderr', 'ssh_remote_exit_255'),
+        ('Data could not be sent to remote host "private-host.example". Make sure this host can be reached over ssh: '
+         'Permission denied token=do-not-log', 'ssh_authentication_failed'),
+        ('Data could not be sent to remote host "private-host.example". Make sure this host can be reached over ssh: '
+         'Connection reset by peer token=do-not-log', 'ssh_connection_reset'),
+        ("Data could not be sent to remote host 'private-host.example'. Make sure this host can be reached over SSH. token=do-not-log",
+         'ssh_data_send_failed'),
         ('Failed to connect to the host via sftp: secret=do-not-log', 'ssh_transfer_failed'),
         ('Failed to connect to the host via piped: secret=do-not-log', 'ssh_transfer_failed'),
         ('Failed to connect to the host via scp: Connection reset by peer secret=do-not-log', 'ssh_connection_reset'),
@@ -121,7 +133,7 @@ for message, expected in [
                 os.environ.pop('ULTRA_ANSIBLE_DIAGNOSTIC_FILE', None)
             saved_text = target.read_text()
             assert json.loads(saved_text)['code'] == expected, saved_text
-            assert all(value not in saved_text for value in ('private-host', 'Network is unreachable', 'do-not-log', 'msg', 'stdout', 'args')), saved_text
+            assert all(value not in saved_text for value in ('private-host', 'Network is unreachable', 'do-not-log', 'additional private stderr', 'Data could not', 'Make sure', 'msg', 'stdout', 'args')), saved_text
 
 ansible_playbook = shutil.which('ansible-playbook')
 assert ansible_playbook, 'ansible-playbook is required for the no_log callback regression'
