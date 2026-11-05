@@ -63,6 +63,9 @@ func LegacyValuesToPlan(v map[string]string) *InstallPlan {
 			AdminListen: "127.0.0.1:8443",
 		},
 		Features: FeatureConfig{
+			ExitPing:               optionalBoolValue(v, "EXIT_PING_ENABLE"),
+			HappExitPing:           optionalBoolValue(v, "HAPP_EXIT_PING_ENABLE"),
+			HappProviderID:         optionalStringValue(v, "HAPP_PROVIDER_ID"),
 			MainExitDomain:         v["MAIN_EXIT_DOMAIN"],
 			Preset:                 valueDefault(v, "PRESET", "apijson"),
 			Transport:              valueDefault(v, "TRANSPORT", "splithttp"),

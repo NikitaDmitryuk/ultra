@@ -124,13 +124,16 @@ func TestBuildBridgeXRayJSONAddsBlackholeWhenBlockTags(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, _ := root["outbounds"].([]any)
-	if len(out) != 3 {
-		t.Fatalf("expected 3 outbounds (exit, direct, blackhole), got %d", len(out))
+	if len(out) != 4 {
+		t.Fatalf("expected 4 outbounds (exit, direct, reserved probe block, geosite block), got %d", len(out))
 	}
-	blk, _ := out[2].(map[string]any)
-	if blk["protocol"] != "blackhole" {
-		t.Fatalf("third outbound: %#v", blk)
+	for _, outbound := range out {
+		blk, _ := outbound.(map[string]any)
+		if blk["tag"] == resolveXrayWire(spec).OutboundBlockTag && blk["protocol"] == "blackhole" {
+			return
+		}
 	}
+	t.Fatal("missing geosite block outbound")
 }
 
 func TestBuildBridgeXRayJSONSplitUsesMphMatcher(t *testing.T) {

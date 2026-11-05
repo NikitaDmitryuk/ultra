@@ -78,6 +78,9 @@ func TestSubscriptionHTTP(t *testing.T) {
 		if w.Code != 200 {
 			continue
 		}
+		if w.Header().Get("providerid") != "" || w.Header().Get("ping-type") != "" || w.Header().Get("check-url-via-proxy") != "" {
+			t.Fatal("disabled exit ping metadata leaked", w.Header())
+		}
 		if test.json {
 			var profiles []map[string]any
 			if err := json.Unmarshal(w.Body.Bytes(), &profiles); err != nil || len(profiles) != 1 ||
@@ -91,6 +94,19 @@ func TestSubscriptionHTTP(t *testing.T) {
 			}
 		} else if !strings.HasPrefix(w.Body.String(), "vless://") || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain") {
 			t.Fatal("URI compatibility lost")
+		}
+	}
+	spec.ExitPing = true
+	spec.HappExitPing = true
+	spec.HappProviderID = "provider-123"
+	for _, format := range []string{"uri", "happ"} {
+		r := httptest.NewRequest("GET", "/v1/subscriptions/issued?format="+format, nil)
+		r.Header.Set("Authorization", "Bearer secret")
+		w := httptest.NewRecorder()
+		s.authMiddleware(s.mux).ServeHTTP(w, r)
+		if w.Code != 200 || w.Header().Get("providerid") != "provider-123" || w.Header().Get("ping-type") != "proxy-head" ||
+			w.Header().Get("check-url-via-proxy") != config.ExitPingURL {
+			t.Fatalf("exit ping metadata missing from %s response: %d %v", format, w.Code, w.Header())
 		}
 	}
 	for _, query := range []string{"transport=unknown", "transport=xhttp-tls&format=happ"} {

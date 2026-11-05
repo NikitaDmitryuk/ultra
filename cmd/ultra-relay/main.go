@@ -17,6 +17,7 @@ import (
 
 	"github.com/NikitaDmitryuk/ultra/internal/auth"
 	"github.com/NikitaDmitryuk/ultra/internal/config"
+	"github.com/NikitaDmitryuk/ultra/internal/exitping"
 	"github.com/NikitaDmitryuk/ultra/internal/exits"
 	"github.com/NikitaDmitryuk/ultra/internal/loglevel"
 	"github.com/NikitaDmitryuk/ultra/internal/mimic"
@@ -188,7 +189,17 @@ func main() {
 		}
 
 	case config.RoleExit:
-		b, err := config.BuildExitXRayJSON(spec, strat, xrayLogLevel)
+		pingPort := 0
+		if spec.ExitPing {
+			responder, pingErr := exitping.Start()
+			if pingErr != nil {
+				log.Warn("exit ping unavailable; synthetic destination remains blocked")
+			} else {
+				defer func() { _ = responder.Close() }()
+				pingPort = responder.Port()
+			}
+		}
+		b, err := config.BuildExitXRayJSONWithPingPort(spec, strat, xrayLogLevel, pingPort)
 		if err != nil {
 			log.Error("build exit config", "err", err)
 			os.Exit(1)

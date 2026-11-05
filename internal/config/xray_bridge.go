@@ -129,8 +129,16 @@ func BuildBridgeXRayJSON(
 	}
 
 	domainStrategy, routeRules := buildBridgeRouting(spec, resolveActiveExitTag(activeExitID, w), userExitTags)
+	pingRules := []any{}
+	if spec.ExitPing {
+		pingRules = injectUserExitRules(
+			[]any{exitPingRule(resolveActiveExitTag(activeExitID, w))},
+			resolveActiveExitTag(activeExitID, w),
+			userExitTags,
+		)
+	}
+	pingRules = append(pingRules, exitPingBlockRule())
 	serviceRules := serviceRouting(users, resolveActiveExitTag(activeExitID, w), w.OutboundBlockTag)
-	routeRules = append(serviceRules, routeRules...)
 	needsBlock := BridgeNeedsBlockOutbound(spec) || len(serviceRules) > 0
 	for _, tag := range userExitTags {
 		if tag == w.OutboundBlockTag {
@@ -167,6 +175,10 @@ func BuildBridgeXRayJSON(
 		routeRules = append([]any{botRule}, routeRules...)
 	}
 
+	// Credential restrictions also precede the synthetic probe; reserve its
+	// address before inbound-specific forwarding (including the local bot SOCKS).
+	routeRules = append(pingRules, routeRules...)
+	routeRules = append(serviceRules, routeRules...)
 	routing := map[string]any{
 		"domainStrategy": domainStrategy,
 		"rules":          routeRules,
@@ -179,10 +191,13 @@ func BuildBridgeXRayJSON(
 	sniffing := map[string]any{
 		"enabled":      true,
 		"destOverride": w.SniffingDestOverride,
+		"ipsExcluded":  []string{ExitPingIPv4},
 	}
 	if ip := net.ParseIP(spec.PublicHost); ip != nil {
 		// Preserve the bridge endpoint when another VPN connection carries its REALITY SNI.
-		sniffing["ipsExcluded"] = []string{ip.String()}
+		if ip.String() != ExitPingIPv4 {
+			sniffing["ipsExcluded"] = append(sniffing["ipsExcluded"].([]string), ip.String())
+		}
 	}
 
 	inbounds := []any{
@@ -296,6 +311,7 @@ func BuildBridgeXRayJSON(
 	}
 
 	outbounds := buildBridgeExitOutbounds(spec, exitNodes, activeExitID, w, buildOutStream)
+	outbounds = append(outbounds, exitPingBlackhole())
 	if fragment := tunnelFragmentOutbound(spec); fragment != nil {
 		outbounds = append(outbounds, fragment)
 	}

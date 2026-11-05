@@ -32,6 +32,7 @@ type cachedSubscription struct {
 type subscriptionCacheSnapshot struct {
 	Version         int                           `json:"version"`
 	HappDefaultJSON bool                          `json:"happ_default_json,omitempty"`
+	HappExitPing    bool                          `json:"happ_exit_ping,omitempty"`
 	BotUsername     string                        `json:"bot_username,omitempty"`
 	Entries         map[string]cachedSubscription `json:"entries"`
 }
@@ -44,6 +45,7 @@ type subscriptionCache struct {
 	entries              map[string]cachedSubscription
 	generation           uint64
 	happDefaultJSON      bool
+	happExitPing         bool
 	botUsername          string
 }
 
@@ -75,7 +77,11 @@ func (b *Bot) ConfigureSubscriptionCache(path string) error {
 		if len(data) > maxSubscriptionCacheSize || json.Unmarshal(data, &snapshot) != nil || snapshot.Version != 1 {
 			return errors.New("invalid subscription cache")
 		}
+		if !validSubscriptionMetadataGeneration(snapshot) {
+			return errors.New("invalid subscription cache metadata generation")
+		}
 		c.happDefaultJSON = snapshot.HappDefaultJSON
+		c.happExitPing = snapshot.HappExitPing
 		if validBotUsername(snapshot.BotUsername) {
 			c.botUsername = snapshot.BotUsername
 		}
@@ -113,9 +119,18 @@ func (c *subscriptionCache) replace(entries map[string]cachedSubscription) error
 	return c.replaceLocked(entries)
 }
 func (c *subscriptionCache) replaceLocked(entries map[string]cachedSubscription) error {
+	if !validSubscriptionMetadataGeneration(subscriptionCacheSnapshot{HappExitPing: c.happExitPing, Entries: entries}) {
+		return errors.New("subscription cache metadata generation mismatch")
+	}
 	// Publish memory only after the durable file has been committed.
 	data, err := json.Marshal(
-		subscriptionCacheSnapshot{Version: 1, HappDefaultJSON: c.happDefaultJSON, BotUsername: c.botUsername, Entries: entries},
+		subscriptionCacheSnapshot{
+			Version:         1,
+			HappDefaultJSON: c.happDefaultJSON,
+			HappExitPing:    c.happExitPing,
+			BotUsername:     c.botUsername,
+			Entries:         entries,
+		},
 	)
 	if err != nil || len(data) > maxSubscriptionCacheSize {
 		return errors.New("subscription cache too large")
@@ -244,6 +259,9 @@ func (b *Bot) refreshSubscriptionCache(ctx context.Context) error {
 	if err = json.Unmarshal(data, &snapshot); err != nil || snapshot.Version != 1 {
 		return errors.New("invalid subscription cache response")
 	}
+	if !validSubscriptionMetadataGeneration(snapshot) {
+		return errors.New("invalid subscription cache response")
+	}
 	now := time.Now()
 	for _, entry := range snapshot.Entries {
 		if !validSubscriptionTime(entry.ConfirmedAt, now) {
@@ -266,12 +284,41 @@ func (b *Bot) refreshSubscriptionCache(ctx context.Context) error {
 		}
 	}
 	previousPolicy := c.happDefaultJSON
+	previousExitPing := c.happExitPing
 	c.happDefaultJSON = snapshot.HappDefaultJSON
+	c.happExitPing = snapshot.HappExitPing
 	if err := c.replaceLocked(snapshot.Entries); err != nil {
 		c.happDefaultJSON = previousPolicy
+		c.happExitPing = previousExitPing
 		return err
 	}
 	return nil
+}
+
+// Entries and policy must come from one admin API snapshot. This also lets
+// pre-feature snapshots load as disabled without carrying stray new headers.
+func validSubscriptionMetadataGeneration(snapshot subscriptionCacheSnapshot) bool {
+	providerID := ""
+	for _, entry := range snapshot.Entries {
+		gotID := entry.Headers["providerid"]
+		gotPing := entry.Headers["ping-type"]
+		gotURL := entry.Headers["check-url-via-proxy"]
+		if !snapshot.HappExitPing {
+			if gotID != "" || gotPing != "" || gotURL != "" {
+				return false
+			}
+			continue
+		}
+		if gotID == "" || gotPing != "proxy-head" || gotURL != config.ExitPingURL {
+			return false
+		}
+		if providerID == "" {
+			providerID = gotID
+		} else if providerID != gotID {
+			return false
+		}
+	}
+	return true
 }
 
 func subscriptionCacheFailureReason(err error) string {

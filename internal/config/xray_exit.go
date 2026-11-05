@@ -19,6 +19,15 @@ func warpProxyPort(spec *Spec) int {
 // BuildExitXRayJSON returns xray JSON for the exit node (splithttp inbound -> freedom / WARP).
 // xrayLogLevel is Xray log.loglevel; empty means warning.
 func BuildExitXRayJSON(spec *Spec, strat mimic.Strategy, xrayLogLevel string) ([]byte, error) {
+	return BuildExitXRayJSONWithPingPort(spec, strat, xrayLogLevel, 0)
+}
+
+// BuildExitXRayJSONWithPingPort binds the synthetic route to a runtime-only
+// loopback responder. Zero keeps the route blocked, including with WARP enabled.
+func BuildExitXRayJSONWithPingPort(spec *Spec, strat mimic.Strategy, xrayLogLevel string, pingPort int) ([]byte, error) {
+	if pingPort < 0 || pingPort > 65535 {
+		return nil, fmt.Errorf("config: invalid exit ping responder port")
+	}
 	if spec.Role != RoleExit {
 		return nil, fmt.Errorf("config: expected exit role")
 	}
@@ -88,6 +97,31 @@ func BuildExitXRayJSON(spec *Spec, strat mimic.Strategy, xrayLogLevel string) ([
 		}
 	}
 
+	pingRules := []any{}
+	if spec.ExitPing && pingPort > 0 {
+		rule := exitPingRule(exitPingOutboundTag)
+		rule["inboundTag"] = []string{w.ExitInboundTunnelTag}
+		pingRules = append(pingRules, rule)
+		outbounds = append(outbounds, map[string]any{
+			"tag": exitPingOutboundTag, "protocol": "freedom",
+			"settings": map[string]any{
+				"redirect": fmt.Sprintf("127.0.0.1:%d", pingPort),
+				"finalRules": []any{
+					map[string]any{
+						"action":  "allow",
+						"network": "tcp",
+						"ip":      []string{ExitPingIPv4 + "/32"},
+						"port":    fmt.Sprint(ExitPingPort),
+					},
+					map[string]any{"action": "allow", "network": "tcp", "ip": []string{"127.0.0.1/32"}, "port": fmt.Sprint(pingPort)},
+					map[string]any{"action": "block"},
+				},
+			},
+		})
+	}
+	pingRules = append(pingRules, exitPingBlockRule())
+	routingRules = append(pingRules, routingRules...)
+	outbounds = append(outbounds, exitPingBlackhole())
 	cfg := map[string]any{
 		"log": map[string]any{"loglevel": xrayLogLevel},
 		"inbounds": []any{
@@ -109,6 +143,7 @@ func BuildExitXRayJSON(spec *Spec, strat mimic.Strategy, xrayLogLevel string) ([
 				"sniffing": map[string]any{
 					"enabled":      true,
 					"destOverride": w.SniffingDestOverride,
+					"ipsExcluded":  []string{ExitPingIPv4},
 				},
 			},
 		},

@@ -186,6 +186,7 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 			return nil, err
 		}
 	}
+	applyExitPingFeatures(bridgeSpec, p.Features)
 	bridgeSpec.AntiCensor = buildAntiCensor(p, false)
 	if p.Features.RoutingMode != "" {
 		bridgeSpec.RoutingMode = p.Features.RoutingMode
@@ -302,6 +303,7 @@ func RenderDesiredStateWithOptions(p *InstallPlan, opts RenderOptions) (*Desired
 		exitSpec := &config.Spec{
 			SchemaVersion:      config.CurrentSpecSchemaVersion,
 			Role:               config.RoleExit,
+			ExitPing:           bridgeSpec.ExitPing,
 			MimicPreset:        strat.Name(),
 			SplithttpHost:      mimicHost,
 			TunnelTLSProvision: tlsProv,
@@ -477,6 +479,9 @@ func applyBridgeOverlay(dst *config.Spec, src *config.Spec) error {
 	src = &previous
 	dst.PublicEntries = src.PublicEntries
 	dst.HappDefaultJSON = src.HappDefaultJSON
+	dst.ExitPing = src.ExitPing
+	dst.HappExitPing = src.HappExitPing
+	dst.HappProviderID = src.HappProviderID
 	dst.SubscriptionPreviewBridges = src.SubscriptionPreviewBridges
 	dst.ProbeURLs = src.ProbeURLs
 	dst.Stats = src.Stats

@@ -32,7 +32,11 @@ func TestWARPDestinationBypassKeepsDefaultProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	rules := cfg["routing"].(map[string]any)["rules"].([]any)
-	first := rules[0].(map[string]any)
+	reserved := rules[0].(map[string]any)
+	if reserved["outboundTag"] != exitPingBlockTag || reserved["ip"].([]any)[0] != ExitPingIPv4+"/32" {
+		t.Fatal("disabled synthetic probe can escape through WARP")
+	}
+	first := rules[1].(map[string]any)
 	if first["domain"].([]any)[0] != "full:control.example" || first["outboundTag"] != "warp-bypass" {
 		t.Fatal("bypass is not restricted to exact domain")
 	}

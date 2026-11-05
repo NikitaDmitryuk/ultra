@@ -34,6 +34,10 @@ SUBSCRIPTION_DOMAIN=sync.example.com
 VPN_DOMAIN=edge.example.com
 ACME_EMAIL=operator@example.com
 PUBLIC_XHTTP_PATH=/connect
+# Enable publication only after Linux/Android Happ acceptance with your Provider ID.
+EXIT_PING_ENABLE=false
+HAPP_EXIT_PING_ENABLE=false
+HAPP_PROVIDER_ID=
 DNS_PROVIDER=vultr
 DNS_ZONE=example.com
 DNS_TTL=300

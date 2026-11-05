@@ -13,7 +13,7 @@ var Headers = []string{
 	"Content-Type", "profile-title", "profile-update-interval", "Vary",
 	"subscription-userinfo", "support-url", "announce", "X-Ultra-Quota-Scope",
 	"X-Ultra-Quota-Period", "X-Ultra-Quota-State", "X-Ultra-Quota-Observed-At",
-	"X-Ultra-Quota-Resets-At",
+	"X-Ultra-Quota-Resets-At", "providerid", "ping-type", "check-url-via-proxy",
 }
 
 func Announce(h http.Header, message string) {

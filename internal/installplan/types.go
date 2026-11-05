@@ -94,30 +94,33 @@ type SecretsConfig struct {
 }
 
 type FeatureConfig struct {
-	MainExitDomain         string `json:"main_exit_domain,omitempty"`
-	BotTelegramProxy       bool   `json:"bot_telegram_proxy,omitempty"`
-	Preset                 string `json:"preset,omitempty"`
-	Transport              string `json:"transport,omitempty"`
-	RoutingMode            string `json:"routing_mode,omitempty"`
-	LogLevel               string `json:"log_level,omitempty"`
-	GenerateExitTLS        bool   `json:"generate_exit_tls,omitempty"`
-	SkipGeoDownload        bool   `json:"skip_geo_download,omitempty"`
-	GeoReleaseTag          string `json:"geo_release_tag,omitempty"`
-	WARP                   bool   `json:"warp,omitempty"`
-	WARPPort               int    `json:"warp_port,omitempty"`
-	DisableDOH             bool   `json:"disable_doh,omitempty"`
-	DisableVLESSFlow       bool   `json:"disable_vless_flow,omitempty"`
-	VLESSFlow              string `json:"vless_flow,omitempty"`
-	AntiCensorProfile      string `json:"anti_censor_profile,omitempty"`
-	PublicXHTTPPort        int    `json:"public_xhttp_port,omitempty"`
-	DisableFragment        bool   `json:"disable_fragment,omitempty"`
-	SplitHTTPPadding       string `json:"splithttp_padding,omitempty"`
-	SplitHTTPMaxChunkKB    int    `json:"splithttp_max_chunk_kb,omitempty"`
-	RealityFingerprintsCSV string `json:"reality_fingerprints,omitempty"`
-	GeositeBlockTags       string `json:"geosite_block_tags,omitempty"`
-	DomainDirect           string `json:"domain_direct,omitempty"`
-	SplitHTTPHost          string `json:"splithttp_host,omitempty"`
-	SplitHTTPPath          string `json:"splithttp_path,omitempty"`
+	ExitPing               *bool   `json:"exit_ping,omitempty"`
+	HappExitPing           *bool   `json:"happ_exit_ping,omitempty"`
+	HappProviderID         *string `json:"happ_provider_id,omitempty"`
+	MainExitDomain         string  `json:"main_exit_domain,omitempty"`
+	BotTelegramProxy       bool    `json:"bot_telegram_proxy,omitempty"`
+	Preset                 string  `json:"preset,omitempty"`
+	Transport              string  `json:"transport,omitempty"`
+	RoutingMode            string  `json:"routing_mode,omitempty"`
+	LogLevel               string  `json:"log_level,omitempty"`
+	GenerateExitTLS        bool    `json:"generate_exit_tls,omitempty"`
+	SkipGeoDownload        bool    `json:"skip_geo_download,omitempty"`
+	GeoReleaseTag          string  `json:"geo_release_tag,omitempty"`
+	WARP                   bool    `json:"warp,omitempty"`
+	WARPPort               int     `json:"warp_port,omitempty"`
+	DisableDOH             bool    `json:"disable_doh,omitempty"`
+	DisableVLESSFlow       bool    `json:"disable_vless_flow,omitempty"`
+	VLESSFlow              string  `json:"vless_flow,omitempty"`
+	AntiCensorProfile      string  `json:"anti_censor_profile,omitempty"`
+	PublicXHTTPPort        int     `json:"public_xhttp_port,omitempty"`
+	DisableFragment        bool    `json:"disable_fragment,omitempty"`
+	SplitHTTPPadding       string  `json:"splithttp_padding,omitempty"`
+	SplitHTTPMaxChunkKB    int     `json:"splithttp_max_chunk_kb,omitempty"`
+	RealityFingerprintsCSV string  `json:"reality_fingerprints,omitempty"`
+	GeositeBlockTags       string  `json:"geosite_block_tags,omitempty"`
+	DomainDirect           string  `json:"domain_direct,omitempty"`
+	SplitHTTPHost          string  `json:"splithttp_host,omitempty"`
+	SplitHTTPPath          string  `json:"splithttp_path,omitempty"`
 }
 
 type Verification struct {

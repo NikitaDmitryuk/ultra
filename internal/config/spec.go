@@ -142,6 +142,12 @@ type StatsSpec struct {
 
 // Spec is relay deployment configuration (JSON file: -spec flag).
 type Spec struct {
+	// ExitPing enables the synthetic HTTP probe through the user's effective exit.
+	ExitPing bool `json:"exit_ping,omitempty"`
+	// HappProviderID is a stable public provider identifier for Happ metadata.
+	HappProviderID string `json:"happ_provider_id,omitempty"`
+	// HappExitPing publishes the synthetic exit probe to Happ clients.
+	HappExitPing bool `json:"happ_exit_ping,omitempty"`
 	// SchemaVersion defaults to 1 when zero (see Validate).
 	SchemaVersion              int                  `json:"schema_version"`
 	ProbeURLs                  []string             `json:"probe_urls,omitempty"`
@@ -345,6 +351,9 @@ func BoolPtr(b bool) *bool {
 }
 
 func (s *Spec) Validate() error {
+	if err := s.ValidateExitPing(); err != nil {
+		return err
+	}
 	if err := s.validateTransportExtensions(); err != nil {
 		return err
 	}

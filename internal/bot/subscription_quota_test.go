@@ -21,6 +21,7 @@ func TestSubscriptionQuotaProxyAndStaleCache(t *testing.T) {
 		"announce":              "base64:" + base64.StdEncoding.EncodeToString([]byte("Общая квота выходов; остальные выходы отдельно.")),
 		"X-Ultra-Quota-Scope":   "shared", "X-Ultra-Quota-State": "ready", "X-Ultra-Quota-Period": "2026-10",
 		"X-Ultra-Quota-Observed-At": "2026-10-12T13:00:00Z", "X-Ultra-Quota-Resets-At": "2026-11-01T00:00:00Z",
+		"providerid": "provider-123", "ping-type": "proxy-head", "check-url-via-proxy": "http://192.0.2.254/generate_204",
 	}
 	broken := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -39,6 +40,9 @@ func TestSubscriptionQuotaProxyAndStaleCache(t *testing.T) {
 	if err := b.ConfigureSubscriptionCache(filepath.Join(t.TempDir(), "cache.json")); err != nil {
 		t.Fatal(err)
 	}
+	b.subscriptionCache.mu.Lock()
+	b.subscriptionCache.happExitPing = true
+	b.subscriptionCache.mu.Unlock()
 	entries := map[string]cachedSubscription{}
 	for _, format := range []string{"uri", "happ"} {
 		entries[subscriptionCacheKey(token, "format="+format)] = cachedSubscription{
@@ -84,7 +88,9 @@ func TestSubscriptionQuotaProxyAndStaleCache(t *testing.T) {
 	}
 	// An old snapshot without quota metadata must not inherit the truncated
 	// upstream's apparently newer quota.
-	entries[subscriptionCacheKey(token, "format=uri")] = cachedSubscription{Body: []byte("confirmed uri"), ConfirmedAt: confirmed}
+	entries[subscriptionCacheKey(token, "format=uri")] = cachedSubscription{Body: []byte("confirmed uri"), Headers: map[string]string{
+		"providerid": "provider-123", "ping-type": "proxy-head", "check-url-via-proxy": "http://192.0.2.254/generate_204",
+	}, ConfirmedAt: confirmed}
 	if err := b.subscriptionCache.replace(entries); err != nil {
 		t.Fatal(err)
 	}
