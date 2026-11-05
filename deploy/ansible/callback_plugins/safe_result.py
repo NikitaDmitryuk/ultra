@@ -233,13 +233,27 @@ class CallbackModule(CallbackBase):
         for fragment, candidate in [('Host key verification failed', 'ssh_pin_mismatch'),
                                     ('Permission denied', 'ssh_authentication_failed'),
                                     ('Timeout during banner exchange', 'ssh_banner_timeout'),
+                                    ('Timeout during key exchange', 'ssh_key_exchange_timeout'),
+                                    ('Connection timed out during key exchange', 'ssh_key_exchange_timeout'),
+                                    ('kex_exchange_identification: read: Connection timed out', 'ssh_key_exchange_timeout'),
                                     ('Connection refused', 'ssh_connection_refused'),
                                     ('Connection timed out', 'ssh_connect_timeout'),
                                     ('Connection reset by peer', 'ssh_connection_reset'),
+                                    ('Broken pipe', 'ssh_broken_pipe'),
+                                    ('Connection closed', 'ssh_connection_closed'),
                                     ('too long for Unix domain socket', 'ssh_control_path_too_long'),
                                     ('Failed to create temporary directory', 'ssh_temporary_directory_failed')]:
             if fragment in text:
                 code = candidate
                 break
+        if code == 'host_unreachable':
+            if re.search(r'(?i)connection(?:\s+to\s+[^\r\n]+?)?\s+closed\b', text):
+                code = 'ssh_connection_closed'
+            elif 'Data could not be sent' in text:
+                code = 'ssh_data_send_failed'
+            elif any(fragment in text for fragment in ('Failed to connect to the host via sftp:',
+                                                       'Failed to connect to the host via scp:',
+                                                       'Failed to connect to the host via piped:')):
+                code = 'ssh_transfer_failed'
         self.event('task_unreachable', result._host, result._task, result, code)
         self.record(result, code)

@@ -107,6 +107,7 @@ func bootstrapInventoryWithNativeAttestation(
 	}
 	common := map[string]any{
 		"ansible_ssh_timeout":          sshTimeout,
+		"ansible_ssh_args":             bootstrapSSHArgs(),
 		"ansible_user":                 "root",
 		"ansible_become":               false,
 		"ansible_become_method":        "sudo",

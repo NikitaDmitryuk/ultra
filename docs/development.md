@@ -98,7 +98,12 @@ failed generation также read-only; её retirement проверяется �
 
 Тест timeout проверяет сериализованный bootstrap inventory без обязательной
 зависимости от Ansible в Go job; при установленном Ansible дополнительно
-проверяется реальное наследование `ansible_ssh_timeout` всеми SSH-hosts.
+проверяется реальное наследование `ansible_ssh_timeout` всеми SSH-hosts и итоговые
+опции OpenSSH без соединения через `ssh -G`. Bootstrap задаёт отключение multiplexing
+и native keepalive policy в раннем `ansible_ssh_args`: поздний `common_args` не
+переопределяет первое значение `ControlMaster`, добавленное самим Ansible.
+Callback сохраняет только фиксированные SSH failure codes, включая closed, broken
+pipe, key-exchange timeout и transfer failure; raw transport messages не сохраняются.
 
 ## PostgreSQL, SQLC и ORM
 
