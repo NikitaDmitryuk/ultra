@@ -26,7 +26,7 @@ func handlePlanSubcommand(args []string) bool {
 	case "replace-production":
 		exitOnErr("production replacement", runProductionReplacement(args[1:], os.Stdout))
 	case "replacement-exit-ping-probe":
-		exitOnErr("isolated exit ping", runReplacementPingProbe(args[1:], os.Stdout))
+		exitOnErr("isolated exit ping", runReplacementPingProbeCommand(args[1:]))
 	case "replacement-exit-ping-lease":
 		exitOnErr("exit ping lease", runReplacementPingLease(args[1:]))
 	case "provider-census":
