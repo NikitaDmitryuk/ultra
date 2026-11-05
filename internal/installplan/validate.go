@@ -55,6 +55,9 @@ func validatePlan(p *InstallPlan, localProjection bool) error {
 // validatePlanRoles is shared with read-only adoption preparation. Callers that
 // deploy a plan must first enforce its schema and complete automation policy.
 func validatePlanRoles(p *InstallPlan) error {
+	if err := validateExitPingFeatures(p.Features); err != nil {
+		return err
+	}
 	if p.Secrets.DatabaseTunnelPrivateKeyFile != "" || p.Secrets.DatabaseTunnelPrivateKeySHA256 != "" {
 		if !p.Database.Enabled {
 			return errors.New("DB_TUNNEL_PRIVATE_KEY_FILE requires a dedicated database")

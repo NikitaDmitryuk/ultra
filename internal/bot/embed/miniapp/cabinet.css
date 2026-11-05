@@ -397,6 +397,41 @@ small {
 .member-grid > .card {
   height: 100%;
 }
+.notifications-card h2 {
+  margin-top: 0;
+}
+.notification-options {
+  display: grid;
+  gap: 4px;
+  margin: 18px 0;
+}
+.notification-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+  color: var(--ink);
+  cursor: pointer;
+}
+.notification-option input {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  margin: 1px 0 0;
+  padding: 0;
+  border: 0;
+  accent-color: var(--blue);
+}
+.notification-option span,
+.notification-option small {
+  display: block;
+}
+.notification-option small {
+  margin-top: 4px;
+  color: var(--muted);
+  line-height: 1.4;
+}
 .help-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

@@ -122,6 +122,11 @@ func (s *Server) renderSubscription(w http.ResponseWriter, r *http.Request, id s
 	w.Header().Set("Vary", "User-Agent")
 	w.Header().Set("profile-title", "ultra")
 	w.Header().Set("profile-update-interval", "1")
+	if s.spec.HappExitPing {
+		w.Header().Set("providerid", s.spec.HappProviderID)
+		w.Header().Set("ping-type", "proxy-head")
+		w.Header().Set("check-url-via-proxy", config.ExitPingURL)
+	}
 	_, _, health, nodes := s.clientExitSelection(u)
 	if quotaHeaders == nil {
 		s.setSubscriptionQuota(r.Context(), w.Header(), u.AccountID, nodes)

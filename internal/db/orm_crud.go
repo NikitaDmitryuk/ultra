@@ -52,12 +52,6 @@ func (u userRow) user() auth.User {
 	return out
 }
 
-type subscriptionTokenRow struct {
-	UserUUID string `gorm:"column:user_uuid;primaryKey"`
-}
-
-func (subscriptionTokenRow) TableName() string { return "subscription_tokens" }
-
 type notificationRow struct {
 	ID         int64   `gorm:"primaryKey"`
 	UserUUID   *string `gorm:"column:user_uuid"`

@@ -13,6 +13,9 @@ import (
 func removeAccountingExtension(t *testing.T, d *DB) {
 	t.Helper()
 	_, err := d.Pool.Exec(context.Background(), `
+ DROP TABLE personal_notification_events,personal_notification_preferences CASCADE;
+ DROP FUNCTION personal_notification_user_change() CASCADE;
+ DELETE FROM schema_migrations WHERE version=26;
  DROP TABLE account_exit_usage,traffic_batches,traffic_accounts,recovery_heartbeat CASCADE;
  ALTER TABLE users DROP COLUMN account_id CASCADE;
  DROP FUNCTION ensure_traffic_account() CASCADE; DROP FUNCTION forbid_account_rotation() CASCADE;
@@ -114,7 +117,7 @@ func TestAccountingSchemaMigrationCompatibility(t *testing.T) {
 				t.Fatalf("repeat migration: %v", err)
 			}
 			var maximum int
-			if err = d.Pool.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&maximum); err != nil || maximum != 25 {
+			if err = d.Pool.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&maximum); err != nil || maximum != 26 {
 				t.Fatalf("migration version %d %v", maximum, err)
 			}
 		})

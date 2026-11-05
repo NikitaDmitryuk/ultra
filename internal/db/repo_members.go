@@ -45,8 +45,9 @@ type VPNInvite struct {
 	CancelledAt   *time.Time `json:"cancelled_at"`
 }
 type MemberRepo struct {
-	db    *DB
-	state *runtimestate.Store
+	db            *DB
+	state         *runtimestate.Store
+	Subscriptions *SubscriptionRepo
 }
 
 func NewMemberRepo(d *DB) *MemberRepo { return &MemberRepo{db: d} }
@@ -342,7 +343,12 @@ func (r *MemberRepo) Reset(ctx context.Context, id, actor int64, expected string
 	}
 	nextID := uuid.New()
 	next := nextID.String()
-	if _, e = NewUserRepo(r.db).rotateUUIDTx(ctx, tx, current, next); e != nil {
+	if _, e = NewUserRepo(r.db, r.Subscriptions).rotateUUIDTx(func() context.Context {
+		if actor == id {
+			return WithPersonalNotificationSuppressed(ctx)
+		}
+		return ctx
+	}(), tx, current, next); e != nil {
 		return e
 	}
 	_, e = tx.Exec(ctx, `INSERT INTO vpn_member_audit(actor,member_id,action) VALUES($1,$2,'reset')`, actor, id)

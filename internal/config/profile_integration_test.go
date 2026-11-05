@@ -252,12 +252,12 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 				hc := &http.Client{Transport: tr, Timeout: 3 * time.Second}
 				resp, e := hc.Get(destination.URL)
 				if e != nil {
-					return e
+					return fmt.Errorf("initial GET: %w", e)
 				}
 				defer func() { _ = resp.Body.Close() }()
 				body, e := io.ReadAll(resp.Body)
 				if e != nil {
-					return e
+					return fmt.Errorf("initial response body: %w", e)
 				}
 				if len(body) != 65536 {
 					t.Fatalf("short body: %d", len(body))
@@ -265,11 +265,11 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 				// Keep this client and an open stream across two server route changes.
 				stream, e := hc.Get(destination.URL + "/stream")
 				if e != nil {
-					return e
+					return fmt.Errorf("stream GET: %w", e)
 				}
 				defer func() { _ = stream.Body.Close() }()
 				if _, e = io.ReadFull(stream.Body, make([]byte, 1024)); e != nil {
-					return e
+					return fmt.Errorf("initial stream read: %w", e)
 				}
 				server["outbounds"] = []any{
 					map[string]any{
@@ -280,7 +280,7 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 				}
 				next, _ := json.Marshal(server)
 				if e = relay.Reload(next); e != nil {
-					return e
+					return fmt.Errorf("reload alternate route: %w", e)
 				}
 				// EOF/error must arrive before the HTTP client's timeout; data is not
 				// allowed to continue on a stream from the closed server instance.
@@ -292,17 +292,17 @@ func TestPublishedProfilesLocalTransfer(t *testing.T) {
 				for _, want := range []byte{'y', 'x'} {
 					if want == 'x' {
 						if e = relay.Reload(data); e != nil {
-							return e
+							return fmt.Errorf("restore original route: %w", e)
 						}
 					}
 					response, e := hc.Get(destination.URL)
 					if e != nil {
-						return e
+						return fmt.Errorf("post-reload GET (want %q): %w", want, e)
 					}
 					payload, e := io.ReadAll(response.Body)
 					_ = response.Body.Close()
 					if e != nil {
-						return e
+						return fmt.Errorf("post-reload response body (want %q): %w", want, e)
 					}
 					if len(payload) != 65536 || payload[0] != want {
 						t.Fatalf("unchanged client used old route: length=%d", len(payload))

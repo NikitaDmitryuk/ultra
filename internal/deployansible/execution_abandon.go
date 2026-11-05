@@ -238,7 +238,7 @@ func proveNoExecutionProcess(expected ExecutionFence) error {
 	excluded := processExclusions()
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return ErrExecutionAbandonmentUnproven
+		return errors.Join(ErrExecutionAbandonmentUnproven, errors.New("process_census_list_failed"))
 	}
 	for _, entry := range entries {
 		pid, parseErr := strconv.Atoi(entry.Name())
@@ -251,17 +251,17 @@ func proveNoExecutionProcess(expected ExecutionFence) error {
 			if os.IsNotExist(readErr) || os.IsPermission(readErr) {
 				continue
 			}
-			return ErrExecutionAbandonmentUnproven
+			return errors.Join(ErrExecutionAbandonmentUnproven, errors.New("process_census_cmdline_failed"))
 		}
 		text := string(raw)
 		for _, arg := range strings.Split(strings.TrimRight(text, "\x00"), "\x00") {
 			switch filepath.Base(arg) {
 			case "ansible-playbook", "controller.py", "reconcile.py":
-				return ErrExecutionAbandonmentUnproven
+				return errors.Join(ErrExecutionAbandonmentUnproven, errors.New("process_census_executor_present"))
 			}
 		}
 		if strings.Contains(text, expected.Generation) || strings.Contains(text, expected.JobDirectory) {
-			return ErrExecutionAbandonmentUnproven
+			return errors.Join(ErrExecutionAbandonmentUnproven, errors.New("process_census_binding_present"))
 		}
 	}
 	return nil

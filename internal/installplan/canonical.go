@@ -166,6 +166,13 @@ func canonicalRoleValuesToPlan(v map[string]string) (*InstallPlan, error) {
 	if err := validateCanonicalDeploymentKeys(v); err != nil {
 		return nil, err
 	}
+	for _, key := range []string{"EXIT_PING_ENABLE", "HAPP_EXIT_PING_ENABLE"} {
+		if raw, ok := v[key]; ok {
+			if _, err := strconv.ParseBool(raw); err != nil {
+				return nil, errors.New(key + " must be a boolean")
+			}
+		}
+	}
 	if version := valueDefault(v, "INSTALL_SCHEMA_VERSION", "2"); version != "2" {
 		return nil, errors.New("only install schema 2 is supported")
 	}

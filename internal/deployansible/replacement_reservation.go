@@ -109,6 +109,17 @@ func ReserveReplacement(
 	binding ReplacementBinding,
 	validatePrevious func(ReplacementReservation) error,
 ) (context.Context, *ReplacementLease, error) {
+	return reserveReplacement(ctx, binding, validatePrevious, ProveReplacementReservationQuiescent)
+}
+
+// Keep the transaction's proof dependency explicit so its deterministic tests
+// do not assume an otherwise idle process namespace. The public entry point
+// always supplies the real verifier; a missing verifier cannot admit takeover.
+func reserveReplacement(
+	ctx context.Context,
+	binding ReplacementBinding,
+	validatePrevious, provePrevious func(ReplacementReservation) error,
+) (context.Context, *ReplacementLease, error) {
 	root, err := executionRoot("")
 	if err != nil {
 		return ctx, nil, err
@@ -123,10 +134,10 @@ func ReserveReplacement(
 		return fail(err)
 	}
 	if previous != nil {
-		if validatePrevious == nil {
+		if validatePrevious == nil || provePrevious == nil {
 			return fail(ErrReplacementReserved)
 		}
-		if err = ProveReplacementReservationQuiescent(*previous); err != nil {
+		if err = provePrevious(*previous); err != nil {
 			return fail(err)
 		}
 		if err = validatePrevious(*previous); err != nil {

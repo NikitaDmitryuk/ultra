@@ -198,8 +198,9 @@ func TestFailedExecutionReplacementRunsRealRetirementBeforeCleanup(t *testing.T)
 			localCalls := 0
 			cleaned := false
 			steps := replacementSteps{
-				PrepareSSH: func(context.Context, replacementTarget) error { return nil },
-				Checkpoint: func(stage string) error { events = append(events, stage); return nil },
+				PreparePrimarySSH: func(context.Context) error { return nil },
+				PrepareSSH:        func(context.Context, replacementTarget) error { return nil },
+				Checkpoint:        func(stage string) error { events = append(events, stage); return nil },
 				Observe: func(context.Context) (replacementPrimary, error) {
 					value := f.primary
 					if prepared && failure == "primary" {
@@ -216,6 +217,8 @@ func TestFailedExecutionReplacementRunsRealRetirementBeforeCleanup(t *testing.T)
 					return nil
 				},
 				PrimaryQuiescent: func(context.Context) error { return nil },
+				PrimarySessions:  func(context.Context) error { return nil },
+				Sessions:         func(context.Context, replacementTarget) error { return nil },
 				Clean: func(context.Context, replacementTarget, []exits.BootstrapEntry) error {
 					cleaned = true
 					competingDispatch()
@@ -371,6 +374,8 @@ func TestFailedExecutionAdmissionLockExcludesConcurrentRetirement(t *testing.T) 
 		replacementSteps{
 			Observe:          func(context.Context) (replacementPrimary, error) { return f.primary, nil },
 			PrimaryQuiescent: func(context.Context) error { return nil },
+			PrimarySessions:  func(context.Context) error { return nil },
+			Sessions:         func(context.Context, replacementTarget) error { return nil },
 		},
 		func(deployansible.ExecutionFence) error { return nil },
 	)
@@ -450,9 +455,10 @@ func TestReplacementFailedSSHPreparationReservationCanBeReclaimed(t *testing.T) 
 		defer func() { _ = lease.Close() }()
 		primary := replacementPrimary{SystemIdentifier: "123", Database: "fixture", DatabaseOID: 42}
 		steps := replacementSteps{
-			Checkpoint: func(string) error { return nil },
-			Discover:   func(context.Context, replacementTarget) error { return nil },
-			Observe:    func(context.Context) (replacementPrimary, error) { return primary, nil },
+			PreparePrimarySSH: func(context.Context) error { return nil },
+			Checkpoint:        func(string) error { return nil },
+			Discover:          func(context.Context, replacementTarget) error { return nil },
+			Observe:           func(context.Context) (replacementPrimary, error) { return primary, nil },
 			PrepareSSH: func(context.Context, replacementTarget) error {
 				if err := lease.SetPhase("mutating"); err != nil {
 					return err

@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/NikitaDmitryuk/ultra/internal/adminapi"
 	"github.com/NikitaDmitryuk/ultra/internal/cloud"
@@ -94,6 +95,9 @@ func configureCloud(
 	api := cloud.NewVultr(key)
 	quotaAPI = api
 	p.API = api
+	p.RefreshQuota = func(ctx context.Context) error {
+		return refreshBandwidth(ctx, db.NewQuotaRepo(database), api, time.Now())
+	}
 	srv.Cloud = &cloud.Service{
 		LockTopology:      srv.LockTopologyMutation,
 		TopologyReady:     controller.Ready,

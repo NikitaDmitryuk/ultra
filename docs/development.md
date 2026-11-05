@@ -98,7 +98,15 @@ failed generation также read-only; её retirement проверяется �
 
 Тест timeout проверяет сериализованный bootstrap inventory без обязательной
 зависимости от Ansible в Go job; при установленном Ansible дополнительно
-проверяется реальное наследование `ansible_ssh_timeout` всеми SSH-hosts.
+проверяется реальное наследование `ansible_ssh_timeout` всеми SSH-hosts и итоговые
+опции OpenSSH без соединения через `ssh -G`. Bootstrap задаёт отключение multiplexing
+и native keepalive policy в раннем `ansible_ssh_args`: поздний `common_args` не
+переопределяет первое значение `ControlMaster`, добавленное самим Ansible.
+Bootstrap передаёт модули через SFTP-файл, без SSH stdin pipelining. Это
+консервативный обход неоднозначного data-send failure, а не гарантия от сетевых
+обрывов; автоматический повтор удалённых мутаций по такому отказу запрещён.
+Callback сохраняет только фиксированные SSH failure codes, включая closed, broken
+pipe, key-exchange timeout и transfer failure; raw transport messages не сохраняются.
 
 ## PostgreSQL, SQLC и ORM
 
@@ -390,7 +398,7 @@ DSN задаётся сервисом workflow. Бот использует lazy
 [сценарий дампа под нагрузкой](../scripts/test-load-pg-recovery.py) запускает этот
 тест, дожидается подтверждённого трафика пяти владельцев, выполняет `pg_dump`
 его изолированной схемы во время передачи и восстанавливает её в новую временную
-БД того же тестового контейнера. Проверяются схема 24 и расходы пяти владельцев;
+БД того же тестового контейнера. Проверяются актуальная схема миграций и расходы пяти владельцев;
 созданная БД удаляется. Запуск: `DATABASE_URL=<test DSN> python3
 scripts/test-load-pg-recovery.py --container <test PostgreSQL16 container>`.
 Разрешены только loopback и тестовые БД `ultra_test`/`ultra_ci`; порт контейнера

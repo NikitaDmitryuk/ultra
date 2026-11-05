@@ -6,6 +6,7 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -41,7 +42,7 @@ class ManualReplacement(unittest.TestCase):
         self.calls = []
         self.previous_configs_seen = []
 
-    def run_main(self, arguments=(), fail=False, dispatched=True):
+    def run_main(self, arguments=(), fail=False, dispatched=True, output_error=False):
         def run(command, cwd, stage, **kwargs):
             self.calls.append((stage, command))
             if stage in ('source_commit', 'source_commit_recheck'):
@@ -60,14 +61,58 @@ class ManualReplacement(unittest.TestCase):
                     state.mkdir(mode=0o700)
                     (state / 'stage.json').write_text('{"stage":"fence-bridge"}')
                 raise D.DeployError('replace_production_failed_exit_1')
+        output_patch = (patch.object(D, 'replacement_output_file',
+                                     side_effect=OSError('simulated output failure'))
+                        if output_error else contextlib.nullcontext())
         with patch.object(D, '__file__', str(self.repo / 'scripts/manual-deploy.py')), \
                 patch.object(D.sys, 'argv', ['manual-deploy.py', *arguments]), \
                 patch.object(D, 'run', side_effect=run), \
                 patch.object(D, 'build_candidate', return_value=self.bundle), \
                 patch.object(D.shutil, 'which', return_value='/fixture/tool'), \
                 patch.object(D.platform, 'machine', return_value='x86_64'), \
+                output_patch, \
                 contextlib.redirect_stdout(io.StringIO()):
             D.main()
+
+    def test_replacement_output_is_private_and_preserves_exit_status(self):
+        for returncode in (0, 17):
+            with self.subTest(returncode=returncode):
+                state = self.manual_root / ('replacement-test' + str(returncode))
+                log_path, output = D.replacement_output_file(self.manual_root, state)
+                self.assertEqual(log_path.name, state.name + '.log')
+                self.assertEqual(log_path.parent.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
+
+                child = [sys.executable, '-u', '-c',
+                         'import sys; print("private stdout"); print("private stderr", file=sys.stderr); sys.exit(int(sys.argv[1]))',
+                         str(returncode)]
+                with output:
+                    if returncode:
+                        with self.assertRaisesRegex(D.DeployError, 'replace_production_failed_exit_17'):
+                            D.run(child, self.repo, 'replace_production', output=output)
+                    else:
+                        D.run(child, self.repo, 'replace_production', output=output)
+
+                self.assertEqual(log_path.read_bytes(), b'private stdout\nprivate stderr\n')
+                self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
+                with self.assertRaises(FileExistsError):
+                    D.replacement_output_file(self.manual_root, state)
+
+    def test_output_creation_failure_only_removes_new_attempt_before_dispatch(self):
+        with self.assertRaisesRegex(OSError, 'simulated output failure'):
+            self.run_main(output_error=True)
+        self.assertEqual(list(self.attempts.iterdir()), [])
+        self.assertNotIn('replace_production', [stage for stage, _ in self.calls])
+
+        candidate = D.config_candidate(
+            self.config.read_bytes(), 'v0.0.' + str(int(self.commit, 16)), self.bundle)
+        prior_attempt = self.attempts / (hashlib.sha256(candidate).hexdigest() + '.config')
+        D.atomic_write(prior_attempt, candidate)
+        with self.assertRaisesRegex(OSError, 'simulated output failure'):
+            self.run_main(output_error=True)
+        self.assertEqual(list(self.attempts.iterdir()), [prior_attempt])
+        self.assertEqual(prior_attempt.read_bytes(), candidate)
+        self.assertNotIn('replace_production', [stage for stage, _ in self.calls])
 
     def test_build_only_preserves_config_and_avoids_replacement(self):
         self.run_main(['--build-only'])

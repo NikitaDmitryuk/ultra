@@ -22,10 +22,12 @@ class DeployError(Exception):
     pass
 
 
-def run(command, cwd, stage, capture=False, env=None):
+def run(command, cwd, stage, capture=False, env=None, output=None):
     result = subprocess.run(command, cwd=cwd,
-                            stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, check=False, env=env)
+                            stdout=output if output is not None else
+                            (subprocess.PIPE if capture else subprocess.DEVNULL),
+                            stderr=subprocess.DEVNULL if output is None else subprocess.STDOUT,
+                            check=False, env=env)
     require(result.returncode == 0, stage + '_failed_exit_' + str(result.returncode))
     return result.stdout.decode().strip() if capture else None
 
@@ -323,6 +325,25 @@ def replacement_may_have_mutated(state):
     return not (stage.startswith('discover-') or stage == 'primary-before-fence')
 
 
+def replacement_output_file(root, state):
+    directory = root / 'replacement-output'
+    if not directory.exists():
+        directory.mkdir(mode=0o700)
+    require_manual_state_directory(directory)
+    state_name = Path(state).name
+    require(re.fullmatch(r'replacement-[A-Za-z0-9_-]+', state_name) is not None,
+            'replacement_state_name_invalid')
+    path = directory / (state_name + '.log')
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        return path, os.fdopen(descriptor, 'wb')
+    except BaseException:
+        os.close(descriptor)
+        path.unlink(missing_ok=True)
+        raise
+
+
 def main():
     require(__debug__, 'python_optimization_disables_release_validation')
     parser = argparse.ArgumentParser(description=__doc__)
@@ -381,8 +402,10 @@ def main():
             state.rmdir()
             command = replacement_command(bundle, config, commit, state, previous_configs)
             try:
-                run(command, repo, 'replace_production')
-            except DeployError:
+                output_path, output = replacement_output_file(root, state)
+                with output:
+                    run(command, repo, 'replace_production', output=output)
+            except (DeployError, OSError):
                 if not attempt_preexisted and not replacement_may_have_mutated(state):
                     attempted.unlink(missing_ok=True)
                 raise

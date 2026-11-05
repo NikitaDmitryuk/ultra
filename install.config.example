@@ -61,6 +61,10 @@ SUBSCRIPTION_INGRESS_MODE=direct
 BOT_PUBLIC_URL=https://sync.example.com
 # HTTP path публичного XHTTP/TLS ingress. Для чистой установки обязателен; в примере /connect.
 PUBLIC_XHTTP_PATH=/connect
+# Ответчик до exit через VPN; включайте публикацию только после приёмки Happ.
+EXIT_PING_ENABLE=false
+HAPP_EXIT_PING_ENABLE=false
+HAPP_PROVIDER_ID=
 # Email для ACME/Let's Encrypt сертификатов.
 ACME_EMAIL=operator@example.com
 # DNS API. Провайдер и зона задаются здесь; API credentials храните в .env.

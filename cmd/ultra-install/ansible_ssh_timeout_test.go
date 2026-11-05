@@ -75,6 +75,9 @@ func TestBootstrapInventoryProjectsBoundedSSHTimeout(t *testing.T) {
 					t.Fatalf("host %s overrides configured timeout", alias)
 				}
 			}
+			if serialized.All.Vars["ansible_ssh_args"] != bootstrapSSHArgs() {
+				t.Fatal("early SSH liveness/multiplex policy missing")
+			}
 			args := serialized.All.Vars["ansible_ssh_common_args"].(string)
 			if !strings.Contains(args, "StrictHostKeyChecking=yes") || !strings.Contains(args, "ControlMaster=no") {
 				t.Fatal("pinned transport changed")
@@ -98,6 +101,25 @@ for name in ('bridge','exit_0','database'):
  assert values['ansible_ssh_timeout']==int(sys.argv[2]),(name,values.get('ansible_ssh_timeout'))
  assert 'StrictHostKeyChecking=yes' in values['ansible_ssh_common_args']
  assert 'ControlMaster=no' in values['ansible_ssh_common_args']
+ assert 'ServerAliveInterval=5' in values['ansible_ssh_args']
+ assert 'ServerAliveCountMax=2' in values['ansible_ssh_args']
+ from ansible.playbook.play_context import PlayContext
+ from ansible.plugins.loader import connection_loader
+ import subprocess
+ context=PlayContext();context.remote_addr='192.0.2.10';context.remote_user='root'
+ connection=connection_loader.get('ssh',context,sys.stdin)
+ connection.set_options(var_options=values)
+ command=connection._build_command('ssh','ssh','192.0.2.10','/bin/true')
+ # -G only resolves options. It must never open a network connection.
+ resolved=subprocess.run(['ssh','-G']+[arg.decode() if isinstance(arg,bytes) else arg for arg in command[1:]],capture_output=True,text=True,check=True)
+ effective=dict(line.split(' ',1) for line in resolved.stdout.splitlines() if ' ' in line)
+ assert effective['controlmaster']=='false',effective['controlmaster']
+ assert effective.get('controlpath','none')=='none',effective.get('controlpath')
+ assert effective['serveraliveinterval']=='5',effective['serveraliveinterval']
+ assert effective['serveralivecountmax']=='2',effective['serveralivecountmax']
+ assert b'-C' in command or '-C' in command,command
+ assert effective['stricthostkeychecking']=='true',effective['stricthostkeychecking']
+
 `
 				command := exec.Command("python3", "-c", python, filepath.Join(directory, "inventory.json"), strconv.Itoa(want))
 				command.Stdin = strings.NewReader(string(raw))

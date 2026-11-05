@@ -21,7 +21,9 @@ func main(){
  os.WriteFile("/fixture/dispatcher.pid",[]byte(fmt.Sprint(os.Getpid())),0600)
  if os.Args[1]=="observe" { f,e:=d.InspectExecutionFence(); out:=map[string]any{"fence":f,"inspect_error":fmt.Sprint(e)};if f!=nil {out["reconcile_error"]=fmt.Sprint(d.ReconcileExecutionFence(*f))}; json.NewEncoder(os.Stdout).Encode(out);return }
  ctx,cancel:=signal.NotifyContext(context.Background(),syscall.SIGTERM);defer cancel()
- budget:=2*time.Second;if os.Args[1]=="cancel"||os.Args[1]=="child"||os.Args[1]=="success"{budget=20*time.Second};ctx,e:=d.WithExecutionTimeout(ctx,budget);if e!=nil{panic(e)}
+ // The deadline includes immutable bundle preparation and fsync before dispatch.
+ // Leave setup room on CI while still expiring before the synthetic 30s runner.
+ budget:=10*time.Second;if os.Args[1]=="cancel"||os.Args[1]=="child"||os.Args[1]=="success"{budget=20*time.Second};ctx,e:=d.WithExecutionTimeout(ctx,budget);if e!=nil{panic(e)}
  r,e:=d.RunLocal(ctx,"bootstrap",map[string]any{"all":map[string]any{}},map[string]any{},"/fixture/job","/usr/bin/python3","/fixture/runner")
  json.NewEncoder(os.Stdout).Encode(map[string]any{"receipt":r,"error":fmt.Sprint(e)})
  if e!=nil{os.Exit(1)}

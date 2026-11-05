@@ -94,6 +94,7 @@ func (s *Server) handleSubscriptionCache(w http.ResponseWriter, r *http.Request)
 	_ = json.NewEncoder(w).Encode(struct {
 		Version         int                               `json:"version"`
 		HappDefaultJSON bool                              `json:"happ_default_json,omitempty"`
+		HappExitPing    bool                              `json:"happ_exit_ping,omitempty"`
 		Entries         map[string]subscriptionCacheEntry `json:"entries"`
-	}{1, s.spec.HappDefaultJSON, entries})
+	}{1, s.spec.HappDefaultJSON, s.spec.HappExitPing, entries})
 }

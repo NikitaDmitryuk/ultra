@@ -26,6 +26,7 @@ type replacementPrimary struct {
 	DatabaseOID      uint32                 `json:"database_oid"`
 	Migrations       string                 `json:"migrations"`
 	Routes           []exits.BootstrapEntry `json:"routes"`
+	PingRoutes       []replacementPingRoute `json:"ping_routes,omitempty"`
 }
 
 type replacementTarget struct{ Address, Identity, Role string }
@@ -46,9 +47,12 @@ type replacementSteps struct {
 	Observe              func(context.Context) (replacementPrimary, error)
 	Discover             func(context.Context, replacementTarget) error
 	PrepareSSH           func(context.Context, replacementTarget) error
+	PreparePrimarySSH    func(context.Context) error
 	Fence                func(context.Context, replacementTarget) error
 	Quiescent            func(context.Context, replacementTarget) error
 	PrimaryQuiescent     func(context.Context) error
+	PrimarySessions      func(context.Context) error
+	Sessions             func(context.Context, replacementTarget) error
 	Clean                func(context.Context, replacementTarget, []exits.BootstrapEntry) error
 	RetireJournal        func() error
 	Bootstrap            func(context.Context) error
@@ -102,14 +106,31 @@ func executeProductionReplacement(
 		if err := run("primary-before-fence", check); err != nil {
 			return err
 		}
-		if steps.PrepareSSH == nil {
+		if steps.PrepareSSH == nil || steps.PreparePrimarySSH == nil {
 			return errors.New("replacement_ssh_liveness_preparer_required")
+		}
+		// Primary transport policy is separate from the destructive inventory.
+		if err := run("prepare-ssh-primary", func() error { return steps.PreparePrimarySSH(ctx) }); err != nil {
+			return err
 		}
 		// Validate the entire fleet transport before stopping any application.
 		for _, target := range targets {
 			if err := run("prepare-ssh-"+target.Role, func() error { return steps.PrepareSSH(ctx, target) }); err != nil {
 				return err
 			}
+		}
+		// Check live SSH sessions while the VPN still runs. The primary's idle
+		// transaction check belongs after fencing; this preflight is sessions only.
+		if steps.Sessions == nil || steps.PrimarySessions == nil {
+			return errors.New("replacement_quiescence_verifier_required")
+		}
+		for _, target := range targets {
+			if err := run("sessions-before-fence-"+target.Role, func() error { return steps.Sessions(ctx, target) }); err != nil {
+				return err
+			}
+		}
+		if err := run("sessions-before-fence-primary", func() error { return steps.PrimarySessions(ctx) }); err != nil {
+			return err
 		}
 		for _, target := range targets {
 			if err := run("fence-"+target.Role, func() error { return steps.Fence(ctx, target) }); err != nil {
@@ -371,7 +392,34 @@ func runProductionReplacement(args []string, output io.Writer) (result error) {
 	if err != nil {
 		return err
 	}
+	if err = observeReplacementPingPolicy(ctx, p); err != nil {
+		return err
+	}
 	if err = validateReplacementTopology(p, before, manifest.DatabaseSchemaMax); err != nil {
+		return err
+	}
+	relayAsset, err := upgradeAsset(manifest, "ultra-relay-linux-amd64")
+	if err != nil {
+		return err
+	}
+	pingRollout, err := planReplacementPing(p, before, digestSHA256([]byte(*state+*manifestSHA+digestSHA256(configRaw))), relayAsset.SHA)
+	if err != nil {
+		return err
+	}
+	if pingRollout != nil {
+		for _, node := range pingRollout.Nodes {
+			if node.Retained {
+				for _, target := range targets {
+					if samePreservedPrimaryHost(node.Address, target.Address) {
+						return errors.New("replacement_exit_ping_retained_host_in_destructive_inventory")
+					}
+				}
+			}
+		}
+	}
+	// Existing verified pins live in disposable cloud runtime. Capture all of
+	// them before the first fencing/cleanup mutation; missing pins close admission.
+	if err = captureReplacementPing(ctx, p, pingRollout, *state); err != nil {
 		return err
 	}
 	if failedScope != nil {
@@ -442,6 +490,24 @@ func runProductionReplacement(args []string, output io.Writer) (result error) {
 	steps := replacementSteps{
 		Observe:  observe,
 		Discover: func(ctx context.Context, target replacementTarget) error { return remote(ctx, target, "discover") },
+		PreparePrimarySSH: func(ctx context.Context) error {
+			if err := reservation.SetPhase("mutating"); err != nil {
+				return err
+			}
+			identity := p.Database.SSHIdentity
+			if identity == "" {
+				identity = p.SSH.Identity
+			}
+			raw, err := prepareReplacementSSH(
+				ctx,
+				p,
+				replacementTarget{Address: p.Database.PrimaryHost, Identity: identity, Role: "primary"},
+			)
+			if err != nil {
+				return err
+			}
+			return replaceUpgradeMetadata(filepath.Join(*state, "ssh-liveness-primary.json"), raw)
+		},
 		PrepareSSH: func(ctx context.Context, target replacementTarget) error {
 			if err := reservation.SetPhase("mutating"); err != nil {
 				return err
@@ -460,6 +526,18 @@ func runProductionReplacement(args []string, output io.Writer) (result error) {
 		},
 		Quiescent: func(ctx context.Context, target replacementTarget) error {
 			return checkReplacementQuiescence(ctx, p, target, false)
+		},
+		Sessions: func(ctx context.Context, target replacementTarget) error {
+			target.Role += "-sessions"
+			return checkReplacementQuiescence(ctx, p, target, false)
+		},
+		PrimarySessions: func(ctx context.Context) error {
+			identity := p.Database.SSHIdentity
+			if identity == "" {
+				identity = p.SSH.Identity
+			}
+			return checkReplacementQuiescence(ctx, p,
+				replacementTarget{Address: p.Database.PrimaryHost, Identity: identity, Role: "primary-sessions"}, true)
 		},
 		PrimaryQuiescent: func(ctx context.Context) error {
 			identity := p.Database.SSHIdentity
@@ -498,23 +576,50 @@ func runProductionReplacement(args []string, output io.Writer) (result error) {
 			if err := reservation.SetPhase("bootstrap"); err != nil {
 				return err
 			}
+			bootstrapArgs := productionReplacementBootstrapArgs(*config, localExecutionState)
+			if pingRollout != nil {
+				bootstrapArgs = append(bootstrapArgs, "--stage-exit-ping-publication")
+			}
 			child := exec.CommandContext(
 				ctx,
 				executable,
-				productionReplacementBootstrapArgs(*config, localExecutionState)...)
+				bootstrapArgs...)
 			child.Env = append(os.Environ(), "ULTRA_INSTALL_STATE_DIR="+filepath.Join(*state, "bootstrap"))
 			if err := reservation.Handoff(child); err != nil {
 				return err
 			}
 			child.Stdout = output
 			child.Stderr = os.Stderr
-			return child.Run()
+			if err := child.Run(); err != nil {
+				return err
+			}
+			if err := stepsObserveReplacement(ctx, observe, before); err != nil {
+				return err
+			}
+			return finishReplacementPing(
+				ctx,
+				p,
+				pingRollout,
+				*state,
+				func(ctx context.Context) error { return stepsObserveReplacement(ctx, observe, before) },
+			)
 		},
 	}
 	if failedExecution != nil {
 		steps.AdmitFailedExecution = admitReplacementFailedExecution(*failedExecution, failedScope, before, steps)
 	}
 	executionErr := executeProductionReplacement(ctx, targets, before, steps)
+	if executionErr == nil && pingRollout != nil {
+		_, executionErr = retainedMutation(
+			ctx,
+			p,
+			p.Bridge.SSHHost,
+			p.BridgeSSHIdentity(),
+			false,
+			replacementPingReleaseProgram,
+			[]string{pingRollout.Binding},
+		)
+	}
 	completed = executionErr == nil
 	return executionErr
 }

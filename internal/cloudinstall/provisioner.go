@@ -40,6 +40,7 @@ type Provisioner struct {
 	Identity, StateDir, BridgeIP, Binary string
 	Apply                                func(context.Context) error
 	Refresh                              func(context.Context) error
+	RefreshQuota                         func(context.Context) error
 }
 
 func (p *Provisioner) port() int {
@@ -155,6 +156,7 @@ func (p *Provisioner) node(ctx context.Context, op *cloud.Operation, instance cl
 func (p *Provisioner) exitSpec(node exits.Node) config.Spec {
 	spec := config.Spec{
 		SchemaVersion: config.CurrentSpecSchemaVersion, Role: config.RoleExit,
+		ExitPing:    p.Bridge.ExitPing,
 		MimicPreset: p.Bridge.MimicPreset, ListenAddress: "0.0.0.0", VLESSPort: node.Port,
 		SplithttpHost: p.Bridge.SplithttpHost, SplithttpPath: p.Bridge.SplithttpPath,
 		SplitHTTPTLS: p.Bridge.SplitHTTPTLS, TunnelTransport: p.Bridge.TunnelTransport,
@@ -754,6 +756,14 @@ func (p *Provisioner) ApplyRoute(ctx context.Context, op *cloud.Operation) error
 		return err
 	} else if applied {
 		return p.Refresh(ctx)
+	}
+	// A new budget has no provider observation yet. Applying it immediately
+	// would confirm a location whose credential still falls back for quota.
+	if p.RefreshQuota == nil {
+		return cloud.ErrUnavailable
+	}
+	if e := p.RefreshQuota(ctx); e != nil {
+		return e
 	}
 	if e := p.Apply(ctx); e != nil {
 		return e

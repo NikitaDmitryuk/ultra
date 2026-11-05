@@ -177,19 +177,46 @@ func TestReplacementReservationFailedNativeMutationRemainsAndExactTakeover(t *te
 	if err = replaceReservationRecord(root, *record); err != nil {
 		t.Fatal(err)
 	}
+	// This test owns the takeover transaction and its exact scope checks. The live-owner and orphan-SSH tests retain
+	// the public verifier path; parallel installer processes are not owned by
+	// this transaction fixture.
+	proofCalls := 0
+	prove := func(actual ReplacementReservation) error {
+		proofCalls++
+		if actual != *record {
+			t.Fatal("wrong prior reservation passed to quiescence proof")
+		}
+		return nil
+	}
+	for _, unproven := range []func(ReplacementReservation) error{nil, func(ReplacementReservation) error { return ErrExecutionAbandonmentUnproven }} {
+		if _, _, err = reserveReplacement(context.Background(), binding, func(ReplacementReservation) error {
+			t.Fatal("unproven reservation reached scope validation")
+			return nil
+		}, unproven); err == nil {
+			t.Fatal("takeover admitted without successful quiescence proof")
+		}
+		actual, readErr := inspectReplacementReservation(root)
+		if readErr != nil || actual == nil || *actual != *record {
+			t.Fatal("failed proof changed durable reservation", readErr)
+		}
+	}
 	denied := errors.New("scope mismatch")
-	if _, _, err = ReserveReplacement(context.Background(), binding, func(ReplacementReservation) error { return denied }); !errors.Is(
+	if _, _, err = reserveReplacement(context.Background(), binding, func(ReplacementReservation) error { return denied }, prove); !errors.Is(
 		err,
 		denied,
 	) {
 		t.Fatalf("scope validation: %v", err)
 	}
-	_, next, err := ReserveReplacement(context.Background(), binding, func(actual ReplacementReservation) error {
+	_, next, err := reserveReplacement(context.Background(), binding, func(actual ReplacementReservation) error {
 		if actual != *record {
 			t.Fatal("wrong prior reservation")
 		}
 		return nil
-	})
+	}, prove)
+	if proofCalls != 2 {
+		t.Fatalf("quiescence proof calls=%d want2", proofCalls)
+	}
+
 	if err != nil {
 		t.Fatal(err)
 	}

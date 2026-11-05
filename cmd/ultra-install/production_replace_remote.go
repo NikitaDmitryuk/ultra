@@ -3,7 +3,7 @@ package main
 // The connection is new and non-multiplexed. Only its own ancestry/session and
 // the independently resolved dedicated tunnel UID and known OS daemons are exempt.
 // Unknown sessions are never signalled by this read-only gate.
-const replacementSessionCensusDefinitions = `import os,sys,json,pwd,subprocess,re,time
+const replacementSessionCensusDefinitions = `import os,sys,json,pwd,subprocess,re,time,stat
 from pathlib import Path
 def gate_error(code,pid=None,row=None):
  error=ValueError(code)
@@ -24,6 +24,49 @@ def preauth_ssh(pid,row,rows):
  if row['comm']!='sshd-session' or row['argv']!=['sshd-session: unknown [priv]'] or row.get('loginuid')==0 or row.get('login_scope',False):return False
  children=[child for child in rows.values() if child['ppid']==pid]
  return bool(children) and all(child['comm']=='sshd-auth' and child['uids'] and 0 not in child['uids'] and child['argv']==['sshd-auth: unknown [net]'] for child in children)
+def trusted_ssh_executable(pid,role):
+ # Titles and comm are mutable: prove the kernel executable is the installed,
+ # root-owned OpenSSH binary. Missing/unknown metadata never earns exemption.
+ paths={'sshd':('/usr/sbin/sshd','/usr/bin/sshd'),
+  'sshd-session':('/usr/lib/openssh/sshd-session','/usr/libexec/openssh/sshd-session','/usr/libexec/sshd-session','/usr/lib/ssh/sshd-session'),
+  'sshd-auth':('/usr/lib/openssh/sshd-auth','/usr/libexec/openssh/sshd-auth','/usr/libexec/sshd-auth','/usr/lib/ssh/sshd-auth')}
+ try:
+  target=os.readlink('/proc/'+str(pid)+'/exe')
+  if target not in paths.get(role,()):return False
+  path=Path(target)
+  for part in (path,)+tuple(path.parents):
+   st=part.lstat()
+   if stat.S_ISLNK(st.st_mode) or st.st_uid!=0 or st.st_mode&0o022:return False
+  st=path.stat();actual=os.stat('/proc/'+str(pid)+'/exe')
+  return stat.S_ISREG(st.st_mode) and bool(st.st_mode&0o111) and (st.st_dev,st.st_ino)==(actual.st_dev,actual.st_ino)
+ except (OSError,ValueError):return False
+
+def modern_preauth_processes(rows):
+ # OpenSSH 10 sets accepted before banner exchange and session-auth before
+ # dropping privileges. Neither title is an authenticated session. Admit only
+ # the complete verified preauth tree; never a named user's persistent [priv].
+ allowed=set()
+ def clean(row,group):
+  return row.get('loginuid')==4294967295 and row.get('login_scope') is False and row.get('cgroups')==[group]
+ for pid,row in rows.items():
+  if row['comm']!='sshd-session' or row['argv']!=['sshd-session: [accepted]'] or row['uids']!=[0]*4 or row.get('ssh_executable') is not True or row['sid']!=pid:continue
+  parent=rows.get(row['ppid'])
+  if not parent or not shared_ssh_listener(parent) or parent['uids']!=[0]*4 or parent.get('ssh_executable') is not True:continue
+  groups=parent.get('cgroups',[])
+  if len(groups)!=1 or groups[0] not in ('/system.slice/ssh.service','/system.slice/sshd.service'):continue
+  group=groups[0]
+  if not clean(row,group):continue
+  tree={pid};valid=True
+  for _ in range(len(rows)+1):
+   added=False
+   for child,candidate in rows.items():
+    if child in tree or (candidate['ppid'] not in tree and candidate['sid']!=pid):continue
+    # The auth binary is the only permitted descendant, directly under monitor.
+    if candidate['ppid']!=pid or candidate['comm']!='sshd-auth' or candidate['argv'] not in (['sshd-auth: [session-auth]'],['sshd-auth: [session-auth early]']) or candidate.get('ssh_executable') is not True or not clean(candidate,group) or candidate['sid']!=pid:valid=False;break
+    tree.add(child);added=True
+   if not valid or not added:break
+  if valid:allowed.update(tree)
+ return allowed
 def os_service(row):
  # Match the complete observed command, never a basename or cgroup alone.
  groups=row.get('cgroups',[])
@@ -37,7 +80,7 @@ def root_helper(row):
   name=os.path.basename(arg)
   if name in ('sh','bash','dash','zsh','ksh','fish','perl','ruby','node','nodejs','busybox','ansible-playbook','ansible.cli.playbook','ultra-install','manual-deploy.py') or name.startswith(('python','ultra-install-linux-','AnsiballZ_')):return True
  return False
-def session_blockers(rows,self_pid,tunnel_uid=None):
+def session_blockers(rows,self_pid,tunnel_uid=None,ssh_only=False):
  if self_pid not in rows:gate_error('replacement_session_census_unavailable')
  ancestors=set();pid=self_pid
  while pid:
@@ -49,7 +92,7 @@ def session_blockers(rows,self_pid,tunnel_uid=None):
  # not a per-connection boundary and cannot exempt all sibling connections.
  leader=' '.join(rows[sid]['argv'])
  if is_ssh(rows[sid]) and ('[listener]' in leader or ': listener' in leader):gate_error('replacement_helper_session_unisolated')
- allowed=set(ancestors)
+ allowed=set(ancestors)|modern_preauth_processes(rows)
  if tunnel_uid is not None:
   if tunnel_uid<=0:gate_error('replacement_tunnel_uid_unavailable')
   for pid,row in rows.items():
@@ -66,7 +109,7 @@ def session_blockers(rows,self_pid,tunnel_uid=None):
   if pid in allowed or row['sid']==sid or 0 not in row['uids']:continue
   if shared_ssh_listener(row) or preauth_ssh(pid,row,rows) or os_service(row):continue
   if is_ssh(row) or row.get('loginuid')==0 or row.get('login_scope',False):blockers.append(('replacement_other_root_ssh_session',pid,row))
-  elif root_helper(row):blockers.append(('replacement_unknown_root_helper',pid,row))
+  elif not ssh_only and root_helper(row):blockers.append(('replacement_unknown_root_helper',pid,row))
  return blockers
 def validate_sessions(rows,self_pid,tunnel_uid=None):
  for code,pid,row in session_blockers(rows,self_pid,tunnel_uid):gate_error(code,pid,row)
@@ -83,11 +126,13 @@ def read_sessions():
     loginuid=int((d/'loginuid').read_text().strip())
     cgroups=[line.split(':',2)[2] for line in (d/'cgroup').read_text().splitlines()]
     login_scope=any(re.search(r'/session-[^/\n]+\.scope(?:/|$)',group) for group in cgroups)
-    rows[int(d.name)]={'ppid':int(fields[1]),'start':fields[19],'sid':int(fields[3]),'uids':[int(x) for x in uid.split()[1:]],'comm':raw.split('(',1)[1].rsplit(') ',1)[0],'argv':argv,'loginuid':loginuid,'login_scope':login_scope,'cgroups':cgroups}
+    comm=raw.split('(',1)[1].rsplit(') ',1)[0]
+    executable=trusted_ssh_executable(int(d.name),comm) if comm in ('sshd','sshd-session','sshd-auth') else False
+    rows[int(d.name)]={'ssh_executable':executable,'ppid':int(fields[1]),'start':fields[19],'sid':int(fields[3]),'uids':[int(x) for x in uid.split()[1:]],'comm':raw.split('(',1)[1].rsplit(') ',1)[0],'argv':argv,'loginuid':loginuid,'login_scope':login_scope,'cgroups':cgroups}
    except (FileNotFoundError,ProcessLookupError):continue
  except Exception:gate_error('replacement_session_census_unavailable')
  return rows
-def require_sessions_quiescent(self_pid,tunnel_uid=None):
+def require_sessions_quiescent(self_pid,tunnel_uid=None,ssh_only=False):
  # Waiting never authorizes a session, changes configuration or signals it.
  # One deadline covers PAM scopes, old/new OpenSSH layouts and PID churn.
  deadline=time.monotonic()+40
@@ -119,7 +164,7 @@ def require_sessions_quiescent(self_pid,tunnel_uid=None):
    own_ancestry.add(ancestor);ancestor=rows[ancestor]['ppid']
   # Classify once, using exactly the snapshot validator's exemptions. Seed
   # every SSH tree before any parent can disappear between polls.
-  blockers=session_blockers(rows,self_pid,tunnel_uid)
+  blockers=session_blockers(rows,self_pid,tunnel_uid,ssh_only)
   for code,pid,row in blockers:
    if code=='replacement_other_root_ssh_session':remember(rows,pid)
   remember(rows)
@@ -155,13 +200,14 @@ def require_primary_idle(database):
 const replacementQuiescenceProgram = replacementSessionCensusDefinitions + `
 try:
  if os.geteuid()!=0:gate_error('replacement_session_census_unavailable')
- primary=sys.argv[1]=='primary'
+ primary=sys.argv[1] in ('primary','primary-sessions')
+ sessions_only=sys.argv[1].endswith('-sessions')
  tunnel_uid=None
  if primary:
   try:tunnel_uid=pwd.getpwnam('ultra-db-tunnel').pw_uid
   except KeyError:gate_error('replacement_tunnel_uid_unavailable')
- require_sessions_quiescent(os.getpid(),tunnel_uid)
- if primary:require_primary_idle(sys.argv[2])
+ require_sessions_quiescent(os.getpid(),tunnel_uid,ssh_only=sessions_only)
+ if sys.argv[1]=='primary':require_primary_idle(sys.argv[2])
  print(json.dumps({'quiescent':True,'code':''}))
 except Exception as error:
  code=str(error)
@@ -178,7 +224,12 @@ SELECT json_build_object('system_identifier',(SELECT system_identifier::text FRO
  'primary',NOT pg_is_in_recovery(),
  'migrations',(SELECT COALESCE(string_agg(version::text,',' ORDER BY version),'') FROM public.schema_migrations),
  'routes',(SELECT COALESCE(json_agg(r ORDER BY r.name,r.address,r.port),'[]'::json) FROM
- (SELECT name,address,port,tunnel_uuid,COALESCE(pinned_peer_cert_sha256,'') AS pinned_peer_cert_sha256,priority,enabled FROM public.exit_nodes) r));
+ (SELECT name,address,port,tunnel_uuid,COALESCE(pinned_peer_cert_sha256,'') AS pinned_peer_cert_sha256,priority,enabled FROM public.exit_nodes) r),
+ 'ping_routes',(SELECT COALESCE(json_agg(r ORDER BY r.id,r.operation_id),'[]'::json) FROM
+ (SELECT e.id::text,e.address,e.port,e.tunnel_uuid,COALESCE(e.pinned_peer_cert_sha256,'') AS pin,
+ COALESCE(o.id::text,'') AS operation_id,COALESCE(o.body->>'instance_id','') AS instance_id,
+ COALESCE(o.state,'') AS state FROM public.exit_nodes e LEFT JOIN public.cloud_operations o
+ ON o.body->>'exit_id'=e.id::text AND o.state NOT IN ('deleted','retired','cancelled') WHERE e.enabled) r));
 ROLLBACK;"""
 r=subprocess.run(['runuser','-u','postgres','--','psql','--no-psqlrc','-qAt','-v','ON_ERROR_STOP=1','-d',sys.argv[1]],input=q,capture_output=True,text=True,timeout=20,env=dict(os.environ,PGOPTIONS='-c default_transaction_read_only=on'))
 if r.returncode:raise ValueError('replacement_primary_read_failed')

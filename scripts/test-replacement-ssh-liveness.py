@@ -202,11 +202,48 @@ print(json.dumps(result))
                     fixture_python("from pathlib import Path; assert Path('/etc/ssh/sshd_config').read_bytes()==Path('/tmp/sshd-before').read_bytes(); assert not Path('/etc/ssh/ultra-root-liveness.conf').exists()")
                 finally:
                     fixture_python("import os,signal; from pathlib import Path; p=Path('/tmp/fixture-main-pid'); os.kill(int(p.read_text()),signal.SIGTERM); p.unlink()")
+            effective_script = "import json,subprocess; result={};\nfor user in ('root','nobody'):\n output=subprocess.check_output(['/usr/sbin/sshd','-T','-C','user='+user+',host=192.0.2.1,addr=192.0.2.1,laddr=192.0.2.2,lport=22'],text=True); values={};\n for line in output.splitlines():\n  key,value=line.split(' ',1);values.setdefault(key.lower(),[]).append(value)\n result[user]=values\nprint(json.dumps(result))"
+            before_effective = json.loads(fixture_python(effective_script))
             # Publish the exact owned disk pair without reloading the existing
             # 0/3 listener: simulate a crash at the final activation boundary.
             fixture_python(policy + "\nmain=Path('/etc/ssh/sshd_config');main.write_bytes(main.read_bytes()+BLOCK);Path('/etc/ssh/ultra-root-liveness.conf').write_bytes(POLICY)\n")
-            assert json.loads(ssh(program))['verified'], 'interrupted activation was not completed'
-            assert json.loads(ssh(program))['verified'], 'repeat was not idempotent'
+            receipt = json.loads(ssh(program))
+            assert receipt == {'verified': True, 'version': 2, 'role': 'bridge', 'global_pre_auth': True, 'login_grace': 30, 'interval': 10, 'count': 2}, receipt
+            assert json.loads(ssh(program)) == receipt, 'repeat was not idempotent'
+            after_effective = json.loads(fixture_python(effective_script))
+            for user in ('root', 'nobody'):
+                assert before_effective[user]['logingracetime'] == ['120']
+                assert after_effective[user]['logingracetime'] == ['30']
+                allowed = {'logingracetime'} | ({'clientaliveinterval', 'clientalivecountmax'} if user == 'root' else set())
+                assert {k: v for k, v in before_effective[user].items() if k not in allowed} == {k: v for k, v in after_effective[user].items() if k not in allowed}, user
+            primary_program = policy + "\nsys.argv=['fixture','primary','127.0.0.1']\n" + suffix
+            primary_receipt = json.loads(ssh(primary_program))
+            assert primary_receipt == dict(receipt, role='primary'), primary_receipt
+            # A TCP client that never identifies/authenticates must disappear
+            # through the server deadline, without closing or killing it here.
+            started = time.monotonic()
+            preauth = socket.create_connection(('127.0.0.1', port), timeout=5)
+            try:
+                preauth.settimeout(5)
+                assert preauth.recv(1024).startswith(b'SSH-'), 'pre-auth listener did not send identification'
+                blocked = json.loads(ssh(snapshot))
+                assert not blocked['quiescent'] and blocked['code'] == 'replacement_other_root_ssh_session' and blocked['offender'], ('pre-auth child was not censused', blocked)
+                observed = json.loads(ssh(census))
+                elapsed = time.monotonic() - started
+                assert observed['quiescent'], ('pre-auth deadline did not drain full census', observed)
+                assert 20 <= elapsed < 40, ('pre-auth deadline outside bounded window', elapsed)
+                # Only the server may end this test connection before the
+                # successful census. Drain any fixed disconnect text to EOF.
+                preauth.settimeout(2)
+                try:
+                    while preauth.recv(1024):
+                        pass
+                except ConnectionResetError:
+                    pass
+                assert json.loads(ssh(census))['quiescent'], 'post-deadline census was not stable'
+            finally:
+                preauth.close()
+
             relay, target = orphan()
             try:
                 assert not json.loads(ssh(snapshot))['quiescent'], 'policy fixture did not start an orphan'
@@ -228,7 +265,7 @@ print(json.dumps(result))
                 os.killpg(live.pid, signal.SIGKILL)
                 live.wait(5)
             assert json.loads(ssh(census))['quiescent'], 'responsive fixture cleanup did not drain'
-            print('Real SSH liveness: baseline blocked; TCP-preserving orphan drained; next full census passed; live foreign SSH blocked; root-only config verified; interrupted activation completed; custom listener args rejected')
+            print('Real SSH liveness: baseline blocked; TCP-preserving orphan drained; next full census passed; live foreign SSH blocked; global pre-auth and root-only liveness config verified; primary role bound; pre-auth TCP naturally drained under 40s; interrupted activation completed; custom listener args rejected')
         finally:
             run(['docker', 'rm', '-f', container])
 

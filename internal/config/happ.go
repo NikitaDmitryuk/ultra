@@ -64,6 +64,9 @@ func validateSubscriptionBridges(bridges []SubscriptionBridge) error {
 // BuildHappProfile builds a complete Xray profile whose credentials select the
 // same server-side route on every bridge. No direct client outbound is installed.
 func BuildHappProfile(spec *Spec, user auth.User, name string) (map[string]any, error) {
+	if err := spec.ValidateExitPing(); err != nil {
+		return nil, err
+	}
 	if err := validateSubscriptionBridges(spec.SubscriptionBridges); err != nil {
 		return nil, err
 	}
@@ -122,6 +125,10 @@ func BuildHappProfile(spec *Spec, user auth.User, name string) (map[string]any, 
 			return nil, err
 		}
 	}
+	probeURL := "https://www.google.com/generate_204"
+	if spec.HappExitPing {
+		probeURL = ExitPingURL
+	}
 	return map[string]any{
 		"remarks": name,
 		"log":     map[string]any{"loglevel": "warning"},
@@ -138,7 +145,7 @@ func BuildHappProfile(spec *Spec, user auth.User, name string) (map[string]any, 
 		"burstObservatory": map[string]any{
 			"subjectSelector": []string{"bridge-"},
 			"pingConfig": map[string]any{
-				"destination": "https://www.google.com/generate_204",
+				"destination": probeURL,
 				"interval":    "10s",
 				"sampling":    1,
 				"timeout":     "5s",
