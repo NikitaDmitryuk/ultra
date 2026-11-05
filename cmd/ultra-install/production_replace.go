@@ -46,6 +46,7 @@ type replacementSteps struct {
 	Observe              func(context.Context) (replacementPrimary, error)
 	Discover             func(context.Context, replacementTarget) error
 	PrepareSSH           func(context.Context, replacementTarget) error
+	PreparePrimarySSH    func(context.Context) error
 	Fence                func(context.Context, replacementTarget) error
 	Quiescent            func(context.Context, replacementTarget) error
 	PrimaryQuiescent     func(context.Context) error
@@ -102,8 +103,12 @@ func executeProductionReplacement(
 		if err := run("primary-before-fence", check); err != nil {
 			return err
 		}
-		if steps.PrepareSSH == nil {
+		if steps.PrepareSSH == nil || steps.PreparePrimarySSH == nil {
 			return errors.New("replacement_ssh_liveness_preparer_required")
+		}
+		// Primary transport policy is separate from the destructive inventory.
+		if err := run("prepare-ssh-primary", func() error { return steps.PreparePrimarySSH(ctx) }); err != nil {
+			return err
 		}
 		// Validate the entire fleet transport before stopping any application.
 		for _, target := range targets {
@@ -442,6 +447,24 @@ func runProductionReplacement(args []string, output io.Writer) (result error) {
 	steps := replacementSteps{
 		Observe:  observe,
 		Discover: func(ctx context.Context, target replacementTarget) error { return remote(ctx, target, "discover") },
+		PreparePrimarySSH: func(ctx context.Context) error {
+			if err := reservation.SetPhase("mutating"); err != nil {
+				return err
+			}
+			identity := p.Database.SSHIdentity
+			if identity == "" {
+				identity = p.SSH.Identity
+			}
+			raw, err := prepareReplacementSSH(
+				ctx,
+				p,
+				replacementTarget{Address: p.Database.PrimaryHost, Identity: identity, Role: "primary"},
+			)
+			if err != nil {
+				return err
+			}
+			return replaceUpgradeMetadata(filepath.Join(*state, "ssh-liveness-primary.json"), raw)
+		},
 		PrepareSSH: func(ctx context.Context, target replacementTarget) error {
 			if err := reservation.SetPhase("mutating"); err != nil {
 				return err

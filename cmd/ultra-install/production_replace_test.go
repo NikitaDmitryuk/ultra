@@ -106,12 +106,18 @@ func TestProductionReplacementOrderAndFailClosedJournalRetirement(t *testing.T) 
 	ctx := context.Background()
 	targets := []replacementTarget{{Role: "bridge"}, {Role: "exit-0"}}
 	primary := replacementPrimary{SystemIdentifier: "123", Database: "fixture", DatabaseOID: 42, Migrations: "1,2"}
-	for _, failure := range []string{"", "discover-exit-0", "prepare-ssh-exit-0", "fence-exit-0", "clean-exit-0", "bootstrap", "changed-schema", "quiescence-before-cleanup-exit-0", "quiescence-before-cleanup-primary", "quiescence-after-cleanup-bridge", "quiescence-before-journal-primary"} {
+	for _, failure := range []string{"", "discover-exit-0", "prepare-ssh-primary", "prepare-ssh-exit-0", "fence-exit-0", "clean-exit-0", "bootstrap", "changed-schema", "quiescence-before-cleanup-exit-0", "quiescence-before-cleanup-primary", "quiescence-after-cleanup-bridge", "quiescence-before-journal-primary"} {
 		t.Run(failure, func(t *testing.T) {
 			var events []string
 			retired := false
 			stage := ""
 			steps := replacementSteps{
+				PreparePrimarySSH: func(context.Context) error {
+					if stage == failure {
+						return errors.New("fixture")
+					}
+					return nil
+				},
 				PrepareSSH: func(context.Context, replacementTarget) error {
 					if stage == failure {
 						return errors.New("fixture")
@@ -170,7 +176,7 @@ func TestProductionReplacementOrderAndFailClosedJournalRetirement(t *testing.T) 
 					"discover-bridge",
 					"discover-exit-0",
 					"primary-before-fence",
-					"prepare-ssh-bridge", "prepare-ssh-exit-0",
+					"prepare-ssh-primary", "prepare-ssh-bridge", "prepare-ssh-exit-0",
 					"fence-bridge",
 					"fence-exit-0",
 					"quiescence-before-cleanup-bridge",

@@ -21,29 +21,45 @@ func prepareReplacementSSH(ctx context.Context, plan *installplan.InstallPlan, t
 	if err != nil {
 		return nil, err
 	}
-	var receipt struct {
-		Verified bool `json:"verified"`
-		RootOnly bool `json:"root_only"`
-		Interval int  `json:"interval"`
-		Count    int  `json:"count"`
-	}
-	if retainedReconcileUniqueJSON(raw) != nil || json.Unmarshal(raw, &receipt) != nil || !receipt.Verified || !receipt.RootOnly ||
-		receipt.Interval != 10 ||
-		receipt.Count != 2 {
-		return nil, errors.New("replacement_ssh_liveness_receipt_invalid")
+	if err := validateReplacementSSHReceipt(raw, target.Role); err != nil {
+		return nil, err
 	}
 	return raw, nil
 }
 
+func validateReplacementSSHReceipt(raw []byte, role string) error {
+	var receipt struct {
+		Verified      bool   `json:"verified"`
+		Version       int    `json:"version"`
+		Role          string `json:"role"`
+		GlobalPreAuth bool   `json:"global_pre_auth"`
+		LoginGrace    int    `json:"login_grace"`
+		Interval      int    `json:"interval"`
+		Count         int    `json:"count"`
+	}
+	if retainedReconcileUniqueJSON(raw) != nil || json.Unmarshal(raw, &receipt) != nil || !receipt.Verified || receipt.Version != 2 ||
+		receipt.Role != role ||
+		!receipt.GlobalPreAuth ||
+		receipt.LoginGrace != 30 ||
+		receipt.Interval != 10 ||
+		receipt.Count != 2 {
+		return errors.New("replacement_ssh_liveness_receipt_invalid")
+	}
+	return nil
+}
+
 // Match belongs at the end of the main configuration: an early conf.d Include
 // would otherwise put subsequent global-only directives inside a Match block.
-// No authentication directive or existing configuration byte is rewritten.
+// LoginGraceTime is global-only, so its owned prefix precedes existing Includes.
+// Existing configuration bytes and authentication permissions are preserved.
 const replacementSSHLivenessDefinitions = `import os,sys,json,stat,tempfile,subprocess,ipaddress,re,signal,shlex
 from pathlib import Path
 EXPECTED_OWNER=0
 POLICY=b'Match User root\n    ClientAliveInterval 10\n    ClientAliveCountMax 2\n'
 BLOCK=b'\n# BEGIN ultra managed root SSH liveness\nMatch all\nInclude /etc/ssh/ultra-root-liveness.conf\n# END ultra managed root SSH liveness\n'
 MARKER=b'ultra managed root SSH liveness'
+GRACE_PREFIX=b'# BEGIN ultra managed SSH pre-authentication\nLoginGraceTime 30\n# END ultra managed SSH pre-authentication\n'
+GRACE_MARKER=b'ultra managed SSH pre-authentication'
 def require(value,code):
  if not value:raise ValueError(code)
 def private_config(path,optional=False):
@@ -104,6 +120,7 @@ def configure_ssh_liveness(main,policy,run,reload,connection):
  previous=private_config(policy,True)
  require(previous is None or previous[0]==POLICY,'replacement_ssh_policy_foreign')
  require(MARKER not in original[0] or (original[0].endswith(BLOCK) and original[0].count(MARKER)==2),'replacement_ssh_config_marker_conflict')
+ require(GRACE_MARKER not in original[0] or (original[0].startswith(GRACE_PREFIX) and original[0].count(GRACE_MARKER)==2),'replacement_ssh_grace_marker_conflict')
  require(len(connection)==4,'replacement_ssh_connection_unavailable')
  remote,remoteport,local,localport=connection
  ipaddress.ip_address(remote);ipaddress.ip_address(local)
@@ -119,13 +136,15 @@ def configure_ssh_liveness(main,policy,run,reload,connection):
   for line in output.splitlines():
    key,space,value=line.partition(' ')
    require(space,'replacement_ssh_effective_config_invalid')
-   result.setdefault(key,[]).append(value)
+   result.setdefault(key.lower(),[]).append(value)
   return result
  command(['/usr/sbin/sshd','-t'])
  before={user:effective(user)for user in ('root','nobody')}
  alive=('clientaliveinterval','clientalivecountmax')
  require(tuple(before['root'].get(k,[None])[0]for k in alive) in (('0','3'),('10','2')),'replacement_ssh_liveness_conflict')
+ require(all(before[user].get('logingracetime') in (['120'],['30'])for user in before),'replacement_ssh_login_grace_conflict')
  candidate=original[0] if original[0].endswith(BLOCK)else original[0]+BLOCK
+ if not candidate.startswith(GRACE_PREFIX):candidate=GRACE_PREFIX+candidate
  installed=False
  def restore():
   current_main=private_config(main)
@@ -147,7 +166,10 @@ def configure_ssh_liveness(main,policy,run,reload,connection):
   command(['/usr/sbin/sshd','-t'])
   after={user:effective(user)for user in before}
   require(tuple(after['root'].get(k,[None])[0]for k in alive)==('10','2'),'replacement_ssh_liveness_not_effective')
-  require({k:v for k,v in before['root'].items()if k not in alive}=={k:v for k,v in after['root'].items()if k not in alive} and before['nobody']==after['nobody'],'replacement_ssh_other_settings_changed')
+  require(all(after[user].get('logingracetime')==['30']for user in after),'replacement_ssh_login_grace_not_effective')
+  for user in before:
+   allowed=(*alive,'logingracetime')if user=='root'else('logingracetime',)
+   require({k:v for k,v in before[user].items()if k not in allowed}=={k:v for k,v in after[user].items()if k not in allowed},'replacement_ssh_other_settings_changed')
   # Disk identity cannot prove that the listener survived activation. A prior
   # crash may have installed both files immediately before its SIGHUP.
   reload()
@@ -158,18 +180,24 @@ def configure_ssh_liveness(main,policy,run,reload,connection):
    try:restore()
    except Exception:raise ValueError('replacement_ssh_rollback_failed')from None
   raise error
- return {'verified':True,'root_only':True,'interval':10,'count':2}
+ return {'verified':True,'version':2,'global_pre_auth':True,'login_grace':30,'interval':10,'count':2}
+def validate_ssh_target(role,primary,addresses):
+ require(role=='primary' or role=='bridge' or re.fullmatch('(exit|former)-[0-9]+',role),'replacement_ssh_role_forbidden')
+ is_primary=any(ipaddress.ip_address(a['local'])==ipaddress.ip_address(primary)for row in addresses for a in row.get('addr_info',[]))
+ require(is_primary==(role=='primary'),'replacement_ssh_primary_role_mismatch')
 `
 
 const replacementSSHLivenessProgram = replacementSSHLivenessDefinitions + `
 try:
  role,primary=sys.argv[1:]
- require(os.geteuid()==0 and (role=='bridge' or re.fullmatch('(exit|former)-[0-9]+',role)),'replacement_ssh_role_forbidden')
+ require(os.geteuid()==0,'replacement_ssh_role_forbidden')
  addresses=json.loads(subprocess.run(['ip','-j','address','show'],check=True,capture_output=True,text=True,timeout=5).stdout)
- require(all(ipaddress.ip_address(a['local'])!=ipaddress.ip_address(primary)for row in addresses for a in row.get('addr_info',[])),'replacement_ssh_primary_forbidden')
+ validate_ssh_target(role,primary,addresses)
  def run(arguments):return subprocess.run(arguments,capture_output=True,text=True,timeout=5)
  listener_fd,reload=bind_ssh_listener(run)
- try:print(json.dumps(configure_ssh_liveness(Path('/etc/ssh/sshd_config'),Path('/etc/ssh/ultra-root-liveness.conf'),run,reload,os.environ.get('SSH_CONNECTION','').split())))
+ try:
+  receipt=configure_ssh_liveness(Path('/etc/ssh/sshd_config'),Path('/etc/ssh/ultra-root-liveness.conf'),run,reload,os.environ.get('SSH_CONNECTION','').split())
+  receipt['role']=role;print(json.dumps(receipt))
  finally:os.close(listener_fd)
 except Exception as error:
  code=str(error)

@@ -198,8 +198,9 @@ func TestFailedExecutionReplacementRunsRealRetirementBeforeCleanup(t *testing.T)
 			localCalls := 0
 			cleaned := false
 			steps := replacementSteps{
-				PrepareSSH: func(context.Context, replacementTarget) error { return nil },
-				Checkpoint: func(stage string) error { events = append(events, stage); return nil },
+				PreparePrimarySSH: func(context.Context) error { return nil },
+				PrepareSSH:        func(context.Context, replacementTarget) error { return nil },
+				Checkpoint:        func(stage string) error { events = append(events, stage); return nil },
 				Observe: func(context.Context) (replacementPrimary, error) {
 					value := f.primary
 					if prepared && failure == "primary" {
@@ -450,9 +451,10 @@ func TestReplacementFailedSSHPreparationReservationCanBeReclaimed(t *testing.T) 
 		defer func() { _ = lease.Close() }()
 		primary := replacementPrimary{SystemIdentifier: "123", Database: "fixture", DatabaseOID: 42}
 		steps := replacementSteps{
-			Checkpoint: func(string) error { return nil },
-			Discover:   func(context.Context, replacementTarget) error { return nil },
-			Observe:    func(context.Context) (replacementPrimary, error) { return primary, nil },
+			PreparePrimarySSH: func(context.Context) error { return nil },
+			Checkpoint:        func(string) error { return nil },
+			Discover:          func(context.Context, replacementTarget) error { return nil },
+			Observe:           func(context.Context) (replacementPrimary, error) { return primary, nil },
 			PrepareSSH: func(context.Context, replacementTarget) error {
 				if err := lease.SetPhase("mutating"); err != nil {
 					return err

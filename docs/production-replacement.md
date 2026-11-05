@@ -62,11 +62,12 @@ execution namespace. Повреждённый fence, running или отсутс
 описывать только текущие и явно сохранённые предыдущие цели с pinned root transport,
 а `primary-before.json` именно её workspace — ту же identity primary.
 
-Перед остановкой приложений на всём non-DB парке replacement проверяет и
-подготавливает root SSH liveness: `ClientAliveInterval 10`, `ClientAliveCountMax 2`.
-Управляемый Include добавляется только в конец `sshd_config`, а root-only policy
-проверяется через `sshd -t` и `sshd -T -C`: остальные effective root-настройки и
-настройки non-root не меняются. Конфликт, чужой файл, неизвестный suffix после
+Перед остановкой приложений replacement проверяет SSH primary и всего non-DB парка:
+глобальный pre-authentication deadline `LoginGraceTime 30` и root SSH liveness: `ClientAliveInterval 10`, `ClientAliveCountMax 2`.
+Глобальный owned prefix добавляется перед существующими Include, а root-only Include —
+в конец `sshd_config`. Проверки `sshd -t` и `sshd -T -C` допускают только
+переход LoginGraceTime с 120 на 30 секунд для всех пользователей и указанные
+root liveness значения; остальные effective root/non-root настройки не меняются. Конфликт, чужой файл, неизвестный suffix после
 managed Include или ошибка reload останавливают работу до app fencing; изменение
 обоих файлов откатывается. До записи проверяются `ssh.service` MainPID/ExecStart,
 реальный executable и startup args listener: поддерживается штатный
@@ -74,7 +75,9 @@ managed Include или ошибка reload останавливают работ
 заменённый executable закрывают gate. Проверенный listener получает SIGHUP через
 pidfd, независимо от ExecReload unit. Активация обязательна и при идентичных
 управляемых файлах: предыдущий процесс мог завершиться до reload.
-Primary SSH config не затрагивается.
+Primary получает ту же SSH policy отдельно и никогда не включается в destructive inventory.
+LoginGraceTime ограничивает время аутентификации всех пользователей; это не idle timeout
+для уже аутентифицированных клиентов. Receipt version 2 связывает policy с ролью хоста.
 
 Census не исключает и не завершает чужие SSH/PAM sessions. Он повторяет полную
 проверку до 40 секунд и отслеживает все наблюдавшиеся SSH-деревья процессов, SID и PAM scope
