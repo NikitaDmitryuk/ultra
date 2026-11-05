@@ -51,7 +51,7 @@ func TestPersonalNotificationSelfOnlyStrictPreferences(t *testing.T) {
 	}
 }
 func TestPersonalNotificationDeliveryCurrentTokenBlockedAndRecheck(t *testing.T) {
-	for _, scenario := range []string{"success", "blocked", "optout", "upstream-error", "rate-limit"} {
+	for _, scenario := range []string{"success", "blocked", "optout", "upstream-error", "pending-confirmation", "rate-limit"} {
 		t.Run(scenario, func(t *testing.T) {
 			prepares, sends, completed := 0, 0, false
 			n := db.PersonalNotification{
@@ -69,7 +69,7 @@ func TestPersonalNotificationDeliveryCurrentTokenBlockedAndRecheck(t *testing.T)
 					_ = json.NewEncoder(w).Encode(n)
 				case "/v1/personal-notifications/7/prepare":
 					prepares++
-					if scenario == "upstream-error" {
+					if scenario == "upstream-error" || scenario == "pending-confirmation" {
 						http.Error(w, "unavailable", http.StatusServiceUnavailable)
 						return
 					}
@@ -102,7 +102,7 @@ func TestPersonalNotificationDeliveryCurrentTokenBlockedAndRecheck(t *testing.T)
 						if body.Sent || body.Terminal || body.Delay != 900 {
 							t.Error("retry_after ignored", body.Delay)
 						}
-					case "upstream-error":
+					case "upstream-error", "pending-confirmation":
 						if body.Sent || body.Terminal || body.Delay == 0 {
 							t.Error("transient failure not retryable")
 						}
@@ -144,7 +144,7 @@ func TestPersonalNotificationDeliveryCurrentTokenBlockedAndRecheck(t *testing.T)
 				t.Fatal("delivery not completed")
 			}
 			want := 1
-			if scenario == "optout" || scenario == "upstream-error" {
+			if scenario == "optout" || scenario == "upstream-error" || scenario == "pending-confirmation" {
 				want = 0
 			}
 			if sends != want {

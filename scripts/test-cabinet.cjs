@@ -236,6 +236,23 @@ test("notification server error keeps connection and traffic controls visible", 
   assert.match(html, /id="notify-credentials"/);
   assert.equal(p.el("#notifications-error").hidden, false);
   assert.equal(p.el("#notify-credentials").checked, false);
+  assert.equal(p.el("#notify-credentials").disabled, true);
+  assert.equal(p.el("#save-notifications").disabled, true);
+  assert.equal(p.el("#retry-notifications").hidden, false);
+  assert.match(html, /id="connect"/);
+  assert.match(html, /id="self-traffic"/);
+  p.context.fetch = async (path, options) => {
+    p.calls.push({ path, options });
+    if (path === "/api/self/notifications")
+      return { ok: true, status: 200, json: async () => ({ credentials: false, access: true, quota: false, availability: false }) };
+    throw new Error("unexpected request " + path);
+  };
+  await p.el("#retry-notifications").click();
+  assert.equal(p.el("#notify-credentials").disabled, false);
+  assert.equal(p.el("#notify-access").checked, true);
+  assert.equal(p.el("#save-notifications").disabled, false);
+  assert.equal(p.el("#app").innerHTML.includes('id="connect"'), true);
+  assert.equal(p.el("#app").innerHTML.includes('id="self-traffic"'), true);
 });
 test("disabled registered member can edit notification preferences", async () => {
   const p = page(true, {
@@ -258,19 +275,28 @@ test("late preferences response neither overwrites edits nor renders after self 
   });
   p.context.fetch = async (path, options) => {
     p.calls.push({ path, options });
-    if (path === "/api/self/notifications") return new Promise((resolve) => { resolvePreferences = resolve; });
+    if (path === "/api/self/notifications" && options.method !== "PUT") return new Promise((resolve) => { resolvePreferences = resolve; });
     if (path === "/api/self") return { ok: true, status: 200, json: async () => ({ registered: true, member: { uuid: "owner", active: true, pending: false } }) };
     if (path === "/api/self/traffic") return { ok: true, status: 200, json: async () => ({ months: [] }) };
     if (path === "/api/self/exits") return { ok: true, status: 200, json: async () => ({ exits: [], profiles: [] }) };
     throw new Error("unexpected request " + path);
   };
   await flush();
+  assert.equal(p.el("#notify-credentials").disabled, true);
   p.el("#notify-credentials").checked = true;
   p.el("#notify-credentials").onchange();
-  resolvePreferences({ ok: true, status: 200, json: async () => ({ credentials: false, access: true, quota: true, availability: true }) });
+  resolvePreferences({ ok: true, status: 200, json: async () => ({ credentials: false, access: true, quota: false, availability: true }) });
   await flush();
-  assert.equal(p.el("#notify-credentials").checked, true);
-  assert.equal(p.el("#notify-access").checked, false);
+  assert.equal(p.el("#notify-credentials").disabled, false);
+  assert.equal(p.el("#notify-credentials").checked, false);
+  assert.equal(p.el("#notify-access").checked, true);
+  assert.equal(p.el("#notify-quota").checked, false);
+  assert.equal(p.el("#notify-availability").checked, true);
+  p.el("#notify-credentials").checked = true;
+  p.el("#notify-credentials").onchange();
+  await p.el("#save-notifications").click();
+  const put = p.calls.find((call) => call.path === "/api/self/notifications" && call.options.method === "PUT");
+  assert.deepEqual(JSON.parse(put.options.body), { credentials: true, access: true, quota: false, availability: true });
   let resolveOld;
   let delayed = false;
   p.context.fetch = async (path, options) => {

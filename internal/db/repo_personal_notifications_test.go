@@ -186,12 +186,18 @@ func TestPersonalAccessExactAcknowledgementAndNoHistoricalReplay(t *testing.T) {
 	if e = r.ConfirmAccess(ctx, old, all); e != nil {
 		t.Fatal(e)
 	}
-	if personalCount(t, d) != 0 {
-		t.Fatal("mismatched snapshot acknowledged")
+	if personalCount(t, d) != 1 {
+		t.Fatal("desired access mutation was not durably queued")
 	}
-	// Failed Apply never calls ConfirmAccess: there is still no event.
-	personalConfirm(t, r, users)
 	n, e := r.Claim(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if ok, e := r.Eligible(ctx, &n); ok || !errors.Is(e, ErrPersonalNotificationPending) {
+		t.Fatal("mismatched/failed apply allowed delivery", e)
+	}
+	// Failed Apply leaves a durable event awaiting its exact acknowledgement.
+	personalConfirm(t, r, users)
 	if e != nil || n.Kind != "disabled" {
 		t.Fatal("ack did not notify disable", e)
 	}
@@ -395,14 +401,22 @@ func TestPersonalRecoveryRequiresDeliveredOnset(t *testing.T) {
 	if ok, e := r.Eligible(ctx, &recovery); e != nil || !ok {
 		t.Fatal("delivered onset recovery eligibility", e)
 	}
-	// A new failure during cooldown supersedes an undelivered recovery, even
-	// though it must not start another incident yet.
+	// A temporary failure must retain the recovery for retry until an opposite
+	// condition is confirmed, without promising that VPN is currently working.
 	v.Available = false
 	if e = r.Observe(ctx, []PersonalRouteObservation{v}, now.Add(9*time.Minute)); e != nil {
 		t.Fatal(e)
 	}
-	if ok, e := r.Eligible(ctx, &recovery); e != nil || ok {
-		t.Fatal("stale recovery promised VPN during cooldown failure", e)
+	if ok, e := r.Eligible(ctx, &recovery); ok || !errors.Is(e, ErrPersonalNotificationPending) {
+		t.Fatal("temporary failure must wait, not promise VPN or become terminal", e)
+	}
+	for i := 10; i <= 14; i++ {
+		if e = r.Observe(ctx, []PersonalRouteObservation{v}, now.Add(time.Duration(i)*time.Minute)); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if ok, e := r.Eligible(ctx, &recovery); ok || e != nil {
+		t.Fatal("confirmed opposite must terminally supersede recovery", e)
 	}
 	// Deleted owners cannot receive queued state or secrets.
 	if _, e = d.Pool.Exec(ctx, `DELETE FROM users WHERE uuid=$1`, u.UUID); e != nil {
@@ -486,5 +500,225 @@ func TestPersonalOwnResetAndRetryIsIdempotent(t *testing.T) {
 	}
 	if personalCount(t, d) != 0 {
 		t.Fatal("own reset duplicated cabinet success")
+	}
+}
+
+func TestPersonalAvailabilityReconfirmsAfterGapAndPersistsCooldown(t *testing.T) {
+	d, r, _, _, u := personalFixture(t)
+	ctx := context.Background()
+	personalOptIn(t, r)
+	now := time.Now().UTC()
+	observe := func(at time.Duration, available bool) {
+		t.Helper()
+		if e := r.Observe(ctx, []PersonalRouteObservation{{Account: u.AccountID, Known: true, Available: available}}, now.Add(at)); e != nil {
+			t.Fatal(e)
+		}
+	}
+	pending := func(n *PersonalNotification) {
+		t.Helper()
+		if ok, e := r.Eligible(ctx, n); ok || !errors.Is(e, ErrPersonalNotificationPending) {
+			t.Fatalf("unconfirmed notification eligible=%v err=%v", ok, e)
+		}
+	}
+	ready := func(n *PersonalNotification) {
+		t.Helper()
+		if ok, e := r.Eligible(ctx, n); !ok || e != nil {
+			t.Fatalf("confirmed notification eligible=%v err=%v", ok, e)
+		}
+	}
+	for i := 0; i <= 5; i++ {
+		observe(time.Duration(i)*time.Minute, false)
+	}
+	onset, e := r.Claim(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	ready(&onset)
+	// A restarted observer cannot treat the unmeasured gap as continuous down.
+	r = NewPersonalNotificationRepo(d)
+	observe(8*time.Minute, false)
+	pending(&onset)
+	for i := 9; i < 13; i++ {
+		observe(time.Duration(i)*time.Minute, false)
+		pending(&onset)
+	}
+	observe(13*time.Minute, false)
+	ready(&onset)
+	if e = r.Complete(ctx, onset, true, false, 0); e != nil {
+		t.Fatal(e)
+	}
+	for i := 14; i <= 16; i++ {
+		observe(time.Duration(i)*time.Minute, true)
+	}
+	recovery, e := r.Claim(ctx)
+	if e != nil || recovery.Kind != "recovered" {
+		t.Fatal("recovery missing", e)
+	}
+	ready(&recovery)
+	r = NewPersonalNotificationRepo(d)
+	observe(19*time.Minute, true)
+	pending(&recovery)
+	observe(20*time.Minute, true)
+	pending(&recovery)
+	observe(21*time.Minute, true)
+	ready(&recovery)
+	if e = r.Complete(ctx, recovery, true, false, 0); e != nil {
+		t.Fatal(e)
+	}
+	// RecoveredAt=16m survives a repository restart. No new incident before46m.
+	for i := 22; i < 46; i++ {
+		observe(time.Duration(i)*time.Minute, false)
+	}
+	if personalCount(t, d) != 2 {
+		t.Fatal("restart lost cooldown")
+	}
+	r = NewPersonalNotificationRepo(d)
+	observe(46*time.Minute, false)
+	next, e := r.Claim(ctx)
+	if e != nil || next.Kind != "down" || next.Incident != onset.Incident+1 {
+		t.Fatal("continued outage did not leave persisted cooldown", e)
+	}
+	ready(&next)
+}
+
+func TestPersonalPendingOnsetSurvivesTransientHealthySample(t *testing.T) {
+	d, r, _, _, u := personalFixture(t)
+	ctx := context.Background()
+	personalOptIn(t, r)
+	now := time.Now().UTC()
+	observe := func(at time.Duration, available bool) {
+		t.Helper()
+		if e := r.Observe(ctx, []PersonalRouteObservation{{Account: u.AccountID, Known: true, Available: available}}, now.Add(at)); e != nil {
+			t.Fatal(e)
+		}
+	}
+	for i := 0; i <= 5; i++ {
+		observe(time.Duration(i)*time.Minute, false)
+	}
+	n, e := r.Claim(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if ok, e := r.Eligible(ctx, &n); e != nil || !ok {
+		t.Fatal("onset initially ineligible", e)
+	}
+	// A Telegram transport error retains the event for retry.
+	if e = r.Complete(ctx, n, false, false, 0); e != nil {
+		t.Fatal(e)
+	}
+	observe(6*time.Minute, true)
+	n, e = r.Claim(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if ok, e := r.Eligible(ctx, &n); ok || !errors.Is(e, ErrPersonalNotificationPending) {
+		t.Fatal("temporary health must be retriable", e)
+	}
+	// This is the same classification the prepare503 sender persists.
+	if e = r.Complete(ctx, n, false, false, 0); e != nil {
+		t.Fatal(e)
+	}
+	r = NewPersonalNotificationRepo(d)
+	observe(6*time.Minute+10*time.Second, false)
+	for i := 7; i <= 11; i++ {
+		observe(time.Duration(i)*time.Minute+10*time.Second, false)
+	}
+	n, e = r.Claim(ctx)
+	if e != nil {
+		t.Fatal("retained onset lost", e)
+	}
+	if ok, e := r.Eligible(ctx, &n); e != nil || !ok {
+		t.Fatal("continued down never made retained onset ready", e)
+	}
+	if personalCount(t, d) != 1 {
+		t.Fatal("transient health created a second incident")
+	}
+	// Confirmed two-minute recovery permanently supersedes the same onset.
+	for i := 12; i <= 14; i++ {
+		observe(time.Duration(i)*time.Minute, true)
+	}
+	if ok, e := r.Eligible(ctx, &n); e != nil || ok {
+		t.Fatal("confirmed opposite must supersede onset", e)
+	}
+}
+
+func TestPersonalTokenChangeCannotBypassUUIDAcknowledgement(t *testing.T) {
+	_, r, users, subs, u := personalFixture(t)
+	ctx := context.Background()
+	personalOptIn(t, r)
+	personalConfirm(t, r, users)
+	next, e := users.RotateUUID(ctx, u.UUID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	uuidEvent, e := r.Claim(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	token, e := subs.Rotate(ctx, next)
+	if e != nil {
+		t.Fatal(e)
+	}
+	tokenEvent, e := r.Claim(ctx)
+	if e != nil || tokenEvent.Kind != "subscription_token" {
+		t.Fatal("missing token event", e)
+	}
+	if ok, e := r.Eligible(ctx, &uuidEvent); e != nil || ok {
+		t.Fatal("superseded UUID event survived", e)
+	}
+	if ok, e := r.Eligible(ctx, &tokenEvent); ok || !errors.Is(e, ErrPersonalNotificationPending) {
+		t.Fatal("token event bypassed UUID runtime acknowledgement", e)
+	}
+	personalConfirm(t, r, users)
+	if ok, e := r.Eligible(ctx, &tokenEvent); e != nil || !ok {
+		t.Fatal("applied token event never became ready", e)
+	}
+	if current, e := subs.Existing(ctx, next); e != nil || current != token {
+		t.Fatal("sender did not read existing current token", e)
+	}
+}
+
+func TestPersonalAccessConsentCapturedAtMutationBeforeLateAck(t *testing.T) {
+	d, r, users, _, u := personalFixture(t)
+	ctx := context.Background()
+	// Subscription was off when disable was requested. Late apply success must
+	// not turn enabling the preference into replay of that earlier mutation.
+	if e := users.Remove(ctx, u.UUID); e != nil {
+		t.Fatal(e)
+	}
+	personalOptIn(t, r)
+	personalConfirm(t, r, users)
+	if personalCount(t, d) != 0 {
+		t.Fatal("late access ack replayed pre-optin mutation")
+	}
+	if _, e := r.Claim(ctx); !errors.Is(e, pgx.ErrNoRows) {
+		t.Fatal("historical access event was claimable", e)
+	}
+	// A new desired change while opted in is durable but awaits exact apply.
+	if e := users.Enable(ctx, u.UUID); e != nil {
+		t.Fatal(e)
+	}
+	n, e := r.Claim(ctx)
+	if e != nil || n.Kind != "enabled" {
+		t.Fatal("opted-in mutation not queued", e)
+	}
+	if ok, e := r.Eligible(ctx, &n); ok || !errors.Is(e, ErrPersonalNotificationPending) {
+		t.Fatal("unapplied desired change eligible", e)
+	}
+	personalConfirm(t, r, users)
+	if ok, e := r.Eligible(ctx, &n); e != nil || !ok {
+		t.Fatal("confirmed access event never ready", e)
+	}
+	// The acknowledgement must never recreate an event invalidated by optout.
+	if e = r.PutPreferences(ctx, 12345, PersonalNotificationPreferences{}); e != nil {
+		t.Fatal(e)
+	}
+	personalOptIn(t, r)
+	personalConfirm(t, r, users)
+	if personalCount(t, d) != 1 {
+		t.Fatal("ack recreated historical event")
+	}
+	if ok, e := r.Eligible(ctx, &n); e != nil || ok {
+		t.Fatal("re-optin revived old access event", e)
 	}
 }

@@ -26,6 +26,7 @@ let currentPerson = null,
 const notificationKeys = ["credentials", "access", "quota", "availability"];
 let notificationDirty = false;
 let notificationBusy = false;
+let notificationLoaded = false;
 const esc = (v) =>
   String(v ?? "").replace(
     /[&<>"']/g,
@@ -162,6 +163,7 @@ async function self() {
   const version = ++viewVersion;
   notificationDirty = false;
   notificationBusy = false;
+  notificationLoaded = false;
   clearTimeout(refreshTimer);
   const data = await api("/api/self");
   if (version !== viewVersion) return;
@@ -182,7 +184,7 @@ async function self() {
     subscriptionOwner = m.uuid;
   }
   const ready = m.active && !m.pending;
-  app.innerHTML = `<div class="page-heading"><div><p class="eyebrow">ЛИЧНЫЙ КАБИНЕТ</p><h1>Доступ и устройства</h1><p class="muted">Состояние подписки, маршруты и расход трафика</p></div></div><div class="member-grid"><div class="card connect-card">${status(m)}<p class="muted">${esc(usage(m))}</p><h2 class="connect-title">${ready ? "Подключитесь через Happ" : m.pending ? "Подтверждаем изменение на сервере" : "Доступ приостановлен"}</h2><p class="muted">${ready ? "Добавьте подписку один раз. Затем включайте VPN в Happ." : m.pending ? "Повторная регистрация не нужна. Дождитесь подтверждения применения." : "Обратитесь к администратору. Новое приглашение не восстановит доступ."}</p>${ready ? '<button class="btn" id="connect">Подключить Happ</button><button class="btn secondary" id="copy-sub">Скопировать подписку</button><small>Не передавайте ссылку другим: она открывает доступ к VPN.</small>' : ""}</div>${ready ? '<div class="card route-card" id="locations">Загружаем локации…</div>' : ""}</div><section class="card notifications-card" id="notifications-card" aria-labelledby="notifications-title"><h2 id="notifications-title">Уведомления в Telegram</h2><p class="muted">Все категории можно отключить. Настройки не отправляют прошлые события.</p><div class="notification-options">${notificationKeys.map((key) => `<label class="notification-option" for="notify-${key}"><input type="checkbox" id="notify-${key}" aria-describedby="notify-help-${key}"><span><strong>${{ credentials: "Данные подключения", access: "Доступ к VPN", quota: "Лимит трафика", availability: "Сбои VPN" }[key]}</strong><small id="notify-help-${key}">${{ credentials: "Администратор или система меняют ключ или подписку.", access: "Доступ отключён или возвращён.", quota: "Квота фактически блокирует VPN или блокировка снята.", availability: "VPN недоступен 5 минут или связь восстановилась и работает 2 минуты." }[key]}</small></span></label>`).join("")}</div><p id="notifications-error" class="bad" role="alert" hidden></p><p id="notifications-status" class="muted" role="status" aria-live="polite">Загружаем настройки…</p><button class="btn secondary" id="save-notifications" disabled>Сохранить настройки</button></section><section id="self-traffic" aria-live="polite">Загружаем статистику…</section><button class="btn secondary" id="refresh-self-traffic">Обновить статистику</button><div class="help-grid"><button class="btn secondary" id="instructions">Как подключить устройство</button><button class="btn secondary" id="help">Не получается подключиться</button></div>`;
+  app.innerHTML = `<div class="page-heading"><div><p class="eyebrow">ЛИЧНЫЙ КАБИНЕТ</p><h1>Доступ и устройства</h1><p class="muted">Состояние подписки, маршруты и расход трафика</p></div></div><div class="member-grid"><div class="card connect-card">${status(m)}<p class="muted">${esc(usage(m))}</p><h2 class="connect-title">${ready ? "Подключитесь через Happ" : m.pending ? "Подтверждаем изменение на сервере" : "Доступ приостановлен"}</h2><p class="muted">${ready ? "Добавьте подписку один раз. Затем включайте VPN в Happ." : m.pending ? "Повторная регистрация не нужна. Дождитесь подтверждения применения." : "Обратитесь к администратору. Новое приглашение не восстановит доступ."}</p>${ready ? '<button class="btn" id="connect">Подключить Happ</button><button class="btn secondary" id="copy-sub">Скопировать подписку</button><small>Не передавайте ссылку другим: она открывает доступ к VPN.</small>' : ""}</div>${ready ? '<div class="card route-card" id="locations">Загружаем локации…</div>' : ""}</div><section class="card notifications-card" id="notifications-card" aria-labelledby="notifications-title"><h2 id="notifications-title">Уведомления в Telegram</h2><p class="muted">Все категории можно отключить. Настройки не отправляют прошлые события.</p><div class="notification-options">${notificationKeys.map((key) => `<label class="notification-option" for="notify-${key}"><input type="checkbox" id="notify-${key}" aria-describedby="notify-help-${key}" disabled><span><strong>${{ credentials: "Данные подключения", access: "Доступ к VPN", quota: "Лимит трафика", availability: "Сбои VPN" }[key]}</strong><small id="notify-help-${key}">${{ credentials: "Администратор или система меняют ключ или подписку.", access: "Доступ отключён или возвращён.", quota: "Квота фактически блокирует VPN или блокировка снята.", availability: "VPN недоступен 5 минут или связь восстановилась и работает 2 минуты." }[key]}</small></span></label>`).join("")}</div><p id="notifications-error" class="bad" role="alert" hidden></p><p id="notifications-status" class="muted" role="status" aria-live="polite">Загружаем настройки…</p><button class="btn secondary" id="retry-notifications" hidden>Повторить загрузку настроек</button><button class="btn secondary" id="save-notifications" disabled>Сохранить настройки</button></section><section id="self-traffic" aria-live="polite">Загружаем статистику…</section><button class="btn secondary" id="refresh-self-traffic">Обновить статистику</button><div class="help-grid"><button class="btn secondary" id="instructions">Как подключить устройство</button><button class="btn secondary" id="help">Не получается подключиться</button></div>`;
   loadNotifications(version);
   button("instructions", instructions);
   button("help", () =>
@@ -256,8 +258,20 @@ async function loadNotifications(version) {
   const status = document.querySelector("#notifications-status");
   const error = document.querySelector("#notifications-error");
   const save = document.querySelector("#save-notifications");
+  const retry = document.querySelector("#retry-notifications");
+  if (version !== viewVersion || document.querySelector("#notifications-card") !== card) return;
+  notificationLoaded = false;
+  save.disabled = true;
+  retry.hidden = true;
+  error.hidden = true;
+  status.textContent = "Загружаем настройки…";
+  for (const key of notificationKeys) {
+    document.querySelector(`#notify-${key}`).disabled = true;
+  }
+  retry.onclick = () => loadNotifications(version);
   for (const key of notificationKeys) {
     document.querySelector(`#notify-${key}`).onchange = () => {
+      if (!notificationLoaded || notificationBusy || version !== viewVersion) return;
       notificationDirty = true;
       status.textContent = "Есть несохранённые изменения.";
       error.hidden = true;
@@ -266,9 +280,9 @@ async function loadNotifications(version) {
   try {
     const prefs = await api("/api/self/notifications");
     if (version !== viewVersion || document.querySelector("#notifications-card") !== card) return;
-    if (!notificationDirty) {
-      for (const key of notificationKeys) document.querySelector(`#notify-${key}`).checked = prefs[key] === true;
-    }
+    for (const key of notificationKeys) document.querySelector(`#notify-${key}`).checked = prefs[key] === true;
+    notificationLoaded = true;
+    for (const key of notificationKeys) document.querySelector(`#notify-${key}`).disabled = false;
     status.textContent = "Изменения сохраняются только после нажатия кнопки.";
     save.disabled = false;
   } catch (e) {
@@ -276,10 +290,10 @@ async function loadNotifications(version) {
     status.textContent = "Настройки не удалось загрузить. Подключение и статистика доступны отдельно.";
     error.textContent = e.message;
     error.hidden = false;
-    save.disabled = false;
+    retry.hidden = false;
   }
   save.onclick = async () => {
-    if (notificationBusy || version !== viewVersion) return;
+    if (!notificationLoaded || notificationBusy || version !== viewVersion) return;
     notificationBusy = true;
     const selected = Object.fromEntries(notificationKeys.map((key) => [key, document.querySelector(`#notify-${key}`).checked === true]));
     save.disabled = true;

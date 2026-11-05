@@ -18,7 +18,7 @@ type PersonalNotificationPreferences struct {
 	Availability bool `json:"availability"`
 }
 
-var ErrPersonalNotificationPending = errors.New("personal notification awaiting runtime acknowledgement")
+var ErrPersonalNotificationPending = errors.New("personal notification awaiting confirmation")
 
 const PersonalNotificationMaxAttempts = 12
 const PersonalNotificationMaxAge = 24 * time.Hour
@@ -147,15 +147,9 @@ func (r *PersonalNotificationRepo) ConfirmAccess(ctx context.Context, snapshot [
 			_ = tx.Rollback(ctx)
 			return e
 		}
-		if st.AccessSet && st.Access != current {
-			kind := "disabled"
-			if current {
-				kind = "enabled"
-			}
-			e = enqueuePersonal(ctx, tx, v.Account, "access", kind, revision, 0)
-		}
 		st.AccessSet = true
 		st.Access = current
+		st.AppliedAccessRevision = revision
 		st.AppliedUUID = v.UUID
 		if e == nil {
 			raw, e = json.Marshal(st)
@@ -184,19 +178,20 @@ type PersonalRouteObservation struct {
 	Available    bool   `json:"available"`
 }
 type personalObservation struct {
-	Known         bool
-	AppliedUUID   string
-	AccessSet     bool
-	Access        bool
-	QuotaSet      bool
-	Quota         bool
-	QuotaRevision int64
-	DownSince     time.Time
-	UpSince       time.Time
-	LastSample    time.Time
-	Incident      int64
-	Down          bool
-	RecoveredAt   time.Time
+	AppliedAccessRevision int64
+	Known                 bool
+	AppliedUUID           string
+	AccessSet             bool
+	Access                bool
+	QuotaSet              bool
+	Quota                 bool
+	QuotaRevision         int64
+	DownSince             time.Time
+	UpSince               time.Time
+	LastSample            time.Time
+	Incident              int64
+	Down                  bool
+	RecoveredAt           time.Time
 }
 
 func (s *personalObservation) observe(v PersonalRouteObservation, now time.Time) (quotaKind, availabilityKind string) {
@@ -351,12 +346,18 @@ func (r *PersonalNotificationRepo) Eligible(ctx context.Context, n *PersonalNoti
 		if !active || credentialRevision != n.Revision {
 			return false, nil
 		}
-		if pending || (n.Kind == "uuid" && st.AppliedUUID != n.UUID) {
+		if pending || st.AppliedUUID != n.UUID {
 			return false, ErrPersonalNotificationPending
 		}
 		return true, nil
 	case "access":
-		return accessRevision == n.Revision && st.AccessSet && st.Access == (n.Kind == "enabled"), nil
+		if accessRevision != n.Revision {
+			return false, nil
+		}
+		if !st.AccessSet || st.AppliedAccessRevision != n.Revision {
+			return false, ErrPersonalNotificationPending
+		}
+		return st.Access == (n.Kind == "enabled"), nil
 	case "quota":
 		if !st.Known || time.Since(st.LastSample) > 90*time.Second {
 			return false, ErrPersonalNotificationPending
@@ -366,19 +367,38 @@ func (r *PersonalNotificationRepo) Eligible(ctx context.Context, n *PersonalNoti
 		if !st.Known || time.Since(st.LastSample) > 90*time.Second {
 			return false, ErrPersonalNotificationPending
 		}
-		if !active || pending || st.Incident != n.Incident || st.Down != (n.Kind == "down") {
+		if !active || st.Incident != n.Incident {
 			return false, nil
 		}
-		if n.Kind == "recovered" {
-			if st.Quota || st.UpSince.IsZero() {
+		if pending {
+			return false, ErrPersonalNotificationPending
+		}
+		if n.Kind == "down" {
+			if !st.Down {
 				return false, nil
+			} // confirmed recovery supersedes this onset
+			if st.Quota || st.DownSince.IsZero() || !st.UpSince.IsZero() || st.LastSample.Sub(st.DownSince) < 5*time.Minute {
+				return false, ErrPersonalNotificationPending
+			}
+			return true, nil
+		}
+		if n.Kind == "recovered" {
+			if st.Down {
+				return false, nil
+			} // a newer confirmed incident supersedes recovery
+			// A brief opposite sample or an observation gap cannot confirm either side.
+			if !st.DownSince.IsZero() && st.LastSample.Sub(st.DownSince) >= 5*time.Minute {
+				return false, nil
+			}
+			if st.Quota || st.UpSince.IsZero() || st.LastSample.Sub(st.UpSince) < 2*time.Minute {
+				return false, ErrPersonalNotificationPending
 			}
 			var sent bool
 			e = r.db.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM personal_notification_events WHERE account_id=$1 AND category='availability' AND kind='down' AND incident=$2 AND sent_at IS NOT NULL AND delivered_to=$3 AND created_at>=$4)`, n.Account, n.Incident, n.TelegramID, since).
 				Scan(&sent)
 			return sent, e
 		}
-		return !st.Quota && st.UpSince.IsZero() && !st.DownSince.IsZero(), nil
+
 	}
 	return false, nil
 }

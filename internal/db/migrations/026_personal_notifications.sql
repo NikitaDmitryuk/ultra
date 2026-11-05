@@ -36,6 +36,11 @@ BEGIN
  INSERT INTO personal_notification_preferences(account_id,observed) VALUES(NEW.account_id,jsonb_build_object('AccessSet',true,'Access',NEW.is_active)) ON CONFLICT DO NOTHING;
  IF TG_OP='UPDATE' AND NEW.is_active IS DISTINCT FROM OLD.is_active THEN
   UPDATE personal_notification_preferences SET access_revision=access_revision+1 WHERE account_id=NEW.account_id;
+  -- Capture consent at the desired mutation, not at its potentially late ack.
+  INSERT INTO personal_notification_events(account_id,category,kind,revision)
+   SELECT account_id,'access',CASE WHEN NEW.is_active THEN 'enabled' ELSE 'disabled' END,access_revision
+   FROM personal_notification_preferences WHERE account_id=NEW.account_id AND access
+   ON CONFLICT DO NOTHING;
  END IF;
  RETURN NEW;
 END $$;
