@@ -15,11 +15,18 @@ import (
 
 // UserRepo handles user CRUD against PostgreSQL.
 type UserRepo struct {
-	db *DB
+	db            *DB
+	subscriptions *SubscriptionRepo
 }
 
 // NewUserRepo creates a UserRepo backed by db.
-func NewUserRepo(db *DB) *UserRepo { return &UserRepo{db: db} }
+func NewUserRepo(db *DB, subscriptions ...*SubscriptionRepo) *UserRepo {
+	r := &UserRepo{db: db}
+	if len(subscriptions) > 0 {
+		r.subscriptions = subscriptions[0]
+	}
+	return r
+}
 
 func normalizeKind(kind string) string {
 	k := strings.TrimSpace(strings.ToLower(kind))
@@ -243,6 +250,12 @@ func (r *UserRepo) rotateUUIDTx(ctx context.Context, tx pgx.Tx, id, newUUID stri
 		return "", err
 	}
 
+	if err := r.prepareRotatedSubscription(ctx, tx, newUUID); err != nil {
+		return "", err
+	}
+	if err := personalCredentialChange(ctx, tx, newUUID, "uuid", personalSuppressed(ctx)); err != nil {
+		return "", err
+	}
 	return newUUID, nil
 }
 

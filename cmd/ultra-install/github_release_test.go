@@ -84,7 +84,7 @@ func githubFixture(t *testing.T) (map[string][]byte, githubReleaseInventory, str
 		"version":             "v2.5.0",
 		"source_commit":       strings.Repeat("a", 40),
 		"database_schema_min": 24,
-		"database_schema_max": 25,
+		"database_schema_max": 26,
 		"capabilities":        []string{"service-access-v1", "provider-pool-quota-v1", "lifecycle-gate-v1", "ansible-deploy-v1"},
 		"assets":              rows,
 	}

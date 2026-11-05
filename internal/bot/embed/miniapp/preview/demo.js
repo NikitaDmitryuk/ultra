@@ -128,6 +128,12 @@
   people[0].last_traffic_at = now;
   people[0].group_membership = { state: "inside", checked_at: now };
   let preferred = null;
+  let notificationPreferences = {
+    credentials: false,
+    access: false,
+    quota: false,
+    availability: false,
+  };
   const exits = [
     { id: "ams", display_name: "Нидерланды · Амстердам", reachable: true },
     { id: "fra", display_name: "Германия · Франкфурт", reachable: true },
@@ -150,6 +156,16 @@
         is_admin: true,
         member: people[0],
       };
+    else if (path === "/api/self/notifications") {
+      if (options.method === "PUT")
+        notificationPreferences = Object.fromEntries(
+          ["credentials", "access", "quota", "availability"].map((key) => [
+            key,
+            body[key] === true,
+          ]),
+        );
+      value = { ...notificationPreferences };
+    }
     else if (path === "/api/members/traffic")
       value = { ...traffic, limits: [], quota_pools: [] };
     else if (

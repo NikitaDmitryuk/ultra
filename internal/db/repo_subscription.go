@@ -91,6 +91,11 @@ func (r *SubscriptionRepo) GetOrReissue(ctx context.Context, id string) (string,
 	if err != nil {
 		return "", false, err
 	}
+	if rotated {
+		if err = personalCredentialChange(ctx, tx, id, "subscription_token", personalSuppressed(ctx)); err != nil {
+			return "", false, err
+		}
+	}
 	return token, rotated, tx.Commit(ctx)
 }
 
@@ -145,11 +150,31 @@ func (r *SubscriptionRepo) issue(ctx context.Context, id string, rotate bool) (s
 	if err != nil {
 		return "", err
 	}
+	if rotate {
+		if err = personalCredentialChange(ctx, tx, id, "subscription_token", personalSuppressed(ctx)); err != nil {
+			return "", err
+		}
+	}
 	return token, tx.Commit(ctx)
 }
 func (r *SubscriptionRepo) Revoke(ctx context.Context, id string) error {
-	return r.db.orm.WithContext(ctx).Table("subscription_tokens").Where("user_uuid = ?", id).Delete(&subscriptionTokenRow{}).Error
+	tx, e := r.db.Pool.Begin(ctx)
+	if e != nil {
+		return e
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, e := tx.Exec(ctx, `DELETE FROM subscription_tokens WHERE user_uuid=$1`, id)
+	if e != nil {
+		return e
+	}
+	if tag.RowsAffected() > 0 {
+		if e = personalCredentialChange(ctx, tx, id, "subscription_token", true); e != nil {
+			return e
+		}
+	}
+	return tx.Commit(ctx)
 }
+
 func (r *SubscriptionRepo) Resolve(ctx context.Context, token string) (string, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil || len(raw) != 32 {
@@ -241,4 +266,56 @@ func (r *SubscriptionRepo) activeTokens(ctx context.Context) *gorm.DB {
 		Joins("JOIN users u ON u.uuid = t.user_uuid").
 		Where("u.is_active AND u.kind = ? AND NOT u.member_pending", "vless").
 		Where("NOT EXISTS (?)", services)
+}
+
+// Existing decrypts a current subscription without creating or rotating it.
+func (r *SubscriptionRepo) Existing(ctx context.Context, id string) (string, error) {
+	var encrypted []byte
+	var version *string
+	err := r.db.Pool.QueryRow(ctx, `SELECT t.encrypted_token,t.key_version FROM subscription_tokens t JOIN users u ON u.uuid=t.user_uuid WHERE u.uuid=$1 AND u.is_active AND NOT u.member_pending AND u.kind='vless' AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=u.account_id)`, id).
+		Scan(&encrypted, &version)
+	if err != nil {
+		return "", err
+	}
+	if version == nil || len(encrypted) == 0 {
+		return "", ErrLegacySubscription
+	}
+	return r.keys.Open(id, encrypted, *version)
+}
+
+// prepareRotatedSubscription is part of the administrative UUID transaction,
+// never called from notification generation/delivery. Failure rolls back reset.
+func (r *UserRepo) prepareRotatedSubscription(ctx context.Context, tx pgx.Tx, id string) error {
+	var opted, eligible bool
+	if e := tx.QueryRow(ctx, `SELECT p.credentials,u.telegram_id IS NOT NULL AND u.telegram_id>0 AND u.is_active AND u.kind='vless' AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=u.account_id) FROM personal_notification_preferences p JOIN users u USING(account_id) WHERE u.uuid=$1`, id).Scan(&opted, &eligible); e != nil {
+		return e
+	}
+	if !eligible {
+		return nil
+	}
+	if r.subscriptions == nil || !r.subscriptions.Ready() {
+		if opted {
+			return subscriptionkey.ErrUnavailable
+		}
+		return nil
+	}
+
+	token, e := NewOpaqueToken()
+	if e != nil {
+		return e
+	}
+	encrypted, version, e := r.subscriptions.keys.Seal(id, token)
+	if e != nil {
+		return e
+	}
+	digest := sha256.Sum256([]byte(token))
+	_, e = tx.Exec(
+		ctx,
+		`INSERT INTO subscription_tokens(user_uuid,token_hash,encrypted_token,key_version) VALUES($1,$2,$3,$4)`,
+		id,
+		digest[:],
+		encrypted,
+		version,
+	)
+	return e
 }

@@ -201,6 +201,8 @@ func (b *Bot) memberRoutes(mux *http.ServeMux) {
 		page, _ := miniappFS.ReadFile("embed/miniapp/member.html")
 		_, _ = w.Write(page)
 	})
+	mux.HandleFunc("GET /api/self/notifications", b.selfNotifications)
+	mux.HandleFunc("PUT /api/self/notifications", b.selfNotifications)
 	mux.HandleFunc("GET /api/self", b.selfState)
 	mux.HandleFunc("GET /api/self/traffic", b.selfTraffic)
 	mux.HandleFunc("POST /api/self/subscription", b.selfSubscription)

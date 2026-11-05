@@ -154,6 +154,37 @@ type Notification struct {
 	Terminal      bool               `json:"terminal"`
 }
 
+type PersonalNotificationEvent struct {
+	ID            int64              `json:"id"`
+	AccountID     pgtype.UUID        `json:"account_id"`
+	Category      string             `json:"category"`
+	Kind          string             `json:"kind"`
+	Revision      int64              `json:"revision"`
+	Incident      int64              `json:"incident"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	SentAt        pgtype.Timestamptz `json:"sent_at"`
+	DeliveredTo   pgtype.Int8        `json:"delivered_to"`
+	Terminal      bool               `json:"terminal"`
+	Attempts      int32              `json:"attempts"`
+	LeaseUntil    pgtype.Timestamptz `json:"lease_until"`
+	NextAttemptAt pgtype.Timestamptz `json:"next_attempt_at"`
+}
+
+type PersonalNotificationPreference struct {
+	AccountID          pgtype.UUID        `json:"account_id"`
+	Credentials        bool               `json:"credentials"`
+	Access             bool               `json:"access"`
+	Quota              bool               `json:"quota"`
+	Availability       bool               `json:"availability"`
+	CredentialsSince   pgtype.Timestamptz `json:"credentials_since"`
+	AccessSince        pgtype.Timestamptz `json:"access_since"`
+	QuotaSince         pgtype.Timestamptz `json:"quota_since"`
+	AvailabilitySince  pgtype.Timestamptz `json:"availability_since"`
+	CredentialRevision int64              `json:"credential_revision"`
+	AccessRevision     int64              `json:"access_revision"`
+	Observed           []byte             `json:"observed"`
+}
+
 type ProviderQuotaPool struct {
 	Scope              string             `json:"scope"`
 	Period             string             `json:"period"`

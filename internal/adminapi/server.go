@@ -42,6 +42,8 @@ type TrafficQuerier interface {
 
 // Server serves provisioning HTTP on loopback only (caller should bind 127.0.0.1).
 type Server struct {
+	PersonalNotifications *db.PersonalNotificationRepo
+	PersonalRouteSnapshot func() []db.PersonalRouteObservation
 	TopologyReady         func(context.Context) error
 	TopologyFrozen        func(context.Context) (bool, error)
 	topologyMu            sync.Mutex
@@ -137,6 +139,7 @@ func (s *Server) decodeAdminJSON(w http.ResponseWriter, r *http.Request, dst any
 }
 
 func (s *Server) routes() error {
+	s.personalNotificationRoutes()
 	s.memberRoutes()
 	s.cloudRoutes()
 	s.databaseRoutes()

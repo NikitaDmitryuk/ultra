@@ -252,7 +252,7 @@ func (s *Server) memberSubscription(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "access unavailable", http.StatusConflict)
 		return
 	}
-	token, rotated, e := s.Members.Subscriptions.GetOrReissue(r.Context(), m.UUID)
+	token, rotated, e := s.Members.Subscriptions.GetOrReissue(db.WithPersonalNotificationSuppressed(r.Context()), m.UUID)
 	if e != nil {
 		s.logMemberSubscriptionFailure(subscriptionFailureReason(e))
 	}

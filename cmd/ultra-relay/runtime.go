@@ -367,6 +367,11 @@ func (r *bridgeRuntime) refresh(ctx context.Context, database *db.DB, users *aut
 	if err := routes.PrepareManual(c); err != nil {
 		return err
 	}
+	personal := db.NewPersonalNotificationRepo(database)
+	accessSnapshot, err := personal.AccessSnapshot(c)
+	if err != nil {
+		return err
+	}
 	stage = "users_refresh"
 	if err := users.Refresh(c); err != nil {
 		return err
@@ -431,6 +436,10 @@ func (r *bridgeRuntime) refresh(ctx context.Context, database *db.DB, users *aut
 	}
 	ackContext, ackCancel := context.WithTimeout(ctx, timeout)
 	defer ackCancel()
+	stage = "personal_access_acknowledge"
+	if err = personal.ConfirmAccess(ackContext, accessSnapshot, all); err != nil {
+		return err
+	}
 	stage = "quota_acknowledge"
 	if err = quotas.Acknowledge(ackContext, acknowledgements); err != nil {
 		return err
@@ -805,7 +814,12 @@ func (r *bridgeRuntime) control(ctx context.Context, wg *sync.WaitGroup, handler
 		return
 	}
 	defer database.Close()
-	userRepo := db.NewUserRepo(database)
+	keys, keyErr := subscriptionkey.Load(os.Getenv("ULTRA_SUBSCRIPTION_ENCRYPTION_KEY_FILE"))
+	if keyErr != nil {
+		r.log.Warn("subscription recovery and issuance unavailable: encryption key not configured")
+	}
+	subscriptions := db.NewSubscriptionRepo(database, keys)
+	userRepo := db.NewUserRepo(database, subscriptions)
 	exitRepo := db.NewExitNodeRepo(database)
 	var users *auth.DBManager
 	var nodes *exits.Manager
@@ -858,19 +872,17 @@ func (r *bridgeRuntime) control(ctx context.Context, wg *sync.WaitGroup, handler
 		srv.ReloadStatus = r.runner.Status
 		srv.RouteStatus = r.applications.Status
 		srv.RuntimeStatus = r.status
+		srv.PersonalNotifications = db.NewPersonalNotificationRepo(database)
+		srv.PersonalRouteSnapshot = r.personalRouteSnapshot
 		srv.SubscriptionQuota = db.NewRuntimeQuotaRepo(database, r.state)
 		configureCloud(ctx, wg, srv, database, r.spec, nodes, refresh, users.Refresh, r.log)
-		keys, keyErr := subscriptionkey.Load(os.Getenv("ULTRA_SUBSCRIPTION_ENCRYPTION_KEY_FILE"))
-		if keyErr != nil {
-			r.log.Warn("subscription recovery and issuance unavailable: encryption key not configured")
-		}
-		subscriptions := db.NewSubscriptionRepo(database, keys)
 		srv.Subscriptions = subscriptions
 		srv.Members = &adminapi.MemberService{
 			Repo:          db.NewRuntimeMemberRepo(database, r.state),
 			Subscriptions: subscriptions,
 			Apply:         refresh,
 		}
+		srv.Members.Repo.Subscriptions = subscriptions
 		wg.Add(1)
 		go func() { defer wg.Done(); srv.Members.Run(ctx) }()
 		handler.install(srv.Handler())

@@ -43,6 +43,7 @@ function page(self, responses) {
         },
         innerHTML: "",
         value: "",
+        checked: false,
         dataset: {},
         classList: { toggle() {} },
         setAttribute() {},
@@ -119,7 +120,11 @@ function page(self, responses) {
     clearTimeout(id) { if (timers[id - 1]) timers[id - 1].cancelled = true; },
     fetch: async (path, options) => {
       calls.push({ path, options });
-      if (!(path in responses)) throw new Error("unexpected request " + path);
+      if (!(path in responses)) {
+        if (path === "/api/self/notifications")
+          return { ok: true, status: 200, json: async () => ({ credentials: false, access: false, quota: false, availability: false }) };
+        throw new Error("unexpected request " + path);
+      }
       if (responses[path] instanceof Error) throw responses[path];
       return { ok: true, status: 200, json: async () => responses[path] };
     },
@@ -195,8 +200,110 @@ test("disabled access cannot issue a subscription", async () => {
   assert.ok(p.el("#app").innerHTML.includes("Доступ приостановлен"));
   assert.ok(!p.el("#app").innerHTML.includes('id="connect"'));
   assert.ok(
-    p.calls.every((c) => ["/api/self", "/api/self/traffic"].includes(c.path)),
+    p.calls.every((c) => ["/api/self", "/api/self/traffic", "/api/self/notifications"].includes(c.path)),
   );
+});
+test("notification preferences display false defaults and save the complete selected object", async () => {
+  const p = page(true, {
+    "/api/self": { registered: true, member: { uuid: "owner", active: true, pending: false } },
+  });
+  await flush();
+  await flush();
+  for (const key of ["credentials", "access", "quota", "availability"])
+    assert.equal(p.el(`#notify-${key}`).checked, false);
+  p.el("#notify-credentials").checked = true;
+  p.el("#notify-credentials").onchange();
+  p.el("#notify-quota").checked = true;
+  p.el("#notify-quota").onchange();
+  await p.el("#save-notifications").click();
+  const put = p.calls.find((call) => call.path === "/api/self/notifications" && call.options.method === "PUT");
+  assert.deepEqual(JSON.parse(put.options.body), { credentials: true, access: false, quota: true, availability: false });
+  assert.equal(put.options.headers["X-Telegram-Init-Data"], "signed-test-session");
+  assert.equal(p.el("#notifications-status").textContent, "Настройки сохранены.");
+});
+test("notification server error keeps connection and traffic controls visible", async () => {
+  const p = page(true, {
+    "/api/self": { registered: true, member: { uuid: "owner", active: true, pending: false } },
+    "/api/self/notifications": new Error("network failure"),
+    "/api/self/traffic": { months: [] },
+    "/api/self/exits": { exits: [], profiles: [] },
+  });
+  await flush();
+  await flush();
+  const html = p.el("#app").innerHTML;
+  assert.match(html, /id="connect"/);
+  assert.match(html, /id="self-traffic"/);
+  assert.match(html, /id="notify-credentials"/);
+  assert.equal(p.el("#notifications-error").hidden, false);
+  assert.equal(p.el("#notify-credentials").checked, false);
+});
+test("disabled registered member can edit notification preferences", async () => {
+  const p = page(true, {
+    "/api/self": { registered: true, member: { uuid: "owner", active: false, pending: false } },
+  });
+  await flush();
+  await flush();
+  assert.match(p.el("#app").innerHTML, /Доступ приостановлен/);
+  assert.ok(p.el("#save-notifications").onclick);
+  p.el("#notify-access").checked = true;
+  p.el("#notify-access").onchange();
+  await p.el("#save-notifications").click();
+  const put = p.calls.find((call) => call.path === "/api/self/notifications" && call.options.method === "PUT");
+  assert.equal(JSON.parse(put.options.body).access, true);
+});
+test("late preferences response neither overwrites edits nor renders after self view changes", async () => {
+  let resolvePreferences;
+  const p = page(true, {
+    "/api/self": { registered: true, member: { uuid: "owner", active: true, pending: false } },
+  });
+  p.context.fetch = async (path, options) => {
+    p.calls.push({ path, options });
+    if (path === "/api/self/notifications") return new Promise((resolve) => { resolvePreferences = resolve; });
+    if (path === "/api/self") return { ok: true, status: 200, json: async () => ({ registered: true, member: { uuid: "owner", active: true, pending: false } }) };
+    if (path === "/api/self/traffic") return { ok: true, status: 200, json: async () => ({ months: [] }) };
+    if (path === "/api/self/exits") return { ok: true, status: 200, json: async () => ({ exits: [], profiles: [] }) };
+    throw new Error("unexpected request " + path);
+  };
+  await flush();
+  p.el("#notify-credentials").checked = true;
+  p.el("#notify-credentials").onchange();
+  resolvePreferences({ ok: true, status: 200, json: async () => ({ credentials: false, access: true, quota: true, availability: true }) });
+  await flush();
+  assert.equal(p.el("#notify-credentials").checked, true);
+  assert.equal(p.el("#notify-access").checked, false);
+  let resolveOld;
+  let delayed = false;
+  p.context.fetch = async (path, options) => {
+    p.calls.push({ path, options });
+    if (path === "/api/self" && !delayed) {
+      delayed = true;
+      return new Promise((resolve) => { resolveOld = resolve; });
+    }
+    if (path === "/api/self") return { ok: true, status: 200, json: async () => ({ registered: true, member: { uuid: "owner", active: true, pending: false } }) };
+    return { ok: true, status: 200, json: async () => ({ credentials: false, access: false, quota: false, availability: false }) };
+  };
+  const olderSelf = vm.runInContext("self()", p.context);
+  await vm.runInContext("self()", p.context);
+  const current = p.el("#app").innerHTML;
+  resolveOld({ ok: true, status: 200, json: async () => ({ registered: false }) });
+  await olderSelf;
+  assert.equal(p.el("#app").innerHTML, current);
+});
+test("pending self refresh waits while notification edits are unsaved", async () => {
+  const p = page(true, {
+    "/api/self": { registered: true, member: { uuid: "owner", active: false, pending: true } },
+    "/api/self/traffic": { months: [] },
+  });
+  await flush();
+  await flush();
+  p.el("#notify-access").checked = true;
+  p.el("#notify-access").onchange();
+  const before = p.calls.filter((call) => call.path === "/api/self").length;
+  const poll = p.timers.filter((timer) => timer.delay === 5000 && !timer.cancelled).at(-1);
+  poll.callback();
+  await flush();
+  assert.equal(p.calls.filter((call) => call.path === "/api/self").length, before);
+  assert.equal(p.el("#notify-access").checked, true);
 });
 test("member access control opens confirmation on the first click", async () => {
   const p = page(false, {
