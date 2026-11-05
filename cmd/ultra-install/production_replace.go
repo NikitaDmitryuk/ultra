@@ -26,6 +26,7 @@ type replacementPrimary struct {
 	DatabaseOID      uint32                 `json:"database_oid"`
 	Migrations       string                 `json:"migrations"`
 	Routes           []exits.BootstrapEntry `json:"routes"`
+	PingRoutes       []replacementPingRoute `json:"ping_routes,omitempty"`
 }
 
 type replacementTarget struct{ Address, Identity, Role string }
@@ -376,7 +377,34 @@ func runProductionReplacement(args []string, output io.Writer) (result error) {
 	if err != nil {
 		return err
 	}
+	if err = observeReplacementPingPolicy(ctx, p); err != nil {
+		return err
+	}
 	if err = validateReplacementTopology(p, before, manifest.DatabaseSchemaMax); err != nil {
+		return err
+	}
+	relayAsset, err := upgradeAsset(manifest, "ultra-relay-linux-amd64")
+	if err != nil {
+		return err
+	}
+	pingRollout, err := planReplacementPing(p, before, digestSHA256([]byte(*state+*manifestSHA+digestSHA256(configRaw))), relayAsset.SHA)
+	if err != nil {
+		return err
+	}
+	if pingRollout != nil {
+		for _, node := range pingRollout.Nodes {
+			if node.Retained {
+				for _, target := range targets {
+					if samePreservedPrimaryHost(node.Address, target.Address) {
+						return errors.New("replacement_exit_ping_retained_host_in_destructive_inventory")
+					}
+				}
+			}
+		}
+	}
+	// Existing verified pins live in disposable cloud runtime. Capture all of
+	// them before the first fencing/cleanup mutation; missing pins close admission.
+	if err = captureReplacementPing(ctx, p, pingRollout, *state); err != nil {
 		return err
 	}
 	if failedScope != nil {
@@ -521,23 +549,50 @@ func runProductionReplacement(args []string, output io.Writer) (result error) {
 			if err := reservation.SetPhase("bootstrap"); err != nil {
 				return err
 			}
+			bootstrapArgs := productionReplacementBootstrapArgs(*config, localExecutionState)
+			if pingRollout != nil {
+				bootstrapArgs = append(bootstrapArgs, "--stage-exit-ping-publication")
+			}
 			child := exec.CommandContext(
 				ctx,
 				executable,
-				productionReplacementBootstrapArgs(*config, localExecutionState)...)
+				bootstrapArgs...)
 			child.Env = append(os.Environ(), "ULTRA_INSTALL_STATE_DIR="+filepath.Join(*state, "bootstrap"))
 			if err := reservation.Handoff(child); err != nil {
 				return err
 			}
 			child.Stdout = output
 			child.Stderr = os.Stderr
-			return child.Run()
+			if err := child.Run(); err != nil {
+				return err
+			}
+			if err := stepsObserveReplacement(ctx, observe, before); err != nil {
+				return err
+			}
+			return finishReplacementPing(
+				ctx,
+				p,
+				pingRollout,
+				*state,
+				func(ctx context.Context) error { return stepsObserveReplacement(ctx, observe, before) },
+			)
 		},
 	}
 	if failedExecution != nil {
 		steps.AdmitFailedExecution = admitReplacementFailedExecution(*failedExecution, failedScope, before, steps)
 	}
 	executionErr := executeProductionReplacement(ctx, targets, before, steps)
+	if executionErr == nil && pingRollout != nil {
+		_, executionErr = retainedMutation(
+			ctx,
+			p,
+			p.Bridge.SSHHost,
+			p.BridgeSSHIdentity(),
+			false,
+			replacementPingReleaseProgram,
+			[]string{pingRollout.Binding},
+		)
+	}
 	completed = executionErr == nil
 	return executionErr
 }

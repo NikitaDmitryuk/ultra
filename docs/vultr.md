@@ -138,6 +138,17 @@ root, допустимы `0640 root:ultra-relay`. При восстановле�
 передаются на проверку провайдеру без преобразования. Источник:
 [переиспользование ключа](../internal/cloud/vultr.go),
 [регрессии](../internal/cloud/vultr_test.go).
+
+Записи `/ssh-keys` содержат публичные ключи клиента для `authorized_keys`, а не
+SSH host keys VPS. Совпадение fleet-ключа в этом списке не восстанавливает
+`known_hosts`. Подготовка ultra передаёт только клиентский ключ и не задаёт
+host keys через user-data; ответ Instance также не содержит их. При утрате
+проверенного pin нужен сохранённый `known_hosts` либо публичный host key из
+официальной консоли провайдера, привязанный к нужному instance. Совпадения IP
+в API недостаточно для доверия ключу из `ssh-keyscan`. Источники:
+[подготовка VPS](../internal/cloudinstall/provisioner.go),
+[модель Instance](https://github.com/vultr/govultr/blob/master/instance.go).
+
 При ограничении API по IP разрешите исходящий адрес bridge в Vultr; с `Any IPv4`
 и `Any IPv6` эта настройка при смене bridge не нужна. Единый API-ключ используется
 для VPS, развёртывания, firewall, SSH-ключей и управления DNS-записями используемой

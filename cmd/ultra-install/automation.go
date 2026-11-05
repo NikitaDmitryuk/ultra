@@ -53,6 +53,11 @@ func runAutomationCommand(action string, args []string) {
 		false,
 		"bootstrap application components while preserving the existing PostgreSQL primary",
 	)
+	stageExitPing := fs.Bool(
+		"stage-exit-ping-publication",
+		false,
+		"internal replacement: defer Happ publication until retained exit verification",
+	)
 	_ = fs.Parse(args)
 	if fs.NArg() > 0 {
 		exitOnErr("automation arguments", errors.New("positional arguments are not supported"))
@@ -76,6 +81,16 @@ func runAutomationCommand(action string, args []string) {
 			exitOnErr("preserved primary authorization", err)
 			return
 		}
+	}
+	if *stageExitPing {
+		if !*preservePrimary || !replacementPingRequested(p) {
+			exitOnErr("exit ping staging", errors.New("replacement_exit_ping_staging_not_authorized"))
+			return
+		}
+		staged := false
+		p.Features.HappExitPing = &staged
+		dataplane := true // Parent replacement resolved the effective inherited policy before fencing.
+		p.Features.ExitPing = &dataplane
 	}
 	exitOnErr("secrets source", selectPlanSecrets(p, "canonical"))
 	if action == "status" {

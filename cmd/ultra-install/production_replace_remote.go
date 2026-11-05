@@ -178,7 +178,12 @@ SELECT json_build_object('system_identifier',(SELECT system_identifier::text FRO
  'primary',NOT pg_is_in_recovery(),
  'migrations',(SELECT COALESCE(string_agg(version::text,',' ORDER BY version),'') FROM public.schema_migrations),
  'routes',(SELECT COALESCE(json_agg(r ORDER BY r.name,r.address,r.port),'[]'::json) FROM
- (SELECT name,address,port,tunnel_uuid,COALESCE(pinned_peer_cert_sha256,'') AS pinned_peer_cert_sha256,priority,enabled FROM public.exit_nodes) r));
+ (SELECT name,address,port,tunnel_uuid,COALESCE(pinned_peer_cert_sha256,'') AS pinned_peer_cert_sha256,priority,enabled FROM public.exit_nodes) r),
+ 'ping_routes',(SELECT COALESCE(json_agg(r ORDER BY r.id,r.operation_id),'[]'::json) FROM
+ (SELECT e.id::text,e.address,e.port,e.tunnel_uuid,COALESCE(e.pinned_peer_cert_sha256,'') AS pin,
+ COALESCE(o.id::text,'') AS operation_id,COALESCE(o.body->>'instance_id','') AS instance_id,
+ COALESCE(o.state,'') AS state FROM public.exit_nodes e LEFT JOIN public.cloud_operations o
+ ON o.body->>'exit_id'=e.id::text AND o.state NOT IN ('deleted','retired','cancelled') WHERE e.enabled) r));
 ROLLBACK;"""
 r=subprocess.run(['runuser','-u','postgres','--','psql','--no-psqlrc','-qAt','-v','ON_ERROR_STOP=1','-d',sys.argv[1]],input=q,capture_output=True,text=True,timeout=20,env=dict(os.environ,PGOPTIONS='-c default_transaction_read_only=on'))
 if r.returncode:raise ValueError('replacement_primary_read_failed')
