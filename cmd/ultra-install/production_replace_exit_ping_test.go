@@ -153,6 +153,7 @@ source=json.loads(sys.argv[1]);d=Path(sys.argv[2]);mode=sys.argv[3];key=d/'key';
 source=source.replace('/etc/ultra-fleet/id_ed25519',str(key)).replace('/var/lib/ultra-relay/vultr',str(d/'cloud'))
 # A temporary unprivileged fixture has a different trust root. Exercise exact pin selection and strict SSH; production ancestry checks are unchanged.
 source=source.replace('for a in [p]+list(p.parents):','for a in [p]:')
+source=source.replace("r['controller_architecture']=verify_current_installer();r['controller_layout_verified']=True","r['controller_architecture']='linux-amd64';r['controller_layout_verified']=True") # Real layout/hash/architecture contract is covered separately.
 os.geteuid=lambda:0
 address='203.0.113.8';op='dab2ff42-8188-4705-9a43-2816ddf368ec';calls=[]
 fallback='' if mode=='missing' else ('*' if mode=='wildcard' else '|1|fixture|fixture' if mode=='hashed' else address)+' ssh-ed25519 AAAA\n'

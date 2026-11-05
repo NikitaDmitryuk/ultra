@@ -13,7 +13,7 @@ else:
 
 // Public host keys only are returned. Neither the fleet private key nor remote
 // specs/environment leave their hosts. Strict SSH is tested before any fence.
-const replacementPingCaptureProgram = `import os,sys,json,stat,pwd,subprocess,tempfile,ipaddress,re
+const replacementPingCaptureProgram = replacementPingInstallerDefinitions + `import os,sys,json,stat,pwd,subprocess,tempfile,ipaddress,re
 from pathlib import Path
 def need(v,c):
  if not v:raise ValueError(c)
@@ -26,6 +26,7 @@ def safe(p,private=False):
  return p
 need(os.geteuid()==0,'exit_ping_root_required')
 r=json.loads(sys.argv[1]);fallback=sys.argv[2] if len(sys.argv)>2 else ''
+r['controller_architecture']=verify_current_installer();r['controller_layout_verified']=True
 for n in r['nodes']:
  if not n.get('retained'):continue
  key=safe('/etc/ultra-fleet/id_ed25519',True)
@@ -167,7 +168,7 @@ need(q.returncode==0,'exit_ping_transaction_start_failed')
 print(json.dumps({'state':'running','binding':binding}))
 `
 
-const replacementPingBridgeProgram = `import os,sys,json,subprocess,hashlib,base64,stat,pwd
+const replacementPingBridgeProgram = replacementPingInstallerDefinitions + `import os,sys,json,subprocess,hashlib,base64,stat,pwd
 from pathlib import Path
 def need(v,c):
  if not v:raise ValueError(c)
@@ -244,28 +245,28 @@ if mode in ('update','rollback'):
  print(json.dumps(answer))
 elif mode=='probe':
  request=d/('probe-'+str(index)+'.json');write(request,json.dumps({'binding':binding,'nodes':[node]}).encode())
- q=subprocess.run(['/usr/local/bin/ultra-install','replacement-exit-ping-probe',str(request),binding],capture_output=True,timeout=25)
+ q=subprocess.run([verified_installer(r['installer'],r['installer_sha256']),'replacement-exit-ping-probe',str(request),binding],capture_output=True,timeout=25)
  need(q.returncode==0,'exit_ping_isolated_probe_failed');answer=json.loads(q.stdout)
  need(answer=={'verified':True,'count':1,'mode':'isolated'},'exit_ping_isolated_receipt_invalid')
  write(d/('coverage-'+str(index)+'.json'),json.dumps({'binding':binding,'spec_sha256':digest(before),'node':node}).encode())
  print(json.dumps({'verified':True,'binding':binding}))
 elif mode in ('stage','publish'):
  if mode=='stage':
-  q=subprocess.run(['/usr/local/bin/ultra-install','replacement-exit-ping-lease',binding,'acquire'],capture_output=True,timeout=28)
+  q=subprocess.run([verified_installer(r['installer'],r['installer_sha256']),'replacement-exit-ping-lease',binding,'acquire'],capture_output=True,timeout=28)
   need(q.returncode==0,'exit_ping_topology_lease_failed')
  if mode=='publish':
   for i,n in enumerate(r['nodes']):
    proof=json.loads(safe(d/('coverage-'+str(i)+'.json')).read_text())
    need(proof=={'binding':binding,'spec_sha256':digest(before),'node':n},'exit_ping_coverage_changed')
  workerpath=d/('publication-'+mode+'.py');write(workerpath,publication.encode())
- request=d/('publication-'+mode+'.json');write(request,json.dumps({'binding':binding,'bot_enabled':r['bot_enabled'],'mode':mode,'spec_sha256':digest(before)}).encode())
+ request=d/('publication-'+mode+'.json');write(request,json.dumps({'binding':binding,'bot_enabled':r['bot_enabled'],'mode':mode,'spec_sha256':digest(before),'installer':r['installer'],'installer_sha256':r['installer_sha256']}).encode())
  q=subprocess.run(['systemd-run','--quiet','--collect','--unit=ultra-ping-publication-'+mode+'-'+binding,'--property=Type=exec','--property=RuntimeMaxSec=240','--property=TimeoutStopSec=240','--property=KillMode=control-group','--property=ExecStopPost=/usr/bin/python3 '+str(workerpath)+' recover '+str(request),'/usr/bin/python3',str(workerpath),'apply',str(request)],capture_output=True,timeout=10)
  need(q.returncode==0,'exit_ping_publication_start_failed')
  print(json.dumps({'state':'running','binding':binding}))
 else:raise ValueError('exit_ping_mode_invalid')
 `
 
-const replacementPingPublicationProgram = `import os,sys,json,stat,hashlib,subprocess,time,tempfile,fcntl
+const replacementPingPublicationProgram = replacementPingInstallerDefinitions + `import os,sys,json,stat,hashlib,subprocess,time,tempfile,fcntl
 from pathlib import Path
 # Relay has the manager's default stop deadline (normally 90s); bot explicitly
 # sets TimeoutStopSec=20s. Each gets 5s command margin and a 3s active check.
@@ -285,12 +286,13 @@ def service(name):
  q=subprocess.run(['systemctl','restart',name],capture_output=True,timeout=RELAY_RESTART_SECONDS if name=='ultra-relay.service' else BOT_RESTART_SECONDS);need(q.returncode==0,'exit_ping_restart_failed')
  q=subprocess.run(['systemctl','is-active','--quiet',name],capture_output=True,timeout=3);need(q.returncode==0,'exit_ping_service_inactive')
 def ready(binding):
+ installer=scoped_installer(binding)
  deadline=time.monotonic()+READY_SECONDS
  while time.monotonic()<deadline:
   remaining=deadline-time.monotonic()
   if remaining<=0:break
   try:
-   q=subprocess.run(['/usr/local/bin/ultra-install','replacement-exit-ping-lease',binding,'ready'],capture_output=True,timeout=min(28,remaining))
+   q=subprocess.run([installer,'replacement-exit-ping-lease',binding,'ready'],capture_output=True,timeout=min(28,remaining))
    if q.returncode==0:return
   except subprocess.TimeoutExpired:pass
   time.sleep(min(.25,max(0,deadline-time.monotonic())))
@@ -341,9 +343,9 @@ if __name__=='__main__':
  except BaseException:print('exit_ping_publication_failed',file=sys.stderr);sys.exit(1)
 `
 
-const replacementPingReleaseProgram = `import os,sys,subprocess,json
+const replacementPingReleaseProgram = replacementPingInstallerDefinitions + `import os,sys,subprocess,json
 if os.geteuid()!=0 or len(sys.argv)!=2 or len(sys.argv[1])!=64:raise ValueError('exit_ping_release_invalid')
-q=subprocess.run(['/usr/local/bin/ultra-install','replacement-exit-ping-lease',sys.argv[1],'release'],capture_output=True,timeout=25)
+q=subprocess.run([scoped_installer(sys.argv[1]),'replacement-exit-ping-lease',sys.argv[1],'release'],capture_output=True,timeout=25)
 if q.returncode:raise ValueError('exit_ping_release_failed')
 print(json.dumps({'verified':True}))
 `

@@ -58,6 +58,7 @@ def run(args,**kwargs):
  assert args[-1]=='ready' and 0<kwargs['timeout']<=28
  return types.SimpleNamespace(returncode=0 if clock[0]>=30 else 1)
 ns['subprocess'].run=run
+ns['scoped_installer']=lambda _:'/opt/ultra-ansible/releases/managed-fixture/ultra-install'
 ns['ready']('a'*64)
 assert 30<=clock[0]<ns['READY_SECONDS']
 clock[0]=0.;ns['subprocess'].run=lambda *args,**kwargs:types.SimpleNamespace(returncode=1)

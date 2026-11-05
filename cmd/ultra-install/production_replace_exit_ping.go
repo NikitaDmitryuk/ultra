@@ -32,10 +32,21 @@ type replacementPingRoute struct {
 }
 
 type replacementPingRollout struct {
-	Binding      string                 `json:"binding"`
-	BinarySHA256 string                 `json:"binary_sha256"`
-	Nodes        []replacementPingRoute `json:"nodes"`
-	BotEnabled   bool                   `json:"bot_enabled"`
+	Binding                  string                 `json:"binding"`
+	BinarySHA256             string                 `json:"binary_sha256"`
+	Nodes                    []replacementPingRoute `json:"nodes"`
+	BotEnabled               bool                   `json:"bot_enabled"`
+	Installer                string                 `json:"installer"`
+	InstallerSHA256          string                 `json:"installer_sha256"`
+	ControllerLayoutVerified bool                   `json:"controller_layout_verified"`
+	ControllerArchitecture   string                 `json:"controller_architecture"`
+}
+
+func validateReplacementPingControllerAttestation(rollout replacementPingRollout) error {
+	if !rollout.ControllerLayoutVerified || rollout.ControllerArchitecture != "linux-amd64" {
+		return errors.New("replacement_exit_ping_bridge_architecture_unverified")
+	}
+	return nil
 }
 
 func stepsObserveReplacement(
@@ -146,6 +157,9 @@ func captureReplacementPing(ctx context.Context, p *installplan.InstallPlan, rol
 	if rollout == nil {
 		return nil
 	}
+	if err := prepareReplacementPingInstaller(p, rollout); err != nil {
+		return err
+	}
 	fallback, err := os.ReadFile(p.Automation.KnownHostsFile)
 	if err != nil {
 		return errors.New("replacement_exit_ping_operator_pins_unavailable")
@@ -156,8 +170,15 @@ func captureReplacementPing(ctx context.Context, p *installplan.InstallPlan, rol
 		return fmt.Errorf("replacement_exit_ping_capture_failed: %w", err)
 	}
 	var captured replacementPingRollout
-	if json.Unmarshal(raw, &captured) != nil || captured.Binding != rollout.Binding || captured.BinarySHA256 != rollout.BinarySHA256 ||
+	if json.Unmarshal(raw, &captured) != nil {
+		return errors.New("replacement_exit_ping_capture_invalid")
+	}
+	if err := validateReplacementPingControllerAttestation(captured); err != nil {
+		return err
+	}
+	if captured.Binding != rollout.Binding || captured.BinarySHA256 != rollout.BinarySHA256 ||
 		captured.BotEnabled != rollout.BotEnabled ||
+		captured.Installer != rollout.Installer || captured.InstallerSHA256 != rollout.InstallerSHA256 ||
 		len(captured.Nodes) != len(rollout.Nodes) {
 		return errors.New("replacement_exit_ping_capture_invalid")
 	}
