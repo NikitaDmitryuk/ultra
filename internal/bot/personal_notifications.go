@@ -92,12 +92,12 @@ func (b *Bot) sendPersonalNotification(ctx context.Context) bool {
 	if status == 404 {
 		return false
 	}
-	complete := func(sent, terminal bool, delay int) {
+	complete := func(sent, terminal, deferred bool, delay int) {
 		_, err := b.relayJSON(
 			ctx,
 			"POST",
 			fmt.Sprintf("/v1/personal-notifications/%d/complete", n.ID),
-			map[string]any{"notification": n, "sent": sent, "terminal": terminal, "delay_seconds": delay},
+			map[string]any{"notification": n, "sent": sent, "terminal": terminal, "deferred": deferred, "delay_seconds": delay},
 			nil,
 		)
 		if err != nil && b.log != nil {
@@ -106,6 +106,7 @@ func (b *Bot) sendPersonalNotification(ctx context.Context) bool {
 	}
 	var prepared struct {
 		Eligible     bool                    `json:"eligible"`
+		Pending      bool                    `json:"pending"`
 		Notification db.PersonalNotification `json:"notification"`
 		Token        string                  `json:"token"`
 	}
@@ -114,27 +115,35 @@ func (b *Bot) sendPersonalNotification(ctx context.Context) bool {
 		return err
 	}
 	if e = prepare(); e != nil {
-		complete(false, false, 60)
+		complete(false, false, false, 60)
+		return true
+	}
+	if prepared.Pending {
+		complete(false, false, true, 60)
 		return true
 	}
 	if !prepared.Eligible {
-		complete(false, true, 0)
+		complete(false, true, false, 0)
 		return true
 	}
 	n = prepared.Notification
 	// Recheck immediately before Telegram, after any credential rendering work.
 	if e = prepare(); e != nil {
-		complete(false, false, 60)
+		complete(false, false, false, 60)
+		return true
+	}
+	if prepared.Pending {
+		complete(false, false, true, 60)
 		return true
 	}
 	if !prepared.Eligible {
-		complete(false, true, 0)
+		complete(false, true, false, 0)
 		return true
 	}
 	n = prepared.Notification
 	base, e := url.Parse(b.miniAppURL)
 	if e != nil || base.Scheme != "https" || base.Host == "" || base.User != nil {
-		complete(false, false, 60)
+		complete(false, false, false, 60)
 		return true
 	}
 	base.RawQuery = ""
@@ -143,7 +152,7 @@ func (b *Bot) sendPersonalNotification(ctx context.Context) bool {
 	subscription := ""
 	if n.Category == "credentials" {
 		if prepared.Token == "" || b.miniAppURL == "" {
-			complete(false, false, 60)
+			complete(false, false, false, 60)
 			return true
 		}
 		base.Path = "/sub/" + prepared.Token
@@ -151,7 +160,7 @@ func (b *Bot) sendPersonalNotification(ctx context.Context) bool {
 	}
 	text := personalNotificationText(n, subscription)
 	if text == "" {
-		complete(false, true, 0)
+		complete(false, true, false, 0)
 		return true
 	}
 	input := map[string]any{"chat_id": n.TelegramID, "text": text, "disable_web_page_preview": true}
@@ -163,12 +172,12 @@ func (b *Bot) sendPersonalNotification(ctx context.Context) bool {
 	e = b.telegramJSON(c, "sendMessage", input, nil)
 	cancel()
 	if e == nil {
-		complete(true, false, 0)
+		complete(true, false, false, 0)
 		return true
 	}
 	// Telegram 403 means blocked/deactivated; no future retry for this event.
 	after, permanent := telegramFailure(e)
-	delay := min(int((retryDelay(n.Attempts, after)+time.Second-1)/time.Second), 24*60*60)
-	complete(false, permanent, delay)
+	delay := min(int((retryDelay(n.DeliveryAttempts, after)+time.Second-1)/time.Second), 24*60*60)
+	complete(false, permanent, false, delay)
 	return true
 }

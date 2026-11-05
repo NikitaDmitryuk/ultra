@@ -155,19 +155,20 @@ type Notification struct {
 }
 
 type PersonalNotificationEvent struct {
-	ID            int64              `json:"id"`
-	AccountID     pgtype.UUID        `json:"account_id"`
-	Category      string             `json:"category"`
-	Kind          string             `json:"kind"`
-	Revision      int64              `json:"revision"`
-	Incident      int64              `json:"incident"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	SentAt        pgtype.Timestamptz `json:"sent_at"`
-	DeliveredTo   pgtype.Int8        `json:"delivered_to"`
-	Terminal      bool               `json:"terminal"`
-	Attempts      int32              `json:"attempts"`
-	LeaseUntil    pgtype.Timestamptz `json:"lease_until"`
-	NextAttemptAt pgtype.Timestamptz `json:"next_attempt_at"`
+	ID               int64              `json:"id"`
+	AccountID        pgtype.UUID        `json:"account_id"`
+	Category         string             `json:"category"`
+	Kind             string             `json:"kind"`
+	Revision         int64              `json:"revision"`
+	Incident         int64              `json:"incident"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	SentAt           pgtype.Timestamptz `json:"sent_at"`
+	DeliveredTo      pgtype.Int8        `json:"delivered_to"`
+	Terminal         bool               `json:"terminal"`
+	Attempts         int32              `json:"attempts"`
+	DeliveryAttempts int32              `json:"delivery_attempts"`
+	LeaseUntil       pgtype.Timestamptz `json:"lease_until"`
+	NextAttemptAt    pgtype.Timestamptz `json:"next_attempt_at"`
 }
 
 type PersonalNotificationPreference struct {

@@ -289,29 +289,30 @@ func (r *PersonalNotificationRepo) Observe(ctx context.Context, observations []P
 }
 
 type PersonalNotification struct {
-	ID         int64  `json:"id"`
-	Account    string `json:"account"`
-	Category   string `json:"category"`
-	Kind       string `json:"kind"`
-	Revision   int64  `json:"revision"`
-	Incident   int64  `json:"incident"`
-	Attempts   int    `json:"attempts"`
-	TelegramID int64  `json:"telegram_id"`
-	UUID       string `json:"-"`
+	ID               int64  `json:"id"`
+	Account          string `json:"account"`
+	Category         string `json:"category"`
+	Kind             string `json:"kind"`
+	Revision         int64  `json:"revision"`
+	Incident         int64  `json:"incident"`
+	Attempts         int    `json:"attempts"`
+	DeliveryAttempts int    `json:"delivery_attempts"`
+	TelegramID       int64  `json:"telegram_id"`
+	UUID             string `json:"-"`
 }
 
 func (r *PersonalNotificationRepo) Claim(ctx context.Context) (n PersonalNotification, err error) {
 	_, err = r.db.Pool.Exec(
 		ctx,
-		`UPDATE personal_notification_events SET terminal=true WHERE sent_at IS NULL AND NOT terminal AND (attempts>=$1 OR created_at<clock_timestamp()-$2*interval '1 second') AND (lease_until IS NULL OR lease_until<clock_timestamp())`,
+		`UPDATE personal_notification_events SET terminal=true WHERE sent_at IS NULL AND NOT terminal AND (delivery_attempts>=$1 OR created_at<clock_timestamp()-$2*interval '1 second') AND (lease_until IS NULL OR lease_until<clock_timestamp())`,
 		PersonalNotificationMaxAttempts,
 		PersonalNotificationMaxAge.Seconds(),
 	)
 	if err != nil {
 		return
 	}
-	err = r.db.Pool.QueryRow(ctx, `UPDATE personal_notification_events n SET attempts=attempts+1,lease_until=clock_timestamp()+interval '1 minute' WHERE id=(SELECT id FROM personal_notification_events WHERE sent_at IS NULL AND NOT terminal AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<clock_timestamp()) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,account_id::text,category,kind,revision,incident,attempts`).
-		Scan(&n.ID, &n.Account, &n.Category, &n.Kind, &n.Revision, &n.Incident, &n.Attempts)
+	err = r.db.Pool.QueryRow(ctx, `UPDATE personal_notification_events n SET attempts=attempts+1,delivery_attempts=delivery_attempts+1,lease_until=clock_timestamp()+interval '1 minute' WHERE id=(SELECT id FROM personal_notification_events WHERE sent_at IS NULL AND NOT terminal AND delivery_attempts<$1 AND created_at>=clock_timestamp()-$2*interval '1 second' AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<clock_timestamp()) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,account_id::text,category,kind,revision,incident,attempts,delivery_attempts`, PersonalNotificationMaxAttempts, PersonalNotificationMaxAge.Seconds()).
+		Scan(&n.ID, &n.Account, &n.Category, &n.Kind, &n.Revision, &n.Incident, &n.Attempts, &n.DeliveryAttempts)
 	return
 }
 
@@ -321,13 +322,13 @@ func (r *PersonalNotificationRepo) Eligible(ctx context.Context, n *PersonalNoti
 	var active, pending, enabled, claimed bool
 	var credentialRevision, accessRevision int64
 	var since, created time.Time
-	e := r.db.Pool.QueryRow(ctx, `SELECT n.account_id::text,n.category,n.kind,n.revision,n.incident,u.telegram_id,u.uuid::text,u.is_active,u.member_pending,
+	e := r.db.Pool.QueryRow(ctx, `SELECT n.account_id::text,n.category,n.kind,n.revision,n.incident,n.delivery_attempts,u.telegram_id,u.uuid::text,u.is_active,u.member_pending,
  CASE n.category WHEN 'credentials' THEN p.credentials WHEN 'access' THEN p.access WHEN 'quota' THEN p.quota WHEN 'availability' THEN p.availability END,
  CASE n.category WHEN 'credentials' THEN p.credentials_since WHEN 'access' THEN p.access_since WHEN 'quota' THEN p.quota_since WHEN 'availability' THEN p.availability_since END,
  p.credential_revision,p.access_revision,p.observed,n.created_at,n.attempts=$2 AND n.lease_until>clock_timestamp() AND n.sent_at IS NULL AND NOT n.terminal AND n.created_at>=clock_timestamp()-interval '24 hours'
  FROM personal_notification_events n JOIN personal_notification_preferences p USING(account_id) JOIN users u USING(account_id)
  WHERE n.id=$1 AND u.telegram_id>0 AND u.kind='vless' AND NOT EXISTS(SELECT 1 FROM service_access s WHERE s.account_id=u.account_id)`, n.ID, n.Attempts).
-		Scan(&n.Account, &n.Category, &n.Kind, &n.Revision, &n.Incident, &n.TelegramID, &n.UUID, &active, &pending, &enabled, &since, &credentialRevision, &accessRevision, &raw, &created, &claimed)
+		Scan(&n.Account, &n.Category, &n.Kind, &n.Revision, &n.Incident, &n.DeliveryAttempts, &n.TelegramID, &n.UUID, &active, &pending, &enabled, &since, &credentialRevision, &accessRevision, &raw, &created, &claimed)
 	if errors.Is(e, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -412,6 +413,23 @@ func (r *PersonalNotificationRepo) Complete(ctx context.Context, n PersonalNotif
 		terminal,
 		delay.Seconds(),
 		n.TelegramID,
+	)
+	return e
+}
+
+// Defer releases a verified not-ready claim without spending its provisional
+// delivery reservation. The independent claim generation never decreases:
+// delayed or repeated deferrals cannot refund another worker's reservation.
+func (r *PersonalNotificationRepo) Defer(ctx context.Context, n PersonalNotification, delay time.Duration) error {
+	if delay < 0 || delay > PersonalNotificationMaxAge {
+		return errors.New("invalid notification delay")
+	}
+	_, e := r.db.Pool.Exec(
+		ctx,
+		`UPDATE personal_notification_events SET delivery_attempts=delivery_attempts-1,lease_until=NULL,next_attempt_at=clock_timestamp()+$3*interval '1 second' WHERE id=$1 AND attempts=$2 AND lease_until>clock_timestamp() AND delivery_attempts>0 AND sent_at IS NULL AND NOT terminal`,
+		n.ID,
+		n.Attempts,
+		delay.Seconds(),
 	)
 	return e
 }

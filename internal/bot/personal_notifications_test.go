@@ -51,17 +51,18 @@ func TestPersonalNotificationSelfOnlyStrictPreferences(t *testing.T) {
 	}
 }
 func TestPersonalNotificationDeliveryCurrentTokenBlockedAndRecheck(t *testing.T) {
-	for _, scenario := range []string{"success", "blocked", "optout", "upstream-error", "pending-confirmation", "rate-limit"} {
+	for _, scenario := range []string{"success", "blocked", "optout", "upstream-error", "pending-confirmation", "second-pending", "rate-limit", "first-failure-after-wait"} {
 		t.Run(scenario, func(t *testing.T) {
 			prepares, sends, completed := 0, 0, false
 			n := db.PersonalNotification{
-				ID:         7,
-				Account:    "account",
-				Category:   "credentials",
-				Kind:       "uuid",
-				Revision:   3,
-				Attempts:   1,
-				TelegramID: 123,
+				ID:               7,
+				Account:          "account",
+				Category:         "credentials",
+				Kind:             "uuid",
+				Revision:         3,
+				Attempts:         100,
+				DeliveryAttempts: 1,
+				TelegramID:       123,
 			}
 			relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
@@ -69,7 +70,7 @@ func TestPersonalNotificationDeliveryCurrentTokenBlockedAndRecheck(t *testing.T)
 					_ = json.NewEncoder(w).Encode(n)
 				case "/v1/personal-notifications/7/prepare":
 					prepares++
-					if scenario == "upstream-error" || scenario == "pending-confirmation" {
+					if scenario == "upstream-error" {
 						http.Error(w, "unavailable", http.StatusServiceUnavailable)
 						return
 					}
@@ -77,12 +78,14 @@ func TestPersonalNotificationDeliveryCurrentTokenBlockedAndRecheck(t *testing.T)
 					if prepares == 2 {
 						token = "current"
 					}
+					pending := scenario == "pending-confirmation" || (scenario == "second-pending" && prepares == 2)
 					_ = json.NewEncoder(w).
-						Encode(map[string]any{"eligible": scenario != "optout" || prepares < 2, "notification": n, "token": token})
+						Encode(map[string]any{"eligible": !pending && (scenario != "optout" || prepares < 2), "notification": n, "token": token, "pending": pending})
 				case "/v1/personal-notifications/7/complete":
 					var body struct {
 						Sent     bool
 						Terminal bool
+						Deferred bool
 						Delay    int `json:"delay_seconds"`
 					}
 					if e := json.NewDecoder(r.Body).Decode(&body); e != nil {
@@ -90,6 +93,14 @@ func TestPersonalNotificationDeliveryCurrentTokenBlockedAndRecheck(t *testing.T)
 					}
 					completed = true
 					switch scenario {
+					case "pending-confirmation", "second-pending":
+						if body.Sent || body.Terminal || !body.Deferred || body.Delay == 0 {
+							t.Error("pending wait consumed delivery budget")
+						}
+					case "first-failure-after-wait":
+						if body.Sent || body.Terminal || body.Deferred || body.Delay < 2 || body.Delay > 3 {
+							t.Error("waiting claims polluted first actual retry backoff", body.Delay)
+						}
 					case "success":
 						if !body.Sent || body.Terminal {
 							t.Error("success completion wrong")
@@ -102,8 +113,8 @@ func TestPersonalNotificationDeliveryCurrentTokenBlockedAndRecheck(t *testing.T)
 						if body.Sent || body.Terminal || body.Delay != 900 {
 							t.Error("retry_after ignored", body.Delay)
 						}
-					case "upstream-error", "pending-confirmation":
-						if body.Sent || body.Terminal || body.Delay == 0 {
+					case "upstream-error":
+						if body.Sent || body.Terminal || body.Deferred || body.Delay == 0 {
 							t.Error("transient failure not retryable")
 						}
 					}
@@ -126,6 +137,9 @@ func TestPersonalNotificationDeliveryCurrentTokenBlockedAndRecheck(t *testing.T)
 					t.Error("wrong recipient/current subscription/cabinet", body)
 				}
 				response := `{"ok":true,"result":{}}`
+				if scenario == "first-failure-after-wait" {
+					response = `{"ok":false,"error_code":500}`
+				}
 				if scenario == "rate-limit" {
 					response = `{"ok":false,"error_code":429,"parameters":{"retry_after":900}}`
 				}
@@ -144,7 +158,7 @@ func TestPersonalNotificationDeliveryCurrentTokenBlockedAndRecheck(t *testing.T)
 				t.Fatal("delivery not completed")
 			}
 			want := 1
-			if scenario == "optout" || scenario == "upstream-error" || scenario == "pending-confirmation" {
+			if scenario == "optout" || scenario == "upstream-error" || scenario == "pending-confirmation" || scenario == "second-pending" {
 				want = 0
 			}
 			if sends != want {

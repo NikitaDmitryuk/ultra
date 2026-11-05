@@ -26,6 +26,7 @@ CREATE TABLE personal_notification_events (
  delivered_to BIGINT,
  terminal BOOLEAN NOT NULL DEFAULT false,
  attempts INTEGER NOT NULL DEFAULT 0,
+ delivery_attempts INTEGER NOT NULL DEFAULT 0 CHECK(delivery_attempts >= 0),
  lease_until TIMESTAMPTZ,
  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  UNIQUE(account_id,category,kind,revision)

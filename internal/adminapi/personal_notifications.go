@@ -117,9 +117,10 @@ func (s *Server) personalPrepare(w http.ResponseWriter, r *http.Request) {
 	}
 	eligible, e := s.PersonalNotifications.Eligible(r.Context(), &n)
 	if e != nil {
-		memberJSON(w, nil, e)
+		personalPreparationJSON(w, n, false, "", e)
 		return
 	}
+
 	token := ""
 	if eligible && n.Category == "credentials" {
 		store, ok := s.Subscriptions.(interface {
@@ -135,7 +136,7 @@ func (s *Server) personalPrepare(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	memberJSON(w, map[string]any{"eligible": eligible, "notification": n, "token": token}, nil)
+	personalPreparationJSON(w, n, eligible, token, nil)
 }
 func (s *Server) personalComplete(w http.ResponseWriter, r *http.Request) {
 	if !s.personalReady(w) {
@@ -145,22 +146,35 @@ func (s *Server) personalComplete(w http.ResponseWriter, r *http.Request) {
 		Notification db.PersonalNotification `json:"notification"`
 		Sent         bool                    `json:"sent"`
 		Terminal     bool                    `json:"terminal"`
+		Deferred     bool                    `json:"deferred"`
 		DelaySeconds int                     `json:"delay_seconds"`
 	}
 	if !s.decodeAdminJSON(w, r, &body) {
 		return
 	}
 	id, e := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if e != nil || id != body.Notification.ID || body.Notification.Attempts <= 0 || body.DelaySeconds < 0 || body.DelaySeconds > 86400 {
+	if e != nil || id != body.Notification.ID || body.Notification.Attempts <= 0 || body.DelaySeconds < 0 || body.DelaySeconds > 86400 ||
+		(body.Deferred && (body.Sent || body.Terminal)) ||
+		(body.Sent && body.Terminal) {
 		http.Error(w, "invalid claim", 400)
 		return
 	}
-	e = s.PersonalNotifications.Complete(
-		r.Context(),
-		body.Notification,
-		body.Sent,
-		body.Terminal,
-		time.Duration(body.DelaySeconds)*time.Second,
-	)
+	if body.Deferred {
+		e = s.PersonalNotifications.Defer(r.Context(), body.Notification, time.Duration(body.DelaySeconds)*time.Second)
+	} else {
+		e = s.PersonalNotifications.Complete(r.Context(), body.Notification, body.Sent, body.Terminal, time.Duration(body.DelaySeconds)*time.Second)
+	}
+
 	memberJSON(w, map[string]bool{"ok": e == nil}, e)
+}
+
+// Pending confirmation is a normal wait, distinct from unexpected API failures.
+func personalPreparationJSON(w http.ResponseWriter, n db.PersonalNotification, eligible bool, token string, err error) {
+	pending := errors.Is(err, db.ErrPersonalNotificationPending)
+	if pending {
+		err = nil
+		eligible = false
+		token = ""
+	}
+	memberJSON(w, map[string]any{"eligible": eligible, "pending": pending, "notification": n, "token": token}, err)
 }

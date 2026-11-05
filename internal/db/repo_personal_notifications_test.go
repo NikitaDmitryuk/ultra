@@ -722,3 +722,140 @@ func TestPersonalAccessConsentCapturedAtMutationBeforeLateAck(t *testing.T) {
 		t.Fatal("re-optin revived old access event", e)
 	}
 }
+
+func TestPersonalDeferredClaimsPreserveDeliveryBudgetUntilAck(t *testing.T) {
+	d, r, users, _, u := personalFixture(t)
+	ctx := context.Background()
+	personalOptIn(t, r)
+	if e := users.Remove(ctx, u.UUID); e != nil {
+		t.Fatal(e)
+	}
+	for i := 1; i <= 100; i++ {
+		n, e := r.Claim(ctx)
+		if e != nil {
+			t.Fatalf("pending claim%d lost: %v", i, e)
+		}
+		if n.Attempts != i || n.DeliveryAttempts != 1 {
+			t.Fatalf("claim/budget counters at%d: %+v", i, n)
+		}
+		if ok, e := r.Eligible(ctx, &n); ok || !errors.Is(e, ErrPersonalNotificationPending) {
+			t.Fatal("expected pending access acknowledgement", e)
+		}
+		if e = r.Defer(ctx, n, 0); e != nil {
+			t.Fatal(e)
+		}
+		// Duplicate acknowledgements cannot refund a reservation twice.
+		if e = r.Defer(ctx, n, 0); e != nil {
+			t.Fatal(e)
+		}
+	}
+	var generation, spent int
+	if e := d.Pool.QueryRow(ctx, `SELECT attempts,delivery_attempts FROM personal_notification_events`).Scan(&generation, &spent); e != nil ||
+		generation != 100 ||
+		spent != 0 {
+		t.Fatalf("waiting spent budget or reset fencing: %d/%d %v", generation, spent, e)
+	}
+	personalConfirm(t, r, users)
+	r = NewPersonalNotificationRepo(d)
+	n, e := r.Claim(ctx)
+	if e != nil || n.Attempts != 101 || n.DeliveryAttempts != 1 {
+		t.Fatal("first actual delivery inherited waiting backoff", n, e)
+	}
+	if ok, e := r.Eligible(ctx, &n); e != nil || !ok {
+		t.Fatal("late acknowledgement could not deliver", e)
+	}
+	if e = r.Complete(ctx, n, true, false, 0); e != nil {
+		t.Fatal(e)
+	}
+}
+
+func TestPersonalDeferredClaimCannotRefundAnotherLease(t *testing.T) {
+	d, r, users, _, u := personalFixture(t)
+	ctx := context.Background()
+	personalOptIn(t, r)
+	if e := users.Remove(ctx, u.UUID); e != nil {
+		t.Fatal(e)
+	}
+	first, e := r.Claim(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = r.Defer(ctx, first, 0); e != nil {
+		t.Fatal(e)
+	}
+	second, e := r.Claim(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = r.Defer(ctx, first, 0); e != nil {
+		t.Fatal(e)
+	}
+	var generation, spent int
+	assertBudget := func(wantGeneration, wantSpent int) {
+		t.Helper()
+		if e := d.Pool.QueryRow(ctx, `SELECT attempts,delivery_attempts FROM personal_notification_events`).Scan(&generation, &spent); e != nil ||
+			generation != wantGeneration ||
+			spent != wantSpent {
+			t.Fatalf("stale defer refunded current lease: %d/%d want%d/%d %v", generation, spent, wantGeneration, wantSpent, e)
+		}
+	}
+	assertBudget(2, 1)
+	if _, e = d.Pool.Exec(ctx, `UPDATE personal_notification_events SET lease_until=clock_timestamp()-interval '1 second'`); e != nil {
+		t.Fatal(e)
+	}
+	// A worker lost before it can prove pending spends a potential delivery.
+	third, e := r.Claim(ctx)
+	if e != nil || third.DeliveryAttempts != 2 {
+		t.Fatal("lost worker reservation was not retained", e)
+	}
+	if e = r.Defer(ctx, second, 0); e != nil {
+		t.Fatal(e)
+	}
+	if e = r.Complete(ctx, second, true, false, 0); e != nil {
+		t.Fatal(e)
+	}
+	assertBudget(3, 2)
+	if ok, e := r.Eligible(ctx, &second); ok || e != nil {
+		t.Fatal("old generation remained eligible", e)
+	}
+	if e = r.Defer(ctx, third, 0); e != nil {
+		t.Fatal(e)
+	}
+	assertBudget(3, 1)
+	if e = r.Defer(ctx, third, 0); e != nil {
+		t.Fatal(e)
+	}
+	assertBudget(3, 1)
+}
+
+func TestPersonalDeferredClaimsStillExpireAfter24Hours(t *testing.T) {
+	d, r, users, _, u := personalFixture(t)
+	ctx := context.Background()
+	personalOptIn(t, r)
+	if e := users.Remove(ctx, u.UUID); e != nil {
+		t.Fatal(e)
+	}
+	for range 15 {
+		n, e := r.Claim(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = r.Defer(ctx, n, 0); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, e := d.Pool.Exec(ctx, `UPDATE personal_notification_events SET created_at=clock_timestamp()-interval '24 hours 1 second'`); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := r.Claim(ctx); !errors.Is(e, pgx.ErrNoRows) {
+		t.Fatal("deferred event escaped age bound", e)
+	}
+	personalConfirm(t, r, users)
+	var terminal bool
+	var spent int
+	if e := d.Pool.QueryRow(ctx, `SELECT terminal,delivery_attempts FROM personal_notification_events`).Scan(&terminal, &spent); e != nil ||
+		!terminal ||
+		spent != 0 {
+		t.Fatal("age expiry confused with delivery exhaustion", terminal, spent, e)
+	}
+}
