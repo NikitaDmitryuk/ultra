@@ -106,7 +106,7 @@ func TestProductionReplacementOrderAndFailClosedJournalRetirement(t *testing.T) 
 	ctx := context.Background()
 	targets := []replacementTarget{{Role: "bridge"}, {Role: "exit-0"}}
 	primary := replacementPrimary{SystemIdentifier: "123", Database: "fixture", DatabaseOID: 42, Migrations: "1,2"}
-	for _, failure := range []string{"", "discover-exit-0", "prepare-ssh-primary", "prepare-ssh-exit-0", "fence-exit-0", "clean-exit-0", "bootstrap", "changed-schema", "quiescence-before-cleanup-exit-0", "quiescence-before-cleanup-primary", "quiescence-after-cleanup-bridge", "quiescence-before-journal-primary"} {
+	for _, failure := range []string{"", "discover-exit-0", "prepare-ssh-primary", "prepare-ssh-exit-0", "sessions-before-fence-bridge", "sessions-before-fence-exit-0", "sessions-before-fence-primary", "fence-exit-0", "clean-exit-0", "bootstrap", "changed-schema", "quiescence-before-cleanup-exit-0", "quiescence-before-cleanup-primary", "quiescence-after-cleanup-bridge", "quiescence-before-journal-primary"} {
 		t.Run(failure, func(t *testing.T) {
 			var events []string
 			retired := false
@@ -150,6 +150,18 @@ func TestProductionReplacementOrderAndFailClosedJournalRetirement(t *testing.T) 
 					}
 					return nil
 				},
+				Sessions: func(context.Context, replacementTarget) error {
+					if failure == stage {
+						return errors.New("foreign session")
+					}
+					return nil
+				},
+				PrimarySessions: func(context.Context) error {
+					if failure == stage {
+						return errors.New("foreign session")
+					}
+					return nil
+				},
 				PrimaryQuiescent: func(context.Context) error {
 					if failure == stage {
 						return errors.New("active transaction")
@@ -177,6 +189,7 @@ func TestProductionReplacementOrderAndFailClosedJournalRetirement(t *testing.T) 
 					"discover-exit-0",
 					"primary-before-fence",
 					"prepare-ssh-primary", "prepare-ssh-bridge", "prepare-ssh-exit-0",
+					"sessions-before-fence-bridge", "sessions-before-fence-exit-0", "sessions-before-fence-primary",
 					"fence-bridge",
 					"fence-exit-0",
 					"quiescence-before-cleanup-bridge",
@@ -204,7 +217,7 @@ func TestProductionReplacementOrderAndFailClosedJournalRetirement(t *testing.T) 
 			if failure != "" && failure != "bootstrap" && retired {
 				t.Fatal("journal retired before all target fences and cleanup succeeded")
 			}
-			if strings.HasPrefix(failure, "prepare-ssh-") {
+			if strings.HasPrefix(failure, "prepare-ssh-") || strings.HasPrefix(failure, "sessions-before-fence-") {
 				for _, event := range events {
 					if strings.HasPrefix(event, "fence-") {
 						t.Fatal("application teardown before fleet SSH verification")

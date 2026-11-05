@@ -79,6 +79,24 @@ Primary получает ту же SSH policy отдельно и никогда
 LoginGraceTime ограничивает время аутентификации всех пользователей; это не idle timeout
 для уже аутентифицированных клиентов. Receipt version 2 связывает policy с ролью хоста.
 
+До первого app fencing выполняется SSH-only census всего non-DB парка и primary;
+эта ранняя проверка допускает работающие app workers и транзакции VPN.
+После fencing повторяются свежие проверки sessions и primary transactions.
+Обнаруженный blocker таким образом останавливает замену до отключения приложений;
+новый сеанс после ранней проверки всё равно закрывает последующий gate.
+
+Census распознаёт pre-authentication OpenSSH 10 только как проверенное дерево:
+`sshd-session: [accepted]` под штатным listener и известные потомки `sshd-auth`
+в состояниях `[session-auth]` / `[session-auth early]`. Проверяются точные
+установленные executable, root ownership без group/world write, service cgroup
+и отсутствие PAM/login scope. Неизвестный executable или потомок закрывает gate.
+UID auth-процесса может быть ещё root до privilege drop; сам по себе UID не
+доказывает успешную authentication. Именованный monitor `root [priv]` может
+сохраняться после authentication и не является preauth-исключением.
+Состояния соответствуют [OpenSSH 10 sshd-session](https://github.com/openssh/openssh-portable/blob/V_10_0_P1/sshd-session.c#L1120)
+и [sshd-auth](https://github.com/openssh/openssh-portable/blob/V_10_0_P1/sshd-auth.c#L704);
+неизвестный layout остаётся блокирующим.
+
 Census не исключает и не завершает чужие SSH/PAM sessions. Он повторяет полную
 проверку до 40 секунд и отслеживает все наблюдавшиеся SSH-деревья процессов, SID и PAM scope
 после смены UID или reparenting. Timeout и неизвестные helpers оставляют gate закрытым.
@@ -147,7 +165,13 @@ identity останавливает замену до отключения пр�
 неизменяемого каталога версии контроллера. Его ожидаемые путь и SHA-256
 привязаны к release manifest; после bootstrap они проверяются до staging.
 Системный путь `/usr/local/bin/ultra-install` не является контрактом bootstrap.
-До fencing отдельно проверяется размещение уже работающего контроллера.
+До fencing отдельно проверяется размещение уже работающего контроллера. Если предыдущая
+попытка уже замаскировала controller, повтор с публикацией `true` остановится на
+этой проверке. Для восстановления VPN канонический конфиг должен явно задать
+`HAPP_EXIT_PING_ENABLE=false` и `EXIT_PING_ENABLE=false`, затем выполняется новый
+`make deploy` с обычными reservation, primary и quiescence gates. Это отключение
+публикации не снимает masks и не возобновляет старый workspace; units восстанавливает
+полная штатная замена. После проверки здоровья можно отдельно включить публикацию.
 Для этого сценария bridge должен работать на Linux amd64; неподдерживаемая
 архитектура останавливает замену до fencing.
 

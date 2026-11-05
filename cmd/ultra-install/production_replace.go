@@ -51,6 +51,8 @@ type replacementSteps struct {
 	Fence                func(context.Context, replacementTarget) error
 	Quiescent            func(context.Context, replacementTarget) error
 	PrimaryQuiescent     func(context.Context) error
+	PrimarySessions      func(context.Context) error
+	Sessions             func(context.Context, replacementTarget) error
 	Clean                func(context.Context, replacementTarget, []exits.BootstrapEntry) error
 	RetireJournal        func() error
 	Bootstrap            func(context.Context) error
@@ -116,6 +118,19 @@ func executeProductionReplacement(
 			if err := run("prepare-ssh-"+target.Role, func() error { return steps.PrepareSSH(ctx, target) }); err != nil {
 				return err
 			}
+		}
+		// Check live SSH sessions while the VPN still runs. The primary's idle
+		// transaction check belongs after fencing; this preflight is sessions only.
+		if steps.Sessions == nil || steps.PrimarySessions == nil {
+			return errors.New("replacement_quiescence_verifier_required")
+		}
+		for _, target := range targets {
+			if err := run("sessions-before-fence-"+target.Role, func() error { return steps.Sessions(ctx, target) }); err != nil {
+				return err
+			}
+		}
+		if err := run("sessions-before-fence-primary", func() error { return steps.PrimarySessions(ctx) }); err != nil {
+			return err
 		}
 		for _, target := range targets {
 			if err := run("fence-"+target.Role, func() error { return steps.Fence(ctx, target) }); err != nil {
@@ -511,6 +526,18 @@ func runProductionReplacement(args []string, output io.Writer) (result error) {
 		},
 		Quiescent: func(ctx context.Context, target replacementTarget) error {
 			return checkReplacementQuiescence(ctx, p, target, false)
+		},
+		Sessions: func(ctx context.Context, target replacementTarget) error {
+			target.Role += "-sessions"
+			return checkReplacementQuiescence(ctx, p, target, false)
+		},
+		PrimarySessions: func(ctx context.Context) error {
+			identity := p.Database.SSHIdentity
+			if identity == "" {
+				identity = p.SSH.Identity
+			}
+			return checkReplacementQuiescence(ctx, p,
+				replacementTarget{Address: p.Database.PrimaryHost, Identity: identity, Role: "primary-sessions"}, true)
 		},
 		PrimaryQuiescent: func(ctx context.Context) error {
 			identity := p.Database.SSHIdentity

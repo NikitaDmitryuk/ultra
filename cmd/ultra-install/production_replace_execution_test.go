@@ -217,6 +217,8 @@ func TestFailedExecutionReplacementRunsRealRetirementBeforeCleanup(t *testing.T)
 					return nil
 				},
 				PrimaryQuiescent: func(context.Context) error { return nil },
+				PrimarySessions:  func(context.Context) error { return nil },
+				Sessions:         func(context.Context, replacementTarget) error { return nil },
 				Clean: func(context.Context, replacementTarget, []exits.BootstrapEntry) error {
 					cleaned = true
 					competingDispatch()
@@ -372,6 +374,8 @@ func TestFailedExecutionAdmissionLockExcludesConcurrentRetirement(t *testing.T) 
 		replacementSteps{
 			Observe:          func(context.Context) (replacementPrimary, error) { return f.primary, nil },
 			PrimaryQuiescent: func(context.Context) error { return nil },
+			PrimarySessions:  func(context.Context) error { return nil },
+			Sessions:         func(context.Context, replacementTarget) error { return nil },
 		},
 		func(deployansible.ExecutionFence) error { return nil },
 	)
