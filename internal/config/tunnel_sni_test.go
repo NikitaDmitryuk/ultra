@@ -92,7 +92,8 @@ func TestTunnelSNIAutomaticPerPinnedPeer(t *testing.T) {
 						continue
 					}
 					tls := stream["tlsSettings"].(map[string]any)
-					omit := tc.omit && out["tag"] != exits.OutboundTag("domain")
+					peer := out["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)["address"]
+					omit := tc.omit && peer == tc.address
 					if (tls["serverName"] == "") != omit {
 						t.Fatalf("%s: SNI omission=%t, expected %t", out["tag"], tls["serverName"] == "", omit)
 					}

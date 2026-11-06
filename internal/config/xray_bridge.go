@@ -310,7 +310,7 @@ func BuildBridgeXRayJSON(
 		})
 	}
 
-	outbounds := buildBridgeExitOutbounds(spec, exitNodes, activeExitID, w, buildOutStream)
+	outbounds := buildBridgeExitOutbounds(spec, exitNodes, w, buildOutStream)
 	outbounds = append(outbounds, exitPingBlackhole())
 	if fragment := tunnelFragmentOutbound(spec); fragment != nil {
 		outbounds = append(outbounds, fragment)

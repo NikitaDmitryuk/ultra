@@ -11,19 +11,9 @@ func resolveActiveExitTag(activeExitID string, w xrayWireResolved) string {
 	return w.OutboundExitTag
 }
 
-func findEnabledExit(nodes []exits.Node, id string) (exits.Node, bool) {
-	for _, n := range nodes {
-		if n.ID == id {
-			return n, true
-		}
-	}
-	return exits.Node{}, false
-}
-
 func buildBridgeExitOutbounds(
 	spec *Spec,
 	exitNodes []exits.Node,
-	activeExitID string,
 	w xrayWireResolved,
 	buildStream func(address, pinnedPeerCertSHA256 string) map[string]any,
 ) []any {
@@ -54,10 +44,10 @@ func buildBridgeExitOutbounds(
 			),
 		)
 	}
-	legacyNode, ok := findEnabledExit(enabled, activeExitID)
-	if !ok {
-		legacyNode, _ = exits.SelectActive(enabled, nil)
-	}
+	// Generated routes use per-node tags whenever an active ID is present. Keep
+	// the legacy fallback alias stable across health selections so those changes
+	// replace routing rules without replacing outbounds and established streams.
+	legacyNode, _ := exits.SelectActive(enabled, nil)
 	if legacyNode.ID != "" {
 		out = append(
 			out,
