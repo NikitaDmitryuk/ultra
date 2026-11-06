@@ -42,10 +42,12 @@ func (r *Runner) ConfigureAccounting(store *runtimestate.Store, users []auth.Use
 
 // ReloadStatus exposes lifecycle events without configuration or credentials.
 type ReloadStatus struct {
-	Count  uint64    `json:"count"`
-	At     time.Time `json:"at,omitempty"`
-	Reason string    `json:"reason,omitempty"`
-	Error  string    `json:"error,omitempty"`
+	Count        uint64    `json:"count"`
+	At           time.Time `json:"at,omitempty"`
+	Reason       string    `json:"reason,omitempty"`
+	Error        string    `json:"error,omitempty"`
+	RoutingCount uint64    `json:"routing_count"`
+	RoutingAt    time.Time `json:"routing_at,omitempty"`
 }
 
 func (r *Runner) Status() ReloadStatus {
@@ -111,6 +113,11 @@ func (r *Runner) ReloadReason(data []byte, reason string) error {
 		r.status.Error = ""
 		return nil
 	}
+	if reason == "exit health selection" && r.inst != nil {
+		if applied, routeErr := r.reloadHealthRouting(cfg); applied || routeErr != nil {
+			return routeErr
+		}
+	}
 	next, err := core.New(cfg)
 	if err != nil {
 		return fmt.Errorf("prepare configuration: %w", err)
@@ -127,7 +134,10 @@ func (r *Runner) ReloadReason(data []byte, reason string) error {
 		_ = r.inst.Close()
 		r.inst = nil
 	}
-	r.status = ReloadStatus{Count: r.status.Count + 1, At: time.Now().UTC(), Reason: reason}
+	r.status = ReloadStatus{
+		Count: r.status.Count + 1, At: time.Now().UTC(), Reason: reason,
+		RoutingCount: r.status.RoutingCount, RoutingAt: r.status.RoutingAt,
+	}
 	if err = next.Start(); err != nil {
 		_ = next.Close()
 		r.status.Error = "start failed"
